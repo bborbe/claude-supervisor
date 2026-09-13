@@ -7,7 +7,7 @@ check-changelog:
 	@python3 scripts/check-changelog.py
 
 check:
-	@node --check server/supervisor.mjs && echo "  server/supervisor.mjs parses"
+	@for f in server/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server modules parse"
 	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json']]" && echo "  manifests parse"
 	@test -f .mcp.json && test -f README.md && echo "  plugin files present"
 

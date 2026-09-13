@@ -16,6 +16,7 @@ import { join } from 'path'
 import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { decide as decideWith, inputKey } from './policy.mjs'
+import { checkLiveness } from './liveness.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -337,31 +338,30 @@ function spawnInteractiveAgent({ id, prompt, cwd, label }) {
 // one that fails in unfamiliar ways and cannot be watched. Opt OUT with
 // interactive:false for the headless path, where the manager answers instead.
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
-// must be closed: resuming a live one puts two writers on one conversation, so a
-// live id is refused below rather than silently producing that.
-// A running session must not be resumed — that is two writers on one conversation.
-// `pgrep -fl` is the same probe /open uses to find a live turn, and it catches both
-// a tab session and a headless `--print` run that no pane would show.
-function sessionIsLive(sessionId) {
-  try {
-    const res = spawnSync('pgrep', ['-fl', sessionId], { encoding: 'utf8' })
-    return res.status === 0 && Boolean((res.stdout || '').trim())
-  } catch (error) {
-    // Fail open on a missing pgrep — but never silently: an unguarded resume can
-    // corrupt a conversation, so the operator must be told the guard did not run.
-    log(`WARNING: cannot check whether session ${sessionId} is live (${error.message}) — the two-writer guard did not run`)
-    return false
-  }
-}
-
+// must be closed: resuming a live one puts two writers on one conversation, which is
+// what the guard below — see liveness.mjs — refuses rather than silently producing.
 function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
   const id = `agent_${++seq}`
 
-  if (resume && sessionIsLive(resume)) {
-    return {
-      error: `session ${resume} is still running — close it before resuming, or you will have two writers on one conversation`,
+  if (resume) {
+    const { live, probes, reason } = checkLiveness(resume)
+    if (live === true) {
+      return {
+        error: `session ${resume} is still running (${reason}) — close it before resuming, or you will have two writers on one conversation`,
+      }
     }
+    // Neither probe could be read. Fail CLOSED: "could not tell" and "confirmed
+    // closed" are different answers, and only one of them is safe to act on. A
+    // refused resume costs one retry; an unguarded one corrupts a conversation.
+    if (live === null) {
+      log(`refusing to resume ${resume}: ${reason}`)
+      return {
+        error: `cannot confirm session ${resume} is closed (${reason}) — refusing, since resuming a live session puts two writers on one conversation. Point SUPERVISOR_SESSIONS_DIR at the session registry if it lives somewhere else.`,
+      }
+    }
+    log(`resume of ${resume} allowed: ${reason} [probes: ${probes.join(', ') || 'none'}]`)
   }
+
   const agent = {
     id,
     label: label || id,
@@ -369,6 +369,11 @@ function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
     cwd: cwd || process.cwd(),
     status: 'running',
     sessionId: null,
+    // Which conversation this one continues, when it is an adoption rather than a
+    // fresh start. `sessionId` alone cannot say: on resume the SDK reports the SAME
+    // id, so the two fields together are what tell the operator which conversation
+    // they are now in.
+    resumedFrom: resume ?? null,
     permissions: [],
     transcript: [],
     error: null,
@@ -465,6 +470,11 @@ const agentView = (a) => ({
   status: a.status,
   cwd: a.cwd,
   session_id: a.sessionId,
+  resumed_from: a.resumedFrom ?? null,
+  // Same id = the conversation continued; a different one = the SDK forked it. Only
+  // answerable once init has reported a session id, so it is null until then rather
+  // than a guess.
+  continued: a.resumedFrom && a.sessionId ? a.sessionId === a.resumedFrom : null,
   created_at: a.createdAt,
   pending_permissions: a.permissions.filter((id) => pending.has(id)),
   last_message: agentView.lastText?.(a) ?? lastAssistantText(a),
@@ -490,7 +500,7 @@ const TOOLS = [
         resume: {
           type: 'string',
           description:
-            'Session id to continue. The session MUST be closed — resuming a live one puts two writers on one conversation. The resumed worker is created here, so unlike the original session it IS supervised and its prompts park for the manager.',
+            'Session id to continue. The session MUST be closed: resuming a live one puts two writers on one conversation, so a session found still running is refused, and so is one whose liveness cannot be determined. The resumed worker is created here, so unlike the original session it IS supervised and its prompts park for the manager.',
         },
       },
       required: ['prompt'],
