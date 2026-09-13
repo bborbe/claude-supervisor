@@ -281,9 +281,45 @@ function resolveClaudeCmd(cwd) {
   return 'claude'
 }
 
+// Read the servers the launcher passes via `--mcp-config <file>`. These arrive as a
+// CLI flag, not as settings, so settingSources cannot reach them: an SDK worker with
+// settings loaded still saw 7 fewer servers than its tab twin. Handing the same file
+// to query()'s mcpServers is what makes the two modes functionally identical.
+function resolveMcpServers(claudeCmd) {
+  const explicit = process.env.SUPERVISOR_MCP_CONFIG
+  let path = explicit
+  if (!path) {
+    try {
+      // The scripts write `--mcp-config ~/.claude/...`, so ~ must be expanded by us.
+      const match = readFileSync(claudeCmd, 'utf8').match(/--mcp-config\s+["']?(~?[^"'\s\\]+)/)
+      if (!match) return {}
+      path = match[1].replace(/^~/, homedir())
+    } catch {
+      return {}
+    }
+  }
+  try {
+    const servers = JSON.parse(readFileSync(path, 'utf8')).mcpServers ?? {}
+    log(`headless workers inherit ${Object.keys(servers).length} servers from ${path}`)
+    return servers
+  } catch (error) {
+    log(`WARNING: cannot read MCP config ${path}: ${error.message} — headless workers get fewer servers than tab workers`)
+    return {}
+  }
+}
+
 function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   const claudeCmd = resolveClaudeCmd(cwd)
-  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(label)} ${shellQuote(prompt)}`
+  // Prefix the tab TITLE so a supervised worker is identifiable at a glance in the
+  // tab bar and the fleet roster — the two places a normal session is otherwise
+  // indistinguishable. The agent's own `label` stays unprefixed, so list_agents
+  // joins to ListAgents by stripping the marker.
+  // A colour command runs before the task so managed workers are visually distinct
+  // in their own tab. Configured, not hardcoded, because whether "/color" exists as
+  // a built-in is unverified; set SUPERVISOR_WORKER_COLOR=off to drop it.
+  const colorCmd = process.env.SUPERVISOR_WORKER_COLOR ?? '/color pink'
+  const seeded = colorCmd && colorCmd !== 'off' ? `${colorCmd}\n\n${prompt}` : prompt
+  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(`⚙ ${label}`)} ${shellQuote(seeded)}`
   const res = spawnSync('wezterm', ['cli', 'spawn', '--', 'bash', '-lc', inner], { encoding: 'utf8' })
 
   if (res.error || res.status !== 0) {
@@ -295,8 +331,37 @@ function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   return { paneId: paneId || null }
 }
 
-function spawnAgent({ prompt, cwd, label, interactive = false }) {
+// Interactive is the DEFAULT. A worker must come up with the same tooling a normal
+// session has — the launcher's env, plugin skills, MCP servers, settings.json
+// permissions. A worker missing its normal tooling is not a cheaper worker, it is
+// one that fails in unfamiliar ways and cannot be watched. Opt OUT with
+// interactive:false for the headless path, where the manager answers instead.
+// `resume` opens a NEW session continuing a CLOSED one's conversation. The session
+// must be closed: resuming a live one puts two writers on one conversation, so a
+// live id is refused below rather than silently producing that.
+// A running session must not be resumed — that is two writers on one conversation.
+// `pgrep -fl` is the same probe /open uses to find a live turn, and it catches both
+// a tab session and a headless `--print` run that no pane would show.
+function sessionIsLive(sessionId) {
+  try {
+    const res = spawnSync('pgrep', ['-fl', sessionId], { encoding: 'utf8' })
+    return res.status === 0 && Boolean((res.stdout || '').trim())
+  } catch (error) {
+    // Fail open on a missing pgrep — but never silently: an unguarded resume can
+    // corrupt a conversation, so the operator must be told the guard did not run.
+    log(`WARNING: cannot check whether session ${sessionId} is live (${error.message}) — the two-writer guard did not run`)
+    return false
+  }
+}
+
+function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
   const id = `agent_${++seq}`
+
+  if (resume && sessionIsLive(resume)) {
+    return {
+      error: `session ${resume} is still running — close it before resuming, or you will have two writers on one conversation`,
+    }
+  }
   const agent = {
     id,
     label: label || id,
@@ -335,6 +400,18 @@ function spawnAgent({ prompt, cwd, label, interactive = false }) {
     prompt,
     options: {
       cwd: agent.cwd,
+      // Load the same settings an interactive session gets. Without this the SDK
+      // starts from nothing — no plugin skills, no settings.json permissions, no
+      // user MCP servers — and a worker missing its normal tooling is not a cheaper
+      // worker, it is one that fails in unfamiliar ways.
+      settingSources: ['user', 'project', 'local'],
+      // Same reason as settingSources: parity with a tab worker. Spawning is rare, so
+      // the per-spawn launcher lookup is not a hot path.
+      mcpServers: resolveMcpServers(resolveClaudeCmd(agent.cwd)),
+      // Continuing an existing conversation. Because THIS call creates the session,
+      // canUseTool applies to it — which is the whole point: a session you did not
+      // create cannot be supervised, but one you resume you do create.
+      ...(resume ? { resume } : {}),
       // Resolved and validated once at module load — never read env in the hot path.
       permissionMode: PERMISSION_MODE,
       canUseTool: makeCanUseTool(agent),
@@ -408,7 +485,12 @@ const TOOLS = [
         interactive: {
           type: 'boolean',
           description:
-            'Open the worker as a real session in a wezterm tab instead of running it headless. Visible and drivable by hand, but its approval prompts are answered IN THAT TAB, so it is not supervised and will never appear in pending_permissions.',
+            'Default true: open the worker as a real session in a wezterm tab, so it has the same tooling a normal session has — launcher env, plugin skills, MCP servers, settings.json permissions — and can be watched and driven by hand. Its approval prompts are answered IN THAT TAB, so it will never appear in pending_permissions. Pass false for a headless worker that the manager supervises instead, accepting the narrower toolchain.',
+        },
+        resume: {
+          type: 'string',
+          description:
+            'Session id to continue. The session MUST be closed — resuming a live one puts two writers on one conversation. The resumed worker is created here, so unlike the original session it IS supervised and its prompts park for the manager.',
         },
       },
       required: ['prompt'],
@@ -487,7 +569,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           prompt: args.prompt,
           cwd: args.cwd,
           label: args.label,
-          interactive: args.interactive === true,
+          interactive: args.interactive !== false,
+          resume: args.resume,
         }),
       )
 

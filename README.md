@@ -22,6 +22,45 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:spawn` `/supervisor:workers` `/supervisor:answer` `/supervisor:drain` | the operator surface |
 | agent `worker-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
 
+## Two spawn modes
+
+`spawn_agent` opens a worker one of two ways. **They have the same tooling** — same plugin skills, same MCP servers, same launcher-resolved environment (measured: 12 MCP prefixes in both, verified 2026-09-14). The only difference is who answers the worker's permission prompts, and whether you can watch it.
+
+| | `interactive: true` — **default** | `interactive: false` |
+|---|---|---|
+| What runs | a real `claude` session in a wezterm tab | a `query()` session inside this server |
+| Launcher | the `cc-*` script, resolved from `vault-cli config` | same env, via `settingSources` + the launcher's `--mcp-config` |
+| Its prompts go to | **its own tab** | **the manager**, via `await_permission` |
+| Visible | yes — tab, scrollback, drivable by hand | no tab; tail its transcript instead |
+| In `ListAgents` | yes, prefixed `⚙` (it is a real session) | **no** — it has no socket |
+| Manager can stop it | yes, close the tab | no — no `interrupt`, no `send_to_agent` |
+
+**Choose interactive when you want to see or steer it. Choose headless when you want the manager answering its prompts.** Neither is more capable; the trade is visibility against supervision.
+
+⚠️ **A headless worker is invisible to `ListAgents` and `/fleet-status`.** A roster-only sweep will declare its task unowned and may spawn a duplicate onto it. Check `list_agents` before concluding a task has no owner.
+
+⚠️ **`permissionMode: 'auto'` bypasses supervision entirely** — the hook never fires and `canUseTool` is never called. Measured: the same `kubectl create secret` that parked for approval under `'default'` ran with **zero** permission requests under `'auto'`. Leave it unset.
+
+## Adopting an existing session
+
+The supervisor can only supervise sessions **it created** — `canUseTool` is attached when a session starts and cannot be grafted onto a running process. That makes its control forward-looking by default: sessions started elsewhere are observable and messageable, but their prompts stay theirs.
+
+`resume` inverts that. Pass a session id and the supervisor opens a **new** session continuing that conversation — and because *this* call creates it, the permission callback applies.
+
+```
+spawn_agent({ prompt, resume: "<session-id>", interactive: false })
+  → continues the old conversation
+  → its prompts park for the manager
+```
+
+**Verified 2026-09-14:** a session killed hours earlier was resumed, recalled its own prior task unprompted, parked a `Write` prompt for the manager, and completed on approval. Same session id — resume continues rather than forks.
+
+**Why this matters:** it reaches what the permission *channel* exists for, with no worker-side plugin, no `--channels` flag and no marketplace dependency. The channel was ruled out as a Non-goal precisely to avoid those.
+
+⚠️ **The session must be closed.** Resuming a live one puts two writers on one conversation. This is currently a **warning in the tool description, not an enforced guard** — it will not stop you.
+
+⚠️ **Unmeasured:** `forkSession` and `resumeSessionAt`. Supported by the SDK; their interaction with `resume` has not been tested.
+
 ## Tools
 
 | Tool | Purpose |
@@ -64,7 +103,7 @@ Extracted from a working prototype proven end-to-end on 2026-09-13: one manager 
 
 Known gaps, tracked rather than hidden:
 
-- **`policy.json` is not consumed yet** — every prompt currently reaches the manager. The policy layer is the next increment.
+- **`send_to_agent` and `interrupt` are missing** — a headless worker cannot be corrected or stopped once running, only waited out. An interactive worker can be closed by closing its tab.
 - **`send_to_agent` is missing** — an SDK string-prompt session is single-shot; multi-turn needs streaming input (`AsyncIterable<SDKUserMessage>`).
 - **Status lags after an allow** — `agent_status` can still read `running` for a few seconds; never treat one post-allow check as final.
 - **Cost figures are meaningless off-Anthropic** — they are priced from Anthropic's table; ignore them when traffic is routed elsewhere.
