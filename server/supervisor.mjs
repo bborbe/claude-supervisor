@@ -339,8 +339,29 @@ function spawnInteractiveAgent({ id, prompt, cwd, label }) {
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, so a
 // live id is refused below rather than silently producing that.
+// A running session must not be resumed — that is two writers on one conversation.
+// `pgrep -fl` is the same probe /open uses to find a live turn, and it catches both
+// a tab session and a headless `--print` run that no pane would show.
+function sessionIsLive(sessionId) {
+  try {
+    const res = spawnSync('pgrep', ['-fl', sessionId], { encoding: 'utf8' })
+    return res.status === 0 && Boolean((res.stdout || '').trim())
+  } catch (error) {
+    // Fail open on a missing pgrep — but never silently: an unguarded resume can
+    // corrupt a conversation, so the operator must be told the guard did not run.
+    log(`WARNING: cannot check whether session ${sessionId} is live (${error.message}) — the two-writer guard did not run`)
+    return false
+  }
+}
+
 function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
   const id = `agent_${++seq}`
+
+  if (resume && sessionIsLive(resume)) {
+    return {
+      error: `session ${resume} is still running — close it before resuming, or you will have two writers on one conversation`,
+    }
+  }
   const agent = {
     id,
     label: label || id,
