@@ -283,7 +283,16 @@ function resolveClaudeCmd(cwd) {
 
 function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   const claudeCmd = resolveClaudeCmd(cwd)
-  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(label)} ${shellQuote(prompt)}`
+  // Prefix the tab TITLE so a supervised worker is identifiable at a glance in the
+  // tab bar and the fleet roster — the two places a normal session is otherwise
+  // indistinguishable. The agent's own `label` stays unprefixed, so list_agents
+  // joins to ListAgents by stripping the marker.
+  // A colour command runs before the task so managed workers are visually distinct
+  // in their own tab. Configured, not hardcoded, because whether "/color" exists as
+  // a built-in is unverified; set SUPERVISOR_WORKER_COLOR=off to drop it.
+  const colorCmd = process.env.SUPERVISOR_WORKER_COLOR ?? '/color pink'
+  const seeded = colorCmd && colorCmd !== 'off' ? `${colorCmd}\n\n${prompt}` : prompt
+  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(`⚙ ${label}`)} ${shellQuote(seeded)}`
   const res = spawnSync('wezterm', ['cli', 'spawn', '--', 'bash', '-lc', inner], { encoding: 'utf8' })
 
   if (res.error || res.status !== 0) {
@@ -295,7 +304,12 @@ function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   return { paneId: paneId || null }
 }
 
-function spawnAgent({ prompt, cwd, label, interactive = false }) {
+// Interactive is the DEFAULT. A worker must come up with the same tooling a normal
+// session has — the launcher's env, plugin skills, MCP servers, settings.json
+// permissions. A worker missing its normal tooling is not a cheaper worker, it is
+// one that fails in unfamiliar ways and cannot be watched. Opt OUT with
+// interactive:false for the headless path, where the manager answers instead.
+function spawnAgent({ prompt, cwd, label, interactive = true }) {
   const id = `agent_${++seq}`
   const agent = {
     id,
@@ -335,6 +349,11 @@ function spawnAgent({ prompt, cwd, label, interactive = false }) {
     prompt,
     options: {
       cwd: agent.cwd,
+      // Load the same settings an interactive session gets. Without this the SDK
+      // starts from nothing — no plugin skills, no settings.json permissions, no
+      // user MCP servers — and a worker missing its normal tooling is not a cheaper
+      // worker, it is one that fails in unfamiliar ways.
+      settingSources: ['user', 'project', 'local'],
       // Resolved and validated once at module load — never read env in the hot path.
       permissionMode: PERMISSION_MODE,
       canUseTool: makeCanUseTool(agent),
@@ -408,7 +427,7 @@ const TOOLS = [
         interactive: {
           type: 'boolean',
           description:
-            'Open the worker as a real session in a wezterm tab instead of running it headless. Visible and drivable by hand, but its approval prompts are answered IN THAT TAB, so it is not supervised and will never appear in pending_permissions.',
+            'Default true: open the worker as a real session in a wezterm tab, so it has the same tooling a normal session has — launcher env, plugin skills, MCP servers, settings.json permissions — and can be watched and driven by hand. Its approval prompts are answered IN THAT TAB, so it will never appear in pending_permissions. Pass false for a headless worker that the manager supervises instead, accepting the narrower toolchain.',
         },
       },
       required: ['prompt'],
@@ -487,7 +506,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           prompt: args.prompt,
           cwd: args.cwd,
           label: args.label,
-          interactive: args.interactive === true,
+          interactive: args.interactive !== false,
         }),
       )
 
