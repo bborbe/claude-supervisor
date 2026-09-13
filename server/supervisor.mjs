@@ -281,6 +281,33 @@ function resolveClaudeCmd(cwd) {
   return 'claude'
 }
 
+// Read the servers the launcher passes via `--mcp-config <file>`. These arrive as a
+// CLI flag, not as settings, so settingSources cannot reach them: an SDK worker with
+// settings loaded still saw 7 fewer servers than its tab twin. Handing the same file
+// to query()'s mcpServers is what makes the two modes functionally identical.
+function resolveMcpServers(claudeCmd) {
+  const explicit = process.env.SUPERVISOR_MCP_CONFIG
+  let path = explicit
+  if (!path) {
+    try {
+      // The scripts write `--mcp-config ~/.claude/...`, so ~ must be expanded by us.
+      const match = readFileSync(claudeCmd, 'utf8').match(/--mcp-config\s+["']?(~?[^"'\s\\]+)/)
+      if (!match) return {}
+      path = match[1].replace(/^~/, homedir())
+    } catch {
+      return {}
+    }
+  }
+  try {
+    const servers = JSON.parse(readFileSync(path, 'utf8')).mcpServers ?? {}
+    log(`headless workers inherit ${Object.keys(servers).length} servers from ${path}`)
+    return servers
+  } catch (error) {
+    log(`WARNING: cannot read MCP config ${path}: ${error.message} — headless workers get fewer servers than tab workers`)
+    return {}
+  }
+}
+
 function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   const claudeCmd = resolveClaudeCmd(cwd)
   // Prefix the tab TITLE so a supervised worker is identifiable at a glance in the
@@ -354,6 +381,9 @@ function spawnAgent({ prompt, cwd, label, interactive = true }) {
       // user MCP servers — and a worker missing its normal tooling is not a cheaper
       // worker, it is one that fails in unfamiliar ways.
       settingSources: ['user', 'project', 'local'],
+      // Same reason as settingSources: parity with a tab worker. Spawning is rare, so
+      // the per-spawn launcher lookup is not a hot path.
+      mcpServers: resolveMcpServers(resolveClaudeCmd(agent.cwd)),
       // Resolved and validated once at module load — never read env in the hot path.
       permissionMode: PERMISSION_MODE,
       canUseTool: makeCanUseTool(agent),
