@@ -10,7 +10,12 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import { appendFileSync } from 'fs'
+import { appendFileSync, mkdirSync, readFileSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
+import { realpathSync } from 'fs'
+import { spawnSync } from 'child_process'
+import { decide as decideWith, inputKey } from './policy.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -30,6 +35,141 @@ const log = (...a) => {
   try {
     appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}`)
   } catch {}
+}
+
+// ── policy layer ────────────────────────────────────────────────────────────
+// Rules decide what a worker may do WITHOUT waking the manager. Anything the
+// rules do not cover defers to canUseTool, which parks it for the manager.
+// Every request is logged, so the policy can be grown from decisions actually
+// made rather than guessed up front.
+
+// ── configuration ───────────────────────────────────────────────────────────
+// User-editable files live under XDG paths, never inside this checkout: a config
+// you edit must not dirty a git tree, and `git pull` must not be able to clobber it.
+//
+//   ~/.config/claude-supervisor/policy.json            your rules, checked first
+//   ~/.local/state/claude-supervisor/permissions.jsonl every request, for mining
+//   <plugin>/server/policy.json                        shipped defaults (fallback)
+
+const CONFIG_DIR = join(
+  process.env.XDG_CONFIG_HOME || join(homedir(), '.config'),
+  'claude-supervisor',
+)
+const STATE_DIR = join(
+  process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'),
+  'claude-supervisor',
+)
+
+const USER_POLICY = process.env.SUPERVISOR_POLICY || join(CONFIG_DIR, 'policy.json')
+const BUNDLED_POLICY = new URL('./policy.json', import.meta.url).pathname
+const PERMISSION_LOG =
+  process.env.SUPERVISOR_PERMISSION_LOG === 'off'
+    ? null
+    : process.env.SUPERVISOR_PERMISSION_LOG || join(STATE_DIR, 'permissions.jsonl')
+
+const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']
+
+// Validated once, at the boundary. An unvalidated mode would silently fall through
+// to the SDK's default and make a typo indistinguishable from a decision.
+const PERMISSION_MODE = (() => {
+  const raw = process.env.SUPERVISOR_PERMISSION_MODE
+  if (!raw) return 'default'
+  if (!PERMISSION_MODES.includes(raw)) {
+    log(`WARNING: SUPERVISOR_PERMISSION_MODE="${raw}" is not a known mode — falling back to "default". Known: ${PERMISSION_MODES.join(', ')}`)
+    return 'default'
+  }
+  if (raw !== 'default') log(`WARNING: permissionMode "${raw}" — see README; 'auto' bypasses the hook and canUseTool entirely, leaving workers unsupervised.`)
+  return raw
+})()
+
+// Distinguish "no such file" (normal — the user file is optional) from "file exists
+// but is unreadable or malformed" (never normal — it means real rules are being
+// silently ignored). Collapsing the two would let a corrupted policy look empty.
+function readRules(path) {
+  let raw
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch (error) {
+    if (error.code !== 'ENOENT') log(`ERROR: cannot read policy ${path}: ${error.message} — its rules are NOT in effect`)
+    return []
+  }
+  try {
+    const parsed = JSON.parse(raw)
+    const rules = Array.isArray(parsed.rules) ? parsed.rules : []
+    for (const rule of rules) {
+      if (!rule?.action || !['allow', 'deny', 'escalate'].includes(rule.action)) {
+        log(`ERROR: policy ${path} has a rule with an unknown action ${JSON.stringify(rule?.action)} — it will never match`)
+      }
+    }
+    return rules
+  } catch (error) {
+    log(`ERROR: policy ${path} is not valid JSON: ${error.message} — its rules are NOT in effect`)
+    return []
+  }
+}
+
+// Overlay, not replace: your rules are evaluated first, and the bundled set fills
+// in whatever you have not decided. Growing the list means appending, never copying.
+const policy = { rules: [...readRules(USER_POLICY), ...readRules(BUNDLED_POLICY)] }
+
+// Evaluation is pure and lives in policy.mjs; this binds it to the loaded rule set.
+const decide = (toolName, input, cwd) => decideWith(policy.rules, toolName, input, cwd)
+
+// The state dir is static — create it once rather than on every write.
+let logDirReady = false
+let logFailureReported = false
+
+function logPermission(record) {
+  if (!PERMISSION_LOG) return
+  try {
+    if (!logDirReady) {
+      mkdirSync(STATE_DIR, { recursive: true })
+      logDirReady = true
+    }
+    appendFileSync(PERMISSION_LOG, `${JSON.stringify(record)}\n`)
+  } catch (error) {
+    // Report once: a failing disk must not turn into a log flood of its own, but a
+    // silent catch would leave permission decisions unrecorded with no signal at all.
+    if (!logFailureReported) {
+      logFailureReported = true
+      log(`ERROR: cannot write permission log ${PERMISSION_LOG}: ${error.message} — decisions are no longer being recorded`)
+    }
+  }
+}
+
+// PermissionRequest hook: answer what policy knows, defer everything else.
+// Returning no decision falls through to canUseTool — that fall-through IS the
+// escalation path, and it is also precisely what gets logged for policy mining.
+function makePermissionHook(agent) {
+  return async (hookInput) => {
+    const toolName = hookInput?.tool_name ?? 'unknown'
+    const { action, key, rule } = decide(toolName, hookInput?.tool_input, agent.cwd)
+    const base = {
+      ts: new Date().toISOString(),
+      agent: agent.id,
+      label: agent.label,
+      tool: toolName,
+      key,
+      matched_rule: rule ? `${rule.tool}:${rule.match}` : null,
+    }
+
+    if (action === 'allow' || action === 'deny') {
+      logPermission({ ...base, decision: action, decided_by: 'policy' })
+      log(`policy ${action} ${toolName} for ${agent.id} (${rule.tool}:${rule.match})`)
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PermissionRequest',
+          decision:
+            action === 'allow'
+              ? { behavior: 'allow' }
+              : { behavior: 'deny', message: `supervisor policy denied ${toolName}` },
+        },
+      }
+    }
+
+    logPermission({ ...base, decision: null, decided_by: 'escalated' })
+    return {}
+  }
 }
 
 const publicPerm = (p) => ({
@@ -99,7 +239,63 @@ function waitForPermission(timeoutMs) {
   })
 }
 
-function spawnAgent({ prompt, cwd, label }) {
+const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+
+// Where Claude Code writes a session's transcript, so it can be tailed live.
+// Claude Code escapes the RESOLVED cwd by replacing "/" with "-", which is why
+// /tmp/sup-verify lands under -private-tmp-sup-verify on macOS.
+function transcriptDirFor(cwd) {
+  let resolved = cwd
+  try {
+    resolved = realpathSync(cwd)
+  } catch {}
+  return join(
+    process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'),
+    'projects',
+    resolved.replace(/\//g, '-'),
+  )
+}
+
+// Spawn a worker as a real interactive session in a wezterm tab.
+//
+// The trade is deliberate: this worker's approval prompts are answered IN ITS TAB,
+// so it is not supervised the way the headless path is. That also means no filter
+// is needed in pending_permissions / await_permission — an interactive worker never
+// calls canUseTool, so no permission record is ever created for it.
+// Resolve the LAUNCHER SCRIPT, not the bare `claude` binary. The cc-* scripts carry
+// the router env (ANTHROPIC_BASE_URL), the MCP config and the model selection, and
+// invoking `claude` directly routes around all three — the same reason /open reads
+// claude_script from vault-cli config instead of calling the binary.
+function resolveClaudeCmd(cwd) {
+  if (process.env.SUPERVISOR_CLAUDE_CMD) return process.env.SUPERVISOR_CLAUDE_CMD
+  try {
+    const out = spawnSync('vault-cli', ['config', 'list', '--output', 'json'], { encoding: 'utf8' })
+    if (out.status === 0) {
+      const vaults = JSON.parse(out.stdout)
+      const match =
+        vaults.find((v) => v.path && cwd.startsWith(v.path)) ||
+        vaults.find((v) => v.name === 'personal')
+      if (match?.claude_script) return match.claude_script
+    }
+  } catch {}
+  return 'claude'
+}
+
+function spawnInteractiveAgent({ id, prompt, cwd, label }) {
+  const claudeCmd = resolveClaudeCmd(cwd)
+  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(label)} ${shellQuote(prompt)}`
+  const res = spawnSync('wezterm', ['cli', 'spawn', '--', 'bash', '-lc', inner], { encoding: 'utf8' })
+
+  if (res.error || res.status !== 0) {
+    const why = res.error?.message || res.stderr?.trim() || `exit ${res.status}`
+    return { error: `could not open a tab: ${why}` }
+  }
+  const paneId = (res.stdout || '').trim()
+  log(`interactive worker ${id} opened in a tab (pane ${paneId || 'unknown'})`)
+  return { paneId: paneId || null }
+}
+
+function spawnAgent({ prompt, cwd, label, interactive = false }) {
   const id = `agent_${++seq}`
   const agent = {
     id,
@@ -115,9 +311,35 @@ function spawnAgent({ prompt, cwd, label }) {
   }
   agents.set(id, agent)
 
+  if (interactive) {
+    agent.status = 'interactive'
+    const res = spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, label: agent.label })
+    if (res.error) {
+      agents.delete(id)
+      return { error: res.error }
+    }
+    agent.paneId = res.paneId
+    agent.transcriptDir = transcriptDirFor(agent.cwd)
+    return {
+      agent_id: id,
+      label: agent.label,
+      cwd: agent.cwd,
+      status: agent.status,
+      interactive: true,
+      pane_id: agent.paneId,
+      transcript_dir: agent.transcriptDir,
+    }
+  }
+
   const q = query({
     prompt,
-    options: { cwd: agent.cwd, permissionMode: 'default', canUseTool: makeCanUseTool(agent) },
+    options: {
+      cwd: agent.cwd,
+      // Resolved and validated once at module load — never read env in the hot path.
+      permissionMode: PERMISSION_MODE,
+      canUseTool: makeCanUseTool(agent),
+      hooks: { PermissionRequest: [{ hooks: [makePermissionHook(agent)] }] },
+    },
   })
   agent.query = q
 
@@ -183,6 +405,11 @@ const TOOLS = [
         prompt: { type: 'string', description: 'The task for the new session.' },
         cwd: { type: 'string', description: 'Working directory (default: supervisor cwd).' },
         label: { type: 'string', description: 'Short label so you can tell agents apart.' },
+        interactive: {
+          type: 'boolean',
+          description:
+            'Open the worker as a real session in a wezterm tab instead of running it headless. Visible and drivable by hand, but its approval prompts are answered IN THAT TAB, so it is not supervised and will never appear in pending_permissions.',
+        },
       },
       required: ['prompt'],
     },
@@ -225,7 +452,24 @@ const TOOLS = [
   },
 ]
 
-const server = new Server({ name: 'supervisor', version: '0.1.0' }, { capabilities: { tools: {} } })
+// Read the version from the plugin manifest rather than hardcoding it. A literal
+// here drifts silently on every release, and scripts/check-versions.py — which
+// guards the four version strings — cannot see a fifth one buried in code.
+function pluginVersion() {
+  const manifest = new URL('../.claude-plugin/plugin.json', import.meta.url).pathname
+  try {
+    const version = JSON.parse(readFileSync(manifest, 'utf8')).version
+    if (!version) throw new Error('no "version" field')
+    return version
+  } catch (error) {
+    // Loud, not silent: a wrong '0.0.0' would look like an absent version and hide
+    // a manifest that check-versions.py believes is fine.
+    process.stderr.write(`[supervisor] WARNING: cannot read version from ${manifest}: ${error.message}\n`)
+    return '0.0.0'
+  }
+}
+
+const server = new Server({ name: 'supervisor', version: pluginVersion() }, { capabilities: { tools: {} } })
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 
@@ -238,7 +482,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (typeof args.prompt !== 'string' || !args.prompt.trim()) {
         return reply({ error: 'prompt is required' })
       }
-      return reply(spawnAgent({ prompt: args.prompt, cwd: args.cwd, label: args.label }))
+      return reply(
+        spawnAgent({
+          prompt: args.prompt,
+          cwd: args.cwd,
+          label: args.label,
+          interactive: args.interactive === true,
+        }),
+      )
 
     case 'list_agents':
       return reply([...agents.values()].map(agentView))
@@ -262,11 +513,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!record) {
         return reply({ error: `no pending permission ${args.request_id} (already answered, or expired)` })
       }
+      // Record the manager's verdict too: a key the manager allows over and over
+      // is the raw material for the next policy rule.
+      const logDecision = (behavior) =>
+        logPermission({
+          ts: new Date().toISOString(),
+          agent: record.agentId,
+          tool: record.toolName,
+          key: inputKey(record.input),
+          matched_rule: null,
+          decision: behavior,
+          decided_by: 'manager',
+          request_id: args.request_id,
+          latency_ms: Date.now() - Date.parse(record.requestedAt),
+        })
+
       if (args.behavior === 'allow') {
+        logDecision('allow')
         record.settle({ behavior: 'allow' })
         log(`permission ${args.request_id} ALLOWED by manager`)
         return reply({ answered: args.request_id, behavior: 'allow', agent_id: record.agentId })
       }
+      logDecision('deny')
       record.settle({ behavior: 'deny', message: args.message || 'Denied by the supervising session.' })
       log(`permission ${args.request_id} DENIED by manager`)
       return reply({ answered: args.request_id, behavior: 'deny', agent_id: record.agentId })
