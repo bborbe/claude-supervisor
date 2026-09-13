@@ -15,6 +15,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
+import { config } from './config.mjs'
 import { decide as decideWith, inputKey } from './policy.mjs'
 import { checkLiveness } from './liveness.mjs'
 
@@ -25,9 +26,11 @@ const pending = new Map() // requestId -> permission record
 const waiters = new Set() // resolvers waiting for the next permission
 let seq = 0
 
-// stderr is the transport-safe channel (stdout carries MCP frames). A file log is
-// opt-in via SUPERVISOR_LOG so nothing depends on a machine-local path by default.
-const LOG_FILE = process.env.SUPERVISOR_LOG
+// Every environment read the server makes happens in config.mjs — see that file for
+// why the surface lives in one place. stderr is the transport-safe log channel (stdout
+// carries MCP frames); the file log is opt-in, so nothing depends on a machine-local
+// path by default.
+const LOG_FILE = config.logFile
 
 const log = (...a) => {
   const line = `[supervisor] ${a.join(' ')}\n`
@@ -52,28 +55,19 @@ const log = (...a) => {
 //   ~/.local/state/claude-supervisor/permissions.jsonl every request, for mining
 //   <plugin>/server/policy.json                        shipped defaults (fallback)
 
-const CONFIG_DIR = join(
-  process.env.XDG_CONFIG_HOME || join(homedir(), '.config'),
-  'claude-supervisor',
-)
-const STATE_DIR = join(
-  process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'),
-  'claude-supervisor',
-)
+const CONFIG_DIR = config.configDir
+const STATE_DIR = config.stateDir
 
-const USER_POLICY = process.env.SUPERVISOR_POLICY || join(CONFIG_DIR, 'policy.json')
+const USER_POLICY = config.userPolicy
 const BUNDLED_POLICY = new URL('./policy.json', import.meta.url).pathname
-const PERMISSION_LOG =
-  process.env.SUPERVISOR_PERMISSION_LOG === 'off'
-    ? null
-    : process.env.SUPERVISOR_PERMISSION_LOG || join(STATE_DIR, 'permissions.jsonl')
+const PERMISSION_LOG = config.permissionLog
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']
 
 // Validated once, at the boundary. An unvalidated mode would silently fall through
 // to the SDK's default and make a typo indistinguishable from a decision.
 const PERMISSION_MODE = (() => {
-  const raw = process.env.SUPERVISOR_PERMISSION_MODE
+  const raw = config.permissionMode
   if (!raw) return 'default'
   if (!PERMISSION_MODES.includes(raw)) {
     log(`WARNING: SUPERVISOR_PERMISSION_MODE="${raw}" is not a known mode — falling back to "default". Known: ${PERMISSION_MODES.join(', ')}`)
@@ -250,11 +244,7 @@ function transcriptDirFor(cwd) {
   try {
     resolved = realpathSync(cwd)
   } catch {}
-  return join(
-    process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'),
-    'projects',
-    resolved.replace(/\//g, '-'),
-  )
+  return join(config.claudeHome, 'projects', resolved.replace(/\//g, '-'))
 }
 
 // Spawn a worker as a real interactive session in a wezterm tab.
@@ -268,7 +258,7 @@ function transcriptDirFor(cwd) {
 // invoking `claude` directly routes around all three — the same reason /open reads
 // claude_script from vault-cli config instead of calling the binary.
 function resolveClaudeCmd(cwd) {
-  if (process.env.SUPERVISOR_CLAUDE_CMD) return process.env.SUPERVISOR_CLAUDE_CMD
+  if (config.claudeCmd) return config.claudeCmd
   try {
     const out = spawnSync('vault-cli', ['config', 'list', '--output', 'json'], { encoding: 'utf8' })
     if (out.status === 0) {
@@ -287,8 +277,7 @@ function resolveClaudeCmd(cwd) {
 // settings loaded still saw 7 fewer servers than its tab twin. Handing the same file
 // to query()'s mcpServers is what makes the two modes functionally identical.
 function resolveMcpServers(claudeCmd) {
-  const explicit = process.env.SUPERVISOR_MCP_CONFIG
-  let path = explicit
+  let path = config.mcpConfig
   if (!path) {
     try {
       // The scripts write `--mcp-config ~/.claude/...`, so ~ must be expanded by us.
@@ -318,7 +307,7 @@ function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   // A colour command runs before the task so managed workers are visually distinct
   // in their own tab. Configured, not hardcoded, because whether "/color" exists as
   // a built-in is unverified; set SUPERVISOR_WORKER_COLOR=off to drop it.
-  const colorCmd = process.env.SUPERVISOR_WORKER_COLOR ?? '/color pink'
+  const colorCmd = config.workerColor
   const seeded = colorCmd && colorCmd !== 'off' ? `${colorCmd}\n\n${prompt}` : prompt
   const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(`⚙ ${label}`)} ${shellQuote(seeded)}`
   const res = spawnSync('wezterm', ['cli', 'spawn', '--', 'bash', '-lc', inner], { encoding: 'utf8' })
