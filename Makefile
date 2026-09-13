@@ -12,6 +12,7 @@ check:
 	@test -f .mcp.json && test -f README.md && echo "  plugin files present"
 
 test: check
+	@node --test server/*.test.mjs
 
 precommit: check-versions check-changelog check
 
