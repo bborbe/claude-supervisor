@@ -57,9 +57,11 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 
 **Why this matters:** it reaches what the permission *channel* exists for, with no worker-side plugin, no `--channels` flag and no marketplace dependency. The channel was ruled out as a Non-goal precisely to avoid those.
 
-⚠️ **The session must be closed.** Resuming a live one puts two writers on one conversation. This is currently a **warning in the tool description, not an enforced guard** — it will not stop you.
+⚠️ **The session must be closed, and a live one is refused.** Two writers on one conversation corrupt it, so `spawn_agent` probes before resuming and returns an error rather than opening the session: a session found running is refused, and so is one whose liveness cannot be determined. Two probes, because neither is enough alone — the session registry at `~/.claude/sessions/<pid>.json`, which is the only one that finds a session started *fresh* (its id is in no process's command line, so `pgrep` has nothing to match), plus `pgrep -fl`, which catches a process the registry does not list. `SUPERVISOR_SESSIONS_DIR` overrides the registry location.
 
-⚠️ **Unmeasured:** `forkSession` and `resumeSessionAt`. Supported by the SDK; their interaction with `resume` has not been tested.
+**Which conversation am I in?** `agent_status` reports `resumed_from` and `continued` — the latter `true` when the session id came back the same (continued) and `false` when it did not (forked), so an adoption is never mistaken for a fresh start.
+
+⚠️ **Unmeasured:** `forkSession` and `resumeSessionAt`. Supported by the SDK; their interaction with `resume` has not been tested, and no run has yet produced a `continued: false`.
 
 ## Tools
 
