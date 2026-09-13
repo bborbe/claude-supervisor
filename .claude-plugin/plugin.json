@@ -1,7 +1,7 @@
 {
   "name": "supervisor",
   "description": "Spawn worker sessions and answer their permission prompts from one manager session.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "BSD-2-Clause",
   "author": { "name": "Benjamin Borbe" },
   "keywords": ["supervisor", "orchestration", "agents", "mcp", "permissions"]
