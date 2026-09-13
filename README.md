@@ -7,7 +7,7 @@ The problem it solves: every agent session normally owns a private channel to yo
 ## Install
 
 ```
-/plugin marketplace add <owner>/claude-supervisor
+/plugin marketplace add bborbe/claude-supervisor
 /plugin install supervisor@claude-supervisor
 ```
 
@@ -49,14 +49,13 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 
 ```
 .claude-plugin/marketplace.json          marketplace manifest
-plugins/supervisor/
-  .claude-plugin/plugin.json             plugin manifest
-  .mcp.json                              starts the server (${CLAUDE_PLUGIN_ROOT}/server)
-  skills/supervising-workers/SKILL.md
-  commands/{spawn,workers,answer,drain}.md
-  agents/worker-wrangler.md
-  server/supervisor.mjs                  the MCP server
-  server/policy.json                     approval policy (NOT wired yet — see Status)
+.claude-plugin/plugin.json               plugin manifest
+.mcp.json                                starts the server (${CLAUDE_PLUGIN_ROOT}/server)
+skills/supervising-workers/SKILL.md
+commands/{spawn,workers,answer,drain}.md
+agents/worker-wrangler.md
+server/supervisor.mjs                    the MCP server
+server/policy.json                       approval policy (NOT wired yet — see Status)
 ```
 
 ## Status
@@ -70,4 +69,3 @@ Known gaps, tracked rather than hidden:
 - **Status lags after an allow** — `agent_status` can still read `running` for a few seconds; never treat one post-allow check as final.
 - **Cost figures are meaningless off-Anthropic** — they are priced from Anthropic's table; ignore them when traffic is routed elsewhere.
 - **Unanswered prompts auto-deny** after 15 minutes.
-- **Not yet audited against [[Claude Code Plugin Development Guide]]** — plugin anatomy, command/agent/skill conventions and the 4-string version alignment still need to be applied.

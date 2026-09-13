@@ -19,11 +19,16 @@ const pending = new Map() // requestId -> permission record
 const waiters = new Set() // resolvers waiting for the next permission
 let seq = 0
 
+// stderr is the transport-safe channel (stdout carries MCP frames). A file log is
+// opt-in via SUPERVISOR_LOG so nothing depends on a machine-local path by default.
+const LOG_FILE = process.env.SUPERVISOR_LOG
+
 const log = (...a) => {
   const line = `[supervisor] ${a.join(' ')}\n`
   process.stderr.write(line)
+  if (!LOG_FILE) return
   try {
-    appendFileSync('/tmp/supervisor-proto/supervisor.log', `${new Date().toISOString()} ${line}`)
+    appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}`)
   } catch {}
 }
 
