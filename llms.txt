@@ -1,0 +1,19 @@
+# claude-supervisor
+
+An MCP server + Claude Code plugin that lets one manager session spawn worker sessions and answer their permission prompts.
+
+## What it provides
+
+- MCP server `supervisor` with tools: spawn_agent, list_agents, agent_status, pending_permissions, await_permission, answer_permission
+- Slash commands: /supervisor:spawn, /supervisor:workers, /supervisor:answer, /supervisor:drain
+- Agent: supervisor:worker-wrangler (routine approval loop on a cheap model)
+- Skill: supervising-workers (when to delegate to a worker, and how to run the loop)
+
+## How a worker's permission prompt is answered
+
+Each worker is a `query()` session from @anthropic-ai/claude-agent-sdk started with `permissionMode: 'default'`. Every approval-requiring tool lands in the server's `canUseTool` callback, which parks the request; the manager resolves it through `answer_permission`.
+
+## Install
+
+/plugin marketplace add <owner>/claude-supervisor
+/plugin install supervisor@claude-supervisor

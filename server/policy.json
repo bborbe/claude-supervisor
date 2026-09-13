@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "note": "Declarative approval policy. NOT consumed by supervisor.mjs yet — the policy layer is the next increment; until then every prompt reaches the manager.",
+  "rules": [
+    { "tool": "Read",  "match": "*",      "action": "allow" },
+    { "tool": "Glob",  "match": "*",      "action": "allow" },
+    { "tool": "Grep",  "match": "*",      "action": "allow" },
+    { "tool": "Write", "match": "cwd",    "action": "allow" },
+    { "tool": "Edit",  "match": "cwd",    "action": "allow" },
+    { "tool": "Bash",  "match": "rm -rf", "action": "deny" },
+    { "tool": "*",     "match": "*",      "action": "escalate" }
+  ]
+}

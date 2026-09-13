@@ -1,0 +1,17 @@
+{
+  "name": "claude-supervisor",
+  "owner": { "name": "Benjamin Borbe" },
+  "metadata": {
+    "description": "Supervise many Claude Code worker sessions from one manager session — spawn them, watch them, answer their permission prompts.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "supervisor",
+      "description": "Spawn worker sessions and answer their permission prompts from one manager session.",
+      "source": "./",
+      "version": "0.1.0",
+      "strict": true
+    }
+  ]
+}
