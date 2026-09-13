@@ -336,7 +336,10 @@ function spawnInteractiveAgent({ id, prompt, cwd, label }) {
 // permissions. A worker missing its normal tooling is not a cheaper worker, it is
 // one that fails in unfamiliar ways and cannot be watched. Opt OUT with
 // interactive:false for the headless path, where the manager answers instead.
-function spawnAgent({ prompt, cwd, label, interactive = true }) {
+// `resume` opens a NEW session continuing a CLOSED one's conversation. The session
+// must be closed: resuming a live one puts two writers on one conversation, so a
+// live id is refused below rather than silently producing that.
+function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
   const id = `agent_${++seq}`
   const agent = {
     id,
@@ -384,6 +387,10 @@ function spawnAgent({ prompt, cwd, label, interactive = true }) {
       // Same reason as settingSources: parity with a tab worker. Spawning is rare, so
       // the per-spawn launcher lookup is not a hot path.
       mcpServers: resolveMcpServers(resolveClaudeCmd(agent.cwd)),
+      // Continuing an existing conversation. Because THIS call creates the session,
+      // canUseTool applies to it — which is the whole point: a session you did not
+      // create cannot be supervised, but one you resume you do create.
+      ...(resume ? { resume } : {}),
       // Resolved and validated once at module load — never read env in the hot path.
       permissionMode: PERMISSION_MODE,
       canUseTool: makeCanUseTool(agent),
@@ -458,6 +465,11 @@ const TOOLS = [
           type: 'boolean',
           description:
             'Default true: open the worker as a real session in a wezterm tab, so it has the same tooling a normal session has — launcher env, plugin skills, MCP servers, settings.json permissions — and can be watched and driven by hand. Its approval prompts are answered IN THAT TAB, so it will never appear in pending_permissions. Pass false for a headless worker that the manager supervises instead, accepting the narrower toolchain.',
+        },
+        resume: {
+          type: 'string',
+          description:
+            'Session id to continue. The session MUST be closed — resuming a live one puts two writers on one conversation. The resumed worker is created here, so unlike the original session it IS supervised and its prompts park for the manager.',
         },
       },
       required: ['prompt'],
@@ -537,6 +549,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           cwd: args.cwd,
           label: args.label,
           interactive: args.interactive !== false,
+          resume: args.resume,
         }),
       )
 
