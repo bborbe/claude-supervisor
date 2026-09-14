@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { frameMessage, isReady, listPanes, sendToPane, tabIdForPane, waitUntilReady } from './tab.mjs'
+import { frameMessage, isReady, listPanes, resumeSupportError, sendToPane, tabIdForPane, waitUntilReady } from './tab.mjs'
 
 const PANE = '1710'
 const TAB = '1105'
@@ -142,4 +142,22 @@ test('sendToPane reports a pane whose tab has disappeared', async () => {
   const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 200 })
   assert.match(res.error, /no tab owns pane/)
   assert.equal(wezterm.calls.some((c) => c.startsWith('cli send-text')), false)
+})
+
+// The regression these exist for: `{ interactive: true, resume }` used to pass the
+// two-writer guard and then drop the id, opening a fresh conversation while the caller
+// believed it was continuing one. A silent drop is the failure, so the test is that a
+// refusal exists at all — not merely that the message reads well.
+test('a resume a tab worker cannot honour is refused, not dropped', () => {
+  const error = resumeSupportError({ resume: 'abc-123', interactive: true })
+  assert.ok(error, 'this must refuse rather than open a fresh conversation')
+  assert.match(error, /headless worker only/)
+  assert.match(error, /abc-123/, 'the error names the id that would have been dropped')
+  assert.match(error, /interactive:false/, 'and names the alternative, so the caller can act')
+})
+
+test('the refusal is exactly scoped to what cannot be honoured', () => {
+  assert.equal(resumeSupportError({ resume: 'abc-123', interactive: false }), null, 'headless resume is the supported path')
+  assert.equal(resumeSupportError({ interactive: true }), null, 'a tab with no resume has nothing to refuse')
+  assert.equal(resumeSupportError({}), null)
 })

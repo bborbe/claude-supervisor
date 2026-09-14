@@ -13,12 +13,18 @@ had never been coloured.
 """
 import json, os, select, subprocess, sys, time
 
-REPO = "/Users/bborbe/Documents/workspaces/claude-supervisor"
+# The repo root, derived from this file's own location. A hardcoded home path works on
+# exactly one machine and breaks silently everywhere else.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(REPO, "server", "supervisor.mjs")
 # NOT derived from the requested cwd. The cc-* launcher does `cd "$OBSIDIAN_PERSONAL"`,
 # so a worker spawned with cwd=/tmp runs in the vault and writes its transcript there —
 # which also means the spawn response's transcript_dir points somewhere the transcript
 # never lands. Verified by the registry entry for a /tmp spawn showing the vault cwd.
+# The one machine-specific value left, and it is data rather than a repo path: it names
+# THIS operator's vault, because that is where the cc-* launcher cd's and therefore where
+# the transcript lands. There is no generic derivation — a different vault means a
+# different directory — so it stays explicit rather than pretending to be portable.
 PROJECT_DIR = os.path.expanduser("~/.claude/projects/-Users-bborbe-Documents-Obsidian-Personal")
 
 env = dict(os.environ)
