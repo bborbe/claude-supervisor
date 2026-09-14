@@ -23,6 +23,28 @@ import { spawnSync } from 'node:child_process'
 
 export const PROMPT_GLYPH = '❯' // ❯ — the input box's prompt, drawn when the TUI is up
 
+// What a tab worker cannot do, stated rather than silently ignored.
+//
+// `resume` reaches the SDK query on the headless branch only: the tab path launches the
+// `cc-*` launcher, which is never handed the flag. So `{ interactive: true, resume }`
+// used to pass the two-writer guard — doing real work, refusing a live session and
+// failing closed on an unreadable registry — and then drop the argument it had just
+// guarded, opening a FRESH conversation while the caller believed it was continuing
+// one. Same shape as the colour seed, where the consequence was cosmetic; here it is a
+// lost conversation.
+//
+// Returns null when there is nothing to refuse, so a caller can use it as a gate
+// without a second condition that could drift from this one.
+export function resumeSupportError({ resume, interactive }) {
+  if (!resume || !interactive) return null
+  return (
+    `resume reaches a headless worker only — the tab path launches the cc-* launcher, ` +
+    `which is not handed the flag, so ${resume} would be dropped and you would get a ` +
+    `fresh conversation while believing you were continuing one. ` +
+    `Pass interactive:false to resume, or omit resume to open a new tab.`
+  )
+}
+
 const defaultWezterm = (args) => spawnSync('wezterm', args, { encoding: 'utf8' })
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 

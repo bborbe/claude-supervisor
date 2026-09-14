@@ -18,7 +18,7 @@ import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { decide as decideWith, inputKey } from './policy.mjs'
 import { checkLiveness, findRegisteredByName } from './liveness.mjs'
-import { sendToPane } from './tab.mjs'
+import { resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, updateRecord, writeRecord } from './ledger.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
@@ -391,6 +391,12 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label }) {
 async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
   const id = `agent_${++seq}`
 
+  // Refused before the liveness probe: there is no point guarding an argument the tab
+  // path would drop anyway, and the caller needs to hear about the limitation rather
+  // than about the session's liveness.
+  const unsupported = resumeSupportError({ resume, interactive })
+  if (unsupported) return { error: unsupported }
+
   if (resume) {
     const { live, probes, reason } = checkLiveness(resume)
     if (live === true) {
@@ -580,7 +586,7 @@ const TOOLS = [
         resume: {
           type: 'string',
           description:
-            'Session id to continue. The session MUST be closed: resuming a live one puts two writers on one conversation, so a session found still running is refused, and so is one whose liveness cannot be determined. The resumed worker is created here, so unlike the original session it IS supervised and its prompts park for the manager.',
+            'Session id to continue. Requires interactive:false — a tab worker cannot honour it (the tab path launches the cc-* launcher, which is never handed the flag) and the call is refused rather than quietly opening a fresh conversation. The session MUST be closed: resuming a live one puts two writers on one conversation, so a session found still running is refused, and so is one whose liveness cannot be determined. The resumed worker is created here, so unlike the original session it IS supervised and its prompts park for the manager.',
         },
       },
       required: ['prompt'],
