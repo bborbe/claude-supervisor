@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.6.0
 
 - fix: Send the worker colour as **its own message** instead of seeding it into the prompt, where it never worked. Claude Code parses one submitted message as one command, and `/color` takes the *entire trimmed argument* — so `/color pink\n\n<task>` validated as `Invalid color "pink\n\n<task>"`, the colour command swallowing the blank line and the whole task. Verified against a live worker and against the CLI's own implementation, which trims the whole argument. The spawn response now reports `color: {applied: true}` only when the colour actually landed, rather than that we asked for it
 - feat: Add `send_agent_message(agent_id, message)` — the `send_to_agent` this server never had. It types a follow-up into a running **tab** worker and submits it, so a worker that has gone wrong can be corrected and one that has stalled can be nudged. Measured rather than assumed: `send-text` reaches a pane only once its tab is **activated** (two attempts against a live pane silently did nothing until then), readiness is the `❯` input glyph rather than a fixed sleep, and a terminal's Enter is `\r` not `\n`. A headless worker is refused rather than attempted — it has no pane, and typing into one that does not exist is how a channel reports success while delivering nothing
