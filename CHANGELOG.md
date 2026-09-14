@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.7.0
 
 - feat: Record every spawned worker to a **durable ledger** at `~/.local/state/claude-supervisor/sessions/<uuid>.json`, keyed by the session uuid and written at spawn so a long-running worker is recorded while it is still running. It closes the gap the other two stores leave: Claude Code's live registry is keyed by pid and **deleted when the session exits** (measured: 13 entries against 13 live processes, zero stale), so it forgets a session exactly when a record would first be useful, and the transcript holds only the conversation — neither says who started the session, in what mode, from which manager, or how it ended. `SUPERVISOR_LEDGER_DIR` overrides the location; deliberately not `SUPERVISOR_SESSIONS_DIR`, which already means the live registry
 - feat: Resolve a **tab worker's session id** from the registry by the tab name, since a tab worker is a separate process whose id is never reported to the SDK caller the way a headless worker's is. Polled rather than assumed — the session registers about a second after the pane opens — and now surfaced as `session_id` on the spawn response, which previously could not tell you which conversation the worker you just started was in
