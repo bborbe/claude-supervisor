@@ -33,9 +33,23 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | Its prompts go to | **its own tab** | **the manager**, via `await_permission` |
 | Visible | yes — tab, scrollback, drivable by hand | no tab; tail its transcript instead |
 | In `ListAgents` | yes, prefixed `⚙` (it is a real session) | **no** — it has no socket |
-| Manager can stop it | yes, close the tab | no — no `interrupt`, no `send_to_agent` |
+| Manager can steer it | yes — `send_agent_message`, or close the tab | **no** — no `interrupt`, and no channel into an SDK session |
 
 **Choose interactive when you want to see or steer it. Choose headless when you want the manager answering its prompts.** Neither is more capable; the trade is visibility against supervision.
+
+## Reaching a running tab worker
+
+`send_agent_message(agent_id, message)` types a follow-up into a running tab worker and submits it. This is the `send_to_agent` the server never had: a worker that has gone wrong can be corrected, and one that has stalled can be nudged, without a human at the tab.
+
+Three things about it are measured rather than assumed, and each one is a trap:
+
+- **It only works on a tab worker.** A headless worker has no pane, so the call is refused rather than attempted — typing into a pane that does not exist is how a channel reports success while delivering nothing.
+- **It activates the worker's tab, which steals focus.** Not silent by design; there is no way to type into a wezterm pane without making its tab active.
+- **It waits for the input prompt, it does not sleep.** A fixed delay is a race that fails on a loaded machine. Readiness is the `❯` glyph in the pane, which appears about a second after spawn.
+
+**The colour is set the same way, and that is a bug fix.** `SUPERVISOR_WORKER_COLOR` (default `/color pink`) used to be seeded as the first line of the worker's prompt, and it never worked: Claude Code parses one submitted message as one command, and `/color` takes the *entire* trimmed argument, so the colour swallowed the blank line and the whole task — `Invalid color "pink\n\n<task>"`. It is now sent as its own message once the pane is up, and the spawn response reports `color: {applied: true}` only when it actually landed.
+
+⚠️ **`transcript_dir` on a tab worker is unreliable, and known to be.** It is derived from the `cwd` you passed, but the `cc-*` launcher does `cd` into its own vault — so a worker spawned with `cwd: "/tmp"` runs in `~/Documents/Obsidian/Personal` and writes its transcript there, while the spawn response still says `/tmp`. Measured 2026-09-14. Tail the directory the launcher's vault implies, or read the pane, until this is resolved.
 
 ⚠️ **A headless worker is invisible to `ListAgents` and `/fleet-status`.** A roster-only sweep will declare its task unowned and may spawn a duplicate onto it. Check `list_agents` before concluding a task has no owner.
 
@@ -67,7 +81,8 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 
 | Tool | Purpose |
 |---|---|
-| `spawn_agent(prompt, cwd?, label?)` | start a worker — one `query()` session |
+| `spawn_agent(prompt, cwd?, label?, interactive?, resume?)` | start a worker — a real session in a tab by default, or headless with `interactive: false` |
+| `send_agent_message(agent_id, message)` | type a follow-up into a running **tab** worker and submit it |
 | `list_agents()` | every worker with status and pending-permission count |
 | `agent_status(agent_id)` | one worker: status, last message, result |
 | `pending_permissions()` | prompts awaiting an answer, across all workers |

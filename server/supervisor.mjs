@@ -18,6 +18,7 @@ import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { decide as decideWith, inputKey } from './policy.mjs'
 import { checkLiveness } from './liveness.mjs'
+import { sendToPane } from './tab.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -298,18 +299,21 @@ function resolveMcpServers(claudeCmd) {
   }
 }
 
-function spawnInteractiveAgent({ id, prompt, cwd, label }) {
+async function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   const claudeCmd = resolveClaudeCmd(cwd)
   // Prefix the tab TITLE so a supervised worker is identifiable at a glance in the
   // tab bar and the fleet roster — the two places a normal session is otherwise
   // indistinguishable. The agent's own `label` stays unprefixed, so list_agents
   // joins to ListAgents by stripping the marker.
-  // A colour command runs before the task so managed workers are visually distinct
-  // in their own tab. Configured, not hardcoded, because whether "/color" exists as
-  // a built-in is unverified; set SUPERVISOR_WORKER_COLOR=off to drop it.
-  const colorCmd = config.workerColor
-  const seeded = colorCmd && colorCmd !== 'off' ? `${colorCmd}\n\n${prompt}` : prompt
-  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(`⚙ ${label}`)} ${shellQuote(seeded)}`
+  //
+  // The TASK goes in the spawn argv, where nothing can lose it. The COLOUR does not:
+  // seeding it as the prompt's first line never worked, because Claude Code parses one
+  // submitted message as one command and `/color` takes the entire trimmed argument —
+  // `/color pink\n\n<task>` validated as `Invalid color "pink\n\n<task>"`. It is sent
+  // as its own message once the pane is up; see tab.mjs for why that needs an
+  // activated tab and a readiness poll. A colour that fails to apply is logged and
+  // non-fatal: the worker still has its task.
+  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(`⚙ ${label}`)} ${shellQuote(prompt)}`
   const res = spawnSync('wezterm', ['cli', 'spawn', '--', 'bash', '-lc', inner], { encoding: 'utf8' })
 
   if (res.error || res.status !== 0) {
@@ -318,7 +322,13 @@ function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   }
   const paneId = (res.stdout || '').trim()
   log(`interactive worker ${id} opened in a tab (pane ${paneId || 'unknown'})`)
-  return { paneId: paneId || null }
+
+  let color = null
+  if (paneId && config.workerColor && config.workerColor !== 'off') {
+    color = await sendToPane(paneId, config.workerColor)
+    if (color.error) log(`WARNING: worker ${id} colour not applied: ${color.error}`)
+  }
+  return { paneId: paneId || null, color }
 }
 
 // Interactive is the DEFAULT. A worker must come up with the same tooling a normal
@@ -329,7 +339,7 @@ function spawnInteractiveAgent({ id, prompt, cwd, label }) {
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, which is
 // what the guard below — see liveness.mjs — refuses rather than silently producing.
-function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
+async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
   const id = `agent_${++seq}`
 
   if (resume) {
@@ -372,7 +382,7 @@ function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
 
   if (interactive) {
     agent.status = 'interactive'
-    const res = spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, label: agent.label })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, label: agent.label })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -387,6 +397,11 @@ function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
       interactive: true,
       pane_id: agent.paneId,
       transcript_dir: agent.transcriptDir,
+      // Whether the colour actually landed, not that we asked for it. Null when
+      // colouring is off; an error when the channel could not deliver — a spawn that
+      // reported success while the colour silently did not apply is the bug this
+      // replaced.
+      color: res.color ? (res.color.error ? { error: res.color.error } : { applied: true }) : null,
     }
   }
 
@@ -496,6 +511,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'send_agent_message',
+    description:
+      'Send a follow-up message to a running INTERACTIVE (tab) worker — the send_to_agent this server has never had. It activates the worker tab, waits for the input prompt, and types the message, so it STEALS FOCUS and only works on a tab worker: a headless worker has no pane to send into. Returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent_id: { type: 'string', description: 'The tab worker to message.' },
+        message: { type: 'string', description: 'The message to type into its input box and submit.' },
+      },
+      required: ['agent_id', 'message'],
+    },
+  },
+  {
     name: 'list_agents',
     description: 'All spawned sessions with status and how many permissions are pending.',
     inputSchema: { type: 'object', properties: {} },
@@ -564,7 +592,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return reply({ error: 'prompt is required' })
       }
       return reply(
-        spawnAgent({
+        await spawnAgent({
           prompt: args.prompt,
           cwd: args.cwd,
           label: args.label,
@@ -572,6 +600,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           resume: args.resume,
         }),
       )
+
+    case 'send_agent_message': {
+      const agent = agents.get(args.agent_id)
+      if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
+      if (typeof args.message !== 'string' || !args.message.trim()) {
+        return reply({ error: 'message is required' })
+      }
+      // Refused rather than attempted: a headless worker has no pane, and typing into
+      // one that does not exist is how a channel reports success while delivering
+      // nothing. Its prompts are answered with answer_permission instead.
+      if (agent.status !== 'interactive' || !agent.paneId) {
+        return reply({
+          error: `agent ${args.agent_id} is not a tab worker (status "${agent.status}", pane ${agent.paneId ?? 'none'}) — send_agent_message reaches a pane, so it only works on interactive workers`,
+        })
+      }
+      const res = await sendToPane(agent.paneId, args.message)
+      if (res.error) return reply({ error: res.error })
+      agent.messages = [...(agent.messages ?? []), { at: new Date().toISOString(), text: args.message }]
+      log(`sent a follow-up message to ${agent.id} (pane ${agent.paneId}, tab ${res.tabId})`)
+      return reply({ agent_id: agent.id, sent: true, tab_id: res.tabId, pane_id: res.paneId })
+    }
 
     case 'list_agents':
       return reply([...agents.values()].map(agentView))
