@@ -51,6 +51,36 @@ Three things about it are measured rather than assumed, and each one is a trap:
 
 ⚠️ **`transcript_dir` on a tab worker is unreliable, and known to be.** It is derived from the `cwd` you passed, but the `cc-*` launcher does `cd` into its own vault — so a worker spawned with `cwd: "/tmp"` runs in `~/Documents/Obsidian/Personal` and writes its transcript there, while the spawn response still says `/tmp`. Measured 2026-09-14. Tail the directory the launcher's vault implies, or read the pane, until this is resolved.
 
+## The spawn ledger
+
+Every worker this server spawns gets a record at `~/.local/state/claude-supervisor/sessions/<uuid>.json`, keyed by its session uuid and written at spawn.
+
+Two stores already exist and neither answers the question this one does:
+
+| store | keyed by | lifetime | says |
+|---|---|---|---|
+| `~/.claude/sessions/<pid>.json` | pid | **deleted when the session exits** | who is running *right now* |
+| `~/.claude/projects/<cwd>/<uuid>.jsonl` | uuid | permanent | the conversation |
+| **the ledger** | uuid | permanent | **who started it, in what mode, from which manager, and how it ended** |
+
+Measured 2026-09-14: the live registry held 13 entries against 13 live processes with **zero stale** — it tracks liveness, not history, so it forgets a session exactly when a record would first be useful.
+
+```json
+{
+  "session_id": "b26cb46e-…", "agent_id": "agent_1", "label": "ledger-drill-tab",
+  "mode": "interactive", "launcher": "…/cc-personal-deepseek", "pane_id": "1714",
+  "resumed_from": null, "parent_session": "0096a027-…",
+  "spawned_at": "2026-09-14T06:10:31.153Z", "ended_at": null,
+  "status": "running", "result": null
+}
+```
+
+`parent_session` is the **spawn edge** — the manager session that called `spawn_agent`, resolved once from this server's own parent pid. Nothing else records it. A worker whose session id never resolved gets no record rather than one filed under a key nothing would look up, and the server logs that rather than staying quiet.
+
+⚠️ **This is not a liveness source.** An entry here must never be read as proof a session is alive — `liveness.mjs` owns that question, and it answers from the live registry plus `pgrep`. The ledger is deliberately the durable half.
+
+`SUPERVISOR_LEDGER_DIR` overrides the location. It is deliberately *not* `SUPERVISOR_SESSIONS_DIR`, which already means the live registry — one variable meaning two stores is how a reader ends up pointing this one at Claude Code's directory.
+
 ⚠️ **A headless worker is invisible to `ListAgents` and `/fleet-status`.** A roster-only sweep will declare its task unowned and may spawn a duplicate onto it. Check `list_agents` before concluding a task has no owner.
 
 ⚠️ **`permissionMode: 'auto'` bypasses supervision entirely** — the hook never fires and `canUseTool` is never called. Measured: the same `kubectl create secret` that parked for approval under `'default'` ran with **zero** permission requests under `'auto'`. Leave it unset.

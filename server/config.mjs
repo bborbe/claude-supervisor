@@ -54,6 +54,13 @@ export const config = Object.freeze({
   // that sees a session whose id appears in no process's command line.
   sessionsDir: ENV.SUPERVISOR_SESSIONS_DIR || join(CLAUDE_HOME, 'sessions'),
 
+  // The durable spawn ledger: one uuid-keyed record per worker this server spawns,
+  // outliving the session it describes. Deliberately NOT reusing
+  // SUPERVISOR_SESSIONS_DIR — that name already means the live registry above, a
+  // different store with a different lifetime, and one variable meaning two things is
+  // how a reader ends up pointing the ledger at Claude Code's directory.
+  ledgerDir: ENV.SUPERVISOR_LEDGER_DIR || join(STATE_DIR, 'sessions'),
+
   // Raw and deliberately unvalidated here: the allowed-mode list and the warning that
   // names a bad value both belong to the server's own logger, not to this module.
   permissionMode: ENV.SUPERVISOR_PERMISSION_MODE || null,

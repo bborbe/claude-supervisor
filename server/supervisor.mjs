@@ -17,8 +17,9 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { decide as decideWith, inputKey } from './policy.mjs'
-import { checkLiveness } from './liveness.mjs'
+import { checkLiveness, findRegisteredByName } from './liveness.mjs'
 import { sendToPane } from './tab.mjs'
+import { buildRecord, parentSessionId, updateRecord, writeRecord } from './ledger.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -248,6 +249,40 @@ function transcriptDirFor(cwd) {
   return join(config.claudeHome, 'projects', resolved.replace(/\//g, '-'))
 }
 
+// The durable record. Written at spawn, so a long-running worker is recorded while it
+// is still running, and updated with the outcome when it finishes.
+//
+// Best-effort by design — a ledger that cannot be written must not take the spawn down
+// with it — but never silent, because a missing record is indistinguishable from a
+// worker that was never spawned. A worker whose session id never resolved gets no
+// record at all rather than one filed under a key that would never be looked up.
+function writeLedger(agent, patch) {
+  if (!agent.sessionId) {
+    log(`WARNING: no ledger record for ${agent.id} — its session id never resolved, so there is no key to file it under`)
+    return null
+  }
+  try {
+    if (patch) return updateRecord(config.ledgerDir, agent.sessionId, patch)
+    const record = buildRecord({
+      sessionId: agent.sessionId,
+      agentId: agent.id,
+      label: agent.label,
+      mode: agent.status === 'interactive' ? 'interactive' : 'headless',
+      cwd: agent.cwd,
+      launcher: agent.launcher ?? null,
+      paneId: agent.paneId ?? null,
+      resumedFrom: agent.resumedFrom ?? null,
+      parentSession: agent.parentSession ?? null,
+      spawnedAt: agent.createdAt,
+    })
+    writeRecord(config.ledgerDir, record)
+    return record
+  } catch (error) {
+    log(`WARNING: could not write the ledger record for ${agent.id}: ${error.message}`)
+    return null
+  }
+}
+
 // Spawn a worker as a real interactive session in a wezterm tab.
 //
 // The trade is deliberate: this worker's approval prompts are answered IN ITS TAB,
@@ -328,7 +363,21 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label }) {
     color = await sendToPane(paneId, config.workerColor)
     if (color.error) log(`WARNING: worker ${id} colour not applied: ${color.error}`)
   }
-  return { paneId: paneId || null, color }
+
+  // A tab worker is a separate process, so unlike a headless one its session id is
+  // never reported to us — and without it there is no key for the ledger. The registry
+  // carries the tab name we set, so that is the join. Polled rather than assumed,
+  // because the session registers about a second after the pane opens.
+  let sessionId = null
+  if (paneId) {
+    const tabName = `⚙ ${label}`
+    const deadline = Date.now() + 8000
+    while (!sessionId && Date.now() < deadline) {
+      sessionId = findRegisteredByName(tabName)
+      if (!sessionId) await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+  }
+  return { paneId: paneId || null, color, sessionId, launcher: claudeCmd }
 }
 
 // Interactive is the DEFAULT. A worker must come up with the same tooling a normal
@@ -373,6 +422,11 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
     // id, so the two fields together are what tell the operator which conversation
     // they are now in.
     resumedFrom: resume ?? null,
+    // The spawn edge, resolved once. Our own parent pid is the MCP client — the manager
+    // session that called spawn_agent — and the live registry maps that pid to a
+    // session id. Stamped here so it outlives the registry entry it came from.
+    parentSession: parentSessionId({ dir: config.sessionsDir }),
+    launcher: null,
     permissions: [],
     transcript: [],
     error: null,
@@ -388,7 +442,10 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
       return { error: res.error }
     }
     agent.paneId = res.paneId
+    agent.sessionId = res.sessionId ?? null
+    agent.launcher = res.launcher ?? null
     agent.transcriptDir = transcriptDirFor(agent.cwd)
+    writeLedger(agent)
     return {
       agent_id: id,
       label: agent.label,
@@ -396,6 +453,10 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
       status: agent.status,
       interactive: true,
       pane_id: agent.paneId,
+      // Resolved from the registry by the tab name we set — a tab worker is a separate
+      // process, so this is the only way to learn it. Null when it did not register in
+      // time, which is also why the ledger has no record for such a worker.
+      session_id: agent.sessionId,
       transcript_dir: agent.transcriptDir,
       // Whether the colour actually landed, not that we asked for it. Null when
       // colouring is off; an error when the channel could not deliver — a spawn that
@@ -404,6 +465,10 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
       color: res.color ? (res.color.error ? { error: res.color.error } : { applied: true }) : null,
     }
   }
+
+  // Resolved once and kept, so the ledger records which launcher the worker inherited
+  // rather than re-deriving it later from a config that may have changed.
+  agent.launcher = resolveClaudeCmd(agent.cwd)
 
   const q = query({
     prompt,
@@ -416,7 +481,7 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
       settingSources: ['user', 'project', 'local'],
       // Same reason as settingSources: parity with a tab worker. Spawning is rare, so
       // the per-spawn launcher lookup is not a hot path.
-      mcpServers: resolveMcpServers(resolveClaudeCmd(agent.cwd)),
+      mcpServers: resolveMcpServers(agent.launcher),
       // Continuing an existing conversation. Because THIS call creates the session,
       // canUseTool applies to it — which is the whole point: a session you did not
       // create cannot be supervised, but one you resume you do create.
@@ -433,7 +498,13 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
     try {
       for await (const message of q) {
         agent.transcript.push(message)
-        if (message.type === 'system' && message.subtype === 'init') agent.sessionId = message.session_id
+        // The session id arrives with init, which is the first moment a headless
+        // worker's ledger record can be filed — unlike a tab worker it has no registry
+        // name to be found by, so this is the only place the key exists.
+        if (message.type === 'system' && message.subtype === 'init') {
+          agent.sessionId = message.session_id
+          writeLedger(agent)
+        }
         if (message.type === 'result') {
           agent.result = {
             subtype: message.subtype,
@@ -444,6 +515,11 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
             permission_denials: message.permission_denials?.length ?? 0,
           }
           agent.status = message.is_error ? 'error' : 'done'
+          writeLedger(agent, {
+            status: agent.status,
+            ended_at: new Date().toISOString(),
+            result: agent.result,
+          })
         }
       }
       if (agent.status === 'running') agent.status = 'done'
