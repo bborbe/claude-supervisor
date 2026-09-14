@@ -23,12 +23,14 @@
 
 import { spawnSync } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { config } from './config.mjs'
 
-export const SESSIONS_DIR =
-  process.env.SUPERVISOR_SESSIONS_DIR ||
-  join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'sessions')
+// Read from the config module rather than the environment: a library module has no
+// business consulting ambient process state, and a default resolved here would make
+// every caller depend on it. Tests pass `dir` explicitly — see config.test.mjs, which
+// fails the build if this file reads `process.env` again.
+export const SESSIONS_DIR = config.sessionsDir
 
 // A pid we are not allowed to signal still exists — EPERM means "there, but not
 // yours", which is a live process every bit as much as ESRCH is a dead one.
