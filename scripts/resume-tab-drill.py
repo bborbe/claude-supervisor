@@ -14,7 +14,9 @@ Neither refusal spawns anything, so this is safe to run against a live session i
 """
 import json, os, select, subprocess, sys, time
 
-REPO = "/Users/bborbe/Documents/workspaces/claude-supervisor"
+# The repo root, derived from this file's own location. A hardcoded home path works on
+# exactly one machine and breaks silently everywhere else.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(REPO, "server", "supervisor.mjs")
 # A session that is definitely live: this drill's own caller is not it, so use the
 # newest registry entry rather than guessing.
