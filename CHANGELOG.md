@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.7.1
 
 - fix: **Refuse a resume a tab worker cannot honour**, instead of accepting it and dropping it. `spawn_agent({ interactive: true, resume })` ran the two-writer guard — doing real work, refusing a live session and failing closed on an unreadable registry — and then discarded the id it had just guarded, because `resume` only reaches the SDK query on the headless branch and the tab path launches the `cc-*` launcher, which is never handed the flag. The caller got a **fresh** conversation while believing it was continuing one. The refusal happens before the liveness probe, since there is no point guarding an argument the tab path would drop anyway, and it names the alternative (`interactive:false`) so the caller can act rather than guess
 - test: Assert the refusal exists at all — the failure being prevented is a silent drop, so the test is that something refuses, not merely that the message reads well — plus `scripts/resume-tab-drill.py`, which exercises **both** resume refusals through the real tool and shows they are distinct: a tab worker is refused because it cannot honour the flag, a headless worker because the session is still running. A plain tab worker with no resume is unaffected
