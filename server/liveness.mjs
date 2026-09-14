@@ -74,6 +74,22 @@ export function registeredAsLive(sessionId, { dir = SESSIONS_DIR, isAlive = pidI
   return entries.some((entry) => entry.sessionId === sessionId && isAlive(entry.pid))
 }
 
+// The other direction: given the name we set on a tab, which session is it?
+//
+// A tab worker is a separate process the supervisor does not create, so it never
+// learns that worker's session id from the SDK the way it does for a headless one.
+// The registry carries `name`, and `spawnInteractiveAgent` sets the tab title, so the
+// name is the join. Verified 2026-09-14: a worker spawned as `⚙ colour-probe` appears
+// in the registry with exactly that `name` and `nameSource: "user"`.
+//
+// null means "not there yet" as well as "unreadable" — the caller polls, so the two
+// are not worth separating here; the caller's timeout is the answer either way.
+export function findRegisteredByName(name, { dir = SESSIONS_DIR, registry = readRegistry } = {}) {
+  const entries = registry(dir)
+  if (!entries) return null
+  return entries.find((entry) => entry.name === name)?.sessionId ?? null
+}
+
 export function defaultPgrep(sessionId) {
   try {
     const res = spawnSync('pgrep', ['-fl', sessionId], { encoding: 'utf8' })
