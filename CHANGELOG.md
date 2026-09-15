@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.8.0
 
 - feat: Add a **per-spawn approval policy**. `spawn_agent({ policy: "<path>" })` gives one worker its own rules, evaluated ahead of the user and bundled files — first match wins, so a rule there beats both, while the bundled set still covers what it does not name. Overlay rather than replace, deliberately: a permissive override must not silently drop the `rm -rf` deny along with it. Full replacement stays reachable by ending the file with a `*:*` escalate catch-all, which then matches before the bundled rules get a turn. An absolute path is used as-is, a relative one resolves against the worker's cwd, and the policy is recorded on the ledger record, in `agent_status`, and on every permission-log line — so a decision mined out of the log can be traced to the file that produced it, not just to the rule text
 - fix: **Refuse a policy that could never be consulted**, rather than accepting it and reporting it applied. Two cases, each an argument the server would otherwise drop silently: a tab worker answers its own prompts in its tab, so `interactive: true` + `policy` is refused — the same shape as the resume refusal in v0.7.1 — and a policy file that cannot be read is refused rather than falling back to the server default, since running under rules the caller did not choose is worse than not starting
