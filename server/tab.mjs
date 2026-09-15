@@ -45,6 +45,22 @@ export function resumeSupportError({ resume, interactive }) {
   )
 }
 
+// The policy hook is installed on the headless query only — see makePermissionHook in
+// supervisor.mjs. A tab worker is a separate process that answers its own prompts in its
+// own tab, so the server never sees them and a policy handed to one would be accepted and
+// then never consulted. That is precisely the failure this repo already shipped once,
+// with policy.json itself: a file that existed, was documented, and was not read.
+// Refused rather than dropped, the same way a resume a tab worker cannot honour is.
+export function policySupportError({ policy, interactive }) {
+  if (!policy || !interactive) return null
+  return (
+    `policy reaches a headless worker only — a tab worker answers its own prompts in ` +
+    `its tab, so the server never sees them and ${policy} would never be consulted. ` +
+    `Pass interactive:false to run the worker under it, or omit policy to use the tab's ` +
+    `own permissions.`
+  )
+}
+
 const defaultWezterm = (args) => spawnSync('wezterm', args, { encoding: 'utf8' })
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 

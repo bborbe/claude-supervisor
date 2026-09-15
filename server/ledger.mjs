@@ -43,6 +43,7 @@ export function buildRecord({
   launcher = null,
   paneId = null,
   resumedFrom = null,
+  policy = null,
   parentSession = null,
   spawnedAt,
 }) {
@@ -57,6 +58,9 @@ export function buildRecord({
     launcher,
     pane_id: paneId,
     resumed_from: resumedFrom,
+    // Which policy the worker ran under, when spawn_agent named one. Null means the
+    // server policy — the same absence-means-default the other spawn fields use.
+    policy,
     parent_session: parentSession,
     spawned_at: spawnedAt ?? new Date().toISOString(),
     ended_at: null,

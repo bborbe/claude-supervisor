@@ -45,6 +45,13 @@ test('buildRecord carries the spawn edge and starts with no outcome', () => {
   assert.equal(record.result, null)
 })
 
+test('buildRecord records which policy the worker ran under', () => {
+  // Absence means the server policy — the same reading agentView and the permission log
+  // use, so the three cannot disagree about what "no policy" means.
+  assert.equal(spawnRecord().policy, null, 'no per-spawn policy reads as the server policy, not as unknown')
+  assert.equal(spawnRecord({ policy: '/etc/strict.json' }).policy, '/etc/strict.json')
+})
+
 test('buildRecord refuses a record it could not file', () => {
   assert.throws(() => buildRecord({ mode: 'interactive' }), /needs a sessionId/)
   assert.throws(() => buildRecord({ sessionId: SESSION, mode: 'telepathy' }), /unknown mode/)

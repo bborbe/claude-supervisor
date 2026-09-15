@@ -27,6 +27,16 @@ export function ruleMatches(rule, toolName, key, cwd) {
   return key.includes(match)
 }
 
+// A per-spawn override, placed ahead of the server's rules. Overlay rather than replace:
+// first match wins, so a rule here beats any later one, while the bundled set still
+// covers whatever the override does not name — a permissive override must not silently
+// drop the `rm -rf` deny along with it. Full replacement stays reachable: end the
+// override file with a `{"tool":"*","match":"*","action":"escalate"}` catch-all, which
+// then matches before the bundled rules ever get a turn.
+export function overlayRules(override, base) {
+  return [...(override ?? []), ...(base ?? [])]
+}
+
 // First matching rule wins; the caller orders user rules before bundled ones so the
 // overlay semantics live at the call site rather than in here.
 export function decide(rules, toolName, input, cwd) {

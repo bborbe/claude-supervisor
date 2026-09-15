@@ -37,6 +37,32 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 
 **Choose interactive when you want to see or steer it. Choose headless when you want the manager answering its prompts.** Neither is more capable; the trade is visibility against supervision.
 
+## The approval policy
+
+Rules decide what a worker may do **without waking the manager**. Anything the rules do not cover defers to `canUseTool`, which parks it for the manager — that fall-through *is* the escalation path.
+
+Rules come from two files, yours first: `~/.config/claude-supervisor/policy.json` (`SUPERVISOR_POLICY`) overlays the shipped `<plugin>/server/policy.json`. Overlay, not replace — growing the list means appending, never copying. The shipped defaults allow Read/Glob/Grep and Write/Edit inside the worker's cwd, deny `Bash rm -rf`, and escalate everything else. Every request is logged as JSONL (`SUPERVISOR_PERMISSION_LOG`), which is what to promote into rules.
+
+### A policy for one worker
+
+`spawn_agent({ policy: "<path>" })` gives **one** worker its own rules, evaluated ahead of both files above. An absolute path is used as-is; a relative one resolves against the worker's cwd.
+
+It overlays rather than replaces, so a permissive override does not silently drop the `rm -rf` deny along with it. Full replacement stays reachable: end the file with a `{"tool":"*","match":"*","action":"escalate"}` catch-all, which then matches before the bundled rules get a turn.
+
+Three refusals, each an argument that would otherwise be accepted and then ignored:
+
+- **`interactive: true` + `policy`** — a tab worker answers its own prompts in its tab, so the server never sees them. Pass `interactive: false`.
+- **a mode that bypasses the hook** (below) — no policy can take effect. Omit `policy` to spawn anyway under that mode's own rules.
+- **a policy file that cannot be read** — a typo or a missing mount must not quietly become "no override".
+
+### The policy only sees what reaches the hook
+
+⚠️ **`auto` and `bypassPermissions` make the whole policy layer inert.** Both answer tool calls without consulting the `PermissionRequest` hook, so no rule — bundled, user, or per-spawn — can take effect. The server warns at startup and refuses a per-spawn policy under either mode.
+
+Measured 2026-09-15 on a machine whose `permissions.defaultMode` resolved to `auto` from the **managed** settings tier: a headless worker ran a non-allowlisted command, reported `success`, and produced **no hook call, no `canUseTool` call, and no permission-log line at all**. The policy code was correct, unit-tested, and doing nothing. An escalating mode from a trusted settings tier wins over the `permissionMode` query option, so this cannot be fixed from the spawn — set `permissions.defaultMode` to `default` in the tier that supplies it.
+
+The same boundary applies the other way: a tool the worker's own settings already allow never reaches the hook either, so a policy can narrow what escalates but cannot revoke an inherited allow.
+
 ## Reaching a running tab worker
 
 `send_agent_message(agent_id, message)` types a follow-up into a running tab worker and submits it. This is the `send_to_agent` the server never had: a worker that has gone wrong can be corrected, and one that has stalled can be nudged, without a human at the tab.
@@ -69,7 +95,7 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
 {
   "session_id": "b26cb46e-…", "agent_id": "agent_1", "label": "ledger-drill-tab",
   "mode": "interactive", "launcher": "…/cc-personal-deepseek", "pane_id": "1714",
-  "resumed_from": null, "parent_session": "0096a027-…",
+  "resumed_from": null, "policy": null, "parent_session": "0096a027-…",
   "spawned_at": "2026-09-14T06:10:31.153Z", "ended_at": null,
   "status": "running", "result": null
 }
@@ -111,7 +137,7 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 
 | Tool | Purpose |
 |---|---|
-| `spawn_agent(prompt, cwd?, label?, interactive?, resume?)` | start a worker — a real session in a tab by default, or headless with `interactive: false` |
+| `spawn_agent(prompt, cwd?, label?, interactive?, resume?, policy?)` | start a worker — a real session in a tab by default, or headless with `interactive: false`. `policy` gives this one worker its own rules; headless only |
 | `send_agent_message(agent_id, message)` | type a follow-up into a running **tab** worker and submit it |
 | `list_agents()` | every worker with status and pending-permission count |
 | `agent_status(agent_id)` | one worker: status, last message, result |
@@ -121,7 +147,9 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 
 ## How it works
 
-Each worker is a `query()` session from `@anthropic-ai/claude-agent-sdk`, started with `permissionMode: 'default'`, so every approval-requiring tool lands in the server's `canUseTool` callback. The callback parks the request and returns a promise; the manager resolves it through `answer_permission`.
+Each worker is a `query()` session from `@anthropic-ai/claude-agent-sdk`, started with `permissionMode: 'default'`, so every approval-requiring tool reaches the server: the `PermissionRequest` hook answers what the policy knows, and anything it does not cover falls through to `canUseTool`, which parks the request for the manager to resolve through `answer_permission`.
+
+⚠️ `permissionMode: 'default'` is a **request, not a guarantee**. An escalating `permissions.defaultMode` from a trusted settings tier wins over it and bypasses the hook and `canUseTool` both, which makes the policy inert — see § The approval policy.
 
 ```
 manager session ──MCP──► supervisor server ──query()×N──► workers
@@ -141,7 +169,7 @@ skills/supervising-workers/SKILL.md
 commands/{spawn,workers,answer,drain}.md
 agents/worker-wrangler.md
 server/supervisor.mjs                    the MCP server
-server/policy.json                       approval policy (NOT wired yet — see Status)
+server/policy.json                       bundled approval rules (see § The approval policy)
 ```
 
 ## Status
@@ -151,6 +179,7 @@ Extracted from a working prototype proven end-to-end on 2026-09-13: one manager 
 Known gaps, tracked rather than hidden:
 
 - **A headless worker cannot be corrected or stopped once running** — only waited out. `send_agent_message` reaches a *pane*, so it does not apply here, and an SDK string-prompt session is single-shot; multi-turn needs streaming input (`AsyncIterable<SDKUserMessage>`). A tab worker can be steered with `send_agent_message` or stopped by closing its tab.
+- **The policy layer is inert under `auto` / `bypassPermissions`** — both answer tool calls without consulting the `PermissionRequest` hook, so no rule can take effect. The server warns at startup and refuses a per-spawn policy under either. Measured 2026-09-15 on a machine whose `defaultMode` resolved to `auto` from the managed tier. See § The approval policy.
 - **Status lags after an allow** — `agent_status` can still read `running` for a few seconds; never treat one post-allow check as final.
 - **Cost figures are meaningless off-Anthropic** — they are priced from Anthropic's table; ignore them when traffic is routed elsewhere.
 - **Unanswered prompts auto-deny** after 15 minutes — headless workers only; a tab worker's prompt waits for its tab.
