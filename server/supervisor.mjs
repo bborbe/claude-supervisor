@@ -108,8 +108,9 @@ async function effectivePermissionMode(cwd) {
     const resolved = await resolveSettings({ cwd, settingSources: SETTING_SOURCES })
     fromSettings = filterEscalatingDefaultMode(resolved).permissions?.defaultMode ?? null
   } catch (error) {
-    // @alpha API: a failure is reported rather than thrown, and deliberately does not
-    // resolve to a mode — an unknown mode must be visible, not read as "default".
+    // @alpha API: a failure is reported rather than thrown, and then falls back to the
+    // option we send — the best available answer, with the uncertainty already logged
+    // rather than silently read as "default".
     log(`WARNING: cannot resolve the effective permission mode: ${error.message} — whether policy rules apply is unknown`)
   }
   return POLICY_UNREACHABLE_MODES.includes(fromSettings) ? fromSettings : PERMISSION_MODE
