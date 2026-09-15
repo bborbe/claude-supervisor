@@ -36,6 +36,15 @@ const PERMISSION_LOG =
     ? null
     : ENV.SUPERVISOR_PERMISSION_LOG || join(STATE_DIR, 'permissions.jsonl')
 
+// The SDK prices a turn from Anthropic's list, so the figure is only the truth when the
+// traffic actually goes there. Under claude-code-router it goes to whatever backend the
+// router points at, and the number becomes fiction — measured 2026-09-13 at $0.40–$0.79
+// per worker against vLLM. The env var is the whole signal: unset means the SDK reaches
+// Anthropic itself, set means something else is on the other end.
+const ANTHROPIC_BASE_URL = ENV.ANTHROPIC_BASE_URL || null
+const COST_FIGURES_MEANINGFUL =
+  !ANTHROPIC_BASE_URL || ANTHROPIC_BASE_URL.includes('api.anthropic.com')
+
 export const config = Object.freeze({
   // stderr is the transport-safe log channel — stdout carries MCP frames — so a file
   // log is opt-in and nothing depends on a machine-local path by default.
@@ -49,6 +58,11 @@ export const config = Object.freeze({
 
   userPolicy: ENV.SUPERVISOR_POLICY || join(CONFIG_DIR, 'policy.json'),
   permissionLog: PERMISSION_LOG,
+
+  // Whether a reported cost figure describes the traffic that actually ran. See the
+  // note above the resolution — this is a property of the deployment, not of a turn.
+  anthropicBaseUrl: ANTHROPIC_BASE_URL,
+  costFiguresMeaningful: COST_FIGURES_MEANINGFUL,
 
   // Claude Code's live session registry, keyed by pid. Read-only, and the only probe
   // that sees a session whose id appears in no process's command line.
