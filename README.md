@@ -140,7 +140,7 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 | `spawn_agent(prompt, cwd?, label?, interactive?, resume?, policy?)` | start a worker — a real session in a tab by default, or headless with `interactive: false`. `policy` gives this one worker its own rules; headless only |
 | `send_agent_message(agent_id, message)` | type a follow-up into a running **tab** worker and submit it |
 | `list_agents()` | every worker with status and pending-permission count |
-| `agent_status(agent_id)` | one worker: status, last message, result |
+| `agent_status(agent_id)` | one worker: status, last message, result. `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed |
 | `pending_permissions()` | prompts awaiting an answer, across all workers |
 | `await_permission(timeout_ms?)` | block until any worker asks — one call instead of polling |
 | `answer_permission(request_id, behavior, message?)` | `allow` / `deny` — this unblocks the worker |
@@ -180,6 +180,5 @@ Known gaps, tracked rather than hidden:
 
 - **A headless worker cannot be corrected or stopped once running** — only waited out. `send_agent_message` reaches a *pane*, so it does not apply here, and an SDK string-prompt session is single-shot; multi-turn needs streaming input (`AsyncIterable<SDKUserMessage>`). A tab worker can be steered with `send_agent_message` or stopped by closing its tab.
 - **The policy layer is inert under `auto` / `bypassPermissions`** — both answer tool calls without consulting the `PermissionRequest` hook, so no rule can take effect. The server warns at startup and refuses a per-spawn policy under either. Measured 2026-09-15 on a machine whose `defaultMode` resolved to `auto` from the managed tier. See § The approval policy.
-- **Status lags after an allow** — `agent_status` can still read `running` for a few seconds; never treat one post-allow check as final.
-- **Cost figures are meaningless off-Anthropic** — they are priced from Anthropic's table; ignore them when traffic is routed elsewhere.
+- **Status lags after an allow** — `agent_status` can still read `running` for a few seconds, because the server marks a worker running the moment it *answers* the prompt, not when the SDK confirms it resumed. That is the most the server can honestly know at that point, so the fix is to stop treating one post-allow check as a verdict: `answer_permission` already returns the outcome, and a worker that was about to finish will read `done` a moment later.
 - **Unanswered prompts auto-deny** after 15 minutes — headless workers only; a tab worker's prompt waits for its tab.

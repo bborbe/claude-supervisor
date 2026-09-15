@@ -59,6 +59,8 @@ test('the config object is a frozen, complete surface', () => {
     'claudeHome',
     'userPolicy',
     'permissionLog',
+    'anthropicBaseUrl',
+    'costFiguresMeaningful',
     'sessionsDir',
     'permissionMode',
     'claudeCmd',
@@ -100,5 +102,31 @@ test('SUPERVISOR_SESSIONS_DIR overrides the registry location', async () => {
   } finally {
     if (before === undefined) delete process.env.SUPERVISOR_SESSIONS_DIR
     else process.env.SUPERVISOR_SESSIONS_DIR = before
+  }
+})
+
+test('a cost figure is only meaningful when the traffic reaches Anthropic', async () => {
+  // The SDK prices from Anthropic's list, so the figure is real only when Anthropic
+  // answered. Unset means the SDK reaches Anthropic itself; any other base URL means
+  // something else did, and the number describes a billing model that never ran.
+  const before = process.env.ANTHROPIC_BASE_URL
+  try {
+    delete process.env.ANTHROPIC_BASE_URL
+    assert.equal(
+      (await import('./config.mjs?cost=unset')).config.costFiguresMeaningful,
+      true,
+      'unset means the SDK reaches Anthropic, so the figure is real',
+    )
+
+    process.env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com'
+    assert.equal((await import('./config.mjs?cost=anthropic')).config.costFiguresMeaningful, true)
+
+    process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:8788'
+    const viaRouter = (await import('./config.mjs?cost=router')).config
+    assert.equal(viaRouter.costFiguresMeaningful, false, 'routed traffic is not billed from Anthropic’s list')
+    assert.equal(viaRouter.anthropicBaseUrl, 'http://127.0.0.1:8788', 'and the URL that made it untrue is kept')
+  } finally {
+    if (before === undefined) delete process.env.ANTHROPIC_BASE_URL
+    else process.env.ANTHROPIC_BASE_URL = before
   }
 })
