@@ -169,7 +169,7 @@ skills/supervising-workers/SKILL.md
 commands/{spawn,workers,answer,drain}.md
 agents/worker-wrangler.md
 server/supervisor.mjs                    the MCP server
-server/policy.json                       approval policy (NOT wired yet — see Status)
+server/policy.json                       bundled approval rules (see § The approval policy)
 ```
 
 ## Status
@@ -178,8 +178,8 @@ Extracted from a working prototype proven end-to-end on 2026-09-13: one manager 
 
 Known gaps, tracked rather than hidden:
 
-- **A headless worker cannot be steered or stopped** — `send_agent_message` types into a *pane*, so it reaches tab workers only. An SDK session is single-shot and has no `interrupt`, so once running it can only be waited out; correcting one needs streaming input (`AsyncIterable<SDKUserMessage>`). A tab worker is closed by closing its tab.
+- **A headless worker cannot be corrected or stopped once running** — only waited out. `send_agent_message` reaches a *pane*, so it does not apply here, and an SDK string-prompt session is single-shot; multi-turn needs streaming input (`AsyncIterable<SDKUserMessage>`). A tab worker can be steered with `send_agent_message` or stopped by closing its tab.
 - **The policy layer is inert under `auto` / `bypassPermissions`** — both answer tool calls without consulting the `PermissionRequest` hook, so no rule can take effect. The server warns at startup and refuses a per-spawn policy under either. Measured 2026-09-15 on a machine whose `defaultMode` resolved to `auto` from the managed tier. See § The approval policy.
 - **Status lags after an allow** — `agent_status` can still read `running` for a few seconds; never treat one post-allow check as final.
 - **Cost figures are meaningless off-Anthropic** — they are priced from Anthropic's table; ignore them when traffic is routed elsewhere.
-- **Unanswered prompts auto-deny** after 15 minutes.
+- **Unanswered prompts auto-deny** after 15 minutes — headless workers only; a tab worker's prompt waits for its tab.
