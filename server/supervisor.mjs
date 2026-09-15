@@ -92,25 +92,27 @@ const SETTING_SOURCES = ['user', 'project', 'local']
 // the policy stays reachable for non-edit tools.
 const POLICY_UNREACHABLE_MODES = ['auto', 'bypassPermissions']
 
-// Which permission mode the worker will ACTUALLY run under. The query option is only a
-// request — an escalating `permissions.defaultMode` from a trusted settings tier wins
-// over it — so the mode has to be resolved rather than assumed.
+// The permission mode a worker will ACTUALLY run under. Two sources, and which one wins
+// is not obvious: an escalating `permissions.defaultMode` from a trusted settings tier
+// beats the `permissionMode` query option, and otherwise the option is what governs.
+// Reporting only the settings value would miss `SUPERVISOR_PERMISSION_MODE=auto`, which
+// makes the policy exactly as unreachable as a settings `auto` does.
 //
 // Measured 2026-09-15, and the reason this exists: `permissions.defaultMode` resolved to
 // "auto" from the managed tier on this machine, and a live worker confirmed what that
 // means — the command ran, reported success, and neither the hook nor canUseTool was
 // called at all. The policy code was correct, unit-tested, and doing nothing.
-//
-// resolveSettings is @alpha, so a failure is reported rather than thrown: an unknown
-// mode must be visible, not fatal.
 async function effectivePermissionMode(cwd) {
+  let fromSettings = null
   try {
     const resolved = await resolveSettings({ cwd, settingSources: SETTING_SOURCES })
-    return filterEscalatingDefaultMode(resolved).permissions?.defaultMode ?? null
+    fromSettings = filterEscalatingDefaultMode(resolved).permissions?.defaultMode ?? null
   } catch (error) {
+    // @alpha API: a failure is reported rather than thrown, and deliberately does not
+    // resolve to a mode — an unknown mode must be visible, not read as "default".
     log(`WARNING: cannot resolve the effective permission mode: ${error.message} — whether policy rules apply is unknown`)
-    return null
   }
+  return POLICY_UNREACHABLE_MODES.includes(fromSettings) ? fromSettings : PERMISSION_MODE
 }
 
 // One reader, two callers with opposite failure semantics. It reports rather than
@@ -883,9 +885,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 })
 
+await server.connect(new StdioServerTransport())
+log('supervisor ready')
+
 // Said once at startup, so an operator learns the policy layer is unreachable without
 // having to spawn a worker and wonder why nothing happened. The per-spawn path refuses
 // loudly for the case that matters; this is the standing condition behind it.
+//
+// After connect(), not before: this awaits an @alpha SDK call, and a diagnostic must
+// never be able to delay the server it diagnoses — every session pays that startup.
 const startupMode = await effectivePermissionMode(process.cwd())
 if (POLICY_UNREACHABLE_MODES.includes(startupMode)) {
   log(
@@ -893,6 +901,3 @@ if (POLICY_UNREACHABLE_MODES.includes(startupMode)) {
       `policy.json (${USER_POLICY} and the bundled defaults) has no effect on any worker. See README § Status.`,
   )
 }
-
-await server.connect(new StdioServerTransport())
-log('supervisor ready')

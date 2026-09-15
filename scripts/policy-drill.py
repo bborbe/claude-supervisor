@@ -69,7 +69,13 @@ def effective_mode():
     script = (
         "import { resolveSettings, filterEscalatingDefaultMode } from '@anthropic-ai/claude-agent-sdk';"
         f"const r = await resolveSettings({{ cwd: {json.dumps(WORK)}, settingSources: ['user','project','local'] }});"
-        "console.log(filterEscalatingDefaultMode(r).permissions?.defaultMode ?? '')"
+        "const fromSettings = filterEscalatingDefaultMode(r).permissions?.defaultMode ?? null;"
+        # Mirrors effectivePermissionMode in server/supervisor.mjs: an escalating settings
+        # mode beats the query option, and otherwise the option governs. Resolving only the
+        # settings half would disagree with the server whenever SUPERVISOR_PERMISSION_MODE
+        # is set — and disagreeing with the thing under test is worse than not checking.
+        f"const option = {json.dumps(os.environ.get('SUPERVISOR_PERMISSION_MODE') or 'default')};"
+        "console.log(['auto','bypassPermissions'].includes(fromSettings) ? fromSettings : option)"
     )
     out = subprocess.run(
         ["node", "--input-type=module", "-e", script],
