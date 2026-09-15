@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { frameMessage, isReady, listPanes, resumeSupportError, sendToPane, tabIdForPane, waitUntilReady } from './tab.mjs'
+import { frameMessage, isReady, listPanes, policySupportError, resumeSupportError, sendToPane, tabIdForPane, waitUntilReady } from './tab.mjs'
 
 const PANE = '1710'
 const TAB = '1105'
@@ -160,4 +160,18 @@ test('the refusal is exactly scoped to what cannot be honoured', () => {
   assert.equal(resumeSupportError({ resume: 'abc-123', interactive: false }), null, 'headless resume is the supported path')
   assert.equal(resumeSupportError({ interactive: true }), null, 'a tab with no resume has nothing to refuse')
   assert.equal(resumeSupportError({}), null)
+})
+
+test('a policy a tab worker cannot consult is refused, not dropped', () => {
+  const error = policySupportError({ policy: 'strict.json', interactive: true })
+  assert.ok(error, 'this must refuse rather than accept a policy that is never read')
+  assert.match(error, /headless worker only/)
+  assert.match(error, /strict\.json/, 'the error names the path that would have been ignored')
+  assert.match(error, /interactive:false/, 'and names the alternative, so the caller can act')
+})
+
+test('the policy refusal is exactly scoped to what cannot be honoured', () => {
+  assert.equal(policySupportError({ policy: 'strict.json', interactive: false }), null, 'headless is the path the hook runs on')
+  assert.equal(policySupportError({ interactive: true }), null, 'a tab with no policy has nothing to refuse')
+  assert.equal(policySupportError({}), null)
 })

@@ -7,7 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { inputKey, ruleMatches, decide } from './policy.mjs'
+import { inputKey, ruleMatches, decide, overlayRules } from './policy.mjs'
 
 const BUNDLED = [
   { tool: 'Read', match: '*', action: 'allow' },
@@ -81,4 +81,33 @@ test('first match wins, which is what makes the user overlay work', () => {
 test('decide tolerates a missing or malformed rule list', () => {
   assert.equal(decide(undefined, 'Read', {}, '/cwd').action, 'escalate')
   assert.equal(decide([], 'Read', {}, '/cwd').action, 'escalate')
+})
+
+test('overlayRules puts the override first, so a per-spawn rule beats the server rules', () => {
+  const merged = overlayRules([{ tool: 'Bash', match: 'echo', action: 'allow' }], BUNDLED)
+  // The override wins where it speaks — this is the whole point of a per-spawn policy,
+  // and the bundled catch-all would otherwise swallow the command first.
+  assert.equal(decide(merged, 'Bash', { command: 'echo hi' }, '/cwd').action, 'allow')
+  // ...and the bundled set still covers what it does not name. A permissive override
+  // must not silently drop the rm -rf deny along with it.
+  assert.equal(decide(merged, 'Bash', { command: 'rm -rf /' }, '/cwd').action, 'deny')
+  assert.equal(decide(merged, 'WebFetch', { url: 'https://x' }, '/cwd').action, 'escalate')
+})
+
+test('a trailing catch-all in the override reaches full replacement', () => {
+  // The documented way to REPLACE rather than overlay. The catch-all matches before any
+  // bundled rule gets a turn — including the rm -rf deny, which is the risk that makes
+  // overlay the default rather than replace.
+  const merged = overlayRules(
+    [{ tool: 'Read', match: '*', action: 'allow' }, { tool: '*', match: '*', action: 'escalate' }],
+    BUNDLED,
+  )
+  assert.equal(decide(merged, 'Read', { file_path: '/x' }, '/cwd').action, 'allow')
+  assert.equal(decide(merged, 'Bash', { command: 'rm -rf /' }, '/cwd').action, 'escalate')
+})
+
+test('overlayRules tolerates a missing override or base', () => {
+  assert.deepEqual(overlayRules(null, BUNDLED), BUNDLED)
+  assert.deepEqual(overlayRules(BUNDLED, null), BUNDLED)
+  assert.deepEqual(overlayRules(undefined, undefined), [])
 })

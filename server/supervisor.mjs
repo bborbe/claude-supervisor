@@ -9,16 +9,16 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { query } from '@anthropic-ai/claude-agent-sdk'
+import { filterEscalatingDefaultMode, query, resolveSettings } from '@anthropic-ai/claude-agent-sdk'
 import { appendFileSync, mkdirSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { isAbsolute, join } from 'path'
 import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
-import { decide as decideWith, inputKey } from './policy.mjs'
+import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName } from './liveness.mjs'
-import { resumeSupportError, sendToPane } from './tab.mjs'
+import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, updateRecord, writeRecord } from './ledger.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
@@ -79,38 +79,107 @@ const PERMISSION_MODE = (() => {
   return raw
 })()
 
-// Distinguish "no such file" (normal — the user file is optional) from "file exists
-// but is unreadable or malformed" (never normal — it means real rules are being
-// silently ignored). Collapsing the two would let a corrupted policy look empty.
-function readRules(path) {
+// The settings tiers a headless worker loads. Named once because the query option and
+// the effective-mode resolution below must agree — resolving a different set would
+// report a mode the worker does not actually run under, which is worse than not checking.
+const SETTING_SOURCES = ['user', 'project', 'local']
+
+// Modes under which the PermissionRequest hook is never consulted, so every rule in
+// policy.json — and any per-spawn override — is unreachable. `auto` is the case the
+// README has warned about since v0.3.0; `bypassPermissions` is the SDK's own wording
+// ("auto-approves every tool call … before the callback is consulted"). `acceptEdits` is
+// deliberately NOT here: it auto-accepts edits and still prompts for everything else, so
+// the policy stays reachable for non-edit tools.
+const POLICY_UNREACHABLE_MODES = ['auto', 'bypassPermissions']
+
+// Which permission mode the worker will ACTUALLY run under. The query option is only a
+// request — an escalating `permissions.defaultMode` from a trusted settings tier wins
+// over it — so the mode has to be resolved rather than assumed.
+//
+// Measured 2026-09-15, and the reason this exists: `permissions.defaultMode` resolved to
+// "auto" from the managed tier on this machine, and a live worker confirmed what that
+// means — the command ran, reported success, and neither the hook nor canUseTool was
+// called at all. The policy code was correct, unit-tested, and doing nothing.
+//
+// resolveSettings is @alpha, so a failure is reported rather than thrown: an unknown
+// mode must be visible, not fatal.
+async function effectivePermissionMode(cwd) {
+  try {
+    const resolved = await resolveSettings({ cwd, settingSources: SETTING_SOURCES })
+    return filterEscalatingDefaultMode(resolved).permissions?.defaultMode ?? null
+  } catch (error) {
+    log(`WARNING: cannot resolve the effective permission mode: ${error.message} — whether policy rules apply is unknown`)
+    return null
+  }
+}
+
+// One reader, two callers with opposite failure semantics. It reports rather than
+// decides: "no such file" is normal for the optional user overlay and never normal for a
+// path a caller named explicitly at spawn time, so the caller owns that judgement.
+function loadRules(path) {
   let raw
   try {
     raw = readFileSync(path, 'utf8')
   } catch (error) {
-    if (error.code !== 'ENOENT') log(`ERROR: cannot read policy ${path}: ${error.message} — its rules are NOT in effect`)
-    return []
+    return { error: `cannot read policy ${path}: ${error.message}`, code: error.code }
   }
+  let parsed
   try {
-    const parsed = JSON.parse(raw)
-    const rules = Array.isArray(parsed.rules) ? parsed.rules : []
-    for (const rule of rules) {
-      if (!rule?.action || !['allow', 'deny', 'escalate'].includes(rule.action)) {
-        log(`ERROR: policy ${path} has a rule with an unknown action ${JSON.stringify(rule?.action)} — it will never match`)
-      }
-    }
-    return rules
+    parsed = JSON.parse(raw)
   } catch (error) {
-    log(`ERROR: policy ${path} is not valid JSON: ${error.message} — its rules are NOT in effect`)
+    return { error: `policy ${path} is not valid JSON: ${error.message}` }
+  }
+  const rules = Array.isArray(parsed?.rules) ? parsed.rules : []
+  for (const rule of rules) {
+    if (!rule?.action || !['allow', 'deny', 'escalate'].includes(rule.action)) {
+      log(`ERROR: policy ${path} has a rule with an unknown action ${JSON.stringify(rule?.action)} — it will never match`)
+    }
+  }
+  return { rules }
+}
+
+// The optional user overlay: absent is the normal case, since most users have none.
+// Unreadable or malformed is not normal — collapsing the two would let a corrupted
+// policy look empty and quietly run under the bundled defaults instead.
+function readRules(path) {
+  const { rules, error, code } = loadRules(path)
+  if (error) {
+    if (code !== 'ENOENT') log(`ERROR: ${error} — its rules are NOT in effect`)
     return []
   }
+  return rules
 }
 
 // Overlay, not replace: your rules are evaluated first, and the bundled set fills
 // in whatever you have not decided. Growing the list means appending, never copying.
 const policy = { rules: [...readRules(USER_POLICY), ...readRules(BUNDLED_POLICY)] }
 
-// Evaluation is pure and lives in policy.mjs; this binds it to the loaded rule set.
-const decide = (toolName, input, cwd) => decideWith(policy.rules, toolName, input, cwd)
+// Evaluation is pure and lives in policy.mjs; this binds it to whichever rule set the
+// worker runs under — the server's by default, its own when spawn_agent named one.
+const decide = (toolName, input, cwd, rules = policy.rules) => decideWith(rules, toolName, input, cwd)
+
+// A policy file named by the caller at spawn time. A relative path resolves against the
+// WORKER's cwd, not the server's: the caller is naming a file in the tree the worker
+// will run in, while the server's own cwd is an accident of how its MCP client happened
+// to launch it.
+//
+// Fails closed on an unreadable file. Falling back to the server default would run the
+// worker under rules the caller did not choose while reporting success — the exact shape
+// of the bug this repo already shipped once, when policy.json existed, was documented,
+// and was not read.
+function resolveSpawnPolicy(policyPath, cwd) {
+  if (typeof policyPath !== 'string' || !policyPath.trim()) {
+    return { error: `policy must be a path to a JSON file, got ${JSON.stringify(policyPath)}` }
+  }
+  const path = isAbsolute(policyPath) ? policyPath : join(cwd, policyPath)
+  const { rules, error } = loadRules(path)
+  if (error) {
+    return {
+      error: `${error} — refusing to spawn, because a named policy that silently falls back to the server default is not the policy you asked for`,
+    }
+  }
+  return { rules: overlayRules(rules, policy.rules), path }
+}
 
 // The state dir is static — create it once rather than on every write.
 let logDirReady = false
@@ -140,7 +209,7 @@ function logPermission(record) {
 function makePermissionHook(agent) {
   return async (hookInput) => {
     const toolName = hookInput?.tool_name ?? 'unknown'
-    const { action, key, rule } = decide(toolName, hookInput?.tool_input, agent.cwd)
+    const { action, key, rule } = decide(toolName, hookInput?.tool_input, agent.cwd, agent.rules)
     const base = {
       ts: new Date().toISOString(),
       agent: agent.id,
@@ -148,6 +217,9 @@ function makePermissionHook(agent) {
       tool: toolName,
       key,
       matched_rule: rule ? `${rule.tool}:${rule.match}` : null,
+      // Which policy this worker ran under, so a decision mined out of the log can be
+      // traced back to the file that produced it rather than to the rule text alone.
+      policy: agent.policyPath ?? null,
     }
 
     if (action === 'allow' || action === 'deny') {
@@ -272,6 +344,7 @@ function writeLedger(agent, patch) {
       launcher: agent.launcher ?? null,
       paneId: agent.paneId ?? null,
       resumedFrom: agent.resumedFrom ?? null,
+      policy: agent.policyPath ?? null,
       parentSession: agent.parentSession ?? null,
       spawnedAt: agent.createdAt,
     })
@@ -388,7 +461,7 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label }) {
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, which is
 // what the guard below — see liveness.mjs — refuses rather than silently producing.
-async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
+async function spawnAgent({ prompt, cwd, label, interactive = true, resume, policy: policyPath }) {
   const id = `agent_${++seq}`
 
   // Refused before the liveness probe: there is no point guarding an argument the tab
@@ -396,6 +469,37 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
   // than about the session's liveness.
   const unsupported = resumeSupportError({ resume, interactive })
   if (unsupported) return { error: unsupported }
+
+  // Same reasoning and the same class of bug: a policy the tab path cannot consult is
+  // refused, not accepted and quietly ignored.
+  const unsupportedPolicy = policySupportError({ policy: policyPath, interactive })
+  if (unsupportedPolicy) return { error: unsupportedPolicy }
+
+  // Resolved before anything is spawned, so a bad path costs no worker, no ledger
+  // record, and no half-started session running under rules nobody chose.
+  const workerCwd = cwd || process.cwd()
+  let workerRules = null
+  let resolvedPolicyPath = null
+  if (policyPath) {
+    // Checked before the file, because the mode decides whether the file could ever
+    // matter. A policy that cannot be REACHED is the same failure as one that is never
+    // read — accepted, reported as applied, and inert — which is the failure this repo
+    // already shipped once, so it is refused rather than warned about.
+    const mode = await effectivePermissionMode(workerCwd)
+    if (POLICY_UNREACHABLE_MODES.includes(mode)) {
+      return {
+        error:
+          `policy would never be consulted: this worker's effective permission mode is "${mode}", which answers ` +
+          `tool calls without consulting the PermissionRequest hook, so ${policyPath} would be accepted and then ` +
+          `ignored. The mode comes from settings, not from the spawn. Omit policy to spawn the worker anyway under ` +
+          `that mode's own rules, or set permissions.defaultMode to "default" in the settings tier that supplies it.`,
+      }
+    }
+    const resolved = resolveSpawnPolicy(policyPath, workerCwd)
+    if (resolved.error) return { error: resolved.error }
+    workerRules = resolved.rules
+    resolvedPolicyPath = resolved.path
+  }
 
   if (resume) {
     const { live, probes, reason } = checkLiveness(resume)
@@ -420,8 +524,12 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
     id,
     label: label || id,
     prompt,
-    cwd: cwd || process.cwd(),
+    cwd: workerCwd,
     status: 'running',
+    // The rule set this worker's permission hook evaluates: the server's when no policy
+    // was named, its own overlay when one was.
+    rules: workerRules ?? policy.rules,
+    policyPath: resolvedPolicyPath,
     sessionId: null,
     // Which conversation this one continues, when it is an adoption rather than a
     // fresh start. `sessionId` alone cannot say: on resume the SDK reports the SAME
@@ -484,7 +592,7 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
       // starts from nothing — no plugin skills, no settings.json permissions, no
       // user MCP servers — and a worker missing its normal tooling is not a cheaper
       // worker, it is one that fails in unfamiliar ways.
-      settingSources: ['user', 'project', 'local'],
+      settingSources: SETTING_SOURCES,
       // Same reason as settingSources: parity with a tab worker. Spawning is rare, so
       // the per-spawn launcher lookup is not a hot path.
       mcpServers: resolveMcpServers(agent.launcher),
@@ -536,7 +644,15 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume }) {
     }
   })()
 
-  return { agent_id: id, label: agent.label, cwd: agent.cwd, status: agent.status }
+  return {
+    agent_id: id,
+    label: agent.label,
+    cwd: agent.cwd,
+    status: agent.status,
+    // Reported so a caller can see which policy actually took effect, rather than
+    // inferring it from the absence of an error.
+    policy: agent.policyPath,
+  }
 }
 
 const lastAssistantText = (agent) => {
@@ -557,6 +673,9 @@ const agentView = (a) => ({
   cwd: a.cwd,
   session_id: a.sessionId,
   resumed_from: a.resumedFrom ?? null,
+  // Null means the worker runs under the server policy — the same absence-means-default
+  // the ledger record uses, so the two cannot disagree about what "no policy" reads as.
+  policy: a.policyPath ?? null,
   // Same id = the conversation continued; a different one = the SDK forked it. Only
   // answerable once init has reported a session id, so it is null until then rather
   // than a guess.
@@ -587,6 +706,11 @@ const TOOLS = [
           type: 'string',
           description:
             'Session id to continue. Requires interactive:false — a tab worker cannot honour it (the tab path launches the cc-* launcher, which is never handed the flag) and the call is refused rather than quietly opening a fresh conversation. The session MUST be closed: resuming a live one puts two writers on one conversation, so a session found still running is refused, and so is one whose liveness cannot be determined. The resumed worker is created here, so unlike the original session it IS supervised and its prompts park for the manager.',
+        },
+        policy: {
+          type: 'string',
+          description:
+            'Path to a JSON file of approval rules for THIS worker, evaluated ahead of the user and bundled rules — first match wins, so a rule here beats both, while the bundled set still covers whatever it does not name. Full replacement is reachable by ending the file with a {"tool":"*","match":"*","action":"escalate"} catch-all. An absolute path is used as-is; a relative one resolves against the worker\'s cwd. The file must exist and parse — a named policy that cannot be read refuses the spawn rather than silently falling back to the server default. Headless only: a tab worker answers its own prompts in its tab, so combining this with interactive:true is refused. Omit to use the server policy.',
         },
       },
       required: ['prompt'],
@@ -680,6 +804,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           label: args.label,
           interactive: args.interactive !== false,
           resume: args.resume,
+          policy: args.policy,
         }),
       )
 
@@ -757,6 +882,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return reply({ error: `unknown tool ${request.params.name}` })
   }
 })
+
+// Said once at startup, so an operator learns the policy layer is unreachable without
+// having to spawn a worker and wonder why nothing happened. The per-spawn path refuses
+// loudly for the case that matters; this is the standing condition behind it.
+const startupMode = await effectivePermissionMode(process.cwd())
+if (POLICY_UNREACHABLE_MODES.includes(startupMode)) {
+  log(
+    `WARNING: effective permission mode is "${startupMode}" — the PermissionRequest hook is never consulted, so ` +
+      `policy.json (${USER_POLICY} and the bundled defaults) has no effect on any worker. See README § Status.`,
+  )
+}
 
 await server.connect(new StdioServerTransport())
 log('supervisor ready')
