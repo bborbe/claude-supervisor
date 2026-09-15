@@ -32,7 +32,7 @@ Spawn when the task is bounded, verifiable, and does not need this conversation'
 
 Pass `interactive: false` when the point is that **you** answer the prompts — that is the only mode this skill's approval loop applies to. Leave the default when a human wants to watch the worker, or correct it mid-run.
 
-⚠️ **The default mode makes `await_permission` useless to you.** A tab worker answers its own prompts in its tab, so no request is ever parked and the call simply times out. If you intend to supervise, say `interactive: false` explicitly — never spawn the default and then wait on it.
+⚠️ **The default mode makes `await_permission` blind to that worker.** A tab worker answers its own prompts in its tab, so no request is ever parked and the call simply times out — it still serves any *headless* worker running alongside. If you intend to supervise, say `interactive: false` explicitly — never spawn the default and then wait on it.
 
 ## The operator surface
 
