@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.8.1
 
 - fix: **Report a worker's cost only when the figure is real.** The SDK prices a turn from Anthropic's list, so under claude-code-router — where the traffic goes to whatever backend the router points at — the number describes a billing model that never ran. Measured 2026-09-13 at $0.40–$0.79 per worker against vLLM. It was previously returned with a README caveat, and a caveat does not travel: a manager reading the response sees a confident number with nothing beside it saying otherwise. `result.total_cost_usd` is now present only when the worker reached Anthropic itself — no `ANTHROPIC_BASE_URL`, or one pointing at `api.anthropic.com` — and absent otherwise, because absence travels where a caveat does not. The § Status gap is deleted rather than restated, and the rule now sits on the `agent_status` row where a reader actually looks
 - docs: **Explain the post-allow status lag instead of only warning about it.** The prototype recorded a "race" — `agent_status` reading `running` right after an allow, with the session closing seconds later. Reading the state machine found no wrong state: the server marks a worker running when it *answers* the prompt, not when the SDK confirms it resumed, which is the most it can honestly know at that moment. So the § Status entry now names that cause and points at the answer already in hand (`answer_permission` returns the outcome), rather than leaving "never treat one check as final" as an unexplained rule
