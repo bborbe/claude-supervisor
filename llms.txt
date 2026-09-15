@@ -4,14 +4,20 @@ An MCP server + Claude Code plugin that lets one manager session spawn worker se
 
 ## What it provides
 
-- MCP server `supervisor` with tools: spawn_agent, list_agents, agent_status, pending_permissions, await_permission, answer_permission
+- MCP server `supervisor` with tools: spawn_agent, send_agent_message, list_agents, agent_status, pending_permissions, await_permission, answer_permission
 - Slash commands: /supervisor:spawn, /supervisor:workers, /supervisor:answer, /supervisor:drain
-- Agent: supervisor:worker-wrangler (routine approval loop on a cheap model)
-- Skill: supervising-workers (when to delegate to a worker, and how to run the loop)
+- Agent: supervisor:worker-wrangler (routine approval loop over headless workers, on a cheap model)
+- Skill: supervising-workers (when to delegate to a worker, which spawn mode to use, and how to run the loop)
+
+## Two spawn modes
+
+`spawn_agent` opens a worker either as a real `claude` session in a wezterm tab (`interactive: true`, **the default**) or headless (`interactive: false`). Tooling is identical in both; the difference is who answers the worker's permission prompts and whether you can watch it.
 
 ## How a worker's permission prompt is answered
 
-Each worker is a `query()` session from @anthropic-ai/claude-agent-sdk started with `permissionMode: 'default'`. Every approval-requiring tool lands in the server's `canUseTool` callback, which parks the request; the manager resolves it through `answer_permission`.
+A **tab worker** answers its own prompts in its tab, so it never appears in `pending_permissions` — steer it with `send_agent_message` or drive its tab by hand.
+
+A **headless worker** is a `query()` session from @anthropic-ai/claude-agent-sdk started with `permissionMode: 'default'`. Every approval-requiring tool lands in the server's `canUseTool` callback, which parks the request; the manager resolves it through `answer_permission`. It never appears in `list_agents`.
 
 ## Install
 
