@@ -150,8 +150,7 @@ Extracted from a working prototype proven end-to-end on 2026-09-13: one manager 
 
 Known gaps, tracked rather than hidden:
 
-- **`send_to_agent` and `interrupt` are missing** — a headless worker cannot be corrected or stopped once running, only waited out. An interactive worker can be closed by closing its tab.
-- **`send_to_agent` is missing** — an SDK string-prompt session is single-shot; multi-turn needs streaming input (`AsyncIterable<SDKUserMessage>`).
+- **A headless worker cannot be corrected or stopped once running** — only waited out. `send_agent_message` reaches a *pane*, so it does not apply here, and an SDK string-prompt session is single-shot; multi-turn needs streaming input (`AsyncIterable<SDKUserMessage>`). A tab worker can be steered with `send_agent_message` or stopped by closing its tab.
 - **Status lags after an allow** — `agent_status` can still read `running` for a few seconds; never treat one post-allow check as final.
 - **Cost figures are meaningless off-Anthropic** — they are priced from Anthropic's table; ignore them when traffic is routed elsewhere.
-- **Unanswered prompts auto-deny** after 15 minutes.
+- **Unanswered prompts auto-deny** after 15 minutes — headless workers only; a tab worker's prompt waits for its tab.
