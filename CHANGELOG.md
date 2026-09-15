@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: **Correct where the escalating permission mode comes from.** The `auto` that makes the policy layer inert was attributed to "the **managed** settings tier" — in the README (twice), in a `supervisor.mjs` comment, and in the v0.8.0 entry below. It comes from `~/.claude/settings.json`, the **user** tier. The tier was inferred from key-level provenance, which names the highest-precedence contributor for the whole `permissions` object: the managed drop-in contributes an `allow` entry, so `provenance.permissions` reported `managed` while `defaultMode` itself came from `user`. A per-source dump settles it — `user -> auto /Users/bborbe/.claude/settings.json`, and the managed drop-in carries no `defaultMode` at all. This earns its own release because it changes the *remedy*, not just the wording: "managed" points at a root-owned file nobody reading the README can edit, which reads as unfixable, when the setting is the operator's own and one line to change. The v0.8.0 section is left exactly as released; this entry is the correction
+
 ## v0.8.1
 
 - fix: **Report a worker's cost only when the figure is real.** The SDK prices a turn from Anthropic's list, so under claude-code-router — where the traffic goes to whatever backend the router points at — the number describes a billing model that never ran. Measured 2026-09-13 at $0.40–$0.79 per worker against vLLM. It was previously returned with a README caveat, and a caveat does not travel: a manager reading the response sees a confident number with nothing beside it saying otherwise. `result.total_cost_usd` is now present only when the worker reached Anthropic itself — no `ANTHROPIC_BASE_URL`, or one pointing at `api.anthropic.com` — and absent otherwise, because absence travels where a caveat does not. The § Status gap is deleted rather than restated, and the rule now sits on the `agent_status` row where a reader actually looks

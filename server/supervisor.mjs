@@ -99,9 +99,12 @@ const POLICY_UNREACHABLE_MODES = ['auto', 'bypassPermissions']
 // makes the policy exactly as unreachable as a settings `auto` does.
 //
 // Measured 2026-09-15, and the reason this exists: `permissions.defaultMode` resolved to
-// "auto" from the managed tier on this machine, and a live worker confirmed what that
-// means — the command ran, reported success, and neither the hook nor canUseTool was
-// called at all. The policy code was correct, unit-tested, and doing nothing.
+// "auto" from ~/.claude/settings.json on this machine, and a live worker confirmed what
+// that means — the command ran, reported success, and neither the hook nor canUseTool
+// was called at all. The policy code was correct, unit-tested, and doing nothing.
+//
+// Naming the file is load-bearing, not colour: the same value read from the managed tier
+// would be a machine policy the operator cannot edit, while this one is theirs to change.
 async function effectivePermissionMode(cwd) {
   let fromSettings = null
   try {
