@@ -100,16 +100,21 @@ const SETTING_SOURCES = ['user', 'project', 'local']
 // Naming that file is load-bearing, not colour: the same value read from the managed tier
 // would be a machine policy the operator cannot edit, while this one is theirs to change.
 async function effectivePermissionMode(cwd) {
-  let resolved = null
   try {
-    resolved = await resolveSettings({ cwd, settingSources: SETTING_SOURCES })
+    const resolved = await resolveSettings({ cwd, settingSources: SETTING_SOURCES })
+    return resolveEffectiveMode({ resolved, optionMode: PERMISSION_MODE })
   } catch (error) {
     // @alpha API: a failure is reported rather than thrown, and then falls back to the
     // option we send — the best available answer, with the uncertainty already logged
     // rather than silently read as "default".
+    //
+    // The whole resolution sits inside the try, not just the await: `resolveEffectiveMode`
+    // calls `filterEscalatingDefaultMode`, which is @alpha too, and a throw from it raised
+    // outside this block would take the server down rather than degrade it — the opposite
+    // of what a diagnostic should do.
     log(`WARNING: cannot resolve the effective permission mode: ${error.message} — whether policy rules apply is unknown`)
+    return PERMISSION_MODE
   }
-  return resolveEffectiveMode({ resolved, optionMode: PERMISSION_MODE })
 }
 
 // One reader, two callers with opposite failure semantics. It reports rather than

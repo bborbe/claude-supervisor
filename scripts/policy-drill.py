@@ -64,20 +64,25 @@ def effective_mode():
     displaces a trusted-tier `auto` the drill would have asserted the behaviour of a mode
     the workers were not running under — wrong exactly where it mattered.
 
-    Returns (None, ()) when the resolution fails, so the caller stops rather than picking
-    a branch at random; the previous fallback returned the stderr text as if it were a
-    mode, which is truthy and skipped the caller's own "could not resolve" guard.
+    Returns (None, ()) when the helper script itself cannot run, so the caller stops rather
+    than picking a branch at random; the previous fallback returned the stderr text as if
+    it were a mode, which is truthy and skipped the caller's own "could not resolve" guard.
+
+    A `resolveSettings` failure is NOT that case: the server logs a warning and falls back
+    to the query option, so the drill resolves the same way and says so. Silence there
+    would report an unresolved mode as a resolved one.
     """
     option = os.environ.get("SUPERVISOR_PERMISSION_MODE") or "default"
     script = (
         "import { resolveSettings } from '@anthropic-ai/claude-agent-sdk';"
         "import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs';"
-        "let resolved = null;"
+        "let resolved = null, resolveError = null;"
         f"try {{ resolved = await resolveSettings({{ cwd: {json.dumps(WORK)}, settingSources: ['user','project','local'] }}); }}"
-        "catch (e) { console.error('resolveSettings failed: ' + e.message); }"
+        "catch (e) { resolveError = e.message; }"
         "console.log(JSON.stringify({"
         f"  mode: resolveEffectiveMode({{ resolved, optionMode: {json.dumps(option)} }}),"
         "  unreachable: POLICY_UNREACHABLE_MODES,"
+        "  resolveError,"
         "}));"
     )
     out = subprocess.run(
@@ -90,6 +95,10 @@ def effective_mode():
         print("   resolveSettings output:", out.stdout.strip() or "(empty)")
         print("   stderr:", (out.stderr.strip().splitlines() or ["(empty)"])[-1])
         return None, ()
+    if facts["resolveError"]:
+        print(f"   WARNING: resolveSettings failed: {facts['resolveError']}")
+        print("            falling back to the query option, as the server does — the mode below is")
+        print("            the option, not a settings value.")
     return facts["mode"], tuple(facts["unreachable"])
 
 
