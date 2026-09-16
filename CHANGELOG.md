@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- chore: **Carry `homepage` and `repository` in the plugin manifest.** `plugin.json` had neither, while both sibling plugins (`vault-cli`, `dark-factory`) carry both pointing at their own repo — so a listing of this plugin had no link home. Checked against the siblings rather than assumed: `marketplace.json` carries neither in any of the three, so the gap is `plugin.json` alone and the change is two fields
+
 ## v0.8.3
 
 - fix: **Resolve a worker's permission mode per settings tier, not from the merged value.** The guard read `filterEscalatingDefaultMode(resolveSettings(...)).permissions.defaultMode` — the merge, then the trust filter — and that pair can report a policy as *reachable* while the worker runs under one that makes the hook unreachable. `project` outranks `user`, so a project-tier `defaultMode: default` displaces a trusted tier's `auto` in `effective`; the trust filter drops an escalating mode only when its provenance says `project`, and provenance is key-level, so the displaced `default` passes through untouched. Measured 2026-09-16: with `.claude/settings.json` holding `{"permissions":{"defaultMode":"default"}}` in the worker's cwd, a live worker was auto-approved with no hook call, no `canUseTool` call, and no permission-log line — while the guard reported the mode reachable. The mode now comes from scanning `resolveSettings(...).sources` per tier, where any trusted tier (`user`/`local`/`managed`/`flag` — the tiers the filter does not strip) holding `auto` or `bypassPermissions` is decisive. Deliberately unranked by precedence among trusted tiers: ranking them would rebuild the merge reasoning the measurement just disproved, and over-reporting costs a loud refusal against a policy accepted and silently inert
