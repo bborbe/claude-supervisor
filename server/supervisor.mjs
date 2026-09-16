@@ -9,13 +9,14 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { filterEscalatingDefaultMode, query, resolveSettings } from '@anthropic-ai/claude-agent-sdk'
+import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk'
 import { appendFileSync, mkdirSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { isAbsolute, join } from 'path'
 import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
+import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName } from './liveness.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
@@ -84,39 +85,31 @@ const PERMISSION_MODE = (() => {
 // report a mode the worker does not actually run under, which is worse than not checking.
 const SETTING_SOURCES = ['user', 'project', 'local']
 
-// Modes under which the PermissionRequest hook is never consulted, so every rule in
-// policy.json — and any per-spawn override — is unreachable. `auto` is the case the
-// README has warned about since v0.3.0; `bypassPermissions` is the SDK's own wording
-// ("auto-approves every tool call … before the callback is consulted"). `acceptEdits` is
-// deliberately NOT here: it auto-accepts edits and still prompts for everything else, so
-// the policy stays reachable for non-edit tools.
-const POLICY_UNREACHABLE_MODES = ['auto', 'bypassPermissions']
-
-// The permission mode a worker will ACTUALLY run under. Two sources, and which one wins
-// is not obvious: an escalating `permissions.defaultMode` from a trusted settings tier
-// beats the `permissionMode` query option, and otherwise the option is what governs.
-// Reporting only the settings value would miss `SUPERVISOR_PERMISSION_MODE=auto`, which
-// makes the policy exactly as unreachable as a settings `auto` does.
+// The permission mode a worker will ACTUALLY run under.
 //
-// Measured 2026-09-15, and the reason this exists: `permissions.defaultMode` resolved to
-// "auto" from ~/.claude/settings.json on this machine, and a live worker confirmed what
-// that means — the command ran, reported success, and neither the hook nor canUseTool
-// was called at all. The policy code was correct, unit-tested, and doing nothing.
+// The decision itself lives in mode.mjs: it is the part worth unit-testing, and the file
+// is where the reasoning is written down — including why the merged settings value is not
+// a safe answer and the tiers are read individually instead.
 //
-// Naming the file is load-bearing, not colour: the same value read from the managed tier
+// Measured 2026-09-15, and the reason this exists at all: `permissions.defaultMode`
+// resolved to "auto" from ~/.claude/settings.json on this machine, and a live worker
+// confirmed what that means — the command ran, reported success, and neither the hook nor
+// canUseTool was called at all. The policy code was correct, unit-tested, and doing
+// nothing.
+//
+// Naming that file is load-bearing, not colour: the same value read from the managed tier
 // would be a machine policy the operator cannot edit, while this one is theirs to change.
 async function effectivePermissionMode(cwd) {
-  let fromSettings = null
+  let resolved = null
   try {
-    const resolved = await resolveSettings({ cwd, settingSources: SETTING_SOURCES })
-    fromSettings = filterEscalatingDefaultMode(resolved).permissions?.defaultMode ?? null
+    resolved = await resolveSettings({ cwd, settingSources: SETTING_SOURCES })
   } catch (error) {
     // @alpha API: a failure is reported rather than thrown, and then falls back to the
     // option we send — the best available answer, with the uncertainty already logged
     // rather than silently read as "default".
     log(`WARNING: cannot resolve the effective permission mode: ${error.message} — whether policy rules apply is unknown`)
   }
-  return POLICY_UNREACHABLE_MODES.includes(fromSettings) ? fromSettings : PERMISSION_MODE
+  return resolveEffectiveMode({ resolved, optionMode: PERMISSION_MODE })
 }
 
 // One reader, two callers with opposite failure semantics. It reports rather than

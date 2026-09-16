@@ -46,11 +46,6 @@ MISSING = os.path.join(WORK, "does-not-exist.json")
 
 PROMPT = "Run the shell command `sleep 1` and then reply DONE."
 
-# Modes under which the PermissionRequest hook is never consulted. Kept in step with
-# POLICY_UNREACHABLE_MODES in server/supervisor.mjs — the drill asserting a different set
-# than the server refuses on would be worse than not checking.
-UNREACHABLE = ("auto", "bypassPermissions")
-
 # Allow exactly the command the worker is about to run, and nothing else. Deliberately
 # narrow: a `{"tool":"Bash","match":"*","action":"allow"}` would also pass, but it would
 # not distinguish "the override was read" from "the override was read and its match
@@ -60,28 +55,42 @@ with open(OVERRIDE, "w") as f:
 
 
 def effective_mode():
-    """The mode the workers will run under, resolved the same way the server resolves it.
+    """The mode the workers will run under and the unreachable set — both from the server.
 
-    Asking the SDK rather than reading a settings file: the effective mode is the
-    winner across every tier, and a hand-rolled read would disagree with the server
-    exactly when it matters.
+    Importing server/mode.mjs rather than re-deriving the rule here, because this drill is
+    the evidence for the policy criterion and a second implementation of the thing under
+    test drifts. It did: this function kept reading the merged settings value long after
+    that read was known to fail open, so on a machine where a project-tier `default`
+    displaces a trusted-tier `auto` the drill would have asserted the behaviour of a mode
+    the workers were not running under — wrong exactly where it mattered.
+
+    Returns (None, ()) when the resolution fails, so the caller stops rather than picking
+    a branch at random; the previous fallback returned the stderr text as if it were a
+    mode, which is truthy and skipped the caller's own "could not resolve" guard.
     """
+    option = os.environ.get("SUPERVISOR_PERMISSION_MODE") or "default"
     script = (
-        "import { resolveSettings, filterEscalatingDefaultMode } from '@anthropic-ai/claude-agent-sdk';"
-        f"const r = await resolveSettings({{ cwd: {json.dumps(WORK)}, settingSources: ['user','project','local'] }});"
-        "const fromSettings = filterEscalatingDefaultMode(r).permissions?.defaultMode ?? null;"
-        # Mirrors effectivePermissionMode in server/supervisor.mjs: an escalating settings
-        # mode beats the query option, and otherwise the option governs. Resolving only the
-        # settings half would disagree with the server whenever SUPERVISOR_PERMISSION_MODE
-        # is set — and disagreeing with the thing under test is worse than not checking.
-        f"const option = {json.dumps(os.environ.get('SUPERVISOR_PERMISSION_MODE') or 'default')};"
-        "console.log(['auto','bypassPermissions'].includes(fromSettings) ? fromSettings : option)"
+        "import { resolveSettings } from '@anthropic-ai/claude-agent-sdk';"
+        "import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs';"
+        "let resolved = null;"
+        f"try {{ resolved = await resolveSettings({{ cwd: {json.dumps(WORK)}, settingSources: ['user','project','local'] }}); }}"
+        "catch (e) { console.error('resolveSettings failed: ' + e.message); }"
+        "console.log(JSON.stringify({"
+        f"  mode: resolveEffectiveMode({{ resolved, optionMode: {json.dumps(option)} }}),"
+        "  unreachable: POLICY_UNREACHABLE_MODES,"
+        "}));"
     )
     out = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         capture_output=True, text=True, cwd=os.path.join(REPO, "server"),
     )
-    return out.stdout.strip() or (out.stderr.strip().splitlines() or [""])[-1]
+    try:
+        facts = json.loads(out.stdout.strip())
+    except ValueError:
+        print("   resolveSettings output:", out.stdout.strip() or "(empty)")
+        print("   stderr:", (out.stderr.strip().splitlines() or ["(empty)"])[-1])
+        return None, ()
+    return facts["mode"], tuple(facts["unreachable"])
 
 
 env = dict(os.environ)
@@ -165,11 +174,15 @@ while select.select([proc.stdout], [], [], 0)[0]:
 failures = []
 
 print("0. resolving the effective permission mode the workers will run under...")
-mode = effective_mode()
-unreachable = mode in UNREACHABLE
-print(f"   -> {mode!r} ({'unreachable — the hook is never consulted' if unreachable else 'reachable'})")
+mode, unreachable_modes = effective_mode()
 if not mode:
-    failures.append("could not resolve the effective permission mode — the drill cannot say which behaviour to expect")
+    print()
+    print("FAIL: could not resolve the effective permission mode — the drill cannot say which")
+    print("      behaviour to expect, and picking a branch anyway would assert the wrong one.")
+    proc.kill()
+    sys.exit(1)
+unreachable = mode in unreachable_modes
+print(f"   -> {mode!r} ({'unreachable — the hook is never consulted' if unreachable else 'reachable'})")
 
 if unreachable:
     # ── the hook cannot be consulted, so a named policy must be refused ──────
