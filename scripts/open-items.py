@@ -343,7 +343,10 @@ def cmd_list(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--session", help="session id (default $CLAUDE_SESSION_ID)")
+    parser.add_argument(
+        "--session",
+        help="session id (default $CLAUDE_CODE_SESSION_ID, falling back to $CLAUDE_SESSION_ID)",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_add = sub.add_parser("add", help="record a new open item")
