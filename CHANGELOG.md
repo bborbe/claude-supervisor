@@ -8,6 +8,28 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: the fleet-manager orphan check seeds from the ownership **declaration** instead of a flag.
+  `claude_session_started` had decayed to **0 of 3845** tasks (down from 496 when the check was
+  written), so the candidate set was empty and the check reported a confident clean bill while
+  real orphans went undetected — two were found by accident on 2026-09-18, neither carrying the
+  flag. Seeding now enumerates `claude_session_id` + `status: in_progress`.
+- fix: adds a **park filter** ahead of the liveness probe — a future `defer_date` **or**
+  `created_by: recurring-task-creator` means scheduled, not abandoned. Neither signal alone is
+  sufficient: the `Start Day` family carries no `defer_date`, and `Repair Bike Switch` carries no
+  `created_by`. Both are dead on every liveness axis, so no process or transcript evidence can
+  separate a parked routine from an orphan; the park signal is the only discriminator.
+- fix: **removes the `≥4h` lower age bound**, which excluded the recently-died orphans the check
+  exists to find — `32d5e57c` died ~35 min before detection, leaving its file only 3h stale.
+  Replayed against recorded state: **1 of 2** orphans detected with the bound, **2 of 2** without.
+  The park filter covers the routine class the bound was originally added for; measured 21
+  candidates with and without it, and 0 recurring tasks in the unbounded set. A 7-day upper bound
+  remains, so the fleet-wide set stays actionable at ~21.
+- fix: the check reads **frontmatter only**. Task bodies quote these keys in prose, so a
+  whole-file `grep` reads a task as parked or owned on the strength of a sentence *about*
+  parking — it reported the very task documenting the defect as a routine.
+
 ## v0.13.1
 
 - fix: make the forked-ledger warning actionable. It said *"N entries also live in session X's
