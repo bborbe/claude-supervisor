@@ -62,14 +62,47 @@ showing `Enter to select` turns any keystroke into a menu selection.
 **Why A is preferred over B:** A removes the typed *task*; B only hardens the typist.
 `send_agent_message` is not an alternative channel — it types and steals focus. Two limits on
 A: it can only supervise sessions **it created**, and `spawn_agent({resume})` refuses a
-session that is still live.
+session that is still live. Measured 2026-09-18: a call site that omitted the follow-up
+`send-text` left a worker (BRO-21462, spawned 09:03) idle for 16 min while its task file
+stayed untouched.
 
-**Resume splits by liveness:**
+⚠️ **The `resume` refusal is a property of `mcp__supervisor__spawn_agent`, not of the
+platform.** `resumeSupportError` (`server/tab.mjs`) rejects `resume` alongside
+`interactive:true` because the *tool's* tab path launches the `cc-*` launcher without handing
+it `--resume` — the flag would be dropped and you would get a fresh conversation while
+believing you were continuing one. Path B hands `--resume` to the launcher directly, so it is
+**interactive and resuming at once**. Read the refusal as *"this tool's tab path cannot carry
+a resume"*, never as *"a resume cannot be interactive"*.
+
+**Resume takes two independent decisions — first the path, then the drive.** Liveness picks
+the path; *why the session died* picks whether anything drives the resumed pane. They do not
+substitute for one another.
+
+**1 — Path, by liveness:**
 
 | Resuming… | Path | Why |
 |---|---|---|
-| a session **proven dead** | **A**, `interactive=false, resume="<id>"` | headless; prompts park for the manager. `resume` **requires** `interactive:false` — the pair is refused, not silently downgraded |
+| a session **proven dead** | **A**, `interactive=false, resume="<id>"` — or **B** where headless is not permitted (below) | A is headless, so prompts park for the manager. On A, `resume` **requires** `interactive:false` — the pair is refused there, not silently downgraded |
 | a session whose liveness **cannot be determined** | **B**, `wezterm cli spawn --resume` | A refuses an unverifiable resume by design |
+
+⚠️ **Where headless is not permitted, the proven-dead row moves to B.** Some phases forbid
+headless fleet-wide — the operator's standing constraint during manager-system development:
+*"we are currently not running headless ever because we are in the development of the manager
+system."* That constraint is **phase-scoped, not permanent**; do not delete path A on account
+of it. Under it a proven-dead session resumes via **B**, exactly as an indeterminate one does.
+The row's preference for A is a preference, not a requirement, and it is the only row affected.
+
+**2 — Drive, by cause of death:**
+
+| The session died… | Then |
+|---|---|
+| **mid-work** | the resumed pane lands at an empty composer with nothing driving it — **deliver the work**: as the `prompt` argument on A, or typed after the colour on B |
+| **holding a human gate** | **drive nothing.** The pane comes up holding its own unanswered gate; idling there is the *correct* state |
+
+⚠️ **A resume onto an unanswered operator gate must never be driven.** The two cases are
+indistinguishable from the session id alone — read the transcript tail before choosing. The
+error is not symmetric: an undriven mid-work resume wastes a session, a driven gate-death
+resume **answers a question on the operator's behalf**.
 
 ## Sweep output — the fleet table
 

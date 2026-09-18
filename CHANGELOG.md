@@ -19,6 +19,17 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.13.0
 
+- docs: let a proven-dead resume take path B where headless is not permitted, and split resume
+  into two decisions. `docs/fleet-surface.md` § Spawn a worker sent every proven-dead session
+  to the headless `spawn_agent` path — which any phase forbidding headless cannot execute, so
+  the worker-manager auto-resume gate was unreachable for that phase's duration even though
+  the command authorises it and the runbooks restate it. The section now records that the
+  no-headless constraint is phase-scoped rather than permanent, routes the proven-dead row to
+  path B under it, scopes the `resume`/`interactive` refusal to `mcp__supervisor__spawn_agent`'s
+  tab path rather than to the platform, and separates the *path* decision (liveness) from the
+  *drive* decision (mid-work needs the work delivered; a gate-death must be left idle).
+  `commands/worker-manager.md` gap-6 and gap-7 no longer restate the spawn shape — each points
+  at that section, as the section's own single-home rule already required.
 - feat: add the **print-the-artifact** guardrail to `worker-manager` — a manager must print the
   artifact in the same turn as any **negative** claim ("X does not exist", "the delta is in
   neither file") or any **attribution** ("you said X", "the script reported Y"). The rule names
