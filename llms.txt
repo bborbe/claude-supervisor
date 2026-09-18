@@ -7,6 +7,8 @@ An MCP server + Claude Code plugin that lets one manager session spawn worker se
 - MCP server `supervisor` with tools: spawn_agent, send_agent_message, list_agents, agent_status, pending_permissions, await_permission, answer_permission
 - Slash commands: /supervisor:spawn, /supervisor:workers, /supervisor:answer, /supervisor:drain
 - Session-finding commands: /supervisor:jump, /supervisor:who-needs-me (scripts/jump.py, scripts/who-needs-me.py; each resolves its location via ${CLAUDE_PLUGIN_ROOT} with a ~/.claude fallback)
+- Fleet commands: /supervisor:fleet-manager (stateful loop), /supervisor:fleet-status (read-only snapshot); helpers scripts/{fleet-sessions,box-table,fleet-snapshot,context-usage}.py
+- docs/fleet-surface.md is the canonical home for the spawn shape and the fleet table render spec
 - Agent: supervisor:worker-wrangler (routine approval loop over headless workers, on a cheap model)
 - Skill: supervising-workers (when to delegate to a worker, which spawn mode to use, and how to run the loop)
 

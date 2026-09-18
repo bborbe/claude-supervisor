@@ -1,0 +1,99 @@
+---
+description: Read-only fleet roster — every peer Claude Code session, its live status, and its vault task mapping. Zero side effects. Ends with a blocked-by-you jump list (waiting sessions + /jump lines).
+allowed-tools:
+  - ListAgents
+  - Bash(python3:*)
+  - Bash(wezterm cli list:*)
+  - Bash(date:*)
+  - Read
+argument-hint: [--all] [--vault NAME]
+---
+
+Answer one question: **what is everyone else doing right now?**
+
+This is NOT `/and`. `/and` = what should **I** do next in this session; `/fleet-status` = what is **everyone else** doing across the machine. Different question, different scope — `/and` never surveys peers, `/fleet-status` never recommends this session's next action.
+
+## What this command does
+
+Pure snapshot, no mutation, no messages sent. Safe to run as often as you like.
+
+1. `ListAgents` — every other Claude Code session on this machine, as `name [ref] · mode · status · started`. **The name is the task the session is on**; the status is live.
+2. `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude}/scripts/fleet-sessions.py --minutes 180` — vault-side mapping: `claude_session_id:` frontmatter stamps → task/goal title, across every vault. Use `--all` if the roster from step 1 includes a session `fleet-sessions.py`'s default window missed.
+
+   **Scoping — default is the current working directory.** `fleet-sessions.py` now scopes to the cwd's project unless told otherwise, so a work-vault session never surfaces personal sessions. Pass `--all` through when the caller asks for the whole machine (it drops the project scope *and* the time filter). If the caller passed `--vault NAME` (e.g. `brogrammers`, `personal`, `ws:coding`), forward it: `fleet-sessions.py --minutes 180 --vault NAME`. The match is a case-insensitive substring of the PROJECT label, which is derived from the session's escaped working directory (`~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`). The flag is repeatable. ⚠️ **`ListAgents` cannot be scoped** — step 1 stays machine-wide, so when a scope is active, filter the combined table down to the sessions `fleet-sessions.py` returned, and say in the output that the roster was scoped and which peers were excluded by it. Never infer a peer's directory from its `ListAgents` name: names are reused across days and `[ref]` is not a session-id prefix.
+3. **Combine them into one table**, one row per peer — rendered **exactly per Fleet Manager Session runbook (per-vault) § Sweep output — the fleet table**. That section is the single source for the frame (a timestamped marker line, then a box indented two spaces under it), the columns, the widths and the icons, and this command must never restate them. Render with `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude}/scripts/box-table.py`; never hand-draw the box. `/fleet-manager` reads the same section, so both commands render identically by construction — the same arrangement the worker pair has against [[Worker Manager Session]] § Sweep output.
+
+   **No id column.** Key on `[ref]` internally; the operator sees the name.
+
+   **Join on NAME, key internally on `[ref]`.** `ListAgents`'s name and `fleet-sessions.py`'s `WORKING ON` are the same string — that is the join. The `[ref]` is `ListAgents`' own stable per-session handle: use it as the internal key, **never display it**.
+
+   ⚠️ **`[ref]` is NOT the session-id prefix** — verified 2026-08-21: refs are 6 chars (`3daaa7`, `56cff2`), `fleet-sessions.py`'s `SESSION` ids are 8 (`b7c33528`); no ref is a prefix of any id. Joining on it matches nothing.
+
+   **Names are normally unique among live peers** — 13/13 distinct when checked 2026-08-21 — so the name is a safe display *and* join key. `ListAgents` documents `[ref]` as the tiebreak for the rare case where two live rows share a name; use it only then.
+
+   ⚠️ **Do not resolve names to session ids via `~/.claude/history.jsonl`.** `/rename` values are recoverable there (549 of them), but names ARE reused **across time** — "Update Go to 1.27.0" was set by two different sessions on different days. `ListAgents` only lists live sessions, so that collision never appears there; it only bites if you go digging in history. Latest-wins on history produces confidently wrong ids. Don't.
+
+   **Show the operator the name, always.** The name is what they set with `/rename` and what they recognise. Sessions never renamed show their auto-generated name (`personal-76`, `boss-48`) — say "never renamed" rather than presenting it as meaningful.
+
+   A peer may appear in only one source — say so rather than dropping the row (e.g. a session that hasn't stamped a task file yet, or a vault task stamped by a session no longer running).
+
+4. **Fallback: resolve the name directly against the vault when `fleet-sessions.py` returns nothing for it.** `fleet-sessions.py` only maps sessions that wrote a `claude_session_id:` stamp into a task file — plenty of sessions are working a task they never stamped, and those come back blank. Before writing `—` for a peer, try its `ListAgents` name as a literal filename in each vault's `tasks_dir`, then `goals_dir`:
+
+   ```bash
+   for d in "25 Tasks" "24 Goals"; do
+     f="$VAULT/$d/$NAME.md"; [ -f "$f" ] && echo "$f"
+   done
+   ```
+
+   This is a **filename-keyword match in a known flat tree** — the documented narrow exception to "semantic search for discovery", not a discovery sweep. Do not `find`, do not fuzzy-match: exact `<name>.md` only. A near-miss is worse than a blank, because it attributes work to a peer that isn't doing it.
+
+   Measured 2026-08-21: stamp-only resolution covered 4 of 13 peers; adding this fallback took it to **7 of 13** — it recovered two sessions whose task file exists under the exact session name (`pr-reviewer agent fails on large multi-file PRs`, `Validate ship cluster route (--route=cluster)`) and one that resolves to `23 Goals/`, not `24 Tasks/` (`Optimize Nuke KVM Cluster Resource Usage`) — which is why the goals dir is in the loop at all.
+
+   The rest stay unresolved by design, in two kinds: **never renamed** (`boss-48`, `gaming-f0`) and **name diverges from the vault title** (`github enable automerge agent` vs the task `Add Per-PR autoMergeOnGreen for End-to-End Agent PR Flow`). Report those as `—` and say which kind. Never guess across a divergence.
+
+## Status semantics — do not over-read
+
+From the Claude Code cross-session messaging notes (operator's vault; not shipped with this plugin) § Status semantics. Repeat this caveat in the output, not just internally:
+
+| Status | Meaning | Safe to conclude |
+|---|---|---|
+| `busy` | actively working | **owns its task — leave it alone** |
+| `shell` | running a bash command | actively working |
+| `waiting` | transient | ❌ **not** "blocked on a human" — observed flipping to `shell` within 5 min |
+| `idle` | finished a turn, nothing queued | may be parked awaiting input, may be done — cannot tell from status alone |
+| *(blank)* | no recent activity | nothing |
+
+**Only `busy` and `shell` support a confident conclusion.** Never report a `waiting` peer as stuck or needing the operator. **Statuses go stale in minutes** — a status printed a few minutes ago is not necessarily still true; re-run `ListAgents` before relying on it for anything beyond this report.
+
+## Output shape
+
+Lead with the box rendered per § Sweep output, indented two spaces, under a lead line of its own — `/fleet-status` is a snapshot rather than a tick, so its lead line carries the timestamp and the scope but **no `✓` marker**. Then, tersely:
+
+- Count by status (`N busy, N shell, N waiting, N idle, N blank`).
+- Flag any row present in `ListAgents` but absent from `fleet-sessions.py` (no vault task stamp) or vice versa (stamped task, no live session) — these are not errors, just note them.
+- **No recommendation, no verdict, no `👤 You:` / `⏰ Next:` panel.** This command reports; it does not decide. If the caller wants "what should I do about this," that's a separate judgment call outside this command's scope — say so rather than inventing one.
+
+## Blocked-by-you section — the jump list
+
+After the counts and one-source notes, emit a **blocked-by-you group** so the operator can clear waiting sessions in one pass. Icons per the operator's Icons reference: ⌛ waiting (possibly on you) · ⏸️ blocked · ⚠️ stale.
+
+1. **Collect** — from the step-1 `ListAgents` roster, every session with status `waiting`. These are the "possibly on you" set. Status semantics: `waiting` is transient, **NOT** confirmed blocked-on-human — label the section honestly and re-verify a row before acting on it (task phase `human_review`, or the session's last message).
+2. **Resolve each waiting session's pane** — `wezterm cli list` → TITLE (the `-n` session name) == `ListAgents` name → **PANEID** (not TABID). Unresolvable rows print the session name only.
+3. **Emit per row + a jump suggestion for the next one** (oldest wait first):
+
+   ```text
+   ⌛ Blocked by you (N waiting — waiting ≠ confirmed blocked; verify before acting)
+     1. <name> — <age> · jump: /jump <PANEID>
+     2. <name> — <age> · jump: /jump <PANEID>
+     Next blocker to jump to: <name> → /jump <PANEID>
+   ```
+
+   The operator runs `/jump <PANEID>`; **hand over a pane id, never a tab id** — a tab that moves windows is renumbered, so a handed-over `--tab-id` goes dead (measured 2026-09-18: three spawned workers routed as tabs 158/159/160 in window 0 became tabs 163/164/165 in window 2, and `activate-tab --tab-id 159` failed outright with *"could not determine which pane should be active"*, while `activate-pane --pane-id 239` worked immediately). Cross-window raise still needs Accessibility — no `activate-window` in wezterm CLI.
+
+   **Names lead, numbers serve the command.** Every row and every mention leads with the session/task name the operator recognizes; the `[ref]` and tab id are secondary, for the command only — never reference a session by bare number in prose.
+
+## Rules
+
+- **Read-only, always.** Never `SendMessage`. Never write files. Never mutate vault state.
+- **Never conflate crews.** `ListAgents` covers interactive Claude Code sessions only — Pattern B k8s agents (task files + watchers) are a different crew with a different contract; don't fold them into this table.
+- **Don't editorialize on `idle`/`waiting`.** If asked "is session X stuck?", the honest answer from status alone is "can't tell — check its task file or ask it," not a guess.
