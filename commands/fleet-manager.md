@@ -266,7 +266,7 @@ Plus one class that comes from Step 2b rather than from any live session:
 
 | Signal | Reading | Action |
 |---|---|---|
-| task `in_progress` + `claude_session_id` + **all four** of: not parked (no future `defer_date`), transcript `LAST-ACTIVE` ≥4h, absent from `ListAgents`, task file mtime ≥4h and ≤7d | **orphan** — open work, dead session | surface for pickup or close |
+| task `in_progress` + `claude_session_id` + **all four** of: not parked (no future `defer_date` **and** no `created_by: recurring-task-creator`), transcript `LAST-ACTIVE` ≥4h, absent from `ListAgents`, task file mtime ≤7d (**no lower bound** — removed 2026-09-18, see § Step 2b) | **orphan** — open work, dead session | surface for pickup or close |
 | any one of those fails — notably a parked task (future `defer_date`), a fresh session (absent from `●` while alive), or a file older than the 7-day window | **owned**, **parked**, or **backlog** | no row; never spawn onto it |
 
 No prior snapshot, or no `task_file` resolved for a session → not enough history/data to classify as stalled; classify as "unclassified — insufficient data" and leave alone (never guess a status you can't back with a diff).
