@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.12.0
 
 - feat: ship `/supervisor:worker-manager` and `/supervisor:worker-status` with the
   `open-items.py` ledger helper, completing the move of the fleet control surface into the
