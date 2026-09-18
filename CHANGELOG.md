@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.11.0
 
 - feat: ship `/supervisor:fleet-manager` and `/supervisor:fleet-status` with their renderer and
   discovery helpers (`fleet-sessions.py`, `box-table.py`, `fleet-snapshot.py`,
