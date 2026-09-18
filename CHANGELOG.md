@@ -8,6 +8,15 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: ship `/supervisor:jump` and `/supervisor:who-needs-me` as plugin commands, with their
+  `jump.py` and `who-needs-me.py` helpers. Both files were previously untracked in `~/.claude`
+  — named by the handover rule in five command files while living in no repository.
+- feat: `jump.py` resolves its import of `who-needs-me.py` via `${CLAUDE_PLUGIN_ROOT}` with a
+  `~/.claude` fallback, so the pair travels together as an installed plugin and still runs
+  standalone.
+
 ## v0.9.0
 
 - feat: read the default spawn mode from `~/.config/claude-supervisor/config.json` (`{"spawn":{"mode":"interactive"|"headless"}}`, path override `SUPERVISOR_CONFIG`), so the fleet-wide interactive-vs-headless decision is one file edit instead of one edit per manager command file. Precedence, highest first: the per-call `interactive` argument, `SUPERVISOR_SPAWN_MODE`, the config file, then the built-in `interactive`.
