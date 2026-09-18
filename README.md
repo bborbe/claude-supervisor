@@ -21,6 +21,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | skill `supervising-workers` | when to spawn a worker instead of doing the work yourself |
 | `/supervisor:spawn` `/supervisor:workers` `/supervisor:answer` `/supervisor:drain` | the operator surface |
 | agent `worker-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
+| `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
 
 ## Two spawn modes
 
@@ -195,6 +196,8 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 .mcp.json                                starts the server (${CLAUDE_PLUGIN_ROOT}/server)
 skills/supervising-workers/SKILL.md
 commands/{spawn,workers,answer,drain}.md
+commands/{jump,who-needs-me}.md                  find and reach a session
+scripts/{jump,who-needs-me}.py                   their helpers
 agents/worker-wrangler.md
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
