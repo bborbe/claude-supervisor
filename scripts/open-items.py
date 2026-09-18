@@ -183,9 +183,23 @@ def forked_from(sid, data):
             except (OSError, ValueError, KeyError, TypeError):
                 continue
             if shared:
+                ids = sorted(shared)
+                shown = ", ".join(ids[:6]) + (" …" if len(ids) > 6 else "")
                 warnings.append(
                     "%d entr%s also live in session %s's ledger — the two have forked and "
-                    "will diverge" % (len(shared), "y" if len(shared) == 1 else "ies", other_sid[:8])
+                    "will diverge.\n"
+                    "    shared ids: %s\n"
+                    "    to reconcile, decide which side owns each entry and close the copy on "
+                    "the other:\n"
+                    "      close --id <id> --evidence \"reconciled: owned by session <owner-id>\"\n"
+                    "    this script never picks a winner — a silent pick is the same "
+                    "divergence bug wearing a different hat."
+                    % (
+                        len(shared),
+                        "y" if len(shared) == 1 else "ies",
+                        other_sid[:8],
+                        shown,
+                    )
                 )
     return warnings
 
