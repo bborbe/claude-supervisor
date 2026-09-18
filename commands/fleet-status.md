@@ -23,15 +23,26 @@ Pure snapshot, no mutation, no messages sent. Safe to run as often as you like.
    **Scoping — default is the current working directory.** `fleet-sessions.py` now scopes to the cwd's project unless told otherwise, so a work-vault session never surfaces personal sessions. Pass `--all` through when the caller asks for the whole machine (it drops the project scope *and* the time filter). If the caller passed `--vault NAME` (e.g. `brogrammers`, `personal`, `ws:coding`), forward it: `fleet-sessions.py --minutes 180 --vault NAME`. The match is a case-insensitive substring of the PROJECT label, which is derived from the session's escaped working directory (`~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`). The flag is repeatable. ⚠️ **`ListAgents` cannot be scoped** — step 1 stays machine-wide, so when a scope is active, filter the combined table down to the sessions `fleet-sessions.py` returned, and say in the output that the roster was scoped and which peers were excluded by it. Never infer a peer's directory from its `ListAgents` name: names are reused across days and `[ref]` is not a session-id prefix.
 3. **Combine them into one table**, one row per peer — rendered **exactly per Fleet Manager Session runbook (per-vault) § Sweep output — the fleet table**. That section is the single source for the frame (a timestamped marker line, then a box indented two spaces under it), the columns, the widths and the icons, and this command must never restate them. Render with `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/box-table.py`; never hand-draw the box. `/fleet-manager` reads the same section, so both commands render identically by construction — the same arrangement the worker pair has against [[Worker Manager Session]] § Sweep output.
 
-   **No id column.** Key on `[ref]` internally; the operator sees the name.
+   **No id column.** Key on the session id internally; the operator sees the name.
 
-   **Join on NAME, key internally on `[ref]`.** `ListAgents`'s name and `fleet-sessions.py`'s `WORKING ON` are the same string — that is the join. The `[ref]` is `ListAgents`' own stable per-session handle: use it as the internal key, **never display it**.
+   **Join on the session id, not the name.** `ListAgents` returns a row per live session with a `name` and a `[ref]` but **no session id**; `fleet-sessions.py` returns the id (`SESSION`) and the vault task (`WORKING ON`). The bridge between them is the session registry: `~/.claude/sessions/<pid>.json` carries `sessionId` beside `name` and a live `status`, so read the registry and match its `sessionId` against `fleet-sessions.py`'s `SESSION` column.
 
-   ⚠️ **`[ref]` is NOT the session-id prefix** — verified 2026-08-21: refs are 6 chars (`3daaa7`, `56cff2`), `fleet-sessions.py`'s `SESSION` ids are 8 (`b7c33528`); no ref is a prefix of any id. Joining on it matches nothing.
+   ```bash
+   python3 - <<'EOF'
+   import json, glob
+   for p in glob.glob('/Users/bborbe/.claude/sessions/*.json'):
+       d = json.load(open(p))
+       print(d['sessionId'], '|', d.get('status'), '|', d.get('name'))
+   EOF
+   ```
 
-   **Names are normally unique among live peers** — 13/13 distinct when checked 2026-08-21 — so the name is a safe display *and* join key. `ListAgents` documents `[ref]` as the tiebreak for the rare case where two live rows share a name; use it only then.
+   **Why not the name.** The previous join was `ListAgents` name == `fleet-sessions.py` `WORKING ON`, which holds only because `/rename <task title>` happens to make the two strings equal. Rename a session to anything else and the join silently drops it: its open gates stop appearing in the sweep while the session is alive and possibly blocked on an unanswered gate. Measured 2026-09-18 — the same name-match in `/open` Step 2C spawned a **second** manager onto a live topic, and neither knew about the other. The session id is stable across `/rename`; verified 2026-09-18 on three sessions carrying `formerNames`, each holding one constant `sessionId` through every rename.
 
-   ⚠️ **Do not resolve names to session ids via `~/.claude/history.jsonl`.** `/rename` values are recoverable there (549 of them), but names ARE reused **across time** — "Update Go to 1.27.0" was set by two different sessions on different days. `ListAgents` only lists live sessions, so that collision never appears there; it only bites if you go digging in history. Latest-wins on history produces confidently wrong ids. Don't.
+   ⚠️ **`[ref]` is NOT the session-id prefix** — verified 2026-08-21: refs are 6 chars (`3daaa7`, `56cff2`), session ids are 8 (`b7c33528`); no ref is a prefix of any id. Joining on it matches nothing. It is also computed per roster read, so it is **not stable across time** — never persist anything keyed on it.
+
+   **The name is for display, not for joining.** Names are normally unique among live peers (13/13 distinct when checked 2026-08-21), which is why the name reads well in the table — but uniqueness is not stability. Keep the name as the operator-facing label and the session id as the key.
+
+   ⚠️ **Do not resolve names to session ids via `~/.claude/history.jsonl`.** `/rename` values are recoverable there (549 of them), but names ARE reused **across time** — "Update Go to 1.27.0" was set by two different sessions on different days. Latest-wins on history produces confidently wrong ids. The registry is the right source: it holds only live sessions and carries the id directly.
 
    **Show the operator the name, always.** The name is what they set with `/rename` and what they recognise. Sessions never renamed show their auto-generated name (`personal-76`, `boss-48`) — say "never renamed" rather than presenting it as meaningful.
 
