@@ -8,6 +8,15 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: ship `/supervisor:worker-manager` and `/supervisor:worker-status` with the
+  `open-items.py` ledger helper, completing the move of the fleet control surface into the
+  plugin. `worker-status` was previously duplicated across two Obsidian vaults and had
+  diverged behaviourally; the agent-delegating form is the one shipped.
+- feat: `worker-manager` now points at `docs/fleet-surface.md` for the spawn shape instead of
+  an Obsidian runbook referenced by absolute path, so the command is readable from any vault.
+
 ## v0.11.0
 
 - feat: ship `/supervisor:fleet-manager` and `/supervisor:fleet-status` with their renderer and
