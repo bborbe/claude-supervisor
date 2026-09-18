@@ -8,16 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.13.1
-
-- fix: make the forked-ledger warning actionable. It said *"N entries also live in session X's
-  ledger — the two have forked and will diverge"* without naming **which** entries or how to
-  resolve them, so the operator had to reconstruct both from the JSON by hand. It now lists the
-  shared ids and prints the exact command — `close --id <id> --evidence "reconciled: owned by
-  session <owner-id>"` — to record which side owns each entry. Still warn-only: the script never
-  picks a winner, because a silent pick is the same divergence bug wearing a different hat.
-
-## v0.13.0
+## Unreleased
 
 - docs: let a proven-dead resume take path B where headless is not permitted, and split resume
   into two decisions. `docs/fleet-surface.md` § Spawn a worker sent every proven-dead session
@@ -30,6 +21,18 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   *drive* decision (mid-work needs the work delivered; a gate-death must be left idle).
   `commands/worker-manager.md` gap-6 and gap-7 no longer restate the spawn shape — each points
   at that section, as the section's own single-home rule already required.
+
+## v0.13.1
+
+- fix: make the forked-ledger warning actionable. It said *"N entries also live in session X's
+  ledger — the two have forked and will diverge"* without naming **which** entries or how to
+  resolve them, so the operator had to reconstruct both from the JSON by hand. It now lists the
+  shared ids and prints the exact command — `close --id <id> --evidence "reconciled: owned by
+  session <owner-id>"` — to record which side owns each entry. Still warn-only: the script never
+  picks a winner, because a silent pick is the same divergence bug wearing a different hat.
+
+## v0.13.0
+
 - feat: add the **print-the-artifact** guardrail to `worker-manager` — a manager must print the
   artifact in the same turn as any **negative** claim ("X does not exist", "the delta is in
   neither file") or any **attribution** ("you said X", "the script reported Y"). The rule names
