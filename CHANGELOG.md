@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.12.2
 
 - fix: read the session id from `CLAUDE_CODE_SESSION_ID`, not `CLAUDE_SESSION_ID`. The
   exported name is the former, so the old fallback could never fire and every caller had to
