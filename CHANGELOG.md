@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.13.0
 
 - feat: add the **print-the-artifact** guardrail to `worker-manager` — a manager must print the
   artifact in the same turn as any **negative** claim ("X does not exist", "the delta is in
