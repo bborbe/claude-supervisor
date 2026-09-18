@@ -37,6 +37,30 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 
 **Choose interactive when you want to see or steer it. Choose headless when you want the manager answering its prompts.** Neither is more capable; the trade is visibility against supervision.
 
+### Setting the fleet default
+
+The mode a worker opens in is a **fleet-wide decision**, so it lives in a file you edit rather than in the instructions each manager reads:
+
+```json
+// ~/.config/claude-supervisor/config.json   (SUPERVISOR_CONFIG)
+{ "spawn": { "mode": "interactive" } }
+```
+
+`mode` is `interactive` or `headless`. Four sources, highest first:
+
+| Source | Use it for |
+|---|---|
+| `spawn_agent({ interactive: … })` | forcing **one** worker against the fleet default — the debug escape hatch, and it works in both directions |
+| `SUPERVISOR_SPAWN_MODE` | one manager, one shell, no file edit |
+| `spawn.mode` in `config.json` | **the fleet** — one edit, every manager |
+| built-in | `interactive` |
+
+The file is read **once at server start**, so restart the MCP server after editing it. It is optional: no file means the built-in default, and that is silent. A file that exists but does not parse is reported, because that is a file you wrote and believe is in effect.
+
+`agent_status`, `list_agents` and each ledger record carry `mode_source` (`argument` / `env` / `config` / `default`), so a worker that opened the wrong way tells you which of the four decided it instead of leaving you to guess.
+
+⚠️ **An unknown `mode` value refuses every spawn**, naming the file and the two valid values — same reasoning as the policy refusals below. A typo that silently fell back to a default would be discovered only by noticing a whole fleet running the wrong way, long after the edit. An unknown *key* only warns, so a config written for a newer version stays usable by this one.
+
 ## The approval policy
 
 Rules decide what a worker may do **without waking the manager**. Anything the rules do not cover defers to `canUseTool`, which parks it for the manager — that fall-through *is* the escalation path.

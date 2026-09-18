@@ -11,7 +11,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from './config.mjs'
@@ -63,6 +64,10 @@ test('the config object is a frozen, complete surface', () => {
     'costFiguresMeaningful',
     'sessionsDir',
     'permissionMode',
+    'configFile',
+    'configFileContents',
+    'configFileError',
+    'spawnMode',
     'claudeCmd',
     'mcpConfig',
     'workerColor',
@@ -75,6 +80,7 @@ test('the resolved paths hang off the XDG homes rather than the checkout', () =>
   assert.match(config.configDir, /claude-supervisor$/)
   assert.match(config.stateDir, /claude-supervisor$/)
   assert.equal(config.userPolicy, join(config.configDir, 'policy.json'))
+  assert.equal(config.configFile, join(config.configDir, 'config.json'))
   assert.equal(config.permissionLog, join(config.stateDir, 'permissions.jsonl'))
   assert.equal(config.sessionsDir, join(config.claudeHome, 'sessions'))
 })
@@ -128,5 +134,67 @@ test('a cost figure is only meaningful when the traffic reaches Anthropic', asyn
   } finally {
     if (before === undefined) delete process.env.ANTHROPIC_BASE_URL
     else process.env.ANTHROPIC_BASE_URL = before
+  }
+})
+
+// --- the config file ---------------------------------------------------------
+//
+// Read at load and frozen, like everything else here, so these tests write a file, point
+// SUPERVISOR_CONFIG at it, and re-import. That the read happens once is the intended
+// behaviour and the reason the install runbook says to restart the MCP server after
+// editing the file.
+
+const withConfigFile = async (contents, tag) => {
+  const dir = mkdtempSync(join(tmpdir(), 'supervisor-config-'))
+  const path = join(dir, 'config.json')
+  if (contents !== null) writeFileSync(path, contents)
+  const before = process.env.SUPERVISOR_CONFIG
+  process.env.SUPERVISOR_CONFIG = path
+  try {
+    return { config: (await import(`./config.mjs?${tag}`)).config, path }
+  } finally {
+    if (before === undefined) delete process.env.SUPERVISOR_CONFIG
+    else process.env.SUPERVISOR_CONFIG = before
+  }
+}
+
+test('SUPERVISOR_CONFIG overrides the config file location', async () => {
+  const { config: fresh, path } = await withConfigFile('{"spawn":{"mode":"headless"}}', 'config-path')
+  assert.equal(fresh.configFile, path)
+})
+
+test('the config file is parsed and exposed raw', async () => {
+  // Raw, not interpreted: what the values MEAN belongs to spawn-mode.mjs, which can then
+  // be tested without a filesystem at all.
+  const { config: fresh } = await withConfigFile('{"spawn":{"mode":"headless"}}', 'config-parsed')
+  assert.deepEqual(fresh.configFileContents, { spawn: { mode: 'headless' } })
+  assert.equal(fresh.configFileError, null)
+})
+
+test('an absent config file is silence, not an error', async () => {
+  // The normal case — most users have none and take the built-in default. Reporting it
+  // would train the operator to ignore the channel that reports real problems.
+  const { config: fresh } = await withConfigFile(null, 'config-absent')
+  assert.equal(fresh.configFileContents, null)
+  assert.equal(fresh.configFileError, null, 'a missing optional file must not be reported')
+})
+
+test('a config file that exists but does not parse IS reported', async () => {
+  // The operator wrote this one and believes it is in effect. Silence here is how a file
+  // gets accepted, documented, and never read.
+  const { config: fresh, path } = await withConfigFile('{"spawn":{', 'config-broken')
+  assert.equal(fresh.configFileContents, null)
+  assert.match(fresh.configFileError, /not valid JSON/)
+  assert.ok(fresh.configFileError.includes(path), 'the message must name the file to edit')
+})
+
+test('SUPERVISOR_SPAWN_MODE is carried raw for spawn-mode.mjs to validate', async () => {
+  const before = process.env.SUPERVISOR_SPAWN_MODE
+  process.env.SUPERVISOR_SPAWN_MODE = 'headless'
+  try {
+    assert.equal((await import('./config.mjs?spawn-mode=set')).config.spawnMode, 'headless')
+  } finally {
+    if (before === undefined) delete process.env.SUPERVISOR_SPAWN_MODE
+    else process.env.SUPERVISOR_SPAWN_MODE = before
   }
 })

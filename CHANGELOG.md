@@ -8,6 +8,13 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: read the default spawn mode from `~/.config/claude-supervisor/config.json` (`{"spawn":{"mode":"interactive"|"headless"}}`, path override `SUPERVISOR_CONFIG`), so the fleet-wide interactive-vs-headless decision is one file edit instead of one edit per manager command file. Precedence, highest first: the per-call `interactive` argument, `SUPERVISOR_SPAWN_MODE`, the config file, then the built-in `interactive`.
+- feat: report `mode_source` (`argument`/`env`/`config`/`default`) on `spawn_agent`, `agent_status`, `list_agents` and each ledger record, so a worker that opened the wrong way says which of the four sources decided it.
+- fix: stop coercing an omitted `interactive` argument to `true` in the `spawn_agent` handler — the server received an explicit mode on every call, which made the env var and the config file unreachable.
+- feat: refuse every spawn when `spawn.mode` or `SUPERVISOR_SPAWN_MODE` holds an unknown value, naming the file and the valid values, rather than silently falling back. An unknown *key* only warns, so a config written for a newer version stays usable.
+
 ## v0.8.4
 
 - chore: **Carry `homepage` and `repository` in the plugin manifest.** `plugin.json` had neither, while both sibling plugins (`vault-cli`, `dark-factory`) carry both pointing at their own repo — so a listing of this plugin had no link home. Checked against the siblings rather than assumed: `marketplace.json` carries neither in any of the three, so the gap is `plugin.json` alone and the change is two fields

@@ -39,6 +39,7 @@ export function buildRecord({
   agentId,
   label,
   mode,
+  modeSource = null,
   cwd,
   launcher = null,
   paneId = null,
@@ -54,6 +55,10 @@ export function buildRecord({
     agent_id: agentId ?? null,
     label: label ?? null,
     mode,
+    // Which source decided the mode — argument, env, config or default. The mode alone
+    // cannot say whether a headless worker was asked for or merely inherited, and that
+    // is the question asked when a fleet turns out to be running the wrong way.
+    mode_source: modeSource,
     cwd: cwd ?? null,
     launcher,
     pane_id: paneId,

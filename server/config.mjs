@@ -1,4 +1,4 @@
-// Every environment read the server makes, in one place.
+// Every environment read the server makes — and the user's config file — in one place.
 //
 // Scattered `process.env` access makes a service's real configuration surface
 // impossible to enumerate and defeats fail-fast validation — a typo in a rarely-hit
@@ -15,8 +15,10 @@
 //
 // Values are resolved once at load and frozen; nothing downstream reads the
 // environment a second time, so tests inject values instead of depending on ambient
-// process state.
+// process state. The same holds for the config file read below: resolved once, which is
+// why editing it takes effect on the next server start rather than the next spawn.
 
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -45,6 +47,32 @@ const ANTHROPIC_BASE_URL = ENV.ANTHROPIC_BASE_URL || null
 const COST_FIGURES_MEANINGFUL =
   !ANTHROPIC_BASE_URL || ANTHROPIC_BASE_URL.includes('api.anthropic.com')
 
+// The user's config file, read here for the same reason every env var is: so the whole
+// configuration surface is enumerable in one place and resolved once at boot rather than
+// re-read in a hot path. Absent is the normal case — most users have none and take the
+// built-in default — so ENOENT is silence, while a file that EXISTS and cannot be parsed
+// is reported, because that is a file the operator wrote and believes is in effect.
+//
+// Kept raw and unvalidated: which keys mean what, and which values are legal, belongs to
+// spawn-mode.mjs, where it can be unit-tested without touching a filesystem.
+const CONFIG_FILE = ENV.SUPERVISOR_CONFIG || join(CONFIG_DIR, 'config.json')
+
+const readConfigFile = (path) => {
+  let raw
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch (error) {
+    return error.code === 'ENOENT' ? { file: null, error: null } : { file: null, error: `cannot read ${path}: ${error.message}` }
+  }
+  try {
+    return { file: JSON.parse(raw), error: null }
+  } catch (error) {
+    return { file: null, error: `${path} is not valid JSON: ${error.message}` }
+  }
+}
+
+const CONFIG_FILE_READ = readConfigFile(CONFIG_FILE)
+
 export const config = Object.freeze({
   // stderr is the transport-safe log channel — stdout carries MCP frames — so a file
   // log is opt-in and nothing depends on a machine-local path by default.
@@ -58,6 +86,19 @@ export const config = Object.freeze({
 
   userPolicy: ENV.SUPERVISOR_POLICY || join(CONFIG_DIR, 'policy.json'),
   permissionLog: PERMISSION_LOG,
+
+  // Where the spawn default comes from. Three fields rather than one resolved answer:
+  // the PATH is what a refusal message has to name so the operator knows which file to
+  // edit, the parsed FILE and the env var are the two sources whose precedence is
+  // decided per spawn in spawn-mode.mjs, and the read ERROR is surfaced by the server's
+  // own logger rather than swallowed here.
+  configFile: CONFIG_FILE,
+  configFileContents: CONFIG_FILE_READ.file,
+  configFileError: CONFIG_FILE_READ.error,
+
+  // Raw and deliberately unvalidated, exactly like permissionMode below: the legal
+  // values and the message naming a bad one belong to the module that owns the meaning.
+  spawnMode: ENV.SUPERVISOR_SPAWN_MODE || null,
 
   // Whether a reported cost figure describes the traffic that actually ran. See the
   // note above the resolution — this is a property of the deployment, not of a turn.
