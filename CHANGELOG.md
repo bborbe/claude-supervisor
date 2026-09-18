@@ -8,6 +8,17 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: add the **print-the-artifact** guardrail to `worker-manager` — a manager must print the
+  artifact in the same turn as any **negative** claim ("X does not exist", "the delta is in
+  neither file") or any **attribution** ("you said X", "the script reported Y"). The rule names
+  the glob trap (a shell glob is a search, and a search that fails to match proves nothing about
+  absence — `ls /tmp/*x*` cannot descend into `/tmp/subdir/`) and treats pane text as
+  multi-author (a WezTerm pane mixes session output with harness-generated lines, so quoting it
+  requires knowing who wrote the line). Justified by the asymmetry: the check is one call, the
+  failure is silent.
+
 ## v0.12.2
 
 - fix: read the session id from `CLAUDE_CODE_SESSION_ID`, not `CLAUDE_SESSION_ID`. The
@@ -24,14 +35,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - fix: key the fleet snapshot on the session id, not `[ref]`. `[ref]` is computed per roster
   read and is not stable across time, so an unchanged session read as vanished-and-new
   between sweeps — the one thing this file exists to detect correctly.
-- feat: add the **print-the-artifact** guardrail to `worker-manager` — a manager must print the
-  artifact in the same turn as any **negative** claim ("X does not exist", "the delta is in
-  neither file") or any **attribution** ("you said X", "the script reported Y"). The rule names
-  the glob trap (a shell glob is a search, and a search that fails to match proves nothing about
-  absence — `ls /tmp/*x*` cannot descend into `/tmp/subdir/`) and treats pane text as
-  multi-author (a WezTerm pane mixes session output with harness-generated lines, so quoting it
-  requires knowing who wrote the line). Justified by the asymmetry: the check is one call, the
-  failure is silent.
 
 ## v0.12.1
 
