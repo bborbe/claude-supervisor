@@ -19,6 +19,7 @@ import { config } from './config.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName } from './liveness.mjs'
+import { resolveSpawnMode, unknownKeyWarnings } from './spawn-mode.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, updateRecord, writeRecord } from './ledger.mjs'
 
@@ -79,6 +80,17 @@ const PERMISSION_MODE = (() => {
   if (raw !== 'default') log(`WARNING: permissionMode "${raw}" — see README; 'auto' bypasses the hook and canUseTool entirely, leaving workers unsupervised.`)
   return raw
 })()
+
+// The config file is optional, so its ABSENCE is silence. Its presence with a problem is
+// not: a file the operator wrote and believes is in effect, which the server could not
+// read, is the exact shape of a setting that is accepted and then ignored. Reported once
+// at boot rather than per spawn, since the read happens once.
+if (config.configFileError) {
+  log(`WARNING: ${config.configFileError} — falling back to the built-in spawn default`)
+}
+for (const warning of unknownKeyWarnings(config.configFileContents, config.configFile)) {
+  log(`WARNING: ${warning}`)
+}
 
 // The settings tiers a headless worker loads. Named once because the query option and
 // the effective-mode resolution below must agree — resolving a different set would
@@ -344,6 +356,7 @@ function writeLedger(agent, patch) {
       agentId: agent.id,
       label: agent.label,
       mode: agent.status === 'interactive' ? 'interactive' : 'headless',
+      modeSource: agent.modeSource ?? null,
       cwd: agent.cwd,
       launcher: agent.launcher ?? null,
       paneId: agent.paneId ?? null,
@@ -457,26 +470,44 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   return { paneId: paneId || null, color, sessionId, launcher: claudeCmd }
 }
 
-// Interactive is the DEFAULT. A worker must come up with the same tooling a normal
-// session has — the launcher's env, plugin skills, MCP servers, settings.json
-// permissions. A worker missing its normal tooling is not a cheaper worker, it is
-// one that fails in unfamiliar ways and cannot be watched. Opt OUT with
-// interactive:false for the headless path, where the manager answers instead.
+// Interactive is the DEFAULT, and `interactive` here is deliberately NOT defaulted in
+// the signature. A worker must come up with the same tooling a normal session has — the
+// launcher's env, plugin skills, MCP servers, settings.json permissions — and one
+// missing that is not a cheaper worker, it is one that fails in unfamiliar ways and
+// cannot be watched. But WHERE that default comes from is the point: a code default is
+// invisible to the operator and was, in practice, overridden by every command file that
+// passed the argument explicitly. So an omitted argument stays `undefined` all the way
+// into resolveSpawnMode, which consults SUPERVISOR_SPAWN_MODE and then the operator's
+// config.json before falling back. Passing `interactive` explicitly still wins — it is
+// the debug escape hatch, and it has to work in both directions.
+//
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, which is
 // what the guard below — see liveness.mjs — refuses rather than silently producing.
-async function spawnAgent({ prompt, cwd, label, interactive = true, resume, policy: policyPath }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: policyPath }) {
   const id = `agent_${++seq}`
+
+  // Resolved first, because every guard below asks which way this worker opens and they
+  // must all get the same answer. A bad value in the env or the file refuses here,
+  // before a worker, a ledger record or a tab exists.
+  const spawnMode = resolveSpawnMode({
+    interactive,
+    env: config.spawnMode,
+    file: config.configFileContents,
+    path: config.configFile,
+  })
+  if (spawnMode.error) return { error: spawnMode.error }
+  const opensInteractive = spawnMode.mode === 'interactive'
 
   // Refused before the liveness probe: there is no point guarding an argument the tab
   // path would drop anyway, and the caller needs to hear about the limitation rather
   // than about the session's liveness.
-  const unsupported = resumeSupportError({ resume, interactive })
+  const unsupported = resumeSupportError({ resume, interactive: opensInteractive })
   if (unsupported) return { error: unsupported }
 
   // Same reasoning and the same class of bug: a policy the tab path cannot consult is
   // refused, not accepted and quietly ignored.
-  const unsupportedPolicy = policySupportError({ policy: policyPath, interactive })
+  const unsupportedPolicy = policySupportError({ policy: policyPath, interactive: opensInteractive })
   if (unsupportedPolicy) return { error: unsupportedPolicy }
 
   // Resolved before anything is spawned, so a bad path costs no worker, no ledger
@@ -544,6 +575,10 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume, poli
     // session that called spawn_agent — and the live registry maps that pid to a
     // session id. Stamped here so it outlives the registry entry it came from.
     parentSession: parentSessionId({ dir: config.sessionsDir }),
+    // Which of argument / env / config / default decided the mode. Carried on the agent
+    // so agent_status, list_agents and the ledger all answer "why is this worker
+    // headless" from one value rather than three independent guesses.
+    modeSource: spawnMode.source,
     launcher: null,
     permissions: [],
     transcript: [],
@@ -552,7 +587,7 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume, poli
   }
   agents.set(id, agent)
 
-  if (interactive) {
+  if (opensInteractive) {
     agent.status = 'interactive'
     const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, label: agent.label })
     if (res.error) {
@@ -570,6 +605,7 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume, poli
       cwd: agent.cwd,
       status: agent.status,
       interactive: true,
+      mode_source: agent.modeSource,
       pane_id: agent.paneId,
       // Resolved from the registry by the tab name we set — a tab worker is a separate
       // process, so this is the only way to learn it. Null when it did not register in
@@ -658,6 +694,8 @@ async function spawnAgent({ prompt, cwd, label, interactive = true, resume, poli
     label: agent.label,
     cwd: agent.cwd,
     status: agent.status,
+    interactive: false,
+    mode_source: agent.modeSource,
     // Reported so a caller can see which policy actually took effect, rather than
     // inferring it from the absence of an error.
     policy: agent.policyPath,
@@ -685,6 +723,10 @@ const agentView = (a) => ({
   // Null means the worker runs under the server policy — the same absence-means-default
   // the ledger record uses, so the two cannot disagree about what "no policy" reads as.
   policy: a.policyPath ?? null,
+  // Which source decided interactive-vs-headless: argument, env, config or default. A
+  // worker that opened the wrong way is otherwise diagnosed by guessing which of four
+  // places was consulted.
+  mode_source: a.modeSource ?? null,
   // Same id = the conversation continued; a different one = the SDK forked it. Only
   // answerable once init has reported a session id, so it is null until then rather
   // than a guess.
@@ -709,7 +751,7 @@ const TOOLS = [
         interactive: {
           type: 'boolean',
           description:
-            'Default true: open the worker as a real session in a wezterm tab, so it has the same tooling a normal session has — launcher env, plugin skills, MCP servers, settings.json permissions — and can be watched and driven by hand. Its approval prompts are answered IN THAT TAB, so it will never appear in pending_permissions. Pass false for a headless worker that the manager supervises instead, accepting the narrower toolchain.',
+            'Per-call override of the fleet default. OMIT IT unless you specifically need to force one mode for this one worker: with no argument the server uses SUPERVISOR_SPAWN_MODE, then spawn.mode in ~/.config/claude-supervisor/config.json, then its built-in default of interactive — so the operator changes the whole fleet in one edit instead of in every command file. true opens the worker as a real session in a wezterm tab, with the same tooling a normal session has (launcher env, plugin skills, MCP servers, settings.json permissions), watchable and drivable by hand; its approval prompts are answered IN THAT TAB, so it never appears in pending_permissions. false opens a headless worker that the manager supervises instead, accepting the narrower toolchain.',
         },
         resume: {
           type: 'string',
@@ -811,7 +853,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           prompt: args.prompt,
           cwd: args.cwd,
           label: args.label,
-          interactive: args.interactive !== false,
+          // Passed through as-is, undefined included. Coercing an omitted argument to a
+          // boolean here is what made the config unreachable: the server would receive
+          // an explicit mode on every call and never consult anything else.
+          interactive: typeof args.interactive === 'boolean' ? args.interactive : undefined,
           resume: args.resume,
           policy: args.policy,
         }),

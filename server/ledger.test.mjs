@@ -118,3 +118,14 @@ test('parentSessionId resolves the manager through the live registry', () => {
   assert.equal(parentSessionId({ ppid: 1234, registry }), null, 'an unknown parent is null, never a guess')
   assert.equal(parentSessionId({ ppid: 58436, registry: () => null }), null, 'an unreadable registry is null too')
 })
+
+test('the record carries which source decided the mode', () => {
+  // The mode alone cannot say whether a headless worker was asked for or merely
+  // inherited from a config nobody remembered editing — which is the question actually
+  // asked when a fleet turns out to be running the wrong way.
+  const record = buildRecord({ sessionId: SESSION, mode: 'headless', modeSource: 'config' })
+  assert.equal(record.mode_source, 'config')
+
+  // Absent rather than invented for a record built before the field existed.
+  assert.equal(buildRecord({ sessionId: SESSION, mode: 'headless' }).mode_source, null)
+})

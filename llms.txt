@@ -11,7 +11,9 @@ An MCP server + Claude Code plugin that lets one manager session spawn worker se
 
 ## Two spawn modes
 
-`spawn_agent` opens a worker either as a real `claude` session in a wezterm tab (`interactive: true`, **the default**) or headless (`interactive: false`). Tooling is identical in both; the difference is who answers the worker's permission prompts and whether you can watch it.
+`spawn_agent` opens a worker either as a real `claude` session in a wezterm tab (`interactive: true`) or headless (`interactive: false`). Tooling is identical in both; the difference is who answers the worker's permission prompts and whether you can watch it.
+
+The default is **fleet-wide and lives in a file**, not in the caller: omit the `interactive` argument and the server resolves `SUPERVISOR_SPAWN_MODE`, then `{"spawn":{"mode":…}}` in `~/.config/claude-supervisor/config.json` (`SUPERVISOR_CONFIG`), then its built-in `interactive`. Pass the argument only to force one worker against that default. An unknown mode value refuses the spawn; the file is read once at server start. `spawn_agent`, `agent_status`, `list_agents` and the ledger all report `mode_source` (`argument`/`env`/`config`/`default`).
 
 ## How a worker's permission prompt is answered
 
