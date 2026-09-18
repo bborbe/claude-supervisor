@@ -21,7 +21,8 @@ Misusing `answer` on an `asked-of-you` is worse than an early close: it writes
 `closed_evidence: "operator answered in session: <text>"`, forging an attribution to the
 operator that a later reader cannot tell from a genuine answer. The entry then looks resolved
 by the one party who never saw it.
-Session id defaults to $CLAUDE_SESSION_ID; --session overrides.
+Session id defaults to $CLAUDE_CODE_SESSION_ID (falling back to the legacy
+$CLAUDE_SESSION_ID); --session overrides.
 """
 import argparse
 import datetime
@@ -65,15 +66,22 @@ def age(created_at):
 
 
 def session_id(args):
-    sid = args.session or os.environ.get("CLAUDE_SESSION_ID")
+    sid = (
+        args.session
+        or os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or os.environ.get("CLAUDE_SESSION_ID")
+    )
     if not sid:
         sys.exit(
             "error: no session id. Pass --session <your-session-id>.\n"
-            "note: CLAUDE_SESSION_ID is NOT exported into the shell by Claude Code — a manager\n"
-            "      must pass its own id explicitly (read it from /status or the session's own\n"
-            "      transcript path ~/.claude/projects/<project>/<session-id>.jsonl). Never guess\n"
-            "      it from the newest file in ~/.claude/state/context/: a wrong id silently\n"
-            "      splits the ledger in two and both halves look healthy."
+            "note: Claude Code exports the session id as CLAUDE_CODE_SESSION_ID, so this\n"
+            "      default fires for any Bash a session runs. CLAUDE_SESSION_ID is kept as a\n"
+            "      fallback for callers written against the old name. Both are empty in a\n"
+            "      spawned child, which is deliberately stripped of them — there, pass --session\n"
+            "      explicitly from the session's own transcript path\n"
+            "      ~/.claude/projects/<project>/<session-id>.jsonl. Never guess it from the\n"
+            "      newest file in ~/.claude/state/context/: a wrong id silently splits the\n"
+            "      ledger in two and both halves look healthy."
         )
     return sid
 

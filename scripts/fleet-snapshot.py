@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Persist a fleet snapshot to ~/.claude/state/fleet-snapshot.json (fleet-manager loop).
-stdin: JSON — either the sessions dict {"<ref>": {...}} or {"scope": "...", "sessions": {...}}.
+stdin: JSON — either the sessions dict {"<session id>": {...}} or {"scope": "...", "sessions": {...}}.
+Key on the session id (`sessionId` from ~/.claude/sessions/<pid>.json), never on `[ref]`:
+`[ref]` is computed per roster read, so an unchanged session would read as vanished-and-new
+between sweeps — and diffing one sweep against the next is this file's whole job.
 swept_at is stamped at write time.
 """
 import sys, json, os, datetime

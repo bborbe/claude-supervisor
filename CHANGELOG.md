@@ -8,6 +8,23 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: read the session id from `CLAUDE_CODE_SESSION_ID`, not `CLAUDE_SESSION_ID`. The
+  exported name is the former, so the old fallback could never fire and every caller had to
+  hand-pass `--session` — while the script's own error text told them to guess the id from
+  `/status` or a transcript path, the exact route its own warning calls out as silently
+  splitting a ledger in two. `CLAUDE_SESSION_ID` is kept as a fallback for older callers.
+- fix: join the fleet sweep on the session id instead of the session name. The old join
+  (`ListAgents` name == `fleet-sessions.py` `WORKING ON`) held only because `/rename <task
+  title>` happened to make the two strings equal, so renaming a session silently dropped it
+  from the sweep while it stayed alive and possibly blocked on an unanswered gate. The
+  session id is stable across `/rename` and is bridged to the roster by the session registry
+  at `~/.claude/sessions/<pid>.json`.
+- fix: key the fleet snapshot on the session id, not `[ref]`. `[ref]` is computed per roster
+  read and is not stable across time, so an unchanged session read as vanished-and-new
+  between sweeps — the one thing this file exists to detect correctly.
+
 ## v0.12.1
 
 - fix: resolve helper scripts from the plugin's own marketplace clone when

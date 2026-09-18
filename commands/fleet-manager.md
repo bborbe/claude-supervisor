@@ -152,7 +152,7 @@ If absent (first ever run), skip diffing for this round — every session is "fi
   "swept_at": "2026-08-21T14:32:00Z",
   "scope": "all",
   "sessions": {
-    "<ListAgents [ref] — internal key only, never displayed>": {
+    "<session id — sessionId from ~/.claude/sessions/<pid>.json, stable across renames>": {
       "name": "<ListAgents name, i.e. the task it's on>",
       "status": "busy",
       "task_file": "/absolute/path/to/vault/task/file.md",
@@ -164,9 +164,10 @@ If absent (first ever run), skip diffing for this round — every session is "fi
 ```
 
 Field notes:
-- **Key** = `ListAgents`'s `[ref]` — its own per-session handle, **stable within one roster read but NOT across time**: measured 2026-09-18, a single session read `[d1bad8]` at 00:12 and `[a84cfe]` at 08:0x with the same pane, tab and sessionId throughout. **Internal only; never shown to the operator.** Store `name` alongside it and display that. It is also **not resolvable** — `jump.py` cannot map a `[ref]` to a tab, because it is persisted nowhere under `~/.claude/` and no hash of the sessionId / socket path / pid / name reproduces it. That is why any table the operator is meant to *act* on must print the **sessionId prefix**, which does resolve.
-- ⚠️ `[ref]` is **not** the session-id prefix and does **not** join to `fleet-sessions.py` (verified 2026-08-21: 6 chars vs 8, no overlap). **Join to the vault mapping on NAME** — `ListAgents` name == `fleet-sessions.py` `WORKING ON`.
-- Names are normally unique among live peers (13/13 distinct, 2026-08-21), so name is a safe join key; `[ref]` is the documented tiebreak for the rare same-name collision.
+- **Key** = the **session id** — `sessionId` from `~/.claude/sessions/<pid>.json`, which carries it beside `name` and a live `status`. Stable across `/rename` (verified 2026-09-18: three sessions carry `formerNames` recording superseded names while `sessionId` stays constant through all of them) and it **resolves**, which `[ref]` does not. Store `name` alongside it and display that.
+- ⚠️ **`[ref]` must never key this file.** It is computed per roster read and is **not stable across time** — measured 2026-09-18, one session read `[d1bad8]` at 00:12 and `[a84cfe]` at 08:0x with the same pane, tab and sessionId throughout. This file's whole job is diffing one sweep against the next, so a per-read key makes an unchanged session read as vanished-and-new. It is also **not resolvable** — `jump.py` cannot map a `[ref]` to a tab, because it is persisted nowhere under `~/.claude/` and no hash of the sessionId / socket path / pid / name reproduces it. That is why any table the operator is meant to *act* on must print the **session id**, which does resolve.
+- ⚠️ `[ref]` is **not** the session-id prefix and does **not** join to `fleet-sessions.py` (verified 2026-08-21: 6 chars vs 8, no overlap). **Join to the vault mapping on the session id** — `fleet-sessions.py`'s `SESSION` column carries it, and the registry bridges it to `ListAgents`' name.
+- Names are for display, never for joining. They are normally unique among live peers (13/13 distinct, 2026-08-21), but uniqueness is not stability: `/rename` changes a name and leaves the session id untouched.
 - ⚠️ Never resolve names to session ids via `~/.claude/history.jsonl`: names are reused **across time**, and `ListAgents` shows only live sessions — so a history lookup reintroduces a collision the live roster does not have.
 - `status` = the raw `ListAgents` status string for this sweep (`busy`/`shell`/`waiting`/`idle`/blank).
 - `task_file` = resolved absolute path to the vault file this session is working, or `null` if none resolves. Resolution comes from `/fleet-status` Step 3 (the `claude_session_id:` stamp) **and** its Step 4 fallback (exact `<name>.md` under `tasks_dir` then `goals_dir`) — do not reimplement either here. It may therefore be a **goal** file, not only a task; the mtime signal works identically on both.
