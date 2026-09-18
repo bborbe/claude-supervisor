@@ -22,6 +22,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:spawn` `/supervisor:workers` `/supervisor:answer` `/supervisor:drain` | the operator surface |
 | agent `worker-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
 | `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
+| `/supervisor:fleet-manager` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
 
 ## Two spawn modes
 
@@ -197,6 +198,8 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 skills/supervising-workers/SKILL.md
 commands/{spawn,workers,answer,drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
+commands/{fleet-manager,fleet-status}.md         fleet surface — many sessions
+docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/worker-wrangler.md
 server/supervisor.mjs                    the MCP server

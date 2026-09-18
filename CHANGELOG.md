@@ -8,6 +8,17 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: ship `/supervisor:fleet-manager` and `/supervisor:fleet-status` with their renderer and
+  discovery helpers (`fleet-sessions.py`, `box-table.py`, `fleet-snapshot.py`,
+  `context-usage.py`), previously maintained by hand in `~/.claude/commands/`.
+- feat: add `docs/fleet-surface.md` as the canonical home for the spawn shape and the fleet
+  table render spec, so the plugin no longer defers its own mechanics to an Obsidian runbook
+  referenced by absolute path.
+- docs: README gains a prerequisites table for the machine-local state the fleet commands read
+  but this plugin does not ship, and the rule for how commands reference vault notes.
+
 ## v0.10.0
 
 - feat: ship `/supervisor:jump` and `/supervisor:who-needs-me` as plugin commands, with their
