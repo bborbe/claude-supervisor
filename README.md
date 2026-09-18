@@ -59,7 +59,7 @@ The file is read **once at server start**, so restart the MCP server after editi
 
 `agent_status`, `list_agents` and each ledger record carry `mode_source` (`argument` / `env` / `config` / `default`), so a worker that opened the wrong way tells you which of the four decided it instead of leaving you to guess.
 
-⚠️ **An unknown `mode` value refuses every spawn**, naming the file and the two valid values — same reasoning as the policy refusals below. A typo that silently fell back to a default would be discovered only by noticing a fleet running the wrong way, which is how this file came to exist: on 2026-09-18 the manager command files each passed `interactive=false` explicitly, so the server's own `interactive` default was unreachable and the fleet ran headless all morning. Reversing it cost three kills, seven more workers discovered under two other managers, and a course-correction message to each. An unknown *key* only warns — a config written for a newer version must still be usable by this one.
+⚠️ **An unknown `mode` value refuses every spawn**, naming the file and the two valid values — same reasoning as the policy refusals below. A typo that silently fell back to a default would be discovered only by noticing a whole fleet running the wrong way, long after the edit. An unknown *key* only warns, so a config written for a newer version stays usable by this one.
 
 ## The approval policy
 

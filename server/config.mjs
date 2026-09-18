@@ -1,4 +1,4 @@
-// Every environment read the server makes, in one place.
+// Every environment read the server makes — and the user's config file — in one place.
 //
 // Scattered `process.env` access makes a service's real configuration surface
 // impossible to enumerate and defeats fail-fast validation — a typo in a rarely-hit
@@ -15,7 +15,8 @@
 //
 // Values are resolved once at load and frozen; nothing downstream reads the
 // environment a second time, so tests inject values instead of depending on ambient
-// process state.
+// process state. The same holds for the config file read below: resolved once, which is
+// why editing it takes effect on the next server start rather than the next spawn.
 
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
