@@ -29,6 +29,19 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - fix: the check reads **frontmatter only**. Task bodies quote these keys in prose, so a
   whole-file `grep` reads a task as parked or owned on the strength of a sentence *about*
   parking — it reported the very task documenting the defect as a routine.
+- refactor: the candidate enumeration moves out of the command into
+  **`scripts/orphan-candidates.py`**, alongside the other manager helpers (`fleet-sessions.py`,
+  `who-needs-me.py`, `fleet-snapshot.py`). The command now calls it and no longer carries the
+  filter logic inline, and the operator's runbook calls the same script — one source rather
+  than two that drift. Verified by running both implementations against the live fleet: the
+  script and the inline block return an **identical 21-task set**.
+- fix: **the check now fails loud instead of quiet.** `scripts/orphan-candidates.py` resolves
+  its own liveness probe (the sibling `fleet-sessions.py`) and prints
+  `⚠️ ORPHAN CHECK FAILED — the result is not clean, it is UNKNOWN.` on **stdout** when it
+  cannot run. This was not hypothetical: `~/.claude/scripts/fleet-sessions.py` — the path both
+  the command and the runbook called — was deleted on 2026-09-18 when the manager scripts
+  moved into the plugin, and the old invocation returned zero candidates with exit 0. The
+  runbook's two references are repointed.
 
 ## v0.13.1
 

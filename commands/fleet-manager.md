@@ -194,47 +194,22 @@ Steps 0–2 run **forward** — live session → task file. That direction struc
 
 ```bash
 cd "$VAULT/$TASKS_DIR"
-TODAY=$(date -u +%Y-%m-%d)
-grep -lE '^claude_session_id:' *.md > /tmp/claims.txt
-# Condition (1): transcript recency. Rows under 4h = alive. NOT `grep '●'` — see below.
-python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-sessions.py --all \
-  | awk '/(^| )[0-9]+(s|m) ago/ || /(^| )[1-3]h ago/' \
-  | grep -oE '\b[0-9a-f]{8}\b' | sort -u > /tmp/live_confirmed.txt
-# Frontmatter-only reader. Task BODIES quote these keys in prose (this command's own
-# source task does), so a whole-file grep matches the quotation and reads a task as
-# parked/owned on the strength of a sentence about parking.
-fm() { awk '/^---$/{c++; next} c==1{print} c==2{exit}' "$1"; }
-while IFS= read -r f; do
-  [ "$(fm "$f" | grep -m1 '^status:' | awk '{print $2}')" = "in_progress" ] || continue
-  # PARK FILTER — two signals, union. This is the ONLY thing that separates a parked
-  # routine from an orphan: both are genuinely dead, so no liveness evidence tells them
-  # apart. Measured 2026-09-18 against the three named counter-examples.
-  #   (a) future defer_date — catches Aquascape PWC W38, Shrimp PWC W38 and Repair Bike
-  #       Switch (all defer_date 2026-09-19). Both real orphans carry none.
-  #   (b) created_by: recurring-task-creator — catches the routine class that carries NO
-  #       defer_date (Start Day, Plan Week, … — the 2026-08-22 flood of 31).
-  # Neither alone is sufficient: Repair Bike has no created_by, Start Day has no
-  # defer_date. Both fail LOUD if the vault stops writing them — tasks read unparked,
-  # the set floods, and the check over-reports. That is the safe direction, and it is
-  # why the original "the flag decays silently" argument does not transfer here.
-  dd=$(fm "$f" | grep -m1 '^defer_date:' | sed 's/.*"\(.*\)".*/\1/')
-  if [ -n "$dd" ] && [ "$(printf '%s\n%s\n' "$dd" "$TODAY" | sort | tail -1)" = "$dd" ]; then
-    continue
-  fi
-  [ "$(fm "$f" | grep -m1 '^created_by:' | awk '{print $2}')" = "recurring-task-creator" ] && continue
-  # RECENCY WINDOW — upper bound only; the lower bound was REMOVED 2026-09-18.
-  # It excluded the very orphans this check exists to find: 32d5e57c died ~35 min before
-  # detection, so its file was only 3h stale and the old >=4h cut dropped it. The park
-  # filter above now covers the routine class that bound was added for, and removing it
-  # costs nothing — measured 21 candidates with and without it, 0 recurring tasks in the
-  # unbounded set. Replay against recorded state: 1 of 2 orphans with the bound, 2 of 2
-  # without.
-  m=$(date -r "$f" +%s); age=$(( ($(date -u +%s) - m) / 3600 ))
-  [ "$age" -le 168 ] || continue    # >7d: backlog hygiene, not a dead worker
-  sid=$(fm "$f" | grep -m1 '^claude_session_id:' | awk '{print $2}')
-  grep -qx "${sid:0:8}" /tmp/live_confirmed.txt || echo "orphan: ${f%.md}"
-done < /tmp/claims.txt
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/orphan-candidates.py \
+  --tasks-dir . --max-age-days 7
 ```
+
+`scripts/orphan-candidates.py` owns the enumeration; this command does not reimplement it. Two filters, in order — **name both when reporting**, because each has a failure direction that matters:
+
+**1. Park filter — the discriminator, and it is task-semantic, not liveness.** A parked routine and an orphan are **both genuinely dead**: the three known counter-examples (`Aquascape PWC - 2026W38`, `Shrimp PWC - 2026W38`, `Repair Bike Switch and Saddle`) are stale by 4.5–27 days and read dead on transcript, argv, spawn ledger *and* pane. No liveness evidence separates them, so the signal has to come from the task. Two, in union:
+
+- a **future `defer_date`** — *scheduled ≠ abandoned*
+- **`created_by: recurring-task-creator`** — the routine class that carries no `defer_date` (`Start Day`, `Plan Week`, … — the 2026-08-22 flood of 31)
+
+**Neither alone is sufficient:** `Repair Bike` carries no `created_by`, `Start Day` carries no `defer_date`. Both fail **LOUD** if the vault stops writing them — tasks read unparked, the set floods, the check over-reports. That is the safe direction, and it is why the original "the flag decays silently" argument does **not** transfer here.
+
+**2. Recency — upper bound only, 7 days.** No lower bound: one used to exist (`≥4h`) and it **excluded the recently-died orphans this check exists to find**, because a session that dies mid-work leaves a task file only minutes stale (`32d5e57c` died ~35 min before detection, file 3h stale). Replay against recorded state: **1 of 2** orphans detected with the bound, **2 of 2** without. The park filter covers the routine class the bound was added for, so removing it costs nothing — 21 candidates measured with and without. The upper bound stays: 39 of 73 candidates were more than a week stale, which is backlog rather than a dead worker.
+
+**Frontmatter only.** Task bodies quote these keys in prose, so a whole-file scan reads a task as parked on the strength of a sentence *about* parking — it reported the task documenting this very defect as a routine.
 
 **Filter by `status: in_progress`.** Completion clears neither the flag nor the declaration, so unfiltered the check returns every task ever worked. The old flag-based seeding needed this filter to cut 496 tasks down to 11 open ones; the declaration needs it for the same reason on a different denominator.
 
