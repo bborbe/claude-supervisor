@@ -8,6 +8,17 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: add the **print-the-artifact** guardrail to `worker-manager` — a manager must print the
+  artifact in the same turn as any **negative** claim ("X does not exist", "the delta is in
+  neither file") or any **attribution** ("you said X", "the script reported Y"). The rule names
+  the glob trap (a shell glob is a search, and a search that fails to match proves nothing about
+  absence — `ls /tmp/*x*` cannot descend into `/tmp/subdir/`) and treats pane text as
+  multi-author (a WezTerm pane mixes session output with harness-generated lines, so quoting it
+  requires knowing who wrote the line). Justified by the asymmetry: the check is one call, the
+  failure is silent.
+
 ## v0.12.1
 
 - fix: resolve helper scripts from the plugin's own marketplace clone when
