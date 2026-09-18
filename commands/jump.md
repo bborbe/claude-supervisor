@@ -8,7 +8,7 @@ argument-hint: "[<tab-id> | tab:<N> | pane:<N> | <title substring>] [--oldest] [
 Run exactly:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude}/scripts/jump.py $ARGUMENTS
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump.py $ARGUMENTS
 ```
 
 Print the output verbatim. Do not add analysis, do not run `ListAgents`, do not message peers.

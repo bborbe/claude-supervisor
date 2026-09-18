@@ -26,7 +26,9 @@ import argparse, base64, glob, importlib.util, json, os, re, subprocess, sys, ti
 
 # Plugin-relative when running as an installed plugin; falls back to ~/.claude so the
 # script still runs standalone (mirrors coding/scripts/validate-citations.sh).
-PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.expanduser("~/.claude")
+PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.expanduser(
+    "~/.claude/plugins/marketplaces/claude-supervisor"
+)
 WNM_PATH = os.path.join(PLUGIN_ROOT, "scripts", "who-needs-me.py")
 SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
 VISITED_PATH = os.path.expanduser("~/.claude/state/jump-visited.json")
