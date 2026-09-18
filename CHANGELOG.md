@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.13.2
 
 - docs: let a proven-dead resume take path B where headless is not permitted, and split resume
   into two decisions. `docs/fleet-surface.md` § Spawn a worker sent every proven-dead session
