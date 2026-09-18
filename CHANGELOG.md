@@ -8,6 +8,20 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: resolve helper scripts from the plugin's own marketplace clone when
+  `CLAUDE_PLUGIN_ROOT` is unset, instead of falling back to `~/.claude/scripts/`.
+  `CLAUDE_PLUGIN_ROOT` is not set in the shell a command's Bash runs in, so the fallback
+  branch is the one that actually executes — and the old fallback pointed at the very
+  directory the migration is about to empty, which would have broken all six commands the
+  moment the originals were removed.
+- fix: port two helper-script changes that landed in `~/.claude/scripts/` after the migration
+  PRs were cut — `who-needs-me.py` gains `is_open_gate()`/`answered()`, so an unanswered gate
+  is distinguished from one the operator has acted on rather than inferred from file
+  existence; `open-items.py` documents that `--answer` on an `asked-of-you` forges an
+  operator attribution a later reader cannot tell from a real one.
+
 ## v0.12.0
 
 - feat: ship `/supervisor:worker-manager` and `/supervisor:worker-status` with the

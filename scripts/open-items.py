@@ -15,9 +15,12 @@ Kinds:
 Subcommands: add | answer | note | close | list
 
 `answer` is for something the OPERATOR said; `note` is for anything else you want to attach
-(evidence, a measurement, progress). Reach for `note` by default — `answer` closes an
-asked-of-you outright, and a verb that resolves one kind while annotating two others is easy
-to reach for by mistake.
+(evidence, a measurement, progress). Reach for `note` by default.
+
+Misusing `answer` on an `asked-of-you` is worse than an early close: it writes
+`closed_evidence: "operator answered in session: <text>"`, forging an attribution to the
+operator that a later reader cannot tell from a genuine answer. The entry then looks resolved
+by the one party who never saw it.
 Session id defaults to $CLAUDE_SESSION_ID; --session overrides.
 """
 import argparse
@@ -348,7 +351,14 @@ def main():
         "kinds it only annotates, so prefer `note` when nobody actually replied",
     )
     p_answer.add_argument("--id", required=True)
-    p_answer.add_argument("--answer", required=True)
+    p_answer.add_argument(
+        "--answer",
+        required=True,
+        help="the operator's words, verbatim. On an asked-of-you this CLOSES the entry AND "
+        "records 'operator answered in session: <text>' as its evidence — an attribution a "
+        "later reader cannot distinguish from a real answer. Never pass a manager's own "
+        "note here; use `note`.",
+    )
     p_answer.set_defaults(func=cmd_answer)
 
     p_note = sub.add_parser(

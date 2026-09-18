@@ -2,7 +2,7 @@
 """List Claude Code sessions that need the operator, joined to WezTerm panes.
 
 Reads ~/.claude/state/attention/*.needs.json / *.tool.json written by
-~/.claude/hooks/attention-log.sh.  Sections:
+~/.claude/hooks/attention-log.py.  Sections:
   Needs you       — permission prompt or open question (oldest first)
   Probably stuck  — inside one tool call longer than --stuck-min (default 20)
   Idle            — turn ended, waiting for a prompt (only with --idle)
@@ -79,6 +79,24 @@ def reclassify_idle(rec):
     return rec
 
 
+def answered(rec):
+    """True once the hook marked the record answered — the operator has acted."""
+    return rec.get("state") == "answered"
+
+
+def is_open_gate(rec):
+    """A gate the operator has not answered yet.
+
+    The record carries `state` ("open" until its answering event fires, then "answered")
+    and `cleared_by`, naming that event. The old rule was file-existence — the hook
+    deleted the record on ANY later event, so a background task completing erased an open
+    gate and the pane vanished from the feed with nothing left to classify. Reproduced
+    2026-09-18 on a throwaway pane: Stop wrote the gate, PostToolUse removed it, and the
+    feed could not tell that apart from the operator having answered.
+    """
+    return not answered(rec) and rec.get("kind") in ("permission", "question")
+
+
 def age(ts):
     m = int((time.time() - ts) // 60)
     return f"{m}m" if m < 60 else f"{m // 60}h{m % 60:02d}m"
@@ -115,9 +133,9 @@ def main():
     needs = [reclassify_idle(r) for r in load("needs") if live(r)]
     tools = [r for r in load("tool") if live(r)]
 
-    blocked = sorted([r for r in needs if r["kind"] in ("permission", "question")], key=lambda r: r["ts"])
+    blocked = sorted([r for r in needs if is_open_gate(r)], key=lambda r: r["ts"])
     stuck = sorted([r for r in tools if time.time() - r["ts"] > a.stuck_min * 60], key=lambda r: r["ts"])
-    idle = sorted([r for r in needs if r["kind"] == "idle"], key=lambda r: r["ts"])
+    idle = sorted([r for r in needs if r["kind"] == "idle" and not answered(r)], key=lambda r: r["ts"])
 
     print(f"Needs you ({len(blocked)})")
     for r in blocked:
