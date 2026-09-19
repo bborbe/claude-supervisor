@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.15.2
 
 - fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`
   argument, so the worker creates its own session in its own pane. Minting the session first
