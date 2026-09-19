@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.14.0
 
 - docs: two manager-contract rules earned this session. **The PR is the boundary, whatever the
   file extension** — editing a doc may be management, opening a PR never is, because it obligates
