@@ -21,6 +21,17 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   `scope` field, and `fleet-status`'s scoping paragraph are deleted along with the mechanism
   they guarded, and `fleet-status`'s `argument-hint` no longer advertises the flags.
 
+## v0.17.1
+
+- fix: the gate notification puts the gate's own text on a line of its own, so the command inside it survives a
+  copy. A phone wraps a long line mid-argument, and an operator copying the recommended command out of a delivered
+  notification got `/vault-cli:complete-goal "The Manager Ranks` — truncated exactly at the wrap, leaving an
+  unbalanced quote and a goal name that does not exist. The gate text is where a manager puts that command, and it
+  was previously rendered inline after a `Manager gate open -- <owner>: ` prefix that pushed it ~24 columns into the
+  wrap zone; it now starts a line. The trailing line also stops advising and states the wall instead —
+  *"Replies here are not read"* — because *"Answer it in the owning session, not here"* was advice the operator
+  reasonably ignored: they replied in Telegram, the predictable response to a message that reads like a conversation.
+
 ## v0.17.0
 
 - fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare

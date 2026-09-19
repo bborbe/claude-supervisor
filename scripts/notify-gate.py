@@ -130,10 +130,23 @@ def decide(entry, now):
 
 
 def render_message(gate):
-    """Name the gate and its owner. Never present itself as answerable."""
+    """Name the gate and its owner, with the gate's own text on a line of its own.
+
+    The gate text is where a manager puts the command the operator is meant to run,
+    and a phone wraps a long line mid-argument -- so a line-wise copy of an INLINE
+    command yields an unbalanced quote and a command naming something that does not
+    exist. Measured 2026-09-19: copying `/vault-cli:complete-goal "The Manager Ranks
+    Work by What It Costs Me"` out of a delivered notification produced
+    `/vault-cli:complete-goal "The Manager Ranks` -- truncated exactly at the wrap.
+
+    Keeping this side's prefix off that line starts it near column zero, which is
+    most of what the sender controls; the rest is the manager's own line length, so
+    the runbook's ACTION-gate frame asks for commands on their own line as well.
+    """
     return (
-        f"Manager gate open -- {normalise(gate['owner'])}: {normalise(gate['text'])}\n"
-        "Notification only. Answer it in the owning session, not here."
+        f"Manager gate open -- {normalise(gate['owner'])}\n"
+        f"{normalise(gate['text'])}\n"
+        "Replies here are not read -- answer it in the owning session."
     )
 
 
