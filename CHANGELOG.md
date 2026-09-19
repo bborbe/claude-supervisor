@@ -8,22 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.16.3
-
-- fix: a topic's `## Goals` list may now declare a **task** directly, alongside its goals.
-  The tracked set was goal-anchored — *"every entry is a member goal. Tracked set = those
-  goals + every task whose `goals:` frontmatter names one of them"* — so live work in a
-  domain that named no member goal rendered as **no row at all**: no error, no
-  smaller-looking table, just a complete-looking one. Measured 2026-09-19 on
-  `23 Topics/Notification System.md`, two `in_progress` tasks with running sessions were
-  absent from a 19-row table and had to be reported in prose beside it. Both
-  `worker-manager.md` and `worker-status.md` § Resolution step 2 now state that an entry
-  may be a goal or a task. **The declaration is unchanged in kind** — membership is still
-  read from the page and never re-derived: no glob, no `goals:` scan, no theme match and no
-  content grep was added. `worker-status.md` additionally named the heading `# Goals`, which
-  matches nothing on a topic page; corrected to `## Goals`, a sub-heading under `# Scope`.
-
-## v0.16.2
+## Unreleased
 
 - fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare
   `/jump <pane-id>`, which resolves to nothing. The plugin installs as
@@ -46,6 +31,24 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   from a clean sweep. Wired at the existing ACTION-gate moments in `commands/worker-manager.md` and
   `commands/fleet-manager.md`; only Gate-triage classes C, D and E publish — A and B are the manager's own to clear
   and stay silent.
+
+## v0.16.3
+
+- fix: a topic's `## Goals` list may now declare a **task** directly, alongside its goals.
+  The tracked set was goal-anchored — *"every entry is a member goal. Tracked set = those
+  goals + every task whose `goals:` frontmatter names one of them"* — so live work in a
+  domain that named no member goal rendered as **no row at all**: no error, no
+  smaller-looking table, just a complete-looking one. Measured 2026-09-19 on
+  `23 Topics/Notification System.md`, two `in_progress` tasks with running sessions were
+  absent from a 19-row table and had to be reported in prose beside it. Both
+  `worker-manager.md` and `worker-status.md` § Resolution step 2 now state that an entry
+  may be a goal or a task. **The declaration is unchanged in kind** — membership is still
+  read from the page and never re-derived: no glob, no `goals:` scan, no theme match and no
+  content grep was added. `worker-status.md` additionally named the heading `# Goals`, which
+  matches nothing on a topic page; corrected to `## Goals`, a sub-heading under `# Scope`.
+
+## v0.16.2
+
 - fix: the reapability check now reads the session's *live* closer and accepts both
   sanctioned close-gate forms, so `Reapable` stops reporting `0` while finished sessions
   sit in `Needs you`. Two independent defects, both inside `is_reapable()`. It matched
