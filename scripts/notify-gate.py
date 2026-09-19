@@ -304,12 +304,15 @@ def load_ledger():
 
 
 def lock_ledger():
-    """Serialise the read-modify-write across the two manager layers.
+    """Serialise the read-modify-write *within* a layer, not across layers.
 
-    Both the fleet and the worker manager run this script against the same ledger,
-    so without a lock the later writer reads a file that predates the earlier
-    writer's commit: one side's delivery count is lost and that gate re-notifies
-    later. `--max-time` on the publish bounds how long this is held.
+    Since the ledger is per layer the two layers hold different files and cannot
+    contend at all. The lock is still load-bearing for two overlapping sweeps of
+    the SAME layer -- a ScheduleWakeup round re-entering while the previous one is
+    still publishing -- where the later writer would otherwise read a file that
+    predates the earlier writer's commit, losing one side's delivery count and
+    re-notifying that gate later. `--max-time` on the publish bounds how long this
+    is held.
     """
     ensure_state_dir()
     handle = open(f"{STATE_PATH}.lock", "w")
