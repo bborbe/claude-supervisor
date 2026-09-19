@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.15.1
+## Unreleased
 
 - fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`
   argument, so the worker creates its own session in its own pane. Minting the session first
@@ -28,6 +28,9 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   corrected to 18. The new sweep line is the roster's only **quantitative** measure — every other
   line in that output is a per-session judgement — and it is read `--all`, because a narrower
   scope silently undercounts the fleet.
+
+## v0.15.1
+
 - fix: stop the forked-ledger warning firing on a ledger that has already been reconciled. The
   shared-id scan counted **all** entries rather than open ones, so closing the duplicate copies —
   the documented way to resolve a fork — left the warning in place forever, still claiming the
