@@ -376,6 +376,52 @@
         "in_feed": true
       },
       "why": "CONSTRUCTED GUARD — same closer shape as the Class 3 case, but pane 999 carries NO open gate this run (no `peer_pane` key, so `open_panes` is empty). Suppression must NOT fire. This is the over-suppression guard: a closer that merely mentions a pane id — a ticket reference, a log line — must still reach the operator, otherwise the Class 3 rule silently eats real gates."
+    },
+    {
+      "id": "sibling-answered-record-is-not-a-gate",
+      "class": "genuine",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "sib",
+        "pane": "9100",
+        "cwd": "/tmp/constructed",
+        "kind": "question",
+        "detail": "pick — 1. do the thing (recommended) · 2. skip",
+        "ts": 1789826945.0,
+        "cleared_by": {
+          "event": "UserPromptSubmit"
+        },
+        "state": "answered"
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": false
+      },
+      "why": "CONSTRUCTED — regression bar for [[who-needs-me.py Omits a Pane That Has an Open Gate]]. The sibling defect was file-existence as the gate test: the hook deleted the record on ANY later event, so a background task completing erased an open gate. The fix made `state: answered` the only clearing signal. This case pins it: an answered record stays out of the feed even though its file is present."
+    },
+    {
+      "id": "sibling-record-without-state-is-still-a-gate",
+      "class": "genuine",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "sib2",
+        "pane": "9101",
+        "cwd": "/tmp/constructed",
+        "kind": "question",
+        "detail": "pick — 1. do the thing (recommended) · 2. skip",
+        "ts": 1789826945.0,
+        "cleared_by": {
+          "event": "UserPromptSubmit"
+        },
+        "state": null
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": true
+      },
+      "why": "CONSTRUCTED — the other half of the sibling bar. A record carrying no `state` field must still read as an open gate: absence of the clearing signal is not the clearing signal. Fail-open for gates, so a hook that has not yet stamped `state` cannot silently hide a real gate."
     }
   ]
 }

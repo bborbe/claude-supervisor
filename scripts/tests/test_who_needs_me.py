@@ -167,6 +167,34 @@ class ContextDependentClasses(unittest.TestCase):
             task_status=lambda _rec: "completed"))
 
 
+class SiblingRegressionBar(unittest.TestCase):
+    """The opposite defect — a real gate omitted.
+
+    [[who-needs-me.py Omits a Pane That Has an Open Gate]] fixed file-existence as
+    the gate test: the hook deleted the record on ANY later event, so a background
+    task completing erased an open gate and the pane vanished with nothing left to
+    classify. `state: answered` is now the only clearing signal, and this pins both
+    halves of it — a fix that over-suppresses must fail here.
+    """
+
+    def rec(self, state):
+        r = {"session_id": "unit", "pane": "1", "cwd": "/tmp", "kind": "question",
+             "detail": "pick — 1. do the thing (recommended) · 2. skip", "ts": 0}
+        if state is not None:
+            r["state"] = state
+        return r
+
+    def test_answered_record_is_not_a_gate(self):
+        self.assertFalse(wnm.is_open_gate(self.rec("answered")))
+
+    def test_open_record_is_a_gate(self):
+        self.assertTrue(wnm.is_open_gate(self.rec("open")))
+
+    def test_record_without_state_is_still_a_gate(self):
+        """Fail-open: a missing clearing signal is not a clearing signal."""
+        self.assertTrue(wnm.is_open_gate(self.rec(None)))
+
+
 class BaselineCorpus(unittest.TestCase):
     """Every case in the frozen 2026-09-19 corpus, one test each."""
 
