@@ -19,6 +19,9 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   from a clean sweep. Wired at the existing ACTION-gate moments in `commands/worker-manager.md` and
   `commands/fleet-manager.md`; only Gate-triage classes C, D and E publish — A and B are the manager's own to clear
   and stay silent.
+
+## v0.16.1
+
 - fix: `open-items.py` now resolves an entry's `--task` against **every** vault in vault-cli's
   config, and marks an open entry whose task target backs no file as `⚠️ UNRESOLVABLE`. The ledger
   previously resolved nothing at all — `list` rendered `task` and `resolves on` as free text — so an
@@ -38,20 +41,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   entry renders `⚠️ UNCHECKED`, not `UNRESOLVABLE` — a check that could not run must not assert a
   negative, which would flag every entry on such a host and is the same failed-lookup-as-claim
   shape this change removes.
-- feat: the worker-manager now authors tasks before spawning, and names the split explicitly —
-  authoring (sections, subtasks, DoD, SC evidence shapes) moves to the manager; execution planning
-  (which file, which mechanism, what the system permits) stays with the worker. A hand-written task
-  file ships without `# Tasks`/`# Definition of Done`, so the worker's own `plan-task` gate stops and
-  asks the operator for the decomposition inside the worker's pane — a multi-question wizard that
-  cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced three
-  3-question wizards, nine operator decisions, none of which needed the repo open. The command now
-  requires `/vault-cli:create-task` (which dispatches the `task-creator` agent) plus
-  `vault-cli:task-auditor` before any spawn, with a grep check that the three sections landed. Both
-  Worker Manager Session runbooks (Personal + Brogrammers) mirrored, and their § Self-improvement
-  source-of-truth path corrected — `~/.claude/commands/worker-manager.md` does not exist; the real
-  home is this repo's `commands/worker-manager.md`.
-
-## v0.16.0
 
 - fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare
   `/jump <pane-id>`, which resolves to nothing. The plugin installs as
@@ -64,6 +53,21 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   are addressed states the rule once, so a plugin or marketplace rename is a one-place edit.
   Measured 2026-09-19: the operator followed a printed handover, typed `/jump 271`, and got
   `Unknown command: /jump`.
+
+## v0.16.0
+
+- feat: the worker-manager now authors tasks before spawning, and names the split explicitly —
+  authoring (sections, subtasks, DoD, SC evidence shapes) moves to the manager; execution planning
+  (which file, which mechanism, what the system permits) stays with the worker. A hand-written task
+  file ships without `# Tasks`/`# Definition of Done`, so the worker's own `plan-task` gate stops and
+  asks the operator for the decomposition inside the worker's pane — a multi-question wizard that
+  cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced three
+  3-question wizards, nine operator decisions, none of which needed the repo open. The command now
+  requires `/vault-cli:create-task` (which dispatches the `task-creator` agent) plus
+  `vault-cli:task-auditor` before any spawn, with a grep check that the three sections landed. Both
+  Worker Manager Session runbooks (Personal + Brogrammers) mirrored, and their § Self-improvement
+  source-of-truth path corrected — `~/.claude/commands/worker-manager.md` does not exist; the real
+  home is this repo's `commands/worker-manager.md`.
 
 ## v0.15.3
 
