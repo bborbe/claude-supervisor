@@ -165,7 +165,15 @@ def teamvault_field(field, key):
 
 def curl_config_user(username, password):
     """A curl `-K` fragment. Escaping is required: a raw `"` would end the string."""
-    value = f"{username}:{password}".replace("\\", "\\\\").replace('"', '\\"')
+    value = (
+        f"{username}:{password}"
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        # A raw newline would end the `user =` line early, so the remainder would be
+        # parsed as further curl directives rather than as part of the credential.
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
     return f'user = "{value}"\n'
 
 
@@ -237,10 +245,22 @@ def lock_ledger():
     writer's commit: one side's delivery count is lost and that gate re-notifies
     later. `--max-time` on the publish bounds how long this is held.
     """
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    ensure_state_dir()
     handle = open(f"{STATE_PATH}.lock", "w")
     fcntl.flock(handle, fcntl.LOCK_EX)
     return handle
+
+
+def ensure_state_dir():
+    """Create the ledger's directory if it has one.
+
+    A bare filename -- `SUPERVISOR_GATE_STATE=gate.json`, which the README's
+    override permits -- has no directory part, and `os.makedirs("")` raises
+    rather than no-opping.
+    """
+    directory = os.path.dirname(STATE_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
 
 
 def commit(ledger, current, updates):
@@ -254,6 +274,7 @@ def commit(ledger, current, updates):
     """
     kept = {key: ledger[key] for key in current if key in ledger}
     kept.update(updates)
+    ensure_state_dir()
     tmp = f"{STATE_PATH}.tmp"
     with open(tmp, "w") as handle:
         json.dump(kept, handle, indent=2, sort_keys=True)
@@ -272,8 +293,27 @@ def read_gates():
         payload = json.load(sys.stdin)
     except ValueError as error:
         sys.exit(f"notify-gate: stdin is not valid JSON: {error}")
-    gates = payload.get("gates") or []
+    if not isinstance(payload, dict):
+        sys.exit(
+            f"notify-gate: stdin must be an object with a `gates` list, got "
+            f"{type(payload).__name__} -- the call is "
+            '\'{"gates": [{"owner": "...", "text": "..."}]}\''
+        )
+    if "gates" not in payload:
+        sys.exit(
+            "notify-gate: stdin has no `gates` key. Pass an explicit "
+            '{"gates": []} for a clean sweep -- a missing key is a typo, and '
+            "reading it as empty would silently prune every open gate."
+        )
+    gates = payload["gates"]
+    if not isinstance(gates, list):
+        sys.exit(f"notify-gate: `gates` must be a list, got {type(gates).__name__}")
     for gate in gates:
+        if not isinstance(gate, dict):
+            sys.exit(
+                f"notify-gate: each gate must be an object, got "
+                f"{type(gate).__name__}: {json.dumps(gate)}"
+            )
         for field in ("owner", "text"):
             if not gate.get(field):
                 sys.exit(
@@ -286,10 +326,14 @@ def read_gates():
 def main():
     now = datetime.datetime.now(datetime.timezone.utc)
     gates = read_gates()
+    # Held for the whole round and released when the file closes, so the read, the
+    # publishes and the commit form one critical section rather than three.
+    with lock_ledger():
+        publish_round(now, gates)
 
-    lock = lock_ledger()  # held until exit; the reference keeps the flock alive
+
+def publish_round(now, gates):
     ledger = load_ledger()
-
     current = {gate_key(g["owner"], g["text"]): g for g in gates}
     due = [
         (key, gate) for key, gate in current.items() if decide(ledger.get(key), now)
@@ -319,7 +363,7 @@ def main():
                 "firstRaisedAt": entry["firstRaisedAt"] if entry else format_time(now),
                 "lastDeliveryAt": format_time(now),
                 "deliveries": deliveries,
-                "owner": gate["owner"],
+                "owner": normalise(gate["owner"]),
                 "text": normalise(gate["text"]),
             }
             delivered.append(f"{gate['owner']} ({deliveries}/{MAX_DELIVERIES})")
