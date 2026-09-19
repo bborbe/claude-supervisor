@@ -72,36 +72,74 @@ export function transcriptPathFor(
  * carry a `tool_use` block and no text at all — measured on a live session, 127 assistant
  * records of which only 27 carried text. So this scans for the last one with non-empty
  * text rather than taking the final record.
+ *
+ * The tail read is a FAST PATH, not a bound on correctness. A fixed window is not safe
+ * here, and the way it fails is silent: measured 2026-09-19 on a real 700 KB transcript,
+ * the last assistant-with-text record sat at byte 402 426 while a 256 KB window began at
+ * byte 438 158 — the trailing records were large attachments, and they pushed the answer
+ * out of the window. A miss therefore falls back to scanning the whole file. Reporting
+ * null instead would make a worker that DID speak read as one that said nothing, which is
+ * the exact failure this module exists to fix.
  */
 export function lastAssistantTextFrom(
   path,
   { read = readFileSync, size = statSync, open = openSync, readAt = readSync, close = closeSync } = {},
 ) {
   if (!path) return null
-  let body
+  let total
   try {
-    const total = size(path).size
-    if (total <= TAIL_BYTES) {
-      body = read(path, 'utf8')
-    } else {
-      const fd = open(path, 'r')
-      try {
-        const buf = Buffer.alloc(TAIL_BYTES)
-        readAt(fd, buf, 0, TAIL_BYTES, total - TAIL_BYTES)
-        body = buf.toString('utf8')
-      } finally {
-        close(fd)
-      }
-      // The window begins mid-line. Dropping through the first newline avoids parsing a
-      // truncated record as if it were whole; when there is no newline the window is one
-      // partial line and the per-line parse below rejects it anyway.
-      const firstBreak = body.indexOf('\n')
-      if (firstBreak >= 0) body = body.slice(firstBreak + 1)
-    }
+    total = size(path).size
   } catch {
     return null
   }
 
+  const io = { read, open, readAt, close }
+  if (total <= TAIL_BYTES) {
+    try {
+      return scanForLastAssistantText(read(path, 'utf8'))
+    } catch {
+      return null
+    }
+  }
+
+  const window = readTail(path, total, io)
+  if (window === null) return null
+  const found = scanForLastAssistantText(window)
+  if (found !== null) return found
+
+  try {
+    return scanForLastAssistantText(read(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The last `TAIL_BYTES` of a file, with the leading partial line dropped.
+ *
+ * The window begins mid-line, and parsing a truncated record as if it were whole is how a
+ * tail read reports a parse error as "nothing was said". When there is no newline at all
+ * the window is one partial line and the per-line parse rejects it anyway.
+ */
+function readTail(path, total, { open, readAt, close }) {
+  try {
+    const fd = open(path, 'r')
+    try {
+      const buf = Buffer.alloc(TAIL_BYTES)
+      readAt(fd, buf, 0, TAIL_BYTES, total - TAIL_BYTES)
+      const body = buf.toString('utf8')
+      const firstBreak = body.indexOf('\n')
+      return firstBreak >= 0 ? body.slice(firstBreak + 1) : body
+    } finally {
+      close(fd)
+    }
+  } catch {
+    return null
+  }
+}
+
+/** The last assistant record in `body` carrying non-empty text, or null. */
+function scanForLastAssistantText(body) {
   let text = null
   for (const line of body.split('\n')) {
     // Match the quoted type VALUE rather than a whole serialized pair, so a separator

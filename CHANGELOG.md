@@ -8,6 +8,22 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `agent_status.last_message` now finds a tab worker's last message even when the
+  transcript's **trailing** records are large. The disk read treated a 256 KB tail window as a
+  bound on correctness rather than as a fast path, so a file whose records *after* the answer
+  are big attachments could push the answer outside the window and report `null` — a worker
+  that had spoken reading as one that said nothing, which is the exact failure the feature
+  exists to fix. Measured on the first real transcript: 700 302 bytes, last
+  assistant-with-text record at bytes 402 426–403 570, window starting at byte 438 158. A miss
+  now falls back to scanning the whole file. ⚠️ **The unit test that shipped with the feature
+  did not catch this** — its filler lines were 400 chars, so the answer always landed inside
+  the window; only records that come *after* the answer and are themselves large reproduce it.
+  That case is now covered, and the fallback was verified against the real transcript that
+  failed rather than against a fixture. The live A/B caught what the suite could not, which is
+  why the feature was specified to require one.
+
 ## v0.18.0
 
 - feat: `agent_status` reads a tab worker's state from disk, so a manager no longer needs

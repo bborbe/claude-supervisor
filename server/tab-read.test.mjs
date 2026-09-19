@@ -121,6 +121,26 @@ test('a transcript longer than the tail window still yields the last message', (
   assert.equal(lastAssistantTextFrom(transcriptPathFor(SESSION, { dir: root })), 'the one that matters')
 })
 
+test('a large TRAILING record does not hide the last message — the live 700 KB shape', () => {
+  // Reproduces the failure the live A/B caught on 2026-09-19, which this suite had missed:
+  // the last assistant-with-text record sat at byte 402 426 while a 256 KB window began at
+  // byte 438 158, because the records AFTER it were large attachments. The previous test
+  // pads with few-hundred-byte lines, so the answer always lands inside the window — the
+  // window has to be pushed PAST the answer by records that come after it, and that is the
+  // only shape that fails.
+  const small = JSON.stringify({ type: 'user', message: { content: 'x'.repeat(200) } })
+  const head = Array.from({ length: 100 }, () => small).join('\n')
+  const answer = assistant([textBlock('said before the big attachment')])
+  const huge = JSON.stringify({ type: 'attachment', blob: 'z'.repeat(400 * 1024) })
+  const body = [head, answer, huge].join('\n')
+  assert.ok(body.length > 256 * 1024, 'fixture must exceed the tail window')
+  const root = fixture({ [`${VAULT_PROJECT}/${SESSION}.jsonl`]: body })
+  assert.equal(
+    lastAssistantTextFrom(transcriptPathFor(SESSION, { dir: root })),
+    'said before the big attachment',
+  )
+})
+
 test('text is capped at the same length the in-memory path caps it', () => {
   const root = fixture({ [`${VAULT_PROJECT}/${SESSION}.jsonl`]: assistant([textBlock('y'.repeat(5000))]) })
   assert.equal(lastAssistantTextFrom(transcriptPathFor(SESSION, { dir: root })).length, 2000)
