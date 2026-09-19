@@ -22,8 +22,8 @@ it ships is addressed `/supervisor:<name>`: `/supervisor:jump`, never `/jump`.
 **This section is the single statement of the rule.** The bare form resolves to nothing —
 Claude Code answers `Unknown command` — and the managers hand `/supervisor:jump` to a blocked
 worker as their last resort, so a bare form fails exactly when it is needed (measured
-2026-09-19: the operator followed a printed handover, typed `/jump 271`, and got
-`Unknown command: /jump`). The namespace follows the install id, so renaming the plugin or the
+2026-09-19: the operator followed a printed handover, typed the bare form with a pane id, and
+got `Unknown command`). The namespace follows the install id, so renaming the plugin or the
 marketplace changes the prefix with it — a one-place edit here, not a sweep of the commands.
 
 ## Spawn a worker
