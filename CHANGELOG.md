@@ -21,6 +21,27 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   dropped — the two surfaces disagreed about who needs you. It now classifies through the same
   function, and the two are verified to agree on the live fleet.
 
+## v0.15.2
+
+- fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`
+  argument, so the worker creates its own session in its own pane. Minting the session first
+  ran a full planning turn inside the manager's own session — blocking it for minutes and
+  making the manager do the worker's work. `docs/fleet-surface.md` § Spawn a worker now
+  carries the fresh-start path, and resolves `interactive` from the fleet's config file
+  (`SUPERVISOR_SPAWN_MODE` → `spawn.mode` → built-in) instead of presenting the built-in code
+  default as the answer.
+
+- fix: `/fleet-manager` reports the green/cyan colour backlog in its sweep, and its Step 3b no
+  longer claims colour is unreadable. That line read *"**no colour is machine-readable**:
+  `wezterm cli list --format json` exposes 19 pane fields and none is a colour, and the session
+  registry carries none either"* — an unmeasured negative: the two stores checked are exactly the
+  two that lack a colour key, and the transcript, which carries one, was never checked. The guard
+  the line exists for still holds and is restated: a `purple` chip means the operator *marked* a
+  session finished, which is a claim, not the fact the done-check needs. The pane-field count is
+  corrected to 18. The new sweep line is the roster's only **quantitative** measure — every other
+  line in that output is a per-session judgement — and it is read `--all`, because a narrower
+  scope silently undercounts the fleet.
+
 ## v0.15.1
 
 - fix: stop the forked-ledger warning firing on a ledger that has already been reconciled. The
@@ -35,14 +56,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   where the parent's ledger no longer exists at all.
 
 ## v0.15.0
-
-- fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`
-  argument, so the worker creates its own session in its own pane. Minting the session first
-  ran a full planning turn inside the manager's own session — blocking it for minutes and
-  making the manager do the worker's work. `docs/fleet-surface.md` § Spawn a worker now
-  carries the fresh-start path, and resolves `interactive` from the fleet's config file
-  (`SUPERVISOR_SPAWN_MODE` → `spawn.mode` → built-in) instead of presenting the built-in code
-  default as the answer.
 
 - feat: adds `scripts/fleet-colours.py`, a census of what colour each live session is. Colour is
   the operator's attention-cost ranking — green/blue/cyan cost a keystroke per step, pink is an
