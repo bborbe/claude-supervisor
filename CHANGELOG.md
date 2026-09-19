@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.13.3
 
 - fix: the fleet-manager orphan check seeds from the ownership **declaration** instead of a flag.
   `claude_session_started` had decayed to **0 of 3845** tasks (down from 496 when the check was
