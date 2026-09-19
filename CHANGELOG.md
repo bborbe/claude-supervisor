@@ -8,6 +8,21 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: the worker-manager now authors tasks before spawning, and names the split explicitly —
+  authoring (sections, subtasks, DoD, SC evidence shapes) moves to the manager; execution planning
+  (which file, which mechanism, what the system permits) stays with the worker. A hand-written task
+  file ships without `# Tasks`/`# Definition of Done`, so the worker's own `plan-task` gate stops and
+  asks the operator for the decomposition inside the worker's pane — a multi-question wizard that
+  cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced three
+  3-question wizards, nine operator decisions, none of which needed the repo open. The command now
+  requires `/vault-cli:create-task` (which dispatches the `task-creator` agent) plus
+  `vault-cli:task-auditor` before any spawn, with a grep check that the three sections landed. Both
+  Worker Manager Session runbooks (Personal + Brogrammers) mirrored, and their § Self-improvement
+  source-of-truth path corrected — `~/.claude/commands/worker-manager.md` does not exist; the real
+  home is this repo's `commands/worker-manager.md`.
+
 ## v0.15.3
 
 - fix: stop `who-needs-me.py` listing parked waits, entity-padded closers, peer-gate restatements
