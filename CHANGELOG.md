@@ -30,8 +30,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   negative, which would flag every entry on such a host and is the same failed-lookup-as-claim
   shape this change removes.
 
-## v0.16.0
-
 - fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare
   `/jump <pane-id>`, which resolves to nothing. The plugin installs as
   `supervisor@claude-supervisor`, so its commands are namespaced by the install id — the bare
@@ -43,6 +41,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   are addressed states the rule once, so a plugin or marketplace rename is a one-place edit.
   Measured 2026-09-19: the operator followed a printed handover, typed `/jump 271`, and got
   `Unknown command: /jump`.
+
+## v0.16.0
 
 - feat: the worker-manager now authors tasks before spawning, and names the split explicitly —
   authoring (sections, subtasks, DoD, SC evidence shapes) moves to the manager; execution planning
