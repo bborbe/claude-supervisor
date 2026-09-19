@@ -51,12 +51,16 @@ CASES = CORPUS["cases"]
 
 
 def classify(case):
-    """Run one corpus case through the parser and report feed membership.
+    """Run one corpus case through the parser and report how it classifies.
 
     Mirrors main(): reclassify_idle() re-derives an `idle` record from the
-    transcript, then is_open_gate() decides whether it belongs in `Needs you`.
-    Idle cases carry their transcript tail inline, so the transcript read is
-    stubbed rather than reaching for a real file.
+    transcript, then is_open_gate() decides `Needs you` membership and
+    is_reapable() decides `Reapable` membership. Both are reported and both are
+    asserted, because a record leaves `Needs you` *by becoming* reapable — a fix
+    that dropped it from the feed without landing it in `Reapable` would hide a
+    decision the operator owns, and an `in_feed`-only corpus cannot tell that apart
+    from a correct fix. Idle cases carry their transcript tail inline, so the
+    transcript read is stubbed rather than reaching for a real file.
     """
     record = dict(case["record"])
     wnm.last_assistant_text = lambda _rec, _t=case.get("last_assistant_text"): _t or ""
@@ -69,7 +73,8 @@ def classify(case):
         extra["task_status"] = lambda _rec, _c=case: _c["anchored_task"]["status"]
 
     try:
-        return wnm.is_open_gate(record, **extra)
+        return {"in_feed": wnm.is_open_gate(record, **extra),
+                "reapable": wnm.is_reapable(record, extra.get("task_status"))}
     except TypeError as exc:
         raise AssertionError(
             f"is_open_gate() has no seam for {case['class']} "
@@ -167,6 +172,92 @@ class ContextDependentClasses(unittest.TestCase):
             task_status=lambda _rec: "completed"))
 
 
+class CloseGateForms(unittest.TestCase):
+    """Both sanctioned close forms count; neither trap does.
+
+    `vault-cli:sync-progress` Phase 6 emits the `approve:` form, while the
+    operator's global DONE rule prescribes the `pick` form. Matching only the first
+    left `Reapable (0)` while a finished session using the second sat in
+    `Needs you` in the same run (measured 2026-09-19, pane 17).
+    """
+
+    def test_approve_form_is_a_close_gate(self):
+        self.assertTrue(wnm.is_close_gate_closer("approve: /vault-cli:session-close"))
+
+    def test_pick_form_is_a_close_gate(self):
+        self.assertTrue(wnm.is_close_gate_closer(
+            "pick — 1. /vault-cli:sync-progress, then /vault-cli:session-close "
+            "(recommended) · 2. /vault-cli:session-close directly"))
+
+    def test_pick_leading_with_session_close_is_a_close_gate(self):
+        self.assertTrue(wnm.is_close_gate_closer(
+            "pick — 1. /vault-cli:session-close (recommended) · 2. keep working"))
+
+    def test_pick_offering_other_work_is_not_a_close_gate(self):
+        """First disposition is other work, so the operator is not being asked to close."""
+        self.assertFalse(wnm.is_close_gate_closer(
+            "pick — 1. keep SC3 as designed; label when you can · 2. rewrite SC3"))
+
+    def test_later_mentioning_session_close_is_not_a_close_gate(self):
+        """The widening trap -- a deferral that merely mentions session-close.
+
+        Widening a prefix test into a containment test is exactly how a
+        false-negative fix becomes a false positive.
+        """
+        self.assertFalse(wnm.is_close_gate_closer(
+            "later (on the next live call): run /vault-cli:session-close"))
+
+    def test_production_approval_is_not_a_close_gate(self):
+        self.assertFalse(wnm.is_close_gate_closer("approve: apply the merged template to prod"))
+
+
+class StaleDetailIsNotTheLiveCloser(unittest.TestCase):
+    """`detail` is hook-written once and never refreshed.
+
+    A hook-written `question` record goes stale the moment its session clears one
+    gate and raises another. Measured 2026-09-19: panes 338 and 254 carried a
+    cleared `you run:` push gate in `detail` while their live closer was the close
+    gate, and both were rejected before their task file was ever opened.
+    """
+
+    def rec(self, detail):
+        return {"session_id": "unit", "pane": "1", "cwd": "/tmp", "kind": "question",
+                "detail": detail, "ts": 0, "state": "open"}
+
+    def stale(self, transcript_closer,
+              detail="you run: ! cd ~/.claude && git push origin master"):
+        wnm.last_assistant_text = lambda _rec, _t=transcript_closer: f"👤 You: {_t}"
+        return self.rec(detail)
+
+    def test_stale_detail_with_a_live_close_gate_is_reapable(self):
+        self.assertTrue(wnm.is_reapable(
+            self.stale("approve: /vault-cli:session-close"),
+            task_status=lambda _rec: "completed"))
+
+    def test_stale_detail_with_a_live_close_gate_leaves_the_feed(self):
+        self.assertFalse(wnm.is_open_gate(
+            self.stale("approve: /vault-cli:session-close"),
+            task_status=lambda _rec: "completed"))
+
+    def test_stale_detail_with_a_live_pick_close_gate_is_reapable(self):
+        self.assertTrue(wnm.is_reapable(
+            self.stale("pick — 1. /vault-cli:session-close (recommended) · 2. keep working"),
+            task_status=lambda _rec: "completed"))
+
+    def test_cleared_gate_alone_is_not_reapable(self):
+        """The cached text is a cleared gate, not a close gate -- no evidence."""
+        self.assertFalse(wnm.is_reapable(
+            self.rec("you run: ! cd ~/.claude && git push origin master"),
+            task_status=lambda _rec: "completed"))
+
+    def test_missing_transcript_falls_back_to_detail(self):
+        """A record whose session file is gone is classified on what was recorded."""
+        wnm.last_assistant_text = lambda _rec: ""
+        self.assertTrue(wnm.is_reapable(
+            self.rec("approve: /vault-cli:session-close"),
+            task_status=lambda _rec: "completed"))
+
+
 class SiblingRegressionBar(unittest.TestCase):
     """The opposite defect — a real gate omitted.
 
@@ -201,11 +292,13 @@ class BaselineCorpus(unittest.TestCase):
 
 def _corpus_test(case):
     def test(self):
-        self.assertEqual(
-            classify(case),
-            case["expect"]["in_feed"],
-            f"{case['id']} [{case['class']}/{case['provenance']}]: {case['why']}",
-        )
+        got = classify(case)
+        for surface in ("in_feed", "reapable"):
+            self.assertEqual(
+                got[surface],
+                case["expect"][surface],
+                f"{case['id']} [{case['class']}/{case['provenance']}] {surface}: {case['why']}",
+            )
     test.__name__ = "test_" + case["id"].replace("-", "_")
     test.__doc__ = f"[{case['class']}/{case['provenance']}] {case['why']}"
     return test
@@ -241,6 +334,26 @@ class CorpusIntegrity(unittest.TestCase):
         """No-regression coverage: a fix that suppresses everything must fail."""
         genuine = [c for c in CASES if c["class"] == "genuine" and c["expect"]["in_feed"]]
         self.assertGreaterEqual(len(genuine), 5, "too few genuine controls to catch over-suppression")
+
+    def test_both_reapable_outcomes_are_represented(self):
+        """A corpus that cannot tell reapable from not is not evidence for this fix."""
+        outcomes = {c["expect"]["reapable"] for c in CASES}
+        self.assertEqual(outcomes, {True, False})
+
+    def test_reapable_and_in_feed_are_mutually_exclusive(self):
+        """A record is either the operator's to close or in the queue -- never both."""
+        for case in CASES:
+            if case["expect"]["reapable"]:
+                self.assertFalse(case["expect"]["in_feed"], case["id"])
+
+    def test_both_defects_and_both_traps_are_represented(self):
+        """A fix for one half must not be able to pass on the others."""
+        ids = {c["id"] for c in CASES}
+        for required in ("class4-constructed-stale-detail",
+                         "class4-constructed-pick-close-form",
+                         "class4-guard-later-mentions-session-close",
+                         "class4-guard-pick-offering-other-work"):
+            self.assertIn(required, ids)
 
 
 if __name__ == "__main__":

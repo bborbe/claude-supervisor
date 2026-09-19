@@ -26,7 +26,15 @@ PARKED_VERBS = ("later (on ",)
 
 # A close gate whose anchored task is finished is the operator's call but not an
 # open gate — it is reapable, and is listed separately.
+#
+# Two closer forms are sanctioned and both must count. `vault-cli:sync-progress`
+# Phase 6 emits `approve: /vault-cli:session-close` verbatim; the operator's global
+# ⚪ DONE rule prescribes the `pick` form instead. Matching only the first silently
+# ignored every session that followed the second (measured 2026-09-19, pane 17).
 CLOSE_GATE = "approve: /vault-cli:session-close"
+_CLOSE_TARGET = "/vault-cli:session-close"
+# The first (recommended) disposition of a `pick` menu, up to the `· 2.` separator.
+_PICK_FIRST = re.compile(r"^pick\s*[—–-]\s*1\.\s*(.*?)(?:\s*·\s*2\.|$)")
 
 # `&nbsp;` is six literal characters, not whitespace, so strip() does not remove it.
 _ENTITY = re.compile(r"&(?:nbsp|#160|#xa0);", re.I)
@@ -92,7 +100,27 @@ def panes():
         return {}
 
 
+_TEXT_CACHE = {}
+
+
 def last_assistant_text(rec):
+    """The transcript's last assistant text block, memoized per session.
+
+    Memoized because classification now asks for it more than once per record —
+    `is_reapable()` resolves the live closer from it while `task_status_from_closer()`
+    resolves the anchored task from it — and the read is a 200KB tail seek. The
+    script is one-shot, so a per-run cache cannot go stale within a run.
+    """
+    key = rec.get("session_id")
+    if key is not None and key in _TEXT_CACHE:
+        return _TEXT_CACHE[key]
+    text = _read_last_assistant_text(rec)
+    if key is not None:
+        _TEXT_CACHE[key] = text
+    return text
+
+
+def _read_last_assistant_text(rec):
     path = rec.get("transcript") or next(iter(glob.glob(os.path.expanduser(
         f"~/.claude/projects/*/{rec['session_id']}.jsonl"))), None)
     if not path or not os.path.exists(path):
@@ -116,6 +144,29 @@ def last_assistant_text(rec):
     return last
 
 
+def closer_from_transcript(rec):
+    """The last `👤 You:` closer line in the transcript, normalized; "" when absent."""
+    lines = [l.strip() for l in last_assistant_text(rec).splitlines() if l.strip()]
+    you = [l for l in lines if l.startswith("👤 You:")]
+    return normalize_closer(you[-1].split(":", 1)[1]) if you else ""
+
+
+def current_closer(rec):
+    """The session's live closer text — re-derived from the transcript, not cached.
+
+    `detail` is written once by the hook and never refreshed, so a hook-written
+    `question` record goes stale the moment its session clears one gate and raises
+    another. `reclassify_idle()` already re-derives from the transcript, but it
+    returns early on `kind != "idle"`, so every hook-written gate kept the old text.
+    Measured 2026-09-19: panes 338 and 254 carried a cleared `you run:` push gate in
+    `detail` while their live closer was `approve: /vault-cli:session-close`.
+
+    Falls back to `detail` when no transcript is readable, so a record whose session
+    file is gone is classified on what the hook recorded rather than dropped.
+    """
+    return closer_from_transcript(rec) or (rec.get("detail") or "")
+
+
 def reclassify_idle(rec):
     """Stop hook may predate the closer-panel rule; re-derive from the transcript.
 
@@ -126,9 +177,7 @@ def reclassify_idle(rec):
     """
     if rec.get("kind") != "idle":
         return rec
-    lines = [l.strip() for l in last_assistant_text(rec).splitlines() if l.strip()]
-    you = [l for l in lines if l.startswith("👤 You:")]
-    ask = normalize_closer(you[-1].split(":", 1)[1]) if you else ""
+    ask = closer_from_transcript(rec)
     if not ask or ask.startswith("nothing") or is_parked_verb(ask):
         return rec
     return dict(rec, kind="question", detail=ask)
@@ -173,6 +222,30 @@ def task_status_from_closer(rec):
     return None
 
 
+def is_close_gate_closer(text):
+    """A closer whose decision is closing this session.
+
+    Both sanctioned forms count — the `approve:` form and the `pick` form.
+
+    Rejected on purpose, one for each direction of error:
+      * a `later (on <trigger>):` line that merely mentions session-close — that is
+        a deferral, not a close gate. `is_parked_verb()` is checked first, so
+        widening a prefix test into a containment test cannot turn a parked wait
+        into a close gate. This is the trap: a false-negative fix becoming a false
+        positive.
+      * a `pick` menu whose first/recommended disposition is not session-close —
+        the operator is being offered other work, so it is not a close gate. The
+        fleet emits these routinely (`pick — 1. keep SC3 as designed; …`).
+    """
+    text = normalize_closer(text)
+    if not text or is_parked_verb(text):
+        return False
+    if text.startswith(CLOSE_GATE):
+        return True
+    m = _PICK_FIRST.match(text)
+    return bool(m) and _CLOSE_TARGET in m.group(1)
+
+
 def is_reapable(rec, task_status):
     """A close gate whose anchored task already reads `status: completed`.
 
@@ -180,9 +253,13 @@ def is_reapable(rec, task_status):
     is done and nothing is blocked, so it is not an open gate. Listed separately
     rather than counted under `Needs you`.
 
+    Reads the *live* closer rather than the record's cached `detail`, and accepts
+    both sanctioned close forms — the two defects measured 2026-09-19, which left
+    `Reapable (0)` while three finished sessions sat in `Needs you` in the same run.
+
     Fails safe: no resolver, or an unresolvable task, leaves it an open gate.
     """
-    if not (rec.get("detail") or "").startswith(CLOSE_GATE):
+    if not is_close_gate_closer(current_closer(rec)):
         return False
     if task_status is None:
         return False
