@@ -228,6 +228,34 @@ class Ledger(_Harness):
         self.mod.commit({}, {}, {})
         self.assertEqual([f for f in os.listdir(self.dir) if f.endswith(".tmp")], [])
 
+    def test_shape_malformed_entries_are_dropped_not_fatal(self):
+        """load_ledger()'s "never fatal" claim has to hold for entries that parse
+        as JSON but carry the wrong shape -- otherwise a single bad entry crashes
+        every later sweep."""
+        with open(self.state, "w") as handle:
+            json.dump(
+                {
+                    "good\x1ftext": {"deliveries": 1, "firstRaisedAt": RAISED_AT},
+                    "no-deliveries\x1ftext": {"firstRaisedAt": RAISED_AT},
+                    "bad-time\x1ftext": {"deliveries": 1, "firstRaisedAt": "nonsense"},
+                    "not-an-object\x1ftext": "x",
+                },
+                handle,
+            )
+        self.assertEqual(list(self.mod.load_ledger()), ["good\x1ftext"])
+
+    def test_a_dropped_entry_re_raises_instead_of_crashing(self):
+        with open(self.state, "w") as handle:
+            json.dump({"k\x1ftext": {"deliveries": 1}}, handle)
+        self.assertTrue(
+            self.mod.decide(self.mod.load_ledger().get("k\x1ftext"), at(RAISED_AT))
+        )
+
+    def test_a_non_mapping_ledger_reads_as_empty(self):
+        with open(self.state, "w") as handle:
+            json.dump(["not", "a", "mapping"], handle)
+        self.assertEqual(self.mod.load_ledger(), {})
+
     def test_a_bare_filename_state_path_is_accepted(self):
         """SUPERVISOR_GATE_STATE=gate.json has no directory part to create."""
         self.mod.STATE_PATH = os.path.join(self.dir, "bare.json").replace(
@@ -283,6 +311,48 @@ class ReadGates(_Harness):
 
     def test_invalid_json_is_reported(self):
         self.assertIn("not valid JSON", self.message("{not json"))
+
+
+class Config(_Harness):
+    """resolve_endpoint(), the sibling hand-authored input path.
+
+    The second pass hardened read_gates() against raw tracebacks and left this one
+    open -- the same defect class, on the other input an operator types by hand.
+    """
+
+    def endpoint_for(self, notify):
+        return self.mod.resolve_endpoint({"notify": notify})
+
+    def message(self, notify):
+        with self.assertRaises(SystemExit) as caught:
+            self.endpoint_for(notify)
+        return str(caught.exception)
+
+    def complete(self, **overrides):
+        block = {
+            "env": "dev",
+            "endpoints": {"dev": {"baseUrl": "http://x", "teamvaultKey": "k"}},
+        }
+        block.update(overrides)
+        return block
+
+    def test_a_valid_block_resolves(self):
+        env, endpoint, notification_type = self.endpoint_for(self.complete())
+        self.assertEqual(env, "dev")
+        self.assertEqual(endpoint["baseUrl"], "http://x")
+        self.assertEqual(notification_type, "pending-approval")
+
+    def test_a_non_object_notify_block_is_reported(self):
+        self.assertIn("must be an object", self.message("yes"))
+
+    def test_a_non_object_endpoints_is_reported(self):
+        self.assertIn(
+            "must be an object keyed by env", self.message({"endpoints": ["a"]})
+        )
+
+    def test_a_null_type_falls_back_to_the_default(self):
+        _, _, notification_type = self.endpoint_for(self.complete(type=None))
+        self.assertEqual(notification_type, "pending-approval")
 
 
 class FailureHandling(_Harness):

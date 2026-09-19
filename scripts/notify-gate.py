@@ -133,14 +133,31 @@ def resolve_endpoint(config):
             '{"notify":{"env":"dev","endpoints":{"dev":{"baseUrl":"...",'
             '"teamvaultKey":"..."}}}} and retry.'
         )
+    if not isinstance(notify, dict):
+        sys.exit(
+            f"notify-gate: `notify` in {CONFIG_PATH} must be an object, got "
+            f"{type(notify).__name__} -- the shape is in the README."
+        )
+    endpoints = notify.get("endpoints")
+    if not isinstance(endpoints, dict):
+        sys.exit(
+            f"notify-gate: `notify.endpoints` in {CONFIG_PATH} must be an object "
+            f"keyed by env, got {type(endpoints).__name__} -- the shape is in the README."
+        )
     env = notify.get("env", "dev")
-    endpoint = (notify.get("endpoints") or {}).get(env) or {}
-    if not endpoint.get("baseUrl") or not endpoint.get("teamvaultKey"):
+    endpoint = endpoints.get(env) or {}
+    if (
+        not isinstance(endpoint, dict)
+        or not endpoint.get("baseUrl")
+        or not endpoint.get("teamvaultKey")
+    ):
         sys.exit(
             f"notify-gate: config has no complete endpoint for env `{env}` in "
             f"{CONFIG_PATH} -- need both baseUrl and teamvaultKey."
         )
-    return env, endpoint, notify.get("type", DEFAULT_TYPE)
+    # `or` rather than a get() default: a key present but null must still fall back,
+    # or the core receives {"type": null} and rejects the publish.
+    return env, endpoint, notify.get("type") or DEFAULT_TYPE
 
 
 def teamvault_field(field, key):
@@ -223,18 +240,39 @@ def publish(base_url, teamvault_key, message, notification_type):
     return result.stdout.strip()
 
 
+def valid_entry(entry):
+    """A shape-malformed entry is dropped, not fatal.
+
+    load_ledger()'s contract is "never fatal", and that has to hold for entries
+    that parse as JSON but carry the wrong shape: a missing `deliveries` KeyErrors
+    inside decide(), and a malformed `firstRaisedAt` ValueErrors inside parse_time().
+    Dropping such an entry costs at most one re-notification.
+    """
+    if not isinstance(entry, dict) or not isinstance(entry.get("deliveries"), int):
+        return False
+    try:
+        parse_time(entry["firstRaisedAt"])
+    except (KeyError, ValueError):
+        return False
+    return True
+
+
 def load_ledger():
     """An unreadable ledger reads as empty, never fatal.
 
     The file is rewritten every sweep, so a write truncated by a dying process
-    would otherwise make every later run die on a JSON traceback -- turning one
-    bad write into the permanent loss of gate notifications.
+    would otherwise make every later run die on a JSON traceback -- turning one bad
+    write into the permanent loss of gate notifications. The same holds for a file
+    that parses but is not a mapping, and for entries of the wrong shape.
     """
     try:
         with open(STATE_PATH) as handle:
-            return json.load(handle)
+            ledger = json.load(handle)
     except (FileNotFoundError, ValueError):
         return {}
+    if not isinstance(ledger, dict):
+        return {}
+    return {key: entry for key, entry in ledger.items() if valid_entry(entry)}
 
 
 def lock_ledger():
