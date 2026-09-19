@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.16.1
 
 - fix: `open-items.py` now resolves an entry's `--task` against **every** vault in vault-cli's
   config, and marks an open entry whose task target backs no file as `⚠️ UNRESOLVABLE`. The ledger
