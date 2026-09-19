@@ -190,34 +190,47 @@ Steps 0–2 run **forward** — live session → task file. That direction struc
 
 `vault-ui`'s Start button (`POST /tasks/{id}/run`) sets `claude_session_started: "true"` on the task *before* launching, then mints the session via `vault-cli task work-on --mode headless` which stamps `claude_session_id`. So a task carrying both fields is claiming a session. Check whether that session is still alive:
 
+⚠️ **Seed from the declaration, not from the flag.** `claude_session_started` is **gone** — 0 of 3845 tasks on 2026-09-18, down from 496 when this check was written. Seeding on it now returns an empty candidate set and reports a confident clean bill while real orphans go undetected (two were found by accident on 2026-09-18; neither carried the flag). `claude_session_id` is the declaration of ownership and cannot decay the same way.
+
 ```bash
 cd "$VAULT/$TASKS_DIR"
-grep -l 'claude_session_started: "true"' *.md > /tmp/started.txt
-# Condition (1): transcript recency. Rows under 4h = alive. NOT `grep '●'` — see below.
-python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-sessions.py --all \
-  | awk '/(^| )[0-9]+(s|m) ago/ || /(^| )[1-3]h ago/' \
-  | grep -oE '\b[0-9a-f]{8}\b' | sort -u > /tmp/live_confirmed.txt
-while IFS= read -r f; do
-  [ "$(grep -m1 '^status:' "$f" | awk '{print $2}')" = "in_progress" ] || continue
-  sid=$(grep -m1 '^claude_session_id:' "$f" | awk '{print $2}')
-  grep -qx "${sid:0:8}" /tmp/live_confirmed.txt || echo "orphan: ${f%.md}"
-done < /tmp/started.txt
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/orphan-candidates.py \
+  --tasks-dir . --max-age-days 7 || {
+    echo "⚠️ ORPHAN CHECK FAILED — the orphan section of this sweep is UNKNOWN, not clean."
+    exit 1
+  }
 ```
 
-**Filter by `status: in_progress`.** The flag is never cleared on completion — 496 tasks carried it when this was written, of which only 11 were still `in_progress`. Unfiltered, the check is meaningless.
+⚠️ **The exit code is checked, and that is load-bearing.** The script prints its own `⚠️ ORPHAN CHECK FAILED` line, but a manager reading only stdout rows can still take an empty result for a clean one — the exact false-clean this whole check was rebuilt to eliminate. The `|| { …; exit 1; }` makes the failure reach the sweep's own exit status, so "unknown" can never be reported as "clean".
+
+`scripts/orphan-candidates.py` owns the enumeration; this command does not reimplement it. Two filters, in order — **name both when reporting**, because each has a failure direction that matters:
+
+**1. Park filter — the discriminator, and it is task-semantic, not liveness.** A parked routine and an orphan are **both genuinely dead**: the three known counter-examples (`Aquascape PWC - 2026W38`, `Shrimp PWC - 2026W38`, `Repair Bike Switch and Saddle`) are stale by 4.5–27 days and read dead on transcript, argv, spawn ledger *and* pane. No liveness evidence separates them, so the signal has to come from the task. Two, in union:
+
+- a **future `defer_date`** — *scheduled ≠ abandoned*
+- **`created_by: recurring-task-creator`** — the routine class that carries no `defer_date` (`Start Day`, `Plan Week`, … — the 2026-08-22 flood of 31)
+
+**Neither alone is sufficient:** `Repair Bike` carries no `created_by`, `Start Day` carries no `defer_date`. Both fail **LOUD** if the vault stops writing them — tasks read unparked, the set floods, the check over-reports. That is the safe direction, and it is why the original "the flag decays silently" argument does **not** transfer here.
+
+**2. Recency — upper bound only, 7 days.** No lower bound: one used to exist (`≥4h`) and it **excluded the recently-died orphans this check exists to find**, because a session that dies mid-work leaves a task file only minutes stale (`32d5e57c` died ~35 min before detection, file 3h stale). Replay against recorded state: **1 of 2** orphans detected with the bound, **2 of 2** without. The park filter covers the routine class the bound was added for, so removing it costs nothing — 21 candidates measured with and without. The upper bound stays: 39 of 73 candidates were more than a week stale, which is backlog rather than a dead worker.
+
+**Frontmatter only.** Task bodies quote these keys in prose, so a whole-file scan reads a task as parked on the strength of a sentence *about* parking — it reported the task documenting this very defect as a routine.
+
+**Filter by `status: in_progress`.** Completion clears neither the flag nor the declaration, so unfiltered the check returns every task ever worked. The old flag-based seeding needed this filter to cut 496 tasks down to 11 open ones; the declaration needs it for the same reason on a different denominator.
 
 ⚠️ **Never build the live set from `grep '●'` — it is argv-only and blind to fresh sessions.** `fleet-sessions.py` sets `●` solely when the id appears in a running `claude --resume <id>` command line (L153-154, L198), so a session started **fresh** carries its id nowhere in argv and never gets the flag. `pgrep -f "<session_id>"` has the identical blind spot. Measured 2026-09-15 on this fleet: **37** sessions had a transcript newer than 4h, only **18** carried `●` — so **24 of 37 live sessions (65%) were invisible to the `●` set**, including the session running this very check. The old `grep '●'` version of the block above would have emitted an orphan row for every one of them. The `LAST-ACTIVE` column is the probe that sees a fresh session, because it reads the transcript's last-message timestamp rather than `ps`.
 
 **Cross-check against the `ListAgents` roster before calling anything an orphan.** Condition (2): a session missing from the transcript set but present in `ListAgents` is alive. Only report tasks absent from **both**.
 
-**Then require the task file to be at least ~4h stale.** Without this the check floods and is useless: on its first real run (2026-08-22) it returned **34** candidates, 31 of which were that morning's recurring Saturday routines — `Start Day`, `Plan Week`, `Weekly Review`, `Docker Registry GC`, `Backup Kafka Topics` and the rest. Those run in short-lived sessions that legitimately exit while the task is still mid-batch; the session being gone means nothing.
+**Then bound the task file's age at the top end only: no more than 7 days.** The original ≥4h **lower bound was removed on 2026-09-18.**
 
-```bash
-m=$(date -r "$f" +%s); age=$(( ($(date -u +%s) - m) / 3600 ))
-[ "$age" -ge 4 ] || continue   # in-flight routine, not an orphan
-```
+**Why the lower bound went.** It was added to suppress a flood: on the check's first real run (2026-08-22) it returned **34** candidates, 31 of which were that morning's recurring Saturday routines — `Start Day`, `Plan Week`, `Weekly Review`, `Docker Registry GC`, `Backup Kafka Topics`. Those legitimately exit while the task is still mid-batch, so the session being gone means nothing. But the bound suppressed them by *staleness*, and the park filter now suppresses that class **directly** — `created_by: recurring-task-creator` catches them even though they carry no `defer_date`. With that signal in place the bound is redundant: measured 21 candidates with it, 21 without, and 0 recurring-generator tasks in the unbounded set.
 
-With the age cut the same run returned **3**, all genuine — open work whose session died and whose file has not been touched in 23–40h. **An orphan is defined by abandonment, not by session absence.** A session exiting is normal; a task nobody has touched in a day is the signal.
+Keeping it was not merely redundant but **harmful** — it excluded the recently-died orphans this check exists to find. `32d5e57c` died roughly 35 minutes before it was detected, leaving its task file only 3h stale, so the ≥4h cut dropped it. Replayed against recorded state: **1 of 2 orphans with the bound, 2 of 2 without.**
+
+**The upper bound is the newer one** and answers a different flood. Moving the seeding from the flag to the declaration grew the pool to **73**; 39 of those were more than a week stale — work nobody has touched in a fortnight. That is backlog hygiene, not a worker that died mid-flight, and the check exists for the latter. At a 7-day window the set lands at **21**, which is actionable.
+
+**An orphan is defined by abandonment, not by session absence.** A session exiting is normal; a task nobody has touched in a day is the signal — but that reading only holds once the *parked* class is removed by an explicit signal rather than by staleness, because a parked routine looks abandoned on every liveness axis.
 
 An orphan is *open work with a dead session behind it* — a candidate for the operator to pick up or close, **not** a fault and **not** a stall (nothing is running to stall). Report it in Step 5 as its own group, never mixed in with stalled sessions.
 
@@ -258,8 +271,8 @@ Plus one class that comes from Step 2b rather than from any live session:
 
 | Signal | Reading | Action |
 |---|---|---|
-| task `in_progress` + `claude_session_started` + **all three** of: transcript `LAST-ACTIVE` ≥4h, absent from `ListAgents`, task file mtime ≥4h | **orphan** — open work, dead session | surface for pickup or close |
-| any one of those three fails — notably a fresh session, which is absent from `●` while alive | **owned** | no row; never spawn onto it |
+| task `in_progress` + `claude_session_id` + **all four** of: not parked (no future `defer_date` **and** no `created_by: recurring-task-creator`), transcript `LAST-ACTIVE` ≥4h, absent from `ListAgents`, task file mtime ≤7d (**no lower bound** — removed 2026-09-18, see § Step 2b) | **orphan** — open work, dead session | surface for pickup or close |
+| any one of those fails — notably a parked task (future `defer_date`), a fresh session (absent from `●` while alive), or a file older than the 7-day window | **owned**, **parked**, or **backlog** | no row; never spawn onto it |
 
 No prior snapshot, or no `task_file` resolved for a session → not enough history/data to classify as stalled; classify as "unclassified — insufficient data" and leave alone (never guess a status you can't back with a diff).
 
