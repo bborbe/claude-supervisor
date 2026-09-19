@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.16.0
 
 - feat: the worker-manager now authors tasks before spawning, and names the split explicitly —
   authoring (sections, subtasks, DoD, SC evidence shapes) moves to the manager; execution planning
