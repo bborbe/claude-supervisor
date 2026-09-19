@@ -133,7 +133,25 @@ Three things about it are measured rather than assumed, and each one is a trap:
 
 **The colour is set the same way, and that is a bug fix.** `SUPERVISOR_WORKER_COLOR` (default `/color pink`) used to be seeded as the first line of the worker's prompt, and it never worked: Claude Code parses one submitted message as one command, and `/color` takes the *entire* trimmed argument, so the colour swallowed the blank line and the whole task — `Invalid color "pink\n\n<task>"`. It is now sent as its own message once the pane is up, and the spawn response reports `color: {applied: true}` only when it actually landed.
 
-⚠️ **`transcript_dir` on a tab worker is unreliable, and known to be.** It is derived from the `cwd` you passed, but the `cc-*` launcher does `cd` into its own vault — so a worker spawned with `cwd: "/tmp"` runs in `~/Documents/Obsidian/Personal` and writes its transcript there, while the spawn response still says `/tmp`. Measured 2026-09-14. Tail the directory the launcher's vault implies, or read the pane, until this is resolved.
+⚠️ **`transcript_dir` on a tab worker is unreliable, and known to be.** It is derived from the `cwd` you passed, but the `cc-*` launcher does `cd` into its own vault — so a worker spawned with `cwd: "/tmp"` runs in `~/Documents/Obsidian/Personal` and writes its transcript there, while the spawn response still says `/tmp`. Measured 2026-09-14.
+
+**Resolved 2026-09-19 for reading a worker's state.** `agent_status` resolves a worker's transcript by **session id** — `<projectsDir>/*/<session-id>.jsonl` — and never from a cwd, so the derivation above is not on that path and is not trusted there. It still describes where the spawn response *claims* the transcript is, and is still wrong for a launcher-`cd` worker: nothing should read it as a location.
+
+### Reading a tab worker
+
+`agent_status(agent_id)` reports three fields that answer "what is it doing", none of which the write half could tell you:
+
+| field | source | means |
+|---|---|---|
+| `last_message` | the worker's transcript JSONL | the last thing it said. Not "the last record" — most assistant records carry a `tool_use` block and no text (measured on a live session: 127 assistant records, 27 with text), so this is the last one carrying text. |
+| `session_status` | the session registry | the raw registry status: `idle`, `busy`, `waiting` or `shell`. |
+| `awaiting_input` | derived from the status above | `true` only when the status is `waiting`. **`null`, not `false`, when the registry does not list the session** — unlisted is a different fact from not-waiting, and reporting it as `false` would be a guess wearing a measurement's clothes. |
+
+⚠️ **`awaiting_input` means "blocked on input", not specifically "a permission gate is open".** It is the superset; whether a permission prompt specifically produces `waiting` is what the live A/B pins.
+
+⚠️ **Gate state cannot come from the transcript, and is not read from one.** A pending `tool_use` with no matching `tool_result` reads identically whether the worker is executing a tool or parked on a prompt — measured 2026-09-19 across 25 live sessions, 3 `busy` sessions carried exactly that pending call, indistinguishable by transcript from the 2 `waiting` ones. The registry is the field that separates them.
+
+The read is bounded: a transcript is read from its **tail** (256 KB). The last message is at the end by definition, and `list_agents` renders every worker — reading each file whole would turn one status call into a read of the fleet's entire history. A window that finds nothing reports `null` rather than falling back to a full read.
 
 ## The spawn ledger
 
@@ -198,7 +216,7 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 | `spawn_agent(prompt, cwd?, label?, interactive?, resume?, policy?)` | start a worker — a real session in a tab by default, or headless with `interactive: false`. `policy` gives this one worker its own rules; headless only |
 | `send_agent_message(agent_id, message)` | type a follow-up into a running **tab** worker and submit it |
 | `list_agents()` | every worker with status and pending-permission count |
-| `agent_status(agent_id)` | one worker: status, last message, result. `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed |
+| `agent_status(agent_id)` | one worker: status, last message, result, plus `session_status` / `awaiting_input` (see [Reading a tab worker](#reading-a-tab-worker)). `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed |
 | `pending_permissions()` | prompts awaiting an answer, across all workers |
 | `await_permission(timeout_ms?)` | block until any worker asks — one call instead of polling |
 | `answer_permission(request_id, behavior, message?)` | `allow` / `deny` — this unblocks the worker |

@@ -22,6 +22,7 @@ import { checkLiveness, findRegisteredByName } from './liveness.mjs'
 import { resolveSpawnMode, unknownKeyWarnings } from './spawn-mode.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, updateRecord, writeRecord } from './ledger.mjs'
+import { awaitingInput, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -713,30 +714,48 @@ const lastAssistantText = (agent) => {
   return null
 }
 
-const agentView = (a) => ({
-  agent_id: a.id,
-  label: a.label,
-  status: a.status,
-  cwd: a.cwd,
-  session_id: a.sessionId,
-  resumed_from: a.resumedFrom ?? null,
-  // Null means the worker runs under the server policy — the same absence-means-default
-  // the ledger record uses, so the two cannot disagree about what "no policy" reads as.
-  policy: a.policyPath ?? null,
-  // Which source decided interactive-vs-headless: argument, env, config or default. A
-  // worker that opened the wrong way is otherwise diagnosed by guessing which of four
-  // places was consulted.
-  mode_source: a.modeSource ?? null,
-  // Same id = the conversation continued; a different one = the SDK forked it. Only
-  // answerable once init has reported a session id, so it is null until then rather
-  // than a guess.
-  continued: a.resumedFrom && a.sessionId ? a.sessionId === a.resumedFrom : null,
-  created_at: a.createdAt,
-  pending_permissions: a.permissions.filter((id) => pending.has(id)),
-  last_message: agentView.lastText?.(a) ?? lastAssistantText(a),
-  result: a.result ?? null,
-  error: a.error,
-})
+const agentView = (a) => {
+  // The in-memory transcript is pushed by the headless SDK loop alone, so it is empty for
+  // exactly the workers `agent_status` used to report null for — the tab ones. The disk
+  // read is what answers for them, and it is skipped when memory already holds the text.
+  const fromDisk =
+    a.transcript.length === 0 ? lastAssistantTextFrom(transcriptPathFor(a.sessionId)) : null
+  // `null` means the registry does not list this session — a different fact from any
+  // status value, and from "not waiting". See tab-read.mjs.
+  const sessionStatus = sessionStatusFor(a.sessionId)
+  return {
+    agent_id: a.id,
+    label: a.label,
+    status: a.status,
+    cwd: a.cwd,
+    session_id: a.sessionId,
+    resumed_from: a.resumedFrom ?? null,
+    // Null means the worker runs under the server policy — the same absence-means-default
+    // the ledger record uses, so the two cannot disagree about what "no policy" reads as.
+    policy: a.policyPath ?? null,
+    // Which source decided interactive-vs-headless: argument, env, config or default. A
+    // worker that opened the wrong way is otherwise diagnosed by guessing which of four
+    // places was consulted.
+    mode_source: a.modeSource ?? null,
+    // Same id = the conversation continued; a different one = the SDK forked it. Only
+    // answerable once init has reported a session id, so it is null until then rather
+    // than a guess.
+    continued: a.resumedFrom && a.sessionId ? a.sessionId === a.resumedFrom : null,
+    created_at: a.createdAt,
+    pending_permissions: a.permissions.filter((id) => pending.has(id)),
+    // Memory first — free, and already correct for headless workers — then the worker's
+    // own transcript on disk, which is the only source a tab worker has.
+    last_message: lastAssistantText(a) ?? fromDisk,
+    // Read from the session registry, NOT the transcript: a pending tool call reads the
+    // same whether the worker is executing a tool or parked on a permission prompt, so the
+    // transcript cannot separate them. `awaiting_input` is null rather than false when the
+    // registry does not list the session — unlisted is not the same as not waiting.
+    session_status: sessionStatus,
+    awaiting_input: awaitingInput(sessionStatus),
+    result: a.result ?? null,
+    error: a.error,
+  }
+}
 
 const TOOLS = [
   {
@@ -787,7 +806,7 @@ const TOOLS = [
   },
   {
     name: 'agent_status',
-    description: 'One session: status, last assistant message, result, pending permission ids.',
+    description: 'One session: status, last assistant message, result, pending permission ids. For a tab worker the last message is read from its transcript on disk. `session_status` and `awaiting_input` come from the session registry; `awaiting_input` is null (not false) when the session is not listed, and means "blocked on input" rather than specifically "a permission gate is open".',
     inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } }, required: ['agent_id'] },
   },
   {

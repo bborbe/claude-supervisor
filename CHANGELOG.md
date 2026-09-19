@@ -8,6 +8,26 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `agent_status` reads a tab worker's state from disk, so a manager no longer needs
+  `wezterm cli get-text` to learn what a worker said or whether it is waiting. `last_message`
+  was `null` for **every** interactive worker: the in-memory transcript is pushed by the
+  headless SDK loop alone, so the tab path had no source at all and `lastAssistantText` walked
+  an empty array. It is now read from the worker's own transcript JSONL, resolved by session
+  id rather than from a cwd — the `transcriptDirFor(cwd)` derivation the README calls
+  unreliable is not consulted, because the `cc-*` launcher `cd`s into its own vault and the
+  passed cwd is not where the transcript lands. Two fields are added: `session_status`, the
+  session registry's raw status, and `awaiting_input`, `true` only when that status is
+  `waiting`. `awaiting_input` is `null` — not `false` — when the registry does not list the
+  session, because unlisted is a different fact from not-waiting, and reporting it as `false`
+  would be a guess wearing a measurement's clothes. ⚠️ Gate state comes from the registry and
+  **not** from the transcript: measured across 25 live sessions, a pending `tool_use` with no
+  matching `tool_result` reads identically for a worker executing a tool and one parked on a
+  permission prompt. The dead `agentView.lastText?.()` call — `agentView` has no `lastText`,
+  so it always fell through — is removed. `SUPERVISOR_PROJECTS_DIR` overrides the transcript
+  root.
+
 ## v0.17.2
 
 - fix: `fleet-sessions.py` and `fleet-colours.py` no longer take a project scope. Both
