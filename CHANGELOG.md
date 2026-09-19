@@ -18,6 +18,16 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   (`SUPERVISOR_SPAWN_MODE` → `spawn.mode` → built-in) instead of presenting the built-in code
   default as the answer.
 
+- fix: `/fleet-manager` reports the green/cyan colour backlog in its sweep, and its Step 3b no
+  longer claims colour is unreadable. That line read *"**no colour is machine-readable**:
+  `wezterm cli list --format json` exposes 19 pane fields and none is a colour, and the session
+  registry carries none either"* — an unmeasured negative: the two stores checked are exactly the
+  two that lack a colour key, and the transcript, which carries one, was never checked. The guard
+  the line exists for still holds and is restated: a `purple` chip means the operator *marked* a
+  session finished, which is a claim, not the fact the done-check needs. The pane-field count is
+  corrected to 18. The new sweep line is the roster's only **quantitative** measure — every other
+  line in that output is a per-session judgement — and it is read `--all`, because a narrower
+  scope silently undercounts the fleet.
 - fix: stop the forked-ledger warning firing on a ledger that has already been reconciled. The
   shared-id scan counted **all** entries rather than open ones, so closing the duplicate copies —
   the documented way to resolve a fork — left the warning in place forever, still claiming the
