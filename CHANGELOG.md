@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.18.2
 
 - fix: retract the claim that `answer_permission(allow)` is blocked by a structural, one-directional
   classifier gate. A controlled re-measurement on 2026-09-19 refuted it: the refusal is the
