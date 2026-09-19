@@ -10,6 +10,14 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.15.0
 
+- fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`
+  argument, so the worker creates its own session in its own pane. Minting the session first
+  ran a full planning turn inside the manager's own session — blocking it for minutes and
+  making the manager do the worker's work. `docs/fleet-surface.md` § Spawn a worker now
+  carries the fresh-start path, and resolves `interactive` from the fleet's config file
+  (`SUPERVISOR_SPAWN_MODE` → `spawn.mode` → built-in) instead of presenting the built-in code
+  default as the answer.
+
 - feat: adds `scripts/fleet-colours.py`, a census of what colour each live session is. Colour is
   the operator's attention-cost ranking — green/blue/cyan cost a keystroke per step, pink is an
   agent, orange a manager — and until now nothing but the operator's eye could read it, so the
