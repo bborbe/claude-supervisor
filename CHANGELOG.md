@@ -21,6 +21,54 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   fact that stays true after reconciliation, and gating it on shared entries would lose the case
   where the parent's ledger no longer exists at all.
 
+## v0.14.0
+
+- docs: two manager-contract rules earned this session. **The PR is the boundary, whatever the
+  file extension** — editing a doc may be management, opening a PR never is, because it obligates
+  a review loop, a merge, an auto-release and a deploy verification; and the Build Drift Gate is a
+  *crossing* trigger, so a one-shot that grows a branch and commits needs its anchor at the
+  crossing, not retroactively. **Never forward a claim you did not measure** — a peer's or a
+  sub-agent's observation is testimony, and relaying it onward launders provenance because the
+  receiver reads it as your measurement. Both measured 2026-09-19, each against a specific
+  failure in the same session.
+
+- fix: name `~/.claude/sessions/*.json` as the **authoritative liveness store** in `/fleet-manager`,
+  and forbid writing a session stamp from a spawn-ledger reading. The ledger never closes when a
+  worker's pane dies, so it does not go quiet when wrong — it asserts the opposite. Measured
+  2026-09-19: a manager read a dead id as `running` from the ledger and **repointed a task's
+  `claude_session_id` to it**, pointing a live task at a dead session — the exact orphaning the
+  repoint was meant to prevent, inverted. The registry deletes an entry on exit, which is the
+  property no other channel has (`pgrep -f` is argv-only, `ListAgents` omits headless workers, a
+  pane can outlive its session). Also records the `/branch` case that defeats id-keyed probes
+  outright: a branch holds a new id while sharing the parent's task file, so every probe keyed on
+  the original id calls a working session dead.
+
+- feat: managers now **reap finished sessions** instead of leaving them parked. `/fleet-manager`'s
+  Step 3 classified `idle` + all-boxes-ticked as `done → nothing`, so a session whose work was
+  complete sat waiting on an operator whose only legal move was the obvious one — measured
+  2026-09-19, **four sessions** parked simultaneously on `approve: /vault-cli:session-close`,
+  every one over a task reading `status: completed`, `phase: done`, zero open boxes. New
+  `/fleet-manager` § Step 3b and a matching `/worker-manager` sweep bullet: verify the three
+  facts against disk, message the worker the evidence non-authorisingly, and report the set to
+  the operator as **self-closeable** — one line, never N approvals.
+  - Encodes what a manager provably **cannot** do here, so the rule is not written against a
+    capability that does not exist: `sync-progress` and `session-close` read the parent
+    conversation, and every route into a worker's pane is refused — `[Remote Shell Writes]`,
+    `[Auto-Mode Bypass]`, classifier-blocked `answer_permission(..., allow)`, and
+    `[Self-Modification]`. (`answer_permission(..., deny)` passes; the gate is one-directional.)
+  - Guards the two ways the check misfires: **deliberately-open Self-Review boxes** mean the task
+    is not complete and the worker is right to park, and **session colour is not machine-readable**
+    (`wezterm cli list --format json` exposes 19 pane fields, none a colour) so it can never be the
+    detection signal.
+
+- fix: restore the attention-feed staleness rule to `/fleet-manager`, lost when the migration
+  deleted the pre-plugin `commands/fleet-manager.md`. **The feed answers "was a gate raised",
+  never "is a gate open"** — a record is overwritten only by that session's next tool call, so a
+  cleared gate lingers and a fresh one is absent. Cost when unrecorded: one stale permission
+  prompt reported **four times in one day**. Extended to cover the doorbell `Monitor` over the
+  same feed, which inherits the limit exactly: a `CLEARED` event means the entry left the feed,
+  which a session going *busy* produces just as readily as a gate being answered.
+
 ## v0.13.3
 
 - fix: the fleet-manager orphan check seeds from the ownership **declaration** instead of a flag.
