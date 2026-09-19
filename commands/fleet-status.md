@@ -78,7 +78,7 @@ From the Claude Code cross-session messaging notes (operator's vault; not shippe
 
 ## Output shape
 
-Lead with the box rendered per § Sweep output, indented two spaces, under a lead line of its own — `/fleet-status` is a snapshot rather than a tick, so its lead line carries the timestamp and the scope but **no `✓` marker**. Then, tersely:
+Lead with the box rendered per § Sweep output, indented two spaces, under a lead line of its own — `/fleet-status` is a snapshot rather than a tick, so its lead line carries the timestamp but **no `✓` marker**. Then, tersely:
 
 - Count by status (`N busy, N shell, N waiting, N idle, N blank`).
 - Flag any row present in `ListAgents` but absent from `fleet-sessions.py` (no vault task stamp) or vice versa (stamped task, no live session) — these are not errors, just note them.
