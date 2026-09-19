@@ -153,6 +153,8 @@ Three things about it are measured rather than assumed, and each one is a trap:
 
 The read is bounded: a transcript is read from its **tail** (256 KB). The last message is at the end by definition, and `list_agents` renders every worker — reading each file whole would turn one status call into a read of the fleet's entire history. A window that finds nothing reports `null` rather than falling back to a full read.
 
+⚠️ **Two scope limits are unchanged by this read, and are named here rather than left to be discovered.** `agent_status` resolves by `agent_id` only — a label returns `unknown agent <label>` — and it reads an in-memory Map inside the caller's own server process, so it only knows workers **that session** spawned. Peers spawned elsewhere are invisible to it entirely, and an empty result is never evidence of absence. The new fields inherit both limits; they do not widen them.
+
 ## The spawn ledger
 
 Every worker this server spawns gets a record at `~/.local/state/claude-supervisor/sessions/<uuid>.json`, keyed by its session uuid and written at spawn.
