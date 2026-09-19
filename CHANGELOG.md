@@ -16,7 +16,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   reclassified `idle` → `question` and counted as an open gate. The feed is triaged oldest-first,
   so the false positives are exactly what a manager reaches first. Measured 2026-09-19: 19 listed,
   roughly 7 real — the two oldest were `later (on <trigger>):` waits misreported as neglect for
-  over five hours.
+  over five hours. `/supervisor:jump` shares the parser but re-derived the predicate inline, so it
+  kept offering answered records, parked waits and finished-work close gates that the feed had
+  dropped — the two surfaces disagreed about who needs you. It now classifies through the same
+  function, and the two are verified to agree on the live fleet.
 
 ## v0.15.1
 

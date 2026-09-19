@@ -197,7 +197,22 @@ def attention_queue(wnm, pmap, oldest=False):
     me = os.environ.get("WEZTERM_PANE")
     live = lambda r: str(r.get("pane")) in pmap and str(r.get("pane")) != str(me)
     needs = [wnm.reclassify_idle(r) for r in wnm.load("needs") if live(r)]
-    blocked = [r for r in needs if r["kind"] in ("permission", "question")]
+
+    # Classify through who-needs-me.py rather than re-deriving the predicate here, so
+    # the two surfaces cannot disagree about who needs you. This previously inlined
+    # `kind in ("permission", "question")`, which skipped every rule is_open_gate()
+    # carries: an answered record stayed listed, and a `later (on <trigger>):` parked
+    # wait written straight in by the hook, a peer-gate restatement and a
+    # finished-work close gate all counted as gates to jump to. Measured 2026-09-19:
+    # the feed dropped panes 223/277 while this surface still offered them.
+    #
+    # Two passes, as in who-needs-me.py: the pane set carrying a gate is computed
+    # without peer-dedup, so a restating pane is dropped only when the pane it names
+    # is itself a gate.
+    open_panes = {str(r.get("pane")) for r in needs
+                  if wnm.is_open_gate(r, task_status=wnm.task_status_from_closer)}
+    blocked = [r for r in needs
+               if wnm.is_open_gate(r, open_panes=open_panes, task_status=wnm.task_status_from_closer)]
 
     # Drop records whose pane now runs a DIFFERENT session than the one that filed
     # them. WezTerm renumbers pane ids across a restart (measured 2026-09-18: a
