@@ -8,6 +8,19 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: stop `who-needs-me.py` listing parked waits, entity-padded closers, peer-gate restatements
+  and completed-task close gates under `Needs you`. All four entered through one
+  `startswith("nothing")` test in `reclassify_idle()`, so a correctly-parked session was
+  reclassified `idle` → `question` and counted as an open gate. The feed is triaged oldest-first,
+  so the false positives are exactly what a manager reaches first. Measured 2026-09-19: 19 listed,
+  roughly 7 real — the two oldest were `later (on <trigger>):` waits misreported as neglect for
+  over five hours. `/supervisor:jump` shares the parser but re-derived the predicate inline, so it
+  kept offering answered records, parked waits and finished-work close gates that the feed had
+  dropped — the two surfaces disagreed about who needs you. It now classifies through the same
+  function, and the two are verified to agree on the live fleet.
+
 ## v0.15.2
 
 - fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`

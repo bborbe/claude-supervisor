@@ -5,12 +5,61 @@ Reads ~/.claude/state/attention/*.needs.json / *.tool.json written by
 ~/.claude/hooks/attention-log.py.  Sections:
   Needs you       — permission prompt or open question (oldest first)
   Probably stuck  — inside one tool call longer than --stuck-min (default 20)
+  Reapable        — close gate whose anchored task is already finished
   Idle            — turn ended, waiting for a prompt (only with --idle)
 --jump PANE activates that WezTerm pane.
+
+The feed answers "was a gate raised", never "is a gate open" — it is hook-written
+and goes stale until the session's next tool call. Read the pane before reporting
+any gate as open.
 """
-import argparse, glob, json, os, subprocess, sys, time
+import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
 
 STATE = os.path.expanduser("~/.claude/state/attention")
+OBSIDIAN = os.path.expanduser("~/Documents/Obsidian")
+
+# Closer verbs describing a parked wait rather than an open gate. `later (on
+# <trigger>):` names the event that resumes the work; until it fires there is
+# nothing for the operator to answer. Measured 2026-09-19: two such closers sat at
+# the top of `Needs you` for over five hours, reported as neglect.
+PARKED_VERBS = ("later (on ",)
+
+# A close gate whose anchored task is finished is the operator's call but not an
+# open gate — it is reapable, and is listed separately.
+CLOSE_GATE = "approve: /vault-cli:session-close"
+
+# `&nbsp;` is six literal characters, not whitespace, so strip() does not remove it.
+_ENTITY = re.compile(r"&(?:nbsp|#160|#xa0);", re.I)
+_PANE_REF = re.compile(r"\bpane\s*#?\s*(\d+)\b", re.I)
+_TASK_LINK = re.compile(r"📌 Task: \[[^\]]*\]\(obsidian://open\?vault=[^&]+&file=([^)]+)\)")
+
+
+def normalize_closer(text):
+    """Reduce a closer verb to a comparable form.
+
+    Panes have emitted `👤 You: &nbsp;&nbsp;&nbsp;&nbsp;nothing`. The entity is
+    text, so `startswith("nothing")` missed it and a parked session was
+    reclassified as an open question. Strip entities and collapse whitespace so
+    the comparison sees the verb rather than its padding.
+    """
+    text = _ENTITY.sub(" ", text or "")
+    return " ".join(text.split()).strip()
+
+
+def is_parked_verb(detail):
+    """True when a closer names the event that resumes the work.
+
+    `later (on <trigger>):` is a parked wait: until that event fires there is
+    nothing for the operator to answer, so it is not an open gate regardless of
+    age. Measured 2026-09-19: two such closers sat at the top of `Needs you` for
+    over five hours, reported as neglect.
+
+    Checked on both paths on purpose. A parked closer reaches the feed two ways —
+    re-derived from an `idle` record's transcript, or written straight in by the
+    hook as `kind: "question"`. Both live instances measured 2026-09-19 arrived the
+    second way, so a reclassify-only check would have missed every real one.
+    """
+    return normalize_closer(detail).startswith(PARKED_VERBS)
 
 
 def load(suffix):
@@ -68,15 +117,21 @@ def last_assistant_text(rec):
 
 
 def reclassify_idle(rec):
-    """Stop hook may predate the closer-panel rule; re-derive from the transcript."""
+    """Stop hook may predate the closer-panel rule; re-derive from the transcript.
+
+    Handles the two text-only false-positive classes. A closer that is absent,
+    `nothing`, or a `later (on <trigger>):` parked wait is left as `idle` — it is
+    genuinely idle, and should still appear under --idle rather than in the gate
+    list.
+    """
     if rec.get("kind") != "idle":
         return rec
     lines = [l.strip() for l in last_assistant_text(rec).splitlines() if l.strip()]
     you = [l for l in lines if l.startswith("👤 You:")]
-    ask = you[-1].split(":", 1)[1].strip() if you else ""
-    if ask and not ask.startswith("nothing"):
-        rec = dict(rec, kind="question", detail=ask)
-    return rec
+    ask = normalize_closer(you[-1].split(":", 1)[1]) if you else ""
+    if not ask or ask.startswith("nothing") or is_parked_verb(ask):
+        return rec
+    return dict(rec, kind="question", detail=ask)
 
 
 def answered(rec):
@@ -84,7 +139,75 @@ def answered(rec):
     return rec.get("state") == "answered"
 
 
-def is_open_gate(rec):
+def read_status(path):
+    """The `status:` value from a vault task's frontmatter, or None."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            head = f.read(4000)
+    except Exception:
+        return None
+    if not head.startswith("---"):
+        return None
+    parts = head.split("---", 2)
+    if len(parts) < 3:
+        return None
+    m = re.search(r"^status:\s*(\S+)", parts[1], re.M)
+    return m.group(1).strip().strip("\"'") if m else None
+
+
+def task_status_from_closer(rec):
+    """`status:` of the vault task this session anchored, read from its closer.
+
+    The closer names its own task (`📌 Task: [..](obsidian://open?vault=..&file=..)`),
+    so no vault scan is needed. Returns None when there is no anchor or the file is
+    not on disk — which keeps the record an open gate rather than suppressing it.
+    """
+    m = _TASK_LINK.search(last_assistant_text(rec))
+    if not m:
+        return None
+    rel = urllib.parse.unquote(m.group(1))
+    for vault in sorted(glob.glob(os.path.join(OBSIDIAN, "*"))):
+        path = os.path.join(vault, rel + ".md")
+        if os.path.exists(path):
+            return read_status(path)
+    return None
+
+
+def is_reapable(rec, task_status):
+    """A close gate whose anchored task already reads `status: completed`.
+
+    The close is genuinely the operator's call, so it stays visible — but the work
+    is done and nothing is blocked, so it is not an open gate. Listed separately
+    rather than counted under `Needs you`.
+
+    Fails safe: no resolver, or an unresolvable task, leaves it an open gate.
+    """
+    if not (rec.get("detail") or "").startswith(CLOSE_GATE):
+        return False
+    if task_status is None:
+        return False
+    return task_status(rec) == "completed"
+
+
+def names_peer_gate(rec, open_panes):
+    """True when this closer restates another pane's gate rather than raising its own.
+
+    A session relaying "the approval in pane 285 is yours alone" is not a second
+    decision — pane 285 already carries it, and the operator's action belongs
+    there. Suppressed only when the named pane is *itself* an open gate in this
+    run, so a closer that merely mentions a pane id (a ticket reference, a log
+    line) is left alone and a real gate is never silently eaten.
+    """
+    if not open_panes:
+        return False
+    mine = str(rec.get("pane"))
+    for named in _PANE_REF.findall(rec.get("detail") or ""):
+        if named != mine and named in open_panes:
+            return True
+    return False
+
+
+def is_open_gate(rec, open_panes=frozenset(), task_status=None):
     """A gate the operator has not answered yet.
 
     The record carries `state` ("open" until its answering event fires, then "answered")
@@ -93,8 +216,19 @@ def is_open_gate(rec):
     gate and the pane vanished from the feed with nothing left to classify. Reproduced
     2026-09-18 on a throwaway pane: Stop wrote the gate, PostToolUse removed it, and the
     feed could not tell that apart from the operator having answered.
+
+    `open_panes` and `task_status` carry the context the context-dependent classes
+    need; both default to absent, which degrades to the text-only rule.
     """
-    return not answered(rec) and rec.get("kind") in ("permission", "question")
+    if answered(rec) or rec.get("kind") not in ("permission", "question"):
+        return False
+    if is_parked_verb(rec.get("detail")):
+        return False
+    if is_reapable(rec, task_status):
+        return False
+    if names_peer_gate(rec, open_panes):
+        return False
+    return True
 
 
 def age(ts):
@@ -133,7 +267,15 @@ def main():
     needs = [reclassify_idle(r) for r in load("needs") if live(r)]
     tools = [r for r in load("tool") if live(r)]
 
-    blocked = sorted([r for r in needs if is_open_gate(r)], key=lambda r: r["ts"])
+    # Two passes: the pane set that carries a gate is computed without peer-dedup,
+    # so a restating pane is dropped only when the pane it names is itself a gate.
+    open_panes = {str(r.get("pane")) for r in needs
+                  if is_open_gate(r, task_status=task_status_from_closer)}
+    blocked = sorted([r for r in needs
+                      if is_open_gate(r, open_panes=open_panes, task_status=task_status_from_closer)],
+                     key=lambda r: r["ts"])
+    reapable = sorted([r for r in needs if not answered(r)
+                       and is_reapable(r, task_status_from_closer)], key=lambda r: r["ts"])
     stuck = sorted([r for r in tools if time.time() - r["ts"] > a.stuck_min * 60], key=lambda r: r["ts"])
     idle = sorted([r for r in needs if r["kind"] == "idle" and not answered(r)], key=lambda r: r["ts"])
 
@@ -142,6 +284,9 @@ def main():
         print(row(r, pmap, f"{r['kind']}: {r['detail']}"))
     print(f"\nProbably stuck > {a.stuck_min}m ({len(stuck)})")
     for r in stuck:
+        print(row(r, pmap, r["detail"]))
+    print(f"\nReapable ({len(reapable)})  — finished work on a close gate, yours to close")
+    for r in reapable:
         print(row(r, pmap, r["detail"]))
     if a.idle:
         print(f"\nIdle, turn ended ({len(idle)})")
