@@ -362,6 +362,18 @@ class Config(_Harness):
         block.update(overrides)
         return block
 
+    def test_a_valid_config_file_loads(self):
+        self.assertIsInstance(self.mod.load_config(), dict)
+
+    def test_a_non_mapping_config_file_is_reported(self):
+        """The top level was the one shape load_config() did not guard, while
+        resolve_endpoint() guards three levels below it."""
+        with open(self.config, "w") as handle:
+            handle.write("[]")
+        with self.assertRaises(SystemExit) as caught:
+            self.mod.load_config()
+        self.assertIn("must contain a JSON object", str(caught.exception))
+
     def test_a_valid_block_resolves(self):
         env, endpoint, notification_type = self.endpoint_for(self.complete())
         self.assertEqual(env, "dev")

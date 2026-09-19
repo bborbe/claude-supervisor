@@ -140,7 +140,7 @@ def render_message(gate):
 def load_config():
     try:
         with open(CONFIG_PATH) as handle:
-            return json.load(handle)
+            config = json.load(handle)
     except FileNotFoundError:
         return {}
     except ValueError as error:
@@ -150,6 +150,15 @@ def load_config():
         # as a traceback -- FileNotFoundError is handled above, so this is the
         # permission/IO class the docstring's "fails loudly" promise also covers.
         sys.exit(f"notify-gate: cannot read {CONFIG_PATH}: {error}")
+    # The top level is guarded here for the same reason resolve_endpoint() guards
+    # `notify`, `endpoints` and `endpoint` one level down: valid JSON that is not
+    # an object would otherwise AttributeError on the first .get().
+    if not isinstance(config, dict):
+        sys.exit(
+            f"notify-gate: {CONFIG_PATH} must contain a JSON object, got "
+            f"{type(config).__name__} -- the shape is in the README."
+        )
+    return config
 
 
 def resolve_endpoint(config):
@@ -347,9 +356,9 @@ def lock_ledger():
     ensure_state_dir()
     try:
         handle = open(f"{STATE_PATH}.lock", "w")
+        fcntl.flock(handle, fcntl.LOCK_EX)
     except OSError as error:
-        sys.exit(f"notify-gate: cannot open {STATE_PATH}.lock: {error}")
-    fcntl.flock(handle, fcntl.LOCK_EX)
+        sys.exit(f"notify-gate: cannot lock {STATE_PATH}.lock: {error}")
     return handle
 
 
