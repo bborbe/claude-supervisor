@@ -13,10 +13,13 @@ Two de-dup axes, and this script owns only the second:
   * WHICH manager notifies is already decided upstream -- `commands/fleet-manager.md`
     drops an entry whose owning worker manager is live on the roster, so any given
     gate reaches this script at most once per sweep.
-  * HOW OFTEN is this script's ledger. The manager loop re-invokes every ~15 min
-    (fleet) and ~5 min (worker), so an unbounded re-raise would put one open gate
-    on the phone roughly 96 times a day -- the noise the TTS gate exists to
-    prevent, moved to a louder channel.
+  * HOW OFTEN is this script's ledger -- and it is PER LAYER, because each layer's
+    sweep is a partial view (the fleet drops worker-owned gates). A shared ledger
+    would let one layer prune the other's gates as "cleared", after which they
+    would re-raise forever. The manager loop re-invokes every ~15 min (fleet) and
+    ~5 min (worker), so an unbounded re-raise would put one open gate on the phone
+    roughly 96 times a day -- the noise the TTS gate exists to prevent, moved to a
+    louder channel.
 
 Cadence, decided 2026-09-19: once on raise, then re-raise at 1h and 4h while the
 gate is still open, capped at 3 deliveries per gate identity. After the third,
@@ -38,10 +41,12 @@ Absent or incomplete FAILS LOUDLY, and only when a gate is actually due. A silen
 skip is the worst failure mode here: the gate is real, the operator is needed, and
 nothing arrives -- and it reads exactly like a clean sweep.
 
-Ledger: ~/.claude/state/gate-notifications.json (override SUPERVISOR_GATE_STATE,
-which is also what lets the tests exercise commit/prune without touching the
-operator's real ledger).
+Ledger: ~/.claude/state/gate-notifications-<layer>.json, one per `--layer`
+(override SUPERVISOR_GATE_STATE, which is also what lets the tests exercise
+commit/prune without touching the operator's real ledger). Per layer, not shared
+-- see ledger_path() for why a shared file silently defeats the cadence.
 """
+import argparse
 import datetime
 import fcntl
 import json
@@ -52,9 +57,27 @@ import sys
 CONFIG_PATH = os.environ.get("SUPERVISOR_CONFIG") or os.path.expanduser(
     "~/.config/claude-supervisor/config.json"
 )
-STATE_PATH = os.environ.get("SUPERVISOR_GATE_STATE") or os.path.expanduser(
-    "~/.claude/state/gate-notifications.json"
-)
+STATE_PATH = None  # set by main() from --layer; see ledger_path()
+
+
+def ledger_path(layer):
+    """The ledger is PER LAYER, and that is load-bearing rather than tidy.
+
+    The two manager layers see different slices of the world: `fleet-manager` drops
+    every gate whose owning worker manager is live, so its sweep is deliberately a
+    subset. A shared ledger would let the fleet's sweep prune a worker-owned gate
+    (absent from *its* list), after which the worker's next sweep sees that gate as
+    first-sight and republishes it with a fresh count -- so a gate that stays open
+    would re-notify on every fleet tick, forever, instead of at most MAX_DELIVERIES
+    times. That is precisely the noise this script exists to prevent.
+
+    Scoping the ledger to the layer makes "absent from this sweep" mean "cleared
+    *for this layer*", which is the only reading that is true for a partial view.
+    """
+    override = os.environ.get("SUPERVISOR_GATE_STATE")
+    if override:
+        return override
+    return os.path.expanduser(f"~/.claude/state/gate-notifications-{layer}.json")
 
 # Mirrors the vault script this replaces: pinned deliberately rather than
 # ${TEAMVAULT_CONFIG:-...}, because that variable is commonly exported to a
@@ -248,11 +271,16 @@ def valid_entry(entry):
     inside decide(), and a malformed `firstRaisedAt` ValueErrors inside parse_time().
     Dropping such an entry costs at most one re-notification.
     """
-    if not isinstance(entry, dict) or not isinstance(entry.get("deliveries"), int):
+    if not isinstance(entry, dict):
+        return False
+    deliveries = entry.get("deliveries")
+    # `bool` is an int subclass, so it has to be excluded explicitly; and a count
+    # below 1 indexes RE_RAISE_AFTER_SECONDS out of range inside decide().
+    if isinstance(deliveries, bool) or not isinstance(deliveries, int) or deliveries < 1:
         return False
     try:
         parse_time(entry["firstRaisedAt"])
-    except (KeyError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return False
     return True
 
@@ -361,7 +389,28 @@ def read_gates():
     return gates
 
 
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Publish a manager sweep's ACTION gates to the notification core."
+    )
+    parser.add_argument(
+        "--layer",
+        required=True,
+        help=(
+            "which manager layer this sweep belongs to (fleet, worker, ...). "
+            "Namespaces the cadence ledger: the layers see different slices of the "
+            "world, so a shared ledger would have one prune the other's gates and "
+            "re-notify them forever."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
 def main():
+    global STATE_PATH
+    args = parse_args(sys.argv[1:])
+    STATE_PATH = ledger_path(args.layer)
+
     now = datetime.datetime.now(datetime.timezone.utc)
     gates = read_gates()
     # Held for the whole round and released when the file closes, so the read, the

@@ -166,6 +166,9 @@ class _Harness(unittest.TestCase):
         os.environ["SUPERVISOR_GATE_STATE"] = self.state
         os.environ["SUPERVISOR_CONFIG"] = self.config
         self.mod = _reload(self._testMethodName)
+        # main() sets this from --layer; the direct commit()/load_ledger() calls
+        # in these tests need it set explicitly.
+        self.mod.STATE_PATH = self.state
 
     def tearDown(self):
         for key, value in self._env.items():
@@ -179,16 +182,17 @@ class _Harness(unittest.TestCase):
         with open(self.state) as handle:
             return json.load(handle)
 
-    def feed(self, raw):
-        before = sys.stdin
+    def feed(self, raw, layer="test"):
+        before_stdin, before_argv = sys.stdin, sys.argv
         sys.stdin = io.StringIO(raw)
+        sys.argv = ["notify-gate.py", "--layer", layer]
         try:
             # main() prints its round summary; capturing it keeps the suite's own
             # output readable instead of interleaving the script's.
             with contextlib.redirect_stdout(io.StringIO()):
                 return self.mod.main()
         finally:
-            sys.stdin = before
+            sys.stdin, sys.argv = before_stdin, before_argv
 
 
 class Ledger(_Harness):
@@ -238,6 +242,14 @@ class Ledger(_Harness):
                     "good\x1ftext": {"deliveries": 1, "firstRaisedAt": RAISED_AT},
                     "no-deliveries\x1ftext": {"firstRaisedAt": RAISED_AT},
                     "bad-time\x1ftext": {"deliveries": 1, "firstRaisedAt": "nonsense"},
+                    # TypeErrors in parse_time() rather than ValueError -- the hole
+                    # the fourth review pass found in an earlier except tuple.
+                    "int-time\x1ftext": {"deliveries": 1, "firstRaisedAt": 123},
+                    "null-time\x1ftext": {"deliveries": 1, "firstRaisedAt": None},
+                    # bool is an int subclass; 0 would index the re-raise table out
+                    # of range inside decide().
+                    "bool-deliveries\x1ftext": {"deliveries": True, "firstRaisedAt": RAISED_AT},
+                    "zero-deliveries\x1ftext": {"deliveries": 0, "firstRaisedAt": RAISED_AT},
                     "not-an-object\x1ftext": "x",
                 },
                 handle,
@@ -255,6 +267,20 @@ class Ledger(_Harness):
         with open(self.state, "w") as handle:
             json.dump(["not", "a", "mapping"], handle)
         self.assertEqual(self.mod.load_ledger(), {})
+
+    def test_the_ledger_is_namespaced_per_layer(self):
+        """The layers see different slices of the world, so they must not share a
+        ledger: the fleet's sweep drops worker-owned gates, and a shared file would
+        let it prune them as cleared, re-raising them on every later tick."""
+        os.environ.pop("SUPERVISOR_GATE_STATE", None)
+        fleet = self.mod.ledger_path("fleet")
+        worker = self.mod.ledger_path("worker")
+        self.assertNotEqual(fleet, worker)
+        self.assertTrue(fleet.endswith("gate-notifications-fleet.json"))
+        self.assertTrue(worker.endswith("gate-notifications-worker.json"))
+
+    def test_the_state_override_wins_over_the_layer(self):
+        self.assertEqual(self.mod.ledger_path("fleet"), self.state)
 
     def test_a_bare_filename_state_path_is_accepted(self):
         """SUPERVISOR_GATE_STATE=gate.json has no directory part to create."""

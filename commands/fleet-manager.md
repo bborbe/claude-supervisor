@@ -84,10 +84,10 @@ This command is the **fleet-manager engine** (renamed from `/fleet-sweep` 2026-0
 
     ```bash
     echo '{"gates": [{"owner": "<session id or pane id>", "text": "<the gate line>"}]}' \
-      | python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/notify-gate.py
+      | python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/notify-gate.py --layer fleet
     ```
 
-    Call it **once per round with every gate the round raised**, and with `{"gates": []}` on a round that raised none — the empty call is what prunes a cleared gate, so the same gate can raise again later at full cadence. **Only gates the operator must decide publish** — § Gate triage classes **C, D and E** in [[Worker Manager Session]]; **A and B are the manager's own to clear and stay silent**, and an `ACTION NEEDED` the manager clears itself is precisely the case that must *not* notify. A notification means *"the operator is needed"*, never *"something happened"*. The script owns the cadence, the ledger and the config (its docstring and the README carry the specifics); **surface its message rather than swallowing it** — a silently-skipped gate is indistinguishable from a clean round.
+    Call it **once per round with every gate the round raised**, and with `{"gates": []}` on a round that raised none — the empty call is what prunes a cleared gate, so the same gate can raise again later at full cadence. **`--layer fleet` is required and must not be dropped:** the cadence ledger is per layer, because this layer's sweep is a *subset* — it drops every gate a live worker manager owns — and a shared ledger would have this sweep prune those as "cleared", so the worker would see them as new on its next tick and re-notify forever. **Only gates the operator must decide publish** — § Gate triage classes **C, D and E** in [[Worker Manager Session]]; **A and B are the manager's own to clear and stay silent**, and an `ACTION NEEDED` the manager clears itself is precisely the case that must *not* notify. A notification means *"the operator is needed"*, never *"something happened"*. The script owns the cadence, the ledger and the config (its docstring and the README carry the specifics); **surface its message rather than swallowing it** — a silently-skipped gate is indistinguishable from a clean round.
   - **Stop** when the human stops it or no sessions remain in flight.
 
 ## The four read channels — and why there are four
