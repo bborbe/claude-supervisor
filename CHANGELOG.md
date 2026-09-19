@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.15.1
 
 - fix: stop the forked-ledger warning firing on a ledger that has already been reconciled. The
   shared-id scan counted **all** entries rather than open ones, so closing the duplicate copies —
