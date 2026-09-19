@@ -10,6 +10,14 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`
+  argument, so the worker creates its own session in its own pane. Minting the session first
+  ran a full planning turn inside the manager's own session — blocking it for minutes and
+  making the manager do the worker's work. `docs/fleet-surface.md` § Spawn a worker now
+  carries the fresh-start path, and resolves `interactive` from the fleet's config file
+  (`SUPERVISOR_SPAWN_MODE` → `spawn.mode` → built-in) instead of presenting the built-in code
+  default as the answer.
+
 - fix: stop the forked-ledger warning firing on a ledger that has already been reconciled. The
   shared-id scan counted **all** entries rather than open ones, so closing the duplicate copies —
   the documented way to resolve a fork — left the warning in place forever, still claiming the
@@ -22,14 +30,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   where the parent's ledger no longer exists at all.
 
 ## v0.15.0
-
-- fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`
-  argument, so the worker creates its own session in its own pane. Minting the session first
-  ran a full planning turn inside the manager's own session — blocking it for minutes and
-  making the manager do the worker's work. `docs/fleet-surface.md` § Spawn a worker now
-  carries the fresh-start path, and resolves `interactive` from the fleet's config file
-  (`SUPERVISOR_SPAWN_MODE` → `spawn.mode` → built-in) instead of presenting the built-in code
-  default as the answer.
 
 - feat: adds `scripts/fleet-colours.py`, a census of what colour each live session is. Colour is
   the operator's attention-cost ranking — green/blue/cyan cost a keystroke per step, pink is an
