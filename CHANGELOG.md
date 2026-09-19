@@ -8,6 +8,18 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: retract the claim that `answer_permission(allow)` is blocked by a structural, one-directional
+  classifier gate. A controlled re-measurement on 2026-09-19 refuted it: the refusal is the
+  **manager session's own** `auto`-mode classifier gating its outgoing call before the fleet is
+  involved, and under `accept edits` the identical call succeeds. The old reading pointed operators
+  at the wrong fix — changing the worker's mode or `defaultMode`, which `spawn_agent` cannot even
+  accept. `commands/fleet-manager.md`, `commands/worker-manager.md`, `commands/answer.md`,
+  `agents/worker-wrangler.md`, `skills/supervising-workers/SKILL.md`, `README.md` and `llms.txt` now
+  state the real precondition (the manager's own mode) and the one-keystroke fix (Shift+Tab →
+  `accept edits`, then retry).
+
 ## v0.18.1
 
 - fix: `agent_status.last_message` now finds a tab worker's last message even when the

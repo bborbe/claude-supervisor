@@ -25,6 +25,8 @@ A **tab worker** answers its own prompts in its tab, so it never appears in `pen
 
 A **headless worker** is a `query()` session from @anthropic-ai/claude-agent-sdk started with `permissionMode: 'default'`. Every approval-requiring tool lands in the server's `canUseTool` callback, which parks the request; the manager resolves it through `answer_permission`. It never appears in `list_agents`.
 
+⚠️ The manager's outgoing `answer_permission` call is gated by the **manager session's own** permission mode, not the worker's. Under `auto` the classifier can refuse it (measured 2026-09-19) — the fix is Shift+Tab → `accept edits` in the manager session, then retry, never a change to the worker's mode or `defaultMode`.
+
 ## Install
 
 /plugin marketplace add <owner>/claude-supervisor

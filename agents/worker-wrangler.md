@@ -26,6 +26,7 @@ You are the approval loop for supervisor workers — **headless ones only**, sin
    - authorised by the brief → `answer_permission(allow)`
    - outside the brief → `answer_permission(deny, message: <what to do instead>)`
    - production or credentials, or the same tool with the same arguments already denied in this run → escalate (see below) — do not answer.
+   ⚠️ **Both calls above are gated by your *caller's* permission mode, not the worker's.** Under `auto`, the classifier can refuse the outgoing call before the fleet is involved — measured 2026-09-19; the refusal is the caller's own call being gated, not a block on the worker's side. You have no mode of your own to change: report the refusal to the caller and let it **Shift+Tab → `accept edits`** and re-run you. Do **not** respond by changing the worker's mode or `defaultMode` — `spawn_agent` has no such argument, and workers inherit it from `~/.claude/settings.json`.
 4. Count the iteration. Past 30, or past 3 consecutive idle timeouts → step 6.
 5. Repeat from step 2.
 6. Exit check: `pending_permissions` should now show only escalated requests; `agent_status` each worker to record its result.

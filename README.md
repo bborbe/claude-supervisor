@@ -221,13 +221,15 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 | `agent_status(agent_id)` | one worker: status, last message, result, plus `session_status` / `awaiting_input` (see [Reading a tab worker](#reading-a-tab-worker)). `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed |
 | `pending_permissions()` | prompts awaiting an answer, across all workers |
 | `await_permission(timeout_ms?)` | block until any worker asks — one call instead of polling |
-| `answer_permission(request_id, behavior, message?)` | `allow` / `deny` — this unblocks the worker |
+| `answer_permission(request_id, behavior, message?)` | `allow` / `deny` — this unblocks the worker. ⚠️ Gated by **your own session's** permission mode, not the worker's: under `auto` the classifier can refuse the outgoing call (measured 2026-09-19). Fix with Shift+Tab → `accept edits`, then retry — never by changing the worker's mode |
 
 ## How it works
 
 Each worker is a `query()` session from `@anthropic-ai/claude-agent-sdk`, started with `permissionMode: 'default'`, so every approval-requiring tool reaches the server: the `PermissionRequest` hook answers what the policy knows, and anything it does not cover falls through to `canUseTool`, which parks the request for the manager to resolve through `answer_permission`.
 
 ⚠️ `permissionMode: 'default'` is a **request, not a guarantee**. An escalating `permissions.defaultMode` from a trusted settings tier wins over it and bypasses the hook and `canUseTool` both, which makes the policy inert — see § The approval policy.
+
+⚠️ **The reverse direction has its own gate.** The manager's *outgoing* `answer_permission` call is itself subject to the **manager session's** permission mode. Under `auto` the classifier can refuse that call before the fleet is involved — the refusal reads like a worker-side denial but is not one (measured 2026-09-19, corrected here from an earlier reading that called it a structural gate). The fix is in the manager session: Shift+Tab → `accept edits`, then retry the same call.
 
 ```
 manager session ──MCP──► supervisor server ──query()×N──► workers
