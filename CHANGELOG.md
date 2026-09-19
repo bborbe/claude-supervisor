@@ -22,6 +22,24 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   Measured 2026-09-19: the operator followed a printed handover, typed `/jump 271`, and got
   `Unknown command: /jump`.
 
+- fix: the reapability check now reads the session's *live* closer and accepts both
+  sanctioned close-gate forms, so `Reapable` stops reporting `0` while finished sessions
+  sit in `Needs you`. Two independent defects, both inside `is_reapable()`. It matched
+  `rec["detail"]` — the hook-written field that is never refreshed — so a session that had
+  cleared one gate and raised another was judged on the old text; `reclassify_idle()`
+  already re-derives the closer from the transcript, but it returns early on
+  `kind != "idle"`, so every hook-written gate kept the stale detail. And it matched the
+  close gate with a literal `startswith("approve: /vault-cli:session-close")`, blind to the
+  `pick` form the operator's global DONE rule prescribes alongside it. Measured 2026-09-19:
+  four reapable sessions in roughly forty minutes and three were missed — 312 caught
+  (`approve:`, fresh), 338 and 254 missed (stale `detail`), 17 missed (`pick` form) — while
+  the same output correctly suppressed parked `later (on <trigger>):` waits, so an operator
+  who had learned to trust the new feed had every reason to trust a `Reapable (0)`. The
+  `pick` match requires session-close to be the first/recommended disposition, and
+  `is_parked_verb()` is checked first, so widening a prefix test into a containment test
+  cannot turn a `later (on …)` deferral into a close gate. `last_assistant_text()` is now
+  memoized per session, holding the transcript read at one per candidate.
+
 ## v0.16.1
 
 - fix: `open-items.py` now resolves an entry's `--task` against **every** vault in vault-cli's

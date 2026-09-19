@@ -9,16 +9,16 @@
     },
     "state_dir": "~/.claude/state/attention",
     "script_under_test": "claude-supervisor marketplace clone 0.14.0 (scripts/who-needs-me.py)",
-    "measured_before_fix": "Needs you (13); 2 Class-2, 1 Class-4, 10 genuine — Classes 1 and 3 had no surviving live instance"
+    "measured_before_fix": "Needs you (13); 2 Class-2, 1 Class-4, 10 genuine \u2014 Classes 1 and 3 had no surviving live instance"
   },
   "provenance_legend": {
     "live": "record copied verbatim from a real ~/.claude/state/attention/*.needs.json at captured_at (transcript path stripped)",
-    "constructed": "hand-written because no live instance survived; carries NO claim about the live fleet — it is a parser unit case, never live evidence"
+    "constructed": "hand-written because no live instance survived; carries NO claim about the live fleet \u2014 it is a parser unit case, never live evidence"
   },
   "fields": {
     "record": "the attention record as who-needs-me.py consumes it",
     "last_assistant_text": "inline stand-in for the transcript tail that reclassify_idle() reads (idle records only)",
-    "expect.kind_after_reclassify": "kind after reclassify_idle() — `question` means the parser treats it as a gate",
+    "expect.kind_after_reclassify": "kind after reclassify_idle() \u2014 `question` means the parser treats it as a gate",
     "expect.in_feed": "whether the record belongs in the `Needs you` section"
   },
   "cases": [
@@ -41,9 +41,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": false
+        "in_feed": false,
+        "reapable": false
       },
-      "why": "Closer verb is `later (on flying it):` — a correctly-parked wait, not an open gate. Must not be counted."
+      "why": "Closer verb is `later (on flying it):` \u2014 a correctly-parked wait, not an open gate. Must not be counted."
     },
     {
       "id": "class2-live-pane277",
@@ -54,7 +55,7 @@
         "pane": "277",
         "cwd": "/Users/bborbe/Documents/Obsidian/Personal",
         "kind": "question",
-        "detail": "later (on the next live Discord call): ask a question, have another session inject a cross-session message mid-turn, then ask a second question — confirm the injected text appears 0 times in `s2s.log`",
+        "detail": "later (on the next live Discord call): ask a question, have another session inject a cross-session message mid-turn, then ask a second question \u2014 confirm the injected text appears 0 times in `s2s.log`",
         "ts": 1789823475.040042,
         "state": "open",
         "cleared_by": {
@@ -64,9 +65,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": false
+        "in_feed": false,
+        "reapable": false
       },
-      "why": "Closer verb is `later (on the next live Discord call):` — parked wait, not an open gate."
+      "why": "Closer verb is `later (on the next live Discord call):` \u2014 parked wait, not an open gate."
     },
     {
       "id": "class4-live-pane230",
@@ -87,7 +89,8 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": false
+        "in_feed": false,
+        "reapable": true
       },
       "anchored_task": {
         "path": "25 Tasks/Docker Registry GC (prod) - 2026W38-sat.md",
@@ -114,12 +117,13 @@
           "event": "UserPromptSubmit"
         }
       },
-      "last_assistant_text": "Applied — one file.\n\n- `50 Knowledge Base/Some Page.md` — added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n📌 Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) — done, session abc12345 (this one)\n\n👤 You: &nbsp;&nbsp;&nbsp;&nbsp;nothing\n⏰ Next: your reply\n",
+      "last_assistant_text": "Applied \u2014 one file.\n\n- `50 Knowledge Base/Some Page.md` \u2014 added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n\ud83d\udccc Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) \u2014 done, session abc12345 (this one)\n\n\ud83d\udc64 You: &nbsp;&nbsp;&nbsp;&nbsp;nothing\n\u23f0 Next: your reply\n",
       "expect": {
         "kind_after_reclassify": "idle",
-        "in_feed": false
+        "in_feed": false,
+        "reapable": false
       },
-      "why": "CONSTRUCTED — the live `&nbsp;`-padded closer recorded 2026-09-19 is no longer present in the feed. `&nbsp;` is six literal characters, not whitespace, so `startswith(\"nothing\")` is False and the idle record is reclassified as an open question."
+      "why": "CONSTRUCTED \u2014 the live `&nbsp;`-padded closer recorded 2026-09-19 is no longer present in the feed. `&nbsp;` is six literal characters, not whitespace, so `startswith(\"nothing\")` is False and the idle record is reclassified as an open question."
     },
     {
       "id": "class1-constructed-nbsp-no-space",
@@ -137,12 +141,13 @@
           "event": "UserPromptSubmit"
         }
       },
-      "last_assistant_text": "Applied — one file.\n\n- `50 Knowledge Base/Some Page.md` — added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n📌 Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) — done, session abc12345 (this one)\n\n👤 You:&nbsp;nothing\n⏰ Next: your reply\n",
+      "last_assistant_text": "Applied \u2014 one file.\n\n- `50 Knowledge Base/Some Page.md` \u2014 added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n\ud83d\udccc Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) \u2014 done, session abc12345 (this one)\n\n\ud83d\udc64 You:&nbsp;nothing\n\u23f0 Next: your reply\n",
       "expect": {
         "kind_after_reclassify": "idle",
-        "in_feed": false
+        "in_feed": false,
+        "reapable": false
       },
-      "why": "CONSTRUCTED — same defect, no space after the colon. Normalization must handle both."
+      "why": "CONSTRUCTED \u2014 same defect, no space after the colon. Normalization must handle both."
     },
     {
       "id": "class3-constructed-peer-restatement",
@@ -160,12 +165,13 @@
           "event": "UserPromptSubmit"
         }
       },
-      "last_assistant_text": "Applied — one file.\n\n- `50 Knowledge Base/Some Page.md` — added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n📌 Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) — done, session abc12345 (this one)\n\n👤 You: The dev-promotion approval in pane 285 — yours alone; nothing happens until you approve it\n⏰ Next: your reply\n",
+      "last_assistant_text": "Applied \u2014 one file.\n\n- `50 Knowledge Base/Some Page.md` \u2014 added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n\ud83d\udccc Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) \u2014 done, session abc12345 (this one)\n\n\ud83d\udc64 You: The dev-promotion approval in pane 285 \u2014 yours alone; nothing happens until you approve it\n\u23f0 Next: your reply\n",
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": false
+        "in_feed": false,
+        "reapable": false
       },
-      "why": "CONSTRUCTED — no record on 2026-09-19 contained a pane-id mention (the pane-85/285 pair is gone; 285 is now `answered`). The closer does NOT begin with `nothing`, so pre-fix it is reclassified as a question and counted; it restates pane 285's gate, so it is not a second INDEPENDENT gate. Detection requires resolving `peer_pane` against the live pane map. NOTE: an earlier draft of this case began with the literal word `nothing` and therefore passed for the wrong reason — the reproducing shape requires a non-`nothing` opener.",
+      "why": "CONSTRUCTED \u2014 no record on 2026-09-19 contained a pane-id mention (the pane-85/285 pair is gone; 285 is now `answered`). The closer does NOT begin with `nothing`, so pre-fix it is reclassified as a question and counted; it restates pane 285's gate, so it is not a second INDEPENDENT gate. Detection requires resolving `peer_pane` against the live pane map. NOTE: an earlier draft of this case began with the literal word `nothing` and therefore passed for the wrong reason \u2014 the reproducing shape requires a non-`nothing` opener.",
       "peer_pane": "285",
       "kind_note": "kind may legitimately stay `question` if the fix tags rather than suppresses; `in_feed` is the binding assertion"
     },
@@ -178,7 +184,7 @@
         "pane": "208",
         "cwd": "/Users/bborbe/Documents/Obsidian/Personal",
         "kind": "question",
-        "detail": "Pane 312 is on `git push -u origin fix/worker-knows-its-manager` — same feature-branch class you approved twice, and I said I would re-ask rather than assume. Approve, and how should I handle the rest",
+        "detail": "Pane 312 is on `git push -u origin fix/worker-knows-its-manager` \u2014 same feature-branch class you approved twice, and I said I would re-ask rather than assume. Approve, and how should I handle the rest",
         "ts": 1789827028.4506629,
         "state": "open",
         "cleared_by": {
@@ -189,9 +195,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": true
+        "in_feed": true,
+        "reapable": false
       },
-      "why": "Closer verb `pick` — a real decision the operator must make."
+      "why": "Closer verb `pick` \u2014 a real decision the operator must make."
     },
     {
       "id": "genuine-live-approve-prod-244",
@@ -202,7 +209,7 @@
         "pane": "244",
         "cwd": "/Users/bborbe/Documents/workspaces/nuke",
         "kind": "question",
-        "detail": "approve: apply the merged template to the prod Schedule CR — reply explicitly (\"yes, apply to prod\"); a bare `y` won't clear a production apply",
+        "detail": "approve: apply the merged template to the prod Schedule CR \u2014 reply explicitly (\"yes, apply to prod\"); a bare `y` won't clear a production apply",
         "ts": 1789826907.365688,
         "state": "open",
         "cleared_by": {
@@ -212,9 +219,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": true
+        "in_feed": true,
+        "reapable": false
       },
-      "why": "`approve:` on a production-touching change — a real gate."
+      "why": "`approve:` on a production-touching change \u2014 a real gate."
     },
     {
       "id": "genuine-live-permission-253",
@@ -235,9 +243,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": true
+        "in_feed": true,
+        "reapable": false
       },
-      "why": "`permission:` — an unanswered tool-approval prompt."
+      "why": "`permission:` \u2014 an unanswered tool-approval prompt."
     },
     {
       "id": "genuine-live-approve-patch-28",
@@ -248,7 +257,7 @@
         "pane": "28",
         "cwd": "/Users/bborbe/Documents/Obsidian/Personal",
         "kind": "question",
-        "detail": "approve: `PATCH /guilds/512637223569719307/roles` moving `Employee` (id `1550866337004261386`) to position 1 — blast radius: one role with 0 members and 0 channel overwrites drops to the bottom; the f",
+        "detail": "approve: `PATCH /guilds/512637223569719307/roles` moving `Employee` (id `1550866337004261386`) to position 1 \u2014 blast radius: one role with 0 members and 0 channel overwrites drops to the bottom; the f",
         "ts": 1789826941.674308,
         "state": "open",
         "cleared_by": {
@@ -258,9 +267,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": true
+        "in_feed": true,
+        "reapable": false
       },
-      "why": "`approve:` on an external API mutation — a real gate."
+      "why": "`approve:` on an external API mutation \u2014 a real gate."
     },
     {
       "id": "genuine-live-yourun-239",
@@ -271,7 +281,7 @@
         "pane": "239",
         "cwd": "/Users/bborbe/Documents/workspaces/trading-dev",
         "kind": "question",
-        "detail": "you run: reopen [trader.ftmo.com/accounts-overview](https://trader.ftmo.com/accounts-overview) and read the **new** account's End date (expect ~14 days out) — that is SC2's evidence and the runbook's ",
+        "detail": "you run: reopen [trader.ftmo.com/accounts-overview](https://trader.ftmo.com/accounts-overview) and read the **new** account's End date (expect ~14 days out) \u2014 that is SC2's evidence and the runbook's ",
         "ts": 1789826957.302075,
         "state": "open",
         "cleared_by": {
@@ -281,9 +291,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": true
+        "in_feed": true,
+        "reapable": false
       },
-      "why": "`you run:` — an operator-only action."
+      "why": "`you run:` \u2014 an operator-only action."
     },
     {
       "id": "genuine-live-yourun-314",
@@ -294,7 +305,7 @@
         "pane": "314",
         "cwd": "/Users/bborbe/Documents/Obsidian/Personal",
         "kind": "question",
-        "detail": "you run: Shift+Tab → accept edits (self-modification is a classifier soft-deny)",
+        "detail": "you run: Shift+Tab \u2192 accept edits (self-modification is a classifier soft-deny)",
         "ts": 1789826958.065451,
         "state": "open",
         "cleared_by": {
@@ -304,9 +315,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": true
+        "in_feed": true,
+        "reapable": false
       },
-      "why": "`you run:` permission-mode switch — a real gate."
+      "why": "`you run:` permission-mode switch \u2014 a real gate."
     },
     {
       "id": "genuine-live-pick-300",
@@ -317,7 +329,7 @@
         "pane": "300",
         "cwd": "/Users/bborbe/Documents/Obsidian/Personal",
         "kind": "question",
-        "detail": "pick — 1. file a task for the distill validation defect (3 failing rule files, CLAUDE.md stale) (recommended) · 2. I fix the 3 TL;DRs to satisfy \"exactly 1 top-level list item\" now — note stage-explic",
+        "detail": "pick \u2014 1. file a task for the distill validation defect (3 failing rule files, CLAUDE.md stale) (recommended) \u00b7 2. I fix the 3 TL;DRs to satisfy \"exactly 1 top-level list item\" now \u2014 note stage-explic",
         "ts": 1789826941.98102,
         "state": "open",
         "cleared_by": {
@@ -327,9 +339,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": true
+        "in_feed": true,
+        "reapable": false
       },
-      "why": "`pick` — a real decision."
+      "why": "`pick` \u2014 a real decision."
     },
     {
       "id": "control-plain-nothing",
@@ -347,12 +360,13 @@
           "event": "UserPromptSubmit"
         }
       },
-      "last_assistant_text": "Applied — one file.\n\n- `50 Knowledge Base/Some Page.md` — added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n📌 Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) — done, session abc12345 (this one)\n\n👤 You: nothing\n⏰ Next: your reply\n",
+      "last_assistant_text": "Applied \u2014 one file.\n\n- `50 Knowledge Base/Some Page.md` \u2014 added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n\ud83d\udccc Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) \u2014 done, session abc12345 (this one)\n\n\ud83d\udc64 You: nothing\n\u23f0 Next: your reply\n",
       "expect": {
         "kind_after_reclassify": "idle",
-        "in_feed": false
+        "in_feed": false,
+        "reapable": false
       },
-      "why": "CONSTRUCTED CONTROL — plain `nothing` is already handled correctly today. Proves the normalization does not over-suppress: a fix that strips too aggressively must not turn `nothing` into a gate."
+      "why": "CONSTRUCTED CONTROL \u2014 plain `nothing` is already handled correctly today. Proves the normalization does not over-suppress: a fix that strips too aggressively must not turn `nothing` into a gate."
     },
     {
       "id": "class3-guard-mentions-non-gate-pane",
@@ -370,12 +384,13 @@
           "event": "UserPromptSubmit"
         }
       },
-      "last_assistant_text": "Applied — one file.\n\n- `50 Knowledge Base/Some Page.md` — added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n📌 Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) — done, session abc12345 (this one)\n\n👤 You: The dev-promotion approval in pane 999 — yours alone; nothing happens until you approve it\n⏰ Next: your reply\n",
+      "last_assistant_text": "Applied \u2014 one file.\n\n- `50 Knowledge Base/Some Page.md` \u2014 added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n\ud83d\udccc Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) \u2014 done, session abc12345 (this one)\n\n\ud83d\udc64 You: The dev-promotion approval in pane 999 \u2014 yours alone; nothing happens until you approve it\n\u23f0 Next: your reply\n",
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": true
+        "in_feed": true,
+        "reapable": false
       },
-      "why": "CONSTRUCTED GUARD — same closer shape as the Class 3 case, but pane 999 carries NO open gate this run (no `peer_pane` key, so `open_panes` is empty). Suppression must NOT fire. This is the over-suppression guard: a closer that merely mentions a pane id — a ticket reference, a log line — must still reach the operator, otherwise the Class 3 rule silently eats real gates."
+      "why": "CONSTRUCTED GUARD \u2014 same closer shape as the Class 3 case, but pane 999 carries NO open gate this run (no `peer_pane` key, so `open_panes` is empty). Suppression must NOT fire. This is the over-suppression guard: a closer that merely mentions a pane id \u2014 a ticket reference, a log line \u2014 must still reach the operator, otherwise the Class 3 rule silently eats real gates."
     },
     {
       "id": "sibling-answered-record-is-not-a-gate",
@@ -386,7 +401,7 @@
         "pane": "9100",
         "cwd": "/tmp/constructed",
         "kind": "question",
-        "detail": "pick — 1. do the thing (recommended) · 2. skip",
+        "detail": "pick \u2014 1. do the thing (recommended) \u00b7 2. skip",
         "ts": 1789826945.0,
         "cleared_by": {
           "event": "UserPromptSubmit"
@@ -396,9 +411,10 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": false
+        "in_feed": false,
+        "reapable": false
       },
-      "why": "CONSTRUCTED — regression bar for [[who-needs-me.py Omits a Pane That Has an Open Gate]]. The sibling defect was file-existence as the gate test: the hook deleted the record on ANY later event, so a background task completing erased an open gate. The fix made `state: answered` the only clearing signal. This case pins it: an answered record stays out of the feed even though its file is present."
+      "why": "CONSTRUCTED \u2014 regression bar for [[who-needs-me.py Omits a Pane That Has an Open Gate]]. The sibling defect was file-existence as the gate test: the hook deleted the record on ANY later event, so a background task completing erased an open gate. The fix made `state: answered` the only clearing signal. This case pins it: an answered record stays out of the feed even though its file is present."
     },
     {
       "id": "sibling-record-without-state-is-still-a-gate",
@@ -409,7 +425,7 @@
         "pane": "9101",
         "cwd": "/tmp/constructed",
         "kind": "question",
-        "detail": "pick — 1. do the thing (recommended) · 2. skip",
+        "detail": "pick \u2014 1. do the thing (recommended) \u00b7 2. skip",
         "ts": 1789826945.0,
         "cleared_by": {
           "event": "UserPromptSubmit"
@@ -419,9 +435,118 @@
       "last_assistant_text": null,
       "expect": {
         "kind_after_reclassify": "question",
-        "in_feed": true
+        "in_feed": true,
+        "reapable": false
       },
-      "why": "CONSTRUCTED — the other half of the sibling bar. A record carrying no `state` field must still read as an open gate: absence of the clearing signal is not the clearing signal. Fail-open for gates, so a hook that has not yet stamped `state` cannot silently hide a real gate."
+      "why": "CONSTRUCTED \u2014 the other half of the sibling bar. A record carrying no `state` field must still read as an open gate: absence of the clearing signal is not the clearing signal. Fail-open for gates, so a hook that has not yet stamped `state` cannot silently hide a real gate."
+    },
+    {
+      "id": "class4-constructed-stale-detail",
+      "class": "class4",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "constructed-9338",
+        "pane": "9338",
+        "cwd": "/tmp/constructed",
+        "kind": "question",
+        "detail": "you run: ! cd ~/.claude && git push origin master",
+        "ts": 1789826945.0,
+        "state": "open"
+      },
+      "last_assistant_text": "\ud83d\udc64 You: approve: /vault-cli:session-close",
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": false,
+        "reapable": true
+      },
+      "anchored_task": {
+        "path": "25 Tasks/constructed.md",
+        "status": "completed",
+        "phase": "done",
+        "open_boxes": 0
+      },
+      "why": "CONSTRUCTED \u2014 the pane-338 shape, measured live 2026-09-19 18:40 and again on pane 254 at 19:04. `detail` is a cleared `you run:` push gate the session had already answered; the transcript's live closer is the close gate. A prefix test on the cached `detail` rejected it before the task file was ever read."
+    },
+    {
+      "id": "class4-constructed-pick-close-form",
+      "class": "class4",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "constructed-9017",
+        "pane": "9017",
+        "cwd": "/tmp/constructed",
+        "kind": "question",
+        "detail": "pick \u2014 1. /vault-cli:sync-progress, then /vault-cli:session-close (recommended) \u00b7 2. /vault-cli:session-close directly",
+        "ts": 1789826945.0,
+        "state": "open"
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": false,
+        "reapable": true
+      },
+      "anchored_task": {
+        "path": "25 Tasks/constructed.md",
+        "status": "completed",
+        "phase": "done",
+        "open_boxes": 0
+      },
+      "why": "CONSTRUCTED \u2014 the pane-17 shape, measured live 2026-09-19 19:00. Both close forms are sanctioned: `vault-cli:sync-progress` Phase 6 emits the `approve:` form, the operator's global DONE rule prescribes the `pick` form. A predicate matching only the first silently ignored every session that followed the second."
+    },
+    {
+      "id": "class4-guard-later-mentions-session-close",
+      "class": "class4",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "constructed-9099",
+        "pane": "9099",
+        "cwd": "/tmp/constructed",
+        "kind": "question",
+        "detail": "later (on the next live call): run /vault-cli:session-close",
+        "ts": 1789826945.0,
+        "state": "open"
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": false,
+        "reapable": false
+      },
+      "anchored_task": {
+        "path": "25 Tasks/constructed.md",
+        "status": "completed",
+        "phase": "done",
+        "open_boxes": 0
+      },
+      "why": "CONSTRUCTED \u2014 the widening trap. A `later (on <trigger>):` deferral that merely mentions session-close must never become reapable: widening a prefix test into a containment test is exactly how a false-negative fix becomes a false positive. No live instance existed on 2026-09-19 (all three live `later (on \u2026)` closers omitted session-close), but `later (on \u2026)` is in routine fleet use, so the collision is a matter of time rather than of possibility."
+    },
+    {
+      "id": "class4-guard-pick-offering-other-work",
+      "class": "class4",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "constructed-9342",
+        "pane": "9342",
+        "cwd": "/tmp/constructed",
+        "kind": "question",
+        "detail": "pick \u2014 1. keep SC3 as designed; label when you can \u00b7 2. rewrite SC3",
+        "ts": 1789826945.0,
+        "state": "open"
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": true,
+        "reapable": false
+      },
+      "anchored_task": {
+        "path": "25 Tasks/constructed.md",
+        "status": "completed",
+        "phase": "done",
+        "open_boxes": 0
+      },
+      "why": "CONSTRUCTED \u2014 a `pick` menu whose first/recommended disposition is other work. Even over a finished task it is not a close gate: the operator is being offered work, not a close. Guards against widening the `pick` match to mere containment of `session-close`."
     }
   ]
 }
