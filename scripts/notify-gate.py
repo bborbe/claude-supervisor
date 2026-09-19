@@ -301,8 +301,17 @@ def load_ledger():
     try:
         with open(STATE_PATH) as handle:
             ledger = json.load(handle)
-    except (FileNotFoundError, ValueError):
+    except FileNotFoundError:
         return {}
+    except ValueError:
+        # A truncated or corrupt ledger self-heals: every gate re-raises once and
+        # the next commit rewrites the file. Reading it as empty is right here.
+        return {}
+    except OSError as error:
+        # An IO/permission failure is a different thing entirely: it will block the
+        # WRITE as well, so reading it as empty would re-raise every gate on every
+        # sweep forever. Loud, not silent.
+        sys.exit(f"notify-gate: cannot read {STATE_PATH}: {error}")
     if not isinstance(ledger, dict):
         return {}
     return {key: entry for key, entry in ledger.items() if valid_entry(entry)}
@@ -320,7 +329,10 @@ def lock_ledger():
     is held.
     """
     ensure_state_dir()
-    handle = open(f"{STATE_PATH}.lock", "w")
+    try:
+        handle = open(f"{STATE_PATH}.lock", "w")
+    except OSError as error:
+        sys.exit(f"notify-gate: cannot open {STATE_PATH}.lock: {error}")
     fcntl.flock(handle, fcntl.LOCK_EX)
     return handle
 
@@ -354,9 +366,14 @@ def commit(ledger, current, updates):
     kept.update(updates)
     ensure_state_dir()
     tmp = f"{STATE_PATH}.tmp"
-    with open(tmp, "w") as handle:
-        json.dump(kept, handle, indent=2, sort_keys=True)
-    os.replace(tmp, STATE_PATH)
+    try:
+        with open(tmp, "w") as handle:
+            json.dump(kept, handle, indent=2, sort_keys=True)
+        os.replace(tmp, STATE_PATH)
+    except OSError as error:
+        # This runs from the `finally` in publish_round, so it cannot be swallowed
+        # -- but it must still read as a fix rather than a traceback.
+        sys.exit(f"notify-gate: cannot write {STATE_PATH}: {error}")
     return kept
 
 
