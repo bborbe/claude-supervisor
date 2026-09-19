@@ -1,5 +1,5 @@
 ---
-description: Read-only fleet roster — every peer Claude Code session, its live status, and its vault task mapping. Zero side effects. Ends with a blocked-by-you jump list (waiting sessions + /jump lines).
+description: Read-only fleet roster — every peer Claude Code session, its live status, and its vault task mapping. Zero side effects. Ends with a blocked-by-you jump list (waiting sessions + /supervisor:jump lines).
 allowed-tools:
   - ListAgents
   - Bash(python3:*)
@@ -94,12 +94,12 @@ After the counts and one-source notes, emit a **blocked-by-you group** so the op
 
    ```text
    ⌛ Blocked by you (N waiting — waiting ≠ confirmed blocked; verify before acting)
-     1. <name> — <age> · jump: /jump <PANEID>
-     2. <name> — <age> · jump: /jump <PANEID>
-     Next blocker to jump to: <name> → /jump <PANEID>
+     1. <name> — <age> · jump: /supervisor:jump <PANEID>
+     2. <name> — <age> · jump: /supervisor:jump <PANEID>
+     Next blocker to jump to: <name> → /supervisor:jump <PANEID>
    ```
 
-   The operator runs `/jump <PANEID>`; **hand over a pane id, never a tab id** — a tab that moves windows is renumbered, so a handed-over `--tab-id` goes dead (measured 2026-09-18: three spawned workers routed as tabs 158/159/160 in window 0 became tabs 163/164/165 in window 2, and `activate-tab --tab-id 159` failed outright with *"could not determine which pane should be active"*, while `activate-pane --pane-id 239` worked immediately). Cross-window raise still needs Accessibility — no `activate-window` in wezterm CLI.
+   The operator runs `/supervisor:jump <PANEID>`; **hand over a pane id, never a tab id** — a tab that moves windows is renumbered, so a handed-over `--tab-id` goes dead (measured 2026-09-18: three spawned workers routed as tabs 158/159/160 in window 0 became tabs 163/164/165 in window 2, and `activate-tab --tab-id 159` failed outright with *"could not determine which pane should be active"*, while `activate-pane --pane-id 239` worked immediately). Cross-window raise still needs Accessibility — no `activate-window` in wezterm CLI.
 
    **Names lead, numbers serve the command.** Every row and every mention leads with the session/task name the operator recognizes; the `[ref]` and tab id are secondary, for the command only — never reference a session by bare number in prose.
 

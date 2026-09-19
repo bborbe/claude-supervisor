@@ -13,11 +13,31 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - feat: publish manager ACTION gates to the notification core, so a gate raised while the operator is away reaches
   their phone instead of waiting unbounded on a TTS line nobody is in the room to hear. New `scripts/notify-gate.py`
   reads the round's gates on stdin, publishes through the configured endpoint, and owns the delivery cadence plus
-  the ledger under `~/.claude/state/` (the bound itself lives in the script). Config sits in
-  `~/.config/claude-supervisor/config.json` beside `spawn.mode`; an absent or incomplete `notify` block exits
-  non-zero rather than skipping silently, because a silently-skipped gate is indistinguishable from a clean sweep.
-  Wired at the existing ACTION-gate moments in `commands/worker-manager.md` and `commands/fleet-manager.md`; only
-  Gate-triage classes C, D and E publish — A and B are the manager's own to clear and stay silent.
+  the per-layer ledger under `~/.claude/state/gate-notifications-<layer>.json` (the bound itself lives in the
+  script). Config sits in `~/.config/claude-supervisor/config.json` beside `spawn.mode`; an absent or incomplete
+  `notify` block exits non-zero rather than skipping silently, because a silently-skipped gate is indistinguishable
+  from a clean sweep. Wired at the existing ACTION-gate moments in `commands/worker-manager.md` and
+  `commands/fleet-manager.md`; only Gate-triage classes C, D and E publish — A and B are the manager's own to clear
+  and stay silent.
+- fix: `open-items.py` now resolves an entry's `--task` against **every** vault in vault-cli's
+  config, and marks an open entry whose task target backs no file as `⚠️ UNRESOLVABLE`. The ledger
+  previously resolved nothing at all — `list` rendered `task` and `resolves on` as free text — so an
+  entry claiming `resolves on: task file status: completed` could not be checked, and a lookup that
+  missed read exactly like a task that was never filed. Measured 2026-09-19 while auditing a live
+  35-entry ledger: a target read as absent was sitting in a **sibling vault**, `status: completed`,
+  while the entry stayed open over a day — a vault-blind lookup, which is the same shape as the
+  defect it was mistaken for. `add` now stores the resolved path and warns (never refuses: the ledger
+  exists to record an ask *before* its task exists); `list` re-resolves on every read, so filing a
+  late task clears the marker without re-adding the entry, and flags **open** entries only — a
+  correctly closed entry with a dead target is history, not a problem, and re-flagging it would make
+  the very entries this explains look broken after they were closed. `--tasks-dir` scopes resolution
+  for a caller that already knows its vault. A path-bearing title (`~/.claude/commands/open.md`) is
+  also matched against its on-disk sanitised form, since `/` cannot appear in a filename and an
+  exact-title lookup would otherwise report "no such file" for a task sitting right there. When no
+  task dir is searchable at all (vault-cli absent, its config unreadable, no `--tasks-dir`), an
+  entry renders `⚠️ UNCHECKED`, not `UNRESOLVABLE` — a check that could not run must not assert a
+  negative, which would flag every entry on such a host and is the same failed-lookup-as-claim
+  shape this change removes.
 - feat: the worker-manager now authors tasks before spawning, and names the split explicitly —
   authoring (sections, subtasks, DoD, SC evidence shapes) moves to the manager; execution planning
   (which file, which mechanism, what the system permits) stays with the worker. A hand-written task
@@ -30,6 +50,20 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   Worker Manager Session runbooks (Personal + Brogrammers) mirrored, and their § Self-improvement
   source-of-truth path corrected — `~/.claude/commands/worker-manager.md` does not exist; the real
   home is this repo's `commands/worker-manager.md`.
+
+## v0.16.0
+
+- fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare
+  `/jump <pane-id>`, which resolves to nothing. The plugin installs as
+  `supervisor@claude-supervisor`, so its commands are namespaced by the install id — the bare
+  form answers `Unknown command` at exactly the moment it is needed, because the handover is
+  the manager's last resort for a worker already blocked on a gate a relay cannot release.
+  32 bare references across the five command files (`jump`, `fleet-status`, `worker-status`,
+  `fleet-manager`, `worker-manager`) now print the namespaced form, including `jump.md`'s own
+  contract sentence — the line that defined the defect. `docs/fleet-surface.md` § How commands
+  are addressed states the rule once, so a plugin or marketplace rename is a one-place edit.
+  Measured 2026-09-19: the operator followed a printed handover, typed `/jump 271`, and got
+  `Unknown command: /jump`.
 
 ## v0.15.3
 
