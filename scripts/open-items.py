@@ -14,6 +14,14 @@ Kinds:
 
 Subcommands: add | answer | note | close | list
 
+`--task` is resolved to a vault file on both write and read. `add` stores the path it
+found (and warns when it finds none); `list` re-resolves and marks any OPEN entry whose
+task target backs no file as `⚠️ UNRESOLVABLE`. An entry claiming `resolves on: task file
+status: completed` while naming a task that does not exist is a close condition that can
+never fire — indistinguishable, until this check existed, from an entry that is simply
+still open. Task dirs come from vault-cli's config, so this ships vault-agnostic;
+`--tasks-dir` overrides for a caller that already knows its vault.
+
 `answer` is for something the OPERATOR said; `note` is for anything else you want to attach
 (evidence, a measurement, progress). Reach for `note` by default.
 
@@ -29,6 +37,7 @@ import datetime
 import glob
 import json
 import os
+import subprocess
 import sys
 import uuid
 
@@ -88,6 +97,114 @@ def session_id(args):
 
 def path_for(sid):
     return os.path.join(ROOT, "%s.json" % sid)
+
+
+_TASK_DIRS = None
+
+
+def filename_candidates(title):
+    """Filename stems a vault task title may live under.
+
+    A title carrying a path (``~/.claude/commands/open.md``) cannot be a filename
+    verbatim: `/` is the one byte a POSIX filename cannot hold, so the vault writes
+    `.` in its place and the two strings stop matching. A resolver that re-derives
+    the file from the human title therefore has to apply the same substitution, or it
+    reports "no such file" for a task sitting right there — a report indistinguishable
+    from the task never having existed.
+
+    This guards a shape, not a repair of an observed one: no live ledger entry carries
+    such a title in its `task` field (the one that does, `efabd66e`, already stores the
+    sanitised form and resolves).
+    """
+    yield title
+    if "/" not in title:
+        return
+    # The substitution is not a plain one-for-one. The observed pair is
+    # `~/.claude/commands/open.md` -> `~.claude.commands.open.md`: the `/.` collapsed
+    # to a single `.` rather than doubling to `..`. The exact rule is inferred from
+    # that one measured filename, so both readings are emitted — a resolver only has
+    # to FIND the file, and a candidate that misses costs one stat().
+    collapsed = title.replace("/.", ".").replace("/", ".")
+    yield collapsed
+    plain = title.replace("/", ".")
+    if plain != collapsed:
+        yield plain
+
+
+def configured_task_dirs():
+    """Every configured vault's task directory, from vault-cli's own config.
+
+    Read from the operator's config rather than hardcoded: this script ships in a
+    plugin that must not depend on any particular vault (docs/fleet-surface.md).
+    vault-cli's config is the single source of truth for where each vault keeps its
+    tasks, so a vault folder rename needs no edit here — the same reasoning
+    fleet-sessions.py's vault_dirs_from_cli() follows.
+
+    Returns [] on any failure. The caller must then report a task-carrying entry as
+    UNRESOLVABLE rather than as fine: "could not check" and "checked, resolves"
+    rendering the same way is the exact defect this file exists to fix.
+    """
+    global _TASK_DIRS
+    if _TASK_DIRS is not None:
+        return _TASK_DIRS
+    dirs = []
+    try:
+        proc = subprocess.run(
+            ["vault-cli", "--output", "json", "config", "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if proc.returncode == 0:
+            for vault in json.loads(proc.stdout):
+                path = os.path.expanduser(vault.get("path") or "")
+                sub = vault.get("tasks_dir")
+                if path and sub:
+                    dirs.append(os.path.join(path, sub))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        dirs = []
+    _TASK_DIRS = dirs
+    return dirs
+
+
+def resolve_task(title, dirs):
+    """Absolute path of the vault file backing `title`, or None."""
+    if not title:
+        return None
+    for name in filename_candidates(title):
+        for directory in dirs:
+            path = os.path.join(directory, name + ".md")
+            if os.path.exists(path):
+                return path
+    return None
+
+
+def target_state(item, dirs):
+    """(state, path) for an entry's task target: none | ok | unresolvable.
+
+    `none` means the entry names no task at all, so it makes no file claim to
+    falsify — an `asked-of-you` resolves on the operator's answer and legitimately
+    has none. `unresolvable` means the entry DOES claim a task and no file backs it,
+    so its `resolves on: task file status: completed` can never fire.
+
+    No live entry is in that state today. The audit that filed one as unreachable had
+    searched a single vault for a task living in a sibling — which is why `dirs`
+    defaults to every configured vault. That the flag is currently silent on real data
+    is the correct result, not an untested path: it fires on a genuinely missing
+    target, and it is what would have made the difference between "this entry is
+    still open" and "this entry can never close" visible at a glance.
+    """
+    title = item.get("task")
+    if not title:
+        return "none", None
+    stored = item.get("task_path")
+    if stored and os.path.exists(stored):
+        return "ok", stored
+    path = resolve_task(title, dirs)
+    if path:
+        return "ok", path
+    return "unresolvable", None
 
 
 def load(sid):
@@ -232,9 +349,21 @@ def find(data, item_id):
     sys.exit("error: no entry %r in session %s" % (item_id, data["session_id"]))
 
 
+def task_dirs_for(args):
+    """Task dirs to resolve against: --tasks-dir when given, else every vault.
+
+    The flag exists for callers that already know their vault (and for tests, which
+    must not depend on the machine's vault-cli config); the default reads every
+    configured vault so the manager call sites need no change.
+    """
+    explicit = [os.path.expanduser(d) for d in (args.tasks_dir or [])]
+    return explicit or configured_task_dirs()
+
+
 def cmd_add(args):
     sid = session_id(args)
     data = load(sid)
+    dirs = task_dirs_for(args)
     item = {
         "id": uuid.uuid4().hex[:8],
         "kind": args.kind,
@@ -243,6 +372,10 @@ def cmd_add(args):
         "resolves_on": args.resolves_on
         or ("the operator's explicit answer" if args.kind == "asked-of-you" else None),
         "task": args.task,
+        # Resolved once, here: `list` then does a file-existence test instead of a
+        # repeated search, and a title the vault sanitised on disk is matched at the
+        # moment the operator can still be told the target is missing.
+        "task_path": resolve_task(args.task, dirs),
         "state": "open",
         "answer": None,
         "answered_at": None,
@@ -254,6 +387,18 @@ def cmd_add(args):
     data["items"].append(item)
     save(data)
     print("added %s [%s] %s" % (item["id"], item["kind"], item["text"]))
+    if args.task and not item["task_path"]:
+        # WARN, never refuse: the ledger exists to record an instruction BEFORE its
+        # task exists — the stretch between being said and becoming a task — so an
+        # unresolvable --task is often correct at add time. Refusing would delete the
+        # ledger's reason to exist; saying nothing would let the entry look resolved
+        # until someone audits it by hand, which is the defect itself.
+        print(
+            "⚠️  --task %r resolves to no file in any configured vault — the entry is "
+            "recorded and will render as UNRESOLVABLE until a task by that title "
+            "exists." % args.task,
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -327,6 +472,7 @@ def cmd_close(args):
 def cmd_list(args):
     sid = session_id(args)
     data = load(sid)
+    dirs = task_dirs_for(args)
     for warning in forked_from(sid, data):
         print("⚠️  FORKED LEDGER: %s" % warning, file=sys.stderr)
     items = data["items"]
@@ -335,22 +481,44 @@ def cmd_list(args):
     elif not args.include_closed:
         items = [i for i in items if i["state"] != "closed"]
     if args.format == "json":
-        print(json.dumps({"session_id": sid, "items": items}, indent=2))
+        rendered = []
+        for item in items:
+            state, path = target_state(item, dirs)
+            row = dict(item)
+            # A three-valued field, not a boolean: a vacuously-true `task_resolved`
+            # on an entry that names no task is the same false-green shape this
+            # script is fixing. "none" is a fact, not a pass.
+            row["task_state"] = state
+            row["task_path"] = path
+            rendered.append(row)
+        print(json.dumps({"session_id": sid, "items": rendered}, indent=2))
         return 0
     if not items:
         print("(none open)")
         return 0
     for item in items:
-        line = "- %s · %s · %s · %s" % (
+        state, path = target_state(item, dirs)
+        # Only an OPEN entry can be flagged. A closed one is terminal — its close
+        # condition no longer gates anything, so an unresolvable target on it is
+        # history, not a problem, and marking it would make the two entries this fix
+        # exists to explain look broken *after* they were correctly closed.
+        flagged = state == "unresolvable" and item["state"] == "open"
+        # The marker rides the summary line, not the detail line: a manager renders
+        # these one per line under "📋 Open with the operator", and the detail line is
+        # exactly what a reader skimming that list does not see.
+        line = "- %s · %s · %s · %s%s" % (
             item["kind"],
             item["text"],
             item["state"],
             age(item["created_at"]),
+            " · ⚠️ UNRESOLVABLE" if flagged else "",
         )
         print(line)
         detail = []
         if item.get("task"):
-            detail.append("task: %s" % item["task"])
+            detail.append(
+                "task: %s%s" % (item["task"], "" if state == "ok" else " (no file)")
+            )
         if item.get("resolves_on"):
             detail.append("resolves on: %s" % item["resolves_on"])
         if item.get("answer"):
@@ -369,6 +537,13 @@ def main():
     parser.add_argument(
         "--session",
         help="session id (default $CLAUDE_CODE_SESSION_ID, falling back to $CLAUDE_SESSION_ID)",
+    )
+    parser.add_argument(
+        "--tasks-dir",
+        action="append",
+        default=None,
+        help="vault task dir to resolve --task against (repeatable; default: every vault "
+        "in vault-cli's config)",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
