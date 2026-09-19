@@ -12,6 +12,7 @@ allowed-tools:
   - Bash(ls:*)
   - Bash(cat:*)
   - Bash(mkdir:*)
+  - Bash(echo:*)
   - Bash(grep:*)
   - Bash(comm:*)
   - Bash(sort:*)
@@ -78,6 +79,15 @@ This command is the **fleet-manager engine** (renamed from `/fleet-sweep` 2026-0
   - **Voice gate:** voice is switched **on automatically** for this session. `~/.claude/hooks/voice-mode.py` writes `{"mode":"on"}` on the prompt that invokes `/fleet-manager`, and **only when no state file exists yet** — so there is nothing to enable by hand, and TTS fires on problems from the first sweep. An explicit `/tts-mcp:off` writes a file holding `off`, which the hook never overwrites: **off always wins**, and re-invoking this command will not resurrect voice over it. `narrate` (a spoken gist of every answer, so the table is read aloud too) is deliberately *not* the default — `/tts-mcp:on` upgrades to it.
 
     **Silence is the default, and the test is an ACTION, not a finding.** Speak only when this round produced something the operator must **do** — an `ACTION NEEDED`, a gate that needs their own keystroke, a decision to make. Everything else stays on screen: a clean round, a no-change tick, the table, the classification, "nothing stalled, no orphans", a summary of what you checked. A manager that narrates its own diligence is the noise this gate exists to prevent. Operator correction, 2026-09-18, after a round summary was spoken: *"it's not about talking if nothing is needed — I want only voice activity by the managers if they have something that I should do."* When in doubt, do not speak: a missed utterance costs one glance at the screen; a routine one costs the operator's attention for a round that had nothing in it.
+
+    **The same test drives the notification, and it goes through the plugin's own publisher — never a vault command.** TTS cannot leave the room, so a gate raised while the operator is away waits unbounded with nothing on the phone. When that gate fires, publish the round's gates in one call:
+
+    ```bash
+    echo '{"gates": [{"owner": "<session id or pane id>", "text": "<the gate line>"}]}' \
+      | python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/notify-gate.py --layer fleet
+    ```
+
+    Call it **once per round with every gate the round raised**, and with `{"gates": []}` on a round that raised none — the empty call is what prunes a cleared gate, so the same gate can raise again later at full cadence. **`--layer fleet` is required and must not be dropped:** the cadence ledger is per layer, because this layer's sweep is a *subset* — it drops every gate a live worker manager owns — and a shared ledger would have this sweep prune those as "cleared", so the worker would see them as new on its next tick and re-notify forever. **Only gates the operator must decide publish** — § Gate triage classes **C, D and E** in [[Worker Manager Session]]; **A and B are the manager's own to clear and stay silent**, and an `ACTION NEEDED` the manager clears itself is precisely the case that must *not* notify. A notification means *"the operator is needed"*, never *"something happened"*. The script owns the cadence, the ledger and the config (its docstring and the README carry the specifics); **surface its message rather than swallowing it** — a silently-skipped gate is indistinguishable from a clean round.
   - **Stop** when the human stops it or no sessions remain in flight.
 
 ## The four read channels — and why there are four

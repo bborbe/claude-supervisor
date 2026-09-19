@@ -37,6 +37,15 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   Measured 2026-09-19: the operator followed a printed handover, typed `/jump 271`, and got
   `Unknown command: /jump`.
 
+- feat: publish manager ACTION gates to the notification core, so a gate raised while the operator is away reaches
+  their phone instead of waiting unbounded on a TTS line nobody is in the room to hear. New `scripts/notify-gate.py`
+  reads the round's gates on stdin, publishes through the configured endpoint, and owns the delivery cadence plus
+  the per-layer ledger under `~/.claude/state/gate-notifications-<layer>.json` (the bound itself lives in the
+  script). Config sits in `~/.config/claude-supervisor/config.json` beside `spawn.mode`; an absent or incomplete
+  `notify` block exits non-zero rather than skipping silently, because a silently-skipped gate is indistinguishable
+  from a clean sweep. Wired at the existing ACTION-gate moments in `commands/worker-manager.md` and
+  `commands/fleet-manager.md`; only Gate-triage classes C, D and E publish — A and B are the manager's own to clear
+  and stay silent.
 - fix: the reapability check now reads the session's *live* closer and accepts both
   sanctioned close-gate forms, so `Reapable` stops reporting `0` while finished sessions
   sit in `Needs you`. Two independent defects, both inside `is_reapable()`. It matched
