@@ -9,22 +9,20 @@ ps-only approach missed.
 Work mapping = vault `claude_session_id:` frontmatter stamps → task/goal title.
 Live-process flag = the session id appears in a running `claude --resume <id>`.
 
-Scope defaults to the CURRENT working directory's project, so a work-vault
-session never surfaces personal sessions unless asked. `--all` widens to every
-project (and drops the time filter); `--vault NAME` scopes somewhere else.
+The fleet is ALWAYS every project — every transcript, newest first, no time
+filter. There is no scope to get wrong, so a sweep can never silently narrow
+and read an out-of-scope live session as gone.
 
-Usage: fleet-sessions.py [--minutes N] [--all] [--vault NAME]
-  --minutes N   only sessions active in the last N min (default 180)
-  --all         no filters at all: every project, every transcript, newest
-                first. Backward compatible — before scoping existed, `--all`
-                already meant "no time filter, all projects".
-  --vault NAME  scope to projects matching NAME instead of the current cwd
-                (case-insensitive substring of the PROJECT label, e.g.
-                `brogrammers`, `personal`, `ws:coding`). Repeatable.
-                Overrides the cwd default; ignored when `--all` is given.
+Usage: fleet-sessions.py [ignored flags]
+  Arguments are accepted and ignored. Before 2026-09-19 the script scoped to
+  the current working directory's project unless `--all` widened it; the
+  operator rejected that default outright — a fleet sweep must always cover
+  every live session on the machine, regardless of which vault created it.
+  The retired flags (`--all`, `--minutes N`, `--vault NAME`) are still
+  tolerated rather than rejected so callers that pass them keep working.
 """
 from __future__ import annotations
-import calendar, json, os, re, subprocess, sys, time
+import calendar, json, os, re, subprocess, time
 from pathlib import Path
 
 HOME = Path.home()
@@ -32,28 +30,12 @@ PROJECTS = HOME / ".claude" / "projects"
 OBSIDIAN = Path(os.environ.get("OBSIDIAN_DIR", HOME / "Documents" / "Obsidian"))
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
-def parse_args(argv):
-    minutes, show_all, vaults = 180, False, []
-    i = 0
-    while i < len(argv):
-        if argv[i] == "--all": show_all = True
-        elif argv[i] == "--minutes" and i + 1 < len(argv):
-            minutes = int(argv[i + 1]); i += 1
-        elif argv[i] == "--vault" and i + 1 < len(argv):
-            vaults.append(argv[i + 1].lower()); i += 1
-        i += 1
-    return minutes, show_all, vaults
-
-def cwd_scope() -> str | None:
-    """PROJECT label of the current working directory, or None if unmappable.
-
-    Claude Code stores transcripts under ~/.claude/projects/<escaped-cwd>/, so
-    the cwd maps onto the same label space the rows use.
-    """
-    try:
-        return project_label(str(Path.cwd()).replace("/", "-")).lower()
-    except Exception:
-        return None
+# Retired scoping flags — `--all`, `--minutes N` and `--vault NAME` are accepted
+# and ignored (removed 2026-09-19). They used to narrow the roster to a single
+# project and a time window; the fleet is now always every project, newest
+# first, with no time filter, so there is nothing left for them to select.
+# Tolerated rather than rejected so callers that still pass them keep working —
+# the Fleet Manager Session runbook passes `--all`.
 
 def last_message_ts(jsonl: Path) -> float:
     """Timestamp of the last transcript line; fall back to file mtime."""
@@ -163,15 +145,6 @@ def human_age(sec: float) -> str:
     return f"{int(sec/86400)}d ago"
 
 def main():
-    minutes, show_all, vaults = parse_args(sys.argv[1:])
-    # Default scope = current working directory. --all clears it; --vault replaces it.
-    implicit = False
-    if show_all:
-        vaults = []
-    elif not vaults:
-        c = cwd_scope()
-        if c:
-            vaults, implicit = [c], True
     now = time.time()
     if not PROJECTS.is_dir():
         print("no ~/.claude/projects"); return
@@ -183,11 +156,7 @@ def main():
         sid = jsonl.stem
         if not UUID_RE.fullmatch(sid): continue
         proj = project_label(jsonl.parent.name)
-        if vaults and not any(v in proj.lower() for v in vaults): continue
-        ts = last_message_ts(jsonl)
-        age = now - ts
-        if not show_all and sid not in resumed and age > minutes * 60: continue
-        rows.append((age, proj, sid))
+        rows.append((now - last_message_ts(jsonl), proj, sid))
 
     rows.sort(key=lambda r: r[0])
     print(f"{'LAST-ACTIVE':<12} {'PROJECT':<12} {'LIVE':<4} {'SESSION':<10} WORKING ON")
@@ -197,12 +166,7 @@ def main():
         working = titles[0] if titles else "—"
         flag = "●" if sid in resumed else " "
         print(f"{human_age(age):<12} {proj:<12} {flag:<4} {sid[:8]:<10} {working}")
-    if vaults:
-        scope = f" · scope: {', '.join(vaults)}"
-        scope += " (cwd default — pass --all for every project)" if implicit else ""
-    else:
-        scope = " · scope: all projects"
-    print(f"\n{proc_count} live `claude` sessions (ps, machine-wide){scope} · "
+    print(f"\n{proc_count} live `claude` sessions (ps, machine-wide) · scope: all projects · "
           f"● = confirmed via --resume · "
           f"age = last transcript message (liveness proxy; <~5m ≈ active, hours ≈ stale)")
 

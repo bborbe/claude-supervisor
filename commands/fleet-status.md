@@ -6,7 +6,7 @@ allowed-tools:
   - Bash(wezterm cli list:*)
   - Bash(date:*)
   - Read
-argument-hint: [--all] [--vault NAME]
+argument-hint: (no args)
 ---
 
 Answer one question: **what is everyone else doing right now?**
@@ -18,9 +18,9 @@ This is NOT `/and`. `/and` = what should **I** do next in this session; `/fleet-
 Pure snapshot, no mutation, no messages sent. Safe to run as often as you like.
 
 1. `ListAgents` — every other Claude Code session on this machine, as `name [ref] · mode · status · started`. **The name is the task the session is on**; the status is live.
-2. `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-sessions.py --minutes 180` — vault-side mapping: `claude_session_id:` frontmatter stamps → task/goal title, across every vault. Use `--all` if the roster from step 1 includes a session `fleet-sessions.py`'s default window missed.
+2. `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-sessions.py` — vault-side mapping: `claude_session_id:` frontmatter stamps → task/goal title, across every vault. Always every project, newest first, with no time filter — there is no scope to pass and no window to widen, so step 1 and step 2 are both machine-wide and always agree.
 
-   **Scoping — default is the current working directory.** `fleet-sessions.py` now scopes to the cwd's project unless told otherwise, so a work-vault session never surfaces personal sessions. Pass `--all` through when the caller asks for the whole machine (it drops the project scope *and* the time filter). If the caller passed `--vault NAME` (e.g. `brogrammers`, `personal`, `ws:coding`), forward it: `fleet-sessions.py --minutes 180 --vault NAME`. The match is a case-insensitive substring of the PROJECT label, which is derived from the session's escaped working directory (`~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`). The flag is repeatable. ⚠️ **`ListAgents` cannot be scoped** — step 1 stays machine-wide, so when a scope is active, filter the combined table down to the sessions `fleet-sessions.py` returned, and say in the output that the roster was scoped and which peers were excluded by it. Never infer a peer's directory from its `ListAgents` name: names are reused across days and `[ref]` is not a session-id prefix.
+   Never infer a peer's directory from its `ListAgents` name: names are reused across days and `[ref]` is not a session-id prefix.
 3. **Combine them into one table**, one row per peer — rendered **exactly per Fleet Manager Session runbook (per-vault) § Sweep output — the fleet table**. That section is the single source for the frame (a timestamped marker line, then a box indented two spaces under it), the columns, the widths and the icons, and this command must never restate them. Render with `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/box-table.py`; never hand-draw the box. `/fleet-manager` reads the same section, so both commands render identically by construction — the same arrangement the worker pair has against [[Worker Manager Session]] § Sweep output.
 
    **No id column.** Key on the session id internally; the operator sees the name.
@@ -78,7 +78,7 @@ From the Claude Code cross-session messaging notes (operator's vault; not shippe
 
 ## Output shape
 
-Lead with the box rendered per § Sweep output, indented two spaces, under a lead line of its own — `/fleet-status` is a snapshot rather than a tick, so its lead line carries the timestamp and the scope but **no `✓` marker**. Then, tersely:
+Lead with the box rendered per § Sweep output, indented two spaces, under a lead line of its own — `/fleet-status` is a snapshot rather than a tick, so its lead line carries the timestamp but **no `✓` marker**. Then, tersely:
 
 - Count by status (`N busy, N shell, N waiting, N idle, N blank`).
 - Flag any row present in `ListAgents` but absent from `fleet-sessions.py` (no vault task stamp) or vice versa (stamped task, no live session) — these are not errors, just note them.

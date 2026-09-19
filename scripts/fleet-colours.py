@@ -22,18 +22,23 @@ tty of a live `claude` process in `ps`, keyed on the registry's `pid`. Panes are
 NOT matched on their title glyph (an animation frame that changes with session
 state) nor on cwd (every vault session shares one, so cwd collides).
 
-Usage: fleet-colours.py [--all] [--vault NAME] [--session ID] [--json]
-  --all         every live session, no project scope. This is the fleet census.
-  --vault NAME  scope to projects matching NAME (case-insensitive substring of
-                the PROJECT label). Repeatable. Defaults to the cwd's project.
+The census is ALWAYS every live session — there is no project scope to get
+wrong, so a count can never silently undercount the fleet.
+
+Usage: fleet-colours.py [--session ID] [--json]
   --session ID  resolve one session only (full id or unique prefix); prints its
                 colour and exits 0, for scripting.
   --json        machine-readable output instead of the table.
 
+The retired scoping flags (`--all`, `--vault NAME`) are accepted and ignored
+(removed 2026-09-19). They used to narrow the census to one project, which
+silently undercounted the fleet; tolerating them rather than rejecting keeps
+callers that still pass them working.
+
 Exit codes: 0 success · 1 a --session id that does not resolve · 2 no registry.
 """
 from __future__ import annotations
-import json, os, subprocess, sys
+import json, subprocess, sys
 from pathlib import Path
 
 HOME = Path.home()
@@ -50,15 +55,18 @@ UNKNOWN = "unknown"
 
 
 def parse_args(argv):
-    show_all, vaults, session, as_json = False, [], None, False
+    session, as_json = None, False
     i = 0
     while i < len(argv):
         a = argv[i]
+        # `--all` and `--vault NAME` are retired scoping flags: accepted and
+        # ignored (2026-09-19). The census is always every live session, so
+        # there is nothing left for them to select. Tolerated rather than
+        # rejected so callers that still pass them keep working.
         if a == "--all":
-            show_all = True
+            pass
         elif a == "--vault" and i + 1 < len(argv):
             i += 1
-            vaults.append(argv[i].lower())
         elif a == "--session" and i + 1 < len(argv):
             i += 1
             session = argv[i]
@@ -68,7 +76,7 @@ def parse_args(argv):
             print(f"unknown argument: {a}", file=sys.stderr)
             return None
         i += 1
-    return show_all, vaults, session, as_json
+    return session, as_json
 
 
 def registry() -> list[dict]:
@@ -158,7 +166,7 @@ def project_label(cwd: str) -> str:
     return "/".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else "—")
 
 
-def census(show_all: bool, vaults: list[str], session: str | None) -> list[dict]:
+def census(session: str | None) -> list[dict]:
     ttys = pid_ttys()
     panes = pane_titles()
     rows = []
@@ -167,8 +175,6 @@ def census(show_all: bool, vaults: list[str], session: str | None) -> list[dict]
         if session and not sid.startswith(session):
             continue
         label = project_label(rec["cwd"])
-        if vaults and not show_all and not any(v in label.lower() for v in vaults):
-            continue
         transcript = find_transcript(sid)
         colour = UNKNOWN if transcript is None else (last_colour(transcript) or DEFAULT)
         # pid → tty → pane. The registry carries the pid; wezterm exposes the tty.
@@ -220,13 +226,13 @@ def main() -> int:
     parsed = parse_args(sys.argv[1:])
     if parsed is None:
         return 2
-    show_all, vaults, session, as_json = parsed
+    session, as_json = parsed
     if not SESSIONS.is_dir():
         print("no ~/.claude/sessions", file=sys.stderr)
         return 2
 
     if session:
-        rows = census(True, [], session)
+        rows = census(session)
         if not rows:
             print(f"no live session matching {session!r}", file=sys.stderr)
             return 1
@@ -237,9 +243,7 @@ def main() -> int:
                 print(r["colour"])
         return 0
 
-    if not show_all and not vaults:
-        vaults = [Path(os.getcwd()).name.lower()]
-    rows = census(show_all, vaults, None)
+    rows = census(None)
     if as_json:
         counts = counts_of(rows)
         print(json.dumps({

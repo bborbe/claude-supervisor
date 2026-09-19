@@ -99,14 +99,14 @@ def resolve_fleet_sessions(explicit=None):
 def live_ids(script):
     """8-char session ids with a transcript seen recently.
 
-    Delegates to fleet-sessions.py rather than reimplementing the probe. Keep
-    `--all`: narrowing the scope makes a live session in another project read
-    as dead.
+    Delegates to fleet-sessions.py rather than reimplementing the probe. No
+    scope flag is passed: the sweep is machine-wide by construction, so there
+    is no scope to widen.
     """
     if not script:
         return None
     proc = subprocess.run(
-        ["python3", script, "--all"], capture_output=True, text=True, check=False
+        ["python3", script], capture_output=True, text=True, check=False
     )
     if proc.returncode != 0:
         print(f"error: {script} exited {proc.returncode}", file=sys.stderr)
