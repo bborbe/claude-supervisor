@@ -376,6 +376,18 @@ class Config(_Harness):
             "must be an object keyed by env", self.message({"endpoints": ["a"]})
         )
 
+    def test_env_defaults_to_dev_when_absent(self):
+        env, _, _ = self.endpoint_for(
+            {"endpoints": {"dev": {"baseUrl": "http://x", "teamvaultKey": "k"}}}
+        )
+        self.assertEqual(env, "dev")
+
+    def test_an_unknown_type_is_passed_through_rather_than_second_guessed(self):
+        """The core validates the type and rejects an unknown one with its own
+        message; a local allowlist here would silently drift from the core's."""
+        _, _, notification_type = self.endpoint_for(self.complete(type="made-up"))
+        self.assertEqual(notification_type, "made-up")
+
     def test_a_null_type_falls_back_to_the_default(self):
         _, _, notification_type = self.endpoint_for(self.complete(type=None))
         self.assertEqual(notification_type, "pending-approval")

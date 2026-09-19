@@ -145,6 +145,11 @@ def load_config():
         return {}
     except ValueError as error:
         sys.exit(f"notify-gate: {CONFIG_PATH} is not valid JSON: {error}")
+    except OSError as error:
+        # An unreadable config is a real failure the manager must see as a fix, not
+        # as a traceback -- FileNotFoundError is handled above, so this is the
+        # permission/IO class the docstring's "fails loudly" promise also covers.
+        sys.exit(f"notify-gate: cannot read {CONFIG_PATH}: {error}")
 
 
 def resolve_endpoint(config):
@@ -328,8 +333,12 @@ def ensure_state_dir():
     rather than no-opping.
     """
     directory = os.path.dirname(STATE_PATH)
-    if directory:
+    if not directory:
+        return
+    try:
         os.makedirs(directory, exist_ok=True)
+    except OSError as error:
+        sys.exit(f"notify-gate: cannot create {directory}: {error}")
 
 
 def commit(ledger, current, updates):
