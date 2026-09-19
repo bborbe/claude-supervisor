@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.17.1
 
 - fix: the gate notification puts the gate's own text on a line of its own, so the command inside it survives a
   copy. A phone wraps a long line mid-argument, and an operator copying the recommended command out of a delivered
