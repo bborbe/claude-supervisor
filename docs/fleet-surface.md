@@ -18,14 +18,39 @@ copy diverged.
 over keystrokes:
 
 ```
-mcp__supervisor__spawn_agent(prompt="...", cwd="/path", label="alpha")                     # TAB worker
-mcp__supervisor__spawn_agent(prompt="...", cwd="/path", label="alpha", interactive=false)  # headless
+mcp__supervisor__spawn_agent(prompt="...", cwd="/path", label="alpha")
 ```
 
-⚠️ **`interactive` defaults to `true`** (`server/supervisor.mjs`, `spawnAgent`). The first
-call is a real `claude` in a wezterm tab and **its prompts are answered in that tab** — the
-manager is not supervising it. Only the second, with `interactive:false` passed explicitly,
-is headless and parks prompts for the manager.
+⚠️ **`interactive` is resolved from the fleet's config — omit it.** With no argument the
+server resolves, highest first: `SUPERVISOR_SPAWN_MODE` → `spawn.mode` in
+`~/.config/claude-supervisor/config.json` → its built-in `interactive`. **Do not pass it on
+a fresh spawn.** Passing it is what made the config unreachable before 2026-09-18, when each
+manager command file hardcoded `interactive=false`, so changing the fleet's mode meant
+editing N instruction files and course-correcting every manager already running (measured
+that morning: 3 workers killed, 7 more found under two other managers). The file is read
+once at server start — restart the MCP server after editing it. The spawn response reports
+`mode_source` (`argument`/`env`/`config`/`default`) when you need to know which source
+decided. Pass `interactive` only as a per-call override: `true` to watch one worker's screen
+live, `false` to force one headless worker while the fleet runs in tabs.
+
+**Fresh start — the worker creates its own session.** Spawn with the work command as the
+`prompt` argument and **no pre-minted `session_id`**:
+
+```
+mcp__supervisor__spawn_agent(prompt='/vault-cli:work-on-task "<task>"', cwd="<dir>", label="<task>")
+```
+
+The worker runs its own planning turn, in its own pane. **Never mint the session first:**
+`vault-cli task work-on "<task>" --mode headless` runs that turn inside the *caller's*
+session — blocking it for minutes — and the `session_id` it returns is the value the very
+next documented step consumes. Measured 2026-09-19: exit 124, an empty output file, and pids
+still running after the caller had given up. With `interactive` omitted the config decides,
+and on the fleet's current setting the worker lands in a real tab, so its progress is
+visible.
+
+**A fresh start needs no `session_id`; a resume cannot work without one.** A resume continues
+an existing conversation, so it must name which one; a fresh start has no prior conversation
+to name, and the worker mints its own. That asymmetry is why the two paths diverge below.
 
 `policy` is headless-only, which is why a tab-producing call site never carries it.
 
