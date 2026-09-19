@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.15.0
 
 - feat: adds `scripts/fleet-colours.py`, a census of what colour each live session is. Colour is
   the operator's attention-cost ranking — green/blue/cyan cost a keystroke per step, pink is an
