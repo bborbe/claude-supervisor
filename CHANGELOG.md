@@ -8,6 +8,34 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: managers now **reap finished sessions** instead of leaving them parked. `/fleet-manager`'s
+  Step 3 classified `idle` + all-boxes-ticked as `done → nothing`, so a session whose work was
+  complete sat waiting on an operator whose only legal move was the obvious one — measured
+  2026-09-19, **four sessions** parked simultaneously on `approve: /vault-cli:session-close`,
+  every one over a task reading `status: completed`, `phase: done`, zero open boxes. New
+  `/fleet-manager` § Step 3b and a matching `/worker-manager` sweep bullet: verify the three
+  facts against disk, message the worker the evidence non-authorisingly, and report the set to
+  the operator as **self-closeable** — one line, never N approvals.
+  - Encodes what a manager provably **cannot** do here, so the rule is not written against a
+    capability that does not exist: `sync-progress` and `session-close` read the parent
+    conversation, and every route into a worker's pane is refused — `[Remote Shell Writes]`,
+    `[Auto-Mode Bypass]`, classifier-blocked `answer_permission(..., allow)`, and
+    `[Self-Modification]`. (`answer_permission(..., deny)` passes; the gate is one-directional.)
+  - Guards the two ways the check misfires: **deliberately-open Self-Review boxes** mean the task
+    is not complete and the worker is right to park, and **session colour is not machine-readable**
+    (`wezterm cli list --format json` exposes 19 pane fields, none a colour) so it can never be the
+    detection signal.
+
+- fix: restore the attention-feed staleness rule to `/fleet-manager`, lost when the migration
+  deleted the pre-plugin `commands/fleet-manager.md`. **The feed answers "was a gate raised",
+  never "is a gate open"** — a record is overwritten only by that session's next tool call, so a
+  cleared gate lingers and a fresh one is absent. Cost when unrecorded: one stale permission
+  prompt reported **four times in one day**. Extended to cover the doorbell `Monitor` over the
+  same feed, which inherits the limit exactly: a `CLEARED` event means the entry left the feed,
+  which a session going *busy* produces just as readily as a gate being answered.
+
 ## v0.13.3
 
 - fix: the fleet-manager orphan check seeds from the ownership **declaration** instead of a flag.

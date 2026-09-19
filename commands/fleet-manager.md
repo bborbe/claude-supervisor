@@ -86,6 +86,8 @@ A round reads exactly four channels, and **none of them replaces another**. Coll
 - **The roster cannot replace the feed.** `ListAgents` shows `waiting` as a transient status, not *what the session is waiting for*; only the feed carries the gate text.
 - **The feed is the primary blocked-session channel.** Read it before building the escalation batch — it is ~66× cheaper than the roster dump and it is the only channel that names the gate.
 - **The context channel is the auto-compaction trigger.** No other channel sees a session *filling up* — the roster shows status, not window usage, and the feed only lists sessions already blocked. The reader joins the statusline's per-session `context_window` to the attention state, so a blocked or in-tool session never surfaces as a candidate.
+- ⚠️ **The attention feed answers "was a gate raised", never "is a gate open."** A record is written when the gate is raised and is overwritten only by that session's *next tool call* — so a gate the worker already cleared still sits in the file, and a fresh gate that arrived after the last write is absent. `who-needs-me.md` is the one consumer that does not document this. Read the pane (`wezterm cli get-text --pane-id <N>`) before reporting any gate as open. Cost when unrecorded: a stale permission prompt on pane 41 was reported **four times in one day**.
+- ⚠️ **A doorbell `Monitor` over this feed inherits that limit exactly.** A `CLEARED` event means the entry left the feed, and a session going *busy* produces that just as readily as a gate being answered. Measured 2026-09-19: eleven `CLEARED` events arrived in one tick and were real, but an earlier single `CLEARED` was emitted while the underlying condition had not changed at all. **Verify before reporting a clear as progress** — read the pane, or confirm the feed's total count moved. The same asymmetry as above applies: reporting a gate still open costs one wasted look, reporting it resolved when it is not means nobody comes back to it.
 
 ⚠️ **Never let an uncompacted roster dump reach your context.** A wide `fleet-sessions.py` sweep is 1992 lines raw; every invocation in this command must pipe through `grep -oE '\b[0-9a-f]{8}\b'` (or filter to one id) before you read it. The 8-char id is all the orphan check needs; the rest of the table is discarded. The `--all` scope **must stay** on the orphan/liveness check — the live set is derived from it, so narrowing the *scope* makes a live session in another project read as *dead* and emits false orphan rows. Fix the cost by compacting the output, never by narrowing the scope.
 
@@ -265,7 +267,7 @@ Then report the collision to Ben in the Step 5 batch as its own group. **Never d
 | status changed since last sweep | progressing | leave alone |
 | `busy`/`shell` **and** vault task file mtime unchanged for ≥2 consecutive sweeps (`stall_count >= 2` after this sweep's update) | **stalled** | investigate |
 | `idle` **and** task file has open `[ ]`/`[/]` boxes | parked, may need the operator | candidate to ask |
-| `idle` **and** task file's boxes are all `[x]` / task shows complete | done | nothing |
+| `idle` **and** task file's boxes are all `[x]` / task shows complete | **finished — reap it** | § Step 3b |
 
 Plus one class that comes from Step 2b rather than from any live session:
 
@@ -275,6 +277,36 @@ Plus one class that comes from Step 2b rather than from any live session:
 | any one of those fails — notably a parked task (future `defer_date`), a fresh session (absent from `●` while alive), or a file older than the 7-day window | **owned**, **parked**, or **backlog** | no row; never spawn onto it |
 
 No prior snapshot, or no `task_file` resolved for a session → not enough history/data to classify as stalled; classify as "unclassified — insufficient data" and leave alone (never guess a status you can't back with a diff).
+
+## Step 3b — Reap the finished: a done session is not "nothing to do"
+
+A session whose work is complete does not close itself. It sits `idle`, or it parks on `approve: /vault-cli:session-close` and waits — and the operator must open it to discover that the only remaining move is the obvious one. Measured 2026-09-19: **four sessions** were parked on that exact gate simultaneously, every one over a task that read `status: completed`, `phase: done`, zero open boxes. That row used to classify as `done → nothing`, which is how they accumulated.
+
+**Verify against disk, never against a colour and never against the session's own claim.**
+
+```bash
+grep -m1 '^status:' "<task file>"                               # want: completed
+grep -m1 '^phase:'  "<task file>"                               # want: done
+grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<task file>"    # want: 0
+```
+
+All three, read **this round**. A session reporting itself finished is a claim; the file is the fact.
+
+⚠️ **Deliberately-open boxes are not an oversight — they are the worker refusing to write the operator's words.** A task left at `0 open` except two Self-Review reflection boxes is *not* complete, and the worker parking on it is behaving correctly. The `grep -c` above is what distinguishes the two cases; never tick a box to make the gate pass.
+
+⚠️ **The colour is not a signal here.** Session colours mean role (pink agents, orange managers, green/blue/cyan operator-driven) with `purple` as the terminal marker, and a purple chip does mean finished — but **no colour is machine-readable**: `wezterm cli list --format json` exposes 19 pane fields and none is a colour, and the session registry carries none either (checked 2026-09-19, 96 records). Colour is a cue for the human scanning tabs. Read the task file.
+
+**What the manager may do, and what it provably cannot.**
+
+A manager **cannot** close a worker's session. `/vault-cli:sync-progress` and `/vault-cli:session-close` both read the parent conversation, which is invisible from here, so the only route would be driving the worker's pane — and every such route is refused. Measured 2026-09-19, four distinct refusals: `wezterm cli send-text` into any pane → `[Remote Shell Writes]`; Enter into a permission modal → `[Auto-Mode Bypass]`; `mcp__supervisor__answer_permission(..., allow)` → blocked by classifier; editing own permission settings → `[Self-Modification]`. (`answer_permission(..., deny)` passes freely — the gate is one-directional by design.) **Do not design a reaping rule that depends on typing into a worker.**
+
+So the manager's move is to **inform**, which is read-only context and needs no approval:
+
+1. Verify the three disk facts above.
+2. `SendMessage` the worker with the evidence, explicitly non-authorising — it states the disk state, names that the operator has *not* answered, and leaves the decision with the session. Anything stronger is laundering: a manager asserting that a gate is cleared, when only the operator can clear it, is the same failure the relay rules already forbid.
+3. Report it in Step 5 as **self-closeable**, not as a decision for the operator — the distinction is the whole point. An operator scanning the batch should see "these N are finished and know it" as one line, never N separate approvals.
+
+Where a worker manager owns the session, it reaps its own — this layer defers, same split as `stalled`.
 
 ## Step 4 — Act, within the autonomy boundary
 
