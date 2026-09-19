@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.18.0
 
 - feat: `agent_status` reads a tab worker's state from disk, so a manager no longer needs
   `wezterm cli get-text` to learn what a worker said or whether it is waiting. `last_message`
