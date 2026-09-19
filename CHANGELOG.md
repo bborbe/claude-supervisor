@@ -10,6 +10,17 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: name `~/.claude/sessions/*.json` as the **authoritative liveness store** in `/fleet-manager`,
+  and forbid writing a session stamp from a spawn-ledger reading. The ledger never closes when a
+  worker's pane dies, so it does not go quiet when wrong — it asserts the opposite. Measured
+  2026-09-19: a manager read a dead id as `running` from the ledger and **repointed a task's
+  `claude_session_id` to it**, pointing a live task at a dead session — the exact orphaning the
+  repoint was meant to prevent, inverted. The registry deletes an entry on exit, which is the
+  property no other channel has (`pgrep -f` is argv-only, `ListAgents` omits headless workers, a
+  pane can outlive its session). Also records the `/branch` case that defeats id-keyed probes
+  outright: a branch holds a new id while sharing the parent's task file, so every probe keyed on
+  the original id calls a working session dead.
+
 - feat: managers now **reap finished sessions** instead of leaving them parked. `/fleet-manager`'s
   Step 3 classified `idle` + all-boxes-ticked as `done → nothing`, so a session whose work was
   complete sat waiting on an operator whose only legal move was the obvious one — measured
