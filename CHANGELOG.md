@@ -8,6 +8,19 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `/fleet-manager` reports the green/cyan colour backlog in its sweep, and its Step 3b no
+  longer claims colour is unreadable. That line read *"**no colour is machine-readable**:
+  `wezterm cli list --format json` exposes 19 pane fields and none is a colour, and the session
+  registry carries none either"* — an unmeasured negative: the two stores checked are exactly the
+  two that lack a colour key, and the transcript, which carries one, was never checked. The guard
+  the line exists for still holds and is restated: a `purple` chip means the operator *marked* a
+  session finished, which is a claim, not the fact the done-check needs. The pane-field count is
+  corrected to 18. The new sweep line is the roster's only **quantitative** measure — every other
+  line in that output is a per-session judgement — and it is read `--all`, because a narrower
+  scope silently undercounts the fleet.
+
 ## v0.15.0
 
 - feat: adds `scripts/fleet-colours.py`, a census of what colour each live session is. Colour is
