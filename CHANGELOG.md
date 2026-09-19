@@ -8,6 +8,16 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`
+  argument, so the worker creates its own session in its own pane. Minting the session first
+  ran a full planning turn inside the manager's own session — blocking it for minutes and
+  making the manager do the worker's work. `docs/fleet-surface.md` § Spawn a worker now
+  carries the fresh-start path, and resolves `interactive` from the fleet's config file
+  (`SUPERVISOR_SPAWN_MODE` → `spawn.mode` → built-in) instead of presenting the built-in code
+  default as the answer.
+
 ## v0.13.3
 
 - fix: the fleet-manager orphan check seeds from the ownership **declaration** instead of a flag.
