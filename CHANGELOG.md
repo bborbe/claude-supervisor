@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.16.0
+## Unreleased
 
 - fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare
   `/jump <pane-id>`, which resolves to nothing. The plugin installs as
@@ -21,6 +21,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   are addressed states the rule once, so a plugin or marketplace rename is a one-place edit.
   Measured 2026-09-19: the operator followed a printed handover, typed `/jump 271`, and got
   `Unknown command: /jump`.
+
+## v0.16.0
 
 - feat: the worker-manager now authors tasks before spawning, and names the split explicitly —
   authoring (sections, subtasks, DoD, SC evidence shapes) moves to the manager; execution planning
