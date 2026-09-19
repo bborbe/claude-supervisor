@@ -10,6 +10,18 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare
+  `/jump <pane-id>`, which resolves to nothing. The plugin installs as
+  `supervisor@claude-supervisor`, so its commands are namespaced by the install id — the bare
+  form answers `Unknown command` at exactly the moment it is needed, because the handover is
+  the manager's last resort for a worker already blocked on a gate a relay cannot release.
+  32 bare references across the five command files (`jump`, `fleet-status`, `worker-status`,
+  `fleet-manager`, `worker-manager`) now print the namespaced form, including `jump.md`'s own
+  contract sentence — the line that defined the defect. `docs/fleet-surface.md` § How commands
+  are addressed states the rule once, so a plugin or marketplace rename is a one-place edit.
+  Measured 2026-09-19: the operator followed a printed handover, typed `/jump 271`, and got
+  `Unknown command: /jump`.
+
 - feat: the worker-manager now authors tasks before spawning, and names the split explicitly —
   authoring (sections, subtasks, DoD, SC evidence shapes) moves to the manager; execution planning
   (which file, which mechanism, what the system permits) stays with the worker. A hand-written task

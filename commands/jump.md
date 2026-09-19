@@ -1,5 +1,5 @@
 ---
-description: Jump to a Claude Code session's WezTerm tab. Bare = newest session needing attention; or by tab id, tab:<N>, pane:<N>, or a title substring. The executor for the `/jump <pane-id>` lines that /fleet-status, /fleet-manager, /worker-status and /worker-manager print but never run — those commands are read-only by contract and must never mutate. **Managers always hand over `/jump <pane-id>`, never a raw `wezterm cli activate-tab` line.**
+description: Jump to a Claude Code session's WezTerm tab. Bare = newest session needing attention; or by tab id, tab:<N>, pane:<N>, or a title substring. The executor for the `/supervisor:jump <pane-id>` lines that the fleet-status, fleet-manager, worker-status and worker-manager commands print but never run — those commands are read-only by contract and must never mutate. **Managers always hand over `/supervisor:jump <pane-id>`, never a raw `wezterm cli activate-tab` line.**
 allowed-tools:
   - Bash(python3:*)
 argument-hint: "[<tab-id> | tab:<N> | pane:<N> | <title substring>] [--oldest] [--list] [--dry-run]"
@@ -17,14 +17,14 @@ Print the output verbatim. Do not add analysis, do not run `ListAgents`, do not 
 
 | Invocation | Effect |
 |---|---|
-| `/jump` | jump to the **newest** session needing attention (permission prompt or open question) |
-| `/jump --oldest` | same queue, oldest first |
-| `/jump --list` | print the attention queue, jump nothing — the `→` marks what bare `/jump` would pick |
-| `/jump 5` | activate 5 — the tab if tab 5 exists, else pane 5 |
-| `/jump tab:5` | force tab 5 past the ambiguity check |
-| `/jump pane:5` | activate pane 5 (more precise — a tab can hold split panes) |
-| `/jump "Complete Kafka Restore"` | case-insensitive substring match on tab titles |
-| `/jump --dry-run …` | print the resolved target, activate nothing |
+| `/supervisor:jump` | jump to the **newest** session needing attention (permission prompt or open question) |
+| `/supervisor:jump --oldest` | same queue, oldest first |
+| `/supervisor:jump --list` | print the attention queue, jump nothing — the `→` marks what bare `/supervisor:jump` would pick |
+| `/supervisor:jump 5` | activate 5 — the tab if tab 5 exists, else pane 5 |
+| `/supervisor:jump tab:5` | force tab 5 past the ambiguity check |
+| `/supervisor:jump pane:5` | activate pane 5 (more precise — a tab can hold split panes) |
+| `/supervisor:jump "Complete Kafka Restore"` | case-insensitive substring match on tab titles |
+| `/supervisor:jump --dry-run …` | print the resolved target, activate nothing |
 
 ## Why newest-first
 
