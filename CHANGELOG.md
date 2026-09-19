@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.17.0
 
 - fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare
   `/jump <pane-id>`, which resolves to nothing. The plugin installs as
