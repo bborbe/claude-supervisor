@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.15.3
 
 - fix: stop `who-needs-me.py` listing parked waits, entity-padded closers, peer-gate restatements
   and completed-task close gates under `Needs you`. All four entered through one
