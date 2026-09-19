@@ -24,7 +24,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   the very entries this explains look broken after they were closed. `--tasks-dir` scopes resolution
   for a caller that already knows its vault. A path-bearing title (`~/.claude/commands/open.md`) is
   also matched against its on-disk sanitised form, since `/` cannot appear in a filename and an
-  exact-title lookup would otherwise report "no such file" for a task sitting right there.
+  exact-title lookup would otherwise report "no such file" for a task sitting right there. When no
+  task dir is searchable at all (vault-cli absent, its config unreadable, no `--tasks-dir`), an
+  entry renders `⚠️ UNCHECKED`, not `UNRESOLVABLE` — a check that could not run must not assert a
+  negative, which would flag every entry on such a host and is the same failed-lookup-as-claim
+  shape this change removes.
 
 ## v0.16.0
 

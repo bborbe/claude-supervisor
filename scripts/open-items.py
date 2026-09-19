@@ -45,6 +45,15 @@ KINDS = ("asked-of-me", "asked-of-you", "pushed")
 STATES = ("open", "closed")
 ROOT = os.path.expanduser("~/.claude/state/open-items")
 
+# Rendered on an OPEN entry's summary line. `unknown` gets its own wording rather
+# than sharing UNRESOLVABLE's: a search that could not run and a search that found
+# nothing are different facts, and only one of them is a problem with the entry.
+MARKERS = {
+    "unresolvable": " · ⚠️ UNRESOLVABLE",
+    "unknown": " · ⚠️ UNCHECKED (no task dirs)",
+}
+DETAIL_SUFFIX = {"ok": "", "unknown": " (not searched)"}
+
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -181,7 +190,7 @@ def resolve_task(title, dirs):
 
 
 def target_state(item, dirs):
-    """(state, path) for an entry's task target: none | ok | unresolvable.
+    """(state, path) for an entry's task target: none | ok | unresolvable | unknown.
 
     `none` means the entry names no task at all, so it makes no file claim to
     falsify — an `asked-of-you` resolves on the operator's answer and legitimately
@@ -190,10 +199,14 @@ def target_state(item, dirs):
 
     No live entry is in that state today. The audit that filed one as unreachable had
     searched a single vault for a task living in a sibling — which is why `dirs`
-    defaults to every configured vault. That the flag is currently silent on real data
-    is the correct result, not an untested path: it fires on a genuinely missing
-    target, and it is what would have made the difference between "this entry is
-    still open" and "this entry can never close" visible at a glance.
+    defaults to every configured vault.
+
+    `unknown` is the case that must NOT collapse into `unresolvable`: no task
+    directory was searchable at all (vault-cli absent, its config unreadable, and no
+    `--tasks-dir` given). Calling that `unresolvable` would assert "no such task" from
+    a search that never ran — the same positive-claim-from-a-failed-lookup shape this
+    check exists to remove, merely inverted, and it would flag every entry on a host
+    without vault-cli. Unknown is reported as unknown.
     """
     title = item.get("task")
     if not title:
@@ -201,6 +214,8 @@ def target_state(item, dirs):
     stored = item.get("task_path")
     if stored and os.path.exists(stored):
         return "ok", stored
+    if not dirs:
+        return "unknown", None
     path = resolve_task(title, dirs)
     if path:
         return "ok", path
@@ -357,7 +372,13 @@ def task_dirs_for(args):
     configured vault so the manager call sites need no change.
     """
     explicit = [os.path.expanduser(d) for d in (args.tasks_dir or [])]
-    return explicit or configured_task_dirs()
+    dirs = explicit or configured_task_dirs()
+    # A directory that does not exist is not searchable. Leaving a dead path in the
+    # list would make it non-empty, so every entry would read UNRESOLVABLE — the same
+    # "no such task" asserted from a search that could not have found one. Filtering
+    # here is what lets target_state's empty-list check catch a typo'd --tasks-dir and
+    # a moved vault, not just a missing vault-cli.
+    return [d for d in dirs if os.path.isdir(d)]
 
 
 def cmd_add(args):
@@ -394,9 +415,16 @@ def cmd_add(args):
         # ledger's reason to exist; saying nothing would let the entry look resolved
         # until someone audits it by hand, which is the defect itself.
         print(
-            "⚠️  --task %r resolves to no file in any configured vault — the entry is "
-            "recorded and will render as UNRESOLVABLE until a task by that title "
-            "exists." % args.task,
+            (
+                "⚠️  --task %r resolves to no file in any configured vault — the entry "
+                "is recorded and will render as UNRESOLVABLE until a task by that "
+                "title exists."
+                if dirs
+                else "⚠️  --task %r was NOT checked — no vault task dir was searchable "
+                "(vault-cli missing, or its config unreadable). The entry is recorded "
+                "and will render as UNCHECKED."
+            )
+            % args.task,
             file=sys.stderr,
         )
     return 0
@@ -500,9 +528,9 @@ def cmd_list(args):
         state, path = target_state(item, dirs)
         # Only an OPEN entry can be flagged. A closed one is terminal — its close
         # condition no longer gates anything, so an unresolvable target on it is
-        # history, not a problem, and marking it would make the two entries this fix
+        # history, not a problem, and marking it would make the entries this fix
         # exists to explain look broken *after* they were correctly closed.
-        flagged = state == "unresolvable" and item["state"] == "open"
+        marker = MARKERS.get(state, "") if item["state"] == "open" else ""
         # The marker rides the summary line, not the detail line: a manager renders
         # these one per line under "📋 Open with the operator", and the detail line is
         # exactly what a reader skimming that list does not see.
@@ -511,13 +539,14 @@ def cmd_list(args):
             item["text"],
             item["state"],
             age(item["created_at"]),
-            " · ⚠️ UNRESOLVABLE" if flagged else "",
+            marker,
         )
         print(line)
         detail = []
         if item.get("task"):
             detail.append(
-                "task: %s%s" % (item["task"], "" if state == "ok" else " (no file)")
+                "task: %s%s"
+                % (item["task"], DETAIL_SUFFIX.get(state, " (no file)"))
             )
         if item.get("resolves_on"):
             detail.append("resolves on: %s" % item["resolves_on"])

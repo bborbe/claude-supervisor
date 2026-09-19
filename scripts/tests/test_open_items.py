@@ -60,11 +60,21 @@ class Base(unittest.TestCase):
             handle.write("---\nstatus: %s\n---\n" % status)
         return path
 
-    def run_cli(self, argv):
-        """Invoke the real CLI. Global flags must precede the subcommand."""
+    def _run(self, argv, tasks_dir=None, unsearchable=False):
+        """Invoke the real CLI. Global flags must precede the subcommand.
+
+        `unsearchable` simulates vault-cli being absent or its config unreadable —
+        the case where the check cannot run at all, which must not be reported as
+        "no such task". `tasks_dir` overrides the default temp task dir.
+        """
+        if unsearchable:
+            oi._TASK_DIRS = []
         out, err = io.StringIO(), io.StringIO()
         saved = sys.argv
-        sys.argv = ["open-items.py", "--session", "s1", "--tasks-dir", self.tasks] + argv
+        globals_ = ["open-items.py", "--session", "s1"]
+        if not unsearchable:
+            globals_ += ["--tasks-dir", tasks_dir or self.tasks]
+        sys.argv = globals_ + argv
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
@@ -74,6 +84,12 @@ class Base(unittest.TestCase):
         finally:
             sys.argv = saved
         return code, out.getvalue(), err.getvalue()
+
+    def run_cli(self, argv):
+        return self._run(argv)
+
+    def run_cli_unsearchable(self, argv):
+        return self._run(argv, unsearchable=True)
 
     def add(self, *argv):
         return self.run_cli(["add"] + list(argv))
@@ -217,6 +233,61 @@ class NegativeControls(Base):
         self.task_file("Late Task")
         _, after, _ = self.listing()
         self.assertNotIn("UNRESOLVABLE", after)
+
+
+class UnsearchableDirs(Base):
+    """A check that could not run must say so, not assert a negative.
+
+    Reporting "UNRESOLVABLE" from a search that never executed is the same
+    positive-claim-from-a-failed-lookup shape the whole check exists to remove —
+    merely inverted — and it would flag every entry on a host without vault-cli.
+    """
+
+    def test_list_reports_unknown_not_unresolvable(self):
+        self.run_cli_unsearchable(
+            ["add", "--kind", "asked-of-me", "--text", "do a thing", "--task", "Any Task"]
+        )
+        code, out, _ = self.run_cli_unsearchable(["list"])
+        self.assertEqual(code, 0)
+        self.assertIn("UNCHECKED", out)
+        self.assertNotIn("UNRESOLVABLE", out)
+
+    def test_add_warns_that_it_did_not_check(self):
+        code, _, err = self.run_cli_unsearchable(
+            ["add", "--kind", "asked-of-me", "--text", "x", "--task", "Any Task"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("NOT checked", err)
+        self.assertNotIn("resolves to no file", err)
+
+    def test_json_carries_the_unknown_state(self):
+        self.run_cli_unsearchable(
+            ["add", "--kind", "asked-of-me", "--text", "x", "--task", "Any Task"]
+        )
+        code, out, _ = self.run_cli_unsearchable(["list", "--format", "json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["items"][0]["task_state"], "unknown")
+
+    def test_an_entry_naming_no_task_is_still_none(self):
+        """`none` and `unknown` are different facts and must not merge: one entry
+        makes no claim, the other's claim simply went unchecked."""
+        self.run_cli_unsearchable(["add", "--kind", "asked-of-you", "--text", "why?"])
+        code, out, _ = self.run_cli_unsearchable(["list", "--format", "json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["items"][0]["task_state"], "none")
+
+    def test_a_nonexistent_tasks_dir_is_unknown_not_unresolvable(self):
+        """A typo'd --tasks-dir, or a vault that moved, is not searchable either. A
+        non-empty dir list must not by itself count as a check that ran."""
+        dead = "/nonexistent/vault/tasks"
+        self._run(
+            ["add", "--kind", "asked-of-me", "--text", "x", "--task", "Any Task"],
+            tasks_dir=dead,
+        )
+        code, out, _ = self._run(["list"], tasks_dir=dead)
+        self.assertEqual(code, 0)
+        self.assertIn("UNCHECKED", out)
+        self.assertNotIn("UNRESOLVABLE", out)
 
 
 class JsonShape(Base):
