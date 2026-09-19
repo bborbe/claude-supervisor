@@ -109,6 +109,12 @@ export const config = Object.freeze({
   // that sees a session whose id appears in no process's command line.
   sessionsDir: ENV.SUPERVISOR_SESSIONS_DIR || join(CLAUDE_HOME, 'sessions'),
 
+  // Where Claude Code writes session transcripts, as `<projectsDir>/<escaped-cwd>/<id>.jsonl`.
+  // Only the ROOT is configuration: the per-session directory is escaped from a cwd, and
+  // deriving it back from a cwd is the unreliability tab-read.mjs exists to avoid. A
+  // reader that needs a transcript resolves it by session id against this root instead.
+  projectsDir: ENV.SUPERVISOR_PROJECTS_DIR || join(CLAUDE_HOME, 'projects'),
+
   // The durable spawn ledger: one uuid-keyed record per worker this server spawns,
   // outliving the session it describes. Deliberately NOT reusing
   // SUPERVISOR_SESSIONS_DIR — that name already means the live registry above, a
