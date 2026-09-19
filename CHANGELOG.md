@@ -8,6 +8,19 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `fleet-sessions.py` and `fleet-colours.py` no longer take a project scope. Both
+  defaulted to the *current working directory*'s project, so a fleet sweep run from a vault
+  silently narrowed the roster and read a live session in another project as *gone* — the
+  exact hazard `fleet-manager`'s scope guard existed to paper over. The fleet is now always
+  every project, newest first, with no time filter, so there is no scope left to disagree
+  about. The retired flags (`--all`, `--minutes N`, `--vault NAME`) are accepted and ignored
+  rather than rejected, so callers that still pass them — the Fleet Manager Session runbook
+  passes `--all` — keep working. `fleet-manager`'s "⚠️ Scope guard" section, the snapshot's
+  `scope` field, and `fleet-status`'s scoping paragraph are deleted along with the mechanism
+  they guarded, and `fleet-status`'s `argument-hint` no longer advertises the flags.
+
 ## v0.17.0
 
 - fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare
