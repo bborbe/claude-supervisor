@@ -40,6 +40,8 @@ Pass `interactive: false` when the point is that **you** answer the prompts — 
 
 `spawn_agent` → `await_permission` → `answer_permission` → `list_agents`
 
+⚠️ The `answer_permission` step is gated by **the manager's own session mode, not the worker's**. Under `auto` the classifier can refuse the outgoing call before the fleet is involved (measured 2026-09-19) — fix it with **Shift+Tab → `accept edits`** in the manager session, then retry. Never by changing the worker's mode or `defaultMode`.
+
 **Tab worker** (default) — its own tab answers them:
 
 `spawn_agent` → `agent_status` / `send_agent_message` → read the tab
