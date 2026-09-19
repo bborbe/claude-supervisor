@@ -8,6 +8,20 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: adds `scripts/fleet-colours.py`, a census of what colour each live session is. Colour is
+  the operator's attention-cost ranking — green/blue/cyan cost a keystroke per step, pink is an
+  agent, orange a manager — and until now nothing but the operator's eye could read it, so the
+  unconverted backlog was unmeasurable across forty panes. The colour turns out to be persisted
+  already: every session transcript re-emits `{"type":"agent-color","agentColor":…}` each turn
+  carrying the *current* value, so the last record is live. Neither `wezterm cli list` (18 fields)
+  nor `~/.claude/sessions/*.json` carries a colour key — the census reads transcripts. Reports
+  green/blue/cyan as the backlog and keeps `default` (transcript present, colour never set) and
+  `purple` (finished) separate rather than folding either in; a session with no transcript reads
+  `unknown` rather than a guessed colour. Panes join on the registry's `pid` → tty, never on cwd,
+  which every session in one vault shares.
+
 ## v0.13.3
 
 - fix: the fleet-manager orphan check seeds from the ownership **declaration** instead of a flag.
