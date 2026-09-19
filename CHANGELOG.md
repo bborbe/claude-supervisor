@@ -8,6 +8,28 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `open-items.py` now resolves an entry's `--task` against **every** vault in vault-cli's
+  config, and marks an open entry whose task target backs no file as `⚠️ UNRESOLVABLE`. The ledger
+  previously resolved nothing at all — `list` rendered `task` and `resolves on` as free text — so an
+  entry claiming `resolves on: task file status: completed` could not be checked, and a lookup that
+  missed read exactly like a task that was never filed. Measured 2026-09-19 while auditing a live
+  35-entry ledger: a target read as absent was sitting in a **sibling vault**, `status: completed`,
+  while the entry stayed open over a day — a vault-blind lookup, which is the same shape as the
+  defect it was mistaken for. `add` now stores the resolved path and warns (never refuses: the ledger
+  exists to record an ask *before* its task exists); `list` re-resolves on every read, so filing a
+  late task clears the marker without re-adding the entry, and flags **open** entries only — a
+  correctly closed entry with a dead target is history, not a problem, and re-flagging it would make
+  the very entries this explains look broken after they were closed. `--tasks-dir` scopes resolution
+  for a caller that already knows its vault. A path-bearing title (`~/.claude/commands/open.md`) is
+  also matched against its on-disk sanitised form, since `/` cannot appear in a filename and an
+  exact-title lookup would otherwise report "no such file" for a task sitting right there. When no
+  task dir is searchable at all (vault-cli absent, its config unreadable, no `--tasks-dir`), an
+  entry renders `⚠️ UNCHECKED`, not `UNRESOLVABLE` — a check that could not run must not assert a
+  negative, which would flag every entry on such a host and is the same failed-lookup-as-claim
+  shape this change removes.
+
 ## v0.16.0
 
 - fix: the manager commands now hand over `/supervisor:jump <pane-id>` instead of the bare
