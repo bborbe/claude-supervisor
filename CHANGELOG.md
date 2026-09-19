@@ -18,6 +18,18 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   (`SUPERVISOR_SPAWN_MODE` → `spawn.mode` → built-in) instead of presenting the built-in code
   default as the answer.
 
+- feat: adds `scripts/fleet-colours.py`, a census of what colour each live session is. Colour is
+  the operator's attention-cost ranking — green/blue/cyan cost a keystroke per step, pink is an
+  agent, orange a manager — and until now nothing but the operator's eye could read it, so the
+  unconverted backlog was unmeasurable across forty panes. The colour turns out to be persisted
+  already: every session transcript re-emits `{"type":"agent-color","agentColor":…}` each turn
+  carrying the *current* value, so the last record is live. Neither `wezterm cli list` (18 fields)
+  nor `~/.claude/sessions/*.json` carries a colour key — the census reads transcripts. Reports
+  green/blue/cyan as the backlog and keeps `default` (transcript present, colour never set) and
+  `purple` (finished) separate rather than folding either in; a session with no transcript reads
+  `unknown` rather than a guessed colour. Panes join on the registry's `pid` → tty, never on cwd,
+  which every session in one vault shares.
+
 ## v0.14.0
 
 - docs: two manager-contract rules earned this session. **The PR is the boundary, whatever the
