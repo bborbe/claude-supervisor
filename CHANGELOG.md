@@ -12,8 +12,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - feat: publish manager ACTION gates to the notification core, so a gate raised while the operator is away reaches
   their phone instead of waiting unbounded on a TTS line nobody is in the room to hear. New `scripts/notify-gate.py`
-  reads the round's gates on stdin, publishes through the configured endpoint, and owns the cadence (once on raise,
-  then 1h and 4h, capped at 3 deliveries per gate identity) plus the ledger under `~/.claude/state/`. Config sits in
+  reads the round's gates on stdin, publishes through the configured endpoint, and owns the delivery cadence plus
+  the ledger under `~/.claude/state/` (the bound itself lives in the script). Config sits in
   `~/.config/claude-supervisor/config.json` beside `spawn.mode`; an absent or incomplete `notify` block exits
   non-zero rather than skipping silently, because a silently-skipped gate is indistinguishable from a clean sweep.
   Wired at the existing ACTION-gate moments in `commands/worker-manager.md` and `commands/fleet-manager.md`; only

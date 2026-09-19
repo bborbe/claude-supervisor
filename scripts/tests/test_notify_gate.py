@@ -22,7 +22,10 @@ Run: python3 -m unittest discover -s scripts/tests -v
 """
 
 import importlib.util
+import json
 import os
+import shutil
+import tempfile
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -116,6 +119,70 @@ class CurlConfig(unittest.TestCase):
             notify_gate.curl_config_user("user", "secret"),
             'user = "user:secret"\n',
         )
+
+
+def _reload(suffix):
+    """A fresh module instance, so STATE_PATH re-reads the current env."""
+    spec = importlib.util.spec_from_file_location(f"notify_gate_{suffix}", _SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class Ledger(unittest.TestCase):
+    """commit() and load_ledger(), which the pure-function tests above cannot reach.
+
+    Pruning is load-bearing -- it is what makes the delivery bound per-gate rather
+    than per-lifetime, and both manager commands depend on it when they instruct a
+    `{"gates": []}` sweep -- so it gets real coverage rather than a promise.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "gate-notifications.json")
+        self._before = os.environ.get("SUPERVISOR_GATE_STATE")
+        os.environ["SUPERVISOR_GATE_STATE"] = self.path
+        self.mod = _reload(self._testMethodName)
+
+    def tearDown(self):
+        if self._before is None:
+            os.environ.pop("SUPERVISOR_GATE_STATE", None)
+        else:
+            os.environ["SUPERVISOR_GATE_STATE"] = self._before
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def read(self):
+        with open(self.path) as handle:
+            return json.load(handle)
+
+    def test_commit_prunes_a_gate_that_cleared(self):
+        key = self.mod.gate_key("pane-243", "approve: make apply")
+        self.mod.commit({key: {"deliveries": 2, "firstRaisedAt": RAISED_AT}}, {}, {})
+        self.assertEqual(self.read(), {})
+
+    def test_commit_keeps_a_gate_that_is_still_open(self):
+        key = self.mod.gate_key("pane-243", "approve: make apply")
+        self.mod.commit(
+            {key: {"deliveries": 2, "firstRaisedAt": RAISED_AT}},
+            {key: {"owner": "pane-243", "text": "approve: make apply"}},
+            {},
+        )
+        self.assertEqual(self.read()[key]["deliveries"], 2)
+
+    def test_a_cleared_gate_raises_again_at_full_cadence(self):
+        key = self.mod.gate_key("pane-243", "approve: make apply")
+        self.mod.commit({key: {"deliveries": 3, "firstRaisedAt": RAISED_AT}}, {}, {})
+        self.assertIsNone(self.mod.load_ledger().get(key))
+        self.assertTrue(self.mod.decide(self.mod.load_ledger().get(key), at(RAISED_AT)))
+
+    def test_an_unreadable_ledger_reads_as_empty(self):
+        with open(self.path, "w") as handle:
+            handle.write("{not json")
+        self.assertEqual(self.mod.load_ledger(), {})
+
+    def test_commit_leaves_no_temp_file_behind(self):
+        self.mod.commit({}, {}, {})
+        self.assertEqual([f for f in os.listdir(self.dir) if f.endswith(".tmp")], [])
 
 
 if __name__ == "__main__":

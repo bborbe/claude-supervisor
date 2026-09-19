@@ -64,6 +64,31 @@ The file is read **once at server start**, so restart the MCP server after editi
 
 ⚠️ **An unknown `mode` value refuses every spawn**, naming the file and the two valid values — same reasoning as the policy refusals below. A typo that silently fell back to a default would be discovered only by noticing a whole fleet running the wrong way, long after the edit. An unknown *key* only warns, so a config written for a newer version stays usable by this one.
 
+### Notifying the operator when a gate is open
+
+A manager that raises an ACTION gate can only speak to an operator in the room. To reach a phone, add a `notify` block to the same file:
+
+```json
+{
+  "spawn": { "mode": "interactive" },
+  "notify": {
+    "env": "dev",
+    "endpoints": {
+      "dev": { "baseUrl": "https://…", "teamvaultKey": "…" },
+      "prod": { "baseUrl": "https://…", "teamvaultKey": "…" }
+    }
+  }
+}
+```
+
+`scripts/notify-gate.py` reads the sweep's gates on stdin, publishes each one that is due through the endpoint named by `env`, and keeps a cadence ledger at `~/.claude/state/gate-notifications.json` (`SUPERVISOR_GATE_STATE` overrides the path). The script owns the delivery bound — read its docstring rather than copying the numbers.
+
+`teamvaultKey` is a **reference** into TeamVault, not the secret itself: the script fetches the credential with `teamvault-cli` and hands it to curl on stdin, so it never appears in the process table.
+
+`type` is optional and defaults to `pending-approval` — the type the notification core routes to the phone.
+
+⚠️ **An absent or incomplete `notify` block exits non-zero the moment a gate is due**, carrying the fix in its message. It deliberately does not fall back to silence: a gate that never reached the phone and a clean sweep look identical from the manager's side, and only one of them is fine.
+
 ## The approval policy
 
 Rules decide what a worker may do **without waking the manager**. Anything the rules do not cover defers to `canUseTool`, which parks it for the manager — that fall-through *is* the escalation path.

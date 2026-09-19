@@ -37,8 +37,13 @@ Config: ~/.config/claude-supervisor/config.json (override SUPERVISOR_CONFIG):
 Absent or incomplete FAILS LOUDLY, and only when a gate is actually due. A silent
 skip is the worst failure mode here: the gate is real, the operator is needed, and
 nothing arrives -- and it reads exactly like a clean sweep.
+
+Ledger: ~/.claude/state/gate-notifications.json (override SUPERVISOR_GATE_STATE,
+which is also what lets the tests exercise commit/prune without touching the
+operator's real ledger).
 """
 import datetime
+import fcntl
 import json
 import os
 import subprocess
@@ -47,7 +52,9 @@ import sys
 CONFIG_PATH = os.environ.get("SUPERVISOR_CONFIG") or os.path.expanduser(
     "~/.config/claude-supervisor/config.json"
 )
-STATE_PATH = os.path.expanduser("~/.claude/state/gate-notifications.json")
+STATE_PATH = os.environ.get("SUPERVISOR_GATE_STATE") or os.path.expanduser(
+    "~/.claude/state/gate-notifications.json"
+)
 
 # Mirrors the vault script this replaces: pinned deliberately rather than
 # ${TEAMVAULT_CONFIG:-...}, because that variable is commonly exported to a
@@ -176,6 +183,16 @@ def publish(base_url, teamvault_key, message, notification_type):
         [
             "curl",
             "-s",
+            # `-s` alone exits 0 for any completed HTTP transaction, so a 4xx/5xx
+            # would read as a successful publish and be written to the ledger as
+            # delivered -- and three of those silence the gate for good while every
+            # run still reports success. That is the worst failure mode this script
+            # has, so the fail flag is load-bearing, not decoration.
+            "--fail-with-body",
+            # Bounds the publish, which is what makes holding the ledger lock safe:
+            # an unbounded curl would block the other manager layer indefinitely.
+            "--max-time",
+            "30",
             "-K",
             "-",
             "-X",
@@ -191,8 +208,39 @@ def publish(base_url, teamvault_key, message, notification_type):
         text=True,
     )
     if result.returncode != 0:
-        sys.exit(f"notify-gate: publish failed: {result.stderr.strip()}")
+        # `--fail-with-body` still prints the response body, which is where the
+        # core puts its own reason; stderr alone would carry only the status.
+        detail = result.stdout.strip() or result.stderr.strip()
+        sys.exit(f"notify-gate: publish failed: {detail}")
     return result.stdout.strip()
+
+
+def load_ledger():
+    """An unreadable ledger reads as empty, never fatal.
+
+    The file is rewritten every sweep, so a write truncated by a dying process
+    would otherwise make every later run die on a JSON traceback -- turning one
+    bad write into the permanent loss of gate notifications.
+    """
+    try:
+        with open(STATE_PATH) as handle:
+            return json.load(handle)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def lock_ledger():
+    """Serialise the read-modify-write across the two manager layers.
+
+    Both the fleet and the worker manager run this script against the same ledger,
+    so without a lock the later writer reads a file that predates the earlier
+    writer's commit: one side's delivery count is lost and that gate re-notifies
+    later. `--max-time` on the publish bounds how long this is held.
+    """
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    handle = open(f"{STATE_PATH}.lock", "w")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
 
 
 def commit(ledger, current, updates):
@@ -200,24 +248,47 @@ def commit(ledger, current, updates):
 
     Pruning falls out of `kept`: a gate that cleared is absent from `current`, so
     its count is dropped and a later re-raise starts fresh.
+
+    Written through a temp file and renamed, so no reader ever sees a half-written
+    ledger even if this process dies mid-dump.
     """
     kept = {key: ledger[key] for key in current if key in ledger}
     kept.update(updates)
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    with open(STATE_PATH, "w") as handle:
+    tmp = f"{STATE_PATH}.tmp"
+    with open(tmp, "w") as handle:
         json.dump(kept, handle, indent=2, sort_keys=True)
+    os.replace(tmp, STATE_PATH)
     return kept
+
+
+def read_gates():
+    """Parse stdin, reporting malformed input in this script's own style.
+
+    Every other failure here exits with a `notify-gate: …` line naming the fix, and
+    the commands tell the manager to surface that message -- so a raw traceback
+    would be surfaced *instead of* a fix, on a one-liner the manager types by hand.
+    """
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError as error:
+        sys.exit(f"notify-gate: stdin is not valid JSON: {error}")
+    gates = payload.get("gates") or []
+    for gate in gates:
+        for field in ("owner", "text"):
+            if not gate.get(field):
+                sys.exit(
+                    f"notify-gate: a gate is missing `{field}`: {json.dumps(gate)} "
+                    '-- each gate needs {"owner": "...", "text": "..."}'
+                )
+    return gates
 
 
 def main():
     now = datetime.datetime.now(datetime.timezone.utc)
-    payload = json.load(sys.stdin)
-    gates = payload.get("gates") or []
+    gates = read_gates()
 
-    ledger = {}
-    if os.path.exists(STATE_PATH):
-        with open(STATE_PATH) as handle:
-            ledger = json.load(handle)
+    lock = lock_ledger()  # held until exit; the reference keeps the flock alive
+    ledger = load_ledger()
 
     current = {gate_key(g["owner"], g["text"]): g for g in gates}
     due = [
@@ -234,25 +305,29 @@ def main():
 
     updates = {}
     delivered = []
-    for key, gate in due:
-        entry = ledger.get(key)
-        publish(
-            endpoint["baseUrl"],
-            endpoint["teamvaultKey"],
-            render_message(gate),
-            notification_type,
-        )
-        deliveries = 1 if entry is None else entry["deliveries"] + 1
-        updates[key] = {
-            "firstRaisedAt": entry["firstRaisedAt"] if entry else format_time(now),
-            "lastDeliveryAt": format_time(now),
-            "deliveries": deliveries,
-            "owner": gate["owner"],
-            "text": normalise(gate["text"]),
-        }
-        delivered.append(f"{gate['owner']} ({deliveries}/{MAX_DELIVERIES})")
-
-    commit(ledger, current, updates)
+    try:
+        for key, gate in due:
+            entry = ledger.get(key)
+            publish(
+                endpoint["baseUrl"],
+                endpoint["teamvaultKey"],
+                render_message(gate),
+                notification_type,
+            )
+            deliveries = 1 if entry is None else entry["deliveries"] + 1
+            updates[key] = {
+                "firstRaisedAt": entry["firstRaisedAt"] if entry else format_time(now),
+                "lastDeliveryAt": format_time(now),
+                "deliveries": deliveries,
+                "owner": gate["owner"],
+                "text": normalise(gate["text"]),
+            }
+            delivered.append(f"{gate['owner']} ({deliveries}/{MAX_DELIVERIES})")
+    finally:
+        # Commit even when a later gate fails. The publishes that already succeeded
+        # must not be re-sent next sweep -- without this, gate A delivers, gate B
+        # fails, and A lands on the phone a second time.
+        commit(ledger, current, updates)
     print(
         f"notify-gate: env={env} type={notification_type} "
         f"delivered {len(delivered)} -- " + "; ".join(delivered)
