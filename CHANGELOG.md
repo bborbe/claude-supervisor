@@ -8,6 +8,19 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: stop the forked-ledger warning firing on a ledger that has already been reconciled. The
+  shared-id scan counted **all** entries rather than open ones, so closing the duplicate copies —
+  the documented way to resolve a fork — left the warning in place forever, still claiming the
+  two "will diverge" after one side was already closed. Measured 2026-09-19: a fork reconciled
+  with `close --id … --evidence "reconciled: owned by session <A>"` read `A open 2 · B open 0`
+  and still warned on every read. The scan now compares open entries on both sides; an
+  unresolved fork still warns, verified against the real pair on this machine. The
+  `origin_session_id` line is deliberately unchanged — "this ledger was copied" is a provenance
+  fact that stays true after reconciliation, and gating it on shared entries would lose the case
+  where the parent's ledger no longer exists at all.
+
 ## v0.15.0
 
 - fix: `worker-manager` starts a worker by spawning it with the work command as the `prompt`

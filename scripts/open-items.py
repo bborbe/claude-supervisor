@@ -171,7 +171,12 @@ def forked_from(sid, data):
             "this ledger was created by session %s, not %s — it looks copied (/branch?)"
             % (origin[:8], sid[:8])
         )
-    mine = {i["id"] for i in data.get("items", [])}
+    # OPEN entries only, on both sides. A closed entry cannot diverge, so counting closed ones
+    # makes a reconciled fork warn forever — and the warning would keep claiming the two "will
+    # diverge" after one side has already been resolved. Measured 2026-09-19: a fork reconciled
+    # with `close --id … --evidence "reconciled: owned by session <A>"` left A open 2 · B open 0
+    # and still printed the warning on every read.
+    mine = {i["id"] for i in data.get("items", []) if i.get("state") == "open"}
     if mine:
         for other in glob.glob(os.path.join(ROOT, "*.json")):
             other_sid = os.path.basename(other)[:-5]
@@ -179,7 +184,11 @@ def forked_from(sid, data):
                 continue
             try:
                 with open(other) as f:
-                    shared = mine & {i["id"] for i in json.load(f).get("items", [])}
+                    shared = mine & {
+                        i["id"]
+                        for i in json.load(f).get("items", [])
+                        if i.get("state") == "open"
+                    }
             except (OSError, ValueError, KeyError, TypeError):
                 continue
             if shared:
