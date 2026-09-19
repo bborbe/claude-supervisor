@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.17.2
 
 - fix: `fleet-sessions.py` and `fleet-colours.py` no longer take a project scope. Both
   defaulted to the *current working directory*'s project, so a fleet sweep run from a vault
