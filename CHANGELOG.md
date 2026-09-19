@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.16.3
 
 - fix: a topic's `## Goals` list may now declare a **task** directly, alongside its goals.
   The tracked set was goal-anchored — *"every entry is a member goal. Tracked set = those
