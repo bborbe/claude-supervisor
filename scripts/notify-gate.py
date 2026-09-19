@@ -188,8 +188,24 @@ def resolve_endpoint(config):
     return env, endpoint, notify.get("type") or DEFAULT_TYPE
 
 
+def run_command(argv, **kwargs):
+    """subprocess.run, with a missing binary reported in this script's own style.
+
+    A binary absent from PATH is the ordinary fresh-machine failure, and neither
+    `teamvault-cli` nor `curl` is checked for anywhere else -- so the spawn is the
+    one place that can name the fix. Left unguarded it raises FileNotFoundError and
+    the manager surfaces a traceback instead of a remedy.
+    """
+    try:
+        return subprocess.run(argv, **kwargs)
+    except OSError as error:
+        sys.exit(
+            f"notify-gate: cannot run {argv[0]}: {error} -- is it installed and on PATH?"
+        )
+
+
 def teamvault_field(field, key):
-    result = subprocess.run(
+    result = run_command(
         [
             "teamvault-cli",
             field,
@@ -232,7 +248,7 @@ def publish(base_url, teamvault_key, message, notification_type):
     username = teamvault_field("username", teamvault_key)
     password = teamvault_field("password", teamvault_key)
     body = json.dumps({"type": notification_type, "message": message})
-    result = subprocess.run(
+    result = run_command(
         [
             "curl",
             "-s",
