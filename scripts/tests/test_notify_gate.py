@@ -95,19 +95,34 @@ class Identity(unittest.TestCase):
 
 
 class Message(unittest.TestCase):
+    def render(self, text="approve: make apply", owner="pane-243"):
+        return notify_gate.render_message({"owner": owner, "text": text})
+
     def test_names_the_gate_and_its_owner(self):
-        text = notify_gate.render_message(
-            {"owner": "pane-243", "text": "approve: make apply"}
-        )
+        text = self.render()
         self.assertIn("pane-243", text)
         self.assertIn("approve: make apply", text)
 
-    def test_never_presents_itself_as_answerable(self):
-        text = notify_gate.render_message(
-            {"owner": "pane-243", "text": "approve: make apply"}
-        )
-        self.assertIn("not here", text)
-        self.assertNotIn("reply", text.lower())
+    def test_the_gate_text_gets_a_line_of_its_own(self):
+        """A phone wraps a long line mid-argument, so an INLINE command copied
+        line-wise comes out with an unbalanced quote -- measured 2026-09-19, when
+        the operator got `/vault-cli:complete-goal "The Manager Ranks` from a
+        notification carrying the whole command. The gate text is where the command
+        lives, so it starts a line rather than sitting after our prefix."""
+        lines = self.render().split("\n")
+        self.assertEqual(lines[1], "approve: make apply")
+        self.assertTrue(lines[0].startswith("Manager gate open -- pane-243"))
+
+    def test_a_long_gate_text_still_starts_its_own_line(self):
+        long_text = 'Manager Layer Manager: pick — 1. /vault-cli:complete-goal "x" ' * 6
+        text = self.render(text=long_text, owner="208")
+        self.assertEqual(text.split("\n")[1], " ".join(long_text.split()))
+
+    def test_it_states_the_wall_rather_than_advising(self):
+        """'Answer it in the owning session, not here' did not work: the operator
+        replied in Telegram anyway, which is the predictable response to a message
+        that reads like a conversation. State that replies are not read."""
+        self.assertIn("Replies here are not read", self.render())
 
 
 class CurlConfig(unittest.TestCase):
