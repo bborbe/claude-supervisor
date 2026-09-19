@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.18.1
 
 - fix: `agent_status.last_message` now finds a tab worker's last message even when the
   transcript's **trailing** records are large. The disk read treated a 256 KB tail window as a
