@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.16.2
 
 - fix: the reapability check now reads the session's *live* closer and accepts both
   sanctioned close-gate forms, so `Reapable` stops reporting `0` while finished sessions
