@@ -10,6 +10,15 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- docs: two manager-contract rules earned this session. **The PR is the boundary, whatever the
+  file extension** — editing a doc may be management, opening a PR never is, because it obligates
+  a review loop, a merge, an auto-release and a deploy verification; and the Build Drift Gate is a
+  *crossing* trigger, so a one-shot that grows a branch and commits needs its anchor at the
+  crossing, not retroactively. **Never forward a claim you did not measure** — a peer's or a
+  sub-agent's observation is testimony, and relaying it onward launders provenance because the
+  receiver reads it as your measurement. Both measured 2026-09-19, each against a specific
+  failure in the same session.
+
 - fix: name `~/.claude/sessions/*.json` as the **authoritative liveness store** in `/fleet-manager`,
   and forbid writing a session stamp from a spawn-ledger reading. The ledger never closes when a
   worker's pane dies, so it does not go quiet when wrong — it asserts the opposite. Measured
