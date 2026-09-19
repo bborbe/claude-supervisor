@@ -64,10 +64,9 @@ def classify(case):
 
     extra = {}
     if "peer_pane" in case:
-        pane = case["peer_pane"]
-        extra["pmap"] = {pane: {"pane_id": int(pane)}}
+        extra["open_panes"] = {case["peer_pane"]}
     if "anchored_task" in case:
-        extra["task_status"] = lambda _sid, _c=case: _c["anchored_task"]["status"]
+        extra["task_status"] = lambda _rec, _c=case: _c["anchored_task"]["status"]
 
     try:
         return wnm.is_open_gate(record, **extra)
@@ -116,6 +115,56 @@ class ParserNormalization(unittest.TestCase):
 
     def test_approve_is_a_gate(self):
         self.assertTrue(self.feed("👤 You: approve: apply to prod"))
+
+
+class ContextDependentClasses(unittest.TestCase):
+    """Classes 3 and 4, plus the Class 3 over-suppression guard.
+
+    Neither class is decidable from the record alone: one needs to know which
+    panes hold an open gate, the other whether the anchored task is finished.
+    """
+
+    def rec(self, detail, pane="1"):
+        return {"session_id": "unit", "pane": pane, "cwd": "/tmp", "kind": "question",
+                "detail": detail, "ts": 0, "state": "open"}
+
+    def test_peer_restatement_is_not_a_gate(self):
+        """Class 3 — pane 285 carries this gate; the restater is a duplicate."""
+        self.assertFalse(wnm.is_open_gate(
+            self.rec("The dev-promotion approval in pane 285 — yours alone"),
+            open_panes={"285"}))
+
+    def test_mentioning_a_pane_that_holds_no_gate_is_still_a_gate(self):
+        """Class 3 guard — a mere mention must never be suppressed."""
+        self.assertTrue(wnm.is_open_gate(
+            self.rec("The dev-promotion approval in pane 285 — yours alone"),
+            open_panes=set()))
+
+    def test_referencing_your_own_pane_is_not_a_peer(self):
+        self.assertTrue(wnm.is_open_gate(
+            self.rec("pane 285 needs you", pane="285"), open_panes={"285"}))
+
+    def test_close_gate_on_a_finished_task_is_not_a_gate(self):
+        """Class 4 — reapable, so it is not counted under Needs you."""
+        self.assertFalse(wnm.is_open_gate(
+            self.rec("approve: /vault-cli:session-close"),
+            task_status=lambda _rec: "completed"))
+
+    def test_close_gate_on_an_open_task_is_still_a_gate(self):
+        self.assertTrue(wnm.is_open_gate(
+            self.rec("approve: /vault-cli:session-close"),
+            task_status=lambda _rec: "in_progress"))
+
+    def test_close_gate_without_a_resolver_is_still_a_gate(self):
+        """Fails safe — no evidence, no suppression."""
+        self.assertTrue(wnm.is_open_gate(
+            self.rec("approve: /vault-cli:session-close"), task_status=None))
+
+    def test_only_the_close_gate_is_reapable(self):
+        """A production approval is not made reapable by a finished task."""
+        self.assertTrue(wnm.is_open_gate(
+            self.rec("approve: apply the merged template to prod"),
+            task_status=lambda _rec: "completed"))
 
 
 class BaselineCorpus(unittest.TestCase):

@@ -353,6 +353,29 @@
         "in_feed": false
       },
       "why": "CONSTRUCTED CONTROL — plain `nothing` is already handled correctly today. Proves the normalization does not over-suppress: a fix that strips too aggressively must not turn `nothing` into a gate."
+    },
+    {
+      "id": "class3-guard-mentions-non-gate-pane",
+      "class": "genuine",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "c3g-constructed",
+        "pane": "9005",
+        "cwd": "/tmp/constructed",
+        "kind": "idle",
+        "detail": "OK",
+        "ts": 1789826945.0,
+        "state": "open",
+        "cleared_by": {
+          "event": "UserPromptSubmit"
+        }
+      },
+      "last_assistant_text": "Applied — one file.\n\n- `50 Knowledge Base/Some Page.md` — added the carve-out.\n\nValidated: head `---`, 54 lines, all headings intact.\n\n---\n📌 Task: [Some Task](obsidian://open?vault=Personal&file=25%20Tasks%2FSome%20Task) — done, session abc12345 (this one)\n\n👤 You: The dev-promotion approval in pane 999 — yours alone; nothing happens until you approve it\n⏰ Next: your reply\n",
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": true
+      },
+      "why": "CONSTRUCTED GUARD — same closer shape as the Class 3 case, but pane 999 carries NO open gate this run (no `peer_pane` key, so `open_panes` is empty). Suppression must NOT fire. This is the over-suppression guard: a closer that merely mentions a pane id — a ticket reference, a log line — must still reach the operator, otherwise the Class 3 rule silently eats real gates."
     }
   ]
 }

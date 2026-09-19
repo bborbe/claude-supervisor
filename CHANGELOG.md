@@ -8,6 +8,16 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: stop `who-needs-me.py` listing parked waits, entity-padded closers, peer-gate restatements
+  and completed-task close gates under `Needs you`. All four entered through one
+  `startswith("nothing")` test in `reclassify_idle()`, so a correctly-parked session was
+  reclassified `idle` → `question` and counted as an open gate. The feed is triaged oldest-first,
+  so the false positives are exactly what a manager reaches first. Measured 2026-09-19: 19 listed,
+  roughly 7 real — the two oldest were `later (on <trigger>):` waits misreported as neglect for
+  over five hours.
+
 ## v0.15.1
 
 - fix: stop the forked-ledger warning firing on a ledger that has already been reconciled. The
