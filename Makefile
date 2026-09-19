@@ -12,7 +12,10 @@ check:
 	@test -f .mcp.json && test -f README.md && echo "  plugin files present"
 
 test: check
-	@node --test server/*.test.mjs
+	@rc=0; \
+	node --test server/*.test.mjs || rc=1; \
+	python3 -m unittest discover -s scripts/tests || rc=1; \
+	exit $$rc
 
 precommit: check-versions check-changelog check
 

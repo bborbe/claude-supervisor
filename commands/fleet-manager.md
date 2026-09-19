@@ -195,8 +195,13 @@ Steps 0–2 run **forward** — live session → task file. That direction struc
 ```bash
 cd "$VAULT/$TASKS_DIR"
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/orphan-candidates.py \
-  --tasks-dir . --max-age-days 7
+  --tasks-dir . --max-age-days 7 || {
+    echo "⚠️ ORPHAN CHECK FAILED — the orphan section of this sweep is UNKNOWN, not clean."
+    exit 1
+  }
 ```
+
+⚠️ **The exit code is checked, and that is load-bearing.** The script prints its own `⚠️ ORPHAN CHECK FAILED` line, but a manager reading only stdout rows can still take an empty result for a clean one — the exact false-clean this whole check was rebuilt to eliminate. The `|| { …; exit 1; }` makes the failure reach the sweep's own exit status, so "unknown" can never be reported as "clean".
 
 `scripts/orphan-candidates.py` owns the enumeration; this command does not reimplement it. Two filters, in order — **name both when reporting**, because each has a failure direction that matters:
 

@@ -42,6 +42,16 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   the command and the runbook called — was deleted on 2026-09-18 when the manager scripts
   moved into the plugin, and the old invocation returned zero candidates with exit 0. The
   runbook's two references are repointed.
+- fix: **the call site checks the exit code.** `commands/fleet-manager.md` § Step 2b now runs
+  `orphan-candidates.py … || { echo "⚠️ ORPHAN CHECK FAILED — the orphan section of this sweep
+  is UNKNOWN, not clean."; exit 1; }`. The script already prints its own warning, but a manager
+  reading only stdout rows can still take an empty result for a clean one; propagating the
+  status to the sweep's own exit code is what makes "unknown" unable to masquerade as "clean".
+- test: adds `scripts/tests/test_orphan_candidates.py` (stdlib `unittest`, 21 cases) covering
+  frontmatter-only parsing, the park union, and the absence of a lower age bound — each case
+  guards a defect the check has actually shipped. Wired into `make test` alongside the Node
+  suite. **Verified by mutation:** re-introducing the removed `≥4h` lower bound fails 2 cases,
+  so the tests bite rather than decorate.
 
 ## v0.13.2
 
