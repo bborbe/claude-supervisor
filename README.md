@@ -137,21 +137,26 @@ Three things about it are measured rather than assumed, and each one is a trap:
 
 **Resolved 2026-09-19 for reading a worker's state.** `agent_status` resolves a worker's transcript by **session id** — `<projectsDir>/*/<session-id>.jsonl` — and never from a cwd, so the derivation above is not on that path and is not trusted there. It still describes where the spawn response *claims* the transcript is, and is still wrong for a launcher-`cd` worker: nothing should read it as a location.
 
-### Reading a tab worker
+### Reading a worker
 
-`agent_status(agent_id)` reports three fields that answer "what is it doing", none of which the write half could tell you:
+`agent_status(agent_id)` reports four fields that answer "what is it doing", none of which the write half could tell you:
 
 | field | source | means |
 |---|---|---|
 | `last_message` | the worker's transcript JSONL | the last thing it said. Not "the last record" — most assistant records carry a `tool_use` block and no text (measured on a live session: 127 assistant records, 27 with text), so this is the last one carrying text. |
+| `current_tool_call` | the worker's transcript JSONL | the call it is inside **right now** — `{name, input_summary, started_at, held_seconds}` — or `null` when nothing is in flight. This is the field that separates a worker executing a long tool call from one parked on a gate: `session_status` says both are not-idle, and this says *which* call and *for how long*. `input_summary` is capped at 200 chars and whitespace-flattened; the full input is `pending_permissions`' job for a parked call. `started_at`/`held_seconds` are `null` together when the record carries no timestamp — `name` is still reported, because "which tool" and "for how long" fail independently. |
 | `session_status` | the session registry | the raw registry status: `idle`, `busy`, `waiting` or `shell`. |
 | `awaiting_input` | derived from the status above | `true` only when the status is `waiting`. **`null`, not `false`, when the registry does not list the session** — unlisted is a different fact from not-waiting, and reporting it as `false` would be a guess wearing a measurement's clothes. |
 
 ⚠️ **`awaiting_input` means "blocked on input", not specifically "a permission gate is open".** It is the superset; whether a permission prompt specifically produces `waiting` is what the live A/B pins.
 
-⚠️ **Gate state cannot come from the transcript, and is not read from one.** A pending `tool_use` with no matching `tool_result` reads identically whether the worker is executing a tool or parked on a prompt — measured 2026-09-19 across 25 live sessions, 3 `busy` sessions carried exactly that pending call, indistinguishable by transcript from the 2 `waiting` ones. The registry is the field that separates them.
+⚠️ **`current_tool_call` names the pending call; it does not say whether the worker is parked.** A pending `tool_use` with no matching `tool_result` reads identically whether the worker is executing a tool or parked on a prompt — measured 2026-09-19 across 25 live sessions, 3 `busy` sessions carried exactly that pending call, indistinguishable by transcript from the 2 `waiting` ones. The two fields are complements: the transcript answers *which call*, the registry answers *is it moving*.
+
+**In flight means the LAST `tool_use` with no `tool_result` carrying its id — not "any unmatched `tool_use`".** An interrupted call leaves an unmatched `tool_use` behind and the conversation carries on, so a scan that reports any of them keeps naming a call the worker abandoned; measured 2026-09-20 over 1 667 live transcripts, 58 carried an unmatched `tool_use` and only 36 had it as their last one. The record's own `timestamp` is the start, so `held_seconds` is measured from the transcript and does not reset when a manager reconnects or polls again.
 
 The read is bounded: a transcript is read from its **tail** (256 KB). The last message is at the end by definition, and `list_agents` renders every worker — reading each file whole would turn one status call into a read of the fleet's entire history. A window that finds nothing reports `null` rather than falling back to a full read.
+
+**That bound costs the tool-call field a blind spot the message field does not have, and it is named rather than hidden.** A `tool_result` always follows its `tool_use`, so a call found inside the window cannot have its result outside it — but a call **older than the whole window** (256 KB of records written after it while it runs) is invisible, and reports as `null`, i.e. as "no call in flight". The message read falls back to a full read on a miss; this one deliberately does not, because a miss there is common (an idle worker has no call to find) and an unbounded read on the status path is the cost the window exists to avoid.
 
 ⚠️ **Two scope limits are unchanged by this read, and are named here rather than left to be discovered.** `agent_status` resolves by `agent_id` only — a label returns `unknown agent <label>` — and it reads an in-memory Map inside the caller's own server process, so it only knows workers **that session** spawned. Peers spawned elsewhere are invisible to it entirely, and an empty result is never evidence of absence. The new fields inherit both limits; they do not widen them.
 
@@ -218,7 +223,7 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 | `spawn_agent(prompt, cwd?, label?, interactive?, resume?, policy?)` | start a worker — a real session in a tab by default, or headless with `interactive: false`. `policy` gives this one worker its own rules; headless only |
 | `send_agent_message(agent_id, message)` | type a follow-up into a running **tab** worker and submit it |
 | `list_agents()` | every worker with status and pending-permission count |
-| `agent_status(agent_id)` | one worker: status, last message, result, plus `session_status` / `awaiting_input` (see [Reading a tab worker](#reading-a-tab-worker)). `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed |
+| `agent_status(agent_id)` | one worker: status, last message, **the current tool call and how long it has been held**, result, plus `session_status` / `awaiting_input` (see [Reading a worker](#reading-a-worker)). `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed |
 | `pending_permissions()` | prompts awaiting an answer, across all workers |
 | `await_permission(timeout_ms?)` | block until any worker asks — one call instead of polling |
 | `answer_permission(request_id, behavior, message?)` | `allow` / `deny` — this unblocks the worker. ⚠️ Gated by **your own session's** permission mode, not the worker's: under `auto` the classifier can refuse the outgoing call (measured 2026-09-19). Fix with Shift+Tab → `accept edits`, then retry — never by changing the worker's mode |

@@ -22,6 +22,15 @@
 //     `busy` sessions carried exactly that pending call, indistinguishable by transcript
 //     from the 2 `waiting` ones. The session registry's `status` is the field that
 //     separates them, and it is the only non-pane source for it.
+//   - **Which call is pending is a different question from whether it is parked, and the
+//     transcript does answer it.** The in-flight call is the LAST `tool_use` record in the
+//     file, and it is in flight exactly when no `tool_result` carries its id. "Any
+//     unmatched `tool_use`" is the plausible wrong answer: an interrupted call leaves an
+//     unmatched `tool_use` behind and the conversation carries on, so a scan that reports
+//     any of them keeps naming a call the worker abandoned — measured 2026-09-20 over
+//     1 667 live transcripts, 58 carried an unmatched `tool_use` and only 36 had it as
+//     their last one. Its record's `timestamp` is what makes a DURATION answerable, and
+//     no other source on this path carries one.
 
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -38,6 +47,13 @@ const TAIL_BYTES = 256 * 1024
 // The cap the in-memory path already applies, so a message reads the same length
 // whichever source produced it.
 const MAX_TEXT = 2000
+
+// How much of a tool call's input survives into `input_summary`. A call's input can be a
+// whole file (`Write`), a heredoc (`Bash`) or a subagent prompt (`Agent`), and this field
+// exists to say WHAT the worker is doing, not to reproduce the payload — a manager reads it
+// across a fleet, in a table. The full input is a different call's job:
+// `pending_permissions` carries it verbatim for a parked call.
+const MAX_SUMMARY = 200
 
 /**
  * The transcript for a session, or null when none is on disk.
@@ -165,6 +181,120 @@ function scanForLastAssistantText(body) {
 }
 
 /**
+ * The tool call a worker is inside right now, and how long it has been held, or null.
+ *
+ * `{ name, input_summary, started_at, held_seconds }`. The operator's stated debugging need
+ * — "the current tool call, and how long it has been held" — is exactly this, and it is the
+ * only signal that separates a worker executing a long call from one parked on a gate
+ * without a pane: both read `busy`-looking from outside, and `agent_status` names neither.
+ *
+ * In flight means the LAST `tool_use` record in the transcript with no `tool_result`
+ * carrying its id — see the module note for why "any unmatched `tool_use`" is wrong. The
+ * record's own `timestamp` is the start, so `held_seconds` is measured from the transcript
+ * rather than from when this call first happened to observe the worker, which is what makes
+ * it survive a manager that polls every few minutes.
+ *
+ * `held_seconds` and `started_at` are null together when the record carries no usable
+ * timestamp; `name` is still reported, because "which tool" and "for how long" fail
+ * independently and collapsing them would throw away the half that answered.
+ *
+ * The read is the same bounded tail window as the message read, and — unlike that one — it
+ * has NO full-file fallback. The reasoning is different here: a `tool_result` always follows
+ * its `tool_use`, so a call found inside the window cannot have its result outside it, and
+ * the only shape the window can miss is a call older than the whole window. Reporting null
+ * then reads as "no call in flight" for a worker that is mid-call; it is the one blind spot
+ * and it is named rather than papered over with an unbounded read on the status path.
+ */
+export function currentToolCallFrom(
+  path,
+  { now = Date.now(), read = readFileSync, size = statSync, open = openSync, readAt = readSync, close = closeSync } = {},
+) {
+  if (!path) return null
+  let total
+  try {
+    total = size(path).size
+  } catch {
+    return null
+  }
+
+  if (total <= TAIL_BYTES) {
+    try {
+      return scanForCurrentToolCall(read(path, 'utf8'), now)
+    } catch {
+      return null
+    }
+  }
+
+  const window = readTail(path, total, { open, readAt, close })
+  return window === null ? null : scanForCurrentToolCall(window, now)
+}
+
+/** The in-flight `tool_use` in `body`, or null when nothing is in flight. */
+function scanForCurrentToolCall(body, now) {
+  let call = null
+  const finished = new Set()
+  for (const line of body.split('\n')) {
+    // Match the quoted type VALUES, so a `tool_result` line is not skipped as a `tool_use`
+    // one and vice versa — `"tool_use_id"` is a key on the result, and matching it as the
+    // call type is how a scan ends up counting results as calls.
+    if (!line.includes('"tool_use"') && !line.includes('"tool_result"')) continue
+    let record
+    try {
+      record = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const content = record.message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (block?.type === 'tool_use') call = { id: block.id, name: block.name, input: block.input, at: record.timestamp }
+      else if (block?.type === 'tool_result' && block.tool_use_id) finished.add(block.tool_use_id)
+    }
+  }
+  if (call === null || finished.has(call.id)) return null
+
+  const startedAt = typeof call.at === 'string' ? call.at : null
+  const parsed = startedAt === null ? NaN : Date.parse(startedAt)
+  return {
+    name: typeof call.name === 'string' ? call.name : null,
+    input_summary: summarizeInput(call.input),
+    started_at: startedAt,
+    // Never negative: a transcript timestamp ahead of this process's clock is a clock skew,
+    // not a call that starts in the future, and "-3 seconds" in a status table is noise a
+    // manager has to reason about instead of a fact it can act on.
+    held_seconds: Number.isNaN(parsed) ? null : Math.max(0, Math.round((now - parsed) / 1000)),
+  }
+}
+
+/**
+ * One line naming what a call is doing, from its input.
+ *
+ * `command` first because `Bash` is the call that gets held longest and its command is the
+ * whole story; anything else is the compact JSON of its input. Whitespace is flattened so
+ * the summary survives a table cell, and an input that carries nothing readable reads as
+ * null rather than as the string `"{}"`.
+ */
+function summarizeInput(input) {
+  if (input === null || input === undefined) return null
+  let text
+  if (typeof input === 'string') text = input
+  else if (typeof input.command === 'string') text = input.command
+  else {
+    // A call made with no arguments is a real call with nothing to say about itself, and
+    // `{}` in a status table reads as a bug rather than as an answer.
+    if (typeof input === 'object' && Object.keys(input).length === 0) return null
+    try {
+      text = JSON.stringify(input)
+    } catch {
+      return null
+    }
+  }
+  if (typeof text !== 'string') return null
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat ? flat.slice(0, MAX_SUMMARY) : null
+}
+
+/**
  * The registry's `status` for a session, or null when it is not listed.
  *
  * Values seen across a live fleet (2026-09-19): `idle`, `busy`, `waiting`, `shell`.
@@ -197,8 +327,12 @@ export const awaitingInput = (status) => (status === null ? null : status === 'w
  */
 export function tabWorkerRead(sessionId, opts = {}) {
   const status = sessionStatusFor(sessionId, opts)
+  const path = transcriptPathFor(sessionId, opts)
   return {
-    last_message: lastAssistantTextFrom(transcriptPathFor(sessionId, opts), opts),
+    last_message: lastAssistantTextFrom(path, opts),
+    // What it is doing and for how long — the other half of "what is it doing", and the half
+    // that answers whether a long silence is a long call or a stuck worker.
+    current_tool_call: currentToolCallFrom(path, opts),
     session_status: status,
     awaiting_input: awaitingInput(status),
   }
