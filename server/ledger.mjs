@@ -14,7 +14,7 @@
 //
 // It is deliberately NOT a second liveness source: an entry here must never be read as
 // proof a session is alive. `liveness.mjs` owns that question, and it answers from the
-// live registry plus pgrep.
+// session registry plus the server's own in-process record of the workers it spawned.
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
