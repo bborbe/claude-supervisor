@@ -37,6 +37,14 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   scope boundary: a headless worker's prompts park only with the server process of the session
   that spawned it, so a worker manager answers its own workers and a fleet manager has no channel
   to answer a topic manager's — route to the owning manager instead.
+- docs: state the headless channel as the primary path and demote the tab relay to a fallback.
+  `commands/fleet-manager.md` gains an explicit two-entry channel table (headless-parked →
+  `answer_permission`; headless-exited → `spawn_agent(resume=…)`; tab worker → its pane), so a
+  reader meets the headless path as a peer of the tab path rather than as an afterthought.
+  `README.md` narrows "a headless worker cannot be corrected or stopped once running" — which
+  read as a statement about the worker — to a limit on `send_agent_message` specifically, noting
+  that cross-session `SendMessage` reaches a headless worker mid-task and that an exited one is
+  continued via `spawn_agent(resume=…)`.
 
 ## v0.18.2
 
