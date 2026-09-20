@@ -8,6 +8,25 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: correct the roster and channel claims across the manager command surface, and document the
+  headless answer path as primary. **Refuted claim:** `commands/fleet-manager.md` (two sites) and
+  `llms.txt` asserted that a headless supervisor worker has no unix socket and cannot appear in
+  `ListAgents`. Measured 2026-09-20 — a headless worker read its own roster row back
+  (`personal-80 [fd6bbe] · interactive · busy`) and holds `/tmp/cc-socks/<pid>.sock`, confirmed
+  independently from a manager session — refutes every clause. The duplicate-spawn warning built on
+  it is re-founded on the session registry. Two real limits replace the false one: the roster's mode
+  column reports `interactive` for headless workers too (so it cannot tell the two apart), and the
+  roster is volatile (12 rows → 8 within 17 minutes as workers exited at turn end).
+  **Harmful omission:** `commands/answer.md` presented `allow`/`deny` as a classifier-mode choice and
+  never said that for an `AskUserQuestion` the answer is `deny` + a `message` — `allow` runs the tool
+  in a tty-less session, waits ~11 minutes, and the worker **exits with the question unanswered**.
+  `commands/answer.md` and `llms.txt` now state the rule. **Narrowed claim:** `llms.txt` carried
+  `send_agent_message`'s tab-only limit in a form that read as "a headless worker cannot be reached";
+  corrected to the narrow truth — the tool is tab-only, but ordinary cross-session `SendMessage`
+  reaches a headless worker mid-task in both directions.
+
 ## v0.18.2
 
 - fix: retract the claim that `answer_permission(allow)` is blocked by a structural, one-directional
