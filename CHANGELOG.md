@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.23.0
 
 - fix: both sweep commands dispatch `supervisor:worker-sweep-reader` instead of the bare `worker-sweep-reader`, which resolved to a personal `~/.claude/agents/` copy and never to this plugin's own agent. A plugin agent's type is namespaced — `drain.md` already dispatches `supervisor:worker-wrangler` — and the Agent tool resolves a dispatch by exact match against that namespaced type, so a bare request can never reach a prefixed one. Measured 2026-09-20: a real dispatch of the bare name returned the personal copy's `##`-heading definition, not this file's. The commands were therefore dispatching to a file the plugin does not own, and on any machine without a personal copy of that name they would fail outright with `Agent type 'worker-sweep-reader' not found`.
 - feat: the plugin's `worker-sweep-reader` carries the grouped frame — `Topic / Goal / Task` as the first column with goals and tasks indented under the topic, a fifth `Met` column, goal-level inheritance in the declared-optional set, a required goal spanning both boxes, and `aborted` as an overlay on `done` rather than a bucket. Ported from the global copy so this agent is not a regression: with the dispatch fixed above, this copy becomes the answering one, and it previously lacked every one of those rules.
