@@ -8,14 +8,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.19.2
-
-- fix: route a spawn to window id 0, which a `typeof === 'string'` gate was silently dropping. `spawn_agent` accepted `window_id` only when it arrived as a string, so the number `0` failed the test, the flag was dropped entirely, and the tab inherited the caller's window — the partial spawn (right colour, wrong window) that reads as success and is worse than no signal. Measured 2026-09-20 on the manager role, whose window is 0: `window_id="0"` inherited the caller's window, `"00"` routed correctly to window 0, and `"99"` was refused by wezterm with `window_id 99 not found` — the third being the conclusive one, since it proves wezterm was handed the flag and parsed it, leaving the loss upstream of wezterm and specific to the canonical-number spelling. Resolution moves to `window-id.mjs` and is widened to accept any value while keeping `undefined` and `null` absent: a naive widening would turn a dropped flag into one that silently targets window 0 whenever the caller passed nothing, which is why the absent case now carries its own test. Emptiness is still decided in exactly one place — `spawnInteractiveAgent`'s `String(windowId).trim() !== ''` — so the new module does not also resolve it.
-
-## v0.19.1
-
-- fix: stop counting a rendered closer panel as a block, and record which hook event wrote each row. `attention-log.py` writes a genuinely parked gate and a rendered `👤 You:` closer panel under the same `kind: question` with an identical `cleared_by` — four write sites, two colliding pairs — so no consumer could tell "waiting on a human" from "rendered a line describing what waiting looks like". Measured 2026-09-20: 13 rows reported as needing the operator, 4 genuinely blocked. Every record now carries `event` (the `hook_event_name` that wrote it), and `who-needs-me.py` lists panels in their own group rather than counting them as blocks — grouped, never dropped, since the soft signal is what the command is for. A record with no `event` predates the marker and is still counted as a gate, so nothing is silently reclassified.
-
 ## Unreleased
 
 - feat: `agent_status` and `list_agents` now report **`current_tool_call`** — `{name,
@@ -42,6 +34,14 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   as `null`. The fallback is deliberately omitted here — unlike a missed message, "no call
   found" is the common case for an idle worker, and an unbounded read on the status path is
   what the window exists to avoid.
+
+## v0.19.2
+
+- fix: route a spawn to window id 0, which a `typeof === 'string'` gate was silently dropping. `spawn_agent` accepted `window_id` only when it arrived as a string, so the number `0` failed the test, the flag was dropped entirely, and the tab inherited the caller's window — the partial spawn (right colour, wrong window) that reads as success and is worse than no signal. Measured 2026-09-20 on the manager role, whose window is 0: `window_id="0"` inherited the caller's window, `"00"` routed correctly to window 0, and `"99"` was refused by wezterm with `window_id 99 not found` — the third being the conclusive one, since it proves wezterm was handed the flag and parsed it, leaving the loss upstream of wezterm and specific to the canonical-number spelling. Resolution moves to `window-id.mjs` and is widened to accept any value while keeping `undefined` and `null` absent: a naive widening would turn a dropped flag into one that silently targets window 0 whenever the caller passed nothing, which is why the absent case now carries its own test. Emptiness is still decided in exactly one place — `spawnInteractiveAgent`'s `String(windowId).trim() !== ''` — so the new module does not also resolve it.
+
+## v0.19.1
+
+- fix: stop counting a rendered closer panel as a block, and record which hook event wrote each row. `attention-log.py` writes a genuinely parked gate and a rendered `👤 You:` closer panel under the same `kind: question` with an identical `cleared_by` — four write sites, two colliding pairs — so no consumer could tell "waiting on a human" from "rendered a line describing what waiting looks like". Measured 2026-09-20: 13 rows reported as needing the operator, 4 genuinely blocked. Every record now carries `event` (the `hook_event_name` that wrote it), and `who-needs-me.py` lists panels in their own group rather than counting them as blocks — grouped, never dropped, since the soft signal is what the command is for. A record with no `event` predates the marker and is still counted as a gate, so nothing is silently reclassified.
 
 ## v0.19.0
 
