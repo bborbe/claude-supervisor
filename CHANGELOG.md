@@ -10,6 +10,49 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.18.3
 
+- docs: correct the roster and channel claims across the manager command surface, and document the
+  headless answer path as primary. **Refuted claim (four sites):** `commands/fleet-manager.md`
+  (two), `commands/worker-manager.md` (step 8 of the sweep procedure) and `llms.txt` asserted that
+  a headless supervisor worker has no unix socket and cannot appear in `ListAgents`. Measured 2026-09-20 — a headless worker read its own roster row back
+  (`personal-80 [fd6bbe] · interactive · busy`) and holds `/tmp/cc-socks/<pid>.sock`, confirmed
+  independently from a manager session — refutes every clause. The duplicate-spawn warning built on
+  it is re-founded on the session registry. Two real limits replace the false one: the roster's mode
+  column reports `interactive` for headless workers too (so it cannot tell the two apart), and the
+  roster is volatile (12 rows → 8 within 17 minutes as workers exited at turn end).
+  **Harmful omission:** `commands/answer.md` presented `allow`/`deny` as a classifier-mode choice and
+  never said that for an `AskUserQuestion` the answer is `deny` + a `message` — `allow` runs the tool
+  in a tty-less session, waits ~11 minutes, and the worker **exits with the question unanswered**.
+  `commands/answer.md` and `llms.txt` now state the rule. **Narrowed claim:** `llms.txt` carried
+  `send_agent_message`'s tab-only limit in a form that read as "a headless worker cannot be reached";
+  corrected to the narrow truth — the tool is tab-only, but ordinary cross-session `SendMessage`
+  reaches a headless worker mid-task in both directions.
+- docs: document the headless continuation mechanic and the spawn-scope constraint.
+  `docs/fleet-surface.md` gains § "A headless worker exits at turn end" — a headless worker ends
+  its turn on a READY panel or exits when a parked question times out (~11 min), neither of which
+  is completion; the continuation is `spawn_agent(prompt=…, resume=<id>, interactive=false,
+  cwd=<explicit>)` as a **plain user turn**, not a relay. It records that **`cwd` is not inherited
+  on resume** (the session id names a conversation, not a directory) and that a worker which
+  exited on a timeout **still holds its unanswered question**, so a "continue" prompt parks it at
+  the same gate again. `commands/worker-manager.md` and `commands/fleet-manager.md` state the
+  scope boundary: a headless worker's prompts park only with the server process of the session
+  that spawned it, so a worker manager answers its own workers and a fleet manager has no channel
+  to answer a topic manager's — route to the owning manager instead.
+- docs: state the headless channel as the primary path and demote the tab relay to a fallback.
+  `commands/fleet-manager.md` gains an explicit two-entry channel table (headless-parked →
+  `answer_permission`; headless-exited → `spawn_agent(resume=…)`; tab worker → its pane), so a
+  reader meets the headless path as a peer of the tab path rather than as an afterthought.
+  `README.md` narrows "a headless worker cannot be corrected or stopped once running" — which
+  read as a statement about the worker — to a limit on `send_agent_message` specifically, noting
+  that cross-session `SendMessage` reaches a headless worker mid-task and that an exited one is
+  continued via `spawn_agent(resume=…)`.
+- docs: name the one-manager-N-workers bottleneck and repeat the tab-relay demotion at the
+  worker-manager relay section. Measured 2026-09-20: two workers lost a turn to supervisor
+  timeouts in one night while their manager was busy elsewhere — the failure mode is a
+  **silently stalled worker**, with nothing reported. Because an unanswered headless prompt
+  auto-denies after 15 minutes, a request left parked past that window resumes the worker with
+  a denial it did not earn; the command now says to answer promptly or not at all, and to
+  prefer fewer longer-lived workers over many short ones.
+
 - fix: stamp every worker a supervisor owned as `unknown` when the server exits, instead of
   leaving its ledger record asserting `running` forever. A record whose server died, was
   restarted, or never saw the exit kept claiming `running` indefinitely — worse than absence,
