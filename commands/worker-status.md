@@ -8,6 +8,9 @@ allowed-tools:
   - Bash(find:*)
   - Bash(awk:*)
   - Bash(python3:*)
+  - Bash(mkdir:*)
+  - Bash(pgrep:*)
+  - Bash(ps:*)
   - Bash(vault-cli:*)
   - Bash(wezterm cli list:*)
   - Read
