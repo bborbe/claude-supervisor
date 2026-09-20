@@ -32,7 +32,7 @@ marketplace changes the prefix with it — a one-place edit here, not a sweep of
 over keystrokes:
 
 ```
-mcp__supervisor__spawn_agent(prompt="...", cwd="/path", label="alpha")
+mcp__supervisor__spawn_agent(prompt="...", cwd="/path", label="alpha", role="agent")
 ```
 
 ⚠️ **`interactive` is resolved from the fleet's config — omit it.** With no argument the
@@ -46,6 +46,38 @@ once at server start — restart the MCP server after editing it. The spawn resp
 `mode_source` (`argument`/`env`/`config`/`default`) when you need to know which source
 decided. Pass `interactive` only as a per-call override: `true` to watch one worker's screen
 live, `false` to force one headless worker while the fleet runs in tabs.
+
+⚠️ **`role` resolves BOTH the colour and the window — pass it, and prefer it over
+`window_id`.** The server reads the map the WezTerm config publishes on its reconcile tick
+(`~/.cache/wezterm-role-map.json`) and resolves `manager` → orange/Managers, `agent` →
+pink/Agents, `human` → cyan/Direct. **Omit it for an agent**, which is the correct default
+for every task that has not declared a role.
+
+```
+mcp__supervisor__spawn_agent(prompt="...", cwd="/path", label="alpha", role="manager")
+```
+
+**A role is a WORD, and that is the whole point.** A `window_id` has to cross the MCP tool
+boundary, and `window_id: 0` did not survive that crossing reliably: measured 2026-09-20 it
+reached the server 4 times in 6 and silently inherited the caller's window the other times —
+both failures were a run's first spawn, and no reproducible trigger was found. A role cannot
+be dropped that way, and the id is looked up in-process at the moment of spawn. The CLI
+itself is not implicated: `wezterm cli spawn --window-id 0` from a shell landed in window 0
+six times out of six.
+
+The spawn response reports the resolved `role` and `window_id`, so routing is **observed**
+rather than inferred from wherever the tab happened to land. An explicit `window_id` still
+wins when passed — reach for it only for a window the role map does not describe.
+
+The two failure modes are deliberately different. An **unusable map degrades**: absence is
+normal, since the map publishes on a reconcile tick and a headless worker has no window at
+all, so the spawn proceeds on the caller's explicit window and `SUPERVISOR_WORKER_COLOR`,
+with a warning logged. An **unknown role is refused**, because it is a caller mistake and a
+worker opened with the wrong colour is discovered only by noticing it.
+
+`SUPERVISOR_WORKER_COLOR` remains an explicit operator override and wins over the resolved
+chip; `off` means send no colour. There is deliberately **no built-in colour default** — the
+colour is a role signal, so a hardcoded one is the defect it replaced.
 
 **Fresh start — the worker creates its own session.** Spawn with the work command as the
 `prompt` argument and **no pre-minted `session_id`**:

@@ -21,6 +21,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName } from './liveness.mjs'
 import { resolveSpawnMode, unknownKeyWarnings } from './spawn-mode.mjs'
 import { windowIdArgument } from './window-id.mjs'
+import { resolveRole } from './role-map.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
@@ -463,7 +464,7 @@ function resolveMcpServers(claudeCmd) {
   }
 }
 
-async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId }) {
+async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId, chip }) {
   const claudeCmd = resolveClaudeCmd(cwd)
   // Prefix the tab TITLE so a supervised worker is identifiable at a glance in the
   // tab bar and the fleet roster — the two places a normal session is otherwise
@@ -497,12 +498,20 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId }) {
   const paneId = (res.stdout || '').trim()
   log(`interactive worker ${id} opened in a tab (pane ${paneId || 'unknown'})`)
 
+  // The colour is a ROLE signal, so it comes from the same resolution that chose the
+  // window — one lookup, so the two can never disagree. `SUPERVISOR_WORKER_COLOR` is an
+  // explicit operator override and wins; `off` still means "send nothing".
+  //
+  // A spawn whose role did not resolve gets NO colour rather than the old hardcoded pink:
+  // a wrong role signal is worse than a missing one, and painting everything the agent
+  // colour is precisely how a manager came up indistinguishable from a worker.
+  const colorCommand = config.workerColor || (chip ? `/color ${chip}` : null)
   let color = null
-  if (paneId && config.workerColor && config.workerColor !== 'off') {
+  if (paneId && colorCommand && colorCommand !== 'off') {
     // Confirmed against the pane's own output, not the send's exit code — the exit code
     // is true whether or not the message submitted, which is how this reported
     // `applied: true` for a colour that never applied (3 of 6 spawns, 2026-09-20).
-    color = await sendToPane(paneId, config.workerColor, { confirm: { marker: 'Session color set to' } })
+    color = await sendToPane(paneId, colorCommand, { confirm: { marker: 'Session color set to' } })
     if (color.error) log(`WARNING: worker ${id} colour not applied: ${color.error}`)
   }
 
@@ -536,7 +545,7 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId }) {
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, which is
 // what the guard below — see liveness.mjs — refuses rather than silently producing.
-async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: policyPath, windowId }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: policyPath, windowId, role }) {
   const id = `agent_${++seq}`
 
   // Resolved first, because every guard below asks which way this worker opens and they
@@ -550,6 +559,18 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
   })
   if (spawnMode.error) return { error: spawnMode.error }
   const opensInteractive = spawnMode.mode === 'interactive'
+
+  // Resolved on the same principle and at the same point: a bad role costs no worker, no
+  // ledger record and no tab. `resolveRole` refuses an unknown role and only DEGRADES on
+  // an unusable map, because the map publishes on a reconcile tick and a headless worker
+  // has no window to route — a missing map must not block a spawn that never needed one.
+  const roleResolution = resolveRole({ role, map: readRoleMap() })
+  if (roleResolution.error) return { error: roleResolution.error }
+  if (roleResolution.warning) log(`WARNING: worker ${id}: ${roleResolution.warning}`)
+
+  // An explicit window id WINS — the caller may need a window the map does not describe.
+  // Otherwise the role decides, in-process, and no window id crosses the tool boundary.
+  const targetWindowId = windowId ?? roleResolution.windowId
 
   // Refused before the liveness probe: there is no point guarding an argument the tab
   // path would drop anyway, and the caller needs to hear about the limitation rather
@@ -631,6 +652,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
     // so agent_status, list_agents and the ledger all answer "why is this worker
     // headless" from one value rather than three independent guesses.
     modeSource: spawnMode.source,
+    // What the role resolved to, and the window actually targeted. Carried on the agent so
+    // the reply, agent_status and the ledger can all answer "where did this spawn go, and
+    // why" from one value — and so a role-routed spawn is OBSERVABLE rather than inferred
+    // from wherever the tab happened to land.
+    role: roleResolution.role,
+    windowId: targetWindowId ?? null,
     launcher: null,
     permissions: [],
     transcript: [],
@@ -641,7 +668,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, label: agent.label, windowId })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -658,6 +685,8 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
       status: agent.status,
       interactive: true,
       mode_source: agent.modeSource,
+      role: agent.role,
+      window_id: agent.windowId,
       pane_id: agent.paneId,
       // Resolved from the registry by the tab name we set — a tab worker is a separate
       // process, so this is the only way to learn it. Null when it did not register in
@@ -830,10 +859,16 @@ const TOOLS = [
         prompt: { type: 'string', description: 'The task for the new session.' },
         cwd: { type: 'string', description: 'Working directory (default: supervisor cwd).' },
         label: { type: 'string', description: 'Short label so you can tell agents apart.' },
+        role: {
+          type: 'string',
+          enum: ['manager', 'agent', 'human'],
+          description:
+            'The role this session plays, which resolves BOTH its colour and its window from the role map the WezTerm config publishes (~/.cache/wezterm-role-map.json) — manager → orange/Managers, agent → pink/Agents, human → cyan/Direct. Omit for agent, which is the correct default for every task that has not declared a role. PREFER THIS OVER window_id: a role is a word, so it cannot be mistyped or dropped in transit, and the id is looked up in-process at the moment of spawn instead of being carried across the tool boundary — which is where `window_id: 0` was lost intermittently (measured 2026-09-20: 4 of 6 spawns routed, and the two failures were a run\'s first spawn). Passing a role alone is the reliable path.',
+        },
         window_id: {
           type: 'string',
           description:
-            'WezTerm window to open the tab in, resolved by the caller from the task\'s role (see ~/.cache/wezterm-role-map.json, published by the wezterm config on its reconcile tick). Omit to inherit the calling session\'s window, which is the old behaviour. Tab path only — a headless worker has no tab, so the value is ignored there. Without it a role-routed spawn is a PARTIAL spawn: right chip, wrong window, which reads as correct and is worse than no signal.',
+            'An EXPLICIT WezTerm window to open the tab in, overriding whatever `role` resolved. Usually unnecessary — prefer `role`, which resolves the window from the role map in-process. Pass this only when you need a window the role map does not describe. Omit to let `role` decide, or — with no role either — to inherit the calling session\'s window, which is the old behaviour. Tab path only: a headless worker has no tab, so the value is ignored there.',
         },
         interactive: {
           type: 'boolean',
@@ -922,6 +957,28 @@ function pluginVersion() {
   }
 }
 
+// The role map, re-read on every spawn rather than cached at boot — see config.roleMap.
+//
+// A missing map is SILENCE, while a map that EXISTS and cannot be parsed is REPORTED: it
+// is a file the WezTerm config believes it published. That is the same split the config
+// file read makes, for the same reason — absence is normal (WezTerm may not be running,
+// and a headless worker has no tab), corruption is not.
+function readRoleMap() {
+  let raw
+  try {
+    raw = readFileSync(config.roleMap, 'utf8')
+  } catch (error) {
+    if (error.code !== 'ENOENT') log(`WARNING: cannot read the role map at ${config.roleMap}: ${error.message}`)
+    return null
+  }
+  try {
+    return JSON.parse(raw)
+  } catch (error) {
+    log(`WARNING: the role map at ${config.roleMap} is not valid JSON: ${error.message}`)
+    return null
+  }
+}
+
 const server = new Server({ name: 'supervisor', version: pluginVersion() }, { capabilities: { tools: {} } })
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
@@ -946,14 +1003,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           interactive: typeof args.interactive === 'boolean' ? args.interactive : undefined,
           resume: args.resume,
           policy: args.policy,
-          // The window the caller resolved from the task's role. Passed through
-          // untouched, `undefined` included, so the tab path can tell "no preference"
-          // (inherit the caller's window) from an explicit id.
+          // Passed through raw and validated in role-map.mjs, which owns the legal values
+          // and the refusal message — the same split as the spawn mode below.
+          role: args.role,
+          // An EXPLICIT override, not the primary path. `role` above resolves the window
+          // in-process from the role map; this is passed through untouched, `undefined`
+          // included, so the tab path can still tell "no preference" from an explicit id.
           //
-          // Widened from a `typeof === 'string'` test on 2026-09-20: the number 0 failed
-          // it, the flag was dropped, and the manager's spawn silently inherited the
-          // caller's window. See window-id.mjs for the three observations that
-          // localised it and why absent must stay absent.
+          // Kept because a caller may need a window the map does not describe. It is no
+          // longer how a role is routed: `window_id: 0` reached the server only 4 times
+          // in 6 (measured 2026-09-20), and not crossing this boundary is the whole point
+          // of resolving a role instead. See window-id.mjs and role-map.mjs.
           windowId: windowIdArgument(args.window_id),
         }),
       )
