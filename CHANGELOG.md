@@ -10,6 +10,22 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.18.4
 
+- fix: verify the worker colour against the pane instead of trusting the send. `spawn_agent` reported
+  `color: {applied: true}` whenever `send-text` exited 0 — true whether or not the message actually
+  submitted. Measured 2026-09-20: **3 of 6 spawns asserted success for a colour that never applied**,
+  confirmed against the transcript's own `agent-color` entry rather than the pane. Two causes, both
+  fixed. (1) `isReady` accepted the prompt glyph while the TUI was still painting the composer's
+  placeholder suggestion (`Try "fix lint errors"`); a message sent into that phase has its Enter
+  swallowed and the text stranded — two spawns failed 81ms and 137ms after a placeholder sample, while
+  the one that saw a plain `❯ ` submitted. Readiness is now an **empty** composer, not a drawn one, and
+  a composer already holding text is refused rather than typed into. (2) `sendToPane` takes an opt-in
+  `confirm` marker, polls the pane's own `Session color set to` output with a bounded bare-Enter retry,
+  and returns an error when it never appears — so an unconfirmed colour can no longer be reported as
+  applied. Confirmation is opt-in because `send_agent_message` shares the function and never produces
+  that marker. A cleared composer is deliberately not treated as delivery: a stranded message can also
+  be discarded without ever submitting (observed: text sat unsubmitted 14 minutes, then vanished, with
+  the colour never applied).
+
 - docs: correct the roster and channel claims across the manager command surface, and document the
   headless answer path as primary. **Refuted claim (four sites):** `commands/fleet-manager.md`
   (two), `commands/worker-manager.md` (step 8 of the sweep procedure) and `llms.txt` asserted that

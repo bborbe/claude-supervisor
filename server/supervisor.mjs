@@ -488,7 +488,10 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label }) {
 
   let color = null
   if (paneId && config.workerColor && config.workerColor !== 'off') {
-    color = await sendToPane(paneId, config.workerColor)
+    // Confirmed against the pane's own output, not the send's exit code — the exit code
+    // is true whether or not the message submitted, which is how this reported
+    // `applied: true` for a colour that never applied (3 of 6 spawns, 2026-09-20).
+    color = await sendToPane(paneId, config.workerColor, { confirm: { marker: 'Session color set to' } })
     if (color.error) log(`WARNING: worker ${id} colour not applied: ${color.error}`)
   }
 
@@ -650,10 +653,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
       // time, which is also why the ledger has no record for such a worker.
       session_id: agent.sessionId,
       transcript_dir: agent.transcriptDir,
-      // Whether the colour actually landed, not that we asked for it. Null when
-      // colouring is off; an error when the channel could not deliver — a spawn that
-      // reported success while the colour silently did not apply is the bug this
-      // replaced.
+      // Whether the colour actually landed, not that we asked for it: `sendToPane` was
+      // asked to confirm against the pane's own "Session color set to" output and
+      // returns an error when that never appears. Null when colouring is off. The
+      // previous version of this comment claimed the same guarantee while the code
+      // checked only that the send had not errored — which is how a spawn reported
+      // `applied: true` for a colour that never applied (3 of 6 spawns, 2026-09-20).
       color: res.color ? (res.color.error ? { error: res.color.error } : { applied: true }) : null,
     }
   }
