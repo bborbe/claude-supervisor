@@ -10,6 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.21.1
 
+- feat: the sweep table carries member goals as rows, with tasks grouped under them
+
 - refactor: `worker-manager` delegates its sweep computation to `worker-sweep-reader`, the way `worker-status` already does. The command carried the task-file read, the bucket classification, the id-set extraction, the orphan candidates and the collision count inline, duplicating what the agent already implements — so a change to the sweep had to land twice. It now passes the tracked set, the declared-optional set and this sweep's roster to the agent, and keeps only what a subagent structurally cannot do: the roster read, every liveness verdict, and every action. **Not yet a line-count collapse** — the command is still 261 lines, because its remaining bulk is the session-level rules (manager contract, gate triage, ledger, relay protocol, guardrails) plus the measured evidence behind each, and trimming those is a separate pass with its own review.
 
 ## v0.21.0
