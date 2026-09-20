@@ -45,6 +45,13 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   read as a statement about the worker — to a limit on `send_agent_message` specifically, noting
   that cross-session `SendMessage` reaches a headless worker mid-task and that an exited one is
   continued via `spawn_agent(resume=…)`.
+- docs: name the one-manager-N-workers bottleneck and repeat the tab-relay demotion at the
+  worker-manager relay section. Measured 2026-09-20: two workers lost a turn to supervisor
+  timeouts in one night while their manager was busy elsewhere — the failure mode is a
+  **silently stalled worker**, with nothing reported. Because an unanswered headless prompt
+  auto-denies after 15 minutes, a request left parked past that window resumes the worker with
+  a denial it did not earn; the command now says to answer promptly or not at all, and to
+  prefer fewer longer-lived workers over many short ones.
 
 ## v0.18.2
 
