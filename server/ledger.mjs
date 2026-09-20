@@ -74,6 +74,36 @@ export function buildRecord({
   }
 }
 
+// The state a worker gets when its supervisor goes away without observing its outcome.
+//
+// `running` is not evidence of liveness: nothing closes an entry whose server died, was
+// restarted, or never saw the exit, so the record keeps asserting `running` indefinitely
+// — worse than absence, because it reads as an affirmative claim. This is the honest
+// replacement. The record stops claiming the worker is alive and says only that this
+// server stopped watching it, at a stamped time.
+//
+// Deliberately not `done`/`error`: those assert an outcome nobody observed. Deliberately
+// not `orphaned` either, which would assert *alive but unparented* — itself an unknown.
+// The name mirrors `liveness.mjs`'s `{ live: null }`, which callers must already keep
+// distinct from `false`; the reason field mirrors its `reason`.
+export const UNOBSERVED_STATUS = 'unknown'
+
+// Why the two worker kinds differ, kept in the record rather than in a caller's head: a
+// headless worker is this process's own `query()` and dies with it mid-turn, while an
+// interactive one is a separate wezterm process that outlives the server. One status
+// plus a per-kind reason is the same shape checkLiveness returns.
+export function unobservedPatch({ mode, at = new Date().toISOString() }) {
+  if (!MODES.includes(mode)) throw new Error(`unobservedPatch: unknown mode "${mode}"`)
+  return {
+    status: UNOBSERVED_STATUS,
+    supervisor_exited_at: at,
+    unknown_reason:
+      mode === 'interactive'
+        ? 'interactive tab worker outlives its supervisor; this server stopped watching it here'
+        : 'headless worker terminated with its supervisor mid-turn; its outcome was never observed',
+  }
+}
+
 export function recordPath(dir, sessionId) {
   return join(dir, `${sessionId}.json`)
 }

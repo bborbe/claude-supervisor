@@ -53,6 +53,18 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   a denial it did not earn; the command now says to answer promptly or not at all, and to
   prefer fewer longer-lived workers over many short ones.
 
+- fix: stamp every worker a supervisor owned as `unknown` when the server exits, instead of
+  leaving its ledger record asserting `running` forever. A record whose server died, was
+  restarted, or never saw the exit kept claiming `running` indefinitely — worse than absence,
+  because it reads as an affirmative claim about a worker nobody is watching. `SIGTERM` and
+  `SIGINT` now write `status: "unknown"` with `supervisor_exited_at` and a per-kind
+  `unknown_reason`, reusing `liveness.mjs`'s `{ live: null }` convention rather than coining a
+  new vocabulary. Never `done`/`error`: those assert an outcome nobody observed. The handler is
+  deliberately write-only — it does not probe liveness, so shutdown cannot hang on an unbounded
+  wait. **Consumers reading the ledger must handle the new `unknown` status**; a reader that
+  trusts `status` should resolve `unknown` against `checkLiveness` rather than reading it as
+  either alive or dead.
+
 ## v0.18.2
 
 - fix: retract the claim that `answer_permission(allow)` is blocked by a structural, one-directional
