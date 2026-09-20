@@ -20,6 +20,7 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName } from './liveness.mjs'
 import { resolveSpawnMode, unknownKeyWarnings } from './spawn-mode.mjs'
+import { windowIdArgument } from './window-id.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
@@ -938,7 +939,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // The window the caller resolved from the task's role. Passed through
           // untouched, `undefined` included, so the tab path can tell "no preference"
           // (inherit the caller's window) from an explicit id.
-          windowId: typeof args.window_id === 'string' ? args.window_id : undefined,
+          //
+          // Widened from a `typeof === 'string'` test on 2026-09-20: the number 0 failed
+          // it, the flag was dropped, and the manager's spawn silently inherited the
+          // caller's window. See window-id.mjs for the three observations that
+          // localised it and why absent must stay absent.
+          windowId: windowIdArgument(args.window_id),
         }),
       )
 
