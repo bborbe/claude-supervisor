@@ -96,20 +96,24 @@ test('sendToPane activates the tab before it types', async () => {
   const res = await sendToPane(PANE, '/color pink', { wezterm, sleep: sleepNoop, timeoutMs: 1000 })
   assert.deepEqual(res, { sent: true, tabId: TAB, paneId: PANE })
 
-  const activateAt = wezterm.calls.findIndex((c) => c.startsWith('cli activate-tab'))
+  const activateAt = wezterm.calls.findIndex((c) => c.startsWith('cli activate-pane'))
   const sendAt = wezterm.calls.findIndex((c) => c.startsWith('cli send-text'))
-  assert.ok(activateAt >= 0, 'the tab must be activated')
+  assert.ok(activateAt >= 0, 'the pane must be activated')
+  assert.ok(
+    !wezterm.calls.some((c) => c.startsWith('cli activate-tab')),
+    'activation must go through the pane id — a tab id is renumbered when its tab moves windows',
+  )
   assert.ok(sendAt > activateAt, 'activation must precede the send — without it the send is silently dropped')
   assert.ok(wezterm.calls[sendAt].endsWith('/color pink\r'), 'the message is submitted with a carriage return')
 })
 
-test('sendToPane sends nothing at all when the tab cannot be activated', async () => {
+test('sendToPane sends nothing at all when the pane cannot be activated', async () => {
   const wezterm = fakeWezterm({
     'cli list': () => ok(panesJson),
-    'cli activate-tab': () => fail('cannot activate'),
+    'cli activate-pane': () => fail('cannot activate'),
   })
   const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 200 })
-  assert.match(res.error, /could not activate tab/)
+  assert.match(res.error, /could not activate pane/)
   assert.equal(
     wezterm.calls.some((c) => c.startsWith('cli send-text')),
     false,

@@ -462,7 +462,7 @@ function resolveMcpServers(claudeCmd) {
   }
 }
 
-async function spawnInteractiveAgent({ id, prompt, cwd, label }) {
+async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId }) {
   const claudeCmd = resolveClaudeCmd(cwd)
   // Prefix the tab TITLE so a supervised worker is identifiable at a glance in the
   // tab bar and the fleet roster — the two places a normal session is otherwise
@@ -477,7 +477,17 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label }) {
   // activated tab and a readiness poll. A colour that fails to apply is logged and
   // non-fatal: the worker still has its task.
   const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(`⚙ ${label}`)} ${shellQuote(prompt)}`
-  const res = spawnSync('wezterm', ['cli', 'spawn', '--', 'bash', '-lc', inner], { encoding: 'utf8' })
+  // `--window-id` is what puts the tab in a ROLE's window. Omitted, the tab inherits
+  // WEZTERM_PANE from the calling session and lands in whatever window the caller is
+  // in — which is how a human-only task came up in the Agents window (2026-09-20).
+  // Passed only when the caller resolved one: an empty value would be an invalid
+  // window id rather than "no preference", so the flag is dropped entirely.
+  const spawnArgs = ['cli', 'spawn']
+  if (windowId !== undefined && windowId !== null && String(windowId).trim() !== '') {
+    spawnArgs.push('--window-id', String(windowId))
+  }
+  spawnArgs.push('--', 'bash', '-lc', inner)
+  const res = spawnSync('wezterm', spawnArgs, { encoding: 'utf8' })
 
   if (res.error || res.status !== 0) {
     const why = res.error?.message || res.stderr?.trim() || `exit ${res.status}`
@@ -522,7 +532,7 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label }) {
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, which is
 // what the guard below — see liveness.mjs — refuses rather than silently producing.
-async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: policyPath }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: policyPath, windowId }) {
   const id = `agent_${++seq}`
 
   // Resolved first, because every guard below asks which way this worker opens and they
@@ -627,7 +637,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, label: agent.label })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, label: agent.label, windowId })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -804,6 +814,11 @@ const TOOLS = [
         prompt: { type: 'string', description: 'The task for the new session.' },
         cwd: { type: 'string', description: 'Working directory (default: supervisor cwd).' },
         label: { type: 'string', description: 'Short label so you can tell agents apart.' },
+        window_id: {
+          type: 'string',
+          description:
+            'WezTerm window to open the tab in, resolved by the caller from the task\'s role (see ~/.cache/wezterm-role-map.json, published by the wezterm config on its reconcile tick). Omit to inherit the calling session\'s window, which is the old behaviour. Tab path only — a headless worker has no tab, so the value is ignored there. Without it a role-routed spawn is a PARTIAL spawn: right chip, wrong window, which reads as correct and is worse than no signal.',
+        },
         interactive: {
           type: 'boolean',
           description:
@@ -915,6 +930,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           interactive: typeof args.interactive === 'boolean' ? args.interactive : undefined,
           resume: args.resume,
           policy: args.policy,
+          // The window the caller resolved from the task's role. Passed through
+          // untouched, `undefined` included, so the tab path can tell "no preference"
+          // (inherit the caller's window) from an explicit id.
+          windowId: typeof args.window_id === 'string' ? args.window_id : undefined,
         }),
       )
 
