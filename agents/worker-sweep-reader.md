@@ -1,10 +1,10 @@
 ---
 name: worker-sweep-reader
-description: Compute the worker sweep's read-only half — read a tracked task set, classify into the canonical 7-bucket set, extract full session-id sets unanchored, flag orphan candidates and live collisions, render the status table. Never probes liveness, never acts, never writes.
+description: Compute the worker sweep's read-only half — read a tracked task set, classify into the canonical 7-bucket set, extract full session-id sets unanchored, flag orphan candidates and live collisions, render the status table. Use when a sweep command (`/supervisor:worker-manager` or `/supervisor:worker-status`) needs that computation, which is both of them on every run. Never probes liveness, never acts, never writes.
 model: sonnet
 tools: Read, Bash
 allowed-tools: Bash(grep:*), Bash(python3:*), Bash(head:*), Bash(wc:*), Bash(find:*), Bash(stat:*)
-color: cyan
+color: yellow
 ---
 
 <role>

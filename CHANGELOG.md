@@ -8,6 +8,13 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: both sweep commands now name the **dispatch mechanism**, not just the agent — `Task(subagent_type: "supervisor:worker-sweep-reader", prompt: …)`. The previous fix corrected the name but left the invocation unstated, so nothing pinned it: the correct string sat in prose beside an incorrect one, and the next paraphrase could put the bare name back. Found by `/coding:audit-slash-command`, which scored both commands 6/10 on it.
+- fix: `worker-manager`'s `allowed-tools` now grants what its own body calls. It ordered the session to call `mcp__supervisor__spawn_agent`, `mcp__supervisor__list_agents`, `mcp__supervisor__answer_permission` and `mcp__supervisor__await_permission`, and to use `Monitor`, `AskUserQuestion` and `wezterm cli list` — none were listed, so the command's core mechanic sat outside its own permission bound. The duplicate `Bash(python3:*)` entry is gone.
+- fix: `worker-status` documents a `$2` vault argument that nothing reads — the vault is resolved from `vault-cli config list`, and `argument-hint` never advertised it. Removed rather than wired, since a second source for the vault is the divergence the two commands' shared block exists to prevent.
+- docs: `worker-sweep-reader`'s description gains a `Use when …` trigger clause, and its `color` moves from `cyan` (used nowhere else in this repo's `agents/`) to `yellow`, the convention for a read-only analysis agent.
+
 ## v0.23.0
 
 - fix: both sweep commands dispatch `supervisor:worker-sweep-reader` instead of the bare `worker-sweep-reader`, which resolved to a personal `~/.claude/agents/` copy and never to this plugin's own agent. A plugin agent's type is namespaced — `drain.md` already dispatches `supervisor:worker-wrangler` — and the Agent tool resolves a dispatch by exact match against that namespaced type, so a bare request can never reach a prefixed one. Measured 2026-09-20: a real dispatch of the bare name returned the personal copy's `##`-heading definition, not this file's. The commands were therefore dispatching to a file the plugin does not own, and on any machine without a personal copy of that name they would fail outright with `Agent type 'worker-sweep-reader' not found`.
