@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.23.1
 
 - fix: both sweep commands now name the **dispatch mechanism**, not just the agent — `Task(subagent_type: "supervisor:worker-sweep-reader", prompt: …)`. The previous fix corrected the name but left the invocation unstated, so nothing pinned it: the correct string sat in prose beside an incorrect one, and the next paraphrase could put the bare name back. Found by `/coding:audit-slash-command`, which scored both commands 6/10 on it.
 - fix: `worker-manager`'s `allowed-tools` now grants what its own body calls. It ordered the session to call `mcp__supervisor__spawn_agent`, `mcp__supervisor__list_agents`, `mcp__supervisor__answer_permission` and `mcp__supervisor__await_permission`, and to use `Monitor`, `AskUserQuestion` and `wezterm cli list` — none were listed, so the command's core mechanic sat outside its own permission bound. The duplicate `Bash(python3:*)` entry is gone.
