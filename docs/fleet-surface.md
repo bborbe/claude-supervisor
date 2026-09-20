@@ -98,7 +98,10 @@ Two load-bearing details:
 Answering another session's operator gate by `send-text` is forbidden. Typing into a pane
 showing `Enter to select` turns any keystroke into a menu selection.
 
-**Why A is preferred over B:** A removes the typed *task*; B only hardens the typist.
+**Why A is preferred over B:** A removes the typed *task*; B only hardens the typist. **B is a
+fallback, never the default** — it types into a pane and steals focus, and it has **no target at
+all for a headless worker**. Reach for it only where A cannot do the job: a resume of a session
+whose liveness cannot be determined, or a resume where headless is not permitted for the phase.
 `send_agent_message` is not an alternative channel — it types and steals focus. Two limits on
 A: it can only supervise sessions **it created**, and `spawn_agent({resume})` refuses a
 session that is still live. Measured 2026-09-18: a call site that omitted the follow-up
