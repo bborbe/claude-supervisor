@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.18.4
 
 - docs: correct the roster and channel claims across the manager command surface, and document the
   headless answer path as primary. **Refuted claim (four sites):** `commands/fleet-manager.md`
