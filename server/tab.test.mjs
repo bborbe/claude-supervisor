@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { frameMessage, isReady, listPanes, policySupportError, resumeSupportError, sendToPane, tabIdForPane, waitUntilReady } from './tab.mjs'
+import { composerLine, confirmInPane, frameMessage, isReady, listPanes, policySupportError, resumeSupportError, sendToPane, tabIdForPane, waitUntilReady } from './tab.mjs'
 
 const PANE = '1710'
 const TAB = '1105'
@@ -53,10 +53,23 @@ test('an unreadable pane list is null, never an empty list', () => {
   assert.deepEqual(listPanes({ wezterm: fakeWezterm({ 'cli list': () => ok('[]') }) }), [])
 })
 
-test('isReady reads the prompt glyph, and null when the pane cannot be read', () => {
-  assert.equal(isReady(PANE, { wezterm: fakeWezterm({ 'cli get-text': () => ok(`some output ${PROMPT} `) }) }), true)
-  assert.equal(isReady(PANE, { wezterm: fakeWezterm({ 'cli get-text': () => ok('still booting') }) }), false)
+test('isReady requires an EMPTY composer, not merely a drawn glyph', () => {
+  const ready = (text) => isReady(PANE, { wezterm: fakeWezterm({ 'cli get-text': () => ok(text) }) })
+  assert.equal(ready(`${PROMPT} `), true, 'an empty composer is ready')
+  assert.equal(ready(PROMPT), true)
+  // The regression this exists for: the TUI paints the composer with a placeholder
+  // suggestion before it will honour a submit, and a message sent into that phase is
+  // accepted and then swallowed (measured 2026-09-20 on live panes).
+  assert.equal(ready(`${PROMPT} Try "fix lint errors"`), false, 'a placeholder is not readiness')
+  assert.equal(ready(`${PROMPT} /color pink`), false, 'text already in the composer is not readiness')
+  assert.equal(ready('still booting'), false, 'no glyph at all is not readiness')
   assert.equal(isReady(PANE, { wezterm: fakeWezterm({ 'cli get-text': () => fail('no such pane') }) }), null)
+})
+
+test('composerLine takes the LAST glyph line, so an echoed prompt is not the composer', () => {
+  const text = `${PROMPT} /vault-cli:work-on-task "do the thing"\noutput\n${PROMPT} `
+  assert.equal(composerLine(text), `${PROMPT} `, 'the echoed prompt above carries the same glyph')
+  assert.equal(composerLine('no glyph here'), null)
 })
 
 test('waitUntilReady returns as soon as the glyph appears, not on a fixed delay', async () => {
@@ -64,7 +77,7 @@ test('waitUntilReady returns as soon as the glyph appears, not on a fixed delay'
   const wezterm = fakeWezterm({
     'cli get-text': () => {
       reads += 1
-      return ok(reads < 3 ? 'booting' : `ready ${PROMPT}`)
+      return ok(reads < 3 ? 'booting' : `${PROMPT} `)
     },
   })
   const res = await waitUntilReady(PANE, { wezterm, sleep: sleepNoop, timeoutMs: 2000, intervalMs: 1 })
@@ -96,20 +109,24 @@ test('sendToPane activates the tab before it types', async () => {
   const res = await sendToPane(PANE, '/color pink', { wezterm, sleep: sleepNoop, timeoutMs: 1000 })
   assert.deepEqual(res, { sent: true, tabId: TAB, paneId: PANE })
 
-  const activateAt = wezterm.calls.findIndex((c) => c.startsWith('cli activate-tab'))
+  const activateAt = wezterm.calls.findIndex((c) => c.startsWith('cli activate-pane'))
   const sendAt = wezterm.calls.findIndex((c) => c.startsWith('cli send-text'))
-  assert.ok(activateAt >= 0, 'the tab must be activated')
+  assert.ok(activateAt >= 0, 'the pane must be activated')
+  assert.ok(
+    !wezterm.calls.some((c) => c.startsWith('cli activate-tab')),
+    'activation must go through the pane id — a tab id is renumbered when its tab moves windows',
+  )
   assert.ok(sendAt > activateAt, 'activation must precede the send — without it the send is silently dropped')
   assert.ok(wezterm.calls[sendAt].endsWith('/color pink\r'), 'the message is submitted with a carriage return')
 })
 
-test('sendToPane sends nothing at all when the tab cannot be activated', async () => {
+test('sendToPane sends nothing at all when the pane cannot be activated', async () => {
   const wezterm = fakeWezterm({
     'cli list': () => ok(panesJson),
-    'cli activate-tab': () => fail('cannot activate'),
+    'cli activate-pane': () => fail('cannot activate'),
   })
   const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 200 })
-  assert.match(res.error, /could not activate tab/)
+  assert.match(res.error, /could not activate pane/)
   assert.equal(
     wezterm.calls.some((c) => c.startsWith('cli send-text')),
     false,
@@ -142,6 +159,60 @@ test('sendToPane reports a pane whose tab has disappeared', async () => {
   const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 200 })
   assert.match(res.error, /no tab owns pane/)
   assert.equal(wezterm.calls.some((c) => c.startsWith('cli send-text')), false)
+})
+
+// Confirmation exists because a send's exit code reports only that keystrokes reached
+// the pty — true whether or not they submitted. Measured 2026-09-20: 3 of 6 spawns
+// reported `applied: true` for a colour that never applied.
+const MARKER = 'Session color set to'
+
+test('confirmInPane succeeds on the marker, and says how many attempts it took', async () => {
+  const wezterm = fakeWezterm({ 'cli get-text': () => ok(`done\n${MARKER}: pink\n${PROMPT} `) })
+  const res = await confirmInPane(PANE, MARKER, { wezterm, sleep: sleepNoop, timeoutMs: 50, intervalMs: 1 })
+  assert.deepEqual(res, { confirmed: true, attempts: 1 })
+})
+
+test('confirmInPane retries a bare Enter, and reports an error when the marker never appears', async () => {
+  const wezterm = fakeWezterm({ 'cli get-text': () => ok(`${PROMPT} /color pink`) })
+  const res = await confirmInPane(PANE, MARKER, { wezterm, sleep: sleepNoop, timeoutMs: 10, intervalMs: 1, retries: 2 })
+  assert.match(res.error, /never showed/)
+  const enters = wezterm.calls.filter((c) => c.startsWith('cli send-text') && c.endsWith('\r'))
+  assert.equal(enters.length, 2, 'exactly one retry Enter per retry, so the loop stays bounded')
+})
+
+test('a cleared composer is NOT treated as delivery', async () => {
+  // Observed 2026-09-20: a stranded message can also be discarded without ever
+  // submitting — the text sat unsubmitted for 14 minutes, then vanished, with the
+  // colour never applied. An empty composer therefore proves nothing.
+  const wezterm = fakeWezterm({ 'cli get-text': () => ok(`${PROMPT} `) })
+  const res = await confirmInPane(PANE, MARKER, { wezterm, sleep: sleepNoop, timeoutMs: 10, intervalMs: 1, retries: 0 })
+  assert.match(res.error, /never showed/, 'an empty composer must not satisfy confirmation')
+})
+
+test('sendToPane does not confirm unless the caller asks', async () => {
+  const wezterm = fakeWezterm({ 'cli list': () => ok(panesJson), 'cli get-text': () => ok(PROMPT) })
+  const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 1000 })
+  assert.deepEqual(res, { sent: true, tabId: TAB, paneId: PANE }, 'a relay must not wait on a marker it never produces')
+})
+
+test('sendToPane surfaces an unconfirmed send as an error, never as applied', async () => {
+  // Ready first (empty composer), then the stranded composer the send left behind.
+  let reads = 0
+  const wezterm = fakeWezterm({
+    'cli list': () => ok(panesJson),
+    'cli get-text': () => {
+      reads += 1
+      return ok(reads === 1 ? `${PROMPT} ` : `${PROMPT} /color pink`)
+    },
+  })
+  const res = await sendToPane(PANE, '/color pink', {
+    wezterm,
+    sleep: sleepNoop,
+    timeoutMs: 1000,
+    confirm: { marker: MARKER, timeoutMs: 10, intervalMs: 1, retries: 0 },
+  })
+  assert.match(res.error, /never showed/)
+  assert.equal(res.applied, undefined, 'an unconfirmed send must never report applied')
 })
 
 // The regression these exist for: `{ interactive: true, resume }` used to pass the
