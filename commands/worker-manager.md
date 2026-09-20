@@ -9,6 +9,8 @@ allowed-tools:
   - Bash(grep:*)
   - Bash(ls:*)
   - Bash(cat:*)
+  - Bash(awk:*)
+  - Bash(mkdir:*)
   - Bash(vault-cli:*)
   - Bash(pgrep:*)
   - Bash(ps:*)
@@ -129,7 +131,7 @@ A name resolves to **either a topic or a goal**, and the branch is **detected, n
    - **Tracked set** = every task whose `goals:` frontmatter names this goal — exact match on the goal name, **all three shapes** (see the census above; a wikilink-only match is non-compliant). This is the declaration; there is no second source.
    - **Cross-check against the goal's `# Tasks` list.** A task listed there whose `goals:` does *not* name the goal — or a task whose `goals:` names it but which is absent from `# Tasks` — is a **finding to report**, never silently unioned. The two disagreeing means the declaration drifted, and that is the information.
    - **Closure is not yours.** The goal's `# Success Criteria` are its closure contract and they close **mechanically**. Report SC status and hand closure to `/vault-cli:complete-goal` — never tick SC or flip the goal's status yourself. A goal closing on criteria vs a topic closing on a judged gate is the branch, not a size difference.
-   - **Skip steps 1–4.** There is no topic page, no `## Goals` list, no declared-optional set and no `# Status Summary` on a goal. Do not synthesise them.
+   - **Skip steps 1–5** — every one of them is topic-only. There is no topic page, no `## Goals` list, no declared-optional set and no `# Status Summary` on a goal, and **step 5's missing-topic-page stop would fire spuriously on a goal branch**. Do not synthesise them.
    - Everything else — the sweep, buckets, orphan detection, the auto-resume gate, spawn mechanics, the status table, TTS, guardrails — is **identical to the topic branch**, because the loop is level-independent.
 
 1. **Resolve the topics folder from config, then find the topic page** — the folder is declared per vault, not hardcoded: `TOPICS_DIR=$(vault-cli config list --output json 2>/dev/null | python3 -c "import json,sys,os;cwd=os.path.realpath(os.getcwd());d=json.load(sys.stdin);print(next((v.get('topics_dir') or '23 Topics' for v in d if os.path.realpath(os.path.expanduser(v['path']))==cwd),'23 Topics'))" 2>/dev/null || echo "23 Topics")`, then `find "$TOPICS_DIR" -maxdepth 1 -iname "$SUBJECT.md"`, then confirm `page_type: topic` **in the frontmatter block** (scope the check: `awk '/^---$/{n++; next} n==1' <page> | grep -q '^page_type: topic'`). **`-iname`, not a shell glob** — a plain `ls "23 Topics/"*"$SUBJECT"*.md` is **case-sensitive** under zsh, so a lowercase argument silently resolves nothing against this vault's Title Case filenames: verified 2026-09-12 in the Personal vault, `*"discord"*.md` returned `no matches found` while `*"Discord"*.md` returned 5 files. Because step 5 refuses to fall back, that miss reads as "the domain has no topic page" — the page exists and the command cannot see it. Never accept `Topic Writing Guide.md` — the convention page lives in the vault's knowledge folder and carries no `page_type`, and an unscoped grep matches its YAML template example, so an unscoped check would resolve the guide that *describes* topics as if it were one. (Topic pages have their own folder; a `24 Goals/` match is a *goal*, not a topic — step 0 routes it to step G.)
