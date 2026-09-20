@@ -11,9 +11,9 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - docs: correct the roster and channel claims across the manager command surface, and document the
-  headless answer path as primary. **Refuted claim:** `commands/fleet-manager.md` (two sites) and
-  `llms.txt` asserted that a headless supervisor worker has no unix socket and cannot appear in
-  `ListAgents`. Measured 2026-09-20 — a headless worker read its own roster row back
+  headless answer path as primary. **Refuted claim (four sites):** `commands/fleet-manager.md`
+  (two), `commands/worker-manager.md` (step 8 of the sweep procedure) and `llms.txt` asserted that
+  a headless supervisor worker has no unix socket and cannot appear in `ListAgents`. Measured 2026-09-20 — a headless worker read its own roster row back
   (`personal-80 [fd6bbe] · interactive · busy`) and holds `/tmp/cc-socks/<pid>.sock`, confirmed
   independently from a manager session — refutes every clause. The duplicate-spawn warning built on
   it is re-founded on the session registry. Two real limits replace the false one: the roster's mode
