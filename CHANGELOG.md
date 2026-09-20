@@ -18,6 +18,31 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.19.0
 
+- feat: `agent_status` and `list_agents` now report **`current_tool_call`** — `{name,
+  input_summary, started_at, held_seconds}`, the call a worker is inside right now and how long
+  it has been held, or `null` when nothing is in flight. This is the operator's stated
+  debugging need, and it is the only signal that separates a worker executing a long tool call
+  from one parked on a gate without a pane: `session_status` says both are not-idle, and it
+  names neither. **The transcript already carried it and the read path threw it away** —
+  `tab-read.mjs`'s `scanForLastAssistantText` parses every `tool_use` block and keeps only
+  `type === 'text'`, so the call, its input and its timestamp were all present and discarded.
+  In flight means the **LAST** `tool_use` record with no `tool_result` carrying its id; "any
+  unmatched `tool_use`" is the plausible wrong answer, because an interrupted call leaves an
+  unmatched `tool_use` behind and the conversation carries on — measured 2026-09-20 over
+  1 667 live transcripts, 58 carried an unmatched `tool_use` and only 36 had it as their last
+  one, so that scan names calls the worker abandoned. `held_seconds` is measured from the
+  record's own `timestamp`, not from when the caller first observed the worker, so it does not
+  reset across polls. `input_summary` is capped at 200 chars and whitespace-flattened (the full
+  input remains `pending_permissions`' job for a parked call); `started_at`/`held_seconds` are
+  `null` together when the record carries no timestamp, and `name` is still reported. Read from
+  the transcript for **both** worker kinds — the in-memory array carries the call but no
+  timestamp with it, so a duration cannot come from memory. ⚠️ **One named blind spot:** the
+  read is the same 256 KB tail window as the message read and has **no** full-file fallback, so
+  a call older than the whole window (256 KB of records written after it while it runs) reports
+  as `null`. The fallback is deliberately omitted here — unlike a missed message, "no call
+  found" is the common case for an idle worker, and an unbounded read on the status path is
+  what the window exists to avoid.
+
 - feat: route a spawned session to its **role's window**, and stop a manager dispatching a human-only task. Three changes, all consumers of the same `role → {chip, window_id}` mapping the wezterm config publishes to `~/.cache/wezterm-role-map.json` on its reconcile tick.
   - **`spawn_agent` gains an optional `window_id`**, threaded through `spawnAgent` to `spawnInteractiveAgent` and onto the `wezterm cli spawn` call as `--window-id`. Without it a role-routed spawn was a **partial spawn**: right chip, wrong window, because the tab inherited `WEZTERM_PANE` from the caller — which is how a human-only task came up in the Agents window (measured 2026-09-20 on `Start Day`). Omitted or empty, the flag is dropped entirely rather than passed empty, so the old behaviour is preserved exactly for callers that do not resolve a role. Tab path only; a headless worker has no tab.
   - **`worker-manager.md` refuses to dispatch a `role: human` task**, rendering it `👤 YOURS` instead of `🚀 READY TO START`. A human-only task is not un-converted work waiting to become autonomous — it is work that *cannot* be delegated, and the two are indistinguishable on the chip (both cyan). Dispatching one would not merely waste a worker: it would put a session on work the operator intended to do themselves, looking like every other agent. Absent `role:`, behaviour is unchanged — the gate only ever subtracts. `role: manager` is likewise not a spawn target.

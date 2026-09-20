@@ -23,7 +23,7 @@ import { resolveSpawnMode, unknownKeyWarnings } from './spawn-mode.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
-import { awaitingInput, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
+import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -771,8 +771,13 @@ const agentView = (a) => {
   // The in-memory transcript is pushed by the headless SDK loop alone, so it is empty for
   // exactly the workers `agent_status` used to report null for — the tab ones. The disk
   // read is what answers for them, and it is skipped when memory already holds the text.
-  const fromDisk =
-    a.transcript.length === 0 ? lastAssistantTextFrom(transcriptPathFor(a.sessionId)) : null
+  const transcript = transcriptPathFor(a.sessionId)
+  const fromDisk = a.transcript.length === 0 ? lastAssistantTextFrom(transcript) : null
+  // Read from disk for BOTH kinds of worker, unlike the message above. The in-memory array
+  // does carry the call, but no timestamp with it, so a duration cannot come from there —
+  // and duration is the half of this field that turns "git fetch" into "git fetch, 14
+  // minutes", which is what makes a held worker visible without a pane.
+  const currentToolCall = currentToolCallFrom(transcript)
   // `null` means the registry does not list this session — a different fact from any
   // status value, and from "not waiting". See tab-read.mjs.
   const sessionStatus = sessionStatusFor(a.sessionId)
@@ -799,6 +804,11 @@ const agentView = (a) => {
     // Memory first — free, and already correct for headless workers — then the worker's
     // own transcript on disk, which is the only source a tab worker has.
     last_message: lastAssistantText(a) ?? fromDisk,
+    // The call the worker is inside right now and how long it has been held, or null when
+    // nothing is in flight. This is the field that separates a worker executing a long tool
+    // call from one parked on a gate: `session_status` says both are not-idle, and this says
+    // which call, for how long. Read from the transcript, not from memory — see above.
+    current_tool_call: currentToolCall,
     // Read from the session registry, NOT the transcript: a pending tool call reads the
     // same whether the worker is executing a tool or parked on a permission prompt, so the
     // transcript cannot separate them. `awaiting_input` is null rather than false when the
@@ -859,12 +869,12 @@ const TOOLS = [
   },
   {
     name: 'list_agents',
-    description: 'All spawned sessions with status and how many permissions are pending.',
+    description: 'All spawned sessions with status and how many permissions are pending. Each row also carries `current_tool_call` (the call in flight and how long it has been held) and `last_message`, so one sweep says what every worker is doing without a pane.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'agent_status',
-    description: 'One session: status, last assistant message, result, pending permission ids. For a tab worker the last message is read from its transcript on disk. `session_status` and `awaiting_input` come from the session registry; `awaiting_input` is null (not false) when the session is not listed, and means "blocked on input" rather than specifically "a permission gate is open".',
+    description: 'One session: status, last assistant message, the current tool call, result, pending permission ids. `current_tool_call` is `{name, input_summary, started_at, held_seconds}` — the call the worker is inside right now and how long it has been held — or null when nothing is in flight; it is read from the worker\'s transcript and is what tells a long tool call apart from a worker parked on a gate. For a tab worker the last message is read from its transcript on disk. `session_status` and `awaiting_input` come from the session registry; `awaiting_input` is null (not false) when the session is not listed, and means "blocked on input" rather than specifically "a permission gate is open".',
     inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } }, required: ['agent_id'] },
   },
   {
