@@ -21,7 +21,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName } from './liveness.mjs'
 import { resolveSpawnMode, unknownKeyWarnings } from './spawn-mode.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
-import { buildRecord, parentSessionId, updateRecord, writeRecord } from './ledger.mjs'
+import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
@@ -372,6 +372,43 @@ function writeLedger(agent, patch) {
     log(`WARNING: could not write the ledger record for ${agent.id}: ${error.message}`)
     return null
   }
+}
+
+// The shutdown path: what this server owes the ledger when it goes away.
+//
+// Without it, a killed or restarted server leaves every record it wrote asserting
+// `running` forever — the defect this exists to close. The hook is deliberately
+// WRITE-ONLY and fast: it does not probe liveness. `checkLiveness` shells out to pgrep
+// per session, so probing every agent inside a signal handler would make shutdown slow
+// and unbounded — the same unbounded wait that ruled out a drain-and-wait mode.
+// Resolving an `unknown` record against liveness belongs at READ time, where a reader
+// can afford it and where the answer is fresh rather than stale by construction.
+//
+// An agent whose session id never resolved has no ledger key, so it has no record to
+// stamp either. writeLedger already says so; this must not invent one.
+function stampUnobservedWorkers() {
+  let stamped = 0
+  for (const agent of agents.values()) {
+    // `done` and `error` are real observed outcomes. Never overwrite one with an unknown.
+    if (agent.status === 'done' || agent.status === 'error') continue
+    const mode = agent.status === 'interactive' ? 'interactive' : 'headless'
+    if (writeLedger(agent, unobservedPatch({ mode }))) stamped += 1
+  }
+  return stamped
+}
+
+// SIGTERM is what a restart or an operator's kill sends; SIGINT is Ctrl-C for a server
+// run by hand. Both must run the same path — a handler on one alone leaves the other
+// dying hard, which is exactly the state this task exists to remove.
+//
+// process.exit after the writes: installing a signal handler suppresses Node's default
+// exit, so without it the server would keep running after being told to stop.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    const stamped = stampUnobservedWorkers()
+    log(`received ${signal} — stamped ${stamped} unobserved worker(s) as ${UNOBSERVED_STATUS}, then exited`)
+    process.exit(0)
+  })
 }
 
 // Spawn a worker as a real interactive session in a wezterm tab.

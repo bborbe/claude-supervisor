@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildRecord, listRecords, parentSessionId, readRecord, recordPath, updateRecord, writeRecord } from './ledger.mjs'
+import { buildRecord, listRecords, parentSessionId, readRecord, recordPath, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 
 const SESSION = 'ea363bb5-123a-4d03-bc89-1087a3114bbd'
 
@@ -128,4 +128,41 @@ test('the record carries which source decided the mode', () => {
 
   // Absent rather than invented for a record built before the field existed.
   assert.equal(buildRecord({ sessionId: SESSION, mode: 'headless' }).mode_source, null)
+})
+
+test('an unobserved worker is stamped unknown, never done or error', () => {
+  // The defect this closes: a record whose server went away kept asserting `running`
+  // indefinitely, which reads as an affirmative claim about a worker nobody watches.
+  const patch = unobservedPatch({ mode: 'headless', at: '2026-09-20T00:00:00.000Z' })
+  assert.equal(patch.status, UNOBSERVED_STATUS)
+  assert.equal(patch.status, 'unknown')
+  assert.equal(patch.supervisor_exited_at, '2026-09-20T00:00:00.000Z')
+  // No outcome may be claimed: nothing observed this worker finish.
+  assert.equal('ended_at' in patch, false, 'an unobserved worker has no end time')
+  assert.equal('result' in patch, false, 'an unobserved worker has no result to report')
+})
+
+test('the two worker kinds carry why they differ, in the record', () => {
+  const tab = unobservedPatch({ mode: 'interactive' })
+  const head = unobservedPatch({ mode: 'headless' })
+  assert.match(tab.unknown_reason, /outlives its supervisor/)
+  assert.match(head.unknown_reason, /terminated with its supervisor/)
+  assert.notEqual(tab.unknown_reason, head.unknown_reason, 'one status, two reasons — the reason is what distinguishes them')
+})
+
+test('unobservedPatch refuses a mode it cannot explain', () => {
+  assert.throws(() => unobservedPatch({ mode: 'telepathy' }), /unknown mode/)
+})
+
+test('stamping an unobserved worker keeps the spawn fields and drops the claim', () => {
+  withDir((dir) => {
+    writeRecord(dir, spawnRecord())
+    const stamped = updateRecord(dir, SESSION, unobservedPatch({ mode: 'interactive' }))
+    assert.equal(stamped.status, 'unknown', 'running must not survive the server that asserted it')
+    assert.equal(stamped.mode, 'interactive')
+    assert.equal(stamped.label, 'drill')
+    assert.equal(stamped.pane_id, '1711')
+    assert.equal(stamped.parent_session, spawnRecord().parent_session)
+    assert.equal(readRecord(dir, SESSION).status, 'unknown', 'the stamp is persisted, not just returned')
+  })
 })
