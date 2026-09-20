@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: the sweep table carries member goals as rows, with tasks grouped under them
+
 ## v0.21.0
 
 - feat: ship the worker sweep's reader as a plugin agent, so `/supervisor:worker-status` stops dispatching to a file the plugin does not own. `worker-sweep-reader` computed the sweep's read-only half — tracked-set read, canonical seven-bucket classification, unanchored id-set extraction, collision count, table render — but lived only in the **global** `~/.claude/agents/`, while the command that invoked it ships here. That is a plugin→vault reference: any install without this user's global agents directory got a command dispatching to an agent type that does not exist. The agent now ships in `agents/` beside `worker-wrangler.md`, converted from its `##`-heading shape to this repo's reference-pair XML shape (`<role>`/`<constraints>`/`<process>`/`<error_handling>`/`<output_format>`/`<success_criteria>`). **Behaviour is unchanged** — the relocation is deliberately neutral so it can be reviewed and reverted on its own; the topic-level necessity check is a separate change and is not in this one. `/supervisor:worker-manager` is not yet wired to the agent — it still carries the analysis inline, and that rewiring lands separately.
