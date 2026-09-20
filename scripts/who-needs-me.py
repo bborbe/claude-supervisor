@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """List Claude Code sessions that need the operator, joined to WezTerm panes.
 
-Reads ~/.claude/state/attention/*.needs.json / *.tool.json written by
-~/.claude/hooks/attention-log.py.  Sections:
+Reads the attention store written by ~/.claude/hooks/attention-log.py. Two formats
+coexist while the fleet rolls over, and both are read:
+  <sid>.events.jsonl  append-only event log — one `open` line per item, one `close`
+                      line when it clears; folded by `load_events()` into current state
+  <sid>.needs.json    the older one-file-per-session snapshot
+  <sid>.tool.json     session inside a tool call (stale => probably stuck)
+Sections:
   Needs you       — permission prompt or open question (oldest first)
   Probably stuck  — inside one tool call longer than --stuck-min (default 20)
   Reapable        — close gate whose anchored task is already finished
@@ -15,7 +20,7 @@ any gate as open.
 """
 import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
 
-STATE = os.path.expanduser("~/.claude/state/attention")
+STATE = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser("~/.claude/state/attention")
 OBSIDIAN = os.path.expanduser("~/Documents/Obsidian")
 
 # Closer verbs describing a parked wait rather than an open gate. `later (on
@@ -77,9 +82,21 @@ def load(suffix):
     in its own pane. Listing it makes a manager surface its own question as a peer's, and
     under the ask-here-relay-back rule it would then relay the answer into its own pane.
     Measured 2026-09-17: the fleet-manager session appeared in its own blocked list (tab 0).
+
+    Reads BOTH store formats, deliberately. The hook was rewritten to an append-only
+    event log (`<sid>.events.jsonl`, one `open` line per item and one `close` line
+    when it clears) and the two formats coexist while the fleet rolls over: a
+    session that has not yet restarted still has a `.needs.json`, and dropping that
+    branch before the last one ages out would silently empty the feed. The
+    `.needs.json` branch is removed only once no session writes it.
     """
     me = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     out = []
+    if suffix == "needs":
+        for rec in load_events():
+            if me and rec.get("session_id") == me:
+                continue
+            out.append(rec)
     for p in glob.glob(os.path.join(STATE, f"*.{suffix}.json")):
         try:
             d = json.load(open(p))
@@ -88,6 +105,49 @@ def load(suffix):
         if me and d.get("session_id") == me:
             continue
         out.append(d)
+    return out
+
+
+def load_events():
+    """Fold each session's event log into its currently-open items.
+
+    The log is append-only and never rewritten: `open` lines carry the item,
+    `close` lines carry only the `item_id` they clear. An item is open exactly
+    when its `item_id` has an `open` line and no matching `close`.
+
+    `state` is reconstructed here rather than read from the record, so the whole
+    downstream classification (`answered()`, `is_open_gate()`) keeps working
+    unchanged against the new format — the record shape stays what every other
+    function already expects.
+
+    A malformed line is skipped, not fatal: the hook appends while this reads, so
+    a torn final line is expected rather than exceptional.
+    """
+    out = []
+    for p in glob.glob(os.path.join(STATE, "*.events.jsonl")):
+        opened, closed = {}, set()
+        try:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    iid = r.get("item_id")
+                    if not iid:
+                        continue
+                    if r.get("type") == "open":
+                        opened[iid] = r
+                    else:
+                        closed.add(iid)
+        except Exception:
+            continue
+        for iid, rec in opened.items():
+            # `state` mirrors the old on-disk marker so `answered()` is unchanged.
+            out.append(dict(rec, state="answered" if iid in closed else "open"))
     return out
 
 

@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `who-needs-me` reads the attention store's new append-only event log (`<sid>.events.jsonl`, one `open` line per item and one `close` line when it clears) alongside the older per-session snapshot, so the feed survives the hook's rollout — a session that has not yet restarted still has a `.needs.json`, and dropping that branch before the last one ages out would silently empty the feed. `load_events()` folds each session's log into its currently-open items and reconstructs `state` there, so `answered()` and `is_open_gate()` are unchanged. The state dir honours `ATTENTION_STATE_DIR`, so the round-trip test can run against an isolated store instead of seeding production state.
+
 ## v0.21.1
 
 - feat: the sweep table carries member goals as rows, with tasks grouped under them
