@@ -284,7 +284,23 @@ def names_peer_gate(rec, open_panes):
     return False
 
 
-def is_open_gate(rec, open_panes=frozenset(), task_status=None):
+def is_rendered_panel(rec):
+    """A closer panel the `Stop` handler rendered — not a parked gate.
+
+    `kind` cannot tell them apart: the `Stop` panel path and the `Notification`
+    elicitation path both write `kind="question"` with an identical `cleared_by`
+    (`{"event": "UserPromptSubmit"}`), and the two `idle` paths collide the same
+    way. The writer is recorded in `event`: `Stop` means the session ended its
+    turn and rendered a line describing what waiting looks like; anything else
+    is a real parked tool call.
+
+    A record with no `event` predates the marker and keeps the old behaviour —
+    counted as a gate — so nothing is silently reclassified by this change.
+    """
+    return rec.get("event") == "Stop"
+
+
+def is_open_gate(rec, open_panes=frozenset(), task_status=None, include_panels=False):
     """A gate the operator has not answered yet.
 
     The record carries `state` ("open" until its answering event fires, then "answered")
@@ -296,6 +312,13 @@ def is_open_gate(rec, open_panes=frozenset(), task_status=None):
 
     `open_panes` and `task_status` carry the context the context-dependent classes
     need; both default to absent, which degrades to the text-only rule.
+
+    `include_panels` is the one knob that separates a *block* from a *soft signal*.
+    A rendered closer panel is not waiting on the operator, so it must not be
+    counted as a block — but it must still be listed, or `/who-needs-me` silently
+    starts hiding panes. Callers pass True to enumerate the panel group through
+    this same predicate, so the two surfaces cannot disagree about which rows are
+    panels.
     """
     if answered(rec) or rec.get("kind") not in ("permission", "question"):
         return False
@@ -304,6 +327,8 @@ def is_open_gate(rec, open_panes=frozenset(), task_status=None):
     if is_reapable(rec, task_status):
         return False
     if names_peer_gate(rec, open_panes):
+        return False
+    if is_rendered_panel(rec) and not include_panels:
         return False
     return True
 
@@ -351,6 +376,15 @@ def main():
     blocked = sorted([r for r in needs
                       if is_open_gate(r, open_panes=open_panes, task_status=task_status_from_closer)],
                      key=lambda r: r["ts"])
+    # Rendered closer panels: the same predicate with `include_panels=True`, so the
+    # block count and the panel list can never disagree about which rows are panels.
+    # They stay VISIBLE — the soft signal is what this command is for — and are
+    # simply not counted as blocks.
+    panels = sorted([r for r in needs
+                     if is_rendered_panel(r) and not answered(r)
+                     and is_open_gate(r, open_panes=open_panes,
+                                      task_status=task_status_from_closer, include_panels=True)],
+                    key=lambda r: r["ts"])
     reapable = sorted([r for r in needs if not answered(r)
                        and is_reapable(r, task_status_from_closer)], key=lambda r: r["ts"])
     stuck = sorted([r for r in tools if time.time() - r["ts"] > a.stuck_min * 60], key=lambda r: r["ts"])
@@ -359,6 +393,9 @@ def main():
     print(f"Needs you ({len(blocked)})")
     for r in blocked:
         print(row(r, pmap, f"{r['kind']}: {r['detail']}"))
+    print(f"\nRendered panels ({len(panels)})  — a closer line, not a parked gate")
+    for r in panels:
+        print(row(r, pmap, r["detail"]))
     print(f"\nProbably stuck > {a.stuck_min}m ({len(stuck)})")
     for r in stuck:
         print(row(r, pmap, r["detail"]))
