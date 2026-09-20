@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.20.0
 
 - feat: `agent_status` and `list_agents` now report **`current_tool_call`** — `{name,
   input_summary, started_at, held_seconds}`, the call a worker is inside right now and how long
