@@ -112,8 +112,17 @@ from every session. If `mcp__supervisor__*` is unavailable, use path B.
 **B — raw `wezterm cli spawn` (fallback, and the path for resuming a live session).**
 
 ```bash
-wezterm cli spawn -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<claude_script>" --resume <session_id> -n "<title>" "/color pink"'
+wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
 ```
+
+**`$WINDOW_ID` and `$CHIP` are a role-resolved PAIR**, read from the published map before
+spawning (`~/.cache/wezterm-role-map.json`): `manager` → Managers / orange, `agent` →
+Agents / pink, `human` → Direct / cyan, with `role:` absent resolving to `agent`. Both are
+role signals, so a hardcoded colour or a missing `--window-id` **is** the defect this shape
+was corrected for on 2026-09-20 — the old `"/color pink"` painted a manager as a worker, and
+the missing flag dropped the tab into whatever window the caller happened to occupy.
+`${WINDOW_ID:+…}` keeps the flag off entirely when the map is unavailable, so the fallback
+degrades to the old behaviour instead of passing an empty `--window-id`.
 
 Two load-bearing details:
 
