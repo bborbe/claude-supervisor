@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.18.3
+## Unreleased
 
 - docs: correct the roster and channel claims across the manager command surface, and document the
   headless answer path as primary. **Refuted claim (four sites):** `commands/fleet-manager.md`
@@ -52,6 +52,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   auto-denies after 15 minutes, a request left parked past that window resumes the worker with
   a denial it did not earn; the command now says to answer promptly or not at all, and to
   prefer fewer longer-lived workers over many short ones.
+
+## v0.18.3
 
 - fix: stamp every worker a supervisor owned as `unknown` when the server exits, instead of
   leaving its ledger record asserting `running` forever. A record whose server died, was
