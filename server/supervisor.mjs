@@ -380,11 +380,12 @@ function writeLedger(agent, patch) {
 //
 // Without it, a killed or restarted server leaves every record it wrote asserting
 // `running` forever — the defect this exists to close. The hook is deliberately
-// WRITE-ONLY and fast: it does not probe liveness. `checkLiveness` shells out to pgrep
-// per session, so probing every agent inside a signal handler would make shutdown slow
-// and unbounded — the same unbounded wait that ruled out a drain-and-wait mode.
-// Resolving an `unknown` record against liveness belongs at READ time, where a reader
-// can afford it and where the answer is fresh rather than stale by construction.
+// WRITE-ONLY and fast: it does not probe liveness. `checkLiveness` reads and parses the
+// session registry per session, so probing every agent inside a signal handler would
+// make shutdown slow and unbounded — the same unbounded wait that ruled out a
+// drain-and-wait mode. Resolving an `unknown` record against liveness belongs at READ
+// time, where a reader can afford it and where the answer is fresh rather than stale by
+// construction.
 //
 // An agent whose session id never resolved has no ledger key, so it has no record to
 // stamp either. writeLedger already says so; this must not invent one.
@@ -614,6 +615,25 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
     if (live === true) {
       return {
         error: `session ${resume} is still running (${reason}) — close it before resuming, or you will have two writers on one conversation`,
+      }
+    }
+    // The half `checkLiveness` cannot see, and the only channel that can see it: a
+    // headless worker this server spawned is an in-process SDK `query()`, so it has no
+    // pid for the registry and no argv for any process probe. Its record here is the
+    // sole evidence it is running, and `status` genuinely closes — `running` is set at
+    // spawn and cleared to `done`/`error` when the query ends — unlike the ledger's
+    // `running`, which never closes at all.
+    //
+    // Without this, a `false` from the registry would be read as "closed" and a live
+    // worker resumed: two writers on one conversation, the corruption this guard
+    // exists to prevent. Scoped to this server's own spawns by construction; a worker
+    // spawned by a different server process is not visible here.
+    const running = [...agents.values()].find(
+      (a) => a.sessionId === resume && a.status === 'running',
+    )
+    if (running) {
+      return {
+        error: `session ${resume} is still running (worker ${running.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`,
       }
     }
     // Neither probe could be read. Fail CLOSED: "could not tell" and "confirmed

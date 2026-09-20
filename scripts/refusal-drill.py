@@ -85,18 +85,23 @@ if not session_id:
     print("FAIL: worker never reported a session id"); proc.kill(); sys.exit(1)
 print("   -> session_id:", session_id, " status:", st.get("status"))
 
-print("3. confirming the worker is LIVE by the same probe the guard uses...")
+print("3. asking each channel whether the worker is live...")
 sys.path.insert(0, os.path.join(REPO, "server"))
 probe = subprocess.run(
     ["node", "--input-type=module", "-e",
      f"import {{ checkLiveness }} from '{os.path.join(REPO, 'server', 'liveness.mjs')}';"
      f"console.log(JSON.stringify(checkLiveness('{session_id}')))"],
     capture_output=True, text=True, cwd=REPO)
-print("   -> new probe:", probe.stdout.strip() or probe.stderr.strip())
+print("   -> registry probe:", probe.stdout.strip() or probe.stderr.strip())
+# Expected to read NOT live, and that is the point rather than a failure: a headless
+# worker is an in-process SDK query() with no pid, so the pid-keyed registry cannot see
+# it. The refusal below is carried by the server's own in-process record instead.
+print("      (registry is blind to a headless worker by construction — the refusal is")
+print("       carried by the server's in-process record of the workers it spawned)")
 
 # A/B: the probe this replaced, run against the same live session right now.
 old = subprocess.run(["pgrep", "-fl", session_id], capture_output=True, text=True)
-print("   -> OLD probe (pgrep -fl alone):",
+print("   -> OLD argv probe (pgrep -fl):",
       f"FOUND {old.stdout.strip()!r}" if old.returncode == 0 and old.stdout.strip()
       else "found nothing — the old guard would have ALLOWED this resume")
 

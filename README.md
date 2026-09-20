@@ -186,7 +186,7 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
 
 `parent_session` is the **spawn edge** — the manager session that called `spawn_agent`, resolved once from this server's own parent pid. Nothing else records it. A worker whose session id never resolved gets no record rather than one filed under a key nothing would look up, and the server logs that rather than staying quiet.
 
-⚠️ **This is not a liveness source.** An entry here must never be read as proof a session is alive — `liveness.mjs` owns that question, and it answers from the live registry plus `pgrep`. The ledger is deliberately the durable half.
+⚠️ **This is not a liveness source.** An entry here must never be read as proof a session is alive — `liveness.mjs` owns that question, and it answers from the session registry plus the server's in-process record of workers it spawned. The ledger is deliberately the durable half.
 
 `SUPERVISOR_LEDGER_DIR` overrides the location. It is deliberately *not* `SUPERVISOR_SESSIONS_DIR`, which already means the live registry — one variable meaning two stores is how a reader ends up pointing this one at Claude Code's directory.
 
@@ -210,7 +210,9 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 
 **Why this matters:** it reaches what the permission *channel* exists for, with no worker-side plugin, no `--channels` flag and no marketplace dependency. The channel was ruled out as a Non-goal precisely to avoid those.
 
-⚠️ **The session must be closed, and a live one is refused.** Two writers on one conversation corrupt it, so `spawn_agent` probes before resuming and returns an error rather than opening the session: a session found running is refused, and so is one whose liveness cannot be determined. Two probes, because neither is enough alone — the session registry at `~/.claude/sessions/<pid>.json`, which is the only one that finds a session started *fresh* (its id is in no process's command line, so `pgrep` has nothing to match), plus `pgrep -fl`, which catches a process the registry does not list. `SUPERVISOR_SESSIONS_DIR` overrides the registry location.
+⚠️ **The session must be closed, and a live one is refused.** Two writers on one conversation corrupt it, so `spawn_agent` probes before resuming and returns an error rather than opening the session: a session found running is refused, and so is one whose liveness cannot be determined. Two channels, because neither is enough alone — the session registry at `~/.claude/sessions/<pid>.json`, which is the only one that finds a session started *fresh* and whose entry is **deleted when the session exits** (the property that makes its absence mean something), and the server's own in-process record of the workers it spawned, which is the only one that can see a **headless** worker: that worker is an in-process SDK `query()` with no pid and no argv, so no process listing can find it. `SUPERVISOR_SESSIONS_DIR` overrides the registry location.
+
+⚠️ **A process listing is not a liveness source for this question, and an argv probe used to be here.** `pgrep -fl <id>` matched the full command line of any process, so a finished worker whose id was merely *mentioned* — by a shell, a watcher, a grep — read as live and became unresumable. It is gone. The reason is specific rather than "argv is unreliable": a resumed interactive session *does* carry its id in argv and `pgrep` would find it, but that is a true positive for a different question. This guard asks whether a headless worker is live, and argv cannot answer that. Do not reintroduce it.
 
 **Which conversation am I in?** `agent_status` reports `resumed_from` and `continued` — the latter `true` when the session id came back the same (continued) and `false` when it did not (forked), so an adoption is never mistaken for a fresh start.
 

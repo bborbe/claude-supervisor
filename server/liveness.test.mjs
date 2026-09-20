@@ -1,9 +1,14 @@
-// Unit tests for the session-liveness probes.
+// Unit tests for the session-liveness probe.
 //
-// The regression these exist for: `sessionIsLive` was `pgrep -fl <id>` alone, and a
-// session started fresh carries its id nowhere in argv, so the guard read a live
-// session as closed and would have allowed the resume it exists to refuse. The first
-// `checkLiveness` test below fails against that implementation.
+// Two regressions these exist for, both found live rather than reasoned about:
+//
+// 1. `sessionIsLive` was `pgrep -fl <id>` alone, and a session started fresh carries
+//    its id nowhere in argv, so the guard read a live session as closed and would have
+//    allowed the resume it exists to refuse.
+// 2. The probe added to fix (1) matched the FULL COMMAND LINE of any process, so a
+//    finished worker whose id was merely MENTIONED — by a shell, a watcher, a grep —
+//    read as live and became unresumable. The bystander test below fails against that
+//    implementation, and it is the reason no argv probe survives in liveness.mjs.
 //
 // They do NOT replace the end-to-end run: that a refused resume leaves no second
 // writer on the conversation is an integration fact these tests cannot see.
@@ -29,9 +34,11 @@ function fixture(files) {
   return dir
 }
 
-const neverPgrep = () => false
-const alwaysPgrep = () => true
-const noPgrep = () => null
+// The registry fixture in which the id is registered nowhere — the state a finished
+// worker is in, and the state a bystander used to be able to override.
+function registryWithout(sessionId) {
+  return fixture({ '1.json': { pid: process.pid, sessionId } })
+}
 
 test('pidIsAlive confirms this process and rejects a pid that is gone', () => {
   assert.equal(pidIsAlive(process.pid), true)
@@ -80,39 +87,48 @@ test('registeredAsLive ignores a stale entry whose pid is gone', () => {
   }
 })
 
-test('checkLiveness finds a live session the registry knows and pgrep cannot see', () => {
+test('checkLiveness finds a live session the registry knows and no process probe could see', () => {
   const dir = fixture({ '1.json': { pid: process.pid, sessionId: SESSION } })
   try {
-    const verdict = checkLiveness(SESSION, { dir, pgrep: neverPgrep })
-    assert.equal(verdict.live, true, 'this is the fresh-session case pgrep-alone missed')
-    assert.deepEqual(verdict.probes, ['registry', 'pgrep'])
+    const verdict = checkLiveness(SESSION, { dir })
+    assert.equal(verdict.live, true, 'this is the fresh-session case a pgrep-alone probe missed')
+    assert.deepEqual(verdict.probes, ['registry'])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('checkLiveness falls back to pgrep for a process the registry does not list', () => {
-  const dir = fixture({ '1.json': { pid: process.pid, sessionId: OTHER } })
+test('a session id mentioned in some other process command line does not read as live', () => {
+  // The regression this file exists for, stated as the guard meets it: the registry
+  // does not know this id, and something on the machine merely MENTIONS it.
+  //
+  // Against the `pgrep -fl <id>` probe this replaces, this test fails — the bystander
+  // matches, the verdict is `live: true`, and a finished worker becomes unresumable.
+  // Measured live 2026-09-20: a manager's own completion watcher held the id in its
+  // argv, so the session that armed the watcher could not resume the worker it had
+  // just watched finish.
+  const dir = registryWithout(OTHER)
   try {
-    const verdict = checkLiveness(SESSION, { dir, pgrep: alwaysPgrep })
-    assert.equal(verdict.live, true)
+    const verdict = checkLiveness(SESSION, { dir })
+    assert.equal(verdict.live, false, 'a bystander mention must not forbid a resume')
+    assert.notEqual(verdict.live, true, 'the two-writers guard must not fire on a process that is not the session')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('checkLiveness reports "could not tell" when no probe is readable', () => {
-  const verdict = checkLiveness(SESSION, { dir: '/nonexistent/supervisor/sessions', pgrep: noPgrep })
+test('checkLiveness reports "could not tell" when the registry is unreadable', () => {
+  const verdict = checkLiveness(SESSION, { dir: '/nonexistent/supervisor/sessions' })
   assert.equal(verdict.live, null, 'unreadable must never be folded into "closed"')
-  assert.deepEqual(verdict.probes, [])
+  assert.deepEqual(verdict.probes, [], 'no probe ran, so the caller cannot read this as "confirmed closed"')
 })
 
 test('checkLiveness reports closed only when a probe ran and found nothing', () => {
-  const dir = fixture({ '1.json': { pid: process.pid, sessionId: OTHER } })
+  const dir = registryWithout(OTHER)
   try {
-    const verdict = checkLiveness(SESSION, { dir, pgrep: neverPgrep })
+    const verdict = checkLiveness(SESSION, { dir })
     assert.equal(verdict.live, false)
-    assert.deepEqual(verdict.probes, ['registry', 'pgrep'])
+    assert.deepEqual(verdict.probes, ['registry'], 'a probe ran and found nothing — this is a real "closed"')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

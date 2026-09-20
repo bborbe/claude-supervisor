@@ -1,27 +1,36 @@
 // Is a session id still running?
 //
-// Two probes, because neither is sufficient alone, and the gap between them is not
-// theoretical: `pgrep` was the only probe for one release, and it cannot see an
-// ordinary running session at all.
+// ONE probe: the session registry. Claude Code writes `~/.claude/sessions/<pid>.json`
+// for a session, carrying the session id it belongs to, and DELETES the entry when the
+// session exits. That deletion is the property that makes absence meaningful here — a
+// pid-keyed file that is gone is a session that is gone, and no other channel on this
+// machine has it.
 //
-// 1. The session registry. Claude Code writes `~/.claude/sessions/<pid>.json` for an
-//    interactive session, carrying the session id it belongs to. This is the only
-//    probe that finds a session started FRESH — its id appears nowhere in any
-//    process's argv, so `pgrep` has nothing to match. Verified 2026-09-14 against a
-//    live session whose transcript was being written seconds earlier: `pgrep -fl`
-//    found nothing, the registry listed it as `busy`.
-// 2. `pgrep -fl <id>`. A session launched as `claude --resume <id>` carries its own
-//    id in argv, so this covers the processes a registry might not list — headless
-//    SDK workers, which hold no socket. It is the same probe `/open` uses to find a
-//    live turn.
+// A `pgrep -f <id>` probe used to sit beside it, on the theory that a session launched
+// as `claude --resume <id>` carries its id in argv. It is gone, and the reason is
+// specific rather than "argv is unreliable": the question this module answers is
+// whether a HEADLESS worker is live, and a headless worker has no process of its own —
+// it is an in-process SDK `query()` owned by the supervisor server. There is no argv
+// to match, so every hit that probe could produce was a bystander: a shell, a watcher,
+// a grep, another session's command line. A finished worker whose id was merely
+// MENTIONED anywhere on the machine read as live and became unresumable.
+//
+// Do not reintroduce an argv probe for the resumed-interactive case. A resumed
+// interactive session does carry its id in argv and a `pgrep` would find it — a true
+// positive for a different question. Precision was never the problem; argv cannot
+// answer the question this module asks, and a probe that is right for some other
+// question is the most persuasive kind of wrong one.
 //
 // The registry is keyed by pid, so a file left behind by a crashed session would read
 // as live forever; every hit is therefore confirmed against the pid, never the JSON
 // alone. And "no probe could be read" is reported as its own answer rather than
 // folded into "not live" — an unguarded resume corrupts a conversation, so a caller
 // must be able to tell "confirmed closed" from "could not tell".
+//
+// A same-server headless worker is invisible to this module by construction, and the
+// supervisor supplies that half itself: see the in-process `agents` Map check in
+// `spawnAgent`, which is the only channel that can see a worker this server spawned.
 
-import { spawnSync } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { config } from './config.mjs'
@@ -90,35 +99,20 @@ export function findRegisteredByName(name, { dir = SESSIONS_DIR, registry = read
   return entries.find((entry) => entry.name === name)?.sessionId ?? null
 }
 
-export function defaultPgrep(sessionId) {
-  try {
-    const res = spawnSync('pgrep', ['-fl', sessionId], { encoding: 'utf8' })
-    if (res.error || res.status === 127) return null
-    return res.status === 0 && Boolean((res.stdout || '').trim())
-  } catch {
-    return null
-  }
-}
-
 // `live: true` is the only answer that forbids a resume; `live: null` is "could not
 // tell" and belongs to the caller to resolve, never to be read as false.
+//
+// The caller supplies the other half of the answer, and must: a headless worker this
+// server spawned is invisible here, so `spawnAgent` checks its own in-process `agents`
+// Map before trusting a `false`. See the header for why that half cannot live here.
 export function checkLiveness(sessionId, opts = {}) {
-  const { pgrep = defaultPgrep } = opts
   const registered = registeredAsLive(sessionId, opts)
-  const matched = pgrep(sessionId)
 
-  const probes = []
-  if (registered !== null) probes.push('registry')
-  if (matched !== null) probes.push('pgrep')
-
-  if (probes.length === 0) {
-    return { live: null, probes, reason: 'neither the session registry nor pgrep could be read' }
+  if (registered === null) {
+    return { live: null, probes: [], reason: 'the session registry could not be read' }
   }
   if (registered === true) {
-    return { live: true, probes, reason: 'the session registry lists it against a running pid' }
+    return { live: true, probes: ['registry'], reason: 'the session registry lists it against a running pid' }
   }
-  if (matched === true) {
-    return { live: true, probes, reason: 'a running process matches its id' }
-  }
-  return { live: false, probes, reason: 'no registry entry against a running pid, and no matching process' }
+  return { live: false, probes: ['registry'], reason: 'no registry entry against a running pid' }
 }
