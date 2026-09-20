@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.19.2
 
 - fix: route a spawn to window id 0, which a `typeof === 'string'` gate was silently dropping. `spawn_agent` accepted `window_id` only when it arrived as a string, so the number `0` failed the test, the flag was dropped entirely, and the tab inherited the caller's window — the partial spawn (right colour, wrong window) that reads as success and is worse than no signal. Measured 2026-09-20 on the manager role, whose window is 0: `window_id="0"` inherited the caller's window, `"00"` routed correctly to window 0, and `"99"` was refused by wezterm with `window_id 99 not found` — the third being the conclusive one, since it proves wezterm was handed the flag and parsed it, leaving the loss upstream of wezterm and specific to the canonical-number spelling. Resolution moves to `window-id.mjs` and is widened to accept any value while keeping `undefined` and `null` absent: a naive widening would turn a dropped flag into one that silently targets window 0 whenever the caller passed nothing, which is why the absent case now carries its own test. Emptiness is still decided in exactly one place — `spawnInteractiveAgent`'s `String(windowId).trim() !== ''` — so the new module does not also resolve it.
 
