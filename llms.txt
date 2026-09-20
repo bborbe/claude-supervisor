@@ -11,6 +11,7 @@ An MCP server + Claude Code plugin that lets one manager session spawn worker se
 - Worker commands: /supervisor:worker-manager (stateful loop over ONE goal or topic), /supervisor:worker-status (read-only snapshot); helper scripts/open-items.py
 - docs/fleet-surface.md is the canonical home for the spawn shape and the fleet table render spec
 - Agent: supervisor:worker-wrangler (routine approval loop over headless workers, on a cheap model)
+- Agent: supervisor:worker-sweep-reader (the worker sweep's read-only half — tracked-set read, bucket classification, id-set extraction, collision count, table render; called by both worker commands, never probes liveness and never acts)
 - Skill: supervising-workers (when to delegate to a worker, which spawn mode to use, and how to run the loop)
 
 ## Two spawn modes

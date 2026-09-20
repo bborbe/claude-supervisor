@@ -257,7 +257,8 @@ commands/{fleet-manager,fleet-status}.md         fleet surface — many sessions
 commands/{worker-manager,worker-status}.md       one goal or topic
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 scripts/{jump,who-needs-me}.py                   their helpers
-agents/worker-wrangler.md
+agents/worker-wrangler.md                routine approval loop over headless workers
+agents/worker-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
 ```
