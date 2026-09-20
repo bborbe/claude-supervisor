@@ -8,9 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.21.2
+## Unreleased
 
 - feat: resolve a spawn's colour AND window from the task's `role`, so a manager stops coming up as a pink worker in whatever window the caller happened to be in. `spawn_agent` takes an optional `role` (`manager` / `agent` / `human`, defaulting to `agent`) and the server resolves both from the map the WezTerm config publishes (`~/.cache/wezterm-role-map.json`), in-process at the moment of spawn. This replaces carrying a `window_id` across the MCP tool boundary, which was not reliable: measured 2026-09-20, `window_id: 0` reached the server 4 times in 6 and silently inherited the caller's window the other times, and both failures were a run's first spawn. A role is a word, so it cannot be dropped that way — and the CLI is not implicated, since `wezterm cli spawn --window-id 0` from a shell landed in window 0 six times out of six. An explicit `window_id` still wins when passed. The hardcoded `workerColor` default `'/color pink'` is **gone**: the colour is a role signal, so a hardcoded default was itself the defect. `SUPERVISOR_WORKER_COLOR` remains an explicit operator override and wins over the resolved chip. The spawn response now reports the resolved `role` and `window_id`, so routing is observable rather than inferred from where the tab landed. An unknown role is refused; an unusable map degrades with a logged warning rather than blocking a headless spawn that never needed a window.
+
+## v0.21.2
 
 - fix: `who-needs-me` reads the attention store's new append-only event log (`<sid>.events.jsonl`, one `open` line per item and one `close` line when it clears) alongside the older per-session snapshot, so the feed survives the hook's rollout — a session that has not yet restarted still has a `.needs.json`, and dropping that branch before the last one ages out would silently empty the feed. `load_events()` folds each session's log into its currently-open items and reconstructs `state` there, so `answered()` and `is_open_gate()` are unchanged. The state dir honours `ATTENTION_STATE_DIR`, so the round-trip test can run against an isolated store instead of seeding production state.
 - feat: the sweep table carries member goals as rows, with tasks grouped under them
