@@ -143,6 +143,52 @@ indistinguishable from the session id alone — read the transcript tail before 
 error is not symmetric: an undriven mid-work resume wastes a session, a driven gate-death
 resume **answers a question on the operator's behalf**.
 
+**3 — `cwd` is not inherited on a resume — pass it explicitly.**
+
+`spawn_agent(resume="<id>", interactive=false, cwd="<dir>")`. The resumed session starts in the
+`cwd` you pass, **not** the directory the original session ran in: the session id names a
+conversation, not a working directory, and nothing carries the old one across. A resume that
+omits `cwd` lands in the caller's directory, so a worker resumed to finish repo work silently
+starts somewhere else and its first file operation goes to the wrong tree. Pass the original
+task's directory; if you cannot determine it, read `cwd` from the session registry
+(`~/.claude/sessions/<pid>.json`) rather than guessing.
+
+## A headless worker exits at turn end — that is not "finished"
+
+Two exits look like completion and are not. A headless worker **ends its turn on a READY
+panel**, and a parked question **times out (~11 min)**, after which it exits with the question
+unanswered. Neither is an error, and neither leaves a trace beyond the roster row disappearing.
+**A headless worker that has exited is a parked process, not a finished one** — read it as
+"waiting for a continuation", never as "done".
+
+The continuation is a new turn, not a restart:
+
+```
+mcp__supervisor__spawn_agent(
+  prompt="<the answer, or the next instruction>",
+  resume="<session-id>",
+  interactive=false,
+  cwd="<explicit — see above>",
+)
+```
+
+The prompt is a **plain user turn** — no relay prefix, no provenance wrapper. That is what
+separates continuing a worker from answering one:
+
+| The worker is… | Channel | Call |
+|---|---|---|
+| **still parked** on a question | the permission channel | `answer_permission(deny, message="Operator answer, via supervisor: <option>")` |
+| **already exited** (timeout, or turn end) | a fresh turn | `spawn_agent(resume=<id>, interactive=false, cwd=<explicit>)` |
+
+They do not substitute for one another: `answer_permission` cannot reach a process that has
+exited, and `spawn_agent(resume=…)` cannot answer a question that is still parked. Check which
+state the worker is in — `agent_status` or `pending_permissions` — before choosing.
+
+⚠️ **A worker that exited on a question timeout still holds an unanswered question.** Its exit
+does not answer it. Resuming with an empty prompt, or with "continue", leaves the question
+unanswered and the worker parked again at the same gate; the continuation prompt must carry the
+operator's actual answer, exactly as `answer_permission` would have.
+
 ## Sweep output — the fleet table
 
 **This section is the single source for the fleet table.** `/supervisor:fleet-manager` and

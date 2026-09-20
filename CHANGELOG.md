@@ -26,6 +26,17 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   `send_agent_message`'s tab-only limit in a form that read as "a headless worker cannot be reached";
   corrected to the narrow truth — the tool is tab-only, but ordinary cross-session `SendMessage`
   reaches a headless worker mid-task in both directions.
+- docs: document the headless continuation mechanic and the spawn-scope constraint.
+  `docs/fleet-surface.md` gains § "A headless worker exits at turn end" — a headless worker ends
+  its turn on a READY panel or exits when a parked question times out (~11 min), neither of which
+  is completion; the continuation is `spawn_agent(prompt=…, resume=<id>, interactive=false,
+  cwd=<explicit>)` as a **plain user turn**, not a relay. It records that **`cwd` is not inherited
+  on resume** (the session id names a conversation, not a directory) and that a worker which
+  exited on a timeout **still holds its unanswered question**, so a "continue" prompt parks it at
+  the same gate again. `commands/worker-manager.md` and `commands/fleet-manager.md` state the
+  scope boundary: a headless worker's prompts park only with the server process of the session
+  that spawned it, so a worker manager answers its own workers and a fleet manager has no channel
+  to answer a topic manager's — route to the owning manager instead.
 
 ## v0.18.2
 
