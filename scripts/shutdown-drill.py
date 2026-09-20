@@ -34,6 +34,11 @@ env["ANTHROPIC_BASE_URL"] = env.get("CLAUDE_CODE_ROUTER_URL", "http://127.0.0.1:
 
 before = set(os.path.basename(p) for p in glob.glob(os.path.join(LEDGER, "*.json")))
 
+# The labels that identify this drill's own records, so a sibling session's concurrent
+# spawn cannot be mistaken for one of ours. See records().
+TAB_LABEL = "shutdown-drill-tab"
+HEAD_LABEL = "shutdown-drill-headless"
+
 proc = subprocess.Popen(["node", SERVER], cwd=REPO, env=env, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 rid = [0]
@@ -64,16 +69,26 @@ def call(name, args, timeout=180):
 
 
 def records():
-    """Only the records THIS run created — the ledger dir is shared with the live fleet."""
+    """Only the records THIS run created.
+
+    Filtered by label, NOT merely by "absent from the pre-run listing". The ledger
+    directory is shared with the live fleet and sibling sessions spawn workers
+    constantly — four appeared inside a seven-minute window while this drill was being
+    written. Those records belong to OTHER, still-live servers and are legitimately
+    `running`; asserting `unknown` over them would fail the drill for a reason that has
+    nothing to do with the shutdown path. Snapshot-diffing alone is not enough.
+    """
     out = {}
     for path in glob.glob(os.path.join(LEDGER, "*.json")):
         name = os.path.basename(path)
         if name in before:
             continue
         try:
-            out[name] = json.load(open(path))
+            rec = json.load(open(path))
         except Exception:
-            pass
+            continue
+        if rec.get("label") in (TAB_LABEL, HEAD_LABEL):
+            out[name] = rec
     return out
 
 
@@ -98,12 +113,12 @@ while select.select([proc.stdout], [], [], 0)[0]:
 
 print("1. spawning one interactive and one headless worker into a THROWAWAY server...")
 tab = call("spawn_agent", {"prompt": "Reply with exactly: TAB. Use no tools.",
-                           "cwd": "/tmp", "label": "shutdown-drill-tab", "interactive": True})
+                           "cwd": "/tmp", "label": TAB_LABEL, "interactive": True})
 print("   tab      ->", json.dumps({k: tab.get(k) for k in ("agent_id", "pane_id", "status")}))
 # Sleeps, so it is still mid-turn when the signal arrives. Without this the worker could
 # finish first and be legitimately `done`, which would make the whole drill vacuous.
 head = call("spawn_agent", {"prompt": "Use the Bash tool to run exactly: sleep 300. Then reply DONE.",
-                            "cwd": "/tmp", "label": "shutdown-drill-headless", "interactive": False})
+                            "cwd": "/tmp", "label": HEAD_LABEL, "interactive": False})
 print("   headless ->", json.dumps({k: head.get(k) for k in ("agent_id", "status")}))
 
 print("\n2. waiting for two records on disk...")
