@@ -74,7 +74,11 @@ def classify(case):
 
     try:
         return {"in_feed": wnm.is_open_gate(record, **extra),
-                "reapable": wnm.is_reapable(record, extra.get("task_status"))}
+                "reapable": wnm.is_reapable(record, extra.get("task_status")),
+                # The third surface: a rendered closer panel is listed but never
+                # counted as a block. Asserting only `in_feed` would let a fix that
+                # dropped panels entirely pass -- which is the regression SC2 forbids.
+                "is_panel": wnm.is_rendered_panel(record)}
     except TypeError as exc:
         raise AssertionError(
             f"is_open_gate() has no seam for {case['class']} "
@@ -293,7 +297,7 @@ class BaselineCorpus(unittest.TestCase):
 def _corpus_test(case):
     def test(self):
         got = classify(case)
-        for surface in ("in_feed", "reapable"):
+        for surface in ("in_feed", "reapable", "is_panel"):
             self.assertEqual(
                 got[surface],
                 case["expect"][surface],
@@ -314,7 +318,7 @@ class CorpusIntegrity(unittest.TestCase):
 
     def test_every_defect_class_is_represented(self):
         classes = {c["class"] for c in CASES}
-        self.assertEqual(classes, {"class1", "class2", "class3", "class4", "genuine"})
+        self.assertEqual(classes, {"class1", "class2", "class3", "class4", "class5", "genuine"})
 
     def test_both_outcomes_are_represented(self):
         outcomes = {c["expect"]["in_feed"] for c in CASES}
@@ -345,6 +349,19 @@ class CorpusIntegrity(unittest.TestCase):
         for case in CASES:
             if case["expect"]["reapable"]:
                 self.assertFalse(case["expect"]["in_feed"], case["id"])
+
+    def test_panel_and_elicitation_are_both_represented(self):
+        """Class 5's whole point. Both sides must be in the corpus, or it cannot
+        tell the correct fix from either wrong one: a fix that counts panels as
+        blocks (over-reporting) and a fix that drops them entirely (hiding panes)
+        each need a case that goes red."""
+        panels = [c for c in CASES if c["expect"]["is_panel"]]
+        real_gates = [c for c in CASES if c["class"] == "class5" and c["expect"]["in_feed"]]
+        self.assertGreaterEqual(
+            len(panels), 2, "no panel cases -- a fix that drops panels entirely would pass")
+        self.assertGreaterEqual(
+            len(real_gates), 1,
+            "no class5 no-regression bar -- a fix that suppresses every question would pass")
 
     def test_both_defects_and_both_traps_are_represented(self):
         """A fix for one half must not be able to pass on the others."""

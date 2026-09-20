@@ -42,7 +42,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": false,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "Closer verb is `later (on flying it):` \u2014 a correctly-parked wait, not an open gate. Must not be counted."
     },
@@ -66,7 +67,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": false,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "Closer verb is `later (on the next live Discord call):` \u2014 parked wait, not an open gate."
     },
@@ -90,7 +92,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": false,
-        "reapable": true
+        "reapable": true,
+        "is_panel": false
       },
       "anchored_task": {
         "path": "25 Tasks/Docker Registry GC (prod) - 2026W38-sat.md",
@@ -121,7 +124,8 @@
       "expect": {
         "kind_after_reclassify": "idle",
         "in_feed": false,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "CONSTRUCTED \u2014 the live `&nbsp;`-padded closer recorded 2026-09-19 is no longer present in the feed. `&nbsp;` is six literal characters, not whitespace, so `startswith(\"nothing\")` is False and the idle record is reclassified as an open question."
     },
@@ -145,7 +149,8 @@
       "expect": {
         "kind_after_reclassify": "idle",
         "in_feed": false,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "CONSTRUCTED \u2014 same defect, no space after the colon. Normalization must handle both."
     },
@@ -169,7 +174,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": false,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "CONSTRUCTED \u2014 no record on 2026-09-19 contained a pane-id mention (the pane-85/285 pair is gone; 285 is now `answered`). The closer does NOT begin with `nothing`, so pre-fix it is reclassified as a question and counted; it restates pane 285's gate, so it is not a second INDEPENDENT gate. Detection requires resolving `peer_pane` against the live pane map. NOTE: an earlier draft of this case began with the literal word `nothing` and therefore passed for the wrong reason \u2014 the reproducing shape requires a non-`nothing` opener.",
       "peer_pane": "285",
@@ -196,7 +202,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "Closer verb `pick` \u2014 a real decision the operator must make."
     },
@@ -220,7 +227,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "`approve:` on a production-touching change \u2014 a real gate."
     },
@@ -244,7 +252,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "`permission:` \u2014 an unanswered tool-approval prompt."
     },
@@ -268,7 +277,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "`approve:` on an external API mutation \u2014 a real gate."
     },
@@ -292,7 +302,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "`you run:` \u2014 an operator-only action."
     },
@@ -316,7 +327,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "`you run:` permission-mode switch \u2014 a real gate."
     },
@@ -340,7 +352,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "`pick` \u2014 a real decision."
     },
@@ -364,7 +377,8 @@
       "expect": {
         "kind_after_reclassify": "idle",
         "in_feed": false,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "CONSTRUCTED CONTROL \u2014 plain `nothing` is already handled correctly today. Proves the normalization does not over-suppress: a fix that strips too aggressively must not turn `nothing` into a gate."
     },
@@ -388,7 +402,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "CONSTRUCTED GUARD \u2014 same closer shape as the Class 3 case, but pane 999 carries NO open gate this run (no `peer_pane` key, so `open_panes` is empty). Suppression must NOT fire. This is the over-suppression guard: a closer that merely mentions a pane id \u2014 a ticket reference, a log line \u2014 must still reach the operator, otherwise the Class 3 rule silently eats real gates."
     },
@@ -412,7 +427,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": false,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "CONSTRUCTED \u2014 regression bar for [[who-needs-me.py Omits a Pane That Has an Open Gate]]. The sibling defect was file-existence as the gate test: the hook deleted the record on ANY later event, so a background task completing erased an open gate. The fix made `state: answered` the only clearing signal. This case pins it: an answered record stays out of the feed even though its file is present."
     },
@@ -436,7 +452,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "why": "CONSTRUCTED \u2014 the other half of the sibling bar. A record carrying no `state` field must still read as an open gate: absence of the clearing signal is not the clearing signal. Fail-open for gates, so a hook that has not yet stamped `state` cannot silently hide a real gate."
     },
@@ -457,7 +474,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": false,
-        "reapable": true
+        "reapable": true,
+        "is_panel": false
       },
       "anchored_task": {
         "path": "25 Tasks/constructed.md",
@@ -484,7 +502,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": false,
-        "reapable": true
+        "reapable": true,
+        "is_panel": false
       },
       "anchored_task": {
         "path": "25 Tasks/constructed.md",
@@ -511,7 +530,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": false,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "anchored_task": {
         "path": "25 Tasks/constructed.md",
@@ -538,7 +558,8 @@
       "expect": {
         "kind_after_reclassify": "question",
         "in_feed": true,
-        "reapable": false
+        "reapable": false,
+        "is_panel": false
       },
       "anchored_task": {
         "path": "25 Tasks/constructed.md",
@@ -547,6 +568,129 @@
         "open_boxes": 0
       },
       "why": "CONSTRUCTED \u2014 a `pick` menu whose first/recommended disposition is other work. Even over a finished task it is not a close gate: the operator is being offered work, not a close. Guards against widening the `pick` match to mere containment of `session-close`."
+    },
+    {
+      "id": "class5-live-panel-question-stop",
+      "class": "class5",
+      "provenance": "live",
+      "record": {
+        "session_id": "2d0b2061-5ebe-4e24-a8df-99819299db7b",
+        "pane": "84",
+        "cwd": "/Users/bborbe/Documents/Obsidian/Personal",
+        "kind": "question",
+        "event": "Stop",
+        "detail": "tap message 133, then tell pane 418 which note opened",
+        "ts": 1789908706.48222,
+        "state": "answered",
+        "cleared_by": {
+          "event": "UserPromptSubmit"
+        },
+        "answered_ts": 1789908722.154115
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": false,
+        "reapable": false,
+        "is_panel": true
+      },
+      "why": "A closer panel the Stop handler rendered. It writes kind=question with cleared_by={event:UserPromptSubmit} - byte-identical to a real elicitation - so only `event` separates them. Listed as a soft signal, never counted as a block."
+    },
+    {
+      "id": "class5-live-idle-stop",
+      "class": "class5",
+      "provenance": "live",
+      "record": {
+        "session_id": "3cd3c008-3838-4f71-87cd-6cdb20c5f8c5",
+        "pane": "549",
+        "cwd": "/Users/bborbe/Documents/workspaces/github-pr-review-agent",
+        "kind": "idle",
+        "event": "Stop",
+        "detail": "\u23f0 Next: the trading streams ending \u2014 caught by the stream watcher; Phase 4 procedure is already read and ready to run the moment it fires",
+        "ts": 1789908486.8935711,
+        "state": "open",
+        "cleared_by": {
+          "event": "UserPromptSubmit"
+        }
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "idle",
+        "in_feed": false,
+        "reapable": false,
+        "is_panel": true
+      },
+      "why": "The Stop path's `You: nothing` branch. Same collision as the question pair: idle_prompt (Notification) and Stop both write kind=idle with an identical cleared_by."
+    },
+    {
+      "id": "class5-constructed-elicitation-notification",
+      "class": "class5",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "00000000-0000-4000-8000-00000000e11c",
+        "pane": "901",
+        "cwd": "/Users/bborbe/Documents/Obsidian/Personal",
+        "kind": "question",
+        "detail": "Claude needs your input",
+        "ts": 1789908731.734255,
+        "state": "open",
+        "event": "Notification"
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": true,
+        "reapable": false,
+        "is_panel": false
+      },
+      "why": "CONSTRUCTED. A genuinely parked elicitation. Constructed because no live instance had fired since the marker shipped - carries no claim about the live fleet. This is the no-regression bar for the panel rule: a fix that suppressed it would pass every panel assertion and fail this one."
+    },
+    {
+      "id": "class5-guard-panel-is-not-a-block",
+      "class": "class5",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "00000000-0000-4000-8000-00000000e11d",
+        "pane": "902",
+        "cwd": "/Users/bborbe/Documents/Obsidian/Personal",
+        "kind": "question",
+        "detail": "approve: make apply on the prod cluster",
+        "ts": 1789908731.734256,
+        "state": "open",
+        "event": "Stop"
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": false,
+        "reapable": false,
+        "is_panel": true
+      },
+      "why": "CONSTRUCTED. The 2026-09-20 phantom: a test-fixture string that reached the doorbell reading `approve: make apply on the prod cluster`. It is a real lever in FORM - no parser can exclude it - which is why the fix is at the record level, not the parser level."
+    },
+    {
+      "id": "class5-guard-legacy-record-without-event",
+      "class": "class5",
+      "provenance": "constructed",
+      "record": {
+        "session_id": "00000000-0000-4000-8000-00000000e11e",
+        "pane": "903",
+        "cwd": "/Users/bborbe/Documents/Obsidian/Personal",
+        "kind": "question",
+        "detail": "pick - 1. A / 2. B",
+        "ts": 1789908731.734256,
+        "state": "open"
+      },
+      "last_assistant_text": null,
+      "expect": {
+        "kind_after_reclassify": "question",
+        "in_feed": true,
+        "reapable": false,
+        "is_panel": false
+      },
+      "why": "CONSTRUCTED. A record written before `event` existed. Absence of the marker must NOT be read as 'panel' - it keeps the old behaviour and is counted as a gate, so the change cannot silently reclassify history."
     }
-  ]
+  ],
+  "extended_at": "2026-09-20T14:52:11+0200",
+  "extended_note": "2026-09-20: added class5 (rendered panel vs parked elicitation), discriminated by the record `event` marker. `is_panel` is a new expect key."
 }
