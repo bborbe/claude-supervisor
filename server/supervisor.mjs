@@ -779,6 +779,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
     status: agent.status,
     interactive: false,
     mode_source: agent.modeSource,
+    // Reported here for the SAME reason as on the tab path, and it is not redundant: the
+    // resolution runs whichever way the worker opens, so a caller that declares a role is
+    // entitled to see what it resolved to. `window_id` is carried even though a headless
+    // worker has no tab to put it in — `interactive: false` sits in this same object, so
+    // "resolved" is not misread as "routed". Omitting both is what made a headless
+    // spawn's routing unverifiable from its own response.
+    role: agent.role,
+    window_id: agent.windowId,
     // Reported so a caller can see which policy actually took effect, rather than
     // inferring it from the absence of an error.
     policy: agent.policyPath,
