@@ -115,6 +115,13 @@ export const config = Object.freeze({
   // reader that needs a transcript resolves it by session id against this root instead.
   projectsDir: ENV.SUPERVISOR_PROJECTS_DIR || join(CLAUDE_HOME, 'projects'),
 
+  // The role → {chip, window_id} map the WezTerm config publishes on its reconcile tick.
+  // Only the PATH lives here, and unlike every other file in this module it is re-read on
+  // each spawn rather than resolved once at boot: the map is republished whenever a
+  // purpose window is adopted, so a boot-time copy would pin a stale window id for the
+  // life of the server — the exact staleness the map exists to avoid.
+  roleMap: ENV.SUPERVISOR_ROLE_MAP || join(homedir(), '.cache', 'wezterm-role-map.json'),
+
   // The durable spawn ledger: one uuid-keyed record per worker this server spawns,
   // outliving the session it describes. Deliberately NOT reusing
   // SUPERVISOR_SESSIONS_DIR — that name already means the live registry above, a
@@ -128,5 +135,12 @@ export const config = Object.freeze({
 
   claudeCmd: ENV.SUPERVISOR_CLAUDE_CMD || null,
   mcpConfig: ENV.SUPERVISOR_MCP_CONFIG || null,
-  workerColor: ENV.SUPERVISOR_WORKER_COLOR ?? '/color pink',
+
+  // An explicit override, and ONLY that — there is deliberately no built-in colour here.
+  // The colour is a role signal, so a hardcoded default IS the defect: `?? '/color pink'`
+  // painted every spawn the agent colour, which is how a manager came up indistinguishable
+  // from a worker (2026-09-20). The role map supplies it now, resolving an absent `role:`
+  // to agent. Unset therefore means "no override", and a spawn whose role did not resolve
+  // gets no colour rather than a wrong one — a degradation the caller reports.
+  workerColor: ENV.SUPERVISOR_WORKER_COLOR || null,
 })
