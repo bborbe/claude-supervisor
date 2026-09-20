@@ -8,6 +8,13 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: route a spawned session to its **role's window**, and stop a manager dispatching a human-only task. Three changes, all consumers of the same `role → {chip, window_id}` mapping the wezterm config publishes to `~/.cache/wezterm-role-map.json` on its reconcile tick.
+  - **`spawn_agent` gains an optional `window_id`**, threaded through `spawnAgent` to `spawnInteractiveAgent` and onto the `wezterm cli spawn` call as `--window-id`. Without it a role-routed spawn was a **partial spawn**: right chip, wrong window, because the tab inherited `WEZTERM_PANE` from the caller — which is how a human-only task came up in the Agents window (measured 2026-09-20 on `Start Day`). Omitted or empty, the flag is dropped entirely rather than passed empty, so the old behaviour is preserved exactly for callers that do not resolve a role. Tab path only; a headless worker has no tab.
+  - **`worker-manager.md` refuses to dispatch a `role: human` task**, rendering it `👤 YOURS` instead of `🚀 READY TO START`. A human-only task is not un-converted work waiting to become autonomous — it is work that *cannot* be delegated, and the two are indistinguishable on the chip (both cyan). Dispatching one would not merely waste a worker: it would put a session on work the operator intended to do themselves, looking like every other agent. Absent `role:`, behaviour is unchanged — the gate only ever subtracts. `role: manager` is likewise not a spawn target.
+  - **`sendToPane` activates by pane id, not tab id** (`server/tab.mjs`). A tab id is renumbered when its tab moves windows (2026-09-18: tabs 158/159/160 → 163/164/165, `activate-tab --tab-id 159` failed while `activate-pane --pane-id 239` worked), so the colour-send path broke exactly when this feature started moving tabs between windows. The function already held the pane id; the tab lookup is now used only for the return value. The test moved with it, and asserts the absence of `activate-tab` rather than only the presence of the new call.
+
 ## v0.18.4
 
 - fix: verify the worker colour against the pane instead of trusting the send. `spawn_agent` reported

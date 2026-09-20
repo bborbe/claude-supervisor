@@ -206,13 +206,19 @@ export async function sendToPane(paneId, message, opts = {}) {
   const { wezterm = defaultWezterm, confirm = null } = opts
   if (!paneId) return { error: 'no pane to send into' }
 
+  // Activate by PANE id, never tab id. A tab id is renumbered when its tab moves
+  // windows (2026-09-18: tabs 158/159/160 in window 0 became 163/164/165 in
+  // window 2, and `activate-tab --tab-id 159` failed outright while
+  // `activate-pane --pane-id 239` worked). Pane ids survive the move, and this
+  // function already holds one — so the tab lookup is only needed for the return
+  // value, not for the activation.
   const tabId = tabIdForPane(paneId, opts)
   if (!tabId) return { error: `no tab owns pane ${paneId} — is it still open?` }
 
-  const activated = wezterm(['cli', 'activate-tab', '--tab-id', tabId])
+  const activated = wezterm(['cli', 'activate-pane', '--pane-id', String(paneId)])
   if (!activated || activated.error || activated.status !== 0) {
     const why = activated?.error?.message || activated?.stderr?.trim() || `exit ${activated?.status}`
-    return { error: `could not activate tab ${tabId}: ${why}` }
+    return { error: `could not activate pane ${paneId}: ${why}` }
   }
 
   const ready = await waitUntilReady(paneId, opts)
