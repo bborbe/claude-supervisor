@@ -75,10 +75,12 @@ One bucket per task, from **Step 4's canonical seven** — read the bucket set *
 - **progressing** — the task advanced, or a new dated `# Progress` entry appeared since the prior snapshot.
 - **stuck** — busy > ~30 min AND the task file unchanged AND no new Progress entry.
 - **waiting-on-human** — `phase: human_review`, the worker asked the human, or the task is **parked on the planning gate**. The planning-gate case is a distinct sub-rule with its own tell (a freshly spawned worker sitting `idle` in `planning` with no Progress write) and its own trap (it is neither `stuck` nor idle-and-fine) — read it in runbook § Step 4 rather than working from this summary, because misclassifying it is the error the sub-rule exists to prevent.
-- **done** — the task flipped `completed`/`aborted`.
+- **done** — the task flipped `completed`.
 - **ready-to-start** — `blocked_by` shipped, or the task was `next` with a free slot, and no session owns it.
 - **close-me** — the task is terminal (`completed`/`aborted`, all SCs `[x]`) but its worker session still runs.
 - **orphaned** — see step 5.
+
+- **aborted** — **an overlay on `done`, not an eighth bucket** (the parallel of `optional`, below). A task the operator killed is terminal by *decision*, not by outcome: it carries unmet criteria on purpose, and its successor — if any — is named by `gate_successor` rather than by its own status. Classify it in the `done` bucket for the tally, but render its Status cell with the ` · aborted` suffix — **`✅ done · aborted`** — so it is never byte-identical to a completed row's bare `✅ done`. Both count as `done`; only the cell differs. A reader must not have to open the file to tell killed work from finished work.
 
 **`optional` is not a bucket and does not compete with one.** A task in the declared-optional set still gets exactly one of the seven (or a non-bucket disposition) and still renders that in its Status cell unchanged. Optional membership decides only which **section** the row prints in (step 7) — never its bucket, never its icon, never its inclusion in the bucket counts.
 
@@ -121,7 +123,8 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 stdin is `{"header": [...], "rows": [[...]], "widths": [...]}`. The column widths are in the runbook section, and they are load-bearing — the status column in particular is wider than the label it holds, because one of the status labels renders double-width. Hand-counting that column is the miscount the runbook documents, and it truncates the longest label in the set.
 
-**The Session cell shows the sessionId prefix — `[<sid8>] live`, `[<sid8>] parked`, or `—`.** Take the 8-hex prefix from the task's own `claude_session_id`, which you already have from the task files you read.
+**The Session cell shows the sessionId prefix alone — `[<sid8>]`, or `—`.** Take the 8-hex prefix from the task's own `claude_session_id`, which you already have from the task files you read.
+⚠️ **The `live` / `parked` words were dropped 2026-09-20** when the grouped frame landed and the fifth column took six characters off Session (16 → 10): the cell is `[<sid8>]` alone, **10 cells exactly**. Liveness is still carried — by the bucket icon in the Status column, which is where it was always read from. The runbook's Session rule is the source; this file matches it.
 
 ⚠️ **Never render the roster `[ref]`.** Corrected 2026-09-19: this cell previously specified a *name* join rendering `[ref] live`, which contradicted `65 Runbooks/Worker Manager Session.md` § Sweep output `:207` — and this file's own preamble names the runbook as the winner when the two disagree, so the contradiction was a bug on this side. The runbook is also right on the merits, and measurably so: **the `[ref]` is an ephemeral per-connection handle, observed changing under a live session** — one session's own ref moved `e38660` → `b93647` across a single `/reload-plugins`. A handle that renumbers on reload identifies nothing.
 
@@ -138,6 +141,8 @@ Both modes indent the box the same two spaces, so the two commands still render 
 
 1. `Essential (first iteration)` — every tracked task **not** in the declared-optional set.
 2. `Optional (phase 2)` — every tracked task in it.
+
+⚠️ **The set is already resolved to tasks, including goal inheritance.** The caller reads the topic page's declarations at whichever level they appear and passes you a flat set of **tasks**: a goal declared optional contributes all of its tasks to that set (the Mantra lane is declared optional as a *goal*, so all five of its tasks are in the set even though no line names three of them), and a task declared optional on its own is in it too. **You place tasks; you never place a goal** — a goal row is structural, derived from its tasks' placement, so a required goal owning an optional task renders in **both** boxes. That is correct, not a defect to collapse.
 
 Each box is its own `box-table.py` call; never hand-draw either, and never fake the split with a separator row inside one box.
 
@@ -184,11 +189,13 @@ Plain markdown, in this order, omitting empty sections:
 
 ```text
 14:30 ✓ <Topic> — 4 tasks · 2 🔄 · 1 ⌛ · 1 ✅ · no change
-  ┌──────────────────────────────────────────────┬──────────────────┬─────────────────────┬───────────┐
-  │ Task                                         │ Session          │ Status              │ Phase     │
-  ├──────────────────────────────────────────────┼──────────────────┼─────────────────────┼───────────┤
-  │ <task>                                       │ [<sid8>] live    │ 🔄 progressing      │ execution │
-  └──────────────────────────────────────────────┴──────────────────┴─────────────────────┴───────────┘
+  ┌────────────────────────────────────────────┬────────────┬─────────────────────┬───────────┬───────────────────┐
+  │ Topic / Goal / Task                        │ Session    │ Status              │ Phase     │ Met               │
+  ├────────────────────────────────────────────┼────────────┼─────────────────────┼───────────┼───────────────────┤
+  │ <topic>                                    │ —          │ 🔄 progressing      │ —         │ SC 2/4 · Gate 1/3 │
+  │    <goal>                                  │ —          │ 🔄 progressing      │ —         │ 2/3               │
+  │       <task>                               │ [<sid8>]   │ 🔄 progressing      │ execution │ 7/12              │
+  └────────────────────────────────────────────┴────────────┴─────────────────────┴───────────┴───────────────────┘
 
 Candidates: <task> — ids <a,b,c> — <reason>
 Collisions: <id> — <n> non-terminal carriers — <task A>, <task B>
@@ -199,11 +206,13 @@ Delta: <what moved, or "no change">
 
 ```text
 Tracked (4): <task> · <task> · <task> · <task>
-  ┌──────────────────────────────────────────────┬──────────────────┬─────────────────────┬───────────┐
-  │ Task                                         │ Session          │ Status              │ Phase     │
-  ├──────────────────────────────────────────────┼──────────────────┼─────────────────────┼───────────┤
-  │ <task>                                       │ [<sid8>] live    │ 🔄 progressing      │ execution │
-  └──────────────────────────────────────────────┴──────────────────┴─────────────────────┴───────────┘
+  ┌────────────────────────────────────────────┬────────────┬─────────────────────┬───────────┬───────────────────┐
+  │ Topic / Goal / Task                        │ Session    │ Status              │ Phase     │ Met               │
+  ├────────────────────────────────────────────┼────────────┼─────────────────────┼───────────┼───────────────────┤
+  │ <topic>                                    │ —          │ 🔄 progressing      │ —         │ SC 2/4 · Gate 1/3 │
+  │    <goal>                                  │ —          │ 🔄 progressing      │ —         │ 2/3               │
+  │       <task>                               │ [<sid8>]   │ 🔄 progressing      │ execution │ 7/12              │
+  └────────────────────────────────────────────┴────────────┴─────────────────────┴───────────┴───────────────────┘
 
 Candidates: <task> — ids <a,b,c> — <reason>
 Collisions: <id> — <n> non-terminal carriers — <task A>, <task B>
@@ -215,21 +224,24 @@ When the declared-optional set is non-empty, the table half becomes two labelled
 ```text
 14:30 ✓ <Topic> — 5 tasks · 2 🔄 · 1 ⌛ · 1 ⏸️ · 1 — · no change
   Essential (first iteration)
-  ┌──────────────────────────────────────────────┬──────────────────┬─────────────────────┬───────────┐
-  │ Task                                         │ Session          │ Status              │ Phase     │
-  ├──────────────────────────────────────────────┼──────────────────┼─────────────────────┼───────────┤
-  │ <task>                                       │ [<sid8>] live    │ 🔄 progressing      │ execution │
-  └──────────────────────────────────────────────┴──────────────────┴─────────────────────┴───────────┘
+  ┌────────────────────────────────────────────┬────────────┬─────────────────────┬───────────┬───────────────────┐
+  │ Topic / Goal / Task                        │ Session    │ Status              │ Phase     │ Met               │
+  ├────────────────────────────────────────────┼────────────┼─────────────────────┼───────────┼───────────────────┤
+  │ <topic>                                    │ —          │ 🔄 progressing      │ —         │ SC 2/4 · Gate 1/3 │
+  │    <goal>                                  │ —          │ 🔄 progressing      │ —         │ 2/3               │
+  │       <task>                               │ [<sid8>]   │ 🔄 progressing      │ execution │ 7/12              │
+  └────────────────────────────────────────────┴────────────┴─────────────────────┴───────────┴───────────────────┘
   Optional (phase 2)
-  ┌──────────────────────────────────────────────┬──────────────────┬─────────────────────┬───────────┐
-  │ Task                                         │ Session          │ Status              │ Phase     │
-  ├──────────────────────────────────────────────┼──────────────────┼─────────────────────┼───────────┤
-  │ <optional task, hold>                        │ —                │ ⏸️ blocked/hold     │ todo      │
-  │ <optional task, backlog>                     │ —                │ —                   │ todo      │
-  └──────────────────────────────────────────────┴──────────────────┴─────────────────────┴───────────┘
+  ┌────────────────────────────────────────────┬────────────┬─────────────────────┬───────────┬───────────────────┐
+  │ Topic / Goal / Task                        │ Session    │ Status              │ Phase     │ Met               │
+  ├────────────────────────────────────────────┼────────────┼─────────────────────┼───────────┼───────────────────┤
+  │    <optional goal>                         │ —          │ 🔄 progressing      │ —         │ 0/4               │
+  │       <optional task, hold>                │ —          │ ⏸️ blocked/hold     │ todo      │ 3/9               │
+  │       <optional task, backlog>             │ —          │ —                   │ todo      │ 0/6               │
+  └────────────────────────────────────────────┴────────────┴─────────────────────┴───────────┴───────────────────┘
 ```
 
-The counts in the marker span both boxes. Note the optional rows keep the Status cells their dispositions earn — the section is what marks them optional.
+The counts in the marker span both boxes. **Both boxes lead with the topic row**, so each reads self-contained, and **a required goal owning an individually-declared-optional task appears in both boxes** — that is the case the header repetition exists for, not a defect to collapse. Note the optional rows keep the Status cells their dispositions earn — the section is what marks them optional.
 
 Omit any section that is empty. `Delta: no change` is never omitted — it is the finding.
 </output_format>
@@ -240,6 +252,7 @@ Omit any section that is empty. `Delta: no change` is never omitted — it is th
 - Every id set is complete — no `metrics_sessions` id is missed, and no anchored line-start match is used.
 - No orphan candidate is reported as a verdict, and no collision is reported without its non-terminal carrier count.
 - The delta is present, including when it reads `no change`.
-- Optional grouping comes **only** from the caller's declared-optional set: with a set, two labelled boxes placing exactly its members in `Optional (phase 2)`; without one, a single unlabelled box. No row's section is ever derived from its `status`, and no row's Status cell changes because of its section.
+- Optional grouping comes **only** from the caller's declared-optional set: with a set, two labelled boxes placing exactly its members in `Optional (phase 2)`; without one, a single unlabelled box. **The set already carries goal-level inheritance** — the caller resolves a goal declared optional into all of that goal's tasks, so you place tasks, never goals, and a **goal row may legitimately appear in both boxes** when it is required and owns an individually-declared-optional task. No row's section is ever derived from its `status`, and no row's Status cell changes because of its section.
+- **The frame carries three levels, and the first column's header is `Topic / Goal / Task`** — the topic row leads every box, goals indent three spaces under it, tasks six. A goal row's Phase cell reads `—`; its Met cell reads its `# Success Criteria` count. A topic row's Met cell carries **two labelled sets**, `SC n/m · Gate n/m`, because a topic is the only level with both a `# Success Criteria` and a `# Completion Gate` and they can disagree.
 - One sweep, one report. You run once and exit — cadence is the caller's (`ScheduleWakeup` is per-session state).
 </success_criteria>
