@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.18.3
 
 - fix: stamp every worker a supervisor owned as `unknown` when the server exits, instead of
   leaving its ledger record asserting `running` forever. A record whose server died, was
