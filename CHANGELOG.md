@@ -16,7 +16,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - fix: stop counting a rendered closer panel as a block, and record which hook event wrote each row. `attention-log.py` writes a genuinely parked gate and a rendered `👤 You:` closer panel under the same `kind: question` with an identical `cleared_by` — four write sites, two colliding pairs — so no consumer could tell "waiting on a human" from "rendered a line describing what waiting looks like". Measured 2026-09-20: 13 rows reported as needing the operator, 4 genuinely blocked. Every record now carries `event` (the `hook_event_name` that wrote it), and `who-needs-me.py` lists panels in their own group rather than counting them as blocks — grouped, never dropped, since the soft signal is what the command is for. A record with no `event` predates the marker and is still counted as a gate, so nothing is silently reclassified.
 
-## v0.19.0
+## Unreleased
 
 - feat: `agent_status` and `list_agents` now report **`current_tool_call`** — `{name,
   input_summary, started_at, held_seconds}`, the call a worker is inside right now and how long
@@ -42,6 +42,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   as `null`. The fallback is deliberately omitted here — unlike a missed message, "no call
   found" is the common case for an idle worker, and an unbounded read on the status path is
   what the window exists to avoid.
+
+## v0.19.0
 
 - feat: route a spawned session to its **role's window**, and stop a manager dispatching a human-only task. Three changes, all consumers of the same `role → {chip, window_id}` mapping the wezterm config publishes to `~/.cache/wezterm-role-map.json` on its reconcile tick.
   - **`spawn_agent` gains an optional `window_id`**, threaded through `spawnAgent` to `spawnInteractiveAgent` and onto the `wezterm cli spawn` call as `--window-id`. Without it a role-routed spawn was a **partial spawn**: right chip, wrong window, because the tab inherited `WEZTERM_PANE` from the caller — which is how a human-only task came up in the Agents window (measured 2026-09-20 on `Start Day`). Omitted or empty, the flag is dropped entirely rather than passed empty, so the old behaviour is preserved exactly for callers that do not resolve a role. Tab path only; a headless worker has no tab.
