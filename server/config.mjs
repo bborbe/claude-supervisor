@@ -136,6 +136,20 @@ export const config = Object.freeze({
   claudeCmd: ENV.SUPERVISOR_CLAUDE_CMD || null,
   mcpConfig: ENV.SUPERVISOR_MCP_CONFIG || null,
 
+  // The process environment, handed wholesale to a spawned worker so it inherits the
+  // launcher's env — PATH, HOME and ANTHROPIC_BASE_URL among it. Here rather than read at
+  // the spawn site because this module owns every environment read (see the header), and
+  // because the SDK's query `env` option REPLACES the subprocess environment instead of
+  // merging with it: a worker built from a hand-picked subset would silently lose whatever
+  // this module did not think to name, and losing ANTHROPIC_BASE_URL stops it routing
+  // through the router while looking like nothing at all.
+  //
+  // The whole environment rather than a resolved subset is deliberate. Every other key
+  // here is a value this module interprets; this one is the ambient environment being
+  // passed through, so the live reference is the honest one — a boot-time snapshot would
+  // only be a copy of the same thing.
+  baseEnv: ENV,
+
   // An explicit override, and ONLY that — there is deliberately no built-in colour here.
   // The colour is a role signal, so a hardcoded default IS the defect: `?? '/color pink'`
   // painted every spawn the agent colour, which is how a manager came up indistinguishable
