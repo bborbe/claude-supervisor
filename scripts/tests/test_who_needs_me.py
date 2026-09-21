@@ -33,7 +33,9 @@ Run: python3 -m unittest discover -s scripts/tests -v
 
 import importlib.util
 import json
+import json
 import os
+import tempfile
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -371,6 +373,113 @@ class CorpusIntegrity(unittest.TestCase):
                          "class4-guard-later-mentions-session-close",
                          "class4-guard-pick-offering-other-work"):
             self.assertIn(required, ids)
+
+
+class OrphanLiveness(unittest.TestCase):
+    """Class 5 -- an item whose session is gone, rendered because its pane outlived it.
+
+    The feed's render filter was `str(rec["pane"]) in pmap`: pane existence standing
+    in for session liveness. A pane id is a lease, not an identifier -- WezTerm
+    renumbers and reuses them -- and a session killed without emitting `SessionEnd`
+    leaves its item open forever on a pane that still exists. Measured 2026-09-21
+    against the live store: 4 such orphans rendered, every one on a live pane.
+
+    Liveness now comes from the session registry (`~/.claude/sessions/<pid>.json`),
+    the source named by `vault-cli/docs/session-liveness.md` and read by the attention
+    store's `pkg/session-liveness-checker.go`.
+
+    These cases exercise `is_live()` and `live_session_ids()` directly rather than
+    through `classify()`: the corpus's `record` dicts carry no pane map or registry,
+    so a corpus case could only assert the filter by stubbing both -- which would test
+    the stub. The corpus classes stay as they are; this is a separate surface.
+    """
+
+    LIVE = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+    DEAD = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+
+    def rec(self, sid, pane="7"):
+        return {"session_id": sid, "pane": pane, "cwd": "/tmp",
+                "kind": "question", "detail": "pick — 1. do the thing"}
+
+    def registry(self, ids):
+        """A temp registry dir holding one `<pid>.json` per id, in the real shape."""
+        d = tempfile.mkdtemp(prefix="attn-registry-")
+        for i, sid in enumerate(ids):
+            with open(os.path.join(d, f"{1000 + i}.json"), "w", encoding="utf-8") as f:
+                json.dump({"pid": 1000 + i, "sessionId": sid, "cwd": "/tmp",
+                           "status": "idle"}, f)
+        return d
+
+    # --- SC1: the orphan is not rendered -------------------------------------
+
+    def test_dead_session_with_live_pane_is_not_rendered(self):
+        """The whole defect in one case: pane present, session gone -> no row."""
+        reg = self.registry([self.LIVE])
+        live = wnm.live_session_ids(reg)
+        self.assertEqual(live, {self.LIVE})
+        self.assertFalse(wnm.is_live(self.rec(self.DEAD), {"7": {}}, live))
+
+    def test_live_session_with_live_pane_is_rendered(self):
+        """SC2, the asymmetry: a fix that drops every unmatched open fails here."""
+        reg = self.registry([self.LIVE])
+        live = wnm.live_session_ids(reg)
+        self.assertTrue(wnm.is_live(self.rec(self.LIVE), {"7": {}}, live))
+
+    def test_pane_check_stays_necessary(self):
+        """SC1 third clause: registry-present but no live pane -> not rendered.
+
+        Discriminates a registry-AND-pane filter from a registry-only one. The jump
+        line is this feed's payload; a row the operator cannot jump to is not
+        actionable.
+        """
+        reg = self.registry([self.LIVE])
+        live = wnm.live_session_ids(reg)
+        self.assertFalse(wnm.is_live(self.rec(self.LIVE), {}, live))
+
+    # --- SC3: the registry is read, and its absence is not death --------------
+
+    def test_unreadable_registry_reads_as_live_and_drops_nothing(self):
+        """The degradation clause -- and the trap that made it necessary.
+
+        `glob` on a missing directory returns `[]` rather than raising, so an absent
+        registry reads as "no session is live" and sweeps the entire feed. Absence is
+        not evidence of death; it is evidence the probe cannot run. Mirrors
+        `session-liveness-checker.go:59-77` (a failed read returns live, not gone).
+        """
+        live = wnm.live_session_ids("/nonexistent/registry/path")
+        self.assertIsNone(live, "unreadable registry must be None, not an empty set")
+        self.assertTrue(wnm.is_live(self.rec(self.DEAD), {"7": {}}, live),
+                        "an unreadable registry must drop nothing")
+        self.assertTrue(wnm.is_live(self.rec(self.LIVE), {"7": {}}, live))
+
+    def test_empty_registry_is_not_none(self):
+        """A real but empty registry IS evidence -- distinct from an unreadable one."""
+        reg = self.registry([])
+        live = wnm.live_session_ids(reg)
+        self.assertEqual(live, set())
+        self.assertFalse(wnm.is_live(self.rec(self.DEAD), {"7": {}}, live))
+
+    def test_registry_reader_uses_the_documented_field(self):
+        """`sessionId` is the registry's key; a renamed field must not read as dead."""
+        reg = self.registry([self.LIVE])
+        self.assertEqual(wnm.live_session_ids(reg), {self.LIVE})
+
+    def test_reader_delegates_to_the_registry_rather_than_reimplementing_it(self):
+        """SC3's evidence is the CALL, not verdict agreement.
+
+        A hand-duplicated check that happens to match on fixtures passes a
+        verdict-agreement reading and is exactly the drift the criterion exists to
+        prevent. This asserts the seam: `is_live()` consults the registry set it is
+        handed, and `main()` sources that set from `live_session_ids()`.
+        """
+        reg = self.registry([self.LIVE])
+        live = wnm.live_session_ids(reg)
+        # Same record, same pane map, opposite verdicts -- decided only by the registry.
+        self.assertTrue(wnm.is_live(self.rec(self.LIVE), {"7": {}}, live))
+        self.assertFalse(wnm.is_live(self.rec(self.DEAD), {"7": {}}, live))
+        src = open(_SCRIPT, encoding="utf-8").read()
+        self.assertIn("live_session_ids()", src,
+                      "main() must source liveness from the registry reader")
 
 
 if __name__ == "__main__":

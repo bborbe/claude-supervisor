@@ -17,11 +17,22 @@ Sections:
 The feed answers "was a gate raised", never "is a gate open" — it is hook-written
 and goes stale until the session's next tool call. Read the pane before reporting
 any gate as open.
+
+A row is rendered only when its session is still live AND its pane still exists.
+Liveness is read from the session registry `~/.claude/sessions/<pid>.json`, per
+`vault-cli/docs/session-liveness.md`; the same source is read by the attention
+store's `pkg/session-liveness-checker.go`. Pane existence alone is not liveness —
+panes are renumbered and reused, and a session killed without `SessionEnd` leaves
+its item open on a pane that outlives it, which is how orphans reached this feed.
 """
 import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
 
 STATE = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser("~/.claude/state/attention")
 OBSIDIAN = os.path.expanduser("~/Documents/Obsidian")
+# The session registry: one `<pid>.json` per live session, deleted on exit, so its
+# presence is the authoritative live-vs-exited probe. Overridable so the reader can
+# be pointed at a fixture, and so a caller can mirror the store's own override.
+SESSIONS_DIR = os.environ.get("SESSIONS_DIR") or os.path.expanduser("~/.claude/sessions")
 
 # Closer verbs describing a parked wait rather than an open gate. `later (on
 # <trigger>):` names the event that resumes the work; until it fires there is
@@ -158,6 +169,63 @@ def panes():
         return {str(p["pane_id"]): p for p in json.loads(raw)}
     except Exception:
         return {}
+
+
+def live_session_ids(sessions_dir=None):
+    """Session ids currently registered as live, or `None` if that cannot be told.
+
+    A pane id is a lease, not an identifier — WezTerm renumbers and reuses them, so
+    `str(rec["pane"]) in panes()` answers "is some pane wearing this id", never "is
+    the session that raised this item still running". A session killed without
+    emitting `SessionEnd` (OOM, a killed worker, a crash) leaves its item open
+    forever and its pane still alive, so pane-existence alone renders an item the
+    operator can never clear. Measured 2026-09-21 against the live store: 4 such
+    orphans were rendered, every one of them on a pane that still existed.
+
+    The authority for liveness is the session registry `~/.claude/sessions/<pid>.json`
+    — an entry is deleted when its session exits, so presence means live. This is the
+    same source the attention store reads in
+    `attention-controller/pkg/session-liveness-checker.go`; that file and
+    `vault-cli/docs/session-liveness.md` are the rule, and this is its reader, not a
+    second definition of it.
+
+    `None` is a distinct answer from `set()`, and the distinction is the whole point:
+    an unreadable registry cannot prove a session is dead, so reporting `set()` would
+    sweep every legitimate item the moment the registry is absent. The caller keeps
+    everything on `None` — the store's own rule at `session-liveness-checker.go:59-77`,
+    where a failed read returns live rather than gone.
+    """
+    d = sessions_dir if sessions_dir is not None else SESSIONS_DIR
+    # `glob` on a missing directory returns `[]` rather than raising, so an absent
+    # registry would otherwise read as "no session is live" and sweep the whole feed.
+    # Absence is not evidence of death — it is evidence the probe cannot run, which is
+    # `None`. Checked explicitly because the silent-empty shape is indistinguishable
+    # from a real empty registry downstream.
+    if not os.path.isdir(d):
+        return None
+    try:
+        ids = set()
+        for path in glob.glob(os.path.join(d, "*.json")):
+            with open(path, encoding="utf-8") as f:
+                sid = json.load(f).get("sessionId")
+            if sid:
+                ids.add(sid)
+        return ids
+    except Exception:
+        return None
+
+
+def is_live(rec, pmap, live_ids):
+    """A row is rendered only when its session is live AND its pane still exists.
+
+    Both conditions are necessary. The pane check alone is what leaked the orphans;
+    the session check alone would keep a row the operator cannot jump to, and the
+    jump line is this feed's payload. `live_ids=None` means the registry could not be
+    read, which reads as live for every record — drop nothing.
+    """
+    if str(rec.get("pane")) not in pmap:
+        return False
+    return live_ids is None or rec.get("session_id") in live_ids
 
 
 _TEXT_CACHE = {}
@@ -425,7 +493,8 @@ def main():
         sys.exit(subprocess.call(["wezterm", "cli", "activate-pane", "--pane-id", a.jump]))
 
     pmap = panes()
-    live = lambda r: str(r.get("pane")) in pmap
+    live_ids = live_session_ids()
+    live = lambda r: is_live(r, pmap, live_ids)
     needs = [reclassify_idle(r) for r in load("needs") if live(r)]
     tools = [r for r in load("tool") if live(r)]
 
