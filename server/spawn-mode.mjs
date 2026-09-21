@@ -102,3 +102,39 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
   // that fails in unfamiliar ways and cannot be watched.
   return { mode: 'interactive', source: 'default' }
 }
+
+export const WORKER_MODE_ENV = 'SUPERVISOR_WORKER_MODE'
+export const WORKER_MODE_SOURCE_ENV = 'SUPERVISOR_WORKER_MODE_SOURCE'
+
+// The environment a headless worker is spawned with, carrying the mode this server has
+// already resolved.
+//
+// Why this exists: a headless worker is an in-process SDK `query()` with no pid and no
+// argv (see the resume guard in supervisor.mjs), so it cannot learn its own mode from a
+// process listing — and the only file it can read, config.json, describes the FLEET, not
+// this worker. A per-call `interactive: false` therefore opens a worker headless while
+// leaving every signal it can see still saying `interactive`. Measured 2026-09-20: two
+// such workers reported they were in an interactive tab and waited for a keystroke that
+// could never be typed. The mis-model is deterministic, not incidental.
+//
+// The fix is a handover rather than a probe: `resolveSpawnMode` already returns `source`
+// alongside `mode`, so the spawner hands the worker the answer it computed instead of
+// leaving the worker to infer it. `source` rides along so a worker that opened the wrong
+// way can say which of the four decided it.
+//
+// ⚠️ The SDK's query `env` option REPLACES the subprocess environment rather than merging
+// with it, so `env` is spread unconditionally here. Dropping the spread would take PATH,
+// HOME and ANTHROPIC_BASE_URL with it — and the last of those stops the worker routing
+// through the router while looking like nothing at all.
+//
+// A missing mode leaves the environment untouched rather than exporting the string
+// "undefined". The caller checks `resolveSpawnMode`'s error first, so this guards a
+// future caller that forgets to, not a reachable state today.
+export function workerEnvFor({ mode, source, env } = {}) {
+  if (!mode) return { ...(env ?? {}) }
+  return {
+    ...(env ?? {}),
+    [WORKER_MODE_ENV]: mode,
+    [WORKER_MODE_SOURCE_ENV]: source,
+  }
+}

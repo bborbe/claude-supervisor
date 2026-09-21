@@ -19,7 +19,7 @@ import { config } from './config.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName } from './liveness.mjs'
-import { resolveSpawnMode, unknownKeyWarnings } from './spawn-mode.mjs'
+import { resolveSpawnMode, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
@@ -731,6 +731,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
     prompt,
     options: {
       cwd: agent.cwd,
+      // Hand the worker the mode this server already resolved, so it never has to infer
+      // its own from a config file that describes the fleet rather than this worker. The
+      // SDK's `env` REPLACES the subprocess environment instead of merging with it, which
+      // is why workerEnvFor spreads the inherited env — without that spread the worker
+      // loses PATH, HOME and ANTHROPIC_BASE_URL, and the last of those silently stops it
+      // routing through the router. That base env comes from config.mjs rather than being
+      // read here, because this module owns no environment reads at all.
+      env: workerEnvFor({ mode: spawnMode.mode, source: spawnMode.source, env: config.baseEnv }),
       // Load the same settings an interactive session gets. Without this the SDK
       // starts from nothing — no plugin skills, no settings.json permissions, no
       // user MCP servers — and a worker missing its normal tooling is not a cheaper
