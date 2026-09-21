@@ -82,6 +82,11 @@ SOURCE_NOTE = None
 # session_id -> enrichment record. One file per session, many items per session.
 _ENRICHED_CACHE = {}
 
+# sessions_dir -> {session_id: name}, or None when that dir cannot be read. The
+# registry is read once per run and asked two questions of the same read — which
+# sessions are live, and what each is called now.
+_REGISTRY_CACHE = {}
+
 # Closer verbs describing a parked wait rather than an open gate. `later (on
 # <trigger>):` names the event that resumes the work; until it fires there is
 # nothing for the operator to answer. Measured 2026-09-19: two such closers sat at
@@ -362,6 +367,51 @@ def panes():
         return {}
 
 
+def read_registry(sessions_dir=None):
+    """The session registry as `session id -> the name it holds now`; `None` if unreadable.
+
+    One read answers both questions the feed asks of this directory, so the two
+    cannot disagree about which entries exist:
+
+      * `live_session_ids()` takes the keys — an entry is deleted when its session
+        exits, so presence means live.
+      * the ownership check takes the values — the name the session holds *now*.
+
+    The values are why this is a map rather than a set. `name` is rewritten on
+    rename, while the watcher's enrichment record holds only the name as of the
+    event, so the registry is the only source that survives a rename. Measured
+    2026-09-21: a live session read `MDM Bugs` here against `Octopus MDM Bugs` in
+    its enrichment record, the old name sitting in the registry's own
+    `formerNames` — comparing a pane title against the snapshot marked that row
+    unroutable while its pane was genuinely correct (1 false positive in 27).
+
+    `None` is a distinct answer from `{}` — an unreadable registry cannot prove
+    anything, so neither caller may read it as "nothing is there".
+    """
+    d = sessions_dir if sessions_dir is not None else SESSIONS_DIR
+    if d in _REGISTRY_CACHE:
+        return _REGISTRY_CACHE[d]
+    # `glob` on a missing directory returns `[]` rather than raising, so an absent
+    # registry would otherwise read as "no session is live" and sweep the whole feed.
+    # Absence is not evidence of death — it is evidence the probe cannot run, which is
+    # `None`. Checked explicitly because the silent-empty shape is indistinguishable
+    # from a real empty registry downstream.
+    out = None
+    if os.path.isdir(d):
+        try:
+            out = {}
+            for path in glob.glob(os.path.join(d, "*.json")):
+                with open(path, encoding="utf-8") as f:
+                    rec = json.load(f)
+                sid = rec.get("sessionId")
+                if sid:
+                    out[sid] = rec.get("name") or ""
+        except Exception:
+            out = None
+    _REGISTRY_CACHE[d] = out
+    return out
+
+
 def live_session_ids(sessions_dir=None):
     """Session ids currently registered as live, or `None` if that cannot be told.
 
@@ -386,24 +436,8 @@ def live_session_ids(sessions_dir=None):
     everything on `None` — the store's own rule at `session-liveness-checker.go:59-77`,
     where a failed read returns live rather than gone.
     """
-    d = sessions_dir if sessions_dir is not None else SESSIONS_DIR
-    # `glob` on a missing directory returns `[]` rather than raising, so an absent
-    # registry would otherwise read as "no session is live" and sweep the whole feed.
-    # Absence is not evidence of death — it is evidence the probe cannot run, which is
-    # `None`. Checked explicitly because the silent-empty shape is indistinguishable
-    # from a real empty registry downstream.
-    if not os.path.isdir(d):
-        return None
-    try:
-        ids = set()
-        for path in glob.glob(os.path.join(d, "*.json")):
-            with open(path, encoding="utf-8") as f:
-                sid = json.load(f).get("sessionId")
-            if sid:
-                ids.add(sid)
-        return ids
-    except Exception:
-        return None
+    registry = read_registry(sessions_dir)
+    return None if registry is None else set(registry)
 
 
 def session_transcript_age(sid):
@@ -730,40 +764,109 @@ def name_of(rec, pmap):
     event-log path, or a session the registry has no entry for) fall through to
     the pane title, unchanged.
     """
-    if rec.get("session_name"):
-        return rec["session_name"]
+def strip_status_glyph(text):
+    """A name without Claude Code's leading status glyph.
+
+    Claude Code prefixes the pane title with a status glyph (✳ ◐ ◑ ◒ ◓ ⠿ …) and a
+    session's own name may carry one too (`⚙ …`), so the strip is applied to *both*
+    sides of the ownership comparison. Extracted from `name_of()` so the display path
+    and the ownership check cannot drift on what "the name" is.
+    """
+    text = (text or "").strip()
+    while text and not (text[0].isalnum() or text[0] in "/~._-"):
+        text = text[1:].lstrip()
+    return text
+
+
+def current_session_name(rec, registry=None):
+    """The session's name as it stands NOW, or "" when it cannot be told.
+
+    The registry wins while the session is registered: it rewrites `name` on rename,
+    while the watcher's enrichment record holds only the name as of the event.
+    Measured 2026-09-21 — a live session read `MDM Bugs` in the registry against
+    `Octopus MDM Bugs` in its enrichment record, the old name sitting in the
+    registry's own `formerNames`. Reading the snapshot as current shows a stale name
+    as resolved, which is the same defect as a recycled pane wearing another
+    session's route.
+
+    A session the registry does not carry is not therefore nameless: a headless worker
+    is an in-process SDK query holding no entry at all, so the enrichment record is
+    the fallback — and it is what keeps a headless worker's inherited pane detectable,
+    since the worker's own name is what the spawner's pane title disagrees with.
+    """
+    if registry:
+        name = registry.get(rec.get("session_id") or "")
+        if name:
+            return name
+    return rec.get("session_name") or ""
+
+
+def name_of(rec, pmap, registry=None):
+    """The session's name, preferring the name it actually holds.
+
+    A store row carries `session_name` from the watcher's enrichment record, but that
+    is a snapshot taken at event time and a rename never reaches it — so the registry's
+    current name is preferred and the snapshot is the fallback for a session the
+    registry cannot speak for. Rows with neither fall through to the pane title,
+    unchanged.
+    """
+    name = current_session_name(rec, registry)
+    if name:
+        return name
     p = pmap.get(str(rec.get("pane")))
     if p:
-        title = p.get("title", "").strip()
-        while title and not (title[0].isalnum() or title[0] in "/~._-"):
-            title = title[1:].lstrip()  # Claude Code prefixes a status glyph (✳ ◐ ◑ ◒ ◓ ⠿ …)
-        return title or os.path.basename(rec.get("cwd", ""))
+        return strip_status_glyph(p.get("title")) or os.path.basename(rec.get("cwd", ""))
     return os.path.basename(rec.get("cwd", "")) + " (pane gone)"
 
 
-def is_routable(rec, pmap):
-    """True when this row's recorded pane resolves to a live pane.
+def is_routable(rec, pmap, registry=None):
+    """True when this row's recorded pane is proven to be *this* session's pane.
 
-    A pane written at event time is not proof it is still this session's: pane
-    ids are recycled across tab moves and WezTerm restarts, so a stale lookup
-    returns *another* session's pane. Validation is therefore required before a
-    pane is presented, and a row that fails it is marked rather than shown.
+    A pane written at event time is not proof it is still this session's: pane ids are
+    recycled across tab moves and WezTerm restarts, so a stale lookup returns *another*
+    session's pane — a wrong answer wearing the appearance of a resolved one, which
+    § Silence 7 of [[Attention Item Schema]] calls strictly worse than a blank.
+
+    Existence is necessary but not sufficient, and it was all this check used to ask:
+    `str(pane) in pmap` rejects a pane that is *gone*, never one that exists and
+    belongs to a different session. Measured 2026-09-21 — a headless worker inherits
+    its spawner's `WEZTERM_PANE`, so its item carries the spawner's pane id, which
+    exists, and the row rendered a confident jump to the wrong tab.
+
+    Ownership is proven by the name: the pane's title against the session's current
+    name, both glyph-stripped. Measured 2026-09-21 against the 27 rendered rows whose
+    session had a name — the registry-first comparison matched 27, while reading the
+    enrichment snapshot matched 26 and marked a renamed session unroutable while its
+    pane was genuinely correct.
+
+    A *mismatch* is required, not merely an absence. A session with no name to compare
+    (neither a registry entry nor an enrichment record) has unprovable ownership, and
+    reporting that as unroutable would strip the jump from every such row; the row is
+    kept and `name_of()` still serves it from the pane title.
     """
     pane = rec.get("pane")
-    return bool(pane) and str(pane) in pmap
+    if not pane or str(pane) not in pmap:
+        return False
+    name = current_session_name(rec, registry)
+    if not name:
+        return True
+    title = strip_status_glyph(pmap.get(str(pane), {}).get("title"))
+    if not title:
+        return True
+    return title == strip_status_glyph(name)
 
 
-def row(rec, pmap, what):
+def row(rec, pmap, what, registry=None):
     pane = rec.get("pane")
-    if pane and is_routable(rec, pmap):
+    if pane and is_routable(rec, pmap, registry):
         jump = f"wezterm cli activate-pane --pane-id {pane}"
     elif pane:
         # Present but unvalidatable. Never rendered as a route: the id may now
         # belong to a different session entirely.
-        jump = f"unroutable — pane {pane} does not resolve to a live session"
+        jump = f"unroutable — pane {pane} does not resolve to this session"
     else:
         jump = "unroutable — no pane recorded for this item"
-    return f"  [{pane or '?':>4}] {age(rec['ts']):>6}  {name_of(rec, pmap)[:50]:<50}  {what[:60]}\n         {jump}"
+    return f"  [{pane or '?':>4}] {age(rec['ts']):>6}  {name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n         {jump}"
 
 
 def capped(rows, show_all):
@@ -793,7 +896,11 @@ def main():
         sys.exit(subprocess.call(["wezterm", "cli", "activate-pane", "--pane-id", a.jump]))
 
     pmap = panes()
-    live_ids = live_session_ids()
+    # One registry read serves both questions: which sessions are live (the `quiet`
+    # pass) and what each is called now (the ownership check). Reading it twice would
+    # let the two disagree about which entries exist.
+    registry = read_registry()
+    live_ids = None if registry is None else set(registry)
     # Read the store once: load("needs") folds every event log, so a second call for
     # the quiet pass would double that cost.
     records = load("needs")
@@ -834,22 +941,22 @@ def main():
     # count of what it omitted is what keeps the cap honest rather than silent.
     shown, withheld = capped(blocked, a.all)
     for r in shown:
-        print(row(r, pmap, f"{r['kind']}: {r['detail']}"))
+        print(row(r, pmap, f"{r['kind']}: {r['detail']}", registry))
     if withheld:
         print(f"{withheld} more — pass --all")
     print(f"\nRendered panels ({len(panels)})  — a closer line, not a parked gate")
     for r in panels:
-        print(row(r, pmap, r["detail"]))
+        print(row(r, pmap, r["detail"], registry))
     print(f"\nProbably stuck > {a.stuck_min}m ({len(stuck)})")
     for r in stuck:
-        print(row(r, pmap, r["detail"]))
+        print(row(r, pmap, r["detail"], registry))
     print(f"\nReapable ({len(reapable)})  — finished work on a close gate, yours to close")
     for r in reapable:
-        print(row(r, pmap, r["detail"]))
+        print(row(r, pmap, r["detail"], registry))
     if a.idle:
         print(f"\nIdle, turn ended ({len(idle)})")
         for r in idle:
-            print(row(r, pmap, r["detail"]))
+            print(row(r, pmap, r["detail"], registry))
     else:
         print(f"\nIdle, turn ended: {len(idle)}  (--idle to list)")
     if not blocked and not stuck:
