@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: the Session cell states **which id it reads**, closing a gap the previous entry left. It said to take the prefix from `claude_session_id` and that `—` means *the task records no id* — but step 3 defines the id set as `claude_session_id` **plus** every `metrics_sessions` id, and warns that the frontmatter id is not guaranteed to be the worker's. A task carrying only `metrics_sessions` ids therefore satisfied neither clause, and two readings were possible: render `—` (blanking 8 cells on a measured 32-task sweep) or fall back to the metrics id. The rule now names the precedence — `claude_session_id` when present, else the first `metrics_sessions` id, else `—` — so a missing key cannot read as *no session*.
+
 ## v0.24.4
 
 - fix: both manager surfaces now state that **cross-layer de-dup belongs to the script, not the sweep**. `fleet-manager` and `worker-manager` each publish gates to `notify-gate` without any way to see the other layer's stamps, so a manager that pre-filters on its own reasoning suppresses a gate nobody surfaces. The note names the failure it prevents, points at the script as the authority rather than restating its rules, and says what the healthy output looks like — a printed skip naming the session that already has the gate, which is evidence the de-dup is working rather than a gate going missing.
