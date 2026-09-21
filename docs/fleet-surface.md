@@ -47,6 +47,21 @@ once at server start — restart the MCP server after editing it. The spawn resp
 decided. Pass `interactive` only as a per-call override: `true` to watch one worker's screen
 live, `false` to force one headless worker while the fleet runs in tabs.
 
+⚠️ **A headless worker is told its own mode — it never has to infer it.** The resolved mode
+and its source are passed into the worker's environment as `SUPERVISOR_WORKER_MODE` and
+`SUPERVISOR_WORKER_MODE_SOURCE`, so the worker reads them instead of reading the fleet
+config. That matters because the config describes the **fleet, not this worker**: a per-call
+`interactive: false` opens a worker headless while the file still reads `interactive`, and
+before 2026-09-20 that file was the only signal a worker could reach — so every
+headless-by-override worker mis-modelled itself, reported it was in an **interactive tab**,
+and waited for a keystroke that could never be typed (measured 2026-09-20: two in one hour,
+one ending `done`/`success` with its task file unedited). A headless worker is an in-process
+SDK `query()` with no pid and no argv, so it cannot probe this for itself: the value is
+handed over, never re-derived. ⚠️ The SDK's `env` option **replaces** the subprocess
+environment rather than merging, so `process.env` is spread explicitly — without it the
+worker loses `PATH`, `HOME` and `ANTHROPIC_BASE_URL`, the last of which stops it routing
+through the router while looking like nothing at all.
+
 ⚠️ **`role` resolves BOTH the colour and the window — pass it, and prefer it over
 `window_id`.** The server reads the map the WezTerm config publishes on its reconcile tick
 (`~/.cache/wezterm-role-map.json`) and resolves `manager` → orange/Managers, `agent` →

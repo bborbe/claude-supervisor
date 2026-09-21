@@ -7,7 +7,14 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveSpawnMode, unknownKeyWarnings, SPAWN_MODES } from './spawn-mode.mjs'
+import {
+  resolveSpawnMode,
+  unknownKeyWarnings,
+  workerEnvFor,
+  SPAWN_MODES,
+  WORKER_MODE_ENV,
+  WORKER_MODE_SOURCE_ENV,
+} from './spawn-mode.mjs'
 
 const file = (mode) => ({ spawn: { mode } })
 
@@ -121,4 +128,43 @@ test('an unknown key warns but never refuses', () => {
     mode: 'headless',
     source: 'config',
   })
+})
+
+test('the worker is told its own mode, so a wrong-way spawn is self-diagnosing', () => {
+  // The failure this prevents: a per-call `interactive: false` opens a worker headless
+  // while every signal that worker can read still says `interactive`, because config.json
+  // describes the FLEET and not this worker. Measured 2026-09-20 — two such workers
+  // reported they were in an interactive tab and waited for a keystroke that could never
+  // be typed. The mode is not re-derived here; it is the one resolveSpawnMode returned.
+  const env = workerEnvFor({ mode: 'headless', source: 'argument', env: {} })
+  assert.equal(env[WORKER_MODE_ENV], 'headless')
+})
+
+test('the worker is told which source decided, not only the mode', () => {
+  // "Why is this worker headless" has to be answerable from inside the worker, not only
+  // from the manager's agent_status. The four sources are the diagnosis.
+  const env = workerEnvFor({ mode: 'headless', source: 'config', env: {} })
+  assert.equal(env[WORKER_MODE_SOURCE_ENV], 'config')
+})
+
+test('the inherited environment survives, because the SDK replaces rather than merges', () => {
+  // The SDK's query `env` REPLACES the subprocess environment instead of merging with it.
+  // Dropping the spread would take PATH, HOME and ANTHROPIC_BASE_URL — and the last of
+  // those stops the worker routing through the router while looking like nothing at all.
+  const env = workerEnvFor({
+    mode: 'headless',
+    source: 'argument',
+    env: { PATH: '/usr/bin', ANTHROPIC_BASE_URL: 'http://127.0.0.1:8788' },
+  })
+  assert.equal(env.PATH, '/usr/bin')
+  assert.equal(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:8788')
+  assert.equal(env[WORKER_MODE_ENV], 'headless')
+})
+
+test('a missing mode leaves the environment untouched rather than exporting "undefined"', () => {
+  // The caller checks resolveSpawnMode's error first, so this guards a future caller that
+  // forgets to — an exported "undefined" would read as a real mode to anything downstream.
+  assert.deepEqual(workerEnvFor({ env: { PATH: '/usr/bin' } }), { PATH: '/usr/bin' })
+  assert.deepEqual(workerEnvFor(), {})
+  assert.equal(workerEnvFor({ env: {} })[WORKER_MODE_ENV], undefined)
 })
