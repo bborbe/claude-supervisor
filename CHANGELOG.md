@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.24.2
 
 - fix: the fleet surface states that **a manager is never started in a worker session**, which neither it nor `worker-manager` said before. A worker session carries a *task*; a manager session carries a *topic or goal* and a loop, and arming one inside the other collapses the roles **silently** — the session keeps its task name and its task anchor while its turns sweep a topic's whole tracked set. Starting a manager is a human act. The rule now has a home in `docs/fleet-surface.md` § Session roles, and a pointer from `worker-manager` where the role boundary is already described. Found 2026-09-21 by a worker session that proposed to exercise this very command as its own end-to-end check, and was refused by the operator.
 - fix: `report-only` no longer reads as a safety property it does not have. The flag suppresses the **arming** of the loop and nothing else — the Guardrails still run, so one report-only sweep may spawn up to 2 sessions on ready-to-start work, auto-resume a dead mid-flight worker, auto-compact a worker over 70%, and reconcile the topic page. **"One sweep" is a cadence limit, not a blast-radius limit.** Documented at both the flag's own description and the role rule, because `report-only` is exactly the flag a careful session reaches for.
