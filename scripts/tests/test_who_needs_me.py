@@ -780,5 +780,40 @@ class PaneOwnership(unittest.TestCase):
         self.assertFalse(wnm.is_routable(rec, {"1": {}}, {"s": "worker-verify"}))
 
 
+class ProvenanceRendering(unittest.TestCase):
+    """The row carries its provenance, and an absent value renders as absent.
+
+    The reader resolved `host`, `cwd` and `tool_name` into the record before this
+    change, but `row()` rendered none of them — so the operator could see a pane and
+    a name and still not know which directory or which tool raised the item, which is
+    the whole question the feed exists to answer.
+
+    Absent renders as `—`, never as a blank: a missing host and a host that is
+    genuinely empty are different claims, and a blank reads as the second.
+    """
+
+    def rec(self, **kw):
+        rec = {"pane": 7, "ts": 0, "cwd": "/tmp/x", "kind": "question", "detail": "d"}
+        rec.update(kw)
+        return rec
+
+    def test_the_row_carries_host_cwd_and_tool(self):
+        rec = self.rec(host="burn", cwd="/Users/bborbe/Documents/Obsidian/Personal",
+                       tool_name="AskUserQuestion")
+        rendered = wnm.row(rec, {"7": {}}, "question: d")
+        self.assertIn("burn:/Users/bborbe/Documents/Obsidian/Personal", rendered)
+        self.assertIn("AskUserQuestion", rendered)
+
+    def test_an_absent_provenance_field_renders_as_absent(self):
+        """`—`, not a blank, and not the payload echoed into the field."""
+        rendered = wnm.row(self.rec(), {"7": {}}, "question: d")
+        self.assertIn("—:/tmp/x · —", rendered)
+
+    def test_an_absent_field_is_never_defaulted_from_the_payload(self):
+        rec = self.rec(detail="raised from burn by Bash")
+        rendered = wnm.row(rec, {"7": {}}, "question: " + rec["detail"])
+        self.assertNotIn("burn:", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

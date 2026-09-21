@@ -856,6 +856,22 @@ def is_routable(rec, pmap, registry=None):
     return title == strip_status_glyph(name)
 
 
+def provenance_of(rec):
+    """The row's provenance line — host, cwd and tool, each absent-marked when absent.
+
+    These are the *event's* fields: the store carries none of them, so they arrive
+    from the hook's own log line and are missing for any item whose producer wrote
+    no log. An absent value renders as `—`, never as a blank — a missing host and a
+    host that is genuinely empty are different claims, and a blank reads as the
+    second. Never defaulted to something plausible: the whole point of this line is
+    that the operator can walk to the thing that needs them.
+    """
+    host = rec.get("host") or "—"
+    cwd = rec.get("cwd") or "—"
+    tool = rec.get("tool_name") or "—"
+    return f"{host}:{cwd} · {tool}"
+
+
 def row(rec, pmap, what, registry=None):
     pane = rec.get("pane")
     if pane and is_routable(rec, pmap, registry):
@@ -866,7 +882,10 @@ def row(rec, pmap, what, registry=None):
         jump = f"unroutable — pane {pane} does not resolve to this session"
     else:
         jump = "unroutable — no pane recorded for this item"
-    return f"  [{pane or '?':>4}] {age(rec['ts']):>6}  {name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n         {jump}"
+    return (f"  [{pane or '?':>4}] {age(rec['ts']):>6}  "
+            f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
+            f"         {provenance_of(rec)}\n"
+            f"         {jump}")
 
 
 def capped(rows, show_all):
