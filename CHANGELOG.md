@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: `docs/fleet-surface.md` § Session roles states the **dispatch authority** — that only a manager opens sessions — and points at the live global rule for the worker-side prohibition, naming the rule **and the file it lives at** (`~/.claude/claude-md-rules/worker-does-not-open-sessions.md`) rather than restating it. `commands/fleet-manager.md` § Manager contract's *"No worker → spawn one"* gains the matching **who-holds-the-verb** clause, so a worker reading that line no longer sees a sanctioned verb with nobody named as its holder. The rule lives **once**, globally, because that is the only artifact every worker actually loads — `docs/fleet-surface.md` is not read by workers — so this ships a pointer and an authority allocation, never a second copy of the prohibition. Both halves were genuinely uncovered: nothing anywhere stated who *does* hold the dispatch verb, and line 45 read to a worker as permission to hand `/open` onward. The pointer names its target file deliberately: if the global rule is ever reverted, a pointer naming a file that is gone is a one-second discovery, while one gesturing at "the global rule" is a dangling link nothing detects.
+
 ## v0.24.6
 
 - docs: `docs/fleet-surface.md` § Spawn a worker gains the **readiness precondition** as its own block — author the task through `/vault-cli:create-task`, score it with the `task-auditor` agent at **9/10**, confirm the three sections exist (`# Success Criteria`, `# Definition of Done`, `# Tasks`), and keep the authoring-vs-planning split. It is the one authoritative home; every spawn site references it rather than restating it. The bar is 9/10 because that is the bar the worker's own `plan-task` gate applies — a manager gate looser than the worker's is decorative, and an 8/10 task clears the manager while still parking the worker.
