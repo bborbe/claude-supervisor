@@ -87,7 +87,7 @@ This command is the **fleet-manager engine** (renamed from `/fleet-sweep` 2026-0
     **The same test drives the notification, and it goes through the plugin's own publisher — never a vault command.** TTS cannot leave the room, so a gate raised while the operator is away waits unbounded with nothing on the phone. When that gate fires, publish the round's gates in one call:
 
     ```bash
-    echo '{"gates": [{"owner": "<session id or pane id>", "text": "<the gate line>"}]}' \
+    echo '{"gates": [{"owner": "<session id or pane id>", "text": "<the gate line>", "session": "<the BLOCKED session id>"}]}' \
       | python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/notify-gate.py --layer fleet
     ```
 
