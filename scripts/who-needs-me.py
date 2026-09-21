@@ -755,15 +755,6 @@ def age(ts):
     return f"{m}m" if m < 60 else f"{m // 60}h{m % 60:02d}m"
 
 
-def name_of(rec, pmap):
-    """The session's name, preferring the name it actually holds.
-
-    A store row carries `session_name` from the watcher's enrichment record —
-    the registry's own `name` — so that is preferred over a pane title, which is
-    whatever the terminal happens to be showing. Rows with no enrichment (the
-    event-log path, or a session the registry has no entry for) fall through to
-    the pane title, unchanged.
-    """
 def strip_status_glyph(text):
     """A name without Claude Code's leading status glyph.
 

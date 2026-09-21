@@ -34,6 +34,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -813,6 +814,32 @@ class ProvenanceRendering(unittest.TestCase):
         rec = self.rec(detail="raised from burn by Bash")
         rendered = wnm.row(rec, {"7": {}}, "question: " + rec["detail"])
         self.assertNotIn("burn:", rendered)
+
+
+class NoShadowedDefinitions(unittest.TestCase):
+    """A top-level definition is never left shadowed by a later one of the same name.
+
+    Observed 2026-09-21 (PR #91): an edit that replaced a function's *body* while
+    leaving its `def` line and docstring behind produced a docstring-only stub. That
+    is valid Python — the docstring IS the body — so the module imported, the whole
+    suite passed, and the reader worked. The stub was silently shadowed by the real
+    definition further down, and only a reviewer reading the diff caught it.
+
+    A duplicate top-level name is never intentional in a one-shot script, so the
+    guard is a plain uniqueness assertion rather than a judgement call.
+    """
+
+    def test_no_top_level_definition_appears_twice(self):
+        with open(_SCRIPT, encoding="utf-8") as handle:
+            names = re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)", handle.read(), re.M)
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        self.assertEqual([], dupes, f"top-level defs defined more than once: {dupes}")
+
+    def test_the_guard_can_see_a_duplicate(self):
+        """The positive control: the regex matches, so an empty result means clean."""
+        names = re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)",
+                           "def a():\n    pass\n\ndef a():\n    pass\n", re.M)
+        self.assertEqual(["a", "a"], names)
 
 
 if __name__ == "__main__":
