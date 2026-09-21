@@ -383,7 +383,7 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
   sessions the registry does *not* carry (a headless worker holds no registry entry at all).
   Never read a short table as a clean fleet, and never read an empty one as an empty fleet.
 - **The marker line is timestamped and is always the first line of the tick's output:**
-  `HH:MM ✓ Fleet — N sessions · <count by status> · <what changed or "no change">`. Silence
+  `HH:MM ✓ Fleet — N sessions · <count by bucket> · <what changed or "no change">`. Silence
   is ambiguous — a quiet loop and a dead loop look identical from the outside.
   `/supervisor:fleet-status` is a one-shot snapshot and carries **no** marker, but indents
   its box the same two spaces under its own lead line.
