@@ -200,10 +200,11 @@ def attention_queue(wnm, pmap, oldest=False):
     # that drift -- pane existence standing in for session liveness -- so an item whose
     # session had exited stayed jumpable here after the feed had correctly dropped it.
     # The reader owns the rule; this surface borrows it.
-    live_ids = wnm.live_session_ids()
-    live = lambda r: (wnm.is_live(r, pmap, live_ids)
+    records = wnm.load("needs")
+    quiet = wnm.quiet_session_ids(records, wnm.live_session_ids())
+    live = lambda r: (wnm.is_live(r, pmap, quiet)
                       and str(r.get("pane")) != str(me))
-    needs = [wnm.reclassify_idle(r) for r in wnm.load("needs") if live(r)]
+    needs = [wnm.reclassify_idle(r) for r in records if live(r)]
 
     # Classify through who-needs-me.py rather than re-deriving the predicate here, so
     # the two surfaces cannot disagree about who needs you. This previously inlined
