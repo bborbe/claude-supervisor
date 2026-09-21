@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.23.8
 
 - docs: the supervisor documents a **manager-scope answer prefix**, `Manager answer, via supervisor:`, so a manager can answer a **parked** headless worker's gate in its own voice without asserting operator provenance. Until now the only documented prefix was `Operator answer, via supervisor:`, which makes a provenance claim — the operator answered, in the manager session, in the current exchange — and a manager deciding on its own under that form is forging an operator answer. Measured 2026-09-20: a worker received exactly that, **agreed with all three answers, and still did not act**, because the worker-side rule is written to reject a non-operator prefix; the session ended `done`/`success` with its task file unedited. The parked case has no other channel — `resume` refuses a session still running, so the fresh-turn path reaches only an *exited* worker. Written into the canonical spec (`docs/fleet-surface.md` § The two prefixes are not interchangeable) and the four sites that tell a manager how to answer: `commands/answer.md`, `commands/worker-manager.md`, `commands/fleet-manager.md`, `llms.txt`. ⚠️ Both prefixes are honoured **on an `AskUserQuestion` only** — a denial on `Bash`/`Edit`/`Write` stays a denial whatever prefix it carries — and **neither releases an irreversible or production-touching action**, which still needs the operator's own confirmation obtained directly.
 
