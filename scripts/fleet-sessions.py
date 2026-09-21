@@ -9,6 +9,21 @@ ps-only approach missed.
 Work mapping = vault `claude_session_id:` frontmatter stamps → task/goal title.
 Live-process flag = the session id appears in a running `claude --resume <id>`.
 
+Spawn mode + attribution = the supervisor's spawn ledger
+(`SUPERVISOR_LEDGER_DIR`, default `$XDG_STATE_HOME|~/.local/state/claude-supervisor/sessions`),
+joined to the roster on the session id. The ledger is the only store that records the
+spawn edge — mode, the manager that spawned it, the label it was given, the launcher —
+so without it a headless worker and a human tab render identically and no row can say
+whose work it is. A session the ledger does not know renders `unknown` for both, never
+a blank and never a guess: an absent record means *not recorded*, which is a different
+claim from *not spawned*.
+
+The two spawn counts are derived at render time from `spawned_at` over **two** buckets,
+because `spawned_at` is UTC-only and the day boundary therefore has two defensible
+readings. Both are printed and each is labelled, rather than one being silently chosen.
+No count in this view rests on the ledger's `status` / `ended_at` — those do not close
+reliably for any mode, so they are not a liveness source (see ledger.mjs).
+
 The fleet is ALWAYS every project — every transcript, newest first, no time
 filter. There is no scope to get wrong, so a sweep can never silently narrow
 and read an out-of-scope live session as gone.
@@ -23,6 +38,7 @@ Usage: fleet-sessions.py [ignored flags]
 """
 from __future__ import annotations
 import calendar, json, os, re, subprocess, time
+from datetime import datetime, timezone
 from pathlib import Path
 
 HOME = Path.home()
@@ -116,6 +132,107 @@ def build_work_map() -> dict[str, list[str]]:
                     out.setdefault(m.group(1), []).append(f.stem)
     return out
 
+def ledger_dir() -> Path:
+    """The spawn ledger directory, resolved from the writer's own env override.
+
+    Mirrors `server/config.mjs`: `SUPERVISOR_LEDGER_DIR` wins, else
+    `$XDG_STATE_HOME|~/.local/state` + `/claude-supervisor/sessions`. Resolved
+    rather than hardcoded so a relocated ledger (or an isolated test run) is read
+    without editing this file, and so the reader cannot drift from the writer.
+
+    Deliberately NOT `SUPERVISOR_SESSIONS_DIR`: that name already means the live
+    registry (`~/.claude/sessions`), a different store with a different lifetime.
+    """
+    override = os.environ.get("SUPERVISOR_LEDGER_DIR")
+    if override:
+        return Path(os.path.expanduser(override))
+    state = os.environ.get("XDG_STATE_HOME") or str(HOME / ".local" / "state")
+    return Path(os.path.expanduser(state)) / "claude-supervisor" / "sessions"
+
+def read_ledger() -> dict[str, dict]:
+    """session-id -> spawn record. A missing or unreadable store is `{}`.
+
+    Absence degrades the two new columns to `unknown`; it never aborts the
+    roster, which is the view's primary job and does not depend on the ledger.
+    """
+    out: dict[str, dict] = {}
+    try:
+        for f in ledger_dir().glob("*.json"):
+            try:
+                rec = json.loads(f.read_text("utf-8", "replace"))
+            except Exception:
+                continue
+            sid = rec.get("session_id") or f.stem
+            if sid:
+                out[sid] = rec
+    except Exception:
+        return {}
+    return out
+
+def _parse_spawned_at(value) -> datetime | None:
+    """Parse the ledger's ISO 8601 `spawned_at`; None when absent or unparseable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+def spawn_counts(records: dict[str, dict], now_ts: float) -> tuple[int, int]:
+    """(spawned today UTC, spawned today local) over `spawned_at`, derived now.
+
+    Two buckets because `spawned_at` is UTC-only and the day boundary has two
+    defensible readings; printing both labelled beats silently picking one.
+    Computed from the records on every render — never cached, never a constant.
+    """
+    utc_day = datetime.fromtimestamp(now_ts, timezone.utc).date()
+    local_day = datetime.fromtimestamp(now_ts).date()
+    utc_n = local_n = 0
+    for rec in records.values():
+        dt = _parse_spawned_at(rec.get("spawned_at"))
+        if dt is None:
+            continue
+        if dt.astimezone(timezone.utc).date() == utc_day:
+            utc_n += 1
+        if dt.astimezone().date() == local_day:
+            local_n += 1
+    return utc_n, local_n
+
+# An absent ledger record is a *different* claim from "not spawned": the spawn edge
+# was never recorded for this session. Rendered explicitly so the operator can tell
+# it apart from a value the ledger actually carries.
+UNKNOWN = "unknown"
+
+def spawn_mode(rec: dict | None) -> str:
+    """The ledger's `mode` for this session, or `unknown` when it has no record."""
+    mode = (rec or {}).get("mode")
+    return mode if mode else UNKNOWN
+
+def attribution(rec: dict | None) -> str:
+    """Which manager spawned this session, and under what label.
+
+    Composed from the spawn edge the ledger records: `parent_session` (the manager
+    that called spawn_agent), `agent_id` (its handle in that manager) and `label`.
+    Falls back to `unknown` when there is no record, and to whichever of the three
+    is present when the others are not — never a guessed default.
+    """
+    if not rec:
+        return UNKNOWN
+    parent = (rec.get("parent_session") or "")[:8]
+    agent = rec.get("agent_id") or ""
+    label = rec.get("label") or ""
+    if parent and label:
+        return f"{parent} {label}"
+    if parent and agent:
+        return f"{parent} {agent}"
+    if label:
+        return label
+    if parent:
+        return parent
+    if agent:
+        return agent
+    return UNKNOWN
+
 def live_processes() -> tuple[int, set[str]]:
     """Returns (count of running `claude --model` sessions, resumed-session ids).
 
@@ -144,11 +261,23 @@ def human_age(sec: float) -> str:
     if sec < 172800: return f"{int(sec/3600)}h ago"
     return f"{int(sec/86400)}d ago"
 
+def render_row(age: float, proj: str, sid: str, working: str, live: bool, rec: dict | None) -> str:
+    """One roster row: the five original columns, then mode and attribution.
+
+    The new pair is appended rather than interleaved so the first five columns
+    keep their positions and widths — `fleet-status` and `fleet-manager` parse
+    `SESSION` and `WORKING ON` by name against them.
+    """
+    flag = "●" if live else " "
+    return (f"{human_age(age):<12} {proj:<12} {flag:<4} {sid[:8]:<10} "
+            f"{working[:43]:<44} {spawn_mode(rec):<11} {attribution(rec)}")
+
 def main():
     now = time.time()
     if not PROJECTS.is_dir():
         print("no ~/.claude/projects"); return
     work = build_work_map()
+    ledger = read_ledger()
     proc_count, resumed = live_processes()
 
     rows = []
@@ -159,16 +288,22 @@ def main():
         rows.append((now - last_message_ts(jsonl), proj, sid))
 
     rows.sort(key=lambda r: r[0])
-    print(f"{'LAST-ACTIVE':<12} {'PROJECT':<12} {'LIVE':<4} {'SESSION':<10} WORKING ON")
+    print(f"{'LAST-ACTIVE':<12} {'PROJECT':<12} {'LIVE':<4} {'SESSION':<10} "
+          f"{'WORKING ON':<44} {'SPAWN MODE':<11} ATTRIBUTION")
     for age, proj, sid in rows:
         titles = work.get(sid, [])
         titles = sorted(titles, key=lambda t: (t.startswith(("Start Day", "Check", "Cleanup", "Feed", "Turn")), t))
         working = titles[0] if titles else "—"
-        flag = "●" if sid in resumed else " "
-        print(f"{human_age(age):<12} {proj:<12} {flag:<4} {sid[:8]:<10} {working}")
+        print(render_row(age, proj, sid, working, sid in resumed, ledger.get(sid)))
+    utc_n, local_n = spawn_counts(ledger, now)
     print(f"\n{proc_count} live `claude` sessions (ps, machine-wide) · scope: all projects · "
           f"● = confirmed via --resume · "
           f"age = last transcript message (liveness proxy; <~5m ≈ active, hours ≈ stale)")
+    print(f"ledger: {len(ledger)} records at {ledger_dir()} · "
+          f"{len(rows) - sum(1 for _, _, sid in rows if sid in ledger)} roster rows with no ledger record "
+          f"(rendered `{UNKNOWN}`) · spawn mode + attribution are ledger-sourced, never inferred")
+    print(f"spawned today (UTC): {utc_n}")
+    print(f"spawned today (local): {local_n}")
 
 if __name__ == "__main__":
     main()
