@@ -38,6 +38,8 @@ Worker manager slash command — the **narrow / deep** layer. Per the vault's Wo
 
 One manager per topic: owns ONE topic's declared goal set (e.g. the *Sentry* topic, the *notification* topic), read from that topic's page. The fleet manager (wide layer) may run above. **Enforced, not merely asserted** — Resolution step 6 confirms no manager already owns the name before arming, and stops on a hit.
 
+⚠️ **A manager is never started in a worker session — so this command is never invoked from one.** A worker session carries a *task*; a manager session carries a *topic or goal* and a loop, and arming one inside the other collapses the roles silently: the session keeps its task name and its task anchor while its turns sweep a topic's whole tracked set. **Starting a manager is a human act**, performed in a session created for that purpose. ⚠️ **`report-only` does not make it safe** — it suppresses the *arming* and nothing else, so one report-only sweep may still spawn up to 2 sessions, auto-resume a dead mid-flight worker, auto-compact a worker over 70%, and reconcile the topic page. Full rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles — who may start what.
+
 ## Manager contract — a manager manages, it does not build
 
 The worker manager **manages; it does not build**. It never performs the topic's *work*: no code edits, no repo/PR/k8s verification, no investigation, no real debugging — not even small ones. (Owner rule, 2026-09-11; boundary restated by the operator 2026-09-18.)

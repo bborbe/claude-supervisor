@@ -26,6 +26,16 @@ worker as their last resort, so a bare form fails exactly when it is needed (mea
 got `Unknown command`). The namespace follows the install id, so renaming the plugin or the
 marketplace changes the prefix with it — a one-place edit here, not a sweep of the commands.
 
+## Session roles — who may start what
+
+**A manager is never started in a worker session.** A worker session carries a *task*; a manager session carries a *topic or goal* and a loop. Arming one inside the other collapses the two roles, and the collapse is silent: the session keeps its task name and its task anchor while its turns now sweep a topic's whole tracked set, and the operator sees a worker whose tab is quietly doing someone else's job. (Operator rule, 2026-09-21 — stated when a worker session proposed to exercise `/supervisor:worker-manager report-only` as its own end-to-end check.)
+
+The direction that **is** allowed runs the other way: a manager starts workers (§ Spawn a worker), and a worker reaches its manager over `SendMessage`. **Starting a manager is a human act** — the operator invokes `/supervisor:worker-manager <subject>` in a session created for that purpose.
+
+⚠️ **`report-only` does not make it safe — it suppresses the arming and nothing else.** The Guardrails still run, so a single report-only sweep may spawn up to 2 sessions on ready-to-start work, auto-resume a dead mid-flight worker, auto-compact a worker over 70%, and reconcile the topic page. **"One sweep" is a cadence limit, not a blast-radius limit**, and reading it as a read-only mode is the mistake this note exists to prevent (made, and caught, on 2026-09-21).
+
+⚠️ **A worker session therefore has no end-to-end check of a manager command.** Exercising one belongs to a manager session's own runtime. A change whose verification is "run the manager and watch it behave" is verified by deployment (the installed copy carries the change) plus a lockstep grep across the copies — never by arming a loop from wherever the change was authored.
+
 ## Spawn a worker
 
 **A — `spawn_agent` (preferred).** The prompt is a spawn *argument*, so the task never goes
