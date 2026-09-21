@@ -195,7 +195,14 @@ def attention_queue(wnm, pmap, oldest=False):
     never by a jump.
     """
     me = os.environ.get("WEZTERM_PANE")
-    live = lambda r: str(r.get("pane")) in pmap and str(r.get("pane")) != str(me)
+    # Liveness through who-needs-me.py, for the same reason the classification below
+    # goes through it: a filter re-derived here drifts from the feed's. This line WAS
+    # that drift -- pane existence standing in for session liveness -- so an item whose
+    # session had exited stayed jumpable here after the feed had correctly dropped it.
+    # The reader owns the rule; this surface borrows it.
+    live_ids = wnm.live_session_ids()
+    live = lambda r: (wnm.is_live(r, pmap, live_ids)
+                      and str(r.get("pane")) != str(me))
     needs = [wnm.reclassify_idle(r) for r in wnm.load("needs") if live(r)]
 
     # Classify through who-needs-me.py rather than re-deriving the predicate here, so
