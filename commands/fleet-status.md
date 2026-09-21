@@ -17,24 +17,23 @@ This is NOT `/and`. `/and` = what should **I** do next in this session; `/fleet-
 
 Pure snapshot, no mutation, no messages sent. Safe to run as often as you like.
 
-1. `ListAgents` — every other Claude Code session on this machine, as `name [ref] · mode · status · started`. **The name is the task the session is on**; the status is live.
-2. `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-sessions.py` — vault-side mapping: `claude_session_id:` frontmatter stamps → task/goal title, across every vault. Always every project, newest first, with no time filter — there is no scope to pass and no window to widen, so step 1 and step 2 are both machine-wide and always agree.
+1. `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py` — **the board**. One row per live session in the session registry (`~/.claude/sessions/<pid>.json`), each classified into `running` / `idle` / `needs-input` / `problem`. It performs the whole join itself — registry, attention store, transcript ages and the vault task lookup — and **asserts its own coverage**: it exits non-zero rather than printing a table that silently omits a session, because a table that renders correctly and drops a row is the exact failure this board exists to prevent.
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py --json \
+     | python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/box-table.py
+   ```
+
+   `--json` also emits the counts, the per-row gate detail and the residual list — transcript-fresh sessions the registry does not carry (a headless worker holds no registry entry at all). The extra keys are safe: `box-table.py` reads only `header`, `rows` and `widths`.
+
+2. `ListAgents` — the live roster, for the statuses the board does not carry and for the `waiting` set the blocked-by-you section below is built from. **The name is the task the session is on**; the status is live.
 
    Never infer a peer's directory from its `ListAgents` name: names are reused across days and `[ref]` is not a session-id prefix.
-3. **Combine them into one table**, one row per peer — rendered **exactly per Fleet Manager Session runbook (per-vault) § Sweep output — the fleet table**. That section is the single source for the frame (a timestamped marker line, then a box indented two spaces under it), the columns, the widths and the icons, and this command must never restate them. Render with `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/box-table.py`; never hand-draw the box. `/fleet-manager` reads the same section, so both commands render identically by construction — the same arrangement the worker pair has against [[Worker Manager Session]] § Sweep output.
+3. **Render the board** — indented two spaces under the lead line, **exactly per Fleet Manager Session runbook (per-vault) § Sweep output — the fleet table**. That section is the single source for the frame (a timestamped marker line, then a box indented two spaces under it), the columns, the widths and the icons, and this command must never restate them. Never hand-draw the box. `/fleet-manager` reads the same section, so both commands render identically by construction — the same arrangement the worker pair has against [[Worker Manager Session]] § Sweep output.
 
    **No id column.** Key on the session id internally; the operator sees the name.
 
-   **Join on the session id, not the name.** `ListAgents` returns a row per live session with a `name` and a `[ref]` but **no session id**; `fleet-sessions.py` returns the id (`SESSION`) and the vault task (`WORKING ON`). The bridge between them is the session registry: `~/.claude/sessions/<pid>.json` carries `sessionId` beside `name` and a live `status`, so read the registry and match its `sessionId` against `fleet-sessions.py`'s `SESSION` column.
-
-   ```bash
-   python3 - <<'EOF'
-   import json, glob
-   for p in glob.glob('/Users/bborbe/.claude/sessions/*.json'):
-       d = json.load(open(p))
-       print(d['sessionId'], '|', d.get('status'), '|', d.get('name'))
-   EOF
-   ```
+   **The join is on the session id, not the name — and it now lives in `fleet-board.py`, not in prose here.** The board keys on the registry's `sessionId`; `fleet-sessions.py` is a *lookup* (session id → task title), never the row set: measured 2026-09-21 it returns 2352 rows, every stamped task ever, so using it as a roster would render the table useless.
 
    **Why not the name.** The previous join was `ListAgents` name == `fleet-sessions.py` `WORKING ON`, which holds only because `/rename <task title>` happens to make the two strings equal. Rename a session to anything else and the join silently drops it: its open gates stop appearing in the sweep while the session is alive and possibly blocked on an unanswered gate. Measured 2026-09-18 — the same name-match in `/open` Step 2C spawned a **second** manager onto a live topic, and neither knew about the other. The session id is stable across `/rename`; verified 2026-09-18 on three sessions carrying `formerNames`, each holding one constant `sessionId` through every rename.
 
