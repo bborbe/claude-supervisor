@@ -35,6 +35,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -527,6 +528,162 @@ class OrphanLiveness(unittest.TestCase):
             src = handle.read()
         self.assertIn("live_session_ids()", src,
                       "main() must source liveness from the registry reader")
+
+
+class AttentionStoreSource(unittest.TestCase):
+    """The store is a THIRD producer of one record shape, not a second path.
+
+    Every case pins a boundary the reader must not cross. The store carries
+    exactly the schema's fourteen fields, so a name, a pane and an age all have
+    to come from somewhere else -- and the failure mode of getting that wrong is
+    not an error, it is a plausible-looking row that routes the operator to
+    another session's pane.
+    """
+
+    def setUp(self):
+        wnm._ENRICHED_CACHE.clear()
+        self._store_items = wnm.store_items
+        self._load_events = wnm.load_events
+
+    def tearDown(self):
+        wnm.store_items = self._store_items
+        wnm.load_events = self._load_events
+        wnm._ENRICHED_CACHE.clear()
+
+    def item(self, **over):
+        base = {
+            "item_id": "store-1",
+            "producer_id": "sess-a",
+            "producer_kind": "session",
+            "liveness_ref": "heartbeat:/tmp/hb",
+            "dedup_key": "log-1",
+            "interrupt_class": "pick",
+            "payload": "Which liveness source should live() consult?",
+            "answer_mechanism": "message",
+            "state": "open",
+            "created_at": "2026-09-21T09:00:00.000000000+02:00",
+        }
+        base.update(over)
+        return base
+
+    def test_mechanism_maps_to_the_readers_kind_vocabulary(self):
+        self.assertEqual("question", wnm.normalize_store_item(self.item(), {})["kind"])
+        rec = wnm.normalize_store_item(self.item(answer_mechanism="permission"), {})
+        self.assertEqual("permission", rec["kind"])
+
+    def test_ack_is_not_a_gate(self):
+        """`ack` is the enum's third value and is not a block.
+
+        The reader's vocabulary is {permission, question}; rendering an
+        acknowledgement as a gate would invent a decision nobody was asked for.
+        """
+        self.assertIsNone(wnm.normalize_store_item(self.item(answer_mechanism="ack"), {}))
+
+    def test_event_fields_join_on_dedup_key(self):
+        events = {"log-1": {"pane": 494, "cwd": "/tmp/x", "transcript": "/tmp/t.jsonl"}}
+        rec = wnm.normalize_store_item(self.item(), events)
+        self.assertEqual(494, rec["pane"])
+        self.assertEqual("/tmp/x", rec["cwd"])
+
+    def test_missing_event_leaves_the_pane_absent_rather_than_defaulted(self):
+        """A defaulted pane is worse than an absent one -- it routes somewhere."""
+        self.assertNotIn("pane", wnm.normalize_store_item(self.item(), {}))
+
+    def test_enrichment_supplies_the_session_name_and_the_render_uses_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "enriched"))
+            with open(os.path.join(tmp, "enriched", "sess-a.json"), "w") as handle:
+                json.dump({"session_id": "sess-a", "session_name": "Attention Routing"}, handle)
+            original, wnm.ENRICHED = wnm.ENRICHED, os.path.join(tmp, "enriched")
+            try:
+                rec = wnm.normalize_store_item(self.item(), {})
+            finally:
+                wnm.ENRICHED = original
+        self.assertEqual("Attention Routing", wnm.name_of(rec, {}))
+
+    def test_absent_enrichment_renders_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original, wnm.ENRICHED = wnm.ENRICHED, os.path.join(tmp, "enriched")
+            try:
+                rec = wnm.normalize_store_item(self.item(), {})
+            finally:
+                wnm.ENRICHED = original
+        self.assertNotIn("session_name", rec)
+
+    def test_unreachable_store_falls_back_and_says_so(self):
+        """A silent fallback is indistinguishable from a working store."""
+        def down():
+            raise wnm.StoreUnreachable("connection refused")
+
+        wnm.store_items = down
+        wnm.load_events = lambda: [{"item_id": "log-1", "session_id": "sess-a"}]
+        self.assertEqual(1, len(wnm.needs_source()))
+        self.assertEqual("store unreachable — reading event log", wnm.SOURCE_NOTE)
+
+    def test_reachable_store_prints_no_note(self):
+        wnm.store_items = lambda: [self.item()]
+        wnm.load_events = lambda: []
+        self.assertEqual(1, len(wnm.needs_source()))
+        self.assertIsNone(wnm.SOURCE_NOTE)
+
+    def test_idle_records_survive_the_store_path(self):
+        """The store carries only the kinds the watcher pushes.
+
+        `idle` is not one of them, and it is not dead weight: the reader
+        promotes an idle record to a real gate by reading its transcript. A
+        store-only read would silently drop every gate arriving that way.
+        """
+        wnm.store_items = lambda: [self.item()]
+        wnm.load_events = lambda: [
+            {"item_id": "log-1", "session_id": "sess-a", "kind": "question"},
+            {"item_id": "idle-1", "session_id": "sess-b", "kind": "idle"},
+        ]
+        kinds = sorted(r.get("kind") for r in wnm.needs_source())
+        self.assertEqual(["idle", "question"], kinds)
+
+    def test_idle_record_is_not_duplicated_when_the_store_also_carries_it(self):
+        wnm.store_items = lambda: []
+        wnm.load_events = lambda: [{"item_id": "idle-1", "session_id": "s", "kind": "idle"}]
+        self.assertEqual(1, len(wnm.needs_source()))
+
+    def test_unvalidatable_pane_is_marked_not_presented(self):
+        """Pane ids are recycled, so a stale one is another session's pane."""
+        rec = {"pane": 999, "ts": 0, "cwd": "/tmp/x", "kind": "question", "detail": "d"}
+        self.assertFalse(wnm.is_routable(rec, {"1": {}}))
+        rendered = wnm.row(rec, {"1": {}}, "d")
+        self.assertIn("unroutable", rendered)
+        self.assertNotIn("activate-pane", rendered)
+
+    def test_valid_pane_renders_a_jump_line(self):
+        rec = {"pane": 7, "ts": 0, "cwd": "/tmp/x", "kind": "question", "detail": "d"}
+        self.assertTrue(wnm.is_routable(rec, {"7": {}}))
+        self.assertIn("activate-pane --pane-id 7", wnm.row(rec, {"7": {}}, "d"))
+
+    def test_store_rows_still_render_an_age(self):
+        """SC7(a) is a regression guard, not new behaviour.
+
+        `row()` aged every row before the store existed; the store path must not
+        be the one that stops.
+        """
+        rec = {"pane": 7, "ts": time.time() - 3600, "cwd": "/tmp/x",
+               "kind": "question", "detail": "d"}
+        self.assertIn("1h00m", wnm.row(rec, {"7": {}}, "d"))
+
+    def test_cap_withholds_and_counts(self):
+        rows = list(range(30))
+        shown, withheld = wnm.capped(rows, show_all=False)
+        self.assertEqual(wnm.CAP, len(shown))
+        self.assertEqual(30 - wnm.CAP, withheld)
+
+    def test_cap_is_lifted_by_all(self):
+        shown, withheld = wnm.capped(list(range(30)), show_all=True)
+        self.assertEqual(30, len(shown))
+        self.assertEqual(0, withheld)
+
+    def test_cap_is_silent_below_the_threshold(self):
+        shown, withheld = wnm.capped(list(range(3)), show_all=False)
+        self.assertEqual(3, len(shown))
+        self.assertEqual(0, withheld)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """List Claude Code sessions that need the operator, joined to WezTerm panes.
 
-Reads the attention store written by ~/.claude/hooks/attention-log.py. Two formats
-coexist while the fleet rolls over, and both are read:
+Reads the attention store at `$ATTENTION_STORE_URL` (default `localhost:18080`)
+when it answers, and falls back to the hook-written files when it does not, so a
+stopped store blinds no manager. Which source answered is printed once.
+  GET /api/1.0/attention  the store — authoritative for WHICH items are open; it
+                      resolves the producer's liveness server-side and drops dead
+                      askers as a side effect of the read
   <sid>.events.jsonl  append-only event log — one `open` line per item, one `close`
-                      line when it clears; folded by `load_events()` into current state
+                      line when it clears; folded by `load_events()` into current
+                      state. Also the join source for the event-time fields the
+                      store deliberately does not carry (pane, cwd, host, transcript)
   <sid>.needs.json    the older one-file-per-session snapshot
   <sid>.tool.json     session inside a tool call (stale => probably stuck)
 Sections:
@@ -25,7 +31,8 @@ store's `pkg/session-liveness-checker.go`. Pane existence alone is not liveness 
 panes are renumbered and reused, and a session killed without `SessionEnd` leaves
 its item open on a pane that outlives it, which is how orphans reached this feed.
 """
-import argparse, glob, json, os, re, subprocess, sys, time, urllib.parse
+import argparse, glob, json, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+from datetime import datetime
 
 STATE = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser("~/.claude/state/attention")
 OBSIDIAN = os.path.expanduser("~/Documents/Obsidian")
@@ -37,6 +44,43 @@ PROJECTS_DIR = os.environ.get("PROJECTS_DIR") or os.path.expanduser("~/.claude/p
 # Matched to vault-cli's per-session flock, per `session-liveness.md`. A transcript
 # written inside this window counts as fresh.
 LIVE_WINDOW = 5 * 60
+
+# The attention store. Tried first; the event log is the fallback, so a stopped
+# store degrades the feed rather than emptying it.
+STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
+# Short on purpose. The store is local, and this runs inside a manager's sweep:
+# a hung store must cost a fallback, never a stalled manager. 3s is generous for
+# a localhost socket and still far below any sweep's patience.
+STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+
+# The watcher's working dir. It owns the enrichment records the store has no room
+# for — `session_name`, `mode`, `owner`, `topic`, `task` — keyed by producer_id.
+# The store carries exactly the schema's fourteen fields, so the name a manager
+# reads off a row is joined from here, not fetched from the store.
+WATCHER_DIR = os.environ.get("ATTENTION_WATCHER_DIR") or os.path.expanduser(
+    "~/.claude/state/attention-watcher"
+)
+ENRICHED = os.path.join(WATCHER_DIR, "enriched")
+
+# The store's `answer_mechanism` enum is {message, permission, ack}; this
+# reader's `kind` vocabulary is {permission, question}. `ack` maps to nothing —
+# an acknowledgement is not a gate and must not be rendered as one. The mapping
+# is the watcher's own (`MECHANISM`), inverted.
+KIND_FROM_MECHANISM = {"permission": "permission", "message": "question"}
+
+# Rows rendered under `Needs you` before the list is cut. The manager reads a
+# summary, not a wall — the point is to help the operator choose, and a reader
+# that prints twenty-five undifferentiated rows has failed to triage rather than
+# failed to report. `--all` lifts the cap.
+CAP = 20
+
+# Which source answered the last `needs_source()` call: None for the store, or
+# the one-line note printed when the fallback carried the read. A silent
+# fallback would read as a working store and hide the outage.
+SOURCE_NOTE = None
+
+# session_id -> enrichment record. One file per session, many items per session.
+_ENRICHED_CACHE = {}
 
 # Closer verbs describing a parked wait rather than an open gate. `later (on
 # <trigger>):` names the event that resumes the work; until it fires there is
@@ -90,6 +134,136 @@ def is_parked_verb(detail):
     return normalize_closer(detail).startswith(PARKED_VERBS)
 
 
+class StoreUnreachable(Exception):
+    """The store did not answer. Retryable, and the event log covers it."""
+
+
+def _parse_ts(value):
+    """An RFC3339 timestamp as epoch seconds, or now when unparseable.
+
+    `created_at` is `libtime.DateTime`, which marshals RFC3339Nano. Falling back
+    to now is deliberate: a row with an unreadable timestamp must still render,
+    and an age reading slightly young beats a row that vanishes.
+    """
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return time.time()
+
+
+def store_items():
+    """Open items from the attention store, or raise StoreUnreachable.
+
+    The store is authoritative for WHICH items are open: it resolves the
+    producer's liveness server-side and drops dead askers as a side effect of
+    the read, so a dead producer costs this reader nothing. It is not
+    authoritative for the event-time fields — `pane`, `cwd`, `host` and
+    `transcript` belong to the event, not the session, so the store has no room
+    for them and the hook wrote them on its own log line instead.
+    """
+    try:
+        with urllib.request.urlopen(
+            STORE + "/api/1.0/attention", timeout=STORE_TIMEOUT
+        ) as resp:
+            return json.loads(resp.read().decode("utf-8") or "[]")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise StoreUnreachable(str(e)) from e
+
+
+def enrichment(session_id):
+    """The watcher's enrichment record for a session, or {}.
+
+    This is where a row's `session_name` comes from. The store cannot carry it,
+    so an absent record means an absent name — rendered absent, never guessed
+    from the pane title or the session id.
+
+    Cached per session: one file per session, but many items per session, and
+    the caller runs inside a manager's sweep.
+    """
+    if session_id in _ENRICHED_CACHE:
+        return _ENRICHED_CACHE[session_id]
+    try:
+        with open(os.path.join(ENRICHED, session_id + ".json"), encoding="utf-8") as f:
+            rec = json.load(f)
+    except Exception:
+        rec = {}
+    _ENRICHED_CACHE[session_id] = rec
+    return rec
+
+
+def normalize_store_item(item, events):
+    """One store item as the record shape every classifier below already reads.
+
+    The store is a THIRD producer of one shape, not a second code path:
+    `answered()`, `is_open_gate()`, `is_reapable()` and `name_of()` stay
+    untouched, so the store and the event log cannot drift apart in
+    classification. Returns None for an item this reader has no kind for — an
+    `ack` is an acknowledgement, not a gate, and rendering it as one would
+    invent a block.
+    """
+    kind = KIND_FROM_MECHANISM.get(item.get("answer_mechanism") or "")
+    if kind is None:
+        return None
+    # Join on `dedup_key`: the watcher sets it to the LOG's item_id, which is
+    # what makes the event-time fields recoverable at all.
+    ev = events.get(item.get("dedup_key") or "") or {}
+    rec = {
+        "item_id": item.get("dedup_key") or item.get("item_id"),
+        "session_id": item.get("producer_id") or "",
+        "kind": kind,
+        "detail": item.get("payload") or "",
+        "state": "open" if item.get("state") == "open" else "answered",
+        "ts": _parse_ts(item.get("created_at")),
+        "source": "store",
+    }
+    # Absent stays absent: only fields the event actually carried are copied, so
+    # a missing pane is missing rather than defaulted to something plausible.
+    for key in ("pane", "cwd", "host", "transcript", "event", "options", "tool_name"):
+        if ev.get(key) is not None:
+            rec[key] = ev[key]
+    # The name the session actually holds, joined from the watcher's enrichment
+    # record — the store has no room for it. Absent stays absent.
+    enriched = enrichment(rec["session_id"])
+    for key in ("session_name", "mode", "owner", "topic", "task"):
+        if enriched.get(key):
+            rec[key] = enriched[key]
+    return rec
+
+
+def needs_source():
+    """Open items from the store, or from the event log when it is unreachable.
+
+    The store is tried first and wins when it answers. The log is the fallback,
+    and which one carried the read is recorded in SOURCE_NOTE for the caller to
+    print: a fallback that announced nothing would be indistinguishable from a
+    healthy store, which is the failure this exists to prevent.
+    """
+    global SOURCE_NOTE
+    try:
+        items = store_items()
+    except StoreUnreachable:
+        SOURCE_NOTE = "store unreachable — reading event log"
+        return load_events()
+    SOURCE_NOTE = None
+    events = {r.get("item_id"): r for r in load_events()}
+    out = []
+    for item in items:
+        rec = normalize_store_item(item, events)
+        if rec is not None:
+            out.append(rec)
+    # The store carries only the kinds the watcher pushes — `permission` and
+    # `question`. `idle` is not one of them, and it is not dead weight: the
+    # reader PROMOTES an idle record to a real gate by reading its transcript
+    # (`reclassify_idle`), so a store-only read silently drops every gate that
+    # arrives that way. Measured 2026-09-21: the log held 16 open `idle` items
+    # the store never received. Take them from the log, where they still are.
+    seen = {r.get("item_id") for r in out}
+    for ev in events.values():
+        if ev.get("kind") == "idle" and ev.get("item_id") not in seen:
+            out.append(ev)
+    return out
+
+
 def load(suffix):
     """Attention records, minus this session's own.
 
@@ -98,19 +272,24 @@ def load(suffix):
     under the ask-here-relay-back rule it would then relay the answer into its own pane.
     Measured 2026-09-17: the fleet-manager session appeared in its own blocked list (tab 0).
 
-    Reads BOTH store formats, deliberately. The hook was rewritten to an append-only
-    event log (`<sid>.events.jsonl`, one `open` line per item and one `close` line
-    when it clears) and the two formats coexist while the fleet rolls over: a
-    session that has not yet restarted still has a `.needs.json`, and dropping that
-    branch before the last one ages out would silently empty the feed. The
-    `.needs.json` branch is removed only once no session writes it.
+    Reads the store first and the hook files second, deliberately. The store is
+    authoritative for which items are open, and the hook-written formats are the
+    fallback that keeps a stopped store from emptying the feed. Two hook formats
+    coexist while the fleet rolls over and both are still read: the append-only
+    event log (`<sid>.events.jsonl`, one `open` line per item and one `close`
+    line when it clears) and the older `.needs.json` snapshot — a session that
+    has not yet restarted still has the latter, and dropping that branch before
+    the last one ages out would silently lose it. The `.needs.json` branch is
+    removed only once no session writes it.
     """
     me = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     out = []
+    covered = set()
     if suffix == "needs":
-        for rec in load_events():
+        for rec in needs_source():
             if me and rec.get("session_id") == me:
                 continue
+            covered.add(rec.get("session_id"))
             out.append(rec)
     for p in glob.glob(os.path.join(STATE, f"*.{suffix}.json")):
         try:
@@ -118,6 +297,14 @@ def load(suffix):
         except Exception:
             continue
         if me and d.get("session_id") == me:
+            continue
+        # A legacy snapshot for a session the primary source already covers is a
+        # stale duplicate, not a second item: `.needs.json` holds one record per
+        # session, so merging it re-adds a row the store (or the event log) has
+        # already resolved — and the store's whole point is that it resolved it.
+        # Sessions the primary source does NOT cover are still merged, which is
+        # what keeps a not-yet-rolled-over session from vanishing.
+        if d.get("session_id") in covered:
             continue
         out.append(d)
     return out
@@ -535,6 +722,16 @@ def age(ts):
 
 
 def name_of(rec, pmap):
+    """The session's name, preferring the name it actually holds.
+
+    A store row carries `session_name` from the watcher's enrichment record —
+    the registry's own `name` — so that is preferred over a pane title, which is
+    whatever the terminal happens to be showing. Rows with no enrichment (the
+    event-log path, or a session the registry has no entry for) fall through to
+    the pane title, unchanged.
+    """
+    if rec.get("session_name"):
+        return rec["session_name"]
     p = pmap.get(str(rec.get("pane")))
     if p:
         title = p.get("title", "").strip()
@@ -544,17 +741,52 @@ def name_of(rec, pmap):
     return os.path.basename(rec.get("cwd", "")) + " (pane gone)"
 
 
+def is_routable(rec, pmap):
+    """True when this row's recorded pane resolves to a live pane.
+
+    A pane written at event time is not proof it is still this session's: pane
+    ids are recycled across tab moves and WezTerm restarts, so a stale lookup
+    returns *another* session's pane. Validation is therefore required before a
+    pane is presented, and a row that fails it is marked rather than shown.
+    """
+    pane = rec.get("pane")
+    return bool(pane) and str(pane) in pmap
+
+
 def row(rec, pmap, what):
-    pane = rec.get("pane") or "?"
-    alive = str(pane) in pmap
-    jump = f"wezterm cli activate-pane --pane-id {pane}" if alive else "(no live pane)"
-    return f"  [{pane:>4}] {age(rec['ts']):>6}  {name_of(rec, pmap)[:50]:<50}  {what[:60]}\n         {jump}"
+    pane = rec.get("pane")
+    if pane and is_routable(rec, pmap):
+        jump = f"wezterm cli activate-pane --pane-id {pane}"
+    elif pane:
+        # Present but unvalidatable. Never rendered as a route: the id may now
+        # belong to a different session entirely.
+        jump = f"unroutable — pane {pane} does not resolve to a live session"
+    else:
+        jump = "unroutable — no pane recorded for this item"
+    return f"  [{pane or '?':>4}] {age(rec['ts']):>6}  {name_of(rec, pmap)[:50]:<50}  {what[:60]}\n         {jump}"
+
+
+def capped(rows, show_all):
+    """The rows to render, and how many were withheld.
+
+    Split out from main() so the cap is testable without driving the render, and
+    so the omitted count is computed from the same slice that is printed — the
+    two cannot disagree.
+    """
+    if show_all or len(rows) <= CAP:
+        return rows, 0
+    return rows[:CAP], len(rows) - CAP
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stuck-min", type=int, default=20)
     ap.add_argument("--idle", action="store_true", help="also list idle (turn ended) sessions")
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help=f"list every open item instead of the first {CAP}",
+    )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
     a = ap.parse_args()
     if a.jump:
@@ -591,9 +823,20 @@ def main():
     stuck = sorted([r for r in tools if time.time() - r["ts"] > a.stuck_min * 60], key=lambda r: r["ts"])
     idle = sorted([r for r in needs if r["kind"] == "idle" and not answered(r)], key=lambda r: r["ts"])
 
+    # Say which source answered, once, before any row. A silent fallback would
+    # be indistinguishable from a healthy store — which is the whole failure
+    # this note exists to prevent.
+    if SOURCE_NOTE:
+        print(SOURCE_NOTE)
     print(f"Needs you ({len(blocked)})")
-    for r in blocked:
+    # Capped: the manager reads a summary. A reader that prints thirty
+    # undifferentiated rows has failed to triage, not failed to report — and the
+    # count of what it omitted is what keeps the cap honest rather than silent.
+    shown, withheld = capped(blocked, a.all)
+    for r in shown:
         print(row(r, pmap, f"{r['kind']}: {r['detail']}"))
+    if withheld:
+        print(f"{withheld} more — pass --all")
     print(f"\nRendered panels ({len(panels)})  — a closer line, not a parked gate")
     for r in panels:
         print(row(r, pmap, r["detail"]))
