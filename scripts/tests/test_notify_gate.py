@@ -174,16 +174,27 @@ class _Harness(unittest.TestCase):
                 },
                 handle,
             )
+        self.stamps = os.path.join(self.dir, "stamps")
         self._env = {
             key: os.environ.get(key)
-            for key in ("SUPERVISOR_GATE_STATE", "SUPERVISOR_CONFIG")
+            for key in (
+                "SUPERVISOR_GATE_STATE",
+                "SUPERVISOR_CONFIG",
+                "SUPERVISOR_GATE_STAMP_DIR",
+                "CLAUDE_CODE_SESSION_ID",
+            )
         }
         os.environ["SUPERVISOR_GATE_STATE"] = self.state
         os.environ["SUPERVISOR_CONFIG"] = self.config
+        os.environ["SUPERVISOR_GATE_STAMP_DIR"] = self.stamps
+        # Default identity: a stamp cannot be written without one, so every test that
+        # is not specifically about the unset case needs a session to be.
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "session-a"
         self.mod = _reload(self._testMethodName)
-        # main() sets this from --layer; the direct commit()/load_ledger() calls
-        # in these tests need it set explicitly.
+        # main() sets these from --layer; the direct commit()/load_ledger() calls
+        # in these tests need them set explicitly.
         self.mod.STATE_PATH = self.state
+        self.mod.STAMP_DIR = self.stamps
 
     def tearDown(self):
         for key, value in self._env.items():
@@ -460,6 +471,238 @@ class FailureHandling(_Harness):
         self.fail_on(1)
         self.feed('{"gates": []}')
         self.assertEqual(self.mod.load_ledger(), {})
+
+
+class Stamp(_Harness):
+    """The cross-layer stamp: the counterweight to the per-layer cadence ledger.
+
+    Measured twice on 2026-09-20 (Fleet Manager session `b700c650`): two managers
+    raised the identical gate independently. Both duplicates cost the operator a
+    decision; one also left a worker parked.
+
+    The three cases that carry the weight, each against a specific way the stamp
+    could be wrong:
+
+      * a DIFFERENT session's stamp must suppress -- the defect itself.
+      * the SAME session's stamp must NOT suppress -- a manager that blocks on its
+        own stamp deadlocks on every later sweep, which is the mirror-image bug and
+        the reason this stores a session id rather than a boolean.
+      * an EXPIRED stamp must NOT suppress -- an unbounded stamp turns "the
+        escalating session died" into "nobody ever escalates this gate again",
+        which is strictly worse than the duplicate it prevents.
+    """
+
+    GATE = {"owner": "pane-243", "text": "approve: make apply"}
+
+    def ok(self):
+        """Stub publish() to succeed, and record what was actually sent."""
+        sent = []
+
+        def stub(base_url, teamvault_key, message, notification_type):
+            sent.append(message)
+            return "ok"
+
+        self.mod.publish = stub
+        return sent
+
+    def feed_as(self, session, layer="worker", gates=None):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = session
+        payload = json.dumps({"gates": gates if gates is not None else [self.GATE]})
+        return self.feed(payload, layer=layer)
+
+    def key(self):
+        """The STAMP key -- normalised text, not the cadence `gate_key`.
+
+        Reading it from `stamp_key` rather than re-deriving it keeps the tests
+        honest about which identity the stamp uses.
+        """
+        return self.mod.stamp_key(self.GATE)
+
+    # --- the defect -------------------------------------------------------
+
+    def test_a_second_session_skips_a_gate_the_first_already_raised(self):
+        """SC1: the duplicate this whole task exists to prevent."""
+        sent = self.ok()
+        self.feed_as("session-a", layer="worker")
+        self.assertEqual(len(sent), 1, "the first session must escalate")
+        self.assertIsNotNone(
+            self.mod.load_stamp(self.key()), "the first session must stamp"
+        )
+
+        self.feed_as("session-b", layer="fleet")
+        self.assertEqual(len(sent), 1, "the second session must NOT escalate")
+
+    def test_the_skip_names_the_session_that_already_raised_it(self):
+        """A silent skip is indistinguishable from a dropped gate, which is the
+        failure mode the whole task is about -- so the skip has to be announced."""
+        self.ok()
+        self.feed_as("session-a", layer="worker")
+        out = io.StringIO()
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "session-b"
+        with contextlib.redirect_stdout(out):
+            self.mod.publish_round(
+                notify_gate.datetime.datetime.now(notify_gate.datetime.timezone.utc),
+                [self.GATE],
+            )
+        self.assertIn("already escalated by session session-a", out.getvalue())
+
+    # --- the mirror-image bug ---------------------------------------------
+
+    def test_a_session_is_never_blocked_by_its_own_stamp(self):
+        """SC2: the case the obvious boolean implementation gets wrong.
+
+        Exercised, not reasoned about -- a boolean flag passes the cross-session
+        test above and fails exactly here.
+        """
+        sent = self.ok()
+        self.feed_as("session-a", layer="worker")
+        self.assertEqual(len(sent), 1)
+        # Same session, next sweep: its own stamp must not suppress it. The gate is
+        # still open, so the cadence is what decides -- and the cadence allows a
+        # re-raise only after 1h, so this asserts the STAMP is not the reason.
+        # Read at the stamp's own instant, so the assertion is about the IDENTITY
+        # rule and not about the TTL -- a hard-coded instant would silently become
+        # an expiry test the day the stamp's clock and that literal diverged.
+        fresh = at(self.mod.load_stamp(self.key())["ts"])
+        self.assertIsNone(
+            self.mod.stamp_of(self.GATE, fresh),
+            "a session must not be suppressed by its own stamp",
+        )
+        # ...and a DIFFERENT session at the same instant IS suppressed, so the test
+        # above is not passing merely because no stamp exists.
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "session-b"
+        self.assertIsNotNone(
+            self.mod.stamp_of(self.GATE, fresh),
+            "a different session must be suppressed by the same stamp",
+        )
+
+    # --- expiry -----------------------------------------------------------
+
+    def test_an_expired_stamp_stops_suppressing(self):
+        """An unbounded stamp would mean a dead escalator permanently silences the
+        gate for everyone else."""
+        self.ok()
+        self.feed_as("session-a", layer="worker")
+        stamp = self.mod.load_stamp(self.key())
+        self.assertIsNotNone(stamp)
+
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "session-b"
+        fresh = at(stamp["ts"])
+        expired = fresh + notify_gate.datetime.timedelta(
+            seconds=notify_gate.STAMP_TTL + 1
+        )
+        self.assertIsNotNone(self.mod.stamp_of(self.GATE, fresh))
+        self.assertIsNone(self.mod.stamp_of(self.GATE, expired))
+
+    def test_reading_an_expired_stamp_removes_it(self):
+        """Expiry doubles as the garbage collector, so the directory cannot grow one
+        file per gate ever seen."""
+        self.ok()
+        self.feed_as("session-a", layer="worker")
+        stamp = self.mod.load_stamp(self.key())
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "session-b"
+        self.mod.stamp_of(
+            self.GATE,
+            at(stamp["ts"])
+            + notify_gate.datetime.timedelta(seconds=notify_gate.STAMP_TTL + 1),
+        )
+        self.assertIsNone(self.mod.load_stamp(self.key()))
+
+    # --- degraded identity ------------------------------------------------
+
+    def test_without_a_session_id_the_gate_still_escalates_but_is_not_stamped(self):
+        """Never fail closed on a real gate. A stamp written with a blank identity
+        cannot tell 'mine' from 'someone else's', so none is written -- and the
+        degradation is reported rather than hidden."""
+        sent = self.ok()
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.mod.publish_round(
+                notify_gate.datetime.datetime.now(notify_gate.datetime.timezone.utc),
+                [self.GATE],
+            )
+        self.assertEqual(len(sent), 1, "the gate must still be escalated")
+        self.assertIsNone(self.mod.load_stamp(self.key()), "no stamp without an id")
+        self.assertIn("CLAUDE_CODE_SESSION_ID unset", out.getvalue())
+
+    # --- ordering ---------------------------------------------------------
+
+    def test_a_failed_publish_writes_no_stamp(self):
+        """A stamp written for a gate that never sent would suppress the OTHER
+        layer's attempt to raise it -- turning a delivery failure into a gate
+        nobody escalates."""
+        self.fail_on(1)
+        with self.assertRaises(SystemExit):
+            self.feed_as("session-a", layer="worker")
+        self.assertIsNone(self.mod.load_stamp(self.key()))
+
+    def fail_on(self, nth):
+        calls = []
+
+        def stub(base_url, teamvault_key, message, notification_type):
+            calls.append(message)
+            if len(calls) == nth:
+                raise SystemExit("notify-gate: publish failed: synthetic")
+            return "ok"
+
+        self.mod.publish = stub
+        return calls
+
+    # --- the key must be comparable across layers -------------------------
+
+    def test_the_same_gate_under_two_layers_shares_one_stamp(self):
+        """The stamp is cross-layer, so the SAME gate raised under `worker` and
+        `fleet` must land on one stamp file. If the key varied by layer the stamp
+        would silently never deduplicate -- the ineffective direction, but still
+        wrong."""
+        self.ok()
+        self.feed_as("session-a", layer="worker")
+        before = sorted(os.listdir(self.stamps))
+        self.feed_as("session-b", layer="fleet")
+        self.assertEqual(sorted(os.listdir(self.stamps)), before)
+
+    def test_dedup_survives_the_two_layers_naming_the_owner_differently(self):
+        """THE case that makes or breaks this mechanism.
+
+        `owner` is documented in both manager commands as `<session id or pane id>`
+        and the choice is left to the manager, so the SAME logical gate can carry a
+        session id from one layer and a pane id from the other. Keyed on the cadence
+        `gate_key(owner, text)` those two never match: every gate double-fires
+        exactly as before, and the defect reads as fixed -- a silent no-op, which is
+        strictly worse than no fix because it stops anyone looking.
+
+        This is why the stamp keys on the normalised TEXT. The test pins the
+        behaviour against the specific regression: if someone "tidies" stamp_key
+        back to gate_key, this fails.
+        """
+        sent = self.ok()
+        self.feed_as("session-a", layer="worker", gates=[{"owner": "pane-243", "text": self.GATE["text"]}])
+        self.assertEqual(len(sent), 1, "the first layer must escalate")
+        self.feed_as("session-b", layer="fleet", gates=[{"owner": "aedb1af7", "text": self.GATE["text"]}])
+        self.assertEqual(
+            len(sent), 1, "the second layer must NOT escalate the same question"
+        )
+
+    def test_two_genuinely_different_gates_do_not_collide(self):
+        """The accepted cost of keying on text, bounded: different questions still
+        escalate independently."""
+        sent = self.ok()
+        self.feed_as("session-a", layer="worker", gates=[{"owner": "pane-1", "text": "approve: make apply"}])
+        self.feed_as("session-b", layer="fleet", gates=[{"owner": "pane-2", "text": "approve: make rollback"}])
+        self.assertEqual(len(sent), 2, "a different question is a different gate")
+
+    def test_the_same_question_from_two_sessions_collides_deliberately(self):
+        """Stated rather than discovered later: keyed on text, two different
+        sessions asking the identical question are treated as one. That is the
+        INTENT -- the operator is being asked the same thing either way -- and the
+        record keeps `owner` so the skip line shows which session was declined."""
+        sent = self.ok()
+        self.feed_as("session-a", layer="worker", gates=[{"owner": "pane-1", "text": "approve: make apply"}])
+        self.feed_as("session-b", layer="fleet", gates=[{"owner": "pane-2", "text": "approve: make apply"}])
+        self.assertEqual(len(sent), 1, "identical text is one question")
+        stamp = self.mod.load_stamp(self.key())
+        self.assertEqual(stamp["owner"], "pane-1", "the declined owner stays visible")
 
 
 if __name__ == "__main__":
