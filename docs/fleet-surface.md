@@ -299,6 +299,49 @@ does not answer it. Resuming with an empty prompt, or with "continue", leaves th
 unanswered and the worker parked again at the same gate; the continuation prompt must carry the
 operator's actual answer, exactly as `answer_permission` would have.
 
+## The session roster — `fleet-sessions.py`
+
+`scripts/fleet-sessions.py` prints one row per session transcript on the machine, newest
+first. It is an **input** to the sweep table above, not the sweep table itself: the manager
+commands join it to `ListAgents` on the session id and re-render. The roster is always every
+project, with no scope to pass.
+
+```
+LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                              SPAWN MODE  ATTRIBUTION
+7h ago       Brogrammers  ●    dfa12e37   MDM Merge Modal Silently Omits Rela…    headless    MDM Merge Modal Silently Omits …
+1s ago       Personal          46647e0e   Show Spawn Mode and Fleet Attribution…  interactive Show Spawn Mode and Fleet …
+```
+
+- **Columns, in this order:** `LAST-ACTIVE · PROJECT · LIVE · SESSION · WORKING ON ·
+  SPAWN MODE · ATTRIBUTION`. The first five keep their positions and widths — the manager
+  commands parse `SESSION` (the join key) and `WORKING ON` by name against them, so the two
+  new columns are **appended**, never interleaved.
+- **`SPAWN MODE` and `ATTRIBUTION` come from the spawn ledger**, joined on the session id.
+  The ledger is the only store recording the spawn edge, so without it a headless worker and
+  a human tab render identically.
+- **Ledger directory:** `SUPERVISOR_LEDGER_DIR`, else `$XDG_STATE_HOME|~/.local/state` +
+  `/claude-supervisor/sessions` — resolved from the writer's own override
+  (`server/config.mjs`), never hardcoded. ⚠️ Deliberately **not** `SUPERVISOR_SESSIONS_DIR`,
+  which names the live registry (`~/.claude/sessions`) — a different store with a different
+  lifetime.
+- **`unknown` is a value, not a blank.** A session with no ledger record was never
+  *recorded*, which is a different claim from *not spawned*. Both new cells render the
+  literal `unknown`; a blank would collapse the two and read as a value the ledger supplied.
+- **`ATTRIBUTION` is `parent_session` + `label` when both are present**, falling back to
+  whichever exists. ⚠️ Measured 2026-09-21: **`parent_session` is null in every one of 380
+  records**, so in practice the column carries the **label** — the worker's purpose, set at
+  `spawn_agent`. The manager identity is therefore *not* currently recoverable from the
+  ledger; do not read a label-only cell as "no manager".
+- **Two spawn counts, both labelled:** `spawned today (UTC): N` and `spawned today (local): M`.
+  `spawned_at` is UTC-only, so the day boundary has two defensible readings and the view
+  states which is which rather than silently picking one. They legitimately differ by the
+  records straddling the boundary.
+- ⚠️ **No count and no column rests on `status` / `ended_at`.** Those never close reliably
+  for any mode (see the runbook's Step 7), so they are not a liveness source and are not
+  read here. Every count is over `spawned_at`.
+- **Retired flags stay no-ops.** `--all`, `--minutes N` and `--vault NAME` are accepted and
+  ignored — the roster is always every project.
+
 ## Sweep output — the fleet table
 
 **This section is the single source for the fleet table.** `/supervisor:fleet-manager` and
