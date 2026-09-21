@@ -8,7 +8,7 @@ Why this exists: a manager that raises an ACTION gate reaches only an operator w
 is at the machine or listening, because TTS cannot leave the room. This publishes
 the same gate to Telegram, so a gate raised while the operator is away arrives.
 
-Two de-dup axes, and this script owns only the second:
+Three de-dup axes, and this script owns the second and third:
 
   * WHICH manager notifies is already decided upstream -- `commands/fleet-manager.md`
     drops an entry whose owning worker manager is live on the roster, so any given
@@ -20,14 +20,36 @@ Two de-dup axes, and this script owns only the second:
     ~5 min (worker), so an unbounded re-raise would put one open gate on the phone
     roughly 96 times a day -- the noise the TTS gate exists to prevent, moved to a
     louder channel.
+  * WHO ALREADY RAISED IT is the cross-layer stamp -- the counterweight to that
+    per-layer split, added 2026-09-21. The split is right for cadence and is what
+    lets two layers escalate the SAME gate with neither aware: the fleet drops a
+    gate a live worker manager owns, but the worker manager and the fleet can both
+    hold the same underlying question, and each stamps its own layer's ledger, so
+    neither sees the other. Measured twice on 2026-09-20 (Fleet Manager session
+    `b700c650`): two duplicates, both costing the operator a decision, one of them
+    also leaving a worker parked. The stamp records which session escalated a gate
+    and suppresses a SECOND session's escalation of it -- deliberately NOT the same
+    session's, which must still re-raise on its own cadence or a manager would
+    deadlock against its own stamp. See stamp_of()/write_stamp().
 
 Cadence, decided 2026-09-19: once on raise, then re-raise at 1h and 4h while the
 gate is still open, capped at 3 deliveries per gate identity. After the third,
 silence until the gate changes or clears.
 
-Gate identity is (owner, normalised text). Normalising collapses whitespace so a
-re-rendered line is not mistaken for a new gate; a genuinely different text IS a
-new identity, because the question changed and the operator should hear it.
+TWO identities, and they are deliberately different -- see stamp_key() for why:
+
+  * CADENCE identity is (owner, normalised text). Normalising collapses whitespace
+    so a re-rendered line is not mistaken for a new gate; a genuinely different text
+    IS a new identity, because the question changed and the operator should hear it.
+    Safe to include `owner` here because the ledger is per layer -- both halves are
+    always compared within one view.
+  * STAMP identity is the normalised TEXT ALONE. `owner` is unpinned across layers:
+    both manager commands document it as `<session id or pane id>` and leave the
+    choice to the manager, so the same logical gate can carry a session id from one
+    layer and a pane id from the other. Keyed on the cadence identity those two
+    never match, every gate double-fires exactly as before, and the defect reads as
+    fixed -- a silent no-op, which is worse than no fix because it stops anyone
+    looking.
 
 Pruning is what makes the bound per-gate rather than per-lifetime: an identity
 absent from a sweep is a gate that cleared, so it is dropped and the SAME gate can
@@ -45,10 +67,19 @@ Ledger: ~/.claude/state/gate-notifications-<layer>.json, one per `--layer`
 (override SUPERVISOR_GATE_STATE, which is also what lets the tests exercise
 commit/prune without touching the operator's real ledger). Per layer, not shared
 -- see ledger_path() for why a shared file silently defeats the cadence.
+
+Stamps: ~/.claude/state/gate-stamps/<hash>.json, ONE FILE PER GATE and shared
+across layers (override SUPERVISOR_GATE_STAMP_DIR). Deliberately not the ledger:
+the ledger is pruned to the sweep's own gates, so a stamp kept there would be
+deleted by the other layer's sweep -- the exact layer that must still see it.
+One file per gate rather than one shared file, because this is the first record
+in this script that two layers contend on and per-gate files need no cross-layer
+lock: each is written by one process at a time and renamed into place.
 """
 import argparse
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -58,6 +89,8 @@ CONFIG_PATH = os.environ.get("SUPERVISOR_CONFIG") or os.path.expanduser(
     "~/.config/claude-supervisor/config.json"
 )
 STATE_PATH = None  # set by main() from --layer; see ledger_path()
+STAMP_DIR = None  # set by main(); see stamp_path() and the module docstring
+LAYER = None  # set by main(); recorded on each stamp for diagnostics only
 
 
 def ledger_path(layer):
@@ -79,6 +112,25 @@ def ledger_path(layer):
         return override
     return os.path.expanduser(f"~/.claude/state/gate-notifications-{layer}.json")
 
+
+def stamp_dir(layer):
+    """The cross-layer stamp directory -- deliberately NOT per layer.
+
+    The exact opposite of ledger_path() above, and for a reason that is the mirror
+    of it: the ledger is per layer because "absent from this sweep" must mean
+    "cleared for this layer", but the stamp's whole job is to be visible to the
+    layer that did NOT raise the gate. Scoping it per layer would reproduce the
+    defect it exists to fix, one directory deeper.
+
+    `layer` is accepted and unused so the call site reads like ledger_path()'s and
+    a future per-layer need is a one-line change rather than a signature change.
+    """
+    override = os.environ.get("SUPERVISOR_GATE_STAMP_DIR")
+    if override:
+        return override
+    return os.path.expanduser("~/.claude/state/gate-stamps")
+
+
 # Mirrors the vault script this replaces: pinned deliberately rather than
 # ${TEAMVAULT_CONFIG:-...}, because that variable is commonly exported to a
 # different instance in an interactive shell and `:-` lets the export win.
@@ -90,6 +142,13 @@ TEAMVAULT_CONFIG = os.environ.get("SUPERVISOR_TEAMVAULT_CONFIG") or os.path.expa
 # and not config. Re-raising at 1h and 4h after the FIRST raise, not after the last.
 RE_RAISE_AFTER_SECONDS = (3600, 14400)
 MAX_DELIVERIES = 3
+
+# How long a cross-layer stamp suppresses another session's escalation of the same
+# gate. Reuses the cadence's FIRST rung rather than inventing a second contract: past
+# it the escalating session would itself be due a re-raise, so a stamp that still
+# suppressed would outlive the evidence that its owner is doing anything about the
+# gate. Re-exported as SUPERVISOR_GATE_STAMP_TTL for the tests only.
+STAMP_TTL = 3600
 
 PUBLISH_PATH = "/api/1.0/command/core-notification-v1/notification-publish?sync=true"
 
@@ -415,6 +474,180 @@ def commit(ledger, current, updates):
     return kept
 
 
+def stamp_key(gate):
+    """The cross-layer stamp identity: the gate's normalised TEXT, and not `owner`.
+
+    Deliberately NOT `gate_key(owner, text)`, which is the cadence identity. The two
+    differ because they answer different questions, and using the cadence key here
+    would ship a fix that looks right and never fires:
+
+      * `gate_key` answers "is this the same gate *for cadence*", where `owner`
+        disambiguates two sessions whose gates read alike. It is safe there because
+        the ledger is per layer -- both halves are compared within one view.
+      * The stamp answers "is another manager already asking the operator this",
+        which is a question about the QUESTION. `owner` is unpinned across layers:
+        both manager commands document it as `<session id or pane id>` and leave the
+        choice to the manager, so the same logical gate can carry a session id from
+        one layer and a pane id from the other. Keyed on `gate_key`, those two never
+        match, every gate double-fires exactly as before, and the defect reads as
+        fixed -- the silent no-op.
+
+    `normalise` is what makes the text usable as this key, and its own docstring
+    already says so: it exists so "a re-rendered gate keeps one identity".
+
+    The cost, stated rather than hidden: two genuinely different gates whose text
+    normalises identically within one TTL would collide, and the second would be
+    suppressed. Narrow -- the text is the question, so identical text means the
+    operator is being asked the same thing -- but real, and it is why `owner` is
+    kept in the record: the skip line quotes it, so a collision is visible.
+    """
+    return normalise(gate.get("text") or "")
+
+
+def stamp_path(key):
+    """The stamp file for a gate identity.
+
+    Hashed rather than named, because a `gate_key` carries a `\\x1f` separator and
+    arbitrary gate prose -- neither survives as a filename, and a sanitised name
+    would collide two different gates onto one stamp, which fails as a SILENT
+    suppression of a real gate.
+    """
+    return os.path.join(STAMP_DIR, hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json")
+
+
+def load_stamp(key):
+    """This gate's stamp, or None when it has none.
+
+    Unreadable reads as None for the same reason load_ledger() reads an unreadable
+    ledger as empty: the cost is one duplicate escalation, and a traceback here
+    would take out the gate notification entirely.
+    """
+    try:
+        with open(stamp_path(key), encoding="utf-8") as handle:
+            stamp = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(stamp, dict) or not stamp.get("session_id"):
+        return None
+    try:
+        parse_time(stamp["ts"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return stamp
+
+
+def write_stamp(layer, session_id, now, gate):
+    """Record that `session_id` escalated this gate.
+
+    `owner`/`text` are stored for DIAGNOSTICS ONLY -- the skip line quotes the gate
+    text so the manager can see which question it is declining to repeat. The
+    DECISION is made on `session_id` alone; never on the stored prose, which is a
+    copy that could drift from the gate it describes.
+
+    Written to a temp file and renamed, the same discipline commit() uses, so a
+    process dying mid-write cannot leave a half-written stamp for the next sweep
+    to read as a suppression.
+    """
+    try:
+        os.makedirs(STAMP_DIR, exist_ok=True)
+    except OSError as error:
+        sys.exit(f"notify-gate: cannot create {STAMP_DIR}: {error}")
+    path = stamp_path(stamp_key(gate))
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "session_id": session_id,
+                    "layer": layer,
+                    "ts": format_time(now),
+                    "owner": normalise(gate.get("owner") or ""),
+                    "text": normalise(gate.get("text") or ""),
+                },
+                handle,
+                indent=2,
+                sort_keys=True,
+            )
+        os.replace(tmp, path)
+    except OSError as error:
+        # Loud, not silent: a stamp that failed to write means the duplicate this
+        # exists to prevent comes back, and nothing else would say so.
+        sys.exit(f"notify-gate: cannot write {path}: {error}")
+
+
+def clear_stamp(key):
+    """Drop a gate's stamp. Used by the tests and by `stamp_of`'s expiry path.
+
+    Deliberately NOT called for every gate absent from a sweep, which is the one
+    place this could go badly wrong: a layer's sweep is a partial view by design
+    (`ledger_path()`), so "absent from MY sweep" does NOT mean the gate cleared --
+    the fleet drops every gate a live worker manager owns. Clearing on absence
+    would let the fleet's sweep delete the worker's stamp, which is precisely the
+    cross-layer blindness this whole mechanism exists to remove.
+
+    So a stamp is released by its TTL instead, and the directory stays bounded
+    because `load_stamp` unlinks a stamp the moment it reads one as expired.
+    """
+    try:
+        os.unlink(stamp_path(key))
+    except OSError:
+        pass
+
+
+def stamp_of(gate, now):
+    """The stamp suppressing this gate, or None when it is this session's to raise.
+
+    Takes the GATE rather than a precomputed key, so the identity is derived in
+    exactly one place (`stamp_key`) and no caller can pass the cadence `gate_key`
+    here by mistake -- the one error that would make this whole mechanism a no-op.
+
+    Returns None in three distinct cases, and they are NOT interchangeable:
+
+      * no stamp            -- nobody has raised it; this session should.
+      * own stamp           -- this session already raised it, so it must be free to
+                               re-raise on its own cadence. Treating an own stamp as
+                               a suppression would deadlock the manager against
+                               itself on every later sweep -- the mirror-image bug
+                               that makes a boolean flag worse than no flag at all.
+      * stale stamp         -- older than STAMP_TTL. A stamp must not suppress
+                               forever: if the escalating session dies or never
+                               relays, an unbounded stamp means the gate is never
+                               escalated by anyone again, which is strictly worse
+                               than the duplicate this prevents. Expiry degrades
+                               the failure to a DELAYED re-escalation.
+
+    A stale stamp is unlinked on the way out, so expiry is also the garbage
+    collector -- the directory cannot grow one file per gate ever seen.
+    """
+    key = stamp_key(gate)
+    stamp = load_stamp(key)
+    if stamp is None:
+        return None
+    try:
+        raised = parse_time(stamp["ts"])
+    except (KeyError, TypeError, ValueError):
+        clear_stamp(key)
+        return None
+    if (now - raised).total_seconds() >= STAMP_TTL:
+        clear_stamp(key)
+        return None
+    if stamp["session_id"] == escalating_session_id():
+        return None
+    return stamp
+
+
+def escalating_session_id():
+    """The session id of the manager running this escalation, or "".
+
+    Empty means the identity is unknown, which is reported rather than papered
+    over: a stamp written with a blank identity cannot distinguish "escalated by
+    me" from "escalated by someone else", so it would reintroduce the boolean bug
+    in another costume. The gate is still escalated -- this never fails closed on
+    a real gate -- and the degradation is named in the output.
+    """
+    return os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+
+
 def read_gates():
     """Parse stdin, reporting malformed input in this script's own style.
 
@@ -474,9 +707,11 @@ def parse_args(argv):
 
 
 def main():
-    global STATE_PATH
+    global STATE_PATH, STAMP_DIR, LAYER
     args = parse_args(sys.argv[1:])
     STATE_PATH = ledger_path(args.layer)
+    STAMP_DIR = stamp_dir(args.layer)
+    LAYER = args.layer
 
     now = datetime.datetime.now(datetime.timezone.utc)
     gates = read_gates()
@@ -489,13 +724,45 @@ def main():
 def publish_round(now, gates):
     ledger = load_ledger()
     current = {gate_key(g["owner"], g["text"]): g for g in gates}
+
+    # Cross-layer stamp: drop any gate a DIFFERENT session already escalated. Applied
+    # before `decide()` so a suppressed gate is not counted as due, and so the
+    # suppression is visible in the output rather than folded into a cadence count.
+    suppressed = {}
+    for key in list(current):
+        stamp = stamp_of(current[key], now)
+        if stamp is not None:
+            suppressed[key] = stamp
+            del current[key]
+
     due = [
         (key, gate) for key, gate in current.items() if decide(ledger.get(key), now)
     ]
 
+    me = escalating_session_id()
+    # A suppressed gate that this session did NOT raise is the duplicate this exists
+    # to prevent. Reported in every case -- a silent skip is indistinguishable from
+    # a dropped gate, which is the failure mode this whole task is about.
+    for key, stamp in suppressed.items():
+        print(
+            f"notify-gate: skipping '{normalise(stamp.get('text') or '')[:60]}' -- "
+            f"already escalated by session {stamp['session_id']} "
+            f"({stamp.get('layer') or 'unknown layer'})"
+        )
+    if not me and (suppressed or due):
+        # Degraded, not broken: without an identity a stamp cannot distinguish
+        # "escalated by me" from "escalated by someone else", so none is written.
+        print(
+            "notify-gate: CLAUDE_CODE_SESSION_ID unset -- escalating WITHOUT a "
+            "stamp; a duplicate of this gate will not be suppressed"
+        )
+
     if not due:
         commit(ledger, current, {})
-        print(f"notify-gate: {len(current)} open, 0 due")
+        print(
+            f"notify-gate: {len(current) + len(suppressed)} open, "
+            f"{len(suppressed)} suppressed, 0 due"
+        )
         return
 
     config = load_config()
@@ -520,15 +787,21 @@ def publish_round(now, gates):
                 "owner": normalise(gate["owner"]),
                 "text": normalise(gate["text"]),
             }
+            # Stamped AFTER a successful publish, never before: a stamp written for a
+            # gate that failed to send would suppress the other layer's attempt to
+            # raise it, turning a delivery failure into a gate nobody escalates.
+            if me:
+                write_stamp(LAYER, me, now, gate)
             delivered.append(f"{gate['owner']} ({deliveries}/{MAX_DELIVERIES})")
     finally:
         # Commit even when a later gate fails. The publishes that already succeeded
         # must not be re-sent next sweep -- without this, gate A delivers, gate B
         # fails, and A lands on the phone a second time.
         commit(ledger, current, updates)
+    tail = f", {len(suppressed)} suppressed" if suppressed else ""
     print(
         f"notify-gate: env={env} type={notification_type} "
-        f"delivered {len(delivered)} -- " + "; ".join(delivered)
+        f"delivered {len(delivered)}{tail} -- " + "; ".join(delivered)
     )
 
 
