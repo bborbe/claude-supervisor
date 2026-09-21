@@ -33,7 +33,6 @@ Run: python3 -m unittest discover -s scripts/tests -v
 
 import importlib.util
 import json
-import json
 import os
 import tempfile
 import unittest
@@ -477,7 +476,8 @@ class OrphanLiveness(unittest.TestCase):
         # Same record, same pane map, opposite verdicts -- decided only by the registry.
         self.assertTrue(wnm.is_live(self.rec(self.LIVE), {"7": {}}, live))
         self.assertFalse(wnm.is_live(self.rec(self.DEAD), {"7": {}}, live))
-        src = open(_SCRIPT, encoding="utf-8").read()
+        with open(_SCRIPT, encoding="utf-8") as handle:
+            src = handle.read()
         self.assertIn("live_session_ids()", src,
                       "main() must source liveness from the registry reader")
 

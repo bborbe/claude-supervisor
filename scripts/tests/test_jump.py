@@ -47,6 +47,7 @@ CLOSE = "approve: /vault-cli:session-close"
 class AttentionQueueMatchesTheFeed(unittest.TestCase):
     def setUp(self):
         self._load, self._panes = wnm.load, wnm.panes
+        self._live_ids = wnm.live_session_ids
         self._sessions = jmp.pane_sessions
         jmp.pane_sessions = lambda _pmap: {}
         self._me = os.environ.pop("WEZTERM_PANE", None)
@@ -54,14 +55,24 @@ class AttentionQueueMatchesTheFeed(unittest.TestCase):
 
     def _restore(self):
         wnm.load, wnm.panes = self._load, self._panes
+        wnm.live_session_ids = self._live_ids
         jmp.pane_sessions = self._sessions
         if self._me is not None:
             os.environ["WEZTERM_PANE"] = self._me
 
-    def queue(self, records, status=None):
+    def queue(self, records, status=None, dead=()):
+        """`dead` names panes whose session has exited -- registry-absent.
+
+        Defaults to none, so every pre-existing case keeps its old meaning; the
+        orphan case opts in. `live_session_ids` is stubbed because the real one reads
+        `~/.claude/sessions/` off the machine, which a unit test must not depend on.
+        """
         pmap = {str(r["pane"]): {"pane_id": int(r["pane"]), "title": "t"} for r in records}
         wnm.load = lambda _suffix: records
         wnm.panes = lambda: pmap
+        wnm.live_session_ids = lambda _d=None: {
+            r["session_id"] for r in records if r["pane"] not in {str(p) for p in dead}
+        }
         wnm.task_status_from_closer = status or (lambda _rec: None)
         return [r["pane"] for r in jmp.attention_queue(wnm, pmap)]
 
@@ -87,6 +98,16 @@ class AttentionQueueMatchesTheFeed(unittest.TestCase):
         """Class 3 — pane 285 already carries the gate."""
         records = [rec(285, PICK), rec(900, "the approval in pane 285 — yours alone")]
         self.assertEqual(self.queue(records), ["285"])
+
+    def test_orphaned_item_is_not_offered(self):
+        """Class 5 — the session exited, so there is nothing to jump TO.
+
+        This surface re-derived the feed's filter as pane-existence, so an item whose
+        session was gone stayed jumpable here long after the feed had dropped it --
+        activating the pane would land the operator on whatever now wears that id.
+        """
+        records = [rec(208, PICK), rec(300, PICK)]
+        self.assertEqual(self.queue(records, dead=[300]), ["208"])
 
     def test_queue_matches_the_feed_on_a_mixed_set(self):
         """The property that actually matters: the two surfaces cannot disagree."""
