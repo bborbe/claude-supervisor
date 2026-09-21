@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.25.1
 
 - fix: `notify-gate.py` scopes the ledger prune **per manager**, not per layer. `--layer worker` is every topic manager in the fleet, all pointed at one file, so a manager whose sweep raised no gates of its own published `{"gates": []}`, `current` came out empty, and `commit()` dropped **every** entry — including gates owned by other managers, which then re-notified as first-sight at full cadence. Each entry now records its escalating session as `escalatedBy`, and a sweep prunes only entries it owns. Measured 2026-09-21 against the real script on a scratch ledger: the same 8-round sequence (foreign manager sweeps, then a different manager's empty sweep) produced **16 notifications before the fix and 2 after**, and the foreign entries survived with `deliveries` and `firstRaisedAt` byte-identical. The per-layer split and the cadence cap are unchanged — the fix is what makes the cap reachable, since a pruned identity restarted at `deliveries: 1` and the third-delivery silence was never reached. An entry with no `escalatedBy` predates the field, so its owner is unknown and it is kept rather than pruned; it is adopted the moment its own manager publishes it again. `commands/worker-manager.md` and `commands/fleet-manager.md` both stated the empty call as the thing that "prunes a cleared gate" without saying *whose*, so both are corrected in the same change — a fix that edited one would leave the other instructing the harmful call.
 
