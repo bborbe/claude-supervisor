@@ -38,6 +38,15 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 ## Spawn a worker
 
+**Readiness precondition — author and score the task before any spawn, or the worker's own gate parks.** A task the manager hand-writes usually ships without `# Tasks` and `# Definition of Done`, so the worker's own `plan-task` gate stops and asks the operator to supply the decomposition — inside the worker's pane, as a multi-question wizard that cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced **three 3-question wizards**, nine operator decisions, none of which needed the repo open. So, before spawning:
+
+1. **Author the task through `/vault-cli:create-task`** — the wrapper that dispatches the `task-creator` agent, which emits exactly the sections `plan-task` needs: `# Success Criteria`, `# Definition of Done`, `# Tasks`.
+2. **Score it with the `task-auditor` agent** (`vault-cli:task-auditor`) — **the bar is 9/10, and it is the same bar the worker's own gate applies.** A manager gate looser than the worker's gate is decorative: an 8/10 task clears the manager and still parks the worker's `plan-task`.
+3. **Check the three sections exist** before the spawn — `grep -cE '^# (Success Criteria|Definition of Done|Tasks)' <task-file>` returns **3**. A task authored through this path does, by construction; a hand-written one usually does not.
+4. **Keep the split — the gate is readiness, never planning.** *Authoring* — sections, subtask decomposition, DoD, naming and SC evidence shapes — needs no repo access and belongs to the manager. *Execution planning* — which file, which mechanism, what the system actually permits — needs ground truth a manager does not have and stays with the worker. Measured counter-example 2026-09-19: a manager told a worker to "narrow the rule" on *The git push Ask-Rule Fires on Feature Branches*, and the worker found the ask-list does literal-prefix matching only and **cannot express that distinction at all**. A manager-side planning pass would have produced the same wrong plan with no wizard left to catch it.
+
+⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the worker-manager command all point here.
+
 **A — `spawn_agent` (preferred).** The prompt is a spawn *argument*, so the task never goes
 over keystrokes:
 
