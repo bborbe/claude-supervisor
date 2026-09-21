@@ -190,6 +190,10 @@ class _Harness(unittest.TestCase):
         # Default identity: a stamp cannot be written without one, so every test that
         # is not specifically about the unset case needs a session to be.
         os.environ["CLAUDE_CODE_SESSION_ID"] = "session-a"
+        # The identity this sweep escalates as, passed explicitly to commit() the
+        # way publish_round() passes it. A test that wants another manager's sweep
+        # uses a different value here rather than mutating the env mid-run.
+        self.me = "session-a"
         self.mod = _reload(self._testMethodName)
         # main() sets these from --layer; the direct commit()/load_ledger() calls
         # in these tests need them set explicitly.
@@ -231,7 +235,18 @@ class Ledger(_Harness):
 
     def test_commit_prunes_a_gate_that_cleared(self):
         key = self.mod.gate_key("pane-243", "approve: make apply")
-        self.mod.commit({key: {"deliveries": 2, "firstRaisedAt": RAISED_AT}}, {}, {})
+        self.mod.commit(
+            {
+                key: {
+                    "deliveries": 2,
+                    "firstRaisedAt": RAISED_AT,
+                    "escalatedBy": self.me,
+                }
+            },
+            {},
+            {},
+            self.me,
+        )
         self.assertEqual(self.read(), {})
 
     def test_commit_keeps_a_gate_that_is_still_open(self):
@@ -240,12 +255,24 @@ class Ledger(_Harness):
             {key: {"deliveries": 2, "firstRaisedAt": RAISED_AT}},
             {key: {"owner": "pane-243", "text": "approve: make apply"}},
             {},
+            self.me,
         )
         self.assertEqual(self.read()[key]["deliveries"], 2)
 
     def test_a_cleared_gate_raises_again_at_full_cadence(self):
         key = self.mod.gate_key("pane-243", "approve: make apply")
-        self.mod.commit({key: {"deliveries": 3, "firstRaisedAt": RAISED_AT}}, {}, {})
+        self.mod.commit(
+            {
+                key: {
+                    "deliveries": 3,
+                    "firstRaisedAt": RAISED_AT,
+                    "escalatedBy": self.me,
+                }
+            },
+            {},
+            {},
+            self.me,
+        )
         self.assertIsNone(self.mod.load_ledger().get(key))
         self.assertTrue(self.mod.decide(self.mod.load_ledger().get(key), at(RAISED_AT)))
 
@@ -255,7 +282,7 @@ class Ledger(_Harness):
         self.assertEqual(self.mod.load_ledger(), {})
 
     def test_commit_leaves_no_temp_file_behind(self):
-        self.mod.commit({}, {}, {})
+        self.mod.commit({}, {}, {}, self.me)
         self.assertEqual([f for f in os.listdir(self.dir) if f.endswith(".tmp")], [])
 
     def test_shape_malformed_entries_are_dropped_not_fatal(self):
@@ -294,6 +321,109 @@ class Ledger(_Harness):
             json.dump(["not", "a", "mapping"], handle)
         self.assertEqual(self.mod.load_ledger(), {})
 
+    def test_a_manager_keeps_a_foreign_gate_it_never_published(self):
+        """The defect this whole scope exists for.
+
+        `--layer worker` is every topic manager in the fleet, not one manager. A
+        manager whose sweep raised nothing publishes `{"gates": []}`; before the
+        fix that emptied `current`, so `commit` dropped EVERY entry in the file --
+        including gates owned by other managers, which then re-notified as
+        first-sight at full cadence, on every sweep, forever.
+        """
+        key = self.mod.gate_key("1011", "approve: decide the allowlist disambiguation")
+        with open(self.state, "w") as handle:
+            json.dump(
+                {
+                    key: {
+                        "deliveries": 1,
+                        "firstRaisedAt": RAISED_AT,
+                        "lastDeliveryAt": RAISED_AT,
+                        "owner": "1011",
+                        "text": "approve: decide the allowlist disambiguation",
+                        "escalatedBy": "another-manager-session",
+                    }
+                },
+                handle,
+            )
+        # This manager's sweep raised nothing -- `current` is empty, which is the
+        # case that used to drop the whole file.
+        self.mod.commit(self.mod.load_ledger(), {}, {}, self.me)
+        kept = self.read()
+        self.assertIn(key, kept, "a foreign gate must survive this manager's sweep")
+        self.assertEqual(kept[key]["deliveries"], 1)
+        self.assertEqual(kept[key]["firstRaisedAt"], RAISED_AT)
+
+    def test_a_manager_still_prunes_its_own_cleared_gate(self):
+        """The positive half -- a fix that simply stops pruning fails this."""
+        key = self.mod.gate_key("pane-243", "approve: make apply")
+        self.mod.commit(
+            {
+                key: {
+                    "deliveries": 1,
+                    "firstRaisedAt": RAISED_AT,
+                    "escalatedBy": self.me,
+                }
+            },
+            {},
+            {},
+            self.me,
+        )
+        self.assertEqual(self.read(), {})
+
+    def test_an_entry_with_no_owner_is_kept_rather_than_pruned(self):
+        """A pre-`escalatedBy` entry has an unknown owner.
+
+        Kept, not pruned: it is adopted the moment its own manager publishes it
+        again, so keeping it costs one stale entry, while pruning it would repeat
+        the foreign-prune defect once during the upgrade -- against the operator's
+        live ledger, which is exactly what must not happen.
+        """
+        key = self.mod.gate_key("1064", "approve: git push origin dev")
+        with open(self.state, "w") as handle:
+            json.dump({key: {"deliveries": 1, "firstRaisedAt": RAISED_AT}}, handle)
+        self.mod.commit(self.mod.load_ledger(), {}, {}, self.me)
+        self.assertIn(key, self.read())
+
+    def test_a_sweep_with_no_identity_prunes_nothing(self):
+        """Without an identity, "mine" is unknowable -- so nothing is claimed.
+
+        A gate published by an identity-less sweep records `escalatedBy: ""`, and a
+        later identity-less sweep must not read that blank as a wildcard matching
+        itself. Fails safe: the entry goes stale rather than being pruned by a
+        manager that cannot prove it owns it.
+        """
+        key = self.mod.gate_key("pane-243", "approve: make apply")
+        with open(self.state, "w") as handle:
+            json.dump(
+                {key: {"deliveries": 1, "firstRaisedAt": RAISED_AT, "escalatedBy": ""}},
+                handle,
+            )
+        self.mod.commit(self.mod.load_ledger(), {}, {}, "")
+        self.assertIn(key, self.read())
+
+    def test_an_entry_with_no_owner_is_adopted_when_its_manager_republishes(self):
+        """The migration path that makes keeping the legacy entry bounded."""
+        key = self.mod.gate_key("1064", "approve: git push origin dev")
+        gate = {"owner": "1064", "text": "approve: git push origin dev"}
+        with open(self.state, "w") as handle:
+            json.dump({key: {"deliveries": 1, "firstRaisedAt": RAISED_AT}}, handle)
+        self.mod.commit(
+            self.mod.load_ledger(),
+            {key: gate},
+            {
+                key: {
+                    "deliveries": 2,
+                    "firstRaisedAt": RAISED_AT,
+                    "escalatedBy": self.me,
+                }
+            },
+            self.me,
+        )
+        self.assertEqual(self.read()[key]["escalatedBy"], self.me)
+        # ...and once adopted, the same manager's later empty sweep does prune it.
+        self.mod.commit(self.mod.load_ledger(), {}, {}, self.me)
+        self.assertEqual(self.read(), {})
+
     def test_the_ledger_is_namespaced_per_layer(self):
         """The layers see different slices of the world, so they must not share a
         ledger: the fleet's sweep drops worker-owned gates, and a shared file would
@@ -316,7 +446,7 @@ class Ledger(_Harness):
         cwd = os.getcwd()
         os.chdir(self.dir)
         try:
-            self.mod.commit({}, {}, {})
+            self.mod.commit({}, {}, {}, self.me)
         finally:
             os.chdir(cwd)
         self.assertTrue(os.path.exists(os.path.join(self.dir, "bare.json")))
