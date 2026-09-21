@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.28.0
 
 - feat: Move the cross-layer gate stamp onto the attention store item's `escalated_by` field, retiring the local `gate-stamps/` ledger. Each gate now names the BLOCKED session in a required `session` field; the script resolves that session's item by `producer_id` and stamps it through `POST /api/1.0/attention/<item_id>/escalate`. First to stamp wins, a manager is never blocked by its own stamp, and a gate with no resolvable store item is reported as `unresolved` rather than silently skipped.
 
