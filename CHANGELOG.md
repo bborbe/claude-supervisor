@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.24.5
 
 - fix: the Session cell states **which id it reads**, closing a gap the previous entry left. It said to take the prefix from `claude_session_id` and that `—` means *the task records no id* — but step 3 defines the id set as `claude_session_id` **plus** every `metrics_sessions` id, and warns that the frontmatter id is not guaranteed to be the worker's. A task carrying only `metrics_sessions` ids therefore satisfied neither clause, and two readings were possible: render `—` (blanking 8 cells on a measured 32-task sweep) or fall back to the metrics id. The rule now names the precedence — `claude_session_id` when present, else the first `metrics_sessions` id, else `—` — so a missing key cannot read as *no session*.
 
