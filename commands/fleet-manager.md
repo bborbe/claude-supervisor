@@ -318,13 +318,16 @@ All three, read **this round**. A session reporting itself finished is a claim; 
 
 **Two channels reach a worker, and they are not interchangeable.**
 
-| The worker is… | Channel | Call |
-|---|---|---|
-| **headless, parked on a question** | the supervisor permission channel — **no pane, no typing** | `mcp__supervisor__answer_permission(request_id, behavior="deny", message="Operator answer, via supervisor: <option>")` |
-| **headless, already exited** (turn end, or ~11 min question timeout) | a fresh turn | `mcp__supervisor__spawn_agent(prompt="<the answer>", resume="<session-id>", interactive=false, cwd="<explicit>")` |
-| **a tab worker** | its pane — `send_agent_message`, or the tab by hand | the path-B relay protocol below |
+| The worker is… | Whose answer | Channel | Call |
+|---|---|---|---|
+| **headless, parked on a question** | the **operator's** | the supervisor permission channel — **no pane, no typing** | `mcp__supervisor__answer_permission(request_id, behavior="deny", message="Operator answer, via supervisor: <option>")` |
+| **headless, parked on a question** | **your own** | the supervisor permission channel — **no pane, no typing** | `mcp__supervisor__answer_permission(request_id, behavior="deny", message="Manager answer, via supervisor: <option>")` |
+| **headless, already exited** (turn end, or ~11 min question timeout) | either | a fresh turn | `mcp__supervisor__spawn_agent(prompt="<the answer>", resume="<session-id>", interactive=false, cwd="<explicit>")` |
+| **a tab worker** | either | its pane — `send_agent_message`, or the tab by hand | the path-B relay protocol below |
 
-⚠️ **The headless row is the primary path, not a fallback.** For a worker this session spawned with `interactive=false`, its prompts park and surface through `mcp__supervisor__await_permission`, and the answer travels over the supervisor's own permission channel — no pane, no `send-text`, no keystroke indistinguishable from the operator's. **For an `AskUserQuestion`, the answer is `deny` + a `message`, never `allow`:** `allow` runs the tool in a tty-less session, waits ~11 min, and the worker exits with the question unanswered. **On a refusal, switch to `accept edits` and retry** — the refusal is this session's own `auto`-mode classifier, and it is not deterministic; never word it as "always blocked under `auto`". Full spec: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § A headless worker exits at turn end.
+⚠️ **The headless row is the primary path, not a fallback.** For a worker this session spawned with `interactive=false`, its prompts park and surface through `mcp__supervisor__await_permission`, and the answer travels over the supervisor's own permission channel — no pane, no `send-text`, no keystroke indistinguishable from the operator's. **For an `AskUserQuestion`, the answer is `deny` + a `message`, never `allow`:** `allow` runs the tool in a tty-less session, waits ~11 min, and the worker exits with the question unanswered. **On a refusal, switch to `accept edits` and retry** — the refusal is this session's own `auto`-mode classifier, and it is not deterministic; never word it as "always blocked under `auto`".
+
+⚠️ **Pick the prefix that matches who actually answered.** `Operator answer, via supervisor:` claims the operator answered it in this session — true only when they did; using it for your own inference forges a provenance claim the worker is written to reject (measured 2026-09-20: it agreed with the answer and still did not act). `Manager answer, via supervisor:` is your own decision on a question you own, and claims nothing about the operator. ⚠️ **Neither prefix releases an irreversible or production-touching action** — those need the operator's own confirmation, and a relay launders exactly the wording that makes it worth having. Full spec, including why a *parked* gate has no other channel (`resume` refuses a session still running): `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § The two prefixes are not interchangeable.
 
 ⚠️ **The tab relay is the fallback, used only where the headless channel cannot reach the same effect** — it types into a pane and steals focus, and it has no target at all for a headless worker. Every `wezterm cli send-text` / `get-text` below is that fallback, never the default.
 

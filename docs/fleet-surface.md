@@ -234,14 +234,44 @@ mcp__supervisor__spawn_agent(
 The prompt is a **plain user turn** — no relay prefix, no provenance wrapper. That is what
 separates continuing a worker from answering one:
 
-| The worker is… | Channel | Call |
-|---|---|---|
-| **still parked** on a question | the permission channel | `answer_permission(deny, message="Operator answer, via supervisor: <option>")` |
-| **already exited** (timeout, or turn end) | a fresh turn | `spawn_agent(resume=<id>, interactive=false, cwd=<explicit>)` |
+| The worker is… | Whose answer | Channel | Call |
+|---|---|---|---|
+| **still parked** on a question | the **operator's** | the permission channel | `answer_permission(deny, message="Operator answer, via supervisor: <option>")` |
+| **still parked** on a question | the **manager's own** | the permission channel | `answer_permission(deny, message="Manager answer, via supervisor: <option>")` |
+| **already exited** (timeout, or turn end) | either | a fresh turn | `spawn_agent(resume=<id>, interactive=false, cwd=<explicit>)` |
 
 They do not substitute for one another: `answer_permission` cannot reach a process that has
 exited, and `spawn_agent(resume=…)` cannot answer a question that is still parked. Check which
 state the worker is in — `agent_status` or `pending_permissions` — before choosing.
+
+### The two prefixes are not interchangeable
+
+A parked gate can be answered in one of two voices, and the prefix is what declares which. Both
+are honoured **on an `AskUserQuestion` only** — a denial on `Bash`, `Edit` or `Write` stays a
+denial whatever prefix it carries.
+
+- **`Operator answer, via supervisor:`** makes a **provenance claim**: the operator answered this
+  question, in the manager session, in the current exchange. Use it only when that is literally
+  true. A manager deciding on its own under this prefix is **forging an operator answer**, which
+  is why the worker-side rule is written to reject it — measured 2026-09-20, a worker that
+  received a manager's own inference under the operator form returned `ANSWER=NONE` and did not
+  act, correctly.
+- **`Manager answer, via supervisor:`** makes **no provenance claim**. It is the manager's own
+  decision, on a question the manager owns — a choice between alternatives, not a question that
+  was ever the operator's to answer.
+
+⚠️ **Neither prefix releases an irreversible or production-touching action.** Those still need
+the operator's own confirmation, obtained directly. A relay launders precisely the thing that
+makes such a confirmation worth having — the operator's own wording naming the target and the
+command — so a manager-prefixed denial that names one must leave the gate unanswered. This is
+stated as a rule rather than a preference because it is the one branch where getting it wrong is
+unrecoverable.
+
+⚠️ **Why a parked gate needs the prefix channel at all.** `resume` refuses a session that is
+still running, so the fresh-turn channel reaches only an **exited** worker. A parked gate is a
+live one, and before 2026-09-21 a manager had no honest way to answer it in its own voice: the
+only documented prefix asserted operator provenance. See
+[[A Headless Worker's Gate Has No Channel a Manager May Honestly Use]].
 
 ⚠️ **A worker that exited on a question timeout still holds an unanswered question.** Its exit
 does not answer it. Resuming with an empty prompt, or with "continue", leaves the question
