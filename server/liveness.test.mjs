@@ -133,3 +133,85 @@ test('checkLiveness reports closed only when a probe ran and found nothing', () 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------------------
+// The cross-server blind spot — [[A Non-Spawning Session Cannot Decide a
+// Headless Worker's Liveness]].
+//
+// A headless worker is an in-process SDK `query()` owned by the supervisor server
+// that spawned it. It writes no registry entry (it holds no socket), so the
+// registry — now the ONLY probe — cannot see it at all. The spawning server knows
+// it is live from its own `agents` Map, and `supervisor.mjs` consults that Map
+// after this module returns `false`.
+//
+// That Map is per-server. A manager that did not spawn the worker has neither
+// channel: the registry has no entry, and its own Map has no record. So it reads
+// the same decisive `false` for a worker that is genuinely mid-turn and for one
+// that finished an hour ago — and the guard acts on `false` by ALLOWING the
+// resume. Two writers land on one conversation.
+//
+// These tests CHARACTERISE the blind spot rather than assert a fix: both cases
+// must produce the same verdict today, which is the defect. When a decisive
+// cross-server probe lands, the live case stops matching the finished case and
+// the first assertion below fails — that failure is the signal the fix works, so
+// update it deliberately rather than deleting it.
+
+test('a cross-server headless worker reads as closed whether it is live or finished', () => {
+  // The registry does not know this id — which is exactly what a headless worker
+  // looks like from any server that did not spawn it. Both the live worker and the
+  // finished one are represented by the same fixture, because from here they are
+  // the same thing: invisible.
+  const dir = registryWithout(OTHER)
+  try {
+    const asSeenFromAnotherServer = checkLiveness(SESSION, { dir })
+
+    assert.equal(
+      asSeenFromAnotherServer.live,
+      false,
+      'THE DEFECT: a genuinely live headless worker reads as closed from a non-spawning server',
+    )
+    assert.deepEqual(
+      asSeenFromAnotherServer.probes,
+      ['registry'],
+      'a probe ran and found nothing, so this is not the honest "could not tell" — it is a decisive negative',
+    )
+    assert.notEqual(
+      asSeenFromAnotherServer.live,
+      null,
+      'null is reserved for an unreadable probe; this verdict is a confident "closed", which is what the guard acts on',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the registry cannot separate a live headless worker from a finished one', () => {
+  // Stated as the property the fix must break: give this module every cross-server
+  // channel it actually has — the registry — and ask it about a live headless worker
+  // and a finished one. The two answers are identical, so no caller can branch on
+  // them. `live: false` here is not evidence about the worker; it is evidence about
+  // where the worker's liveness is recorded (the spawner's process).
+  //
+  // The registry holds an UNRELATED session, so a probe genuinely runs and finds
+  // nothing for both ids — the decisive-negative case, not the unreadable one. If
+  // the fixture instead registered `OTHER`, the finished case would read `true` and
+  // the test would compare a real hit against a real miss, proving nothing.
+  const dir = fixture({ '1.json': { pid: process.pid, sessionId: 'a1b2c3d4-0000-4000-8000-000000000000' } })
+  try {
+    const liveHeadlessWorker = checkLiveness(SESSION, { dir })
+    const finishedHeadlessWorker = checkLiveness(OTHER, { dir })
+
+    assert.deepEqual(
+      liveHeadlessWorker.probes,
+      ['registry'],
+      'a probe must have run, or this compares two unreadable answers instead of the blind spot',
+    )
+    assert.equal(
+      liveHeadlessWorker.live,
+      finishedHeadlessWorker.live,
+      'THE DEFECT: the registry returns one answer for both, so a non-spawning server cannot decide',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
