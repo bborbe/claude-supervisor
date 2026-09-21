@@ -348,26 +348,40 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
 `/supervisor:fleet-status` both render it and neither carries its own spec.
 
 ```
-14:30 ✓ Fleet — 27 sessions · 6 busy · 3 shell · 4 waiting · 12 idle · 2 orphaned
-  ┌────────────────────────────┬─────────────────────┬────────────────────────────────────┬─────────────┬───────────┐
-  │ Session                    │ Status              │ Vault task                         │ Project     │ Last      │
-  ├────────────────────────────┼─────────────────────┼────────────────────────────────────┼─────────────┼───────────┤
-  │ Dark-Factory Refuses …     │ 🔄 progressing      │ Dark-Factory Refuses to Start …    │ personal    │ 2m ago    │
-  │ Sentry Manager             │ ⏸️ parked           │ Map Sentry Projects to the Repo …  │ personal    │ 14m ago   │
-  │ PR Review - 2026W38-tue    │ ⌛ waiting-on-human │ PR Review - 2026W38-tue            │ personal    │ 9m ago    │
-  │ Complete Kafka Restore     │ ✅ done             │ Complete Kafka Restore             │ brogrammers │ 5h ago    │
-  └────────────────────────────┴─────────────────────┴────────────────────────────────────┴─────────────┴───────────┘
+14:30 ✓ Fleet — 42 sessions · 9 running · 23 needs-input · 10 idle · 0 problem · 1 residual · no change
+  ┌────────────────────────────┬──────────────────┬────────────────────────────────────┬─────────────┬───────────┐
+  │ Session                    │ Bucket           │ Vault task                         │ Project     │ Last      │
+  ├────────────────────────────┼──────────────────┼────────────────────────────────────┼─────────────┼───────────┤
+  │ Sentry Manager             │ ⌛ needs-input   │ Map Sentry Projects to the Repo …  │ personal    │ 14m ago   │
+  │ Dark-Factory Refuses …     │ 🔄 running       │ Dark-Factory Refuses to Start …    │ personal    │ 2m ago    │
+  │ Complete Kafka Restore     │ ⏸️ idle          │ Complete Kafka Restore             │ brogrammers │ 5h ago    │
+  │ Wedge Probe                │ ⚠️ problem       │ Wedge Probe                        │ personal    │ 41m ago   │
+  └────────────────────────────┴──────────────────┴────────────────────────────────────┴─────────────┴───────────┘
 ```
 
-- **Columns and widths:** Session 26 · Status 19 · Vault task 34 · Project 11 · Last 9 —
-  **115 rendered characters**, the ceiling for a 119-column terminal. A box that wraps is
-  worse than a truncated cell. **`Project` is the column to drop** if task titles need more
-  room; cutting it buys the task column 10 characters.
-- **Status** carries the bucket icon: 🔄 progressing · ⚠️ stalled · ⏸️ parked · ✅ done.
-  **Orphaned is not a Status cell** — it is an action line *below* the box, because it
-  describes the absence of a session rather than a live one's state.
-- **Render with `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude}/scripts/box-table.py`** —
-  stdin `{"header": [...], "rows": [[...]], "widths": [...]}`. **Never hand-draw the box.**
+- **Columns and widths:** Session 26 · Bucket 16 · Vault task 34 · Project 11 · Last 9 —
+  **112 rendered characters** (`sum(widths) + 3n + 1`) against a 119-column terminal. A box
+  that wraps is worse than a truncated cell. The bucket column **replaced** the old `Status`
+  column rather than joining it — a sixth column lands at 132 — and the raw `busy` / `shell` /
+  `idle` counts still ride the marker line. **`Project` is the column to drop** if task titles
+  need more room; cutting it buys the task column 10 characters.
+- **Bucket** carries the four-way classification, one bucket per live session, in precedence
+  order **problem → needs-input → running → idle** so the classification is **total**: every
+  registry row lands in exactly one bucket. ⚠️ problem · ⌛ needs-input · 🔄 running · ⏸️ idle.
+  Each bucket consults a **second signal** the registry status cannot supply, and
+  `fleet-board.py` is the single source for the rule — `problem` = inside one tool call ≥ 20m;
+  `needs-input` = an open gate in the attention store; `running` = status `busy` or `shell`,
+  the only two the status table calls conclusive; `idle` = everything else, carrying the
+  transcript age. **Orphaned is not a Bucket cell** — it is an action line *below* the box,
+  because it describes the absence of a session rather than a live one's state.
+- **Build the rows with `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py --json`, render them with the same root's `scripts/box-table.py`** —
+  stdin `{"header": [...], "rows": [[...]], "widths": [...]}`, with the board's extra keys
+  (`counts`, `residual`, `coverage_ok`) ignored by the renderer. **Never hand-draw the box.**
+  ⚠️ The board **asserts its own coverage** and exits non-zero rather than printing a table
+  that omits a session — one row per registry entry, plus every transcript-fresh session the
+  registry carries present among the rows. A **residual** line reports transcript-fresh
+  sessions the registry does *not* carry (a headless worker holds no registry entry at all).
+  Never read a short table as a clean fleet, and never read an empty one as an empty fleet.
 - **The marker line is timestamped and is always the first line of the tick's output:**
   `HH:MM ✓ Fleet — N sessions · <count by status> · <what changed or "no change">`. Silence
   is ambiguous — a quiet loop and a dead loop look identical from the outside.
@@ -376,9 +390,14 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
 - ⚠️ **Do not type a leading glyph.** The harness already bullets assistant output with `⏺`;
   a literal copy renders doubled.
 - Below the box, only the non-empty action lines: the **blocked-by-you jump list**
-  (`⌛ Blocked by you (N waiting …)` with `wezterm cli activate-tab` per row),
+  (`⌛ Blocked by you (N waiting …)` with `/supervisor:jump <PANEID>` per row),
   `⚠️ ORPHANED: <task> — <why>`, and `⚠️ ACTION NEEDED: <the human decision>`. **Names lead**;
-  the `[ref]` and tab id are secondary.
+  the `[ref]` and pane id are secondary. ⚠️ **Hand over a pane id, never a tab id** — a tab
+  that moves windows is renumbered, so a handed-over `--tab-id` goes dead (measured
+  2026-09-18: tabs 158/159/160 in window 0 became 163/164/165 in window 2, and
+  `activate-tab --tab-id 159` failed outright while `activate-pane --pane-id 239` worked
+  immediately). `/supervisor:jump` is the executor; a raw `wezterm cli activate-tab` line
+  is not a handover.
 
 The table is the dashboard; TTS stays problem-only and voice-mode gated; the action lines
 appear only when non-empty.
