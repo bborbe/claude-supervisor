@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.23.5
 
 - fix: a **headless worker is now told its own spawn mode** instead of inferring it from the fleet config. A per-call `interactive: false` opened a worker headless while `~/.config/claude-supervisor/config.json` still read `interactive` — and that file was the only signal the worker could read, so every headless-by-override worker mis-modelled itself deterministically. Measured 2026-09-20: two such workers reported they were in an **interactive tab** and waited for a keystroke that could never be typed; one ended `done`/`success` with its task file unedited. A headless worker is an in-process SDK `query()` with no pid and no argv, so no process probe can answer this question for it — the fix is a handover rather than a probe. `spawnAgent` passes the `mode` and `mode_source` it already resolved into the worker's environment as `SUPERVISOR_WORKER_MODE` / `SUPERVISOR_WORKER_MODE_SOURCE`, so a worker that opened the wrong way can now say so and name which of the four sources decided it. ⚠️ The SDK's `env` option **replaces** the subprocess environment rather than merging with it, so `process.env` is spread explicitly: without that spread the worker loses `PATH`, `HOME` and `ANTHROPIC_BASE_URL`, and the last of those stops it routing through the router while looking like nothing at all.
 
