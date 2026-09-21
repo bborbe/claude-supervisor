@@ -53,7 +53,10 @@ TWO identities, and they are deliberately different -- see stamp_key() for why:
 
 Pruning is what makes the bound per-gate rather than per-lifetime: an identity
 absent from a sweep is a gate that cleared, so it is dropped and the SAME gate can
-raise again later at full cadence.
+raise again later at full cadence -- but only when the sweep that finds it absent
+is the one that RAISED it. A manager's sweep is one topic's partial view, so
+"absent from my sweep" is a claim about its own gates and never about another
+manager's; that scoping is `owned_by_this_sweep()`.
 
 Config: ~/.config/claude-supervisor/config.json (override SUPERVISOR_CONFIG):
   {"notify": {"env": "dev",
@@ -66,7 +69,10 @@ nothing arrives -- and it reads exactly like a clean sweep.
 Ledger: ~/.claude/state/gate-notifications-<layer>.json, one per `--layer`
 (override SUPERVISOR_GATE_STATE, which is also what lets the tests exercise
 commit/prune without touching the operator's real ledger). Per layer, not shared
--- see ledger_path() for why a shared file silently defeats the cadence.
+-- see ledger_path() for why a shared file silently defeats the cadence. Each
+entry records the escalating session as `escalatedBy`, and a sweep prunes only
+entries it owns -- the layer namespaces the FILE, `escalatedBy` namespaces the
+PRUNE, and both are needed because a layer holds many managers.
 
 Stamps: ~/.claude/state/gate-stamps/<hash>.json, ONE FILE PER GATE and shared
 across layers (override SUPERVISOR_GATE_STAMP_DIR). Deliberately not the ledger:
@@ -106,6 +112,17 @@ def ledger_path(layer):
 
     Scoping the ledger to the layer makes "absent from this sweep" mean "cleared
     *for this layer*", which is the only reading that is true for a partial view.
+
+    ⚠️ The layer is necessary and NOT sufficient, and reading this docstring as the
+    whole answer is what let the defect through. `--layer worker` is not one
+    manager: it is every topic manager in the fleet, all pointed at this one file.
+    So "absent from this sweep" still did not mean "cleared" -- a manager whose
+    sweep raised nothing published `{"gates": []}` and pruned every other manager's
+    open gates, which re-notified as first-sight on their next tick, forever. The
+    per-layer split is right and stays; what was missing is the per-MANAGER half,
+    which lives on each entry as `escalatedBy` and is enforced in
+    `owned_by_this_sweep()`. Measured 2026-09-21: the operator's live worker ledger
+    held gates owned by two other topics, neither of them the sweeping manager's.
     """
     override = os.environ.get("SUPERVISOR_GATE_STATE")
     if override:
@@ -450,16 +467,61 @@ def ensure_state_dir():
         sys.exit(f"notify-gate: cannot create {directory}: {error}")
 
 
-def commit(ledger, current, updates):
-    """Keep only identities still open, then apply this sweep's updates.
+def owned_by_this_sweep(entry, me):
+    """True when this sweep's manager is the one that escalated `entry`.
+
+    This is what makes the prune scoped to a MANAGER rather than to a layer, and it
+    is the fix for the defect the per-layer ledger could not see: `--layer worker`
+    is not one manager, it is every topic manager in the fleet, so a manager whose
+    sweep raised nothing published `{"gates": []}`, `current` came out empty, and
+    `commit` dropped EVERY entry in the file -- including gates owned by other
+    managers, which then re-notified as first-sight.
+
+    An entry with no `escalatedBy` predates the field, so its owner is unknown --
+    and unknown is NOT this sweep's. It is kept, which is both the conservative
+    direction and the migration path: the entry is adopted the moment its own
+    manager publishes it again (the update carries `escalatedBy`), and only then
+    does it become prunable. Keeping it costs at most one stale entry that its
+    owner re-adopts on its next sweep; claiming it here would prune exactly the
+    foreign gates this function exists to protect, once, against the operator's
+    live ledger during the upgrade.
+
+    The same reading covers `escalatedBy: ""`, written by a sweep that ran with no
+    identity: a blank is not a wildcard matching a later blank, so two
+    identity-less managers never prune each other.
+    """
+    owner = entry.get("escalatedBy")
+    return bool(me) and owner == me
+
+
+def commit(ledger, current, updates, me):
+    """Keep only identities still open AND owned by this sweep, then apply updates.
 
     Pruning falls out of `kept`: a gate that cleared is absent from `current`, so
-    its count is dropped and a later re-raise starts fresh.
+    its count is dropped and a later re-raise starts fresh. The `owned_by_this_sweep`
+    half is what keeps "absent from MY sweep" from reading as "cleared" for a gate
+    another manager raised -- the two are different claims and only the first is
+    true of a partial view.
+
+    The loop runs over `ledger` rather than over `current`, and that is load-bearing
+    rather than stylistic: iterating `current` can only ever keep keys THIS sweep
+    published, so an empty sweep -- `current == {}` -- would drop the whole file no
+    matter what the ownership test said. A foreign entry is precisely one that is
+    absent from `current`, so it has to be reachable from the ledger side.
+
+    `me` is passed rather than read from the environment so the identity is decided
+    in one place (`escalating_session_id`, at the top of the round) instead of at
+    each write, and so a caller cannot commit against an identity it did not
+    escalate with.
 
     Written through a temp file and renamed, so no reader ever sees a half-written
     ledger even if this process dies mid-dump.
     """
-    kept = {key: ledger[key] for key in current if key in ledger}
+    kept = {
+        key: entry
+        for key, entry in ledger.items()
+        if key in current or not owned_by_this_sweep(entry, me)
+    }
     kept.update(updates)
     ensure_state_dir()
     tmp = f"{STATE_PATH}.tmp"
@@ -758,7 +820,7 @@ def publish_round(now, gates):
         )
 
     if not due:
-        commit(ledger, current, {})
+        commit(ledger, current, {}, me)
         print(
             f"notify-gate: {len(current) + len(suppressed)} open, "
             f"{len(suppressed)} suppressed, 0 due"
@@ -786,6 +848,15 @@ def publish_round(now, gates):
                 "deliveries": deliveries,
                 "owner": normalise(gate["owner"]),
                 "text": normalise(gate["text"]),
+                # Who owns this identity, for `owned_by_this_sweep` at the next
+                # commit. `me` is written as-is (empty included): a blank value is
+                # NOT a wildcard, so an entry published without an identity is
+                # simply never pruned by anyone, which fails safe. Writing the
+                # gate's `owner` here instead would make ownership depend on a
+                # field the commands document as "<session id or pane id>" and
+                # leave to the manager -- unstable by construction, and it would
+                # let one manager prune another's gate whenever the two agree.
+                "escalatedBy": me,
             }
             # Stamped AFTER a successful publish, never before: a stamp written for a
             # gate that failed to send would suppress the other layer's attempt to
@@ -797,7 +868,7 @@ def publish_round(now, gates):
         # Commit even when a later gate fails. The publishes that already succeeded
         # must not be re-sent next sweep -- without this, gate A delivers, gate B
         # fails, and A lands on the phone a second time.
-        commit(ledger, current, updates)
+        commit(ledger, current, updates, me)
     tail = f", {len(suppressed)} suppressed" if suppressed else ""
     print(
         f"notify-gate: env={env} type={notification_type} "
