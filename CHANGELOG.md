@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.23.7
 
 - fix: the status-table rule now reads **every tick**, matching the runbook it names as its single source. The line read *"**Print the status table** (on change + ~30-min heartbeat + on demand)"* while the `noop: true` bullet 23 lines below it read *"Print the marker **and the full table**, per § Sweep output — the same frame as a change tick"* — so the command contradicted itself, and a manager following the stricter of its own two rules printed byte-identical tables every five minutes. Measured 2026-09-21: four ticks in seventeen minutes against a tree frozen on one unanswered operator gate, 12 identical tables an hour, each re-reading seven task files. The interval and its one named exception now defer to the runbook's § Cadence mechanics, which owns both — including the **frozen-tree case** (every non-terminal task parked on one gate, no mtime movement for ≥2 intervals), where the gate is armed and the table relocates to the tick file while the interval is unchanged.
 
