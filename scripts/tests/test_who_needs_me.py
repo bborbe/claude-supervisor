@@ -34,6 +34,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -519,14 +520,19 @@ class OrphanLiveness(unittest.TestCase):
         A hand-duplicated check that happens to match on fixtures passes a
         verdict-agreement reading and is exactly the drift the criterion exists to
         prevent. This asserts the seam: `quiet_session_ids()` consults the registry
-        set it is handed, and `main()` sources that set from `live_session_ids()`.
+        set it is handed, and `main()` sources that set from the registry reader.
+
+        The seam moved from `live_session_ids()` to `read_registry()` on 2026-09-21,
+        when the ownership check needed the registry's *names* and not only its ids.
+        One read now answers both questions, so `main()` takes the map and derives
+        the set from it — the call is still a delegation, not a reimplementation.
         """
         rec = self.rec(self.DEAD)
         q = self.quiet([rec], [], {self.DEAD: 10 * 3600})
         self.assertIn(self.DEAD, q)
         with open(_SCRIPT, encoding="utf-8") as handle:
             src = handle.read()
-        self.assertIn("live_session_ids()", src,
+        self.assertIn("read_registry()", src,
                       "main() must source liveness from the registry reader")
 
 
@@ -684,6 +690,156 @@ class AttentionStoreSource(unittest.TestCase):
         shown, withheld = wnm.capped(list(range(3)), show_all=False)
         self.assertEqual(3, len(shown))
         self.assertEqual(0, withheld)
+
+
+class PaneOwnership(unittest.TestCase):
+    """Existence is not ownership -- the recycled pane that a live list still carries.
+
+    `is_routable()` was `str(pane) in pmap`, which rejects a pane that is *gone* and
+    never one that exists and belongs to a different session. A headless worker
+    inherits its spawner's `WEZTERM_PANE`, so its item carries the spawner's pane id
+    — which exists, so the row rendered a confident jump to the wrong tab.
+    Reproduced 2026-09-21 and recorded at [[Attention Item Schema]] § Silence 7.
+
+    Ownership is proven by the name: the pane's title against the session's current
+    name, both glyph-stripped. The rule fires on a *mismatch* — a session with no name
+    to compare keeps its row, because stripping the jump from an unprovable row is a
+    regression dressed as a safety fix.
+    """
+
+    def setUp(self):
+        wnm._REGISTRY_CACHE.clear()
+        self.addCleanup(wnm._REGISTRY_CACHE.clear)
+
+    def rec(self, sid="s", pane="7", name=None):
+        rec = {"session_id": sid, "pane": pane, "ts": 0, "cwd": "/tmp/x",
+               "kind": "question", "detail": "d"}
+        if name is not None:
+            rec["session_name"] = name
+        return rec
+
+    def test_a_pane_belonging_to_another_session_is_not_routable(self):
+        """THE DEFECT -- the pane exists, and it is not this session's."""
+        rec = self.rec(name="worker-verify")
+        pmap = {"7": {"title": "◐ some other session"}}
+        self.assertFalse(wnm.is_routable(rec, pmap, {"s": "worker-verify"}))
+        rendered = wnm.row(rec, pmap, "d", {"s": "worker-verify"})
+        self.assertIn("unroutable", rendered)
+        self.assertNotIn("activate-pane", rendered)
+
+    def test_a_matching_title_is_routable(self):
+        """The positive control: the check can pass, so it is not a constant."""
+        rec = self.rec(name="worker-verify")
+        pmap = {"7": {"title": "◐ worker-verify"}}
+        self.assertTrue(wnm.is_routable(rec, pmap, {"s": "worker-verify"}))
+        self.assertIn("activate-pane --pane-id 7",
+                      wnm.row(rec, pmap, "d", {"s": "worker-verify"}))
+
+    def test_the_status_glyph_is_stripped_from_both_sides(self):
+        """The name carries a glyph the pane title may lack.
+
+        Measured 2026-09-21: 17 of 27 rendered rows disagreed on the leading `⚙`
+        alone. Stripping one side only would have marked two thirds of the feed
+        unroutable.
+        """
+        rec = self.rec(name="⚙ Verify Parallel Fan-Out")
+        pmap = {"7": {"title": "✳ ⚙ Verify Parallel Fan-Out"}}
+        self.assertTrue(wnm.is_routable(rec, pmap, {"s": "⚙ Verify Parallel Fan-Out"}))
+
+    def test_a_renamed_session_is_routable_from_the_registry(self):
+        """The registry rewrites `name`; the enrichment snapshot does not.
+
+        Measured 2026-09-21: one live session read `MDM Bugs` in the registry against
+        `Octopus MDM Bugs` in its enrichment record, the old name sitting in the
+        registry's own `formerNames`. Comparing against the snapshot marked that row
+        unroutable while its pane was genuinely correct — a false positive on every
+        rename, and renames are routine.
+        """
+        rec = self.rec(name="Octopus MDM Bugs")     # the stale snapshot
+        pmap = {"7": {"title": "◐ MDM Bugs"}}       # the current title
+        self.assertTrue(wnm.is_routable(rec, pmap, {"s": "MDM Bugs"}))
+
+    def test_a_headless_worker_with_no_registry_entry_still_mismatches(self):
+        """No registry entry is not a licence to skip the check.
+
+        A headless worker is an in-process SDK query holding no entry at all, so the
+        enrichment record is the only name available — and it is exactly what makes
+        its inherited pane detectable.
+        """
+        rec = self.rec(name="worker-verify")
+        pmap = {"7": {"title": "◐ the spawner's session"}}
+        self.assertFalse(wnm.is_routable(rec, pmap, {}))
+
+    def test_unprovable_ownership_keeps_the_row(self):
+        """A mismatch is required; an absence is not a verdict."""
+        rec = self.rec()
+        self.assertTrue(wnm.is_routable(rec, {"7": {"title": "◐ anything"}}, {}))
+
+    def test_a_gone_pane_is_still_not_routable(self):
+        """Existence is added to, not replaced -- a pane that is gone still fails."""
+        rec = self.rec(name="worker-verify")
+        self.assertFalse(wnm.is_routable(rec, {"1": {}}, {"s": "worker-verify"}))
+
+
+class ProvenanceRendering(unittest.TestCase):
+    """The row carries its provenance, and an absent value renders as absent.
+
+    The reader resolved `host`, `cwd` and `tool_name` into the record before this
+    change, but `row()` rendered none of them — so the operator could see a pane and
+    a name and still not know which directory or which tool raised the item, which is
+    the whole question the feed exists to answer.
+
+    Absent renders as `—`, never as a blank: a missing host and a host that is
+    genuinely empty are different claims, and a blank reads as the second.
+    """
+
+    def rec(self, **kw):
+        rec = {"pane": 7, "ts": 0, "cwd": "/tmp/x", "kind": "question", "detail": "d"}
+        rec.update(kw)
+        return rec
+
+    def test_the_row_carries_host_cwd_and_tool(self):
+        rec = self.rec(host="burn", cwd="/Users/bborbe/Documents/Obsidian/Personal",
+                       tool_name="AskUserQuestion")
+        rendered = wnm.row(rec, {"7": {}}, "question: d")
+        self.assertIn("burn:/Users/bborbe/Documents/Obsidian/Personal", rendered)
+        self.assertIn("AskUserQuestion", rendered)
+
+    def test_an_absent_provenance_field_renders_as_absent(self):
+        """`—`, not a blank, and not the payload echoed into the field."""
+        rendered = wnm.row(self.rec(), {"7": {}}, "question: d")
+        self.assertIn("—:/tmp/x · —", rendered)
+
+    def test_an_absent_field_is_never_defaulted_from_the_payload(self):
+        rec = self.rec(detail="raised from burn by Bash")
+        rendered = wnm.row(rec, {"7": {}}, "question: " + rec["detail"])
+        self.assertNotIn("burn:", rendered)
+
+
+class NoShadowedDefinitions(unittest.TestCase):
+    """A top-level definition is never left shadowed by a later one of the same name.
+
+    Observed 2026-09-21 (PR #91): an edit that replaced a function's *body* while
+    leaving its `def` line and docstring behind produced a docstring-only stub. That
+    is valid Python — the docstring IS the body — so the module imported, the whole
+    suite passed, and the reader worked. The stub was silently shadowed by the real
+    definition further down, and only a reviewer reading the diff caught it.
+
+    A duplicate top-level name is never intentional in a one-shot script, so the
+    guard is a plain uniqueness assertion rather than a judgement call.
+    """
+
+    def test_no_top_level_definition_appears_twice(self):
+        with open(_SCRIPT, encoding="utf-8") as handle:
+            names = re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)", handle.read(), re.M)
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        self.assertEqual([], dupes, f"top-level defs defined more than once: {dupes}")
+
+    def test_the_guard_can_see_a_duplicate(self):
+        """The positive control: the regex matches, so an empty result means clean."""
+        names = re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)",
+                           "def a():\n    pass\n\ndef a():\n    pass\n", re.M)
+        self.assertEqual(["a", "a"], names)
 
 
 if __name__ == "__main__":
