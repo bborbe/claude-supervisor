@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.23.4
 
 - fix: `who-needs-me.py` stops rendering an item whose **session is gone**, so an item killed mid-flight no longer sits in the feed forever on a pane that outlived it. The render filter was `str(rec["pane"]) in pmap` — pane existence standing in for session liveness — but a pane id is a lease, not an identifier: WezTerm renumbers and reuses them, and a session killed without emitting `SessionEnd` (OOM, a killed worker, a crash) leaves its item open permanently. Measured 2026-09-21 against the live store: **4 orphans rendered, every one of them on a pane that still existed**, out of 42 rows. Liveness now comes from the session registry `~/.claude/sessions/<pid>.json` — the source named by `vault-cli/docs/session-liveness.md` and already read by the attention store's `pkg/session-liveness-checker.go` — and the pane check stays as a **necessary** second condition, because the jump line is this feed's payload and a row the operator cannot jump to is not actionable.
 - fix: an **unreadable session registry reads as live, never as gone**. `glob` on a missing directory returns `[]` rather than raising, so an absent registry would otherwise have read as "no session is live" and swept the entire feed — the failure direction that hides every genuine gate behind a silently quieter fleet. Mirrors `session-liveness-checker.go:59-77` (*"an unreadable registry cannot prove a session is dead"*). Measured: with the registry pointed at a nonexistent path the feed renders exactly the rows it rendered before the change.
