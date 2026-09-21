@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: Move the cross-layer gate stamp onto the attention store item's `escalated_by` field, retiring the local `gate-stamps/` ledger. Each gate now names the BLOCKED session in a required `session` field; the script resolves that session's item by `producer_id` and stamps it through `POST /api/1.0/attention/<item_id>/escalate`. First to stamp wins, a manager is never blocked by its own stamp, and a gate with no resolvable store item is reported as `unresolved` rather than silently skipped.
+
 ## v0.27.0
 
 - fix: the fleet table's **marker line is documented as `<count by bucket>`**, not `<count by status>`. The rendered example in both `docs/fleet-surface.md` § Sweep output and the per-vault runbook shows bucket counts (`9 running · 23 needs-input · 10 idle · 0 problem · 1 residual`), so the prose named a vocabulary the frame no longer renders — a reader following the contract literally would have printed status counts while the example above it showed buckets. The `Status` column became `Bucket` in the same change; this is the one sentence that did not follow it.
