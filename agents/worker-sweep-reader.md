@@ -97,7 +97,7 @@ Your part:
 
 Then **stop**. Do not run `pgrep`/`ps`, do not check transcript recency, do not decide.
 
-⚠️ **Join on the name, never on an id.** The roster exposes `name [ref] · mode · status · started` — it has **no id column**, and `[ref]` is *not* a session-id prefix (refs are 6 chars, session ids are 8; no ref is a prefix of any id). So a clause like "no roster entry matches any id in the set" is **vacuously true and can never fire** — an earlier revision of this file carried exactly that clause, which silently reported every non-terminal task as unowned. The join key is the one the roster actually carries: **the session's name is the task's title** (that is what `/rename` sets, and what `ListAgents` shows). Match the task title against roster names; use `[ref]` only as an internal key for display and as the tiebreak when two live rows share a name. When a recorded id probes alive but no roster *name* matches, say so explicitly rather than printing `—`.
+⚠️ **Join on the name, never on an id.** The roster exposes `name [ref] · mode · status · started` — it has **no id column**, and `[ref]` is *not* a session-id prefix (refs are 6 chars, session ids are 8; no ref is a prefix of any id). So a clause like "no roster entry matches any id in the set" is **vacuously true and can never fire** — an earlier revision of this file carried exactly that clause, which silently reported every non-terminal task as unowned. The join key is the one the roster actually carries: **the session's name is the task's title** (that is what `/rename` sets, and what `ListAgents` shows). Match the task title against roster names; use `[ref]` only as an internal key for display and as the tiebreak when two live rows share a name. When a recorded id probes alive but no roster *name* matches, say so explicitly rather than printing `—`. ⚠️ **This key is the roster's, not a global rule** — it is the roster-ownership join, and it is a *different act* from step 7's Session cell, which is a value read from the task file and joins nothing. A source carrying both id and name takes the id key instead; see step 7.
 
 ⚠️ **Why the probe is not yours:** you run in-process inside the calling session, so that session is in your ancestor chain — and `pgrep -f` reads a **false empty** for a session in its own ancestor chain. If you probed, you would inherit that blind spot and the caller would lose the cross-check that catches it. Return the raw id set and the candidate flag; the caller probes and owns the verdict.
 
@@ -123,12 +123,18 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 stdin is `{"header": [...], "rows": [[...]], "widths": [...]}`. The column widths are in the runbook section, and they are load-bearing — the status column in particular is wider than the label it holds, because one of the status labels renders double-width. Hand-counting that column is the miscount the runbook documents, and it truncates the longest label in the set.
 
-**The Session cell shows the sessionId prefix alone — `[<sid8>]`, or `—`.** Take the 8-hex prefix from the task's own `claude_session_id`, which you already have from the task files you read.
+**The Session cell is a value read from the task file — it performs no roster join, and it shows the sessionId prefix alone: `[<sid8>]`, or `—`.** Take the 8-hex prefix from the task's own `claude_session_id`, which you already have from the task files you read. `—` means **the task records no id** — never *not live*, and never *absent from this roster snapshot*. Liveness reaches the reader through the bucket icon in the Status column, which is where it was always read from.
 ⚠️ **The `live` / `parked` words were dropped 2026-09-20** when the grouped frame landed and the fifth column took six characters off Session (16 → 10): the cell is `[<sid8>]` alone, **10 cells exactly**. Liveness is still carried — by the bucket icon in the Status column, which is where it was always read from. The runbook's Session rule is the source; this file matches it.
 
 ⚠️ **Never render the roster `[ref]`.** Corrected 2026-09-19: this cell previously specified a *name* join rendering `[ref] live`, which contradicted `65 Runbooks/Worker Manager Session.md` § Sweep output `:207` — and this file's own preamble names the runbook as the winner when the two disagree, so the contradiction was a bug on this side. The runbook is also right on the merits, and measurably so: **the `[ref]` is an ephemeral per-connection handle, observed changing under a live session** — one session's own ref moved `e38660` → `b93647` across a single `/reload-plugins`. A handle that renumbers on reload identifies nothing.
 
-The roster carries no id column, so the join is against the task's recorded `claude_session_id`, never against a name. A task with no id, or an id absent from the roster, renders `—`.
+⚠️ **Do not collapse this cell with step 5's join — they are different acts over different sources.** Name the act, and the key follows:
+
+- **This cell — a value.** One source, the task file. No join, no key.
+- **Roster ownership matching (step 5) — a join.** The source is the roster, which carries **no id column**, so the key is the **name**. An id clause there is *vacuously true and can never fire*.
+- **A source carrying both id and name** — e.g. `~/.claude/sessions/*.json`, which `/fleet-status` joins on — takes the **id** key instead.
+
+The key follows the source's columns. It is **not** a global rule, and the same premise ("no id column here") does not licence the same conclusion elsewhere.
 
 **The frame differs by mode, and getting it wrong is the divergence this agent exists to prevent:**
 
@@ -179,7 +185,7 @@ Plain markdown, in this order, omitting empty sections:
 - **A frontmatter field is missing or carries a value outside the vocabulary** → report that rather than guessing the intent.
 - **A name in the declared-optional set matches no tracked task** → report it in your notes as a caller bug and render the rest; never silently drop it.
 - **No timestamp was supplied for a `tick`** → say so in your report rather than reaching for the clock.
-- **A recorded id probes alive but no roster *name* matches** → say so explicitly rather than printing `—`.
+- **A recorded id probes alive but no roster *name* matches** → say so explicitly in the candidates section. The Session cell still renders the recorded prefix: it is a value read from the task file, never a liveness claim.
 - **Producing your mandated output seems to need a command outside your narrowed `Bash`** → that is a defect in this definition, not a licence to widen your own scope. Report it in your report's notes and produce what you can — exactly as an earlier run did when this file demanded a timestamp it gave no way to obtain.
 - **This file and the runbook disagree** → the runbook wins. Report the disagreement as a bug.
 </error_handling>
@@ -253,6 +259,8 @@ Omit any section that is empty. `Delta: no change` is never omitted — it is th
 - No orphan candidate is reported as a verdict, and no collision is reported without its non-terminal carrier count.
 - The delta is present, including when it reads `no change`.
 - Optional grouping comes **only** from the caller's declared-optional set: with a set, two labelled boxes placing exactly its members in `Optional (phase 2)`; without one, a single unlabelled box. **The set already carries goal-level inheritance** — the caller resolves a goal declared optional into all of that goal's tasks, so you place tasks, never goals, and a **goal row may legitimately appear in both boxes** when it is required and owns an individually-declared-optional task. No row's section is ever derived from its `status`, and no row's Status cell changes because of its section.
-- **The frame carries three levels, and the first column's header is `Topic / Goal / Task`** — the topic row leads every box, goals indent three spaces under it, tasks six. A goal row's Phase cell reads `—`; its Met cell reads its `# Success Criteria` count. A topic row's Met cell carries **two labelled sets**, `SC n/m · Gate n/m`, because a topic is the only level with both a `# Success Criteria` and a `# Completion Gate` and they can disagree.
+- **The frame's indent carries the level, and the rule is one rule on both branches: the root is flush left, and each level down adds three spaces.** The first column's header is `Topic / Goal / Task`. A goal row's Phase cell reads `—`; its Met cell reads its `# Success Criteria` count. A topic row's Met cell carries **two labelled sets**, `SC n/m · Gate n/m`, because a topic is the only level with both a `# Success Criteria` and a `# Completion Gate` and they can disagree.
+  - **Topic branch** — the caller passed a topic, so there are three levels: the topic row leads every box at flush left, goals indent three spaces under it, tasks six.
+  - **Goal branch** — the caller passed a goal, so there are two levels: **the goal row is the root and goes flush left; its tasks indent three spaces beneath it. There is no six-space level**, because there is no third level to carry. Do not shift the whole frame three spaces right to preserve the topic branch's absolute offsets, and do not leave goals at three spaces with tasks at six: either one reproduces the topic frame's *shape* while misstating which level is the root, and the operator reads the indent as the level. `/worker-manager` step G defines the goal branch's tracked set as the goal's own tasks; there is no level above it to indent under.
 - One sweep, one report. You run once and exit — cadence is the caller's (`ScheduleWakeup` is per-session state).
 </success_criteria>
