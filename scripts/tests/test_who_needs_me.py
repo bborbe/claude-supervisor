@@ -380,21 +380,33 @@ class OrphanLiveness(unittest.TestCase):
     The feed's render filter was `str(rec["pane"]) in pmap`: pane existence standing
     in for session liveness. A pane id is a lease, not an identifier -- WezTerm
     renumbers and reuses them -- and a session killed without emitting `SessionEnd`
-    leaves its item open forever on a pane that still exists. Measured 2026-09-21
-    against the live store: 4 such orphans rendered, every one on a live pane.
+    leaves its item open forever on a pane that still exists.
 
-    Liveness now comes from the session registry (`~/.claude/sessions/<pid>.json`),
-    the source named by `vault-cli/docs/session-liveness.md` and read by the attention
-    store's `pkg/session-liveness-checker.go`.
+    The fix applies the liveness rule's `quiet` verdict, which is **both** signals:
+    absent from the session registry AND a stale transcript. Either one alone is
+    wrong, and each has its own case below -- registry absence alone drops live
+    headless workers, and transcript staleness alone drops a live-but-idle session.
 
-    These cases exercise `is_live()` and `live_session_ids()` directly rather than
-    through `classify()`: the corpus's `record` dicts carry no pane map or registry,
-    so a corpus case could only assert the filter by stubbing both -- which would test
-    the stub. The corpus classes stay as they are; this is a separate surface.
+    `is_live()` stays a pure predicate (records, pane map, quiet set); the two
+    machine-reading halves are `live_session_ids()` and `quiet_session_ids()`.
     """
 
-    LIVE = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
-    DEAD = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+    LIVE = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"   # registered, interactive
+    HEADLESS = "cccccccc-3333-4333-8333-cccccccccccc"  # live worker, NO registry entry
+    DEAD = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"   # no registry entry, stale transcript
+
+    def setUp(self):
+        self._age = wnm.session_transcript_age
+        wnm._AGE_CACHE.clear()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        wnm.session_transcript_age = self._age
+        wnm._AGE_CACHE.clear()
+
+    def ages(self, mapping):
+        """Stub the transcript read: sid -> age in seconds (absent => inf)."""
+        wnm.session_transcript_age = lambda sid: mapping.get(sid, float("inf"))
 
     def rec(self, sid, pane="7"):
         return {"session_id": sid, "pane": pane, "cwd": "/tmp",
@@ -409,31 +421,70 @@ class OrphanLiveness(unittest.TestCase):
                            "status": "idle"}, f)
         return d
 
+    def quiet(self, records, registry_ids, ages):
+        self.ages(ages)
+        return wnm.quiet_session_ids(records, wnm.live_session_ids(self.registry(registry_ids)))
+
     # --- SC1: the orphan is not rendered -------------------------------------
 
     def test_dead_session_with_live_pane_is_not_rendered(self):
-        """The whole defect in one case: pane present, session gone -> no row."""
-        reg = self.registry([self.LIVE])
-        live = wnm.live_session_ids(reg)
-        self.assertEqual(live, {self.LIVE})
-        self.assertFalse(wnm.is_live(self.rec(self.DEAD), {"7": {}}, live))
+        """The whole defect: pane present, session gone (absent + stale) -> no row."""
+        rec = self.rec(self.DEAD)
+        q = self.quiet([rec], [], {self.DEAD: 10 * 3600})
+        self.assertEqual(q, {self.DEAD})
+        self.assertFalse(wnm.is_live(rec, {"7": {}}, q))
 
     def test_live_session_with_live_pane_is_rendered(self):
         """SC2, the asymmetry: a fix that drops every unmatched open fails here."""
-        reg = self.registry([self.LIVE])
-        live = wnm.live_session_ids(reg)
-        self.assertTrue(wnm.is_live(self.rec(self.LIVE), {"7": {}}, live))
+        rec = self.rec(self.LIVE)
+        q = self.quiet([rec], [self.LIVE], {self.LIVE: 10 * 3600})
+        self.assertEqual(q, set())
+        self.assertTrue(wnm.is_live(rec, {"7": {}}, q))
 
     def test_pane_check_stays_necessary(self):
-        """SC1 third clause: registry-present but no live pane -> not rendered.
+        """SC1 third clause: a live session with no live pane -> not rendered.
 
-        Discriminates a registry-AND-pane filter from a registry-only one. The jump
-        line is this feed's payload; a row the operator cannot jump to is not
-        actionable.
+        The jump line is this feed's payload; a row the operator cannot jump to is
+        not actionable.
         """
-        reg = self.registry([self.LIVE])
-        live = wnm.live_session_ids(reg)
-        self.assertFalse(wnm.is_live(self.rec(self.LIVE), {}, live))
+        rec = self.rec(self.LIVE)
+        q = self.quiet([rec], [self.LIVE], {self.LIVE: 0})
+        self.assertFalse(wnm.is_live(rec, {}, q))
+
+    # --- the two halves of `quiet`, each of which alone is wrong --------------
+
+    def test_live_headless_worker_is_not_quiet_despite_no_registry_entry(self):
+        """THE REGRESSION CASE -- registry absence alone is not death.
+
+        A headless worker is an in-process SDK `query()` in the supervisor server: it
+        holds no socket, so Claude Code writes it no registry entry at all. Measured
+        2026-09-21: of 21 workers the ledger called `running`, 0 were in the registry.
+        A filter keyed on registry absence alone therefore drops every gate a headless
+        worker raises -- including ones it is asking right now. The fresh transcript is
+        what separates it from a finished session.
+        """
+        rec = self.rec(self.HEADLESS)
+        q = self.quiet([rec], [], {self.HEADLESS: 30})   # absent from registry, fresh
+        self.assertEqual(q, set(), "a live headless worker must not read as quiet")
+        self.assertTrue(wnm.is_live(rec, {"7": {}}, q))
+
+    def test_live_but_idle_session_is_not_quiet_despite_stale_transcript(self):
+        """The mirror case -- transcript staleness alone is not death either.
+
+        A registered session with an idle transcript is `live` per the rule's
+        `stale + alive` row. This is why transcript recency alone was rejected as the
+        source: it would drop a genuinely parked gate.
+        """
+        rec = self.rec(self.LIVE)
+        q = self.quiet([rec], [self.LIVE], {self.LIVE: 10 * 3600})   # stale, registered
+        self.assertEqual(q, set())
+        self.assertTrue(wnm.is_live(rec, {"7": {}}, q))
+
+    def test_fresh_transcript_absent_from_registry_is_indeterminate_not_quiet(self):
+        """The rule's `fresh + none` row is `indeterminate`, and cannot prove death."""
+        rec = self.rec(self.HEADLESS)
+        q = self.quiet([rec], [], {self.HEADLESS: 1})
+        self.assertNotIn(self.HEADLESS, q)
 
     # --- SC3: the registry is read, and its absence is not death --------------
 
@@ -445,37 +496,33 @@ class OrphanLiveness(unittest.TestCase):
         not evidence of death; it is evidence the probe cannot run. Mirrors
         `session-liveness-checker.go:59-77` (a failed read returns live, not gone).
         """
-        live = wnm.live_session_ids("/nonexistent/registry/path")
-        self.assertIsNone(live, "unreadable registry must be None, not an empty set")
-        self.assertTrue(wnm.is_live(self.rec(self.DEAD), {"7": {}}, live),
+        self.assertIsNone(wnm.live_session_ids("/nonexistent/registry/path"),
+                          "unreadable registry must be None, not an empty set")
+        rec = self.rec(self.DEAD)
+        q = wnm.quiet_session_ids([rec], None)   # None => nothing provably quiet
+        self.assertEqual(q, set())
+        self.assertTrue(wnm.is_live(rec, {"7": {}}, q),
                         "an unreadable registry must drop nothing")
-        self.assertTrue(wnm.is_live(self.rec(self.LIVE), {"7": {}}, live))
 
     def test_empty_registry_is_not_none(self):
         """A real but empty registry IS evidence -- distinct from an unreadable one."""
-        reg = self.registry([])
-        live = wnm.live_session_ids(reg)
-        self.assertEqual(live, set())
-        self.assertFalse(wnm.is_live(self.rec(self.DEAD), {"7": {}}, live))
+        self.assertEqual(wnm.live_session_ids(self.registry([])), set())
 
     def test_registry_reader_uses_the_documented_field(self):
         """`sessionId` is the registry's key; a renamed field must not read as dead."""
-        reg = self.registry([self.LIVE])
-        self.assertEqual(wnm.live_session_ids(reg), {self.LIVE})
+        self.assertEqual(wnm.live_session_ids(self.registry([self.LIVE])), {self.LIVE})
 
     def test_reader_delegates_to_the_registry_rather_than_reimplementing_it(self):
         """SC3's evidence is the CALL, not verdict agreement.
 
         A hand-duplicated check that happens to match on fixtures passes a
         verdict-agreement reading and is exactly the drift the criterion exists to
-        prevent. This asserts the seam: `is_live()` consults the registry set it is
-        handed, and `main()` sources that set from `live_session_ids()`.
+        prevent. This asserts the seam: `quiet_session_ids()` consults the registry
+        set it is handed, and `main()` sources that set from `live_session_ids()`.
         """
-        reg = self.registry([self.LIVE])
-        live = wnm.live_session_ids(reg)
-        # Same record, same pane map, opposite verdicts -- decided only by the registry.
-        self.assertTrue(wnm.is_live(self.rec(self.LIVE), {"7": {}}, live))
-        self.assertFalse(wnm.is_live(self.rec(self.DEAD), {"7": {}}, live))
+        rec = self.rec(self.DEAD)
+        q = self.quiet([rec], [], {self.DEAD: 10 * 3600})
+        self.assertIn(self.DEAD, q)
         with open(_SCRIPT, encoding="utf-8") as handle:
             src = handle.read()
         self.assertIn("live_session_ids()", src,

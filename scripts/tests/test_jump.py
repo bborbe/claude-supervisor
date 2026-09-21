@@ -47,32 +47,41 @@ CLOSE = "approve: /vault-cli:session-close"
 class AttentionQueueMatchesTheFeed(unittest.TestCase):
     def setUp(self):
         self._load, self._panes = wnm.load, wnm.panes
-        self._live_ids = wnm.live_session_ids
+        self._live_ids, self._age = wnm.live_session_ids, wnm.session_transcript_age
         self._sessions = jmp.pane_sessions
         jmp.pane_sessions = lambda _pmap: {}
         self._me = os.environ.pop("WEZTERM_PANE", None)
+        wnm._AGE_CACHE.clear()
         self.addCleanup(self._restore)
 
     def _restore(self):
         wnm.load, wnm.panes = self._load, self._panes
-        wnm.live_session_ids = self._live_ids
+        wnm.live_session_ids, wnm.session_transcript_age = self._live_ids, self._age
         jmp.pane_sessions = self._sessions
+        wnm._AGE_CACHE.clear()
         if self._me is not None:
             os.environ["WEZTERM_PANE"] = self._me
 
     def queue(self, records, status=None, dead=()):
-        """`dead` names panes whose session has exited -- registry-absent.
+        """`dead` names panes whose session has exited.
 
         Defaults to none, so every pre-existing case keeps its old meaning; the
-        orphan case opts in. `live_session_ids` is stubbed because the real one reads
-        `~/.claude/sessions/` off the machine, which a unit test must not depend on.
+        orphan case opts in. Both machine-reading halves of the liveness rule are
+        stubbed: the real `live_session_ids` reads `~/.claude/sessions/` and the real
+        `session_transcript_age` reads `~/.claude/projects/`, neither of which a unit
+        test may depend on. A `dead` session is absent from the registry *and* stale,
+        which is the rule's `quiet` verdict -- either signal alone would be wrong.
         """
+        dead_panes = {str(p) for p in dead}
         pmap = {str(r["pane"]): {"pane_id": int(r["pane"]), "title": "t"} for r in records}
         wnm.load = lambda _suffix: records
         wnm.panes = lambda: pmap
         wnm.live_session_ids = lambda _d=None: {
-            r["session_id"] for r in records if r["pane"] not in {str(p) for p in dead}
+            r["session_id"] for r in records if str(r["pane"]) not in dead_panes
         }
+        wnm.session_transcript_age = lambda sid: (
+            float("inf") if any(r["session_id"] == sid and str(r["pane"]) in dead_panes
+                                for r in records) else 0)
         wnm.task_status_from_closer = status or (lambda _rec: None)
         return [r["pane"] for r in jmp.attention_queue(wnm, pmap)]
 
@@ -100,7 +109,7 @@ class AttentionQueueMatchesTheFeed(unittest.TestCase):
         self.assertEqual(self.queue(records), ["285"])
 
     def test_orphaned_item_is_not_offered(self):
-        """Class 5 — the session exited, so there is nothing to jump TO.
+        """Class 5 — the session exited (absent from the registry AND stale).
 
         This surface re-derived the feed's filter as pane-existence, so an item whose
         session was gone stayed jumpable here long after the feed had dropped it --
@@ -108,6 +117,22 @@ class AttentionQueueMatchesTheFeed(unittest.TestCase):
         """
         records = [rec(208, PICK), rec(300, PICK)]
         self.assertEqual(self.queue(records, dead=[300]), ["208"])
+
+    def test_live_headless_worker_is_still_offered(self):
+        """The regression guard — absent from the registry is NOT dead.
+
+        A headless worker holds no registry entry by construction, so a filter keyed
+        on registry absence alone would hide every gate it raises from this surface
+        too. Its fresh transcript is what keeps it.
+        """
+        records = [rec(846, PICK)]
+        pmap = {"846": {"pane_id": 846, "title": "t"}}
+        wnm.load = lambda _s: records
+        wnm.panes = lambda: pmap
+        wnm.live_session_ids = lambda _d=None: set()          # absent, as headless is
+        wnm.session_transcript_age = lambda _sid: 30          # ...but writing right now
+        wnm.task_status_from_closer = lambda _rec: None
+        self.assertEqual([r["pane"] for r in jmp.attention_queue(wnm, pmap)], ["846"])
 
     def test_queue_matches_the_feed_on_a_mixed_set(self):
         """The property that actually matters: the two surfaces cannot disagree."""

@@ -33,6 +33,10 @@ OBSIDIAN = os.path.expanduser("~/Documents/Obsidian")
 # presence is the authoritative live-vs-exited probe. Overridable so the reader can
 # be pointed at a fixture, and so a caller can mirror the store's own override.
 SESSIONS_DIR = os.environ.get("SESSIONS_DIR") or os.path.expanduser("~/.claude/sessions")
+PROJECTS_DIR = os.environ.get("PROJECTS_DIR") or os.path.expanduser("~/.claude/projects")
+# Matched to vault-cli's per-session flock, per `session-liveness.md`. A transcript
+# written inside this window counts as fresh.
+LIVE_WINDOW = 5 * 60
 
 # Closer verbs describing a parked wait rather than an open gate. `later (on
 # <trigger>):` names the event that resumes the work; until it fires there is
@@ -215,17 +219,81 @@ def live_session_ids(sessions_dir=None):
         return None
 
 
-def is_live(rec, pmap, live_ids):
-    """A row is rendered only when its session is live AND its pane still exists.
+def session_transcript_age(sid):
+    """Seconds since the session's transcript was last written; `inf` if absent.
+
+    The second signal of the liveness rule. Reuses `fleet-sessions.py`'s own
+    `last_message_ts()` rather than re-deriving the read, so the two cannot drift on
+    what "last written" means — it reads the tail of the jsonl and falls back to
+    mtime. An absent transcript returns `inf` so it reads as stale, which is the
+    honest answer: nothing has been written for a session with no transcript.
+
+    Memoized: `quiet_session_ids()` asks per record, and several records share a
+    session, so without this the same file is tail-read once per item.
+    """
+    if sid in _AGE_CACHE:
+        return _AGE_CACHE[sid]
+    age = float("inf")
+    try:
+        hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
+        if hits:
+            age = time.time() - max(os.path.getmtime(h) for h in hits)
+    except Exception:
+        age = float("inf")
+    _AGE_CACHE[sid] = age
+    return age
+
+
+_AGE_CACHE = {}
+
+
+def quiet_session_ids(records, live_ids):
+    """Session ids that are provably finished — the `quiet` verdict of the rule.
+
+    `quiet` is **both** signals, never one of them:
+
+      * not in the registry (the session holds no `<pid>.json` entry), AND
+      * its transcript is stale — last written more than `LIVE_WINDOW` ago.
+
+    ⚠️ **Registry absence alone is not death, and reading it as death drops live
+    work.** A headless worker is an in-process SDK `query()` inside the supervisor
+    server: it holds no socket, so Claude Code never writes it a registry entry at
+    all. Measured 2026-09-21: of the 21 headless workers the ledger called `running`,
+    **0** appeared in the registry, while its 23 entries were interactive sessions
+    only. So "absent from the registry" describes *every* headless worker, live or
+    not, and a filter keyed on registry absence alone silently drops every gate a
+    headless worker raises. The transcript is what separates the two cases — a live
+    worker keeps writing it, a finished one stops. This is the documented decision
+    table in `vault-cli/docs/session-liveness.md`, whose `stale + no process` row is
+    exactly this predicate.
+
+    `live_ids=None` means the registry could not be read; that cannot prove anything
+    dead, so nothing is quiet.
+    """
+    if live_ids is None:
+        return set()
+    quiet = set()
+    for rec in records:
+        sid = rec.get("session_id")
+        if not sid or sid in live_ids:
+            continue
+        if session_transcript_age(sid) > LIVE_WINDOW:
+            quiet.add(sid)
+    return quiet
+
+
+def is_live(rec, pmap, quiet):
+    """A row is rendered only when its session is not provably finished AND its pane
+    still exists.
 
     Both conditions are necessary. The pane check alone is what leaked the orphans;
     the session check alone would keep a row the operator cannot jump to, and the
-    jump line is this feed's payload. `live_ids=None` means the registry could not be
-    read, which reads as live for every record — drop nothing.
+    jump line is this feed's payload. `quiet` is a set of ids, and `None` (an
+    unreadable registry) reads as empty — drop nothing.
     """
     if str(rec.get("pane")) not in pmap:
         return False
-    return live_ids is None or rec.get("session_id") in live_ids
+    return not quiet or rec.get("session_id") not in quiet
 
 
 _TEXT_CACHE = {}
@@ -494,8 +562,12 @@ def main():
 
     pmap = panes()
     live_ids = live_session_ids()
-    live = lambda r: is_live(r, pmap, live_ids)
-    needs = [reclassify_idle(r) for r in load("needs") if live(r)]
+    # Read the store once: load("needs") folds every event log, so a second call for
+    # the quiet pass would double that cost.
+    records = load("needs")
+    quiet = quiet_session_ids(records, live_ids)
+    live = lambda r: is_live(r, pmap, quiet)
+    needs = [reclassify_idle(r) for r in records if live(r)]
     tools = [r for r in load("tool") if live(r)]
 
     # Two passes: the pane set that carries a gate is computed without peer-dedup,
