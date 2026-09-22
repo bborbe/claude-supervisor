@@ -39,6 +39,10 @@ class GoalsShapes(unittest.TestCase):
         for text in shapes:
             self.assertEqual(reset.goals_of(text), {"G"}, text)
 
+    def test_goals_after_long_frontmatter(self):
+        pad = "metrics_sessions:\n" + "    - session_id: x\n" * 400
+        self.assertEqual(reset.goals_of("---\n" + pad + "goals: G\n---\n"), {"G"})
+
     def test_empty_and_absent(self):
         self.assertEqual(reset.goals_of("---\ngoals: []\n---\n"), set())
         self.assertEqual(reset.goals_of("---\nstatus: next\n---\n"), set())

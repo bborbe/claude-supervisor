@@ -274,7 +274,7 @@ def tracked_set(subject, branch, page, vcfg):
             continue
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
-                text = fh.read(4096)
+                text = fh.read()  # whole file: long metrics_sessions can push goals: far down
         except OSError:
             continue
         if goals_of(text) & set(members):
