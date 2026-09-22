@@ -27,6 +27,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:fleet-drive` | one-shot: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
 | `/supervisor:worker-manager` `/supervisor:worker-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
+| `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 
 ## Two spawn modes
 
@@ -288,6 +289,7 @@ commands/{jump,who-needs-me}.md                  find and reach a session
 commands/{fleet-manager,fleet-status,fleet-drive}.md  fleet surface — many sessions
 commands/{worker-manager,worker-status}.md       one goal or topic
 commands/stop.md                                 stand that loop down
+commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/worker-wrangler.md                routine approval loop over headless workers
