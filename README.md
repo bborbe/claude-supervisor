@@ -288,6 +288,7 @@ docs/fleet-surface.md                            spawn shape + table render spec
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/worker-wrangler.md                routine approval loop over headless workers
 agents/worker-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
+agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-manager)
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
 ```
