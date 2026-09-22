@@ -27,12 +27,20 @@ const SHELL_METACHARACTERS = /[;&|`<>\n(){}]/
 // genuine `ls`. So an assignment is refused rather than skipped.
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 
-// The command's whitespace-separated tokens, or null when the command is compound or
-// carries an environment assignment and is therefore unsafe to match on at all.
+// The shell splits words on space and tab only. JavaScript's `\s` also matches U+00A0
+// and other Unicode spaces, which bash keeps INSIDE a word — so `ls<U+00A0>x` would read
+// as `ls` here while bash looks up a program literally named `ls<U+00A0>x`. Refusing any
+// other whitespace keeps this tokenizer and the shell in agreement.
+const NON_SHELL_WHITESPACE = /[^\S \t]/
+
+// The command's space/tab-separated tokens, or null when the command is compound,
+// carries an environment assignment, or contains whitespace the shell would not split
+// on — any of which makes it unsafe to match on at all.
 export function commandTokens(command) {
   if (typeof command !== 'string') return null
   if (SHELL_METACHARACTERS.test(command)) return null
-  const tokens = command.trim().split(/\s+/).filter(Boolean)
+  if (NON_SHELL_WHITESPACE.test(command)) return null
+  const tokens = command.trim().split(/[ \t]+/).filter(Boolean)
   if (tokens.length === 0 || ENV_ASSIGNMENT.test(tokens[0])) return null
   return tokens
 }

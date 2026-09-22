@@ -152,6 +152,16 @@ test('commandTokens refuses a leading environment assignment, which can pick the
   }
 })
 
+test('commandTokens refuses whitespace the shell would not split on', () => {
+  // bash keeps these inside a word, so a split here would disagree with the shell
+  // about which program runs.
+  assert.equal(commandTokens('ls\u00a0-la'), null)
+  assert.equal(commandTokens('ls\u2003-la'), null)
+  assert.equal(commandTokens('ls\r'), null)
+  // Space and tab are what the shell splits on, and stay accepted.
+  assert.deepEqual(commandTokens('ls\t-la'), ['ls', '-la'])
+})
+
 test('commandTokens is null rather than throwing on shapes it does not know', () => {
   assert.equal(commandTokens(null), null)
   assert.equal(commandTokens(''), null)
