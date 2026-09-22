@@ -184,7 +184,7 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
 }
 ```
 
-`parent_session` is the **spawn edge** — the manager session that called `spawn_agent`, resolved once from this server's own parent pid. Nothing else records it. A worker whose session id never resolved gets no record rather than one filed under a key nothing would look up, and the server logs that rather than staying quiet.
+`parent_session` is the **spawn edge** — the manager session that called `spawn_agent`, resolved once by walking up from this server's own pid to the **nearest ancestor the live registry knows**. It is *not* the direct parent pid: `.mcp.json` starts this server through a `bun run` wrapper, so the direct parent is that wrapper and a bare `process.ppid` lookup named nothing — which is why this field was `null` in every record written before the walk existed. When no ancestor is registered — an exited manager, or a chain that never passed through a session — the field stays `null` rather than carrying a guess. Nothing else records it. A worker whose session id never resolved gets no record rather than one filed under a key nothing would look up, and the server logs that rather than staying quiet.
 
 ⚠️ **This is not a liveness source.** An entry here must never be read as proof a session is alive — `liveness.mjs` owns that question, and it answers from the session registry plus the server's in-process record of workers it spawned. The ledger is deliberately the durable half.
 

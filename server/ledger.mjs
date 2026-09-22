@@ -16,20 +16,63 @@
 // proof a session is alive. `liveness.mjs` owns that question, and it answers from the
 // session registry plus the server's own in-process record of the workers it spawned.
 
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { readRegistry } from './liveness.mjs'
 
 export const MODES = ['interactive', 'headless']
 
-// The spawn edge. The supervisor is spawned by the MCP client, so its own parent pid is
-// the manager session that called spawn_agent — the live registry is exactly the right
-// tool for that one lookup, and the answer is then stamped into a record that outlives
-// it. Returns null rather than guessing when the parent is not in the registry.
-export function parentSessionId({ ppid = process.ppid, dir, registry = readRegistry } = {}) {
+// The spawn edge: the session that called spawn_agent, resolved from the live registry
+// (keyed by pid) and stamped into a record that outlives it.
+//
+// The supervisor is NOT a direct child of the manager session, which is what a bare
+// `process.ppid` lookup assumes and why that lookup returned null for every spawn ever
+// recorded. `.mcp.json` launches it through a `bun run` wrapper (`server/package.json`
+// `start`), so `process.ppid` is the wrapper — a pid no registry entry ever names — and
+// the manager is one or more levels above it. Measured 2026-09-22 across 42 live
+// servers: 0/42 had their `ppid` in the registry and 42/42 had their grandparent in it,
+// uniformly, so the indirection is the launch path rather than a race.
+//
+// The NEAREST registered ancestor wins. The first session up the chain is the one that
+// started this process tree; anything above it merely launched that session, so it is
+// not the spawn edge. Returns null rather than guessing when no ancestor is registered —
+// a manager that has exited, or a chain that never passed through a session.
+//
+// `CLAUDE_CODE_SESSION_ID` is deliberately not read here, though the MCP server inherits
+// it. Measured the same day: it agreed with the registry in 41 of 42 live servers, and in
+// the 42nd it named a session present in no registry entry — so it would have written a
+// wrong-but-plausible id exactly where the registry lookup is authoritative.
+export function parentSessionId({
+  ppid = process.ppid,
+  dir,
+  registry = readRegistry,
+  parentOf = systemParentOf,
+  maxDepth = 10,
+} = {}) {
   const entries = registry(dir)
   if (!entries) return null
-  return entries.find((entry) => entry.pid === ppid)?.sessionId ?? null
+  const byPid = new Map(entries.map((entry) => [entry.pid, entry.sessionId]))
+  let pid = ppid
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const sessionId = byPid.get(pid)
+    if (sessionId !== undefined) return sessionId
+    const next = parentOf(pid)
+    // `1`/`0` end the chain — neither is ever a Claude session — and a pid that is its
+    // own parent would spin, so both stop the walk rather than extend it.
+    if (!next || next === pid || next <= 1) break
+    pid = next
+  }
+  return null
+}
+
+// The real process tree, read the way the rest of this repo shells out (`spawnSync`, as
+// `tab.mjs` and `supervisor.mjs` do). Best-effort: a pid that has exited produces no
+// output, which ends the walk rather than raising into the spawn path.
+function systemParentOf(pid) {
+  const result = spawnSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' })
+  const parent = Number.parseInt(result.stdout?.trim() ?? '', 10)
+  return Number.isInteger(parent) ? parent : null
 }
 
 // Pure. `ended_at`/`result` stay absent until the worker finishes, so "still running"
