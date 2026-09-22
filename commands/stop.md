@@ -23,7 +23,9 @@ Stand the manager loop **this session** is running down. This is the operator's 
    |---|---|---|
    | `✓ <driver> — <what it was>` | disarmed, confirmed | the enumerable driver — a cron job, which `CronList` reads |
    | `· <driver> — not armed` | read surface says it was never armed | the same one |
-   | `~ <driver> — stop sent, no read surface` | a stop was issued; the harness offers nothing to confirm it | every driver without a read surface — § Session end names them and why |
+   | `~ <driver> — <what was done, or why nothing could be>` | **unconfirmed** — nothing can confirm it | every driver without a read surface — § Session end names them and why |
+
+   ⚠️ **`~` carries a reason, and the reason must be true.** Two cases reach it and they are not the same sentence: a stop *was* sent (the driver was reachable but unreadable), or nothing *could* be sent (no id exists in this conversation to name it — the `Monitor` case, which § Session end bounds at ≤30 min for exactly this reason). Writing *"stop sent"* where no stop was sent is the same over-claim as a `✓` you could not read, one form down.
 
 2. **Probe the state `stop` must not change** — read-only; the probe writes nothing and signals nothing:
 
@@ -40,7 +42,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
      Disarmed
        ✓ <driver> — <what it was>
        · <driver> — not armed
-       ~ <driver> — stop sent, no read surface
+       ~ <driver> — <what was done, or why nothing could be>
      Left running — fleet-surface.md § Session end owns this contract
        ● gate loop  pid <pid>, up <etime>  <command>
        ● tick file  <path>  mtime <iso>  (<age>s ago)
