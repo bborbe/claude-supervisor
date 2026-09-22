@@ -11,10 +11,44 @@ export function inputKey(input) {
   return input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.url ?? ''
 }
 
+// Anything that lets a SECOND command ride along on an allowed one, plus redirection,
+// which clobbers a file without running anything extra. A substring rule cannot see
+// these: `match: 'ls '` is contained in `rm -rf ~/Documents && ls `, so an allow written
+// that way is a universal bypass — append the allowed text to any command.
+//
+// Deliberately over-refuses: `grep ';' file` is harmless and still rejected, because the
+// alternative is parsing a shell, and a false refusal costs one escalation while a false
+// allow costs the filesystem.
+const SHELL_METACHARACTERS = /[;&|`<>\n(){}]/
+
+// The command's argv0, or null when the command is compound and therefore unsafe to
+// match on. Leading `VAR=value` assignments are skipped, so `BRANCH=dev make buca`
+// reports `make` rather than the assignment.
+export function commandHead(command) {
+  if (typeof command !== 'string' || command.length === 0) return null
+  if (SHELL_METACHARACTERS.test(command)) return null
+  const tokens = command.trim().split(/\s+/)
+  let i = 0
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i += 1
+  return tokens[i] ?? null
+}
+
 export function ruleMatches(rule, toolName, key, cwd) {
   if (!rule || typeof rule !== 'object') return false
   if (rule.tool !== '*' && rule.tool !== toolName) return false
   const match = rule.match ?? '*'
+
+  // Anchored mode. `match` names the command itself, and a compound command never
+  // matches at all — which is what makes an `allow` safe to write here. Under this mode
+  // `match: '*'` means "any single uncompounded command", NOT "anything".
+  // An absent `matchType` keeps the substring behaviour below, so every rule written
+  // before this existed — bundled, user, or per-spawn — evaluates exactly as it did.
+  if (rule.matchType === 'command') {
+    const head = commandHead(key)
+    if (head === null) return false
+    return match === '*' || head === match
+  }
+
   if (match === '*') return true
   if (match === 'cwd') {
     // Compare on a path BOUNDARY, not a raw string prefix. `/work/repo-2/x` starts
