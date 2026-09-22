@@ -93,10 +93,53 @@ export function registeredAsLive(sessionId, { dir = SESSIONS_DIR, isAlive = pidI
 //
 // null means "not there yet" as well as "unreadable" — the caller polls, so the two
 // are not worth separating here; the caller's timeout is the answer either way.
-export function findRegisteredByName(name, { dir = SESSIONS_DIR, registry = readRegistry } = {}) {
+//
+// ⚠️ A NAME IS NOT UNIQUE, and `find` returns the first match. A session that already
+// held this name before the spawn therefore satisfies the poll just as well as the one
+// the caller just started, and it is the OLD session's id that gets recorded. `exclude`
+// is how a caller that snapshotted the pre-existing holders refuses them — see
+// `sessionIdsNamed` and `uniqueTabName`, which together make the join unambiguous by
+// construction rather than by luck.
+export function findRegisteredByName(name, { dir = SESSIONS_DIR, registry = readRegistry, exclude = null } = {}) {
   const entries = registry(dir)
   if (!entries) return null
-  return entries.find((entry) => entry.name === name)?.sessionId ?? null
+  return entries.find((entry) => entry.name === name && !exclude?.has(entry.sessionId))?.sessionId ?? null
+}
+
+// Every session id currently registered under `name` — the companion to the join above.
+// A caller about to create a name needs the pre-existing set, both to derive a name
+// nothing holds and to refuse a poll match that is an old holder rather than its own
+// session; `findRegisteredByName` cannot tell those two apart on its own.
+//
+// null is "no information" (unreadable directory) and must stay distinct from `[]`,
+// "read, and nothing holds this name" — a caller renames on `[]` and must not on null.
+export function sessionIdsNamed(name, { dir = SESSIONS_DIR, registry = readRegistry } = {}) {
+  const entries = registry(dir)
+  if (!entries) return null
+  return entries.filter((entry) => entry.name === name).map((entry) => entry.sessionId)
+}
+
+// A tab name that nothing currently holds, derived BEFORE the process starts.
+//
+// The name is the only join back from a tab to its session id, so a name two sessions
+// can answer to makes that join ambiguous — and the ambiguity is not theoretical: it is
+// how a new worker's ledger record ends up carrying another live session's id, and how a
+// poll that should resolve resolves to a stranger instead. Suffixing until the name is
+// free removes the ambiguity whatever produced the earlier holder, which is why this is a
+// guard on the NAME rather than a fix for one cause of a collision.
+//
+// An unreadable registry returns the base name unchanged: "no information" is not
+// "nothing holds it", and renaming on that answer would rename every spawn whenever the
+// directory is briefly unreadable.
+export function uniqueTabName(baseName, { dir = SESSIONS_DIR, registry = readRegistry, limit = 100 } = {}) {
+  const held = sessionIdsNamed(baseName, { dir, registry })
+  if (held === null || held.length === 0) return baseName
+  for (let n = 2; n < limit; n++) {
+    const candidate = `${baseName} (${n})`
+    const ids = sessionIdsNamed(candidate, { dir, registry })
+    if (ids !== null && ids.length === 0) return candidate
+  }
+  return baseName
 }
 
 // `live: true` is the only answer that forbids a resume; `live: null` is "could not
