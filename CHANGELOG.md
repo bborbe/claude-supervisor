@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.30.1
 
 - fix: bump `@anthropic-ai/claude-agent-sdk` to 0.3.280 (bundles Claude Code 2.1.280). The lockfile pinned 0.3.270 / Claude Code 2.1.270, and `start` runs `bun install` against it, so every headless `spawn_agent` / resume on a model requiring 2.1.280 died before its first turn with `API Error: 400 Claude Code 2.1.270 does not support this model`. Tab workers were unaffected — they run the PATH launcher. A running server keeps the old SDK until its session restarts.
 
