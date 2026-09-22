@@ -11,10 +11,68 @@ export function inputKey(input) {
   return input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.url ?? ''
 }
 
+// Anything that lets a SECOND command ride along on an allowed one, plus redirection,
+// which clobbers a file without running anything extra. A substring rule cannot see
+// these: `match: 'ls '` is contained in `rm -rf ~/Documents && ls `, so an allow written
+// that way is a universal bypass — append the allowed text to any command.
+//
+// Deliberately over-refuses: `grep ';' file` is harmless and still rejected, because the
+// alternative is parsing a shell, and a false refusal costs one escalation while a false
+// allow costs the filesystem.
+const SHELL_METACHARACTERS = /[;&|`<>\n(){}]/
+
+// A leading `VAR=value` picks the environment the allowed program runs in, and that is
+// enough to pick the program: `PATH=/tmp/evil ls` runs /tmp/evil/ls, and
+// `LD_PRELOAD=/tmp/x.so ls` / `DYLD_INSERT_LIBRARIES=… ls` load attacker code into a
+// genuine `ls`. So an assignment is refused rather than skipped.
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+// The shell splits words on space and tab only. JavaScript's `\s` also matches U+00A0
+// and other Unicode spaces, which bash keeps INSIDE a word — so `ls<U+00A0>x` would read
+// as `ls` here while bash looks up a program literally named `ls<U+00A0>x`. Refusing any
+// other whitespace keeps this tokenizer and the shell in agreement.
+const NON_SHELL_WHITESPACE = /[^\S \t]/
+
+// The command's space/tab-separated tokens, or null when the command is compound,
+// carries an environment assignment, or contains whitespace the shell would not split
+// on — any of which makes it unsafe to match on at all.
+export function commandTokens(command) {
+  if (typeof command !== 'string') return null
+  if (SHELL_METACHARACTERS.test(command)) return null
+  if (NON_SHELL_WHITESPACE.test(command)) return null
+  const tokens = command.trim().split(/[ \t]+/).filter(Boolean)
+  if (tokens.length === 0 || ENV_ASSIGNMENT.test(tokens[0])) return null
+  return tokens
+}
+
 export function ruleMatches(rule, toolName, key, cwd) {
   if (!rule || typeof rule !== 'object') return false
   if (rule.tool !== '*' && rule.tool !== toolName) return false
   const match = rule.match ?? '*'
+
+  // Anchored mode. `match` is a whole-token PREFIX of the command: `git status` matches
+  // `git status -sb` but not `git push`, and not `git -c alias.x=!cmd status` either,
+  // because `-c` is not `status`. A compound or env-prefixed command never matches.
+  //
+  // Only the prefix is anchored — tokens after it are unconstrained. So allow a prefix
+  // only when EVERY extension of it is read-only: `ls` is, `sed -n` is not (`sed -n -i`),
+  // `find` is not (`-delete`). No `git` prefix is: git runs commands named in the repo's
+  // own config (`core.fsmonitor` fires on `git status`), and the bundled policy lets a
+  // worker edit `.git/config` in its cwd — so an allowed git subcommand is code execution.
+  //
+  // Under this mode `match: '*'` means "any single uncompounded command", NOT "anything".
+  // An absent `matchType` keeps the substring behaviour below, so every rule written
+  // before this existed — bundled, user, or per-spawn — evaluates exactly as it did.
+  if (rule.matchType === 'command') {
+    if (typeof match !== 'string') return false
+    const tokens = commandTokens(key)
+    if (tokens === null) return false
+    if (match === '*') return true
+    const prefix = match.trim().split(/\s+/).filter(Boolean)
+    if (prefix.length === 0 || prefix.length > tokens.length) return false
+    return prefix.every((token, i) => tokens[i] === token)
+  }
+
   if (match === '*') return true
   if (match === 'cwd') {
     // Compare on a path BOUNDARY, not a raw string prefix. `/work/repo-2/x` starts
