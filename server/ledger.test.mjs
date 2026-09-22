@@ -119,6 +119,54 @@ test('parentSessionId resolves the manager through the live registry', () => {
   assert.equal(parentSessionId({ ppid: 58436, registry: () => null }), null, 'an unreadable registry is null too')
 })
 
+test('parentSessionId walks the launch path to the manager, past the wrapper', () => {
+  // The shape that produced a null in every record ever written, and the one a literal
+  // ppid cannot see: `.mcp.json` starts the server through a `bun run` wrapper, so the
+  // pid handed in is the wrapper and the manager session is one level above it.
+  // Measured 2026-09-22: 0 of 42 live servers had their own ppid in the registry, and
+  // 42 of 42 had their grandparent in it.
+  //
+  // Injected rather than read from this machine, deliberately. A test that passed a
+  // literal pid which happened to be a registered session would have passed before this
+  // fix too, so it would prove nothing; and the real pids here are this machine's, which
+  // makes the assertion a fact about the machine rather than about the resolver.
+  const registry = () => [{ pid: 74590, sessionId: 'manager-session' }]
+  const parentOf = (pid) => ({ 76174: 76172, 76172: 74590, 74590: 1 })[pid] ?? null
+  assert.equal(
+    parentSessionId({ ppid: 76174, registry, parentOf }),
+    'manager-session',
+    'the manager is the nearest registered ancestor, not the direct parent',
+  )
+})
+
+test('the nearest registered ancestor is the spawn edge when two are registered', () => {
+  // The first session up the chain started this process tree; anything above it merely
+  // launched that session, so it is not the edge this field records. Nearest-wins is the
+  // whole rule, so it is pinned rather than left to whichever the map happens to yield.
+  const registry = () => [
+    { pid: 700, sessionId: 'the-manager' },
+    { pid: 500, sessionId: 'an-outer-session' },
+  ]
+  const parentOf = (pid) => ({ 900: 800, 800: 700, 700: 500, 500: 1 })[pid] ?? null
+  assert.equal(parentSessionId({ ppid: 900, registry, parentOf }), 'the-manager')
+})
+
+test('no registered ancestor is null, never a guess', () => {
+  // The honest-null case, asserted against an injected chain so it does not depend on
+  // this machine's process table. A walk that reaches the end without a hit must answer
+  // null — the registry is the only authority, and a manager that exited has no id.
+  const registry = () => [{ pid: 111, sessionId: 'unrelated' }]
+  const parentOf = (pid) => ({ 900: 800, 800: 700, 700: 1 })[pid] ?? null
+  assert.equal(parentSessionId({ ppid: 900, registry, parentOf }), null)
+})
+
+test('a chain that loops or ends stops rather than spinning', () => {
+  const registry = () => [{ pid: 111, sessionId: 'unrelated' }]
+  assert.equal(parentSessionId({ ppid: 900, registry, parentOf: (pid) => pid }), null, 'a pid that is its own parent')
+  assert.equal(parentSessionId({ ppid: 900, registry, parentOf: () => null }), null, 'a pid with no parent')
+  assert.equal(parentSessionId({ ppid: 900, registry, parentOf: (pid) => pid - 1 }), null, 'a walk capped by maxDepth')
+})
+
 test('the record carries which source decided the mode', () => {
   // The mode alone cannot say whether a headless worker was asked for or merely
   // inherited from a config nobody remembered editing — which is the question actually

@@ -664,9 +664,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
     // id, so the two fields together are what tell the operator which conversation
     // they are now in.
     resumedFrom: resume ?? null,
-    // The spawn edge, resolved once. Our own parent pid is the MCP client — the manager
-    // session that called spawn_agent — and the live registry maps that pid to a
-    // session id. Stamped here so it outlives the registry entry it came from.
+    // The spawn edge, resolved once: the manager session that called spawn_agent, found
+    // by walking up from our own pid to the nearest ancestor the live registry knows.
+    // NOT our direct parent — `.mcp.json` starts this server through a `bun run`
+    // wrapper, so the direct parent is that wrapper and a bare `process.ppid` lookup
+    // named nothing, which is why this field was null in every record ever written.
+    // Stamped here so it outlives the registry entry it came from.
     parentSession: parentSessionId({ dir: config.sessionsDir }),
     // Which of argument / env / config / default decided the mode. Carried on the agent
     // so agent_status, list_agents and the ledger all answer "why is this worker
