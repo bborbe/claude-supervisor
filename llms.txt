@@ -12,6 +12,7 @@ An MCP server + Claude Code plugin that lets one manager session spawn worker se
 - docs/fleet-surface.md is the canonical home for the spawn shape and the fleet table render spec
 - Agent: supervisor:worker-wrangler (routine approval loop over headless workers, on a cheap model)
 - Agent: supervisor:worker-sweep-reader (the worker sweep's read-only half — tracked-set read, bucket classification, id-set extraction, collision count, table render; called by both worker commands, never probes liveness and never acts)
+- Agent: supervisor:fleet-sweep-reader (the fleet sweep's read half — four channels, open-items ledger, snapshot diff, orphan reverse index, collision/unmanaged-topic candidates, classification; returns a ≤40-line digest and persists the snapshot; called by /supervisor:fleet-manager)
 - Skill: supervising-workers (when to delegate to a worker, which spawn mode to use, and how to run the loop)
 
 ## Two spawn modes

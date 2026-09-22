@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: **`commands/fleet-manager.md` thinned from 79,103 B to 27,323 B, so a recurring sweep stops re-injecting prose it has already paid for.** The harness injects the command body on every invocation — measured on one Fleet Manager session, command bodies were ~48% of its context. Rationale, incident history and superseded readings moved verbatim into the vault runbook `65 Runbooks/Fleet Manager Session.md` § Fleet-Manager Command — Rationale and Measured History; the command keeps every step, command, threshold, output-shape line and autonomy rule. The sweep's read half (Steps 0b–3: the four channels, the open-items ledger, the snapshot diff, the orphan reverse index, collision and unmanaged-topic candidates, classification) moved into a new Sonnet agent, `agents/fleet-sweep-reader.md`, which returns a ≤40-line digest and persists the next snapshot through `fleet-snapshot.py` — so the ~2000-line `fleet-sessions.py` dump and the other raw reads stay out of the manager's context. `supervisor:worker-sweep-reader` was not reused: its input is one topic's tracked set, it has no snapshot diff, ledger or fleet orphan filters, and it emits the worker layer's seven buckets. If the delegation returns no usable digest, the command runs the reads itself for that round.
+
 ## v0.30.1
 
 - fix: bump `@anthropic-ai/claude-agent-sdk` to 0.3.280 (bundles Claude Code 2.1.280). The lockfile pinned 0.3.270 / Claude Code 2.1.270, and `start` runs `bun install` against it, so every headless `spawn_agent` / resume on a model requiring 2.1.280 died before its first turn with `API Error: 400 Claude Code 2.1.270 does not support this model`. Tab workers were unaffected — they run the PATH launcher. A running server keeps the old SDK until its session restarts.
