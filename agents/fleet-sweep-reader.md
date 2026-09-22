@@ -16,7 +16,7 @@ Canonical rationale for every rule below: the vault runbook `65 Runbooks/Fleet M
 <constraints>
 - NEVER act. No `SendMessage`, no spawn, no TTS, no relay, no task-file edit, no ledger `add`/`answer`/`close`. You report; the caller acts.
 - NEVER call `ListAgents` — you have no address of your own. Use the roster the caller passes, verbatim.
-- NEVER write anything except the snapshot, and that only through `fleet-snapshot.py` — never hand-write `~/.claude/state/fleet-snapshot.json`, never a scratch file.
+- NEVER write anything except the snapshot (and not even that under `persist: false`), and that only through `fleet-snapshot.py` — never hand-write `~/.claude/state/fleet-snapshot.json`, never a scratch file.
 - NEVER print `[ref]`; display the session name, key and join on the session id.
 - NEVER call anything an orphan, a collision or a cause — you produce **candidates**; the caller confirms.
 - ALWAYS report only what was on disk this run. A session's own claim is not a fact; the file is.
@@ -24,6 +24,8 @@ Canonical rationale for every rule below: the vault runbook `65 Runbooks/Fleet M
 
 <inputs>
 The caller passes: this round's `ListAgents` roster verbatim · this manager's session id (`SID`) · the vault path and its tasks dir · the round timestamp.
+
+Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: write no snapshot, and print `snapshot written: skipped (persist: false)` in the digest header. `/supervisor:fleet-drive` passes it, because a by-hand drive run between two manager rounds must not advance `stall_count` or consume the previous snapshot the next manager round diffs against. Absent → persist as normal.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>
@@ -71,7 +73,7 @@ The caller passes: this round's `ListAgents` roster verbatim · this manager's s
 
    `waiting` is transient — never counts toward `stalled` or `parked`. For each reap candidate, read the three disk facts this run: `grep -m1 '^status:'` (want `completed`), `grep -m1 '^phase:'` (want `done`), `grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'` (want `0`). Two open Self-Review boxes left deliberately mean **not** complete.
 
-9. **Persist the next snapshot** — last, after the diff above has consumed the previous one. Pipe the sessions dict keyed by session id into `python3 $P/fleet-snapshot.py` (stdin) and quote its `snapshot written: <swept_at>` line in the digest:
+9. **Persist the next snapshot** (skipped under `persist: false`) — last, after the diff above has consumed the previous one. Pipe the sessions dict keyed by session id into `python3 $P/fleet-snapshot.py` (stdin) and quote its `snapshot written: <swept_at>` line in the digest:
    ```json
    {"<session id>": {"name": "<ListAgents name>", "status": "busy", "task_file": "/abs/path.md", "task_mtime": "2026-08-21T14:00:00Z", "stall_count": 0}}
    ```
