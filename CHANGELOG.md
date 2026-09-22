@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.29.1
 
 - docs: `commands/worker-manager.md` § *Author the task before you spawn on it* now **states the 9/10 bar and names its home** — the one spawn site that told a manager to score a task without telling it the score to clear. The rule ended *"then score it with `vault-cli:task-auditor`, before any spawn"*: no number and no pointer, while the file's only `9/10` sat in § *Plan-gate parking*, a statement about why a **worker** parks, in a section a reader following the authoring rule never reaches. The command's `fleet-surface` references were all to the spawn **shape**, never the threshold, so `docs/fleet-surface.md` § Spawn a worker's declaration that *"the fleet command, the fleet runbook, and the worker-manager command all point here"* held for the shape and was false for the bar. `commands/fleet-manager.md` already carried bar **and** pointer, so this was one command's omission rather than a repo-wide convention. It survived two passes because both checked **presence in a file** rather than presence in the section that governs the behaviour — `grep -c '9/10' commands/worker-manager.md` returns a hit, and has since before the bar was unified, from a bullet describing the worker's own gate. The per-vault `Worker Manager Session` runbook's parking line, *"stops when the auditor scores below its bar"*, gains the same number and home, since that is the line a manager reads when classifying a parked worker.
 
