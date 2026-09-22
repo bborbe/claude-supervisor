@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.32.0
 
 - feat: **`/supervisor:fleet-drive` — the fleet layer's drive verb, promoted from a vault-local command.** Restarts sessions that are idle with open work and no verified blocker; everything else is escalated in one batch grouped by cause. A thin command composes `fleet-sweep-reader` (which owns the classification *and* the roster-name → `sessionId` join — no second copy) and dispatches the new `agents/fleet-drive.md`, which splits the sweep's `parked` row into **revive** / **blocked** by live probes (operator gate + the systems the session names), suppresses re-nudges through `~/.claude/state/fleet-drive/ledger.json` keyed on session id, and returns drafted nudges. Every `SendMessage` stays in the command, because a sub-agent has no cross-session address. `fleet-sweep-reader` gains an optional `persist: false` input, so a by-hand drive run between two manager rounds does not advance `stall_count` or consume the snapshot the next round diffs against.
 
