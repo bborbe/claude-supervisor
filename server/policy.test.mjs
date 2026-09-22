@@ -160,9 +160,11 @@ test('commandTokens is null rather than throwing on shapes it does not know', ()
 })
 
 test('an anchored allow cannot be smuggled past by composition', () => {
+  // `git status` here exercises MATCHING only. It is not a safe rule to ship: git runs
+  // commands named in the repo config a worker may edit (see the README).
   const merged = overlayRules([anchored('ls'), anchored('git status')], BUNDLED)
 
-  // What it is meant to allow.
+  // What the rules match.
   assert.equal(decide(merged, 'Bash', { command: 'ls /tmp' }, '/cwd').action, 'allow')
   assert.equal(decide(merged, 'Bash', { command: 'git status -sb' }, '/cwd').action, 'allow')
 
@@ -179,7 +181,8 @@ test('an anchored allow cannot be reached through an environment assignment', ()
   assert.equal(decide(merged, 'Bash', { command: 'PATH=/tmp/evil ls' }, '/cwd').action, 'escalate')
 })
 
-test('a multi-token prefix allows the subcommand and nothing else under the same program', () => {
+test('a multi-token prefix matches the subcommand and nothing else under the same program', () => {
+  // Matching mechanics only — no git prefix is safe to allow; see the README.
   const merged = overlayRules([anchored('git status')], BUNDLED)
   assert.equal(decide(merged, 'Bash', { command: 'git status --porcelain' }, '/cwd').action, 'allow')
   for (const cmd of [
@@ -209,6 +212,21 @@ test("anchored '*' means any single command, not anything", () => {
   assert.equal(ruleMatches(anchored('*'), 'Bash', 'ls -la', '/cwd'), true)
   assert.equal(ruleMatches(anchored('*'), 'Bash', 'ls && rm -rf /', '/cwd'), false)
   assert.equal(ruleMatches(anchored('*'), 'Bash', 'PATH=/tmp/evil ls', '/cwd'), false)
+})
+
+test('an anchored rule with a non-string match matches nothing instead of throwing', () => {
+  // The substring path tolerates a malformed rule; the anchored path must too, or one
+  // bad line in a user overlay would throw inside the permission hook.
+  for (const match of [42, ['ls'], { ls: true }]) {
+    const rule = { tool: 'Bash', match, matchType: 'command', action: 'allow' }
+    assert.equal(ruleMatches(rule, 'Bash', 'ls', '/cwd'), false, `match=${JSON.stringify(match)}`)
+  }
+  // An absent or null match is the existing wildcard contract shared by every rule —
+  // under this mode that is still "any single command", never "anything".
+  const bare = { tool: 'Bash', matchType: 'command', action: 'allow' }
+  assert.equal(ruleMatches(bare, 'Bash', 'ls', '/cwd'), true)
+  assert.equal(ruleMatches({ ...bare, match: null }, 'Bash', 'ls', '/cwd'), true)
+  assert.equal(ruleMatches(bare, 'Bash', 'ls && rm -rf /', '/cwd'), false)
 })
 
 test('an absent matchType leaves existing rules byte-for-byte unchanged', () => {

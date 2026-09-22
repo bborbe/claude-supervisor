@@ -47,13 +47,16 @@ export function ruleMatches(rule, toolName, key, cwd) {
   // because `-c` is not `status`. A compound or env-prefixed command never matches.
   //
   // Only the prefix is anchored — tokens after it are unconstrained. So allow a prefix
-  // only when EVERY extension of it is read-only: `git status` is safe, bare `git` is
-  // not (`git push --force`), `sed -n` is not (`sed -n -i`), `find` is not (`-delete`).
+  // only when EVERY extension of it is read-only: `ls` is, `sed -n` is not (`sed -n -i`),
+  // `find` is not (`-delete`). No `git` prefix is: git runs commands named in the repo's
+  // own config (`core.fsmonitor` fires on `git status`), and the bundled policy lets a
+  // worker edit `.git/config` in its cwd — so an allowed git subcommand is code execution.
   //
   // Under this mode `match: '*'` means "any single uncompounded command", NOT "anything".
   // An absent `matchType` keeps the substring behaviour below, so every rule written
   // before this existed — bundled, user, or per-spawn — evaluates exactly as it did.
   if (rule.matchType === 'command') {
+    if (typeof match !== 'string') return false
     const tokens = commandTokens(key)
     if (tokens === null) return false
     if (match === '*') return true

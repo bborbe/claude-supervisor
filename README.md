@@ -103,16 +103,20 @@ Rules come from two files, yours first: `~/.config/claude-supervisor/policy.json
 ⚠️ **Never write a Bash `allow` without `"matchType": "command"`.** A plain `match` is a substring test, and your overlay is evaluated before the bundled rules — so `{"tool": "Bash", "match": "ls ", "action": "allow"}` also matches `rm -rf ~/Documents && ls `, and un-denies it. Any allowed substring can be appended to any command.
 
 ```json
-{ "tool": "Bash", "match": "git status", "matchType": "command", "action": "allow" }
+{ "tool": "Bash", "match": "ls", "matchType": "command", "action": "allow" }
 ```
 
-Under `"matchType": "command"`, `match` is a **whole-token prefix** of the command: `git status` matches `git status -sb`, not `git push`, and not `git statuses`. Three shapes never match at all, and so fall through to the bundled rules:
+Under `"matchType": "command"`, `match` is a **whole-token prefix** of the command: `ls` matches `ls -la /tmp` but not `lsof`, and a two-token prefix such as `docker ps` matches `docker ps -a` but not `docker rm`. Three shapes never match at all, and so fall through to the bundled rules:
 
 - anything with a shell metacharacter — `;` `&` `|` `` ` `` `<` `>` newline, parens, braces — so nothing can ride along;
 - a leading `VAR=value`, because the environment picks the program: `PATH=/tmp/evil ls` and `LD_PRELOAD=… ls` both run attacker code under a genuine `ls`;
 - an empty prefix.
 
-**Only the prefix is anchored.** Tokens after it are unconstrained, so allow a prefix only when *every* extension of it is read-only. `ls` and `git status` qualify. Bare `git` does not (`git push --force`), nor `sed -n` (`sed -n -i`), nor `find` (`-delete`), nor `git log` (`--output=<file>` writes a file). When in doubt, leave it escalating — a false refusal costs one prompt, a false allow costs the filesystem.
+**Only the prefix is anchored.** Tokens after it are unconstrained, so allow a prefix only when *every* extension of it is read-only. `ls` qualifies. `sed -n` does not (`sed -n -i`), nor `find` (`-delete`).
+
+⚠️ **No `git` prefix qualifies — not even `git status`.** Git runs commands named in the repository's own config, and the shipped defaults let a worker edit any file in its cwd, `.git/config` included. So a worker can set `core.fsmonitor` to a command of its choosing and then run an allowed `git status`, which executes it with no prompt (verified: `git status` runs `core.fsmonitor`). `core.pager`, `diff.external` and hooks are further routes. The same holds for any tool that reads config or plugins from the working tree.
+
+When in doubt, leave it escalating — a false refusal costs one prompt, a false allow costs the filesystem.
 
 Under this mode `"match": "*"` means *any single uncompounded command*, not *anything*. A rule without `matchType` keeps the substring behaviour, so existing rules and the bundled `deny rm -rf` are unaffected.
 
