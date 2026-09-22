@@ -21,16 +21,20 @@ export function inputKey(input) {
 // allow costs the filesystem.
 const SHELL_METACHARACTERS = /[;&|`<>\n(){}]/
 
-// The command's argv0, or null when the command is compound and therefore unsafe to
-// match on. Leading `VAR=value` assignments are skipped, so `BRANCH=dev make buca`
-// reports `make` rather than the assignment.
-export function commandHead(command) {
-  if (typeof command !== 'string' || command.length === 0) return null
+// A leading `VAR=value` picks the environment the allowed program runs in, and that is
+// enough to pick the program: `PATH=/tmp/evil ls` runs /tmp/evil/ls, and
+// `LD_PRELOAD=/tmp/x.so ls` / `DYLD_INSERT_LIBRARIES=… ls` load attacker code into a
+// genuine `ls`. So an assignment is refused rather than skipped.
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+// The command's whitespace-separated tokens, or null when the command is compound or
+// carries an environment assignment and is therefore unsafe to match on at all.
+export function commandTokens(command) {
+  if (typeof command !== 'string') return null
   if (SHELL_METACHARACTERS.test(command)) return null
-  const tokens = command.trim().split(/\s+/)
-  let i = 0
-  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i += 1
-  return tokens[i] ?? null
+  const tokens = command.trim().split(/\s+/).filter(Boolean)
+  if (tokens.length === 0 || ENV_ASSIGNMENT.test(tokens[0])) return null
+  return tokens
 }
 
 export function ruleMatches(rule, toolName, key, cwd) {
@@ -38,15 +42,24 @@ export function ruleMatches(rule, toolName, key, cwd) {
   if (rule.tool !== '*' && rule.tool !== toolName) return false
   const match = rule.match ?? '*'
 
-  // Anchored mode. `match` names the command itself, and a compound command never
-  // matches at all — which is what makes an `allow` safe to write here. Under this mode
-  // `match: '*'` means "any single uncompounded command", NOT "anything".
+  // Anchored mode. `match` is a whole-token PREFIX of the command: `git status` matches
+  // `git status -sb` but not `git push`, and not `git -c alias.x=!cmd status` either,
+  // because `-c` is not `status`. A compound or env-prefixed command never matches.
+  //
+  // Only the prefix is anchored — tokens after it are unconstrained. So allow a prefix
+  // only when EVERY extension of it is read-only: `git status` is safe, bare `git` is
+  // not (`git push --force`), `sed -n` is not (`sed -n -i`), `find` is not (`-delete`).
+  //
+  // Under this mode `match: '*'` means "any single uncompounded command", NOT "anything".
   // An absent `matchType` keeps the substring behaviour below, so every rule written
   // before this existed — bundled, user, or per-spawn — evaluates exactly as it did.
   if (rule.matchType === 'command') {
-    const head = commandHead(key)
-    if (head === null) return false
-    return match === '*' || head === match
+    const tokens = commandTokens(key)
+    if (tokens === null) return false
+    if (match === '*') return true
+    const prefix = match.trim().split(/\s+/).filter(Boolean)
+    if (prefix.length === 0 || prefix.length > tokens.length) return false
+    return prefix.every((token, i) => tokens[i] === token)
   }
 
   if (match === '*') return true

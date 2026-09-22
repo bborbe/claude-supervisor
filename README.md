@@ -98,6 +98,26 @@ Rules decide what a worker may do **without waking the manager**. Anything the r
 
 Rules come from two files, yours first: `~/.config/claude-supervisor/policy.json` (`SUPERVISOR_POLICY`) overlays the shipped `<plugin>/server/policy.json`. Overlay, not replace — growing the list means appending, never copying. The shipped defaults allow Read/Glob/Grep and Write/Edit inside the worker's cwd, deny `Bash rm -rf`, and escalate everything else. Every request is logged as JSONL (`SUPERVISOR_PERMISSION_LOG`), which is what to promote into rules.
 
+### Allowing a Bash command
+
+⚠️ **Never write a Bash `allow` without `"matchType": "command"`.** A plain `match` is a substring test, and your overlay is evaluated before the bundled rules — so `{"tool": "Bash", "match": "ls ", "action": "allow"}` also matches `rm -rf ~/Documents && ls `, and un-denies it. Any allowed substring can be appended to any command.
+
+```json
+{ "tool": "Bash", "match": "git status", "matchType": "command", "action": "allow" }
+```
+
+Under `"matchType": "command"`, `match` is a **whole-token prefix** of the command: `git status` matches `git status -sb`, not `git push`, and not `git statuses`. Three shapes never match at all, and so fall through to the bundled rules:
+
+- anything with a shell metacharacter — `;` `&` `|` `` ` `` `<` `>` newline, parens, braces — so nothing can ride along;
+- a leading `VAR=value`, because the environment picks the program: `PATH=/tmp/evil ls` and `LD_PRELOAD=… ls` both run attacker code under a genuine `ls`;
+- an empty prefix.
+
+**Only the prefix is anchored.** Tokens after it are unconstrained, so allow a prefix only when *every* extension of it is read-only. `ls` and `git status` qualify. Bare `git` does not (`git push --force`), nor `sed -n` (`sed -n -i`), nor `find` (`-delete`), nor `git log` (`--output=<file>` writes a file). When in doubt, leave it escalating — a false refusal costs one prompt, a false allow costs the filesystem.
+
+Under this mode `"match": "*"` means *any single uncompounded command*, not *anything*. A rule without `matchType` keeps the substring behaviour, so existing rules and the bundled `deny rm -rf` are unaffected.
+
+This mode needs a server that ships it. An older server ignores `matchType` and reads the rule as a substring — the bypass above — so upgrade the plugin **before** adding such a rule, and confirm with `claude plugin list`.
+
 ### A policy for one worker
 
 `spawn_agent({ policy: "<path>" })` gives **one** worker its own rules, evaluated ahead of both files above. An absolute path is used as-is; a relative one resolves against the worker's cwd.
