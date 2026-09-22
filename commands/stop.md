@@ -12,10 +12,18 @@ argument-hint: "(no argument)"
 
 Stand the manager loop **this session** is running down. This is the operator's verb; it is not a close. It takes no argument — the cadence is session-scoped, so there is nothing to name.
 
-**The disarm contract — what must be disarmed, which harness surface reaches each driver and which it cannot, and what must be left running — is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session end. Read it and execute it from there; do not restate it here.** The vault's `Worker Manager Session` runbook § Guardrails item 6 — Session end carries the per-vault operating statement and points back at both. **What this file owns is the procedure and the report** — the knowledge is the contract doc, read directly at step 1; an agent behind this file would only add a hop between it and the doc it points at.
+**The disarm contract — what must be disarmed, which harness surface reaches each driver and which it cannot, and what must be left running — is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session end. Read it and execute it from there; do not restate it here.** The vault's `Worker Manager Session` runbook § Guardrails item 6 — Session end carries the per-vault operating statement and points back at both. **What this file owns is the procedure and the report** — the knowledge is the contract doc, read directly at step 1; an agent behind this file would only add a hop between it and the doc it points at, and could not reach the drivers anyway, since they are session-scoped and a subagent has its own session.
 
 <process>
-1. **Read the contract, then disarm every model-waking driver it names** — in the order it gives, printing each driver's line as you go and *before* the call that removes it, since a deletion the operator cannot see is indistinguishable from a job that was never armed. Print `·` for a driver that was **not** armed rather than dropping the line: a missing line reads as "checked and clean" when the truth may be "never looked". Those lines **are** the report's `Disarmed` block — collect them, and do not print the set a second time.
+1. **Read the contract, then disarm every model-waking driver it names** — in the order it gives, printing each driver's line as you go and *before* the call that removes it, since a deletion the operator cannot see is indistinguishable from a job that was never armed. Those lines **are** the report's `Disarmed` block — collect them, and do not print the set a second time.
+
+   **Three forms, because the drivers do not share a read surface.** `✓` and `·` are claims a read surface confirmed; `~` is the honest form when only a stop was sent and nothing can confirm the outcome. Never print `✓` for a driver you could not read.
+
+   | Form | Means | Available for |
+   |---|---|---|
+   | `✓ <driver> — <what it was>` | disarmed, confirmed | any driver with a read surface |
+   | `· <driver> — not armed` | read surface says it was never armed | any driver with a read surface |
+   | `~ <driver> — stop sent, no read surface` | a stop was issued; the harness offers nothing to confirm it | the non-enumerable drivers — § Session end names which those are and why |
 
 2. **Probe the state `stop` must not change** — read-only; the probe writes nothing and signals nothing:
 
@@ -23,7 +31,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/stop-probe.py
    ```
 
-   It prints the subject, the gate loop's pid and uptime, the tick file's mtime and age, and the ledger's open count.
+   It prints the session id; the subject with its branch and vault; **one line per gate loop found**, each with its pid and uptime; the tick file's path, mtime and age; and the ledger's open count.
 
 3. **Print the report** — this command's own output format, and the only surface the contract does not own:
 
@@ -31,7 +39,8 @@ Stand the manager loop **this session** is running down. This is the operator's 
    ⏹️ STOP — <subject> (<branch>) · session <sid8>
      Disarmed
        ✓ <driver> — <what it was>
-       · <driver that was not armed>
+       · <driver> — not armed
+       ~ <driver> — stop sent, no read surface
      Left running — fleet-surface.md § Session end owns this contract
        ● gate loop  pid <pid>, up <etime>
        ● tick file  <path>  mtime <iso>  (<age>s ago)
@@ -40,7 +49,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
      Restart: /supervisor:worker-manager "<subject>"
    ```
 
-   The gate-loop line takes the absent form below rather than printing a pid the probe did not find.
+   Print only the forms that occurred. A `●` line whose read came back absent takes its own form from `<error_handling>` instead of a fabricated value — the tick file and the gate loop each have one, and a dropped line reads as "checked and clean" when the truth may be "never looked".
 </process>
 
 <constraints>
@@ -51,5 +60,6 @@ Stand the manager loop **this session** is running down. This is the operator's 
 <error_handling>
 - **A driver that refuses to disarm** — print the failure verbatim together with the driver still standing, and say the loop is **not** fully stood down. Reporting success over a live driver is worse than reporting the failure.
 - **No gate loop found**: print `⚠️ no gate loop found` in place of the gate-loop line, and say plainly that it may never have been armed. A fact to report, not to repair.
+- **Tick file absent**: print `· tick file — absent` in place of that line, and say which of the two reasons it is — no subject recorded, so no tick path resolves, or the loop has not written one yet. Neither is a fault in this command.
 - **No subject recorded**: print the session id and carry on — the loop may have been armed before the subject was written.
 </error_handling>
