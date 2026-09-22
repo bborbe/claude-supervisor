@@ -1,5 +1,5 @@
 ---
-description: Read-only fleet roster — every peer Claude Code session, its live status, and its vault task mapping. Zero side effects. Ends with a blocked-by-you jump list (waiting sessions + /supervisor:jump lines).
+description: Read-only fleet roster — every peer Claude Code session, its live status, and its vault task mapping. Zero side effects. Ends with a blocked-by-you jump list (waiting sessions + clickable jump links).
 allowed-tools:
   - ListAgents
   - Bash(python3:*)
@@ -93,12 +93,14 @@ After the counts and one-source notes, emit a **blocked-by-you group** so the op
 
    ```text
    ⌛ Blocked by you (N waiting — waiting ≠ confirmed blocked; verify before acting)
-     1. <name> — <age> · jump: /supervisor:jump <PANEID>
-     2. <name> — <age> · jump: /supervisor:jump <PANEID>
-     Next blocker to jump to: <name> → /supervisor:jump <PANEID>
+     1. <name> — <age> · jump: <jump-link.py PANEID>
+     2. <name> — <age> · jump: <jump-link.py PANEID>
+     Next blocker to jump to: <name> → <jump-link.py PANEID --label>
    ```
 
-   The operator runs `/supervisor:jump <PANEID>`; **hand over a pane id, never a tab id** — a tab that moves windows is renumbered, so a handed-over `--tab-id` goes dead (measured 2026-09-18: three spawned workers routed as tabs 158/159/160 in window 0 became tabs 163/164/165 in window 2, and `activate-tab --tab-id 159` failed outright with *"could not determine which pane should be active"*, while `activate-pane --pane-id 239` worked immediately). Cross-window raise still needs Accessibility — no `activate-window` in wezterm CLI.
+   **Each `jump:` field is the one-line output of `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py <PANEID>` — never a hand-written URL, and never the token.** With the local fleet-jump server configured that is a clickable `http://127.0.0.1:1337/jump?pane=<N>&t=…` link the operator follows with **SHIFT+CMD+click** (the click is three keys, not one: inside a mouse-reporting TUI like Claude Code the modifier is what bypasses reporting, and WezTerm's own config documents this); without it the script prints the `/supervisor:jump <N>` command, so the row is always usable. **Never print a bare URL you built yourself** — the token lives in a 0600 file outside every repo, so a hand-written link is either broken or leaks the token into the repo. Emitting the link is a read-only act: printing a URL mutates nothing, which is what keeps this command inside its no-mutation contract.
+
+   The link carries a pane id; **hand over a pane id, never a tab id** — a tab that moves windows is renumbered, so a handed-over `--tab-id` goes dead (measured 2026-09-18: three spawned workers routed as tabs 158/159/160 in window 0 became tabs 163/164/165 in window 2, and `activate-tab --tab-id 159` failed outright with *"could not determine which pane should be active"*, while `activate-pane --pane-id 239` worked immediately). Cross-window raise still needs Accessibility — no `activate-window` in wezterm CLI.
 
    **Names lead, numbers serve the command.** Every row and every mention leads with the session/task name the operator recognizes; the `[ref]` and tab id are secondary, for the command only — never reference a session by bare number in prose.
 
