@@ -21,9 +21,9 @@ Stand the manager loop **this session** is running down. This is the operator's 
 
    | Form | Means | Available for |
    |---|---|---|
-   | `✓ <driver> — <what it was>` | disarmed, confirmed | any driver with a read surface |
-   | `· <driver> — not armed` | read surface says it was never armed | any driver with a read surface |
-   | `~ <driver> — stop sent, no read surface` | a stop was issued; the harness offers nothing to confirm it | the non-enumerable drivers — § Session end names which those are and why |
+   | `✓ <driver> — <what it was>` | disarmed, confirmed | the enumerable driver — a cron job, which `CronList` reads |
+   | `· <driver> — not armed` | read surface says it was never armed | the same one |
+   | `~ <driver> — stop sent, no read surface` | a stop was issued; the harness offers nothing to confirm it | every driver without a read surface — § Session end names them and why |
 
 2. **Probe the state `stop` must not change** — read-only; the probe writes nothing and signals nothing:
 
@@ -31,18 +31,18 @@ Stand the manager loop **this session** is running down. This is the operator's 
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/stop-probe.py
    ```
 
-   It prints the session id; the subject with its branch and vault; **one line per gate loop found**, each with its pid and uptime; the tick file's path, mtime and age; and the ledger's open count.
+   It prints the session id; the subject with its branch and vault; **one line per gate loop found**, each with its pid, uptime and command; the tick file's path, mtime and age; and the ledger's open count. The report below has a slot for every one of those — if a line has no slot, that is this template's defect, not a value to drop.
 
 3. **Print the report** — this command's own output format, and the only surface the contract does not own:
 
    ```
-   ⏹️ STOP — <subject> (<branch>) · session <sid8>
+   ⏹️ STOP — <subject> (<branch> · <vault>) · session <sid8>
      Disarmed
        ✓ <driver> — <what it was>
        · <driver> — not armed
        ~ <driver> — stop sent, no read surface
      Left running — fleet-surface.md § Session end owns this contract
-       ● gate loop  pid <pid>, up <etime>
+       ● gate loop  pid <pid>, up <etime>  <command>
        ● tick file  <path>  mtime <iso>  (<age>s ago)
      Session alive
        ● ledger <path> — <n> open of <m>, unchanged by this command
@@ -61,5 +61,6 @@ Stand the manager loop **this session** is running down. This is the operator's 
 - **A driver that refuses to disarm** — print the failure verbatim together with the driver still standing, and say the loop is **not** fully stood down. Reporting success over a live driver is worse than reporting the failure.
 - **No gate loop found**: print `⚠️ no gate loop found` in place of the gate-loop line, and say plainly that it may never have been armed. A fact to report, not to repair.
 - **Tick file absent**: print `· tick file — absent` in place of that line, and say which of the two reasons it is — no subject recorded, so no tick path resolves, or the loop has not written one yet. Neither is a fault in this command.
-- **No subject recorded**: print the session id and carry on — the loop may have been armed before the subject was written.
+- **No session id resolves**: the header prints `session (unknown)` verbatim, and the ledger line names the path it looked for. Say the id could not be resolved rather than leaving the slot empty — an empty slot reads as a value that was not printed, not as one that does not exist.
+- **No subject recorded**: print the session id and carry on — the loop may have been armed before the subject was written. The branch and vault render as `—` with it, since all three come from the same record.
 </error_handling>
