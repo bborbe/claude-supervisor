@@ -328,10 +328,14 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
   *recorded*, which is a different claim from *not spawned*. Both new cells render the
   literal `unknown`; a blank would collapse the two and read as a value the ledger supplied.
 - **`ATTRIBUTION` is `parent_session` + `label` when both are present**, falling back to
-  whichever exists. ⚠️ Measured 2026-09-21: **`parent_session` is null in every one of 380
-  records**, so in practice the column carries the **label** — the worker's purpose, set at
-  `spawn_agent`. The manager identity is therefore *not* currently recoverable from the
-  ledger; do not read a label-only cell as "no manager".
+  whichever exists. ✅ Fixed 2026-09-22: `parent_session` now resolves to the nearest
+  registered ancestor, so the column names the manager for records written since. ⚠️ The
+  store's **existing** records keep `null` — measured that day at 398 of 398, and they are
+  deliberately not backfilled, because a repaired edge would assert an attribution nobody
+  observed at spawn time. So a label-only cell means *the manager was not recorded*, not
+  *there was no manager* — and since the two vintages are indistinguishable by field alone,
+  compare `spawned_at` against the release that added the ancestor walk before reading a
+  `null` as a defect in the current build.
 - **Two spawn counts, both labelled:** `spawned today (UTC): N` and `spawned today (local): M`.
   `spawned_at` is UTC-only, so the day boundary has two defensible readings and the view
   states which is which rather than silently picking one. They legitimately differ by the
