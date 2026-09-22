@@ -21,6 +21,7 @@ import io
 import os
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -74,6 +75,38 @@ class TestJumpLink(unittest.TestCase):
         rc, out = run_main(["1346"], token_path=self.tmp.name)
         self.assertEqual(rc, 0)
         self.assertNotIn("\n", out)
+
+    def test_url_special_token_is_encoded_not_interpolated(self):
+        """A token with `&`, `#` or `=` must survive the round trip intact.
+
+        Interpolating it raw lets `&` inject a second query parameter and `#`
+        truncate the token at the fragment, so the link fails in a way that
+        reads as "the server is down" rather than "the link is malformed".
+        Asserting on the RECOVERED token is what makes this test bite: a test
+        that only checked the URL contained the token would pass either way.
+        """
+        nasty = "abc&foo=bar#123"
+        with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+            fh.write(nasty + "\n")
+            path = fh.name
+        try:
+            rc, out = run_main(["1346"], token_path=path)
+            self.assertEqual(rc, 0)
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(out).query)
+            self.assertEqual(query.get("t"), [nasty])
+            self.assertEqual(query.get("pane"), ["1346"])
+            self.assertNotIn("foo", query)  # the injected parameter must not exist
+            self.assertNotIn("#", out)      # nothing may open a fragment
+        finally:
+            os.unlink(path)
+
+    def test_malformed_host_and_port_fall_back_to_defaults(self):
+        """A bad env value must not produce a link that resolves nowhere."""
+        rc, out = run_main(["7"], token_path=self.tmp.name,
+                           extra_env={"JUMP_HOST": "http://evil.example.com/x",
+                                      "JUMP_PORT": "not-a-port"})
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("http://127.0.0.1:1337/jump?pane=7&t="))
 
     def test_port_and_host_are_overridable(self):
         rc, out = run_main(["7"], token_path=self.tmp.name,

@@ -32,16 +32,21 @@ race the click. The pane id handed over is the one the sweep just resolved.
 jump list reads today. It costs one extra `wezterm cli list`; use it for the
 primary handover line, not for a column repeated per row.
 """
+import json
 import os
+import re
 import subprocess
 import sys
+import urllib.parse
 
 DEFAULT_TOKEN_PATH = os.path.expanduser("~/.claude/secrets/jump-token")
 DEFAULT_PORT = 1337
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_JUMP_PY = os.path.expanduser(
-    "~/.claude/plugins/marketplaces/claude-supervisor/scripts/jump.py"
-)
+
+# A hostname or IPv4 literal. Deliberately narrow: this value goes into a URL
+# unencoded, so anything outside this set (a scheme, a path, userinfo, spaces)
+# is a value we would rather discard than emit.
+_HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
 
 
 def clean_title(title):
@@ -59,7 +64,6 @@ def pane_title(pane_id):
     try:
         raw = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
                              capture_output=True, text=True, timeout=5).stdout
-        import json
         for p in json.loads(raw):
             if str(p.get("pane_id")) == str(pane_id):
                 return clean_title(p.get("title"))
@@ -84,8 +88,20 @@ def main(argv):
     fallback = "/supervisor:jump %s" % pane
 
     token_path = os.environ.get("JUMP_TOKEN_PATH", DEFAULT_TOKEN_PATH)
+
+    # Validate host/port before they reach the URL. These come from the
+    # environment rather than the operator, but a malformed value would produce
+    # a link that looks fine and resolves nowhere, which is the failure this
+    # script exists to avoid — so fall back to the defaults rather than emit it.
     host = os.environ.get("JUMP_HOST", DEFAULT_HOST)
-    port = os.environ.get("JUMP_PORT", str(DEFAULT_PORT))
+    if not _HOST_RE.match(host or ""):
+        host = DEFAULT_HOST
+    try:
+        port = int(os.environ.get("JUMP_PORT", DEFAULT_PORT))
+        if not 1 <= port <= 65535:
+            raise ValueError(port)
+    except (TypeError, ValueError):
+        port = DEFAULT_PORT
 
     try:
         with open(token_path, encoding="utf-8") as fh:
@@ -99,7 +115,13 @@ def main(argv):
         print(fallback)
         return 0
 
-    link = "http://%s:%s/jump?pane=%s&t=%s" % (host, port, pane, token)
+    # ENCODE, never interpolate. The token is file-sourced, not operator-typed,
+    # but it is still a value being placed into a query string: a token holding
+    # `&` or `#` would otherwise inject a second parameter or truncate itself,
+    # and the link would fail in a way that reads as "the server is down".
+    # urlencode also keeps this correct if the token alphabet ever widens.
+    query = urllib.parse.urlencode({"pane": pane, "t": token})
+    link = "http://%s:%s/jump?%s" % (host, port, query)
 
     if label:
         title = pane_title(pane)
