@@ -36,6 +36,7 @@ The caller passes: this round's `ListAgents` roster verbatim · this manager's s
    - **Task mapping + mtime:** `python3 $P/fleet-sessions.py`. ~2000 lines raw: never read it uncompacted — pipe through `grep -oE '\b[0-9a-f]{8}\b'`, or filter to one id. **Exception:** a call made to read a row's `LAST-ACTIVE` must not compact. Never extract the id by column position (`awk '{print $4}'` — the `●` marker shifts columns); never build the live set from `grep '●'` (argv-only, blind to fresh sessions).
    - **Context usage:** `python3 $P/context-usage.py --compactable --threshold 70` — sessions over threshold, neither blocked nor in a tool call.
    - **Liveness authority:** `~/.claude/sessions/*.json` (pid-keyed, carries `sessionId`, `status`, `cwd`; deleted on exit). Registry beats the spawn ledger and `pgrep` every time. A `/branch` holds a new id — id-keyed probes on the parent id call it dead; the registry sees it.
+   - **Roster → session id join — do this before anything else keys on a session.** The `[ref]` in a roster row's brackets is **not** a session id and joins to nothing: it is 6 chars, computed per roster read, persisted nowhere. Map each row by its **name** instead — strip a leading `⚙ ` marker, then match it exactly against `name` in `~/.claude/sessions/*.json`; that record's `sessionId` is the key (its first 8 chars join to `fleet-sessions.py`'s `SESSION` column). No match, or more than one → the row is **unresolved**: display it as `<name> [unresolved]`, give it no snapshot entry, and name it in NOTES. **Never guess an id** — a guessed key is diffed as a real session next round.
 
 2. **Read the open-items ledger (Step 0b).** `python3 $P/open-items.py --session "$SID" list`. Render every open entry: kind · what · state · age. Empty is a valid read.
 
@@ -74,7 +75,7 @@ The caller passes: this round's `ListAgents` roster verbatim · this manager's s
    ```json
    {"<session id>": {"name": "<ListAgents name>", "status": "busy", "task_file": "/abs/path.md", "task_mtime": "2026-08-21T14:00:00Z", "stall_count": 0}}
    ```
-   `status` = raw roster string (`busy`/`shell`/`waiting`/`idle`/blank). `task_file`/`task_mtime` = `null` when none resolves. `stall_count` = consecutive sweeps `busy`/`shell` with `task_mtime` not advancing; reset to 0 when mtime advances, status changes, or status leaves `busy`/`shell`. Never key on `[ref]`; never resolve names via `~/.claude/history.jsonl`.
+   `status` = raw roster string (`busy`/`shell`/`waiting`/`idle`/blank). `task_file`/`task_mtime` = `null` when none resolves. `stall_count` = consecutive sweeps `busy`/`shell` with `task_mtime` not advancing; reset to 0 when mtime advances, status changes, or status leaves `busy`/`shell`. Never key on `[ref]`, never on a guessed id — unresolved rows get no entry; never resolve names via `~/.claude/history.jsonl`.
 
 </process>
 
