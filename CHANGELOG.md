@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.28.1
 
 - fix: `commands/worker-manager.md`'s `approve:`-line rule is **widened from a relayed line to an authored one**, matching the wording its sibling `commands/fleet-manager.md:74` already carried. It read *"Never restate the blocked session's `approve:` line — and never merely refuse it"*, which covers a human-decision relayed from a worker but not a command the manager writes into its own closer panel or `pick`. Measured 2026-09-22 on the goal `Phase-Gated Topic Flow`: the closer panel carried `approve: /vault-cli:complete-goal` while the goal read **1/5 SC**, and that command refuses at any unticked criterion without a recorded `unticked_criteria:` route — so the line named an act the session could not perform, and the operator caught it verbatim: *"Why do you think the goal is completed if the success criteria are at 20%?"* One turn later the tick itself, an act the manager contract forbids, went into a `pick` as option 1. The relay half is kept verbatim and the two shapes are now labelled `(a)`/`(b)`; the new half is the rule `fleet-manager.md` already stated as *"this session cannot execute"*.
 
