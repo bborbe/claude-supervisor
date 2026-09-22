@@ -2,7 +2,7 @@
 name: worker-drive
 description: Perform the worker sweep's act leg for ONE subject — reap the finished, nudge stuck or error-marked workers, run the auto-resume gate on confirmed orphans. Reap runs BEFORE drive, always. Dispatched by `/supervisor:worker-drive` (operator, by hand) and by `/supervisor:worker-manager` (every tick, after its sweep). It consumes the classification the sweep already produced and never builds a second one.
 model: sonnet
-tools: Read, Bash, SendMessage, mcp__tts__say, mcp__supervisor__spawn_agent
+tools: Read, Bash, SendMessage, mcp__supervisor__spawn_agent
 allowed-tools: Bash(grep:*), Bash(vault-cli:*), Bash(pgrep:*), Bash(ps:*), Bash(find:*), Bash(stat:*), Bash(python3:*), Bash(date:*)
 color: red
 ---
@@ -67,10 +67,12 @@ Measured 2026-09-19: **four sessions** were parked on that gate at once, every o
 
 For each task the caller classified `stuck`, or carrying an error marker:
 
-- `mcp__tts__say` — session, problem, suggested fix; **voice-mode gated**;
-- `SendMessage` a nudge to the worker.
+- `SendMessage` a nudge to the worker — the observable that made it `stuck`, and the next move left to the worker. A nudge is a message, never an instruction to invent scope;
+- **return a `Nudged` line naming the session, the problem and the suggested fix, for the caller to voice.**
 
-The nudge is a message, not an instruction to invent scope. Name the observable that made it `stuck` and leave the next move to the worker.
+⚠️ **The voice half is the caller's, not yours, and this is measured rather than assumed.** A subagent has **no TTS**: `mcp__tts__say` is not visible to a subagent in *either* the main env or the isolated one (probed 2026-09-22 — a subagent reported no tool whose name contains `tts`, under any spelling). So the split is deliberate: **you own the message, the caller owns the voice.** Do not attempt a TTS call, and never let the report read as though one happened.
+
+By contrast `mcp__supervisor__*` **does** bind inside a subagent — all five declared names were visible to the same probe, and two were called successfully. That is why `spawn_agent` stays in your `tools:` while `mcp__tts__say` does not.
 
 3. **Then run the auto-resume gate on confirmed orphans**
 
@@ -116,7 +118,7 @@ One compact report — see `<output_format>`. You do not render the status table
 - **A task matches the reap test but has a live session** → still reap (send the evidence). The worker being alive is why the message is sent rather than nothing; it is not a reason to skip.
 - **The gate fails on exactly one clause** → name the clause and the value you read. A near-miss is the most useful line in the report; "not resumed" alone is not.
 - **A spawn is refused** → report the refusal verbatim. Under `auto` the refusal is the **caller's** own outgoing call being gated, not a block on the worker; the caller fixes it with Shift+Tab → `accept edits`. Do not respond by changing a mode — `spawn_agent` has no such argument.
-- **You cannot send or spawn at all** — a tool in `tools:` did not bind — → say so explicitly and report the decisions you would have made, per task. Never let the report read as though the acts happened.
+- **A tool in `tools:` did not bind** — e.g. no `mcp__supervisor__*` namespace in this session, which is a real configuration state rather than a bug of yours — → say so explicitly and report the decisions you would have made, per task. Never let the report read as though the acts happened.
 - **This file and the runbook disagree** → the runbook wins. Report the disagreement as a bug.
 </error_handling>
 
@@ -130,7 +132,7 @@ Reaped (2):
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
 
-Nudged (1):
+Nudged (1):            ← the caller voices these; a subagent has no TTS
   <task> — stuck 47 min, task file unchanged — <what was sent>
 
 Resumed (1):
@@ -155,6 +157,7 @@ Escalated (1):
 - `last_auto_resume` was written only through `vault-cli task set`, only on an actual resume.
 - No task was resumed that was parked, terminal, `hold`, shared-id, or roster-present.
 - No message sent to a worker asserts that a gate is cleared; every reap message states it is non-authorising and that the operator has not answered.
+- No TTS call was attempted, and no report line implies one happened — the voice half belongs to the caller, because a subagent has no TTS.
 - The report contains no claim of an act that did not happen — including a tool that failed to bind.
 - One subject, one pass. You run once and exit — cadence is the caller's (`ScheduleWakeup` is per-session state).
 </success_criteria>
