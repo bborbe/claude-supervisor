@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.31.0
 
 - feat: **jump targets are clickable links, so the operator stops copy-pasting `/supervisor:jump <N>` dozens of times a session.** The `fleet-status`, `worker-status` and `fleet-manager` blocked-by-you lists now emit each pane's target as the one-line output of the new `scripts/jump-link.py <pane-id>`: a `http://127.0.0.1:1337/jump?pane=<N>&t=…` link the operator follows with SHIFT+CMD+click (three keys, not one — inside a mouse-reporting TUI the modifier is what bypasses reporting, and WezTerm's own config documents this), served by a loopback-only launchd agent that validates the pane against the live WezTerm list and then delegates to the shipped `jump.py`. **The script falls back to the literal `/supervisor:jump <N>` command whenever the server is not configured, so a row is never a dead link** — the failure this guards is a link that looks followable and is not. **The token is never in this repo:** it is read at emit time from `~/.claude/secrets/jump-token` (0600), because a committed token would defeat the CSRF control it exists for — a visited page can fire `<img src="…/jump?pane=X">`, and cross-origin JS cannot read a token it cannot see. Emitting a URL mutates nothing, so the read-only-by-contract status commands stay read-only. The `/supervisor:jump` command is unchanged and remains the executor behind every link.
 
