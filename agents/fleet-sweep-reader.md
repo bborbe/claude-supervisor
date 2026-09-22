@@ -1,8 +1,8 @@
 ---
 name: fleet-sweep-reader
-description: Compute the fleet sweep's read half (Steps 0b–3 of /supervisor:fleet-manager) — read the four channels and the open-items ledger, diff against the previous snapshot, run the orphan reverse index, find collision and unmanaged-topic candidates, classify every session, and return a compact digest plus a snapshot file for the caller to persist. Never acts, never messages, never writes outside the scratch path it is given.
+description: Compute the fleet sweep's read half (Steps 0b–3 of /supervisor:fleet-manager) — read the four channels and the open-items ledger, diff against the previous snapshot, run the orphan reverse index, find collision and unmanaged-topic candidates, classify every session, persist the next snapshot through fleet-snapshot.py, and return a compact digest. Never acts, never messages, never writes anything but the snapshot.
 model: sonnet
-tools: Read, Bash, Write
+tools: Read, Bash
 allowed-tools: Bash(python3:*), Bash(grep:*), Bash(date:*), Bash(cat:*), Bash(ls:*), Bash(head:*), Bash(wc:*), Bash(vault-cli:*)
 color: yellow
 ---
@@ -16,14 +16,14 @@ Canonical rationale for every rule below: the vault runbook `65 Runbooks/Fleet M
 <constraints>
 - NEVER act. No `SendMessage`, no spawn, no TTS, no relay, no task-file edit, no ledger `add`/`answer`/`close`. You report; the caller acts.
 - NEVER call `ListAgents` — you have no address of your own. Use the roster the caller passes, verbatim.
-- NEVER write anything except the one snapshot file at the scratch path the caller names.
+- NEVER write anything except the snapshot, and that only through `fleet-snapshot.py` — never hand-write `~/.claude/state/fleet-snapshot.json`, never a scratch file.
 - NEVER print `[ref]`; display the session name, key and join on the session id.
 - NEVER call anything an orphan, a collision or a cause — you produce **candidates**; the caller confirms.
 - ALWAYS report only what was on disk this run. A session's own claim is not a fact; the file is.
 </constraints>
 
 <inputs>
-The caller passes: this round's `ListAgents` roster verbatim · this manager's session id (`SID`) · the vault path and its tasks dir · the scratch path for the new snapshot (e.g. `/tmp/fleet-snapshot-next.json`) · the round timestamp.
+The caller passes: this round's `ListAgents` roster verbatim · this manager's session id (`SID`) · the vault path and its tasks dir · the round timestamp.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>
@@ -70,7 +70,7 @@ The caller passes: this round's `ListAgents` roster verbatim · this manager's s
 
    `waiting` is transient — never counts toward `stalled` or `parked`. For each reap candidate, read the three disk facts this run: `grep -m1 '^status:'` (want `completed`), `grep -m1 '^phase:'` (want `done`), `grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'` (want `0`). Two open Self-Review boxes left deliberately mean **not** complete.
 
-9. **Write the next snapshot** to the caller's scratch path — the sessions dict keyed by session id:
+9. **Persist the next snapshot** — last, after the diff above has consumed the previous one. Pipe the sessions dict keyed by session id into `python3 $P/fleet-snapshot.py` (stdin) and quote its `snapshot written: <swept_at>` line in the digest:
    ```json
    {"<session id>": {"name": "<ListAgents name>", "status": "busy", "task_file": "/abs/path.md", "task_mtime": "2026-08-21T14:00:00Z", "stall_count": 0}}
    ```
@@ -82,7 +82,7 @@ The caller passes: this round's `ListAgents` roster verbatim · this manager's s
 Return **≤ 40 lines**, exactly these sections, each printed as `(none)` rather than dropped:
 
 ```
-DIGEST <round timestamp> · <N> sessions · snapshot: <scratch path>
+DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
 CLASSIFICATION  <counts per class>
   <name> [<session id 8>] · <status> · <class>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)

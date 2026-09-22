@@ -122,9 +122,9 @@ python3 $P/open-items.py --session "$SID" close  --id <id> --evidence "<the on-d
 
 **Steps 0b–3 — delegate.** Dispatch:
 
-`Task(subagent_type: "supervisor:fleet-sweep-reader", prompt: <this round's ListAgents roster verbatim + SID + vault path and tasks dir + scratch path /tmp/fleet-snapshot-next.json + round timestamp>)`
+`Task(subagent_type: "supervisor:fleet-sweep-reader", prompt: <this round's ListAgents roster verbatim + SID + vault path and tasks dir + round timestamp>)`
 
-The plugin prefix is required — a bare `fleet-sweep-reader` resolves to a personal `~/.claude/agents/` copy. The agent (Sonnet) reads the four channels and the ledger, loads the previous snapshot, stats each `busy`/`shell` task file, runs the orphan reverse index (`orphan-candidates.py --tasks-dir . --max-age-days 7`, park filter + 7-day upper bound, exit code checked), finds collision and unmanaged-topic candidates, classifies every session, writes the next snapshot to the scratch path, and returns a **≤ 40-line digest**. It owns those rules — read them in `agents/fleet-sweep-reader.md`; this command does not restate them.
+The plugin prefix is required — a bare `fleet-sweep-reader` resolves to a personal `~/.claude/agents/` copy. The agent (Sonnet) reads the four channels and the ledger, loads the previous snapshot, stats each `busy`/`shell` task file, runs the orphan reverse index (`orphan-candidates.py --tasks-dir . --max-age-days 7`, park filter + 7-day upper bound, exit code checked), finds collision and unmanaged-topic candidates, classifies every session, persists the next snapshot through `fleet-snapshot.py`, and returns a **≤ 40-line digest**. It owns those rules — read them in `agents/fleet-sweep-reader.md`; this command does not restate them.
 
 **What stays here:** every liveness verdict, every confirmation of a candidate, and every action.
 
@@ -205,11 +205,7 @@ Never one interruption per stuck session. Collect every `stalled`, `parked` and 
 
 ## Step 6 — Persist the new snapshot
 
-```bash
-python3 $P/fleet-snapshot.py < /tmp/fleet-snapshot-next.json
-```
-
-Overwrites `~/.claude/state/fleet-snapshot.json` (schema: `agents/fleet-sweep-reader.md` step 9). On the fallback path, pipe the sessions JSON you built instead.
+The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`). On the fallback path, persist it yourself — pipe the sessions JSON (schema: `agents/fleet-sweep-reader.md` step 9) into `python3 $P/fleet-snapshot.py`; never hand-write `~/.claude/state/fleet-snapshot.json`.
 
 ## Output shape
 
