@@ -18,7 +18,15 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { checkLiveness, pidIsAlive, readRegistry, registeredAsLive } from './liveness.mjs'
+import {
+  checkLiveness,
+  findRegisteredByName,
+  pidIsAlive,
+  readRegistry,
+  registeredAsLive,
+  sessionIdsNamed,
+  uniqueTabName,
+} from './liveness.mjs'
 
 const SESSION = '63c613e0-7fd8-4dc3-b05e-c43bbf89be58'
 const OTHER = '4ff785a3-c2b9-45cc-98d9-83720ff1883d'
@@ -214,4 +222,81 @@ test('the registry cannot separate a live headless worker from a finished one', 
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// The tab name is the join between a spawned session and its id, and a name is NOT
+// unique. `findRegisteredByName` returned the FIRST entry matching the name, so a label
+// reused while an earlier worker still held it resolved the new spawn to THAT worker —
+// and its id, not the new session's, is what went into the ledger record. Nothing in the
+// old implementation could tell "the session I just started" from "a session that was
+// already there".
+//
+// Measured live 2026-09-22: a spawn whose label collided returned `sessionId: null` and
+// wrote no ledger record, while the same call with a free label resolved and wrote one.
+// The name is what differs, so the name is what the spawn has to make unambiguous.
+
+test('findRegisteredByName will not hand back a holder the caller already knew about', () => {
+  const dir = fixture({ '1.json': { pid: process.pid, sessionId: SESSION, name: '⚙ reused' } })
+  try {
+    // Pre-fix behaviour: the pre-existing holder IS the answer, indistinguishable from a
+    // session that registered a moment ago.
+    assert.equal(findRegisteredByName('⚙ reused', { dir }), SESSION)
+    // Excluding it leaves nothing — "not there yet", which the caller polls on, rather
+    // than a stranger's id it would otherwise record as its own.
+    assert.equal(findRegisteredByName('⚙ reused', { dir, exclude: new Set([SESSION]) }), null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('findRegisteredByName with an exclusion rejects every holder, not just the first read', () => {
+  // Two holders of one name: which one `find` returns is a readdir order the caller
+  // cannot know, so the exclusion has to reject BOTH rather than whichever it saw.
+  const dir = fixture({
+    '1.json': { pid: process.pid, sessionId: SESSION, name: '⚙ reused' },
+    '2.json': { pid: process.pid, sessionId: OTHER, name: '⚙ reused' },
+  })
+  try {
+    assert.ok(
+      [SESSION, OTHER].includes(findRegisteredByName('⚙ reused', { dir })),
+      'pre-fix, one of the two holders is returned as if it were the session just started',
+    )
+    assert.equal(findRegisteredByName('⚙ reused', { dir, exclude: new Set([SESSION, OTHER]) }), null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('sessionIdsNamed reports every holder, and null when the registry is unreadable', () => {
+  const dir = fixture({
+    '1.json': { pid: process.pid, sessionId: SESSION, name: '⚙ reused' },
+    '2.json': { pid: process.pid, sessionId: OTHER, name: '⚙ reused' },
+    '3.json': { pid: process.pid, sessionId: 'a1b2c3d4-0000-4000-8000-000000000000', name: '⚙ other' },
+  })
+  try {
+    assert.deepEqual(sessionIdsNamed('⚙ reused', { dir }).sort(), [SESSION, OTHER].sort())
+    assert.deepEqual(sessionIdsNamed('⚙ nobody', { dir }), [])
+    assert.equal(sessionIdsNamed('⚙ reused', { dir: '/nonexistent/supervisor/sessions' }), null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('uniqueTabName suffixes past every holder so the join can only be the new session', () => {
+  const dir = fixture({
+    '1.json': { pid: process.pid, sessionId: SESSION, name: '⚙ dup' },
+    '2.json': { pid: process.pid, sessionId: OTHER, name: '⚙ dup (2)' },
+  })
+  try {
+    assert.equal(uniqueTabName('⚙ dup', { dir }), '⚙ dup (3)')
+    assert.equal(uniqueTabName('⚙ free', { dir }), '⚙ free')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('uniqueTabName leaves the name alone when the registry cannot be read', () => {
+  // An unreadable registry is "no information", not "nothing holds this name": renaming
+  // on that answer would rename on every spawn whenever the directory is briefly gone.
+  assert.equal(uniqueTabName('⚙ x', { dir: '/nonexistent/supervisor/sessions' }), '⚙ x')
 })

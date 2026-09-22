@@ -18,7 +18,7 @@ import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
-import { checkLiveness, findRegisteredByName } from './liveness.mjs'
+import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { resolveSpawnMode, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
@@ -479,7 +479,18 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId, chip })
   // as its own message once the pane is up; see tab.mjs for why that needs an
   // activated tab and a readiness poll. A colour that fails to apply is logged and
   // non-fatal: the worker still has its task.
-  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(`⚙ ${label}`)} ${shellQuote(prompt)}`
+  // The tab name is the ONLY join back from this tab to its session id, and a name is
+  // NOT unique — so it is made unique HERE, before the process exists. `find` returns the
+  // first holder, so a label reused while an earlier worker still answers to it would
+  // resolve this spawn to THAT worker and write its id into this one's ledger record.
+  // Deriving a free name first, and snapshotting who held it, is what makes the join
+  // unambiguous whatever produced the earlier holder — a guard on the name, not a fix for
+  // one cause of a collision. Measured 2026-09-22: a spawn whose name collided returned
+  // `sessionId: null` and wrote no ledger record, while the same call with a free name
+  // resolved and wrote one.
+  const tabName = uniqueTabName(`⚙ ${label}`)
+  const preexisting = new Set(sessionIdsNamed(tabName) ?? [])
+  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
   // `--window-id` is what puts the tab in a ROLE's window. Omitted, the tab inherits
   // WEZTERM_PANE from the calling session and lands in whatever window the caller is
   // in — which is how a human-only task came up in the Agents window (2026-09-20).
@@ -520,12 +531,16 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId, chip })
   // never reported to us — and without it there is no key for the ledger. The registry
   // carries the tab name we set, so that is the join. Polled rather than assumed,
   // because the session registers about a second after the pane opens.
+  //
+  // `exclude` carries the holders snapshotted before the spawn, so a name taken in the
+  // race between that snapshot and this poll still cannot be matched. The poll can then
+  // only resolve to the session this call created — or to nothing, which is the honest
+  // "never registered" the caller already has to handle.
   let sessionId = null
   if (paneId) {
-    const tabName = `⚙ ${label}`
     const deadline = Date.now() + 8000
     while (!sessionId && Date.now() < deadline) {
-      sessionId = findRegisteredByName(tabName)
+      sessionId = findRegisteredByName(tabName, { exclude: preexisting })
       if (!sessionId) await new Promise((resolve) => setTimeout(resolve, 250))
     }
   }

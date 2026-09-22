@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a spawned worker's tab name is made unique before its process starts, so the name → session-id join cannot resolve to a different session.** That join is `findRegisteredByName("⚙ " + label)`, an exact name match, and a name is not unique — `find` returned the FIRST holder, so a label reused while an earlier worker still answered to it resolved the new spawn to THAT worker, and the old session's id is what went into the new worker's ledger record. `uniqueTabName` now suffixes until the name is free, and the poll takes the holders snapshotted before the spawn as an `exclude` set, so a name taken in the race between the snapshot and the poll cannot be matched either. The guard is on the name rather than on one cause of a collision: a live collision measured 2026-09-22 returned `sessionId: null` and wrote no ledger record, while the same call with a free name resolved and wrote one, and no mechanism for producing the collision has survived a control.
+
 ## v0.30.3
 
 - fix: **`fleet-sweep-reader` joined the roster on `[ref]` and wrote a guessed session id into the snapshot.** Its first real sweep (v0.30.2) treated the `ListAgents` `[ref]` tokens as session ids, found no registry match, fell back to title matching, and keyed one session as `be1ee10b?`. The old command's snapshot-schema notes carried the join rule (`[ref]` never joins; the registry bridges name → `sessionId`) and it did not make it into the agent. The agent now maps each roster row by name to `~/.claude/sessions/*.json` `name` → `sessionId`, and an unmatched or ambiguous row is reported `[unresolved]` with no snapshot entry instead of a guessed key.
