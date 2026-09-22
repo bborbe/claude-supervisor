@@ -17,7 +17,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
 <process>
 1. **Read the contract, then disarm every model-waking driver it names** — in the order it gives, printing each driver's line as you go and *before* the call that removes it, since a deletion the operator cannot see is indistinguishable from a job that was never armed. Those lines **are** the report's `Disarmed` block — collect them, and do not print the set a second time.
 
-   **Three forms, because the drivers do not share a read surface.** `✓` and `·` are claims a read surface confirmed; `~` is the honest form when only a stop was sent and nothing can confirm the outcome. Never print `✓` for a driver you could not read.
+   **Three forms, because the drivers do not share a read surface.** `✓` and `·` are claims a read surface confirmed; `~` is the honest form for a driver nothing can confirm — whether a stop was sent or none could be. Never print `✓` for a driver you could not read.
 
    | Form | Means | Available for |
    |---|---|---|
