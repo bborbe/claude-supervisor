@@ -259,6 +259,33 @@ starts somewhere else and its first file operation goes to the wrong tree. Pass 
 task's directory; if you cannot determine it, read `cwd` from the session registry
 (`~/.claude/sessions/<pid>.json`) rather than guessing.
 
+### The tab name is the join — and it is made unique before the process starts
+
+A tab worker is a separate process the supervisor does not create, so it never learns that
+worker's session id the way it does for a headless one. The registry carries `name`, and the
+spawn sets the tab title, so **the name is the only join back from a tab to its session id**:
+`findRegisteredByName("⚙ " + label)`, polled for up to 8s after the pane opens.
+
+A name is not unique, and `find` returns the FIRST entry matching it. A label reused while an
+earlier worker still answered to it therefore resolved the new spawn to **that** worker — and
+the old session's id is what went into the new worker's ledger record. So the name is derived
+*before* the process starts: `uniqueTabName` suffixes `(2)`, `(3)`, … until nothing holds it,
+and the poll carries the holders snapshotted before the spawn as an `exclude` set, so a name
+taken in the race between that snapshot and the poll cannot be matched either.
+
+Two consequences worth knowing when reading a roster:
+
+- **A suffixed tab title means the base name was taken.** A worker spawned under a label
+  already in use comes up as `⚙ <label> (2)`, not `⚙ <label>` — the suffix is the guard
+  working, not a naming mistake.
+- **`sessionId: null` on a spawn response is the honest "never registered".** The poll could
+  not resolve the name to a session that did not already exist, so no ledger record is
+  written for it — `writeLedger` skips a falsy id and logs `WARNING: no ledger record for
+  <id>`. A spawn **can** return `sessionId: null` while still opening a working tab.
+
+⚠️ The guard is on the **name**, not on one cause of a collision: it makes the join
+unambiguous whatever produced the earlier holder, including a cause not yet identified.
+
 ## A headless worker exits at turn end — that is not "finished"
 
 Two exits look like completion and are not. A headless worker **ends its turn on a READY
