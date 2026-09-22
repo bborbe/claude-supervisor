@@ -24,6 +24,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
 | `/supervisor:fleet-manager` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
 | `/supervisor:worker-manager` `/supervisor:worker-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
+| `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 
 ## Two spawn modes
 
@@ -257,6 +258,7 @@ commands/{spawn,workers,answer,drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
 commands/{fleet-manager,fleet-status}.md         fleet surface — many sessions
 commands/{worker-manager,worker-status}.md       one goal or topic
+commands/stop.md                                 stand that loop down
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/worker-wrangler.md                routine approval loop over headless workers
