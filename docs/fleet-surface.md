@@ -420,14 +420,18 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
 - ⚠️ **Do not type a leading glyph.** The harness already bullets assistant output with `⏺`;
   a literal copy renders doubled.
 - Below the box, only the non-empty action lines: the **blocked-by-you jump list**
-  (`⌛ Blocked by you (N waiting …)` with `/supervisor:jump <PANEID>` per row),
+  (`⌛ Blocked by you (N waiting …)` with one `jump:` target per row),
   `⚠️ ORPHANED: <task> — <why>`, and `⚠️ ACTION NEEDED: <the human decision>`. **Names lead**;
-  the `[ref]` and pane id are secondary. ⚠️ **Hand over a pane id, never a tab id** — a tab
-  that moves windows is renumbered, so a handed-over `--tab-id` goes dead (measured
-  2026-09-18: tabs 158/159/160 in window 0 became 163/164/165 in window 2, and
+  the `[ref]` and pane id are secondary. Each `jump:` target is the one-line output of
+  `scripts/jump-link.py <PANEID>` — a clickable `http://127.0.0.1:1337/jump?pane=<N>&t=…`
+  link when the local fleet-jump server is configured, and the `/supervisor:jump <N>` command
+  when it is not. **Never hand-write the URL**: the token lives in a 0600 file outside every
+  repo, so a hand-built link is either broken or leaks it. ⚠️ **Hand over a pane id, never a
+  tab id** — a tab that moves windows is renumbered, so a handed-over `--tab-id` goes dead
+  (measured 2026-09-18: tabs 158/159/160 in window 0 became 163/164/165 in window 2, and
   `activate-tab --tab-id 159` failed outright while `activate-pane --pane-id 239` worked
-  immediately). `/supervisor:jump` is the executor; a raw `wezterm cli activate-tab` line
-  is not a handover.
+  immediately). `/supervisor:jump` stays the executor behind the link; a raw
+  `wezterm cli activate-tab` line is not a handover.
 
 The table is the dashboard; TTS stays problem-only and voice-mode gated; the action lines
 appear only when non-empty.
