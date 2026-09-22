@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.30.3
 
 - fix: **`fleet-sweep-reader` joined the roster on `[ref]` and wrote a guessed session id into the snapshot.** Its first real sweep (v0.30.2) treated the `ListAgents` `[ref]` tokens as session ids, found no registry match, fell back to title matching, and keyed one session as `be1ee10b?`. The old command's snapshot-schema notes carried the join rule (`[ref]` never joins; the registry bridges name → `sessionId`) and it did not make it into the agent. The agent now maps each roster row by name to `~/.claude/sessions/*.json` `name` → `sessionId`, and an unmatched or ambiguous row is reported `[unresolved]` with no snapshot entry instead of a guessed key.
 
