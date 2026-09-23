@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: fleet-drive fails closed — a candidate with no `CLOSERS` row is unverifiable (a chat-only `pick` was nudged past), revive requires an observed routine-continue closer; the drive ledger is read only from its own file and merged on write, never rebuilt from the digest's open-items line (it had shrunk 37 → 8 entries).
+
 ## v0.41.0
 
 - fix: **`make check-changelog` fails when a released tree has unreleased files and no `## Unreleased` section.** The released-tree branch treated a missing `## Unreleased` as legitimate, which holds only while nothing is unreleased behind it. A merge landing *after* the release cut folds its entry under the released heading and leaves no `## Unreleased` at all — the release watcher then has nothing to cut, so the change can never ship (measured 2026-09-23: #138's entry folded under `## v0.39.1`, and master carried unreleased code with no section to cut it from). The check now asks whether any file other than `CHANGELOG.md` differs from the newest tag: counting commits was too coarse, because a merge can land after the cut carrying nothing unreleased, and repairing a released section's text leaves `CHANGELOG.md` itself differing from the tag. An unanswerable git check is reported as such, never passed silently.
