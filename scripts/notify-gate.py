@@ -14,7 +14,7 @@ the same gate to Telegram, so a gate raised while the operator is away arrives.
 
 Three de-dup axes, and this script owns the second and third:
 
-  * WHICH manager notifies is already decided upstream -- `commands/fleet-manager.md`
+  * WHICH manager notifies is already decided upstream -- `commands/fleet-loop.md`
     drops an entry whose owning worker manager is live on the roster, so any given
     gate reaches this script at most once per sweep.
   * HOW OFTEN is this script's ledger -- and it is PER LAYER, because each layer's
@@ -131,7 +131,7 @@ STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 def ledger_path(layer):
     """The ledger is PER LAYER, and that is load-bearing rather than tidy.
 
-    The two manager layers see different slices of the world: `fleet-manager` drops
+    The two manager layers see different slices of the world: `fleet-loop` drops
     every gate whose owning worker manager is live, so its sweep is deliberately a
     subset. A shared ledger would let the fleet's sweep prune a worker-owned gate
     (absent from *its* list), after which the worker's next sweep sees that gate as

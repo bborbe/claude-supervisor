@@ -1,5 +1,5 @@
 ---
-description: Jump to a Claude Code session's WezTerm tab. Bare = newest session needing attention; or by tab id, tab:<N>, pane:<N>, or a title substring. The executor for the `/supervisor:jump <pane-id>` lines that the fleet-status, fleet-manager, worker-status and worker-manager commands print but never run — those commands are read-only by contract and must never mutate. **Managers always hand over `/supervisor:jump <pane-id>`, never a raw `wezterm cli activate-tab` line.**
+description: Jump to a Claude Code session's WezTerm tab. Bare = newest session needing attention; or by tab id, tab:<N>, pane:<N>, or a title substring. The executor for the `/supervisor:jump <pane-id>` lines that the fleet-status, fleet-loop, manager-status and manager-loop commands print but never run — those commands are read-only by contract and must never mutate. **Managers always hand over `/supervisor:jump <pane-id>`, never a raw `wezterm cli activate-tab` line.**
 allowed-tools:
   - Bash(python3:*)
 argument-hint: "[<tab-id> | tab:<N> | pane:<N> | <title substring>] [--oldest] [--list] [--dry-run]"
@@ -42,4 +42,4 @@ A bare number resolves to **whichever namespace holds it** — the tab if tab N 
 
 - `/open <name>` — resolves a task/goal/topic and *then* jumps, resumes, or spawns. Heavyweight resolution; this command is the bare executor.
 - `/who-needs-me` — lists who needs you, vault-local to Personal. This command reuses the same attention state (`who-needs-me.py`'s parsing, imported not copied) but is global and jumps.
-- `/fleet-status`, `/worker-status` — read-only by contract; they print jump lines and must never mutate. This command is what executes them.
+- `/fleet-status`, `/manager-status` — read-only by contract; they print jump lines and must never mutate. This command is what executes them.

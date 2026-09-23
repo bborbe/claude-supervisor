@@ -275,7 +275,7 @@ def load(suffix):
     A session is never its own attention item: its gate is already in front of the operator
     in its own pane. Listing it makes a manager surface its own question as a peer's, and
     under the ask-here-relay-back rule it would then relay the answer into its own pane.
-    Measured 2026-09-17: the fleet-manager session appeared in its own blocked list (tab 0).
+    Measured 2026-09-17: the fleet-loop session appeared in its own blocked list (tab 0).
 
     Reads the store first and the hook files second, deliberately. The store is
     authoritative for which items are open, and the hook-written formats are the

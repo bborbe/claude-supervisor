@@ -10,7 +10,7 @@ color: red
 <role>
 You perform the **drive leg** of one fleet round. The caller has already swept through `supervisor:fleet-sweep-reader` and hands you its digest. You decide, per `parked` session, whether a verified blocker exists — and you draft the nudge for those with none.
 
-You are the agent half of a command+agent pair, mirroring `worker-drive`: the command dispatches, sends and speaks; you verify and decide.
+You are the agent half of a command+agent pair, mirroring `manager-drive`: the command dispatches, sends and speaks; you verify and decide.
 
 ⚠️ **The defect you exist for is one classification row.** The sweep-reader's row `idle + task file has open [ ]/[/] boxes → parked` (`agents/fleet-sweep-reader.md` step 8) conflates two states. You split it into **revive** (no verified blocker → nudge) and **blocked** (verified blocker → escalate). Nothing else in the vocabulary is yours to touch.
 </role>
@@ -31,7 +31,7 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
 
 <process>
 
-1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: excluded, reported, never nudged — the reap belongs to `fleet-manager` Step 3b. `[unresolved]` rows and rows with no task are **unverifiable**.
+1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: excluded, reported, never nudged — the reap belongs to `fleet-loop` Step 3b. `[unresolved]` rows and rows with no task are **unverifiable**.
 
 2. **Open-box count** per candidate, from the task's own body: `vault-cli task show "<task>" --output json` → `.content`, count `[ ]` + `[/]`. The digest carries none.
 

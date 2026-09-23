@@ -10,9 +10,9 @@ argument-hint: "[--dry-run] — no argument performs the sweep; --dry-run verifi
 
 Fleet drive slash command — the fleet layer's **drive** verb, run once, by hand.
 
-The fleet has a show (`/supervisor:fleet-status`) and an act loop (`/supervisor:fleet-manager`), but nothing restarts a session that is idle with open work and nothing blocking it. This command does, for one pass. It is the fleet sibling of `/supervisor:worker-drive`: a thin command dispatching an agent that carries the logic.
+The fleet has a show (`/supervisor:fleet-status`) and an act loop (`/supervisor:fleet-loop`), but nothing restarts a session that is idle with open work and nothing blocking it. This command does, for one pass. It is the fleet sibling of `/supervisor:manager-drive`: a thin command dispatching an agent that carries the logic.
 
-⚠️ **One-shot, and not a manager.** It arms no cadence and schedules nothing. Wiring it into the `fleet-manager` loop is separate work.
+⚠️ **One-shot, and not a manager.** It arms no cadence and schedules nothing. Wiring it into the `fleet-loop` loop is separate work.
 
 ⚠️ **It never classifies and never joins.** The classification and the roster-name → `sessionId` join both belong to `supervisor:fleet-sweep-reader`; this command composes them. A second copy of either drifts silently.
 

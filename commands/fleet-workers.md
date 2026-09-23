@@ -4,7 +4,7 @@ allowed-tools: mcp__supervisor__list_agents, mcp__supervisor__pending_permission
 ---
 Call `mcp__supervisor__list_agents` and `mcp__supervisor__pending_permissions`, then print one table: label, agent_id, status, last message, and pending request count.
 
-Below the table, list every pending permission with its prompt sentence and request_id, so each can be answered with `/supervisor:answer`.
+Below the table, list every pending permission with its prompt sentence and request_id, so each can be answered with `/supervisor:manager-answer`.
 
 Two readings of this output are wrong by construction, so state them rather than letting the table imply otherwise:
 

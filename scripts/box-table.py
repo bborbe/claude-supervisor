@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a box-drawn table (used by topic-manager / topic-status / fleet-manager sweeps).
+"""Render a box-drawn table (used by topic-manager / topic-status / fleet-loop sweeps).
 
 stdin: JSON {"header": [...], "rows": [[...]], "widths": [...]}  (widths optional, default 20)
 

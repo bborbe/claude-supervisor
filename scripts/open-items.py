@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-session ledger of operator asks (manager loops: fleet-manager / worker-manager).
+"""Per-session ledger of operator asks (manager loops: fleet-loop / manager-loop).
 
 Storage: ~/.claude/state/open-items/<session-id>.json — never hand-written, same
 write discipline as fleet-snapshot.py (atomic tmp+rename, timestamps stamped here).
