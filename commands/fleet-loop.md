@@ -93,28 +93,10 @@ A round reads four channels and none replaces another — the attention feed (**
 
 ## The open-items ledger — the operator's asks
 
-Not a fifth channel: it holds what the operator asked and is still waiting on — the stretch before a task exists, and between a question and its answer. Storage is on disk, `~/.claude/state/open-items/<this-session-id>.json`, written only through the script:
+Not a fifth channel: it holds what the operator asked and is still waiting on — the stretch before a task exists, and between a question and its answer. Read and write it only through the **`supervisor:open-items` skill** — `/supervisor:open-items <list|add|answer|note|close> …`, the single home of its kinds and rules; never restate them here. The fleet layer's specifics:
 
-```bash
-SID=<this manager session's own id>   # NOT $CLAUDE_SESSION_ID — Claude Code does not export it
-                                      # into the shell; read yours from /status or your own
-                                      # transcript path, never from the newest state/ file
-python3 $P/open-items.py --session "$SID" list    # round start + render
-python3 $P/open-items.py --session "$SID" add --kind asked-of-me --text "<verbatim>" --task "<task>"
-python3 $P/open-items.py --session "$SID" answer --id <id> --answer "<the operator's words>"
-python3 $P/open-items.py --session "$SID" close  --id <id> --evidence "<the on-disk fact>"
-```
-
-| Kind | What it is | Resolves on |
-|---|---|---|
-| `asked-of-me` | an operator instruction | its task file reads `status: completed`, or the operator withdraws it |
-| `asked-of-you` | a question this manager put to the operator | the operator's explicit answer — nothing else |
-| `pushed` | a task this manager filed or spawned on their behalf | that task file reads `status: completed` |
-
-- **An instruction becomes an entry the moment it is said** — `add` it *before* replying. A task is an entry's resolution path, never its start.
-- **Read at round start** (Step 0b, in the digest), **render every round** under `📋 Open with the operator`, **act every round** (Step 4), **close only on evidence.**
-- **Close on evidence only:** a task file's `status: completed` read *this round*, or the operator's explicit answer *in this session*. Never on belief, never on a peer's claim. A `resolves_on` containing an AND needs every half checked on disk.
-- It replaces nothing — not the task system, not a manager's § Current Work, not the attention feed. The fleet ledger holds only items no manager's ledger claims.
+- **Read at round start** (Step 0b, in the digest), **render every round** under `📋 Open with the operator`.
+- **Close on evidence only:** a task file's `status: completed` read *this round* (Step 4), or the operator's own answer.
 
 ## Steps 0–3 — Read half, delegated to `supervisor:fleet-sweep-reader`
 
@@ -128,7 +110,7 @@ The plugin prefix is required — a bare `fleet-sweep-reader` resolves to a pers
 
 **What stays here:** every liveness verdict, every confirmation of a candidate, and every action.
 
-**When the delegation returns no usable digest** — it errored, came back empty, or resolved to something that returned no digest — run the reads yourself for this round (`/fleet-status`, then `open-items.py … list`, `orphan-candidates.py` as above), compacting `fleet-sessions.py` through `grep -oE '\b[0-9a-f]{8}\b'`. Trigger on the missing digest, never on a matched error string.
+**When the delegation returns no usable digest** — it errored, came back empty, or resolved to something that returned no digest — run the reads yourself for this round (`/fleet-status`, then `/supervisor:open-items list`, `orphan-candidates.py` as above), compacting `fleet-sessions.py` through `grep -oE '\b[0-9a-f]{8}\b'`. Trigger on the missing digest, never on a matched error string.
 
 **Classes the digest reports** (Step 3): progressing · **stalled** (`busy`/`shell`, task mtime unchanged ≥2 sweeps) · parked (`idle`, open boxes) · **finished — reap** (`idle`, task complete) · **orphan** candidate (open work, dead session) · unclassified (insufficient data — never guess). `waiting` never counts toward `stalled` or `parked`.
 
@@ -221,7 +203,7 @@ The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`).
 
 ## Rules (non-negotiable)
 
-- **An operator ask lives on disk from the moment it is said** — `open-items.py add` it before replying, render every round, close only on Step 4's evidence.
+- **An operator ask lives on disk from the moment it is said** — `/supervisor:open-items add` it before replying, render every round, close only on Step 4's evidence.
 - **Never preempt a busy peer.** Never ask a `busy`/`shell` session to drop its work; never touch its worktree, branch or containers.
 - **Work is task/goal anchored.** Every delegated message and spawned session names its task or goal.
 - **No permission laundering.** Never ask a peer to run something denied here — route it to the operator.

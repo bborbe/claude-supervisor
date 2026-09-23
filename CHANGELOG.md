@@ -10,6 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.36.5
 
+- feat: add `supervisor:open-items` skill — single home of the open-items ledger rules, invoked as `/supervisor:open-items <list|add|answer|note|close>`; `fleet-loop`, `manager-loop` and `fleet-sweep-reader` point at it instead of restating the rules and hardcoding the script path. `scripts/open-items.py` is unchanged at its path (vault-cli `/post-compact` calls it directly).
 - fix: subject resolution source 1 (session state) matched the vault name case-sensitively, so a state file holding `Personal` never matched config `personal` and fell through to the session name; the match is now case-insensitive and records are written lowercase (manager-drive/loop/status/verify).
 
 ## v0.36.4
