@@ -19,13 +19,13 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 |---|---|
 | MCP server `supervisor` | spawns and owns the workers; parks their permission prompts |
 | skill `supervising-workers` | when to spawn a worker instead of doing the work yourself |
-| `/supervisor:spawn` `/supervisor:workers` `/supervisor:answer` `/supervisor:drain` | the operator surface |
-| agent `worker-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
+| `/supervisor:manager-spawn` `/supervisor:fleet-workers` `/supervisor:manager-answer` `/supervisor:manager-drain` | the operator surface |
+| agent `manager-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
 | `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
 | `scripts/jump-link.py` | render a pane's jump target as a clickable link (falls back to `/supervisor:jump <N>` when the local fleet-jump server is not configured) |
-| `/supervisor:fleet-manager` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
+| `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
 | `/supervisor:fleet-drive` | one-shot: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
-| `/supervisor:worker-manager` `/supervisor:worker-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
+| `/supervisor:manager-loop` `/supervisor:manager-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 
@@ -275,7 +275,7 @@ manager session ──MCP──► supervisor server ──query()×N──► w
                               └──── canUseTool ──────────────┘
 ```
 
-**Escalation chain:** worker → policy → `worker-wrangler` → manager → human. Routine approvals should never reach the manager, and genuine forks should never reach the human.
+**Escalation chain:** worker → policy → `manager-wrangler` → manager → human. Routine approvals should never reach the manager, and genuine forks should never reach the human.
 
 ## Layout
 
@@ -286,15 +286,15 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 skills/supervising-workers/SKILL.md
 commands/{spawn,workers,answer,drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
-commands/{fleet-manager,fleet-status,fleet-drive}.md  fleet surface — many sessions
-commands/{worker-manager,worker-status}.md       one goal or topic
+commands/{fleet-loop,fleet-status,fleet-drive}.md  fleet surface — many sessions
+commands/{manager-loop,manager-status}.md       one goal or topic
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 scripts/{jump,who-needs-me}.py                   their helpers
-agents/worker-wrangler.md                routine approval loop over headless workers
-agents/worker-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
-agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-manager, read-only by /fleet-drive)
+agents/manager-wrangler.md                routine approval loop over headless workers
+agents/manager-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
+agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-loop, read-only by /fleet-drive)
 agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive)
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)

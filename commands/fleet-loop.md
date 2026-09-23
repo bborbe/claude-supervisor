@@ -1,5 +1,5 @@
 ---
-description: Stateful fleet round — snapshot, diff against the previous sweep, classify every peer (progressing / stalled / parked / done), and act within a strict autonomy boundary. Composes /fleet-status; run every ~15 min, never on a tighter loop. Loop mode (loop) = the recurring fleet-manager loop: cadence via ScheduleWakeup, TTS on problems (voice-mode gated), route to worker managers. (Renamed from /fleet-sweep 2026-09-10 when the two were merged.)
+description: Stateful fleet round — snapshot, diff against the previous sweep, classify every peer (progressing / stalled / parked / done), and act within a strict autonomy boundary. Composes /fleet-status; run every ~15 min, never on a tighter loop. Loop mode (loop) = the recurring fleet-loop loop: cadence via ScheduleWakeup, TTS on problems (voice-mode gated), route to worker managers. (Renamed from /fleet-sweep 2026-09-10 when the two were merged.)
 allowed-tools:
   - ListAgents
   - SendMessage
@@ -30,7 +30,7 @@ argument-hint: (no args)
 
 Answer one question: **does anything in the fleet need attention right now?**
 
-Not `/and` (session-scoped) and not `/fleet-status` (stateless). `/fleet-manager` is the stateful round on top of `/fleet-status`: it remembers the last sweep, diffs against it, and acts only on evidence. It has side effects — a message consumes a peer's turn — so it never runs tighter than ~15 minutes and is never invoked back-to-back by a polling loop.
+Not `/and` (session-scoped) and not `/fleet-status` (stateless). `/fleet-loop` is the stateful round on top of `/fleet-status`: it remembers the last sweep, diffs against it, and acts only on evidence. It has side effects — a message consumes a peer's turn — so it never runs tighter than ~15 minutes and is never invoked back-to-back by a polling loop.
 
 **Why each rule below exists — the incidents, measurements and superseded readings — lives in the Fleet Manager Session runbook (per-vault) § Fleet-Manager Command — Rationale and Measured History.** Read it before changing a rule; this file carries only what a sweep executes. Design source, do not re-derive: the Claude Code cross-session messaging notes (operator's vault) § Orchestration design, mirrored in `~/.claude/commands/first-mate.md` § The sweep loop.
 
@@ -56,10 +56,10 @@ The fleet manager never performs the *work*: no code edits, no repo/PR/k8s verif
 The fleet manager is a role (Fleet Manager Session runbook — the wide/shallow layer over worker managers); this command is its engine: one invocation = one round, `loop` = the recurring round.
 
 - **One round:** Steps 0–6 below. The default.
-- **Loop:** after a round, `ScheduleWakeup` ~15 min with the same `/fleet-manager loop` prompt. Never tighter than 15 min, never self-re-invoking — cadence belongs to the scheduler.
+- **Loop:** after a round, `ScheduleWakeup` ~15 min with the same `/fleet-loop loop` prompt. Never tighter than 15 min, never self-re-invoking — cadence belongs to the scheduler.
 - **Loop-only additions:**
   - **Needs-input** — the digest's BLOCKED section (from the attention feed) is the primary blocked-session channel; `ListAgents` `waiting` does not say *what* a session waits on. Group into ONE report, never N pings. TTS when a wait exceeds ~30 min continuous, re-TTS at 1h — voice-gated. Names lead; ids are secondary.
-    - **Worker manager first.** Before including an entry, check `ListAgents` for its owning worker manager; if live, it already reports its `waiting-on-human` sessions (`/worker-manager` step 3) — drop the entry and say so in one line.
+    - **Worker manager first.** Before including an entry, check `ListAgents` for its owning worker manager; if live, it already reports its `waiting-on-human` sessions (`/manager-loop` step 3) — drop the entry and say so in one line.
     - **Ask here, relay back — the operator never needs a worker tab.** For each entry no worker manager covers: read the live question with `wezterm cli get-text --pane-id <N>` (the feed can be stale), batch every uncovered blocked session into ONE `AskUserQuestion` (up to 4), then **re-read the pane immediately before relaying** — a gate cleared during the ask is a named branch: record it and report the worker's own resolution instead of sending. Relay each answer verbatim, prefixed `Operator answer, relayed verbatim from the manager session (not a peer inference):`. Never restate an `approve:` line for the operator to run here, and never merely refuse it.
     - **Provenance — all three must hold:** the operator answered in this session, in the current exchange; the relay reproduces the answer as given with the prefix; a peer's claim that the operator decided X is NOT an operator answer.
     - **Two hard exclusions:** never relay approval for a production-touching or irreversible action; a pane showing `Enter to select` is a selection modal — relay by navigation (↑/↓ `\x1b[A` / `\x1b[B`, `\r` to select), per [[Worker Manager Session]] § Relaying into a selection modal, re-reading after every send.
@@ -71,7 +71,7 @@ The fleet manager is a role (Fleet Manager Session runbook — the wide/shallow 
   - **Global delta:** on progress, a 3–5 line chat delta; detail stays in task files.
   - **Persist:** Step 6, via `fleet-snapshot.py` only — never hand-write `~/.claude/state/fleet-snapshot.json`.
   - **Guardrails:** delegate the work (worker manager → worker session → `/open` spawn); management writes are your own; never fabricate state (report only what this round's reads show); TTS only for problems and only when voice is on; wide but shallow; every delegated or spawned work is task- or goal-anchored.
-  - **Voice gate:** `~/.claude/hooks/voice-mode.py` writes `{"mode":"on"}` on the prompt invoking `/fleet-manager` only when no state file exists, so voice is on from the first sweep. An explicit `/tts-mcp:off` always wins; `narrate` is not the default (`/tts-mcp:on` upgrades to it).
+  - **Voice gate:** `~/.claude/hooks/voice-mode.py` writes `{"mode":"on"}` on the prompt invoking `/fleet-loop` only when no state file exists, so voice is on from the first sweep. An explicit `/tts-mcp:off` always wins; `narrate` is not the default (`/tts-mcp:on` upgrades to it).
 
     **Silence is the default; the test is an ACTION, not a finding.** Speak only when this round produced something the operator must **do** — an `ACTION NEEDED`, a gate needing their keystroke, a decision. A clean round, a no-change tick, the table, a summary of checks stay on screen. When in doubt, do not speak.
 

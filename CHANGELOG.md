@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **BREAKING — rename commands by the tier of session that invokes them.** `/manager-*` for manager sessions, `/fleet-*` for the fleet session. `worker-manager` → `manager-loop`, `fleet-manager` → `fleet-loop`, `worker-status` → `manager-status`, `answer` → `manager-answer`, `drain` → `manager-drain`, `spawn` → `manager-spawn`, `workers` → `fleet-workers`; agents `worker-sweep-reader` → `manager-sweep-reader`, `worker-wrangler` → `manager-wrangler`. `jump`, `who-needs-me`, `reset`, `stop` unchanged. The loop state directory `~/.claude/state/worker-manager/` is kept, so running loops are unaffected.
+
 ## v0.33.0
 
 - feat: **`/supervisor:reset` — re-discover a manager's state from disk, never delete it.** A manager's ledger entries stayed open after their evidence landed on disk, because nothing re-read an entry once written. `scripts/reset.py` runs four steps and prints each: re-resolves the subject from the argument, this session's state file and its name — **never** `last-<vault>.json`, whose content is printed only to show the skip; rewrites the sweep-gate digest to a `reset-<ts>` sentinel so the next tick is a full sweep (rewritten, not deleted, so `busy_since` survives); re-validates every open asks-ledger entry against its task file — `completed` closes it with the cited path, a missing or `aborted` task sets `reset_flag`, `asked-of-you` is never closed by disk — and aborts without writing if the entry id set would change; and re-reads the tracked set from the topic page's `## Goals` plus `goals:` frontmatter in every declaration shape. `--dry-run` writes none of it. The contract lives in the vault's `Worker Manager Session` runbook § Reset; the command file points there. A `clear` verb is declined, not deferred: `reset` covers every safe meaning of it.

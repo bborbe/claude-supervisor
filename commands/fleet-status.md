@@ -29,7 +29,7 @@ Pure snapshot, no mutation, no messages sent. Safe to run as often as you like.
 2. `ListAgents` — the live roster, for the statuses the board does not carry and for the `waiting` set the blocked-by-you section below is built from. **The name is the task the session is on**; the status is live.
 
    Never infer a peer's directory from its `ListAgents` name: names are reused across days and `[ref]` is not a session-id prefix.
-3. **Render the board** — indented two spaces under the lead line, **exactly per Fleet Manager Session runbook (per-vault) § Sweep output — the fleet table**. That section is the single source for the frame (a timestamped marker line, then a box indented two spaces under it), the columns, the widths and the icons, and this command must never restate them. Never hand-draw the box. `/fleet-manager` reads the same section, so both commands render identically by construction — the same arrangement the worker pair has against [[Worker Manager Session]] § Sweep output.
+3. **Render the board** — indented two spaces under the lead line, **exactly per Fleet Manager Session runbook (per-vault) § Sweep output — the fleet table**. That section is the single source for the frame (a timestamped marker line, then a box indented two spaces under it), the columns, the widths and the icons, and this command must never restate them. Never hand-draw the box. `/fleet-loop` reads the same section, so both commands render identically by construction — the same arrangement the worker pair has against [[Worker Manager Session]] § Sweep output.
 
    **No id column.** Key on the session id internally; the operator sees the name.
 

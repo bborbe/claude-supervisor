@@ -1,8 +1,8 @@
 # Fleet surface — spawn shape and table render spec
 
 The canonical, self-contained home for the two operational specs the fleet commands
-(`/supervisor:worker-manager`, `/supervisor:fleet-manager`, `/supervisor:fleet-status`,
-`/supervisor:worker-status`) depend on.
+(`/supervisor:manager-loop`, `/supervisor:fleet-loop`, `/supervisor:fleet-status`,
+`/supervisor:manager-status`) depend on.
 
 These specs previously lived in an Obsidian vault runbook and were referenced by absolute
 path, because Obsidian wikilinks do not resolve across vaults. A plugin cannot depend on a
@@ -28,11 +28,11 @@ marketplace changes the prefix with it — a one-place edit here, not a sweep of
 
 ## Session roles — who may start what
 
-**A manager is never started in a worker session.** A worker session carries a *task*; a manager session carries a *topic or goal* and a loop. Arming one inside the other collapses the two roles, and the collapse is silent: the session keeps its task name and its task anchor while its turns now sweep a topic's whole tracked set, and the operator sees a worker whose tab is quietly doing someone else's job. (Operator rule, 2026-09-21 — stated when a worker session proposed to exercise `/supervisor:worker-manager report-only` as its own end-to-end check.)
+**A manager is never started in a worker session.** A worker session carries a *task*; a manager session carries a *topic or goal* and a loop. Arming one inside the other collapses the two roles, and the collapse is silent: the session keeps its task name and its task anchor while its turns now sweep a topic's whole tracked set, and the operator sees a worker whose tab is quietly doing someone else's job. (Operator rule, 2026-09-21 — stated when a worker session proposed to exercise `/supervisor:manager-loop report-only` as its own end-to-end check.)
 
-The direction that **is** allowed runs the other way: a manager starts workers (§ Spawn a worker), and a worker reaches its manager over `SendMessage`. **Starting a manager is a human act** — the operator invokes `/supervisor:worker-manager <subject>` in a session created for that purpose.
+The direction that **is** allowed runs the other way: a manager starts workers (§ Spawn a worker), and a worker reaches its manager over `SendMessage`. **Starting a manager is a human act** — the operator invokes `/supervisor:manager-loop <subject>` in a session created for that purpose.
 
-**Dispatch authority is the manager's.** Only a manager opens sessions — the worker-manager for its topic or goal, the fleet-manager fleet-wide — each under its own spawn cap (§ Spawn a worker). The worker-side rule lives once, in the global rule `worker-does-not-open-sessions` at `~/.claude/claude-md-rules/worker-does-not-open-sessions.md`; that file carries the prohibition, and it is **not restated here**. A worker that finds work outside its anchored task routes it to its manager, per the rule above.
+**Dispatch authority is the manager's.** Only a manager opens sessions — the manager-loop for its topic or goal, the fleet-loop fleet-wide — each under its own spawn cap (§ Spawn a worker). The worker-side rule lives once, in the global rule `worker-does-not-open-sessions` at `~/.claude/claude-md-rules/worker-does-not-open-sessions.md`; that file carries the prohibition, and it is **not restated here**. A worker that finds work outside its anchored task routes it to its manager, per the rule above.
 
 ⚠️ **`report-only` does not make it safe — it suppresses the arming and nothing else.** The Guardrails still run, so a single report-only sweep may spawn up to 2 sessions on ready-to-start work, auto-resume a dead mid-flight worker, auto-compact a worker over 70%, and reconcile the topic page. **"One sweep" is a cadence limit, not a blast-radius limit**, and reading it as a read-only mode is the mistake this note exists to prevent (made, and caught, on 2026-09-21).
 
@@ -40,7 +40,7 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 ## Session end — the disarm contract
 
-`/supervisor:worker-manager` arms a loop. **`/supervisor:stop` stands it down**, and this section is the contract that command points at: what it must disarm, which harness surface reaches each driver and which it cannot, and what must survive.
+`/supervisor:manager-loop` arms a loop. **`/supervisor:stop` stands it down**, and this section is the contract that command points at: what it must disarm, which harness surface reaches each driver and which it cannot, and what must survive.
 
 **The four drivers, and what reaches each.** They do not share a kill path, and the reachable set is smaller than the list.
 
@@ -57,10 +57,10 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 **What must survive `stop`:**
 
-- **The model-free gate loop.** Armed outside the session — verified live 2026-09-22: the running loop's parent is a detached supervisor at `ppid 1`, so it outlives the session that started it — it is what keeps `~/.claude/state/sweep-gate/<topic>.tick.txt` and `/worker-status` truthful. `stop` prints its pid and the tick file's mtime as evidence it survived, and never signals it. Killing it leaves the operator a frozen table and a `/worker-status` reporting a tree nobody is watching.
+- **The model-free gate loop.** Armed outside the session — verified live 2026-09-22: the running loop's parent is a detached supervisor at `ppid 1`, so it outlives the session that started it — it is what keeps `~/.claude/state/sweep-gate/<topic>.tick.txt` and `/manager-status` truthful. `stop` prints its pid and the tick file's mtime as evidence it survived, and never signals it. Killing it leaves the operator a frozen table and a `/manager-status` reporting a tree nobody is watching.
 - **The session.** The cadence is session-scoped, but the asks ledger is keyed by session id — `~/.claude/state/open-items/<session-id>.json` — so closing the session and re-opening the topic mints a new id and an empty ledger, and every open entry vanishes silently, including the `asked-of-you` entries only the operator can resolve. Measured 2026-09-22: session `433c856d` held **10 open entries, 2 of them `asked-of-you`**, and the session that replaced it carries the same 10 re-added **by hand** — the workaround, not a mechanism.
 
-**`stop` is not a close.** It writes no page, the topic's `status` is byte-identical before and after, and it never offers `/vault-cli:session-close`. **Restart is the same command that started the loop** — `/supervisor:worker-manager "<subject>"` — so there is no `start` verb and none is needed.
+**`stop` is not a close.** It writes no page, the topic's `status` is byte-identical before and after, and it never offers `/vault-cli:session-close`. **Restart is the same command that started the loop** — `/supervisor:manager-loop "<subject>"` — so there is no `start` verb and none is needed.
 
 ⚠️ **Probe the gate loop by the script argument's basename, never by a substring of the command line.** `pgrep -f sweep-gate` matches any process whose argv merely *mentions* the path, and a manager's spawn prompt quotes it — measured 2026-09-22, the substring probe returned **three** pids for one loop, two of them the worker sessions spawned from a prompt naming the script. **The count is transient; the mechanism is not** — re-run hours later those two workers had exited and it returned one, while a bystander process whose argv merely carried the string reproduced the spurious pid on demand. `scripts/stop-probe.py` matches the second argv token's basename against the two known script names, which also fails in the safe direction: a path containing a space mis-splits and the probe under-reports rather than inventing a loop.
 
@@ -73,7 +73,7 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 3. **Check the three sections exist** before the spawn — `grep -cE '^# (Success Criteria|Definition of Done|Tasks)' <task-file>` returns **3**. A task authored through this path does, by construction; a hand-written one usually does not.
 4. **Keep the split — the gate is readiness, never planning.** *Authoring* — sections, subtask decomposition, DoD, naming and SC evidence shapes — needs no repo access and belongs to the manager. *Execution planning* — which file, which mechanism, what the system actually permits — needs ground truth a manager does not have and stays with the worker. Measured counter-example 2026-09-19: a manager told a worker to "narrow the rule" on *The git push Ask-Rule Fires on Feature Branches*, and the worker found the ask-list does literal-prefix matching only and **cannot express that distinction at all**. A manager-side planning pass would have produced the same wrong plan with no wizard left to catch it.
 
-⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the worker-manager command all point here.
+⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the manager-loop command all point here.
 
 **A — `spawn_agent` (preferred).** The prompt is a spawn *argument*, so the task never goes
 over keystrokes:
@@ -401,7 +401,7 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
 
 ## Sweep output — the fleet table
 
-**This section is the single source for the fleet table.** `/supervisor:fleet-manager` and
+**This section is the single source for the fleet table.** `/supervisor:fleet-loop` and
 `/supervisor:fleet-status` both render it and neither carries its own spec.
 
 ```

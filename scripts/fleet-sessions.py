@@ -265,7 +265,7 @@ def render_row(age: float, proj: str, sid: str, working: str, live: bool, rec: d
     """One roster row: the five original columns, then mode and attribution.
 
     The new pair is appended rather than interleaved so the first five columns
-    keep their positions and widths — `fleet-status` and `fleet-manager` parse
+    keep their positions and widths — `fleet-status` and `fleet-loop` parse
     `SESSION` and `WORKING ON` by name against them.
     """
     flag = "●" if live else " "
