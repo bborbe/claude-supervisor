@@ -12,13 +12,21 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - fix: the auto-resume gate and the orphan verdict now decide liveness from the session registry (`~/.claude/sessions/<pid>.json` against a running pid), not from `pgrep -f` / `ps -eo pid,args`. The argv probes are demoted to confirm-life-only — an empty read is indeterminate, never dead — because a live session usually carries its id in no argv (three live sessions read 0 under both, 2026-09-22/23) (manager-drive agent + command, manager-loop).
 
+## v0.38.1
+
+- fix: fleet-drive reads each candidate's chat closer from a new sweep-digest `CLOSERS` section (who-needs-me Rendered panels), so a session parked on `pick`/`review:`/`you run:` or a non-routine `approve:` is never revived; a digest without `CLOSERS` makes candidates unverifiable.
+
+## v0.38.0
+
+- feat: policy allows a chained Bash command (`&&` `||` `;` `|`) when only the catch-all escalated it and every segment is allowed by an anchored `matchType: "command"` rule; exact `2>/dev/null` / `2>&1` tokens are ignored, deny and owner-written escalate rules still win
+
 ## v0.37.0
 
 - feat: `/fleet-drive` reaps finished workers (disk-evidence message, sent before any nudge) and nudges an `approve:` closer that passes a fixed routine-continue table (execution phase, `proceed`/`continue`/`start subtask …`, no push/merge/deploy/release/prod vocabulary); every other closer stays a blocker. Idle/tick thresholds documented in `agents/fleet-drive.md`.
+- feat: add `supervisor:open-items` skill — single home of the open-items ledger rules, invoked as `/supervisor:open-items <list|add|answer|note|close>`; `fleet-loop`, `manager-loop` and `fleet-sweep-reader` point at it instead of restating the rules and hardcoding the script path. `scripts/open-items.py` is unchanged at its path (vault-cli `/post-compact` calls it directly).
 
 ## v0.36.5
 
-- feat: add `supervisor:open-items` skill — single home of the open-items ledger rules, invoked as `/supervisor:open-items <list|add|answer|note|close>`; `fleet-loop`, `manager-loop` and `fleet-sweep-reader` point at it instead of restating the rules and hardcoding the script path. `scripts/open-items.py` is unchanged at its path (vault-cli `/post-compact` calls it directly).
 - fix: subject resolution source 1 (session state) matched the vault name case-sensitively, so a state file holding `Personal` never matched config `personal` and fell through to the session name; the match is now case-insensitive and records are written lowercase (manager-drive/loop/status/verify).
 
 ## v0.36.4
