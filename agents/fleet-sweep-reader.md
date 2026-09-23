@@ -44,7 +44,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 3. **Load the previous snapshot (Step 1).** `cat ~/.claude/state/fleet-snapshot.json 2>/dev/null || echo "no previous snapshot"`. Absent → every session is first-seen, nothing is `stalled`.
 
-4. **Stall signal (Step 2).** For every `busy`/`shell` session, resolve its task file (the `claude_session_id:` stamp, else exact `<name>.md` under `tasks_dir` then `goals_dir` — may be a goal) and `date -r "<task_file>" -u '+%Y-%m-%dT%H:%M:%SZ'`. Compare with the previous `task_mtime`. Never a message.
+4. **Task file + stall signal (Step 2).** For every `busy`/`shell` **and `idle`** session, resolve its task file (the `claude_session_id:` stamp, else exact `<name>.md` under `tasks_dir` then `goals_dir` — may be a goal) and count its open boxes (`grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'`). ⚠️ `idle` is not optional: step 8's `parked` and `finished` rows both read an idle session's task file, so skipping it leaves every idle row unclassifiable. For `busy`/`shell` only, also `date -r "<task_file>" -u '+%Y-%m-%dT%H:%M:%SZ'`. Compare with the previous `task_mtime`. Never a message.
 
 5. **Reverse index — tasks claiming a dead session (Step 2b).**
    ```bash
@@ -87,7 +87,7 @@ Return **≤ 40 lines**, exactly these sections, each printed as `(none)` rather
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
 CLASSIFICATION  <counts per class>
-  <name> [<session id 8>] · <status> · <class>        ← only non-progressing rows
+  <name> [<session id 8>] · <status> · <class> · <task file basename | —> · <open boxes | —>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)
   <name> · pane <id> · <gate text, ≤80 chars>
 ORPHAN CANDIDATES (park filter + 7d bound applied)  — or: UNKNOWN (check failed)
