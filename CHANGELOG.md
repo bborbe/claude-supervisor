@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`fleet-sweep-reader` never produced a `parked` row, so `/supervisor:fleet-drive` had no candidates to drive.** Step 4 resolved task files only for `busy`/`shell` sessions, but the `parked` and `finished` rows are defined on an *idle* session's task file — so every idle row came back unclassified. It now resolves the task file and open-box count for idle sessions too, and each classification row carries `<task file> · <open boxes>`. The drive agent reads both from the row instead of looking up a task it was never given, and treats a digest missing them as a malformed handoff (idle rows → unverifiable) rather than choosing candidates by hand. Found by the first manager-runtime `--dry-run` (5 candidates, all hand-picked, open boxes unknown on every row).
+
 ## v0.35.0
 
 - feat: extract the worker sweep's **act leg** into `/supervisor:manager-drive` (a thin command) plus `supervisor:manager-drive` (the agent holding the logic). It reaps the finished, nudges stuck or error-marked workers, and runs the auto-resume gate on confirmed orphans — **reap always before drive**, because a completed task with zero open boxes is also idle and a drive that runs first nudges a finished session to continue. The command is operator-runnable against one subject, so the act leg is testable without arming a manager loop, and it composes its classification from `supervisor:manager-sweep-reader` rather than rebuilding one.
