@@ -928,6 +928,18 @@ class PaneFor(unittest.TestCase):
         self.assertEqual("", out)
         self.assertIn("no pane", err)
 
+    def test_pane_is_taken_from_a_sibling_record(self):
+        """The store returns one record per open item; only some carry a pane.
+
+        A session holding two records — the first without a pane — must still
+        resolve off the second. Taking the first record outright would report
+        `no pane` for a session that has one.
+        """
+        self.records.insert(0, {"session_id": self.SID_A, "kind": "tool", "ts": 0})
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("204\n", out)
+
     def test_empty_id_refuses(self):
         rc, out, _ = self.run_pane_for("")
         self.assertEqual(1, rc)

@@ -106,7 +106,8 @@ LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · <written <ts> 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
 
 Carry on each `ESCALATION` row the pane id the digest's `BLOCKED` / `CLOSERS` row gave for that
-session, and `—` when the digest carried none. **Never resolve a pane here**, and never match a
-session title — `/rename` breaks a title-keyed join silently. The caller resolves the `—` rows, by
-session id, and renders `no pane — <reason>` when it cannot.
+session, and `—` when the digest carried none — those digest rows are keyed by name, and this is
+the one place a name is read, only to lift a pane off a row the sweep already resolved. **Never go
+looking for a pane yourself**: no `wezterm cli list`, no title match, no fallback of your own. The
+caller resolves the `—` rows, by session id, and renders `no pane — <reason>` when it cannot.
 </output_format>

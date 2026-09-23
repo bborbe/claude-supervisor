@@ -922,19 +922,24 @@ def pane_for(session_id):
         )
         return 1
     full = matches[0]
+    # A session can hold several records at once — the store returns one item per
+    # open item, and `load` folds the event log per item too — so pick the first
+    # record for this session that actually carries a pane. Taking the first record
+    # outright would report "no pane" for a session whose sibling record has one.
+    rec = next(
+        (r for r in records if r.get("session_id") == full and r.get("pane")), None
+    )
+    if rec is None:
+        sys.stderr.write("pane-for: session %s carries no pane\n" % full[:8])
+        return 1
     pmap = panes()
     registry = read_registry()
     live_ids = None if registry is None else set(registry)
     quiet = quiet_session_ids(records, live_ids)
-    rec = next(r for r in records if r.get("session_id") == full)
     if not is_live(rec, pmap, quiet):
         sys.stderr.write("pane-for: session %s is not live\n" % full[:8])
         return 1
-    pane = rec.get("pane")
-    if not pane:
-        sys.stderr.write("pane-for: session %s carries no pane\n" % full[:8])
-        return 1
-    print(pane)
+    print(rec["pane"])
     return 0
 
 
