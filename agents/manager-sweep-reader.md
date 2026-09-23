@@ -73,7 +73,7 @@ Field-scoped extraction is correct in both directions: it cannot miss an indente
 One bucket per task, from **Step 4's canonical seven** — read the bucket set *and* the non-bucket dispositions (`hold`, `backlog`) in runbook § Step 4; do not work from a list here.
 
 - **progressing** — the task advanced, or a new dated `# Progress` entry appeared since the prior snapshot.
-- **stuck** — busy > ~30 min AND the task file unchanged AND no new Progress entry.
+- **stuck** — the task file unchanged AND no new Progress entry, AND either (a) busy > ~30 min, or (b) **idle** > ~30 min in `phase: execution` with ≥1 open `[ ]`/`[/]` box. Branch (b) is what lets the drive leg nudge an idle worker with work left — without it an idle session never matches and sits unnudged (measured 2026-09-23: idle 7h, 15/16 boxes open, bucketed `progressing`). It is scoped to `execution` so planning-gate parking stays `waiting-on-human`; a 0-open-box task is `done`/`close-me` and is reaped before drive runs.
 - **waiting-on-human** — `phase: human_review`, the worker asked the human, or the task is **parked on the planning gate**. The planning-gate case is a distinct sub-rule with its own tell (a freshly spawned worker sitting `idle` in `planning` with no Progress write) and its own trap (it is neither `stuck` nor idle-and-fine) — read it in runbook § Step 4 rather than working from this summary, because misclassifying it is the error the sub-rule exists to prevent.
 - **done** — the task flipped `completed`.
 - **ready-to-start** — `blocked_by` shipped, or the task was `next` with a free slot, and no session owns it.

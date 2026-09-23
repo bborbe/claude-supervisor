@@ -10,6 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: the manager sweep's `stuck` bucket now also matches an **idle** worker (> ~30 min, `phase: execution`, ≥1 open box, task file unchanged), so `manager-drive` nudges it — previously `stuck` required busy, an idle worker with open boxes was bucketed `progressing` and never nudged, contradicting `manager-drive.md`'s reap-before-drive rationale
 - feat: add `/supervisor:open` — the session launcher (resolve a task/goal/topic, then jump, resume or spawn), moved from the personal `/open` command; spawn shape now referenced from `docs/fleet-surface.md` § Spawn a worker
 
 ## v0.39.1
