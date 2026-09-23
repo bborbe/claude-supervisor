@@ -95,12 +95,59 @@ export function overlayRules(override, base) {
   return [...(override ?? []), ...(base ?? [])]
 }
 
-// First matching rule wins; the caller orders user rules before bundled ones so the
-// overlay semantics live at the call site rather than in here.
-export function decide(rules, toolName, input, cwd) {
-  const key = inputKey(input)
+// Stderr discards that change no file and run nothing. Only these exact tokens are
+// dropped before a segment is tokenized; any other redirect still reaches
+// commandTokens and refuses the segment.
+const HARMLESS_REDIRECTS = new Set(['2>/dev/null', '2>&1'])
+
+// The segments of a chained command — split on `&&`, `||`, `;` and `|` — each with its
+// harmless redirects removed, or null when any segment is empty. Splitting ignores
+// quoting on purpose: a separator inside quotes only yields extra, stranger segments,
+// each of which must still pass the anchored match on its own, so mis-splitting can
+// refuse a command but never allow one the shell would run differently.
+export function commandSegments(command) {
+  if (typeof command !== 'string') return null
+  const segments = command.split(/&&|\|\||;|\|/).map((segment) =>
+    segment.split(/[ \t]+/).filter((token) => !HARMLESS_REDIRECTS.has(token)).join(' ').trim())
+  if (segments.length < 2 || segments.some((segment) => segment === '')) return null
+  return segments
+}
+
+// Is the rule that decided the whole command just the generic fallthrough? Only that
+// verdict may be revisited segment by segment; a rule that named the command — a deny,
+// or an escalate the owner wrote on purpose — always stands.
+function isCatchAll(rule) {
+  return rule === null || (rule.match === '*' && rule.matchType === undefined && rule.action === 'escalate')
+}
+
+// A chained Bash command is allowed when EVERY segment, decided alone, is allowed by an
+// anchored (`matchType: 'command'`) rule. Substring allows never count here: they are
+// the rules composition smuggles past, which is why the anchored mode exists.
+function allSegmentsAnchoredAllow(rules, toolName, key, cwd) {
+  const segments = commandSegments(key)
+  if (segments === null) return false
+  return segments.every((segment) => {
+    const { action, rule } = decideWhole(rules, toolName, segment, cwd)
+    return action === 'allow' && rule?.matchType === 'command'
+  })
+}
+
+function decideWhole(rules, toolName, key, cwd) {
   for (const rule of rules ?? []) {
     if (ruleMatches(rule, toolName, key, cwd)) return { action: rule.action, key, rule }
   }
   return { action: 'escalate', key, rule: null }
+}
+
+// First matching rule wins; the caller orders user rules before bundled ones so the
+// overlay semantics live at the call site rather than in here. A Bash command that only
+// the catch-all escalated gets a second look segment by segment.
+export function decide(rules, toolName, input, cwd) {
+  const key = inputKey(input)
+  const whole = decideWhole(rules, toolName, key, cwd)
+  if (toolName === 'Bash' && whole.action === 'escalate' && isCatchAll(whole.rule)
+      && allSegmentsAnchoredAllow(rules, toolName, key, cwd)) {
+    return { action: 'allow', key, rule: { tool: 'Bash', match: 'segments', matchType: 'segments', action: 'allow' } }
+  }
+  return whole
 }
