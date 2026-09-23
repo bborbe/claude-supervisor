@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: `fleet-surface.md` — a worker handing a manager command's live run to its manager must not close WAITING on the reply; an idle manager never drains the message unprompted.
+
 ## v0.35.1
 
 - docs: the per-subject manager's runbook is now `[[Manager Session]]` (was `[[Worker Manager Session]]`), and the role is called "manager" throughout — completing the session-tier rename. Wording only; the state directory `~/.claude/state/worker-manager/` is unchanged.
