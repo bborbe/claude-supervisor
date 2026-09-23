@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: subject resolution source 1 (session state) matched the vault name case-sensitively, so a state file holding `Personal` never matched config `personal` and fell through to the session name; the match is now case-insensitive and records are written lowercase (manager-drive/loop/status/verify).
+
 ## v0.36.4
 
 - docs: keep-in-sync notes enumerate `/manager-drive`'s vault-resolution paragraph as an allowed difference, so the shared subject-resolution blocks diff only where declared.

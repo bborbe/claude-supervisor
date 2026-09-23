@@ -40,7 +40,7 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 A bare invocation takes the first source that yields a **real page**:
 
-1. **Session state** — `~/.claude/state/worker-manager/<CLAUDE_CODE_SESSION_ID>.json`, shape `{"subject","vault","branch","resolved_at"}`. Accepted only when `vault` matches the resolved vault **and** `subject` still resolves to a page. This is what makes a subject named once stick across the ticks of one session.
+1. **Session state** — `~/.claude/state/worker-manager/<CLAUDE_CODE_SESSION_ID>.json`, shape `{"subject","vault","branch","resolved_at"}`. Accepted only when `vault` matches the resolved vault **and** `subject` still resolves to a page. Compare **case-insensitively** — the vault is the lowercase vault-cli config `name` (`personal`), but state files written before 2026-09-23 may carry display case (`Personal`); a strict match silently drops to source 2. This is what makes a subject named once stick across the ticks of one session.
 2. **Session name** — `~/.claude/sessions/$CLAUDE_PID.json` → `.name` (pid-keyed: `CLAUDE_PID`, not `CLAUDE_CODE_SESSION_ID`). Strip leading decoration (`⚙ `); accept only if what remains resolves to a goal or topic page. No match, a task-page match or a missing pid file → silent miss, fall through.
 3. **Conversation** — the priority order `/vault-cli:task-status` uses in its Phase 2: the most recent `/manager-loop`, `/manager-status`, `/manager-drive` or `/manager-verify` argument in this conversation, then the most recent goal/topic page referenced **as a subject** (a wikilink or a read/edited path — not a prose mention).
 4. **Vault's last subject** — `~/.claude/state/worker-manager/last-<vault>.json`, same shape and same test. Last resort: the only source not about this session.
@@ -55,7 +55,7 @@ A bare invocation takes the first source that yields a **real page**:
 ```bash
 mkdir -p ~/.claude/state/worker-manager && python3 -c "
 import json,os,sys,datetime
-subject,vault,branch=sys.argv[1:4]
+subject,vault,branch=sys.argv[1:4]; vault=vault.lower()
 d=os.path.expanduser('~/.claude/state/worker-manager'); os.makedirs(d,exist_ok=True)
 rec={'subject':subject,'vault':vault,'branch':branch,'resolved_at':datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
 for n in (os.environ['CLAUDE_CODE_SESSION_ID']+'.json','last-'+vault+'.json'):
@@ -68,7 +68,7 @@ for n in (os.environ['CLAUDE_CODE_SESSION_ID']+'.json','last-'+vault+'.json'):
 ```bash
 mkdir -p ~/.claude/state/worker-manager && python3 -c "
 import json,os,sys,datetime
-subject,vault,branch=sys.argv[1:4]
+subject,vault,branch=sys.argv[1:4]; vault=vault.lower()
 d=os.path.expanduser('~/.claude/state/worker-manager'); os.makedirs(d,exist_ok=True)
 rec={'subject':subject,'vault':vault,'branch':branch,'resolved_at':datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
 json.dump(rec,open(os.path.join(d,os.environ['CLAUDE_CODE_SESSION_ID']+'.json'),'w'),indent=2)
