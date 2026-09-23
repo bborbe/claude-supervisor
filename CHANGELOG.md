@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: **`commands/manager-loop.md` carries only what a sweep executes — 86,759 → 41,951 B (−52%).** Every line ≥ 400 chars (56 of 219 non-empty lines, 66 KB) mixed a rule with its rationale and incident history, and the command file is re-injected on every sweep. Each such line is replaced by a condensed rule (same commands, thresholds, gates and output shape); the full original text moves verbatim to the vault runbook `Worker Manager Session` § Command rationale (moved from /manager-loop), plus a pointer line at the top of the command. The 163 shorter lines are unchanged byte-for-byte. No filter, threshold or gate semantics change.
+
 ## v0.34.1
 
 - fix: **`/supervisor:fleet-drive` states it is a fleet-manager verb, never run from a worker session.** The vault-local original gained this operator rule (`docs/fleet-surface.md` § Session roles) after the promotion was ported; the plugin copy lacked it, so a worker could sweep the whole fleet while keeping its task anchor. A worker routes a sweep to its manager instead, and `--dry-run` is called out as suppressing sends, not the role collapse.
