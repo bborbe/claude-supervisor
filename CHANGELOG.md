@@ -10,6 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.38.1
 
+- fix: `stop-probe.py` reports the launchd-hosted gate (`com.bborbe.sweep-gate-notify`) as present when the job is loaded AND its heartbeat is fresh (≤ 2× `StartInterval`); previously it matched only live processes and said "no sweep-gate loop found" between ticks of a healthy job.
 - fix: fleet-drive reads each candidate's chat closer from a new sweep-digest `CLOSERS` section (who-needs-me Rendered panels), so a session parked on `pick`/`review:`/`you run:` or a non-routine `approve:` is never revived; a digest without `CLOSERS` makes candidates unverifiable.
 
 ## v0.38.0
