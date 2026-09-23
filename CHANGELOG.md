@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.41.1
 
 - fix: fleet-drive fails closed — a candidate with no `CLOSERS` row is unverifiable (a chat-only `pick` was nudged past), revive requires an observed routine-continue closer; the drive ledger is read only from its own file and merged on write, never rebuilt from the digest's open-items line (it had shrunk 37 → 8 entries).
 
