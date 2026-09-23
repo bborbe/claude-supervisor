@@ -11,6 +11,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: add `/supervisor:open` — the session launcher (resolve a task/goal/topic, then jump, resume or spawn), moved from the personal `/open` command; spawn shape now referenced from `docs/fleet-surface.md` § Spawn a worker
+
+## v0.39.0
+
+- fix: the auto-resume gate and the orphan verdict now decide liveness from the session registry (`~/.claude/sessions/<pid>.json` against a running pid), not from `pgrep -f` / `ps -eo pid,args`. The argv probes are demoted to confirm-life-only — an empty read is indeterminate, never dead — because a live session usually carries its id in no argv (three live sessions read 0 under both, 2026-09-22/23) (manager-drive agent + command, manager-loop).
 - feat: `scripts/manager-liveness.py` detects a lapsed manager loop from outside the session. `manager-loop` records each re-arm with its real interval (`--arm`), `/supervisor:stop` writes a `<slug>.stopped` marker (`--stop`), and `--check` (model-free, for a host loop) reports a topic once when its last re-arm is older than 2x its own interval and no stop marker is present.
 
 ## v0.38.2
