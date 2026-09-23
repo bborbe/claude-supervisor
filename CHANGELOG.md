@@ -12,6 +12,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - feat: add `/supervisor:fleet-verify` and `/supervisor:manager-verify`, moved from the Personal vault's local commands; script paths resolve via `${CLAUDE_PLUGIN_ROOT}`, and manager-verify documents its vault-local `verify-topic` dependency.
 
+## v0.39.1
+
+- fix: fleet-drive routine-continue test 4 no longer counts the closer under test as its own `BLOCKED` gate — the attention feed lists every rendered `approve:` closer there, so the table was unreachable (0 routine continues across three live runs).
+
 ## v0.39.0
 
 - fix: the auto-resume gate and the orphan verdict now decide liveness from the session registry (`~/.claude/sessions/<pid>.json` against a running pid), not from `pgrep -f` / `ps -eo pid,args`. The argv probes are demoted to confirm-life-only — an empty read is indeterminate, never dead — because a live session usually carries its id in no argv (three live sessions read 0 under both, 2026-09-22/23) (manager-drive agent + command, manager-loop).
