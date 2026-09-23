@@ -36,7 +36,7 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 ⚠️ **`report-only` does not make it safe — it suppresses the arming and nothing else.** The Guardrails still run, so a single report-only sweep may spawn up to 2 sessions on ready-to-start work, auto-resume a dead mid-flight worker, auto-compact a worker over 70%, and reconcile the topic page. **"One sweep" is a cadence limit, not a blast-radius limit**, and reading it as a read-only mode is the mistake this note exists to prevent (made, and caught, on 2026-09-21).
 
-⚠️ **A worker session therefore has no end-to-end check of a manager command.** Exercising one belongs to a manager session's own runtime. A change whose verification is "run the manager and watch it behave" is verified by deployment (the installed copy carries the change) plus a lockstep grep across the copies — never by arming a loop from wherever the change was authored.
+⚠️ **A worker session therefore has no end-to-end check of a manager command.** Exercising one belongs to a manager session's own runtime. A change whose verification is "run the manager and watch it behave" is verified by deployment (the installed copy carries the change) plus a lockstep grep across the copies — never by arming a loop from wherever the change was authored. **Handing that run to the manager is not a wait:** an idle manager drains `SendMessage` only on its next turn, and nothing gives it one. Send with `notify_when_idle: true` and close the worker's turn 🔵 READY with `you run: <command>` for the operator to type in the manager's tab — never 🟡 WAITING on the reply. (Measured 2026-09-23: a `/supervisor:reset` handoff sat unread ~4.5 h.)
 
 ## Session end — the disarm contract
 
