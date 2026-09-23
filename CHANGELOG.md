@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the `fleet-drive` agent re-counted a candidate's open boxes instead of taking the digest row's count.** On the first live manager-runtime run (0.36.1) it reported 7 open boxes for a task whose row, and disk, both read 3 — so the ledger's suppression input was wrong. Step 2 now states the row's count is the only authority for the round, and that the task text for the operator-gate probe is read with `Read` from the row's file, never via `vault-cli task show` on the `25 Tasks/<file>` path form (which 404s).
+
 ## v0.36.1
 
 - feat: add `docs/session-tiers.md` — the three session tiers (fleet manager / manager / worker), a command → tier table covering every `/supervisor:*` command with "never run from" guidance, and the worker boundary (`/open` is manager-only; workers route out-of-scope work to their manager)
