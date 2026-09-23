@@ -11,6 +11,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: **`/supervisor:fleet-drive`'s escalation table now carries a clickable jump link on every row.** The command declared no `Bash` at all, so it could not call `scripts/jump-link.py` and told the caller to hand over a bare `/supervisor:jump <pane-id>` for every escalated session; it now emits the link itself, and a row whose pane cannot be resolved prints `no pane — <reason>` rather than a blank. The pane comes from the digest's `BLOCKED`/`CLOSERS` row where it has one — `agents/fleet-drive.md` now carries it on the `ESCALATION` row — and is otherwise resolved **by session id** through a new `who-needs-me.py --pane-for <sid8>`, never by session title, which `/rename` breaks silently. `docs/session-tiers.md` § *Handing the operator a pane* carried a bare `${CLAUDE_PLUGIN_ROOT}/scripts/jump-link.py`, which resolves to `/scripts/…` because `CLAUDE_PLUGIN_ROOT` is unset in a command's Bash; it now uses the `:-` fallback form the other commands already use.
+
+## v0.41.2
+
+- fix: `/supervisor:manager-verify` step 7 names `/supervisor:open` (the bare `/open` it carried no longer resolves) and routes a start recommendation to the subject's manager via `SendMessage` instead of handing the operator an `approve: /supervisor:open` line — ports a vault-side edit made after the v0.41.0 move.
 - fix: the manager sweep's `stuck` bucket now also matches an **idle** worker (> ~30 min, `phase: execution`, ≥1 open box, task file unchanged), so `manager-drive` nudges it — previously `stuck` required busy, an idle worker with open boxes was bucketed `progressing` and never nudged, contradicting `manager-drive.md`'s reap-before-drive rationale
 
 ## v0.41.1
