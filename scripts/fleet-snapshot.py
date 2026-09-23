@@ -31,6 +31,27 @@ def extract_sessions(payload):
     return payload
 
 
+def entries_are_objects(sessions):
+    """Every entry must be an object, per the documented schema `{"<id>": {...}}`.
+
+    An empty guard alone is not enough: a failed read that returns an error
+    envelope rather than nothing — `{"error": "roster read failed"}` — is
+    non-empty, so it passed the guard, was written as a one-session snapshot,
+    and exited 0. That is the same collapse the empty guard exists to prevent,
+    reached by a payload that merely *looks* like data.
+
+    The value shape is the discriminator, not the key shape. Real keys are
+    UUIDs, but live snapshots also carry a `…dup` suffix (measured 2026-09-23:
+    1 of 45 keys), so key-format validation would reject production data. Every
+    real entry is an object; an error string, a scalar, or a bare `null` is not.
+    """
+    if isinstance(sessions, dict):
+        return all(isinstance(v, dict) for v in sessions.values())
+    if isinstance(sessions, list):
+        return all(isinstance(v, dict) for v in sessions)
+    return False
+
+
 def write_snapshot(sessions, path=None, swept_at=None):
     """Write the snapshot atomically (tmp + os.replace) and return the document.
 
@@ -71,6 +92,14 @@ def main(stdin=None, path=None):
             "refusing to write an empty snapshot: the payload carries no sessions. "
             "A failed read and an empty fleet must not look alike; the existing "
             "snapshot is left unchanged.",
+            file=sys.stderr,
+        )
+        return 1
+    if not entries_are_objects(sessions):
+        print(
+            "refusing to write a malformed snapshot: an entry is not an object, so "
+            'this payload did not come from a roster read (schema: {"<session id>": '
+            '{"...": ...}}). The existing snapshot is left unchanged.',
             file=sys.stderr,
         )
         return 1

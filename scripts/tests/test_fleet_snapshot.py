@@ -169,5 +169,47 @@ class AtomicWrite(Base):
         self.assertFalse(os.path.exists(self.path + ".tmp"))
 
 
+class MalformedPayload(Base):
+    """Non-empty is not the same as *came from a roster read*.
+
+    A failed read that returns an error envelope rather than nothing is
+    non-empty, so it passed the empty guard, was written as a one-session
+    snapshot and exited 0 — the same collapse the guard exists to prevent,
+    reached with a payload that merely looks like data.
+    """
+
+    def test_error_envelope_is_refused(self):
+        before = self.write_existing()
+        rc, out, err = self.run_main({"error": "roster read failed"})
+        self.assertEqual(rc, 1)
+        self.assertEqual(_digest(self.path), before, "snapshot must be untouched")
+        self.assertEqual(out, "", "nothing may be reported as written")
+        self.assertIn("malformed", err)
+
+    def test_scalar_entry_is_refused(self):
+        before = self.write_existing()
+        rc, _, err = self.run_main({"foo": 1})
+        self.assertEqual(rc, 1)
+        self.assertEqual(_digest(self.path), before)
+        self.assertIn("malformed", err)
+
+    def test_string_entry_inside_the_wrapper_is_refused(self):
+        rc, _, _ = self.run_main({"sessions": {"aaaa1111": "oops"}})
+        self.assertEqual(rc, 1)
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_list_with_a_non_object_entry_is_refused(self):
+        rc, _, _ = self.run_main([{"name": "x"}, "oops"])
+        self.assertEqual(rc, 1)
+
+    def test_a_dup_suffixed_key_still_writes(self):
+        """Key-shape validation would reject live data — 1 of 45 keys is `…dup`."""
+        rc, out, err = self.run_main(
+            {"3d3b7835-8c20-46e7-8ec5-0c0782d238d7dup": {"name": "x"}}
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertIn("1 sessions", out)
+
+
 if __name__ == "__main__":
     unittest.main()
