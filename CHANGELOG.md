@@ -12,6 +12,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - fix: fleet-drive fails closed — a candidate with no `CLOSERS` row is unverifiable (a chat-only `pick` was nudged past), revive requires an observed routine-continue closer; the drive ledger is read only from its own file and merged on write, never rebuilt from the digest's open-items line (it had shrunk 37 → 8 entries).
 
+- feat: add `/supervisor:fleet-verify` and `/supervisor:manager-verify`, moved from the Personal vault's local commands; script paths resolve via `${CLAUDE_PLUGIN_ROOT}`, and manager-verify documents its vault-local `verify-topic` dependency.
+
 ## v0.40.0
 
 - fix: **`agents/manager-drive.md` resolves `claude_script` explicitly, so the auto-resume gate can actually fire.** The step said *"resolve the vault's `claude_script` from `vault-cli config list`"* and gave no invocation. A run on 2026-09-23 read `vault-cli config --help` instead — which lists the `current-user` and `list` **subcommands** and never the per-vault **fields** — concluded no `claude_script` was exposed, and withheld the spawn while every gate clause genuinely held, so the branch could not fire on that host at all. The step now carries the exact command, states that the field is invisible to `--help`, and an empty result prints `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` rather than disappearing into a withheld spawn that reads like a failed clause.
