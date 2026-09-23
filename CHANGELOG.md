@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.41.2
 
 - fix: the manager sweep's `stuck` bucket now also matches an **idle** worker (> ~30 min, `phase: execution`, ≥1 open box, task file unchanged), so `manager-drive` nudges it — previously `stuck` required busy, an idle worker with open boxes was bucketed `progressing` and never nudged, contradicting `manager-drive.md`'s reap-before-drive rationale
 
