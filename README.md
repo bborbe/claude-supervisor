@@ -286,11 +286,9 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 skills/supervising-workers/SKILL.md
 commands/{spawn,workers,answer,drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
-commands/{fleet-manager,fleet-status}.md         fleet surface — many sessions
-commands/{worker-manager,worker-status}.md       one goal or topic — the loop and the snapshot
-commands/manager-drive.md                         one goal or topic — the act leg, by hand
 commands/{fleet-manager,fleet-status,fleet-drive}.md  fleet surface — many sessions
-commands/{worker-manager,worker-status}.md       one goal or topic
+commands/{worker-manager,worker-status}.md       one goal or topic — the loop and the snapshot
+commands/manager-drive.md                        one goal or topic — the act leg, by hand
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
