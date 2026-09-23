@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.35.3
 
 - docs: two residual pre-rename names — `manager-drive` names `manager-verify` (was `worker-verify`), `fleet-drive` calls itself a fleet-loop verb.
 
