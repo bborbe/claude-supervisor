@@ -12,6 +12,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - feat: add `/supervisor:fleet-verify` and `/supervisor:manager-verify`, moved from the Personal vault's local commands; script paths resolve via `${CLAUDE_PLUGIN_ROOT}`, and manager-verify documents its vault-local `verify-topic` dependency.
 
+- feat: `scripts/manager-liveness.py` detects a lapsed manager loop from outside the session. `manager-loop` records each re-arm with its real interval (`--arm`), `/supervisor:stop` writes a `<slug>.stopped` marker (`--stop`), and `--check` (model-free, for a host loop) reports a topic once when its last re-arm is older than 2x its own interval and no stop marker is present.
+
+## v0.38.2
+
+- fix: **`/supervisor:manager-drive` states its tier — a manager verb, never run from a worker session.** The command said the opposite: *"Running this command from an ordinary session is fine precisely because it is one pass with no cadence."* That contradicts `docs/session-tiers.md` (`/supervisor:manager-drive` → tier manager, never from a worker) and `docs/fleet-surface.md` § Session roles — a worker session has no end-to-end check of a manager command — and it is the same defect v0.34.1 fixed on `/supervisor:fleet-drive`. One pass limits the cadence, not the blast radius: a drive run reaps, nudges and auto-resumes a whole tracked set. A worker that needs a subject driven routes it to its manager with `SendMessage`; the command is exercised in a manager session's runtime, never from the session that authored it.
+
 ## v0.38.1
 
 - fix: `stop-probe.py` reports the launchd-hosted gate (`com.bborbe.sweep-gate-notify`) as present when the job is loaded AND its heartbeat is fresh (≤ 2× `StartInterval`); previously it matched only live processes and said "no sweep-gate loop found" between ticks of a healthy job.
