@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.37.0
 
 - feat: `/fleet-drive` reaps finished workers (disk-evidence message, sent before any nudge) and nudges an `approve:` closer that passes a fixed routine-continue table (execution phase, `proceed`/`continue`/`start subtask …`, no push/merge/deploy/release/prod vocabulary); every other closer stays a blocker. Idle/tick thresholds documented in `agents/fleet-drive.md`.
 
