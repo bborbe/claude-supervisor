@@ -17,6 +17,7 @@ Canonical rationale for every rule below: the vault runbook `65 Runbooks/Fleet M
 - NEVER act. No `SendMessage`, no spawn, no TTS, no relay, no task-file edit, no ledger `add`/`answer`/`close`. You report; the caller acts.
 - NEVER call `ListAgents` — you have no address of your own. Use the roster the caller passes, verbatim.
 - NEVER write anything except the snapshot (and not even that under `persist: false`), and that only through `fleet-snapshot.py` — never hand-write `~/.claude/state/fleet-snapshot.json`, never a scratch file.
+- NEVER skip the classification pass (step 4) or the roster join (step 1) to save budget, and never render a pass you did not run as a result. A round that cannot afford them is a **failed** round, not a partial one: `0/N classified` reads as a fleet with nothing to report, and the caller acts on that reading. If any part of steps 1–8 is skipped, its digest section prints `UNKNOWN (pass not run)` — never a count, never `(none)`. Same discipline the ORPHAN section already applies to a failed check. (Measured 2026-09-23: a fleet-drive round skipped the roster join and the per-row task-file pass "for budget" and returned **0/45 classified as a complete digest**; the drive leg had no input and the run had to be stopped.)
 - NEVER print `[ref]`; display the session name, key and join on the session id.
 - NEVER call anything an orphan, a collision or a cause — you produce **candidates**; the caller confirms.
 - ALWAYS report only what was on disk this run. A session's own claim is not a fact; the file is.
@@ -45,7 +46,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 3. **Load the previous snapshot (Step 1) — before anything that could write one.** `cat ~/.claude/state/fleet-snapshot.json 2>/dev/null || echo "no previous snapshot"`. Absent → every session is first-seen, nothing is `stalled`. This read is the round's diff baseline: it must complete before any step that can persist, because a snapshot overwritten before it was diffed is a baseline lost for the round that needed it, and step 4's `task_mtime` comparison then degrades silently to first-seen for every session. Record whether the read succeeded — step 9 refuses to persist if it did not.
 
-4. **Task file + stall signal (Step 2).** For every `busy`/`shell` **and `idle`** session, resolve its task file (the `claude_session_id:` stamp, else exact `<name>.md` under `tasks_dir` then `goals_dir` — may be a goal) and count its open boxes (`grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'`). ⚠️ `idle` is not optional: step 8's `parked` and `finished` rows both read an idle session's task file, so skipping it leaves every idle row unclassifiable. For `busy`/`shell` only, also `date -r "<task_file>" -u '+%Y-%m-%dT%H:%M:%SZ'`. Compare with the previous `task_mtime`. Never a message.
+4. **Task file + stall signal (Step 2).** For every `busy`/`shell` **and `idle`** session, resolve its task file (the `claude_session_id:` stamp, else exact `<name>.md` under `tasks_dir` then `goals_dir` — may be a goal) and count its open boxes (`grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'`). ⚠️ `idle` is not optional: step 8's `parked` and `finished` rows both read an idle session's task file, so skipping it leaves every idle row unclassifiable. For `busy`/`shell` only, also `date -r "<task_file>" -u '+%Y-%m-%dT%H:%M:%SZ'`. Compare with the previous `task_mtime`. Never a message. ⚠️ **Not skippable for budget, and not partially skippable** — this pass and the step-1 roster join are what make every other section possible. A round that skips either has nothing for the drive leg and must not return a digest that reads as complete: print `UNKNOWN (pass not run)` in each section it starved.
 
 5. **Reverse index — tasks claiming a dead session (Step 2b).**
    ```bash
@@ -87,7 +88,7 @@ Return **≤ 40 lines**, exactly these sections, each printed as `(none)` rather
 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
-CLASSIFICATION  <counts per class>
+CLASSIFICATION  <counts per class>                 — or: UNKNOWN (pass not run)
   <name> [<session id 8>] · <status> · <class> · <task file basename | —> · <open boxes | —>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)
   <name> · pane <id> · <gate text, ≤80 chars>
