@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `/supervisor:attention-next` — the conversational answering arm of the attention stack. Bare, it lists open items with where each answer would route; with `ITEM_ID ANSWER`, it writes `POST /api/1.0/attention/{id}/answer` first and, only on winning the store's compare-and-set, delivers the answer by `SendMessage` to the asking session's name, resolved from `producer_id` through the session registry. A registry miss (asker exited) or a name shared by two sessions is reported as undeliverable, never guessed; `permission`/`ack` items are refused (`scripts/attention-answer.py`).
+
 ## v0.39.0
 
 - fix: the auto-resume gate and the orphan verdict now decide liveness from the session registry (`~/.claude/sessions/<pid>.json` against a running pid), not from `pgrep -f` / `ps -eo pid,args`. The argv probes are demoted to confirm-life-only — an empty read is indeterminate, never dead — because a live session usually carries its id in no argv (three live sessions read 0 under both, 2026-09-22/23) (manager-drive agent + command, manager-loop).
