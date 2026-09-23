@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: add `supervisor:open-items` skill — single home of the open-items ledger rules, invoked as `/supervisor:open-items <list|add|answer|note|close>`; `fleet-loop`, `manager-loop` and `fleet-sweep-reader` point at it instead of restating the rules and hardcoding the script path. `scripts/open-items.py` is unchanged at its path (vault-cli `/post-compact` calls it directly).
+
 ## v0.35.3
 
 - docs: two residual pre-rename names — `manager-drive` names `manager-verify` (was `worker-verify`), `fleet-drive` calls itself a fleet-loop verb.

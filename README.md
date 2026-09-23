@@ -284,6 +284,7 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 .claude-plugin/plugin.json               plugin manifest
 .mcp.json                                starts the server (${CLAUDE_PLUGIN_ROOT}/server)
 skills/supervising-workers/SKILL.md
+skills/open-items/SKILL.md               the operator-asks ledger — rules + /supervisor:open-items (script stays at scripts/open-items.py)
 commands/{spawn,workers,answer,drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
 commands/{fleet-loop,fleet-status,fleet-drive}.md  fleet surface — many sessions
