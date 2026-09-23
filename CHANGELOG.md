@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: policy allows a chained Bash command (`&&` `||` `;` `|`) when only the catch-all escalated it and every segment is allowed by an anchored `matchType: "command"` rule; exact `2>/dev/null` / `2>&1` tokens are ignored, deny and owner-written escalate rules still win
+
 ## v0.37.0
 
 - feat: `/fleet-drive` reaps finished workers (disk-evidence message, sent before any nudge) and nudges an `approve:` closer that passes a fixed routine-continue table (execution phase, `proceed`/`continue`/`start subtask …`, no push/merge/deploy/release/prod vocabulary); every other closer stays a blocker. Idle/tick thresholds documented in `agents/fleet-drive.md`.
