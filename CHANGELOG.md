@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `stop-probe.py` reports the launchd-hosted gate (`com.bborbe.sweep-gate-notify`) as present when the job is loaded AND its heartbeat is fresh (≤ 2× `StartInterval`); previously it matched only live processes and said "no sweep-gate loop found" between ticks of a healthy job.
+
 ## v0.37.0
 
 - feat: `/fleet-drive` reaps finished workers (disk-evidence message, sent before any nudge) and nudges an `approve:` closer that passes a fixed routine-continue table (execution phase, `proceed`/`continue`/`start subtask …`, no push/merge/deploy/release/prod vocabulary); every other closer stays a blocker. Idle/tick thresholds documented in `agents/fleet-drive.md`.

@@ -22,15 +22,26 @@ under-reports rather than inventing a loop.
 The gate loop is armed detached (`setsid nohup …`, so `ppid 1`) and is never
 signalled from here — see `docs/fleet-surface.md` § Session end.
 
+**The gate may also be hosted by launchd** (`com.bborbe.sweep-gate-notify`, a
+`StartInterval` job). Such a job has no standing pid between ticks, so the `ps`
+match alone reports it absent while it is healthy. It counts as present when the
+job is loaded (`launchctl print` exits 0) AND its heartbeat is fresh (≤ 2× its
+`StartInterval`). Both are required: loaded-but-stale is a wedged job, and a fresh
+heartbeat outlives a `bootout` by up to two intervals.
+
 The tick-file slug is the gate's own — copied from `sweep-gate.py`'s `slug()` so the
 two agree on the filename rather than on a second guess at it.
 """
-import argparse, json, os, re, subprocess, sys
+import argparse, json, os, plistlib, re, subprocess, sys, time
 from datetime import datetime
 
 STATE = os.path.expanduser("~/.claude/state")
 INTERPRETERS = {"bash", "sh", "zsh", "dash", "python", "python3"}
 GATE_SCRIPTS = {"sweep-gate.py", "sweep-gate-ledger-loop.sh"}
+LAUNCHD_LABEL = "com.bborbe.sweep-gate-notify"
+LAUNCHD_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
+HEARTBEAT = os.path.join(STATE, "sweep-gate-loop", "manager-layer.heartbeat")
+DEFAULT_INTERVAL = 900
 
 
 def slug(topic: str) -> str:
@@ -71,6 +82,46 @@ def gate_processes() -> list:
     return rows
 
 
+def launchd_loaded(label: str = LAUNCHD_LABEL) -> bool:
+    try:
+        return subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True, timeout=15,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+def launchd_interval(plist: str = LAUNCHD_PLIST) -> int:
+    try:
+        with open(plist, "rb") as fh:
+            return int(plistlib.load(fh).get("StartInterval") or DEFAULT_INTERVAL)
+    except Exception:
+        return DEFAULT_INTERVAL
+
+
+def heartbeat_age(path: str = HEARTBEAT, now: float = None):
+    """Seconds since the heartbeat's epoch field, or None when missing/unreadable."""
+    try:
+        with open(path) as fh:
+            epoch = int(fh.read().split()[0])
+    except Exception:
+        return None
+    return int((now if now is not None else time.time()) - epoch)
+
+
+def launchd_gate(loaded: bool, age, interval: int):
+    """(present, detail) for the launchd-hosted gate — loaded AND heartbeat fresh."""
+    limit = 2 * interval
+    if not loaded:
+        return False, f"launchd {LAUNCHD_LABEL} not loaded"
+    if age is None:
+        return False, f"launchd {LAUNCHD_LABEL} loaded, heartbeat MISSING {HEARTBEAT}"
+    if age > limit:
+        return False, f"launchd {LAUNCHD_LABEL} loaded, heartbeat STALE {age}s > {limit}s"
+    return True, f"launchd {LAUNCHD_LABEL} loaded, heartbeat {age}s ago (limit {limit}s)"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Read-only state probe for /supervisor:stop.")
     ap.add_argument(
@@ -91,10 +142,12 @@ def main() -> int:
     )
 
     rows = gate_processes()
-    if rows:
-        for pid, etime, command in rows:
-            print(f"gate     pid {pid}  up {etime}  {command}")
-    else:
+    for pid, etime, command in rows:
+        print(f"gate     pid {pid}  up {etime}  {command}")
+    present, detail = launchd_gate(launchd_loaded(), heartbeat_age(), launchd_interval())
+    if present or not rows:
+        print(f"gate     {detail}")
+    if not rows and not present:
         print("gate     NONE — no sweep-gate loop found; it may never have been armed")
 
     tick = os.path.join(STATE, "sweep-gate", f"{slug(subject)}.tick.txt") if subject else ""
