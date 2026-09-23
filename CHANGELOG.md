@@ -10,6 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.36.0
 
+- fix: bare `/manager-drive` now detects its subject with the same resolution rule as `/manager-loop` and `/manager-status` (session state → session name → conversation → vault's last) and prints `Subject: <name> (from <source>)` first, instead of refusing with "Pass a goal or topic name"; keep-in-sync notes in all participants name it.
+- fix: remove `/manager-loop`'s one-sweep `report-only` flag — it suppressed only the arming, so a "report" still spawned, resumed and wrote back; use `/manager-status` to look and `/manager-drive` to act once.
 - feat: add `/supervisor:worker-drive` — moved from the personal `~/.claude/commands/worker-drive.md` so the worker tier sits beside `/supervisor:fleet-drive` and `/supervisor:manager-drive`
 
 ## v0.35.3
