@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`scripts/manager-liveness.py` measures staleness against the manager's OBSERVED arm-to-arm period, not the delay it reports.** `--arm` now appends its epoch to `<slug>.arms`, and `--check` uses `2 x median(gap) + SLACK` once three gaps exist, falling back to the reported interval before that; a gap spanning a `<slug>.stopped` marker is dropped so a stand-down cannot inflate the median. Measured 2026-09-23: a manager reporting a 300 s delay was really arming every **17 min** (300 s delay + the tick's own runtime), so the 660 s limit sat below its true period and the watcher pushed **five STALE alerts in 32 min** on live, correctly re-arming managers — the exact false positive the criterion forbids — after which five managers were stood down. The reported delay is not trustworthy as a period, because the period includes a tick whose duration the manager does not measure.
+
 ## v0.41.3
 
 - feat: **`/supervisor:fleet-drive`'s escalation table now carries a clickable jump link on every row.** The command declared no `Bash` at all, so it could not call `scripts/jump-link.py` and told the caller to hand over a bare `/supervisor:jump <pane-id>` for every escalated session; it now emits the link itself, and a row whose pane cannot be resolved prints `no pane — <reason>` rather than a blank. The pane comes from the digest's `BLOCKED`/`CLOSERS` row where it has one — `agents/fleet-drive.md` now carries it on the `ESCALATION` row — and is otherwise resolved **by session id** through a new `who-needs-me.py --pane-for <sid8>`, never by session title, which `/rename` breaks silently. `docs/session-tiers.md` § *Handing the operator a pane* carried a bare `${CLAUDE_PLUGIN_ROOT}/scripts/jump-link.py`, which resolves to `/scripts/…` because `CLAUDE_PLUGIN_ROOT` is unset in a command's Bash; it now uses the `:-` fallback form the other commands already use.
