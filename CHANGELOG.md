@@ -8,14 +8,18 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: keep-in-sync notes enumerate `/manager-drive`'s vault-resolution paragraph as an allowed difference, so the shared subject-resolution blocks diff only where declared.
+
 ## v0.36.3
 
+- fix: bare `/manager-drive` resolves its vault from the session cwd (vault-cli config path match) before any subject source, so a session in a non-Personal vault (e.g. Brogrammers "MDM Bugs") detects its subject there instead of refusing.
 - docs: session-tiers guide gains a jump-link section — generate with `scripts/jump-link.py`, never hand-build the URL (token required), `/supervisor:jump` is the executor, restart a session to pick up new command text after a plugin update
 
 ## v0.36.2
 
 - fix: **the `fleet-drive` agent re-counted a candidate's open boxes instead of taking the digest row's count.** On the first live manager-runtime run (0.36.1) it reported 7 open boxes for a task whose row, and disk, both read 3 — so the ledger's suppression input was wrong. Step 2 now states the row's count is the only authority for the round, and that the task text for the operator-gate probe is read with `Read` from the row's file, never via `vault-cli task show` on the `25 Tasks/<file>` path form (which 404s).
-- fix: bare `/manager-drive` resolves its vault from the session cwd (vault-cli config path match) before any subject source, so a session in a non-Personal vault (e.g. Brogrammers "MDM Bugs") detects its subject there instead of refusing.
 - feat: add `docs/session-tiers.md` — the three session tiers (fleet manager / manager / worker), a command → tier table covering every `/supervisor:*` command with "never run from" guidance, and the worker boundary (`/open` is manager-only; workers route out-of-scope work to their manager)
 - feat: add `/supervisor:read-guides` — reads every guide in `docs/` and indexes the commands, mirroring `/vault-cli:read-guides` and `/dark-factory:read-guides`
 
