@@ -39,7 +39,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 
 A worker whose task is complete does not close itself. It goes `idle`, or it parks on `approve: /vault-cli:session-close` and waits for an operator whose only legal move is the obvious one.
 
-⚠️ **Why this runs before the drive pass, and why it is not a style choice.** A completed task with zero open boxes is *also idle*. A drive pass that runs first sees an idle worker and nudges it to continue — and a session with nothing left to do that is told to continue will **invent work**. The sequence is **sweep → reap → drive → escalate**, and reap precedes drive for that reason.
+⚠️ **Why this runs before the drive pass, and why it is not a style choice.** A completed task with zero open boxes is *also idle*. A drive pass that runs first sees an idle worker and nudges it to continue (the sweep's `stuck` bucket includes idle > ~30 min in `execution` with open boxes, so idle alone is a nudge trigger) — and a session with nothing left to do that is told to continue will **invent work**. The sequence is **sweep → reap → drive → escalate**, and reap precedes drive for that reason.
 
 Verify against disk this run, per task:
 
