@@ -12,6 +12,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - fix: **`fleet-sweep-reader` never produced a `parked` row, so `/supervisor:fleet-drive` had no candidates to drive.** Step 4 resolved task files only for `busy`/`shell` sessions, but the `parked` and `finished` rows are defined on an *idle* session's task file — so every idle row came back unclassified. It now resolves the task file and open-box count for idle sessions too, and each classification row carries `<task file> · <open boxes>`. The drive agent reads both from the row instead of looking up a task it was never given, and treats a digest missing them as a malformed handoff (idle rows → unverifiable) rather than choosing candidates by hand. Found by the first manager-runtime `--dry-run` (5 candidates, all hand-picked, open boxes unknown on every row).
 
+## v0.35.3
+
+- docs: two residual pre-rename names — `manager-drive` names `manager-verify` (was `worker-verify`), `fleet-drive` calls itself a fleet-loop verb.
+
 ## v0.35.2
 
 - docs: `fleet-surface.md` — a worker handing a manager command's live run to its manager must not close WAITING on the reply; an idle manager never drains the message unprompted.

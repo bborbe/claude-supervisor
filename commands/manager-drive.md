@@ -17,7 +17,7 @@ argument-hint: "<goal|topic>"
 
 Manager drive slash command — the **act leg**, run once, by hand, against one subject.
 
-This is the third leg of the triad `manager-status` (show) · `worker-verify` (check) · **`manager-drive` (act)**, and it is the same act leg `/manager-loop` composes on every tick. Running it by hand is what makes the act leg testable on its own: you see what drive would do to a subject without arming a loop over it.
+This is the third leg of the triad `manager-status` (show) · `manager-verify` (check) · **`manager-drive` (act)**, and it is the same act leg `/manager-loop` composes on every tick. Running it by hand is what makes the act leg testable on its own: you see what drive would do to a subject without arming a loop over it.
 
 ⚠️ **"Testable" here means operator-runnable, not unit-tested — and that is this repo's existing shape, not a gap this change introduces.** Commands and agents in this plugin are markdown prompts: there is no harness that executes them, and no test file exists for any of the eleven commands or four agents already shipped. What this repo *does* test is the server (`server/*.test.mjs`) and the render scripts (`scripts/tests/`), and this change touches neither. The verification this artifact actually carries is the marketplace-clone e2e run recorded in its PR — the command appears in the loaded `slash_commands`, the agent registers and dispatches, and the loaded `manager-loop.md` is byte-identical to the worktree. A test asserting that a markdown prompt contains certain sentences would restate the file rather than exercise it.
 
