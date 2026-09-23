@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.36.0
 
 - feat: add `/supervisor:worker-drive` — moved from the personal `~/.claude/commands/worker-drive.md` so the worker tier sits beside `/supervisor:fleet-drive` and `/supervisor:manager-drive`
 
