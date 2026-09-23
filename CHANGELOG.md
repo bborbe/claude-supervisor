@@ -10,8 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- feat: extract the worker sweep's **act leg** into `/supervisor:manager-drive` (a thin command) plus `supervisor:manager-drive` (the agent holding the logic). It reaps the finished, nudges stuck or error-marked workers, and runs the auto-resume gate on confirmed orphans — **reap always before drive**, because a completed task with zero open boxes is also idle and a drive that runs first nudges a finished session to continue. The command is operator-runnable against one subject, so the act leg is testable without arming a manager loop, and it composes its classification from `supervisor:worker-sweep-reader` rather than rebuilding one.
-- feat: `worker-manager` now **dispatches the drive agent** each tick instead of inlining the act logic, preserving the `sweep → reap → drive → escalate` sequence. Its cadence, escalation and TTS behaviour are unchanged, and the reap / auto-resume prose that merely *names* those behaviours stays, because it is part of the manager's own contract rather than the act leg.
+- feat: extract the worker sweep's **act leg** into `/supervisor:manager-drive` (a thin command) plus `supervisor:manager-drive` (the agent holding the logic). It reaps the finished, nudges stuck or error-marked workers, and runs the auto-resume gate on confirmed orphans — **reap always before drive**, because a completed task with zero open boxes is also idle and a drive that runs first nudges a finished session to continue. The command is operator-runnable against one subject, so the act leg is testable without arming a manager loop, and it composes its classification from `supervisor:manager-sweep-reader` rather than rebuilding one.
+- feat: `manager-loop` now **dispatches the drive agent** each tick instead of inlining the act logic, preserving the `sweep → reap → drive → escalate` sequence. Its cadence, escalation and TTS behaviour are unchanged, and the reap / auto-resume prose that merely *names* those behaviours stays, because it is part of the manager's own contract rather than the act leg.
 
 ## v0.34.1
 
