@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.35.0
 
 - docs: **`commands/manager-loop.md` carries only what a sweep executes — 82,770 → 39,589 B (−52%).** Every line ≥ 400 chars (53 of 204 non-empty lines, 64 KB) mixed a rule with its rationale and incident history, and the command file is re-injected on every sweep. Each such line is replaced by a condensed rule (same commands, thresholds, gates and output shape); the full original text moves verbatim to the vault runbook `Worker Manager Session` § Command rationale (moved from /manager-loop), plus a pointer line at the top of the command. The 151 shorter lines are unchanged byte-for-byte. No filter, threshold or gate semantics change.
 
