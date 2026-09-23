@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: add `supervisor:open-items` skill — single home of the open-items ledger rules, invoked as `/supervisor:open-items <list|add|answer|note|close>`; `fleet-loop`, `manager-loop` and `fleet-sweep-reader` point at it instead of restating the rules and hardcoding the script path. `scripts/open-items.py` is unchanged at its path (vault-cli `/post-compact` calls it directly).
+- feat: add `/supervisor:worker-drive` — moved from the personal `~/.claude/commands/worker-drive.md` so the worker tier sits beside `/supervisor:fleet-drive` and `/supervisor:manager-drive`
 
 ## v0.35.3
 
