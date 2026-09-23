@@ -25,6 +25,8 @@ Three verbs, one file each, all in the sweep-gate state dir:
                                     where PERIOD is the manager's observed median
                                     arm-to-arm gap (>=3 gaps), falling back to the
                                     reported interval until that history exists.
+                                    A re-arm after a stand-down resets the history,
+                                    so an outage gap never counts as cadence.
                                     Prints one line per topic that TURNED stale (or
                                     recovered) since the last check; exits 10 if any
                                     turned stale, else 0. The notified set lives in
@@ -77,25 +79,11 @@ def read_arms(s: str) -> list:
 
 
 def observed_interval(s: str):
-    """Median arm-to-arm gap in seconds, or None when there is too little history.
-
-    Gaps that span a deliberate stand-down are dropped — the loop was not running,
-    so such a gap measures the stop, not the cadence.
-    """
+    """Median arm-to-arm gap in seconds, or None when there is too little history."""
     vals = read_arms(s)[-ARMS_KEEP:]
     if len(vals) < 4:
         return None
-    stop_at = None
-    if os.path.exists(path(s, "stopped")):
-        try:
-            stop_at = os.path.getmtime(path(s, "stopped"))
-        except OSError:
-            stop_at = None
-    gaps = sorted(
-        b - a
-        for a, b in zip(vals, vals[1:])
-        if not (stop_at is not None and a < stop_at < b)
-    )
+    gaps = sorted(b - a for a, b in zip(vals, vals[1:]))
     if len(gaps) < 3:
         return None
     return gaps[len(gaps) // 2]
@@ -104,7 +92,12 @@ def observed_interval(s: str):
 def arm(topic: str, interval: int) -> int:
     s = slug(topic)
     write_atomic(path(s, "cadence"), f"{interval}\n")
-    arms = (read_arms(s) + [time.time()])[-ARMS_KEEP:]
+    # A re-arm after a stand-down starts a NEW cadence sample. The outage gap is not
+    # cadence, and it cannot be filtered at read time: the marker that records when
+    # the stop happened is deleted a few lines below, so by the time `check` runs
+    # there is nothing left to compare the gap against. Drop the stale history here.
+    prior = [] if os.path.exists(path(s, "stopped")) else read_arms(s)
+    arms = (prior + [time.time()])[-ARMS_KEEP:]
     write_atomic(path(s, "arms"), "".join(f"{v:.0f}\n" for v in arms))
     try:
         os.remove(path(s, "stopped"))

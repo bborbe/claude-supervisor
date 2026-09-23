@@ -127,14 +127,21 @@ class Liveness(unittest.TestCase):
         self.assertEqual(rc, 10)
         self.assertIn("period=1020s(observed)", out)
 
-    def test_gap_spanning_a_stand_down_is_not_cadence(self):
-        # A stop breaks the arm history; the outage gap must not inflate the median.
-        self.plant_arms("Manager Layer", [11000, 10000, 9000, 8000, 1000])
-        self.arm("Manager Layer", 300, age=1000)
-        stop = self.m.path("manager-layer", "stopped")
-        with open(stop, "w") as fh:
-            fh.write("stopped\n")
-        os.utime(stop, (time.time() - 5000, time.time() - 5000))
+    def test_rearm_after_a_stand_down_resets_the_history(self):
+        # The outage gap must never count as cadence. It cannot be filtered at read
+        # time — `arm` deletes the marker that records when the stop happened — so a
+        # restart starts a fresh sample instead.
+        self.plant_arms("Manager Layer", [11000, 10000, 9000, 8000])
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer")
+            self.m.arm("Manager Layer", 300)
+        self.assertEqual(len(self.m.read_arms("manager-layer")), 1)
+        self.assertIsNone(self.m.observed_interval("manager-layer"))
+
+    def test_history_survives_ordinary_rearms(self):
+        self.plant_arms("Manager Layer", [3000, 2000, 1000])
+        self.arm("Manager Layer", 300, age=0)
+        self.assertEqual(len(self.m.read_arms("manager-layer")), 4)
         self.assertEqual(int(self.m.observed_interval("manager-layer")), 1000)
 
     def test_unreadable_cadence_is_flagged(self):
