@@ -89,7 +89,19 @@ The caller owns the **verdict**; you receive orphans it has already confirmed. T
 
 ⚠️ **`pgrep -f` and `ps -eo pid,args` are not OS-truth — they can confirm life, never death.** Both read a command line, and a live Claude Code session usually carries its id in none. Measured 2026-09-22 and re-measured 2026-09-23: three live sessions read `pgrep` **0** and `ps` **0** while each held a registry entry against a running pid; on 2026-09-22 the documented gate would have resumed two live workers, and only the server's own resume guard refused. `pgrep -f` also reads a false empty for a session in your own ancestor chain (2026-09-15: 2 hits under `ps`, 0 under `pgrep`). So: argv hit → alive; argv empty → **indeterminate**; the death verdict rests on **registry absence plus transcript staleness**, never on an empty argv read.
 
-**Gate holds → resume.** Resolve the vault's `claude_script` from `vault-cli config list`, then **re-probe at the spawn site and spawn in one shell** — the earlier probe and the spawn are not atomic, and a claim made minutes earlier is not a claim.
+**Gate holds → resume.** Resolve the vault's `claude_script` — it is a **per-vault field, not a subcommand**, so `vault-cli config --help` never lists it, and reading that help as "the value does not exist" silently kills this whole branch. Measured 2026-09-23: a run did exactly that, checked `--help`, concluded no `claude_script` was exposed, and withheld the spawn while every gate clause genuinely held. The field is there. Resolve it explicitly:
+
+```bash
+vault-cli config list --output json | python3 -c "
+import json,sys
+v='<vault>'.lower()
+print(next((e.get('claude_script','') for e in json.load(sys.stdin) if str(e.get('name','')).lower()==v),''))
+"
+```
+
+**An empty result is a reportable fact, never a silent skip.** Print `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` and carry it to the caller: a withheld spawn with no line of its own is indistinguishable from a failed gate clause, which is exactly how the 2026-09-23 run lost it.
+
+Then **re-probe at the spawn site and spawn in one shell** — the earlier probe and the spawn are not atomic, and a claim made minutes earlier is not a claim.
 
 **A positive re-probe aborts.** Print `⛔ RESUME ABORTED: <task> — a process appeared between probe and spawn`, spawn nothing, and **do not write `last_auto_resume`** — the resume did not happen, so the crash-loop cap must not be armed against its own retry. Observed 2026-09-14 10:27: a probe read `pgrep` 0 and a 634-min-stale transcript, every clause genuinely held, the task genuinely orphaned — and by 10:41 `pgrep -f` was **2**. Nothing was wrong with the probe; the gap was temporal.
 
@@ -117,6 +129,7 @@ One compact report — see `<output_format>`. You do not render the status table
 - **The caller passed no classification** → stop and say so. You do not sweep, and a bucket you computed yourself is a second classification, which is the thing this extraction exists to avoid.
 - **A task matches the reap test but has a live session** → still reap (send the evidence). The worker being alive is why the message is sent rather than nothing; it is not a reason to skip.
 - **The gate fails on exactly one clause** → name the clause and the value you read. A near-miss is the most useful line in the report; "not resumed" alone is not.
+- **`claude_script` resolves empty** → print `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` as its own line, and name that as the reason the branch was skipped. Never let it read as a failed gate clause: the gate held, and the launcher is the thing that is missing.
 - **A spawn is refused** → report the refusal verbatim. Under `auto` the refusal is the **caller's** own outgoing call being gated, not a block on the worker; the caller fixes it with Shift+Tab → `accept edits`. Do not respond by changing a mode — `spawn_agent` has no such argument.
 - **A tool in `tools:` did not bind** — e.g. no `mcp__supervisor__*` namespace in this session, which is a real configuration state rather than a bug of yours — → say so explicitly and report the decisions you would have made, per task. Never let the report read as though the acts happened.
 - **This file and the runbook disagree** → the runbook wins. Report the disagreement as a bug.
