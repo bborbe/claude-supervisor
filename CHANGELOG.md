@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.41.4
 
 - fix: **`scripts/manager-liveness.py` measures staleness against the manager's OBSERVED arm-to-arm period, not the delay it reports.** `--arm` now appends its epoch to `<slug>.arms`, and `--check` uses `2 x median(gap) + SLACK` once three gaps exist, falling back to the reported interval before that; a re-arm after a stand-down resets the history, so an outage gap never counts as cadence. Measured 2026-09-23: a manager reporting a 300 s delay was really arming every **17 min** (300 s delay + the tick's own runtime), so the 660 s limit sat below its true period and the watcher pushed **five STALE alerts in 32 min** on live, correctly re-arming managers — the exact false positive the criterion forbids — after which five managers were stood down. The reported delay is not trustworthy as a period, because the period includes a tick whose duration the manager does not measure.
 
