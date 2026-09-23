@@ -38,6 +38,7 @@ other side.
 | `/supervisor:read-guides` | any | — |
 | `/supervisor:jump` | any | — |
 | `/supervisor:who-needs-me` | any | — |
+| `/supervisor:attention-next` | any — relays the operator's own answer | — |
 
 Keep this table in lockstep with `commands/`: a command file with no row here, or a row with
 no command file, is a defect. Check it with:

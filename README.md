@@ -22,6 +22,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:manager-spawn` `/supervisor:fleet-workers` `/supervisor:manager-answer` `/supervisor:manager-drain` | the operator surface |
 | agent `manager-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
 | `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
+| `/supervisor:attention-next` | what's next on the attention stack — answer an item in chat, delivered to the session that asked |
 | `scripts/jump-link.py` | render a pane's jump target as a clickable link (falls back to `/supervisor:jump <N>` when the local fleet-jump server is not configured) |
 | `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
 | `/supervisor:fleet-drive` | one-shot: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
@@ -293,6 +294,7 @@ skills/supervising-workers/SKILL.md
 skills/open-items/SKILL.md               the operator-asks ledger — rules + /supervisor:open-items (script stays at scripts/open-items.py)
 commands/{spawn,workers,answer,drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
+commands/attention-next.md + scripts/attention-answer.py  answer an attention item, route it to the asker
 commands/{fleet-loop,fleet-status,fleet-drive}.md  fleet surface — many sessions
 commands/{manager-loop,manager-status}.md       one goal or topic
 commands/manager-drive.md                        one goal or topic — the act leg, by hand
