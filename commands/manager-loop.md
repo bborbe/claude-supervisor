@@ -63,7 +63,7 @@ The manager **manages; it does not build**. It never performs the topic's *work*
 
 ## Subject resolution — when `$1` is omitted
 
-**Keep-in-sync block** — shared with `/manager-status`, `/manager-drive` and `/manager-verify`; the resolution rule is identical in all four. Enumerated differences, never counted: between the three plugin copies — the sibling list here, the STOP line, the "No fallback, ever" clause, and the closing write-contract sentence; `/manager-verify` also differs in the recording paragraphs (prose there, since its `allowed-tools` lacks `Bash(python3:*)` / `Bash(mkdir:*)`). Change one, change the others.
+**Keep-in-sync block** — shared with `/manager-status`, `/manager-drive` and `/manager-verify`; the resolution rule is identical in all four. Enumerated differences, never counted: between the three plugin copies — the sibling list here, the STOP line, the "No fallback, ever" clause, and the closing write-contract sentence; `/manager-verify` also differs in the recording paragraphs (prose there, since its `allowed-tools` lacks `Bash(python3:*)` / `Bash(mkdir:*)`). `/manager-drive` also carries a leading **vault-resolution paragraph** (cwd → vault-cli config path), because it has no `## Resolution` section of its own to derive the vault in. Change one, change the others.
 
 A bare invocation takes the first source that yields a **real page**:
 
