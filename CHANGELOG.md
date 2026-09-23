@@ -12,6 +12,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - fix: the auto-resume gate and the orphan verdict now decide liveness from the session registry (`~/.claude/sessions/<pid>.json` against a running pid), not from `pgrep -f` / `ps -eo pid,args`. The argv probes are demoted to confirm-life-only — an empty read is indeterminate, never dead — because a live session usually carries its id in no argv (three live sessions read 0 under both, 2026-09-22/23) (manager-drive agent + command, manager-loop).
 
+## v0.37.0
+
+- feat: `/fleet-drive` reaps finished workers (disk-evidence message, sent before any nudge) and nudges an `approve:` closer that passes a fixed routine-continue table (execution phase, `proceed`/`continue`/`start subtask …`, no push/merge/deploy/release/prod vocabulary); every other closer stays a blocker. Idle/tick thresholds documented in `agents/fleet-drive.md`.
+
 ## v0.36.5
 
 - feat: add `supervisor:open-items` skill — single home of the open-items ledger rules, invoked as `/supervisor:open-items <list|add|answer|note|close>`; `fleet-loop`, `manager-loop` and `fleet-sweep-reader` point at it instead of restating the rules and hardcoding the script path. `scripts/open-items.py` is unchanged at its path (vault-cli `/post-compact` calls it directly).
