@@ -11,6 +11,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: add `supervisor:open-items` skill — single home of the open-items ledger rules, invoked as `/supervisor:open-items <list|add|answer|note|close>`; `fleet-loop`, `manager-loop` and `fleet-sweep-reader` point at it instead of restating the rules and hardcoding the script path. `scripts/open-items.py` is unchanged at its path (vault-cli `/post-compact` calls it directly).
+
+## v0.36.1
+
+- feat: add `docs/session-tiers.md` — the three session tiers (fleet manager / manager / worker), a command → tier table covering every `/supervisor:*` command with "never run from" guidance, and the worker boundary (`/open` is manager-only; workers route out-of-scope work to their manager)
+- feat: add `/supervisor:read-guides` — reads every guide in `docs/` and indexes the commands, mirroring `/vault-cli:read-guides` and `/dark-factory:read-guides`
 - fix: **`fleet-sweep-reader` never produced a `parked` row, so `/supervisor:fleet-drive` had no candidates to drive.** Step 4 resolved task files only for `busy`/`shell` sessions, but the `parked` and `finished` rows are defined on an *idle* session's task file — so every idle row came back unclassified. It now resolves the task file and open-box count for idle sessions too, and each classification row carries `<task file> · <open boxes>`. The drive agent reads both from the row instead of looking up a task it was never given, and treats a digest missing them as a malformed handoff (idle rows → unverifiable) rather than choosing candidates by hand. Found by the first manager-runtime `--dry-run` (5 candidates, all hand-picked, open boxes unknown on every row).
 
 ## v0.36.0
