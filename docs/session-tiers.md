@@ -26,9 +26,11 @@ other side.
 | `/supervisor:fleet-status` | fleet manager | worker |
 | `/supervisor:fleet-drive` | fleet manager | worker; goal/topic manager (use `manager-drive`) |
 | `/supervisor:fleet-workers` | fleet manager | worker |
+| `/supervisor:fleet-verify` | fleet manager | worker; goal/topic manager (use `manager-verify`) |
 | `/supervisor:manager-loop` | manager | worker — arming it collapses the two roles silently |
 | `/supervisor:manager-status` | manager | worker |
 | `/supervisor:manager-drive` | manager | worker |
+| `/supervisor:manager-verify` | manager | worker |
 | `/supervisor:manager-spawn` | manager | worker — workers never start sessions |
 | `/supervisor:manager-answer` | manager | worker |
 | `/supervisor:manager-drain` | manager | worker |

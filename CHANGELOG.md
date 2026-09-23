@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: add `/supervisor:fleet-verify` and `/supervisor:manager-verify`, moved from the Personal vault's local commands; script paths resolve via `${CLAUDE_PLUGIN_ROOT}`, and manager-verify documents its vault-local `verify-topic` dependency.
+
 ## v0.38.1
 
 - fix: fleet-drive reads each candidate's chat closer from a new sweep-digest `CLOSERS` section (who-needs-me Rendered panels), so a session parked on `pick`/`review:`/`you run:` or a non-routine `approve:` is never revived; a digest without `CLOSERS` makes candidates unverifiable.

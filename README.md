@@ -25,7 +25,9 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `scripts/jump-link.py` | render a pane's jump target as a clickable link (falls back to `/supervisor:jump <N>` when the local fleet-jump server is not configured) |
 | `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
 | `/supervisor:fleet-drive` | one-shot: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
+| `/supervisor:fleet-verify` | read-only: verify the fleet layer's own contract, ending in a numbered fix list |
 | `/supervisor:manager-loop` `/supervisor:manager-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
+| `/supervisor:manager-verify` | read-only: verify ONE goal or topic and suggest fixes, ending in a numbered fix list |
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |
@@ -296,6 +298,8 @@ commands/{jump,who-needs-me}.md                  find and reach a session
 commands/{fleet-loop,fleet-status,fleet-drive}.md  fleet surface — many sessions
 commands/{manager-loop,manager-status}.md       one goal or topic
 commands/manager-drive.md                        one goal or topic — the act leg, by hand
+commands/fleet-verify.md                         fleet manager — verify the fleet layer's contract, suggest fixes
+commands/manager-verify.md                       goal/topic manager — verify one subject, suggest fixes
 commands/worker-drive.md                         one worker session — drive its anchored task to done
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
