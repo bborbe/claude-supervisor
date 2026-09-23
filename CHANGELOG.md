@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.39.1
 
 - fix: fleet-drive routine-continue test 4 no longer counts the closer under test as its own `BLOCKED` gate — the attention feed lists every rendered `approve:` closer there, so the table was unreachable (0 routine continues across three live runs).
 
