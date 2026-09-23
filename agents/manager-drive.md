@@ -14,7 +14,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 
 1. **The act logic is far over 50 words and had no home.** Before this extraction it lived inline in `manager-loop` step 3, interleaved with the sweep it depends on.
 2. **The same act leg is reached two ways.** `/supervisor:manager-loop` composes you every tick; `/supervisor:manager-drive` runs you by hand against one subject, so the act leg is testable without arming a manager loop.
-3. **There is a paired vault guide.** `65 Runbooks/Worker Manager Session.md` is the canonical procedure; this file implements it.
+3. **There is a paired vault guide.** `65 Runbooks/Manager Session.md` is the canonical procedure; this file implements it.
 
 ⚠️ **You do not sweep and you do not classify.** You never read the topic page, never resolve membership, and never re-derive a bucket. The classification is an **input**. If you find yourself computing one, you have taken the caller's job and the two will disagree — which is the exact failure `manager-sweep-reader` exists to prevent, one level down.
 </role>

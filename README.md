@@ -87,7 +87,7 @@ A manager that raises an ACTION gate can only speak to an operator in the room. 
 
 `scripts/notify-gate.py --layer <name>` reads the sweep's gates on stdin, publishes each one that is due through the endpoint named by `env`, and keeps a cadence ledger at `~/.claude/state/gate-notifications-<layer>.json` (`SUPERVISOR_GATE_STATE` overrides the path). It also owns cross-layer de-dup, now carried on the attention store item's `escalated_by` rather than a local file: each gate names the BLOCKED session in a `session` field, the script resolves that session's item by `producer_id`, and a gate with no resolvable item is reported as `unresolved` instead of being silently skipped. The script owns the delivery bound — read its docstring rather than copying the numbers.
 
-**`--layer` is required, and the ledger is per layer on purpose.** Each manager layer sees a different slice of the gates — the fleet manager drops every gate a live worker manager owns — so a shared ledger would let one layer's sweep prune the other's gates as "cleared", after which they would be seen as new and re-notified on every tick.
+**`--layer` is required, and the ledger is per layer on purpose.** Each manager layer sees a different slice of the gates — the fleet manager drops every gate a live manager owns — so a shared ledger would let one layer's sweep prune the other's gates as "cleared", after which they would be seen as new and re-notified on every tick.
 
 `teamvaultKey` is a **reference** into TeamVault, not the secret itself: the script fetches the credential with `teamvault-cli` and hands it to curl on stdin, so it never appears in the process table.
 

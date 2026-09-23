@@ -1,5 +1,5 @@
 ---
-description: Re-discover this manager's state from disk rather than delete it. The reset contract is the vault's Worker Manager Session runbook § Reset; this file owns the invocation and the report.
+description: Re-discover this manager's state from disk rather than delete it. The reset contract is the vault's Manager Session runbook § Reset; this file owns the invocation and the report.
 allowed-tools:
   - Read
   - Bash(python3:*)
@@ -8,7 +8,7 @@ argument-hint: "[goal or topic name] [--dry-run]"
 
 Re-baseline the manager **this session** is running.
 
-**The reset contract — the steps, what each may change, and what it must never touch — is the vault's `Worker Manager Session` runbook § Reset. Read it and execute it from there; do not restate it here.** What this file owns is the invocation and the report. The four steps run in one script so the ledger's no-discard check and the digest rewrite happen where they can be tested, not in prose.
+**The reset contract — the steps, what each may change, and what it must never touch — is the vault's `Manager Session` runbook § Reset. Read it and execute it from there; do not restate it here.** What this file owns is the invocation and the report. The four steps run in one script so the ledger's no-discard check and the digest rewrite happen where they can be tested, not in prose.
 
 <process>
 1. **Pick the subject argument.** `$1` given → pass it as `--subject "$1"` (source `explicit`). No `$1` → the most recent `/manager-loop`, `/manager-status` or `/supervisor:reset` argument, or goal/topic page referenced as a subject in this conversation, passed as `--subject "<name>" --source conversation`; none → pass no `--subject` and let the script fall through to this session's own state and name. **Never** read `~/.claude/state/worker-manager/last-<vault>.json` to pick it — the script prints that file's content only to show it was skipped.
