@@ -33,7 +33,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 <process>
 
 1. **Read the four channels.** None replaces another.
-   - **Attention feed — who is blocked:** `python3 $P/who-needs-me.py`. It answers "was a gate raised", never "is a gate open" — list its entries as *raised*, with pane id and the gate's `approve:` detail; the caller reads the pane before calling one open.
+   - **Attention feed — who is blocked:** `python3 $P/who-needs-me.py`. It answers "was a gate raised", never "is a gate open" — list its entries as *raised*, with pane id and the gate's `approve:` detail; the caller reads the pane before calling one open. Also copy its `Rendered panels` section into `CLOSERS` — the closer line each idle session ended its last turn on. That line is the only place a chat-only `pick` / `review:` / `approve:` is visible; the task file never carries it (measured 2026-09-23: fleet-drive revived a session parked on a `review:` closer because it looked only at `# Progress`).
    - **Roster — who exists:** the caller's `ListAgents` text. The mode column reports `interactive` for headless workers too, so it cannot tell the two apart; the roster is volatile, so timestamp any conclusion drawn from it.
    - **Task mapping + mtime:** `python3 $P/fleet-sessions.py`. ~2000 lines raw: never read it uncompacted — pipe through `grep -oE '\b[0-9a-f]{8}\b'`, or filter to one id. **Exception:** a call made to read a row's `LAST-ACTIVE` must not compact. Never extract the id by column position (`awk '{print $4}'` — the `●` marker shifts columns); never build the live set from `grep '●'` (argv-only, blind to fresh sessions).
    - **Context usage:** `python3 $P/context-usage.py --compactable --threshold 70` — sessions over threshold, neither blocked nor in a tool call.
@@ -90,6 +90,8 @@ CLASSIFICATION  <counts per class>
   <name> [<session id 8>] · <status> · <class> · <task file basename | —> · <open boxes | —>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)
   <name> · pane <id> · <gate text, ≤80 chars>
+CLOSERS (rendered panels — last-turn closer line)
+  <name> · pane <id> · <closer text, ≤80 chars>                     ← only for rows in CLASSIFICATION
 ORPHAN CANDIDATES (park filter + 7d bound applied)  — or: UNKNOWN (check failed)
   <task> · claimed by <session id 8> · file age <h>
 REAP CANDIDATES (3 disk facts read this run)
