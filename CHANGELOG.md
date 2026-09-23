@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: session-tiers guide gains a jump-link section — generate with `scripts/jump-link.py`, never hand-build the URL (token required), `/supervisor:jump` is the executor, restart a session to pick up new command text after a plugin update
+
 ## v0.36.2
 
 - fix: **the `fleet-drive` agent re-counted a candidate's open boxes instead of taking the digest row's count.** On the first live manager-runtime run (0.36.1) it reported 7 open boxes for a task whose row, and disk, both read 3 — so the ledger's suppression input was wrong. Step 2 now states the row's count is the only authority for the round, and that the task text for the operator-gate probe is read with `Read` from the row's file, never via `vault-cli task show` on the `25 Tasks/<file>` path form (which 404s).
