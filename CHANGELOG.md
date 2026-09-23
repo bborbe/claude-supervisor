@@ -10,6 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- feat: `/supervisor:attention-next` — the conversational answering arm of the attention stack. Bare, it lists open items with where each answer would route; with `ITEM_ID ANSWER`, it writes `POST /api/1.0/attention/{id}/answer` first and, only on winning the store's compare-and-set, delivers the answer by `SendMessage` to the asking session's name, resolved from `producer_id` through the session registry. A registry miss (asker exited) or a name shared by two sessions is reported as undeliverable, never guessed; `permission`/`ack` items are refused (`scripts/attention-answer.py`).
 - feat: add `/supervisor:fleet-verify` and `/supervisor:manager-verify`, moved from the Personal vault's local commands; script paths resolve via `${CLAUDE_PLUGIN_ROOT}`, and manager-verify documents its vault-local `verify-topic` dependency.
 
 ## v0.40.0
