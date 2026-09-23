@@ -36,6 +36,8 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 **Keep-in-sync block** — shared with `/manager-loop`, `/manager-status` and `/manager-verify`; the resolution rule is identical in all four. Enumerated differences, never counted: between the three plugin copies — the sibling list here, the STOP line, the "No fallback, ever" clause, and the closing write-contract sentence; `/manager-verify` also differs in the recording paragraphs (prose there, since its `allowed-tools` lacks `Bash(python3:*)` / `Bash(mkdir:*)`). Change one, change the others.
 
+**Resolve the vault first — from the session's cwd, never a default.** `VAULT=$(vault-cli config list --output json | python3 -c "import json,sys,os;cwd=os.path.realpath(os.getcwd());print(next((v['name'] for v in json.load(sys.stdin) if os.path.realpath(os.path.expanduser(v['path']))==cwd),''))")`. Every page test below (`24 Goals/`, the vault's `topics_dir`) runs inside that vault. No match → STOP with `❌ cwd is not a configured vault — pass a goal or topic name and run from the vault root`; never fall back to `personal`. A session in `~/Documents/Obsidian/Brogrammers` named *MDM Bugs* must resolve `Brogrammers/23 Topics/MDM Bugs.md`.
+
 A bare invocation takes the first source that yields a **real page**:
 
 1. **Session state** — `~/.claude/state/worker-manager/<CLAUDE_CODE_SESSION_ID>.json`, shape `{"subject","vault","branch","resolved_at"}`. Accepted only when `vault` matches the resolved vault **and** `subject` still resolves to a page. This is what makes a subject named once stick across the ticks of one session.
