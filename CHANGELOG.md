@@ -10,6 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: **`agents/manager-drive.md` resolves `claude_script` explicitly, so the auto-resume gate can actually fire.** The step said *"resolve the vault's `claude_script` from `vault-cli config list`"* and gave no invocation. A run on 2026-09-23 read `vault-cli config --help` instead — which lists the `current-user` and `list` **subcommands** and never the per-vault **fields** — concluded no `claude_script` was exposed, and withheld the spawn while every gate clause genuinely held, so the branch could not fire on that host at all. The step now carries the exact command, states that the field is invisible to `--help`, and an empty result prints `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` rather than disappearing into a withheld spawn that reads like a failed clause.
+
 - feat: `scripts/manager-liveness.py` detects a lapsed manager loop from outside the session. `manager-loop` records each re-arm with its real interval (`--arm`), `/supervisor:stop` writes a `<slug>.stopped` marker (`--stop`), and `--check` (model-free, for a host loop) reports a topic once when its last re-arm is older than 2x its own interval and no stop marker is present.
 
 ## v0.38.2
