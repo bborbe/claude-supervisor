@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: fleet-drive reads each candidate's chat closer from a new sweep-digest `CLOSERS` section (who-needs-me Rendered panels), so a session parked on `pick`/`review:`/`you run:` or a non-routine `approve:` is never revived; a digest without `CLOSERS` makes candidates unverifiable.
+
 ## v0.38.0
 
 - feat: policy allows a chained Bash command (`&&` `||` `;` `|`) when only the catch-all escalated it and every segment is allowed by an anchored `matchType: "command"` rule; exact `2>/dev/null` / `2>&1` tokens are ignored, deny and owner-written escalate rules still win
