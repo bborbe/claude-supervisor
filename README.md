@@ -257,12 +257,12 @@ commands/{spawn,workers,answer,drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
 commands/{fleet-manager,fleet-status}.md         fleet surface — many sessions
 commands/{worker-manager,worker-status}.md       one goal or topic — the loop and the snapshot
-commands/worker-drive.md                         one goal or topic — the act leg, by hand
+commands/manager-drive.md                         one goal or topic — the act leg, by hand
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/worker-wrangler.md                routine approval loop over headless workers
 agents/worker-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
-agents/worker-drive.md                    the worker sweep's act leg (composed by worker-manager, runnable by hand)
+agents/manager-drive.md                    the worker sweep's act leg (composed by worker-manager, runnable by hand)
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
 ```
