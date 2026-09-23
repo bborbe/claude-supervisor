@@ -1,6 +1,7 @@
 ---
 description: Read all supervisor guides for context before working — session tiers (which commands each session may run) plus the fleet-surface spec
 allowed-tools: [Read, Glob]
+argument-hint: "(no argument)"
 ---
 
 Read all claude-supervisor documentation to build full context. Use this before running any `/supervisor:*` command, before spawning or driving workers, or whenever you are unsure which session tier you are in and what it may do.
