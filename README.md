@@ -22,8 +22,12 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:spawn` `/supervisor:workers` `/supervisor:answer` `/supervisor:drain` | the operator surface |
 | agent `worker-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
 | `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
+| `scripts/jump-link.py` | render a pane's jump target as a clickable link (falls back to `/supervisor:jump <N>` when the local fleet-jump server is not configured) |
 | `/supervisor:fleet-manager` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
+| `/supervisor:fleet-drive` | one-shot: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
 | `/supervisor:worker-manager` `/supervisor:worker-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
+| `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
+| `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 
 ## Two spawn modes
 
@@ -96,6 +100,31 @@ A manager that raises an ACTION gate can only speak to an operator in the room. 
 Rules decide what a worker may do **without waking the manager**. Anything the rules do not cover defers to `canUseTool`, which parks it for the manager — that fall-through *is* the escalation path.
 
 Rules come from two files, yours first: `~/.config/claude-supervisor/policy.json` (`SUPERVISOR_POLICY`) overlays the shipped `<plugin>/server/policy.json`. Overlay, not replace — growing the list means appending, never copying. The shipped defaults allow Read/Glob/Grep and Write/Edit inside the worker's cwd, deny `Bash rm -rf`, and escalate everything else. Every request is logged as JSONL (`SUPERVISOR_PERMISSION_LOG`), which is what to promote into rules.
+
+### Allowing a Bash command
+
+⚠️ **Never write a Bash `allow` without `"matchType": "command"`.** A plain `match` is a substring test, and your overlay is evaluated before the bundled rules — so `{"tool": "Bash", "match": "ls ", "action": "allow"}` also matches `rm -rf ~/Documents && ls `, and un-denies it. Any allowed substring can be appended to any command.
+
+```json
+{ "tool": "Bash", "match": "ls", "matchType": "command", "action": "allow" }
+```
+
+Under `"matchType": "command"`, `match` is a **whole-token prefix** of the command: `ls` matches `ls -la /tmp` but not `lsof`, and a two-token prefix such as `docker ps` matches `docker ps -a` but not `docker rm`. Four shapes never match at all, and so fall through to the bundled rules:
+
+- anything with a shell metacharacter — `;` `&` `|` `` ` `` `<` `>` newline, parens, braces — so nothing can ride along;
+- a leading `VAR=value`, because the environment picks the program: `PATH=/tmp/evil ls` and `LD_PRELOAD=… ls` both run attacker code under a genuine `ls`;
+- whitespace the shell does not split on (U+00A0, other Unicode spaces, `\r`), so this matcher and bash always agree on which program runs;
+- an empty prefix.
+
+**Only the prefix is anchored.** Tokens after it are unconstrained, so allow a prefix only when *every* extension of it is read-only. `ls` qualifies. `sed -n` does not (`sed -n -i`), nor `find` (`-delete`).
+
+⚠️ **No `git` prefix qualifies — not even `git status`.** Git runs commands named in the repository's own config, and the shipped defaults let a worker edit any file in its cwd, `.git/config` included. So a worker can set `core.fsmonitor` to a command of its choosing and then run an allowed `git status`, which executes it with no prompt (verified: `git status` runs `core.fsmonitor`). `core.pager`, `diff.external` and hooks are further routes. The same holds for any tool that reads config or plugins from the working tree.
+
+When in doubt, leave it escalating — a false refusal costs one prompt, a false allow costs the filesystem.
+
+Under this mode `"match": "*"` means *any single uncompounded command*, not *anything*. A rule without `matchType` keeps the substring behaviour, so existing rules and the bundled `deny rm -rf` are unaffected.
+
+This mode needs a server that ships it. An older server ignores `matchType` and reads the rule as a substring — the bypass above — so upgrade the plugin **before** adding such a rule, and confirm with `claude plugin list`.
 
 ### A policy for one worker
 
@@ -186,6 +215,8 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
 
 `parent_session` is the **spawn edge** — the manager session that called `spawn_agent`, resolved once by walking up from this server's own pid to the **nearest ancestor the live registry knows**. It is *not* the direct parent pid: `.mcp.json` starts this server through a `bun run` wrapper, so the direct parent is that wrapper and a bare `process.ppid` lookup named nothing — which is why this field was `null` in every record written before the walk existed. When no ancestor is registered — an exited manager, or a chain that never passed through a session — the field stays `null` rather than carrying a guess. Nothing else records it. A worker whose session id never resolved gets no record rather than one filed under a key nothing would look up, and the server logs that rather than staying quiet.
 
+**Why the id may never resolve.** For a tab worker the id is found *by name* — `findRegisteredByName("⚙ " + label)`, an exact match, polled for up to 8s — so the name is the join back to the session. A name is not unique, and `find` returns the first holder, so a label reused while an earlier worker still answered to it resolved the new spawn to **that** worker and filed the old session's id as the new one's. The spawn therefore derives a free name before starting the process (`⚙ <label> (2)`, … until nothing holds it) and refuses poll matches against holders that existed before the spawn, so the join can only resolve to the session it created. A suffixed tab title is that guard working. See `docs/fleet-surface.md` § *The tab name is the join*.
+
 ⚠️ **This is not a liveness source.** An entry here must never be read as proof a session is alive — `liveness.mjs` owns that question, and it answers from the session registry plus the server's in-process record of workers it spawned. The ledger is deliberately the durable half.
 
 `SUPERVISOR_LEDGER_DIR` overrides the location. It is deliberately *not* `SUPERVISOR_SESSIONS_DIR`, which already means the live registry — one variable meaning two stores is how a reader ends up pointing this one at Claude Code's directory.
@@ -258,11 +289,17 @@ commands/{jump,who-needs-me}.md                  find and reach a session
 commands/{fleet-manager,fleet-status}.md         fleet surface — many sessions
 commands/{worker-manager,worker-status}.md       one goal or topic — the loop and the snapshot
 commands/manager-drive.md                         one goal or topic — the act leg, by hand
+commands/{fleet-manager,fleet-status,fleet-drive}.md  fleet surface — many sessions
+commands/{worker-manager,worker-status}.md       one goal or topic
+commands/stop.md                                 stand that loop down
+commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/worker-wrangler.md                routine approval loop over headless workers
 agents/worker-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
 agents/manager-drive.md                    the worker sweep's act leg (composed by worker-manager, runnable by hand)
+agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-manager, read-only by /fleet-drive)
+agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive)
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
 ```

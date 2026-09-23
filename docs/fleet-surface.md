@@ -38,6 +38,32 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 ⚠️ **A worker session therefore has no end-to-end check of a manager command.** Exercising one belongs to a manager session's own runtime. A change whose verification is "run the manager and watch it behave" is verified by deployment (the installed copy carries the change) plus a lockstep grep across the copies — never by arming a loop from wherever the change was authored.
 
+## Session end — the disarm contract
+
+`/supervisor:worker-manager` arms a loop. **`/supervisor:stop` stands it down**, and this section is the contract that command points at: what it must disarm, which harness surface reaches each driver and which it cannot, and what must survive.
+
+**The four drivers, and what reaches each.** They do not share a kill path, and the reachable set is smaller than the list.
+
+| Driver | Wakes the model? | Reached by | Reachable from inside the session? |
+|---|---|---|---|
+| a `CronCreate` job | yes | `CronDelete <id>` | **yes** — `CronList` enumerates this session's own jobs |
+| a `ScheduleWakeup` loop | yes | `ScheduleWakeup {stop:true}` | **yes** |
+| a `Monitor` / background task | yes — each emitted line is a turn | `TaskStop <task_id>` | **only while the id is still in the conversation.** The harness exposes no enumeration of in-session background tasks, so the command cannot discover one it cannot name. A `Monitor` is also **bounded** (≤30 min), so it is not a durable cadence driver whatever the tick uses it for |
+| the detached gate loop | **no** — 0 model tokens, ~330 ms a tick | `kill <pid>` | reachable, and **deliberately not touched** |
+
+**The three model-waking drivers do not share a read surface, and that is what decides what `stop` may claim.** Only a `CronCreate` job can be **read** — `CronList` enumerates this session's own jobs, so the command knows both before and after whether one existed, and may report `disarmed` or `not armed`. A `ScheduleWakeup` loop and a `Monitor` can be **stopped but not enumerated**, so neither can ever be reported as disarmed. A driver the command cannot read is not a driver it may report as clean, and the command's report carries a third form for exactly this case. ⚠️ **But the two are not the same unconfirmed case, and the third form must say which one it is.** A `ScheduleWakeup` loop is reachable without being readable — a stop is sent and the harness returns a receipt, which is still not a read surface, so the report says *stop sent*. A `Monitor` may be **neither**: with no task id left in the conversation there is nothing to name, so no stop is sent at all and the honest line is *no id to stop*. Reporting the second as the first claims an act that never happened — the same over-claim as a `✓` the harness could not support, one form down. Measured 2026-09-22, on the first live run of the command: the model reached for `~` for the `Monitor` line, found "stop sent" false, and printed a form the template did not yet carry rather than assert it.
+
+**Interrupting a turn disarms nothing.** Every driver above survives it, so the next firing arrives on schedule. That is why the verb exists rather than an interrupt.
+
+**What must survive `stop`:**
+
+- **The model-free gate loop.** Armed outside the session — verified live 2026-09-22: the running loop's parent is a detached supervisor at `ppid 1`, so it outlives the session that started it — it is what keeps `~/.claude/state/sweep-gate/<topic>.tick.txt` and `/worker-status` truthful. `stop` prints its pid and the tick file's mtime as evidence it survived, and never signals it. Killing it leaves the operator a frozen table and a `/worker-status` reporting a tree nobody is watching.
+- **The session.** The cadence is session-scoped, but the asks ledger is keyed by session id — `~/.claude/state/open-items/<session-id>.json` — so closing the session and re-opening the topic mints a new id and an empty ledger, and every open entry vanishes silently, including the `asked-of-you` entries only the operator can resolve. Measured 2026-09-22: session `433c856d` held **10 open entries, 2 of them `asked-of-you`**, and the session that replaced it carries the same 10 re-added **by hand** — the workaround, not a mechanism.
+
+**`stop` is not a close.** It writes no page, the topic's `status` is byte-identical before and after, and it never offers `/vault-cli:session-close`. **Restart is the same command that started the loop** — `/supervisor:worker-manager "<subject>"` — so there is no `start` verb and none is needed.
+
+⚠️ **Probe the gate loop by the script argument's basename, never by a substring of the command line.** `pgrep -f sweep-gate` matches any process whose argv merely *mentions* the path, and a manager's spawn prompt quotes it — measured 2026-09-22, the substring probe returned **three** pids for one loop, two of them the worker sessions spawned from a prompt naming the script. **The count is transient; the mechanism is not** — re-run hours later those two workers had exited and it returned one, while a bystander process whose argv merely carried the string reproduced the spurious pid on demand. `scripts/stop-probe.py` matches the second argv token's basename against the two known script names, which also fails in the safe direction: a path containing a space mis-splits and the probe under-reports rather than inventing a loop.
+
 ## Spawn a worker
 
 **Readiness precondition — author and score the task before any spawn, or the worker's own gate parks.** A task the manager hand-writes usually ships without `# Tasks` and `# Definition of Done`, so the worker's own `plan-task` gate stops and asks the operator to supply the decomposition — inside the worker's pane, as a multi-question wizard that cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced **three 3-question wizards**, nine operator decisions, none of which needed the repo open. So, before spawning:
@@ -233,6 +259,33 @@ starts somewhere else and its first file operation goes to the wrong tree. Pass 
 task's directory; if you cannot determine it, read `cwd` from the session registry
 (`~/.claude/sessions/<pid>.json`) rather than guessing.
 
+### The tab name is the join — and it is made unique before the process starts
+
+A tab worker is a separate process the supervisor does not create, so it never learns that
+worker's session id the way it does for a headless one. The registry carries `name`, and the
+spawn sets the tab title, so **the name is the only join back from a tab to its session id**:
+`findRegisteredByName("⚙ " + label)`, polled for up to 8s after the pane opens.
+
+A name is not unique, and `find` returns the FIRST entry matching it. A label reused while an
+earlier worker still answered to it therefore resolved the new spawn to **that** worker — and
+the old session's id is what went into the new worker's ledger record. So the name is derived
+*before* the process starts: `uniqueTabName` suffixes `(2)`, `(3)`, … until nothing holds it,
+and the poll carries the holders snapshotted before the spawn as an `exclude` set, so a name
+taken in the race between that snapshot and the poll cannot be matched either.
+
+Two consequences worth knowing when reading a roster:
+
+- **A suffixed tab title means the base name was taken.** A worker spawned under a label
+  already in use comes up as `⚙ <label> (2)`, not `⚙ <label>` — the suffix is the guard
+  working, not a naming mistake.
+- **`sessionId: null` on a spawn response is the honest "never registered".** The poll could
+  not resolve the name to a session that did not already exist, so no ledger record is
+  written for it — `writeLedger` skips a falsy id and logs `WARNING: no ledger record for
+  <id>`. A spawn **can** return `sessionId: null` while still opening a working tab.
+
+⚠️ The guard is on the **name**, not on one cause of a collision: it makes the join
+unambiguous whatever produced the earlier holder, including a cause not yet identified.
+
 ## A headless worker exits at turn end — that is not "finished"
 
 Two exits look like completion and are not. A headless worker **ends its turn on a READY
@@ -394,14 +447,18 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
 - ⚠️ **Do not type a leading glyph.** The harness already bullets assistant output with `⏺`;
   a literal copy renders doubled.
 - Below the box, only the non-empty action lines: the **blocked-by-you jump list**
-  (`⌛ Blocked by you (N waiting …)` with `/supervisor:jump <PANEID>` per row),
+  (`⌛ Blocked by you (N waiting …)` with one `jump:` target per row),
   `⚠️ ORPHANED: <task> — <why>`, and `⚠️ ACTION NEEDED: <the human decision>`. **Names lead**;
-  the `[ref]` and pane id are secondary. ⚠️ **Hand over a pane id, never a tab id** — a tab
-  that moves windows is renumbered, so a handed-over `--tab-id` goes dead (measured
-  2026-09-18: tabs 158/159/160 in window 0 became 163/164/165 in window 2, and
+  the `[ref]` and pane id are secondary. Each `jump:` target is the one-line output of
+  `scripts/jump-link.py <PANEID>` — a clickable `http://127.0.0.1:1337/jump?pane=<N>&t=…`
+  link when the local fleet-jump server is configured, and the `/supervisor:jump <N>` command
+  when it is not. **Never hand-write the URL**: the token lives in a 0600 file outside every
+  repo, so a hand-built link is either broken or leaks it. ⚠️ **Hand over a pane id, never a
+  tab id** — a tab that moves windows is renumbered, so a handed-over `--tab-id` goes dead
+  (measured 2026-09-18: tabs 158/159/160 in window 0 became 163/164/165 in window 2, and
   `activate-tab --tab-id 159` failed outright while `activate-pane --pane-id 239` worked
-  immediately). `/supervisor:jump` is the executor; a raw `wezterm cli activate-tab` line
-  is not a handover.
+  immediately). `/supervisor:jump` stays the executor behind the link; a raw
+  `wezterm cli activate-tab` line is not a handover.
 
 The table is the dashboard; TTS stays problem-only and voice-mode gated; the action lines
 appear only when non-empty.

@@ -13,6 +13,14 @@ An MCP server + Claude Code plugin that lets one manager session spawn worker se
 - Agent: supervisor:worker-wrangler (routine approval loop over headless workers, on a cheap model)
 - Agent: supervisor:worker-sweep-reader (the worker sweep's read-only half — tracked-set read, bucket classification, id-set extraction, collision count, table render; called by both worker commands, never probes liveness and never acts)
 - Agent: supervisor:manager-drive (the worker sweep's act leg — reap the finished, nudge stuck or error-marked workers, run the auto-resume gate on confirmed orphans; composed by /supervisor:worker-manager each tick and runnable by hand, reap always before drive)
+- Jump handover: the manager commands emit each pane's jump target as `scripts/jump-link.py <pane-id>` — a clickable `http://127.0.0.1:1337/jump?pane=<N>&t=…` link when the local fleet-jump server is configured, else the literal `/supervisor:jump <N>`. Never hand-write that URL: the token is read at emit time from `~/.claude/secrets/jump-token` (0600, outside every repo).
+- Fleet commands: /supervisor:fleet-manager (stateful loop), /supervisor:fleet-status (read-only snapshot), /supervisor:fleet-drive (one-shot: nudge verified-unblocked parked sessions, escalate the rest); helpers scripts/{fleet-sessions,box-table,fleet-snapshot,context-usage}.py
+- Worker commands: /supervisor:worker-manager (stateful loop over ONE goal or topic), /supervisor:worker-status (read-only snapshot), /supervisor:stop (stand that loop down — disarm the model-waking cadence, leave the model-free gate loop and the session running); helper scripts/open-items.py
+- docs/fleet-surface.md is the canonical home for the spawn shape and the fleet table render spec
+- Agent: supervisor:worker-wrangler (routine approval loop over headless workers, on a cheap model)
+- Agent: supervisor:worker-sweep-reader (the worker sweep's read-only half — tracked-set read, bucket classification, id-set extraction, collision count, table render; called by both worker commands, never probes liveness and never acts)
+- Agent: supervisor:fleet-sweep-reader (the fleet sweep's read half — four channels, open-items ledger, snapshot diff, orphan reverse index, collision/unmanaged-topic candidates, classification; returns a ≤40-line digest and persists the snapshot unless passed `persist: false`; called by /supervisor:fleet-manager and, read-only, by /supervisor:fleet-drive)
+- Agent: supervisor:fleet-drive (the fleet drive leg — splits parked into revive/blocked by live blocker probes, suppresses re-nudges via ~/.claude/state/fleet-drive/ledger.json, returns drafted nudges; never sends; called by /supervisor:fleet-drive)
 - Skill: supervising-workers (when to delegate to a worker, which spawn mode to use, and how to run the loop)
 
 ## Two spawn modes
