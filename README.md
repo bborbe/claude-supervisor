@@ -288,6 +288,7 @@ commands/{spawn,workers,answer,drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
 commands/{fleet-loop,fleet-status,fleet-drive}.md  fleet surface — many sessions
 commands/{manager-loop,manager-status}.md       one goal or topic
+commands/manager-drive.md                        one goal or topic — the act leg, by hand
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
@@ -295,6 +296,7 @@ scripts/{jump,who-needs-me}.py                   their helpers
 agents/manager-wrangler.md                routine approval loop over headless workers
 agents/manager-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
 agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-loop, read-only by /fleet-drive)
+agents/manager-drive.md                    the worker sweep's act leg (composed by manager-loop, runnable by hand)
 agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive)
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
