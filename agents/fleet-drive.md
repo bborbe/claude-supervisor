@@ -42,7 +42,7 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
    grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<task file>"    # want: 0
    ```
 
-   All three hold → draft a **reap** message: the three commands and their output, that the task is terminal on disk, that nothing was authorised and the operator has **not** answered, and that closing (`/vault-cli:sync-progress` then `/vault-cli:session-close`) is the session's own call. Any fact fails → the row is **unverifiable** (digest and disk disagree), never nudged. A manager cannot close a worker's session; the reap is the evidence message, nothing more. Skip a session whose owning manager loop is armed (`~/.claude/state/sweep-gate-loop/<subject>.heartbeat` younger than 15 min and the task in its member set) — that manager reaps its own.
+   All three hold → draft a **reap** message: the three commands and their output, that the task is terminal on disk, that nothing was authorised and the operator has **not** answered, and that closing (`/vault-cli:sync-progress` then `/vault-cli:session-close`) is the session's own call. Any fact fails → the row is **unverifiable** (digest and disk disagree), never nudged. A manager cannot close a worker's session; the reap is the evidence message, nothing more. No owning-manager skip: the gate-loop state records only a member *count* (`sweep-gate-loop/<subject>.json` → `"members": N`), so "this task belongs to an armed manager" is not derivable here. A second reap message from a manager that also reaps is harmless — it is the same non-authorising evidence — and the ledger (step 3) stops this layer repeating it.
 
 2. **Task and open-box count** per candidate come from the digest row (`<task file basename> · <open boxes>`), read from disk by the sweep-reader this round. A row whose task is `—` is **unverifiable**. A digest with no `parked` row while it has idle rows, or rows missing the task column, is a malformed handoff: report it in the header and treat every idle row as **unverifiable** — never pick candidates by hand. ⚠️ **Never re-count the boxes.** The row's count is the one authority for this round; a second count from a different read disagrees with it (measured 2026-09-23: row 3, re-count 7, disk 3) and the suppression rule then compares against the wrong value. If you need the task's text for probe (a), open the file named in the row with `Read` — never resolve it through `vault-cli task show "25 Tasks/<file>"`, which 404s on the path form.
 
@@ -56,7 +56,7 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
      | # | test | evidence |
      |---|---|---|
      | 1 | task `phase:` is `execution` | `grep -m1 '^phase:' "<task file>"` |
-     | 2 | closer body (backticks stripped, lower-cased) starts with `proceed`, `continue`, `go ahead`, `start subtask`, `start the next subtask`, or `start ` followed by words from the task's next unchecked subtask | the closer line, quoted verbatim |
+     | 2 | closer body (backticks stripped, lower-cased) starts with `proceed`, `continue`, `go ahead`, `start subtask`, or `start the next subtask` — nothing else; a closer naming its own step in free words is a gate | the closer line, quoted verbatim |
      | 3 | the body names none of: `push`, `merge`, `deploy`, `release`, `tag`, `apply`, `buca`, `kubectl`, `delete`, `rm `, `trade`, `session-close`, `prod` | same line |
      | 4 | the session is not in the digest's `BLOCKED` section | the section |
 

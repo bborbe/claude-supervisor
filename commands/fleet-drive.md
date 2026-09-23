@@ -50,7 +50,7 @@ Parse `$ARGUMENTS`: contains `--dry-run` → `dry-run: true` everywhere below; o
 
 - **Never classify, never join names to ids.** Both are `fleet-sweep-reader`'s.
 - **Never send a course correction.** A nudge is read-only context that authorises nothing; anything stronger is drafted for the operator's explicit yes.
-- **Never nudge past an operator gate.** A pending pick, `review:` / `you run:` line, permission prompt, or an `approve:` line that fails the agent's routine-continue table (`agents/fleet-drive.md` step 4a) is a blocker, never a revive. Only a routine continue on a worker's own reversible next step (execution phase, no push/merge/deploy/release/prod vocabulary) is nudged.
+- **Never nudge past an operator gate.** A pending pick, `review:` / `you run:` line, permission prompt, or an `approve:` line that fails the agent's routine-continue table (`agents/fleet-drive.md` step 4a) is a blocker, never a revive. The table is the agent's alone — not restated here.
 - **Never close a session.** A reap is the disk-evidence message; closing stays the worker's own call.
 - **Never write inside the vault.** The ledger lives at `~/.claude/state/fleet-drive/ledger.json`, written by the agent.
 - **Never `AskUserQuestion` mid-run.** Anything needing a decision goes into the escalation batch.
