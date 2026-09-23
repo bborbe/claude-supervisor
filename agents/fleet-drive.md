@@ -95,7 +95,7 @@ fleet-drive — <N> candidates · <F> finished (reaped) · <R> revive (<C> routi
       ledger: <drafted | suppressed: <reason> | excluded>
 ESCALATION — grouped by cause
   <cause>
-    <name> [<sid8>] — <probe> → <result>   (mark unverified causes "unverified")
+    <name> [<sid8>] · pane <id|—> — <probe> → <result>   (mark unverified causes "unverified")
 REAPS
   TO: <exact roster name> | <evidence message text>
 NUDGES
@@ -104,4 +104,9 @@ LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · <written <ts> 
 ```
 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
+
+Carry on each `ESCALATION` row the pane id the digest's `BLOCKED` / `CLOSERS` row gave for that
+session, and `—` when the digest carried none. **Never resolve a pane here**, and never match a
+session title — `/rename` breaks a title-keyed join silently. The caller resolves the `—` rows, by
+session id, and renders `no pane — <reason>` when it cannot.
 </output_format>
