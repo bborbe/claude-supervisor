@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.36.3
 
 - docs: session-tiers guide gains a jump-link section — generate with `scripts/jump-link.py`, never hand-build the URL (token required), `/supervisor:jump` is the executor, restart a session to pick up new command text after a plugin update
 
