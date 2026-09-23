@@ -32,6 +32,12 @@ turns exit 10 into a push.
 """
 import argparse, json, os, re, sys, time
 
+# This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
+# through it, so its reads and writes agree — it is a live namespace, not a retired
+# one, and it is deliberately NOT the gate's per-vault tree. Converting it to
+# `sweep-gate-loop/<vault>/` would need a --vault on all three verbs and would turn
+# `check`'s single listdir into a walk of per-vault subdirs, for no defect to fix.
+# (Audited 2026-09-23 alongside the stop-probe path fix; left flat on purpose.)
 STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_LIVENESS_STATE_DIR", "~/.claude/state/sweep-gate")
 )
