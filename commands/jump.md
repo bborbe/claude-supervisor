@@ -40,6 +40,6 @@ A bare number resolves to **whichever namespace holds it** — the tab if tab N 
 
 ## Related — do not rebuild these
 
-- `/open <name>` — resolves a task/goal/topic and *then* jumps, resumes, or spawns. Heavyweight resolution; this command is the bare executor.
+- `/supervisor:open <name>` — resolves a task/goal/topic and *then* jumps, resumes, or spawns. Heavyweight resolution; this command is the bare executor.
 - `/who-needs-me` — lists who needs you, vault-local to Personal. This command reuses the same attention state (`who-needs-me.py`'s parsing, imported not copied) but is global and jumps.
 - `/fleet-status`, `/manager-status` — read-only by contract; they print jump lines and must never mutate. This command is what executes them.
