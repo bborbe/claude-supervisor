@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - fix: the manager sweep's `stuck` bucket now also matches an **idle** worker (> ~30 min, `phase: execution`, ≥1 open box, task file unchanged), so `manager-drive` nudges it — previously `stuck` required busy, an idle worker with open boxes was bucketed `progressing` and never nudged, contradicting `manager-drive.md`'s reap-before-drive rationale
+- feat: add `/supervisor:fleet-verify` and `/supervisor:manager-verify`, moved from the Personal vault's local commands; script paths resolve via `${CLAUDE_PLUGIN_ROOT}`, and manager-verify documents its vault-local `verify-topic` dependency.
 
 ## v0.40.0
 
