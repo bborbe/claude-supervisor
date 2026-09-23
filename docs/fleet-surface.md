@@ -466,7 +466,7 @@ appear only when non-empty.
 ## Referencing vault notes
 
 Several fleet commands cite the operator's Obsidian runbooks. The rule is a **wikilink by
-title** (`[[Worker Manager Session]]`) — never a filesystem path, never an `obsidian://` URL.
+title** (`[[Manager Session]]`) — never a filesystem path, never an `obsidian://` URL.
 
 Vaults number their folders differently — one vault's `65 Runbooks/` is another's
 `70 Runbooks/`, one's `50 Knowledge Base/` is another's `50 Knowledge/` — so any path form is

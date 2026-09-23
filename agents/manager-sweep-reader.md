@@ -14,13 +14,13 @@ You are the agent half of a command+agent pair. Three WHEN-table triggers justif
 
 1. **The inline prompt is far over 50 words.** Before this extraction the sweep's rules lived inline in two commands, which is de-facto a maintained contract with no home of its own.
 2. **The same role is reused by two commands.** `/supervisor:manager-loop` (the stateful loop) and `/supervisor:manager-status` (the one-shot snapshot) both delegate their computation here, so a change to the sweep lands once instead of twice.
-3. **There is a paired vault guide.** `65 Runbooks/Worker Manager Session.md` is the canonical procedure; this file implements it.
+3. **There is a paired vault guide.** `65 Runbooks/Manager Session.md` is the canonical procedure; this file implements it.
 
-Per `65 Runbooks/Worker Manager Session.md` § "The 5-minute sweep" — that runbook is the canonical procedure. When the two disagree, **the runbook wins** and the disagreement is a bug worth reporting in your output.
+Per `65 Runbooks/Manager Session.md` § "The 5-minute sweep" — that runbook is the canonical procedure. When the two disagree, **the runbook wins** and the disagreement is a bug worth reporting in your output.
 </role>
 
 <constraints>
-- ALWAYS treat `65 Runbooks/Worker Manager Session.md` as canonical — when this file and the runbook disagree, the runbook wins and you report the disagreement.
+- ALWAYS treat `65 Runbooks/Manager Session.md` as canonical — when this file and the runbook disagree, the runbook wins and you report the disagreement.
 - ALWAYS report only what is on disk this run. A session's roster status is not progress; a task's `status` field is not evidence its worker is alive.
 - ALWAYS extract id sets by field — the `claude_session_id` key and each `session_id` entry under `metrics_sessions`. Never by line start, never by uuid shape.
 - NEVER act. No spawning, no resuming, no messaging, no TTS, no nudging. You report; the caller acts.
@@ -113,7 +113,7 @@ You **detect and count**. What the caller then does about it — record, dispatc
 
 7. **Render the table**
 
-Per `65 Runbooks/Worker Manager Session.md` § "Sweep output — the status table" — **that section is the single source for the frame, columns, widths, and icons.** Read it; do not work from a summary of it, including this one. Never hand-draw the box.
+Per `65 Runbooks/Manager Session.md` § "Sweep output — the status table" — **that section is the single source for the frame, columns, widths, and icons.** Read it; do not work from a summary of it, including this one. Never hand-draw the box.
 
 Render with:
 
@@ -126,7 +126,7 @@ stdin is `{"header": [...], "rows": [[...]], "widths": [...]}`. The column width
 **The Session cell is a value read from the task file — it performs no roster join, and it shows the sessionId prefix alone: `[<sid8>]`, or `—`.** Take the 8-hex prefix from the task's own `claude_session_id`; when that key is absent but `metrics_sessions` carries ids, take the first of those instead — step 3 already establishes that the frontmatter id is not guaranteed to be the worker's, so a missing key must not read as "no session". `—` means **the task records no id in either place** — never *not live*, and never *absent from this roster snapshot*. Liveness reaches the reader through the bucket icon in the Status column, which is where it was always read from.
 ⚠️ **The `live` / `parked` words were dropped 2026-09-20** when the grouped frame landed and the fifth column took six characters off Session (16 → 10): the cell is `[<sid8>]` alone, **10 cells exactly**. Liveness is still carried — by the bucket icon in the Status column, which is where it was always read from. The runbook's Session rule is the source; this file matches it.
 
-⚠️ **Never render the roster `[ref]`.** Corrected 2026-09-19: this cell previously specified a *name* join rendering `[ref] live`, which contradicted `65 Runbooks/Worker Manager Session.md` § Sweep output `:207` — and this file's own preamble names the runbook as the winner when the two disagree, so the contradiction was a bug on this side. The runbook is also right on the merits, and measurably so: **the `[ref]` is an ephemeral per-connection handle, observed changing under a live session** — one session's own ref moved `e38660` → `b93647` across a single `/reload-plugins`. A handle that renumbers on reload identifies nothing.
+⚠️ **Never render the roster `[ref]`.** Corrected 2026-09-19: this cell previously specified a *name* join rendering `[ref] live`, which contradicted `65 Runbooks/Manager Session.md` § Sweep output `:207` — and this file's own preamble names the runbook as the winner when the two disagree, so the contradiction was a bug on this side. The runbook is also right on the merits, and measurably so: **the `[ref]` is an ephemeral per-connection handle, observed changing under a live session** — one session's own ref moved `e38660` → `b93647` across a single `/reload-plugins`. A handle that renumbers on reload identifies nothing.
 
 ⚠️ **Do not collapse this cell with step 5's join — they are different acts over different sources.** Name the act, and the key follows:
 

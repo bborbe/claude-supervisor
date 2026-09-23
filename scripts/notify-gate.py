@@ -15,7 +15,7 @@ the same gate to Telegram, so a gate raised while the operator is away arrives.
 Three de-dup axes, and this script owns the second and third:
 
   * WHICH manager notifies is already decided upstream -- `commands/fleet-loop.md`
-    drops an entry whose owning worker manager is live on the roster, so any given
+    drops an entry whose owning manager is live on the roster, so any given
     gate reaches this script at most once per sweep.
   * HOW OFTEN is this script's ledger -- and it is PER LAYER, because each layer's
     sweep is a partial view (the fleet drops worker-owned gates). A shared ledger
@@ -27,7 +27,7 @@ Three de-dup axes, and this script owns the second and third:
   * WHO ALREADY RAISED IT is the **attention store item's `escalated_by` field** --
     the counterweight to that per-layer split. The split is right for cadence and is
     what lets two layers escalate the SAME gate with neither aware: the fleet drops a
-    gate a live worker manager owns, but the worker manager and the fleet can both
+    gate a live manager owns, but the manager and the fleet can both
     hold the same underlying question, and each keeps its own layer's ledger, so
     neither sees the other. Measured twice on 2026-09-20 (Fleet Manager session
     `b700c650`): two duplicates, both costing the operator a decision, one of them
@@ -132,7 +132,7 @@ def ledger_path(layer):
     """The ledger is PER LAYER, and that is load-bearing rather than tidy.
 
     The two manager layers see different slices of the world: `fleet-loop` drops
-    every gate whose owning worker manager is live, so its sweep is deliberately a
+    every gate whose owning manager is live, so its sweep is deliberately a
     subset. A shared ledger would let the fleet's sweep prune a worker-owned gate
     (absent from *its* list), after which the worker's next sweep sees that gate as
     first-sight and republishes it with a fresh count -- so a gate that stays open
