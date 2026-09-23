@@ -17,7 +17,7 @@ allowed-tools:
 argument-hint: "[goal|topic] (detected when omitted)"
 ---
 
-Worker-status slash command — the **read-only, one-shot** twin of `/fleet-status` for a single subject, **goal or topic**. The manager-loop loop is stateful and pings; this is a pure snapshot: "what is this tree doing right now?" Safe to run as often as you like, never sends messages, never arms the loop.
+Manager-status slash command — the **read-only, one-shot** twin of `/fleet-status` for a single subject, **goal or topic**. The manager-loop loop is stateful and pings; this is a pure snapshot: "what is this tree doing right now?" Safe to run as often as you like, never sends messages, never arms the loop.
 
 It resolves its subject **exactly as `/manager-loop` does** — same branch detection, same fallback chain, same state files — so the two commands can never disagree about which tree is being reported.
 

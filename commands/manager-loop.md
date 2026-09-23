@@ -34,7 +34,7 @@ allowed-tools:
 argument-hint: "[goal|topic] (detected when omitted)"
 ---
 
-Worker manager slash command — the **narrow / deep** layer. Per the vault's Worker Manager Session runbook.
+Manager-loop slash command — the **narrow / deep** layer. Per the vault's Worker Manager Session runbook.
 
 One manager per topic: owns ONE topic's declared goal set (e.g. the *Sentry* topic, the *notification* topic), read from that topic's page. The fleet manager (wide layer) may run above. **Enforced, not merely asserted** — Resolution step 6 confirms no manager already owns the name before arming, and stops on a hit.
 
