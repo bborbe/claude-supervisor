@@ -34,7 +34,7 @@ It resolves its subject **exactly as `/manager-loop` does** — same branch dete
 
 A bare invocation takes the first source that yields a **real page**:
 
-1. **Session state** — `~/.claude/state/worker-manager/<CLAUDE_CODE_SESSION_ID>.json`, shape `{"subject","vault","branch","resolved_at"}`. Accepted only when `vault` matches the resolved vault **and** `subject` still resolves to a page. This is what makes a subject named once stick across the ticks of one session.
+1. **Session state** — `~/.claude/state/worker-manager/<CLAUDE_CODE_SESSION_ID>.json`, shape `{"subject","vault","branch","resolved_at"}`. Accepted only when `vault` matches the resolved vault **and** `subject` still resolves to a page. Compare **case-insensitively** — the vault is the lowercase vault-cli config `name` (`personal`), but state files written before 2026-09-23 may carry display case (`Personal`); a strict match silently drops to source 2. This is what makes a subject named once stick across the ticks of one session.
 2. **Session name** — the name this session carries, read from `~/.claude/sessions/$CLAUDE_PID.json` → `.name`. **`CLAUDE_PID`, not `CLAUDE_CODE_SESSION_ID`** — that directory is pid-keyed, so the session-id key the source above uses does not address it; both variables are exported, and this is the one lookup that needs the pid. Strip leading decoration before matching (`⚙ ` prefixes 11 of 47 live names), then accept only when the stripped name resolves to a goal or topic page — the same test every other source uses. A name that resolves to nothing, a name that resolves only to a **task** page, and a missing pid file are all **silent misses**: fall through to the next source, never error. Pid files are transient (the record this rule was filed from was gone hours later), and most session names are task names — measured over the 24 named Personal sessions on disk, 1 resolved to a topic, 0 to a goal, 20 to a task. **The source is narrow by construction.** It does not exist to resolve most sessions; it exists so that a session named after its own subject can never be overruled by another session's leftovers.
 3. **Conversation** — the priority order `/vault-cli:task-status` uses in its Phase 2: the most recent `/manager-loop`, `/manager-status`, `/manager-drive` or `/manager-verify` argument in this conversation, then the most recent goal/topic page referenced **as a subject** (a wikilink or a read/edited path — not a prose mention).
 4. **Vault's last subject** — `~/.claude/state/worker-manager/last-<vault>.json`, same shape and same test. **The fallback of last resort** — below this session's own state, below its own name, below the conversation. It still earns its place: it carries a subject named in one session into another, and the vault in the filename is why two vaults never clobber each other. It ranks last because it is the only source that is not about *this* session. On 2026-09-18 a session named *Dark Factory Pipeline Hygiene* rendered a full, correct-looking snapshot of **Notification System** — this file had been written that morning by a different session, and at position 2 it outranked both the session's own name and the conversation.
@@ -49,7 +49,7 @@ A bare invocation takes the first source that yields a **real page**:
 ```bash
 mkdir -p ~/.claude/state/worker-manager && python3 -c "
 import json,os,sys,datetime
-subject,vault,branch=sys.argv[1:4]
+subject,vault,branch=sys.argv[1:4]; vault=vault.lower()
 d=os.path.expanduser('~/.claude/state/worker-manager'); os.makedirs(d,exist_ok=True)
 rec={'subject':subject,'vault':vault,'branch':branch,'resolved_at':datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
 for n in (os.environ['CLAUDE_CODE_SESSION_ID']+'.json','last-'+vault+'.json'):
@@ -62,7 +62,7 @@ for n in (os.environ['CLAUDE_CODE_SESSION_ID']+'.json','last-'+vault+'.json'):
 ```bash
 mkdir -p ~/.claude/state/worker-manager && python3 -c "
 import json,os,sys,datetime
-subject,vault,branch=sys.argv[1:4]
+subject,vault,branch=sys.argv[1:4]; vault=vault.lower()
 d=os.path.expanduser('~/.claude/state/worker-manager'); os.makedirs(d,exist_ok=True)
 rec={'subject':subject,'vault':vault,'branch':branch,'resolved_at':datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
 json.dump(rec,open(os.path.join(d,os.environ['CLAUDE_CODE_SESSION_ID']+'.json'),'w'),indent=2)
