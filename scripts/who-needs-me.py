@@ -891,6 +891,58 @@ def capped(rows, show_all):
     return rows[:CAP], len(rows) - CAP
 
 
+def pane_for(session_id):
+    """Print the pane of one live session, or exit non-zero.
+
+    The join is on the **session id**, never the name: `/rename` leaves the id
+    alone while a title match silently drops the row, and the caller here is a
+    command about to hand the operator a link — a link resolved off a renamed
+    session points at the wrong pane and reads as a working one.
+
+    The caller passes the 8-char prefix the sweep digest carries, so a unique
+    prefix resolves and an ambiguous one is refused rather than guessed. Liveness
+    goes through the same `is_live` pipeline the feed uses, so a session that has
+    exited cannot yield a pane: a pane id outlives its session, and handing one
+    over would produce exactly the dead link this path exists to avoid.
+    """
+    sid = (session_id or "").strip().lower()
+    if not sid:
+        sys.stderr.write("pane-for: no session id given\n")
+        return 1
+    records = load("needs")
+    matches = sorted(
+        {r["session_id"] for r in records if str(r.get("session_id", "")).lower().startswith(sid)}
+    )
+    if not matches:
+        sys.stderr.write("pane-for: no session id matches %s\n" % sid)
+        return 1
+    if len(matches) > 1:
+        sys.stderr.write(
+            "pane-for: %d session ids match %s — pass the full id\n" % (len(matches), sid)
+        )
+        return 1
+    full = matches[0]
+    # A session can hold several records at once — the store returns one item per
+    # open item, and `load` folds the event log per item too — so pick the first
+    # record for this session that actually carries a pane. Taking the first record
+    # outright would report "no pane" for a session whose sibling record has one.
+    rec = next(
+        (r for r in records if r.get("session_id") == full and r.get("pane")), None
+    )
+    if rec is None:
+        sys.stderr.write("pane-for: session %s carries no pane\n" % full[:8])
+        return 1
+    pmap = panes()
+    registry = read_registry()
+    live_ids = None if registry is None else set(registry)
+    quiet = quiet_session_ids(records, live_ids)
+    if not is_live(rec, pmap, quiet):
+        sys.stderr.write("pane-for: session %s is not live\n" % full[:8])
+        return 1
+    print(rec["pane"])
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stuck-min", type=int, default=20)
@@ -901,9 +953,17 @@ def main():
         help=f"list every open item instead of the first {CAP}",
     )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
+    ap.add_argument(
+        "--pane-for",
+        metavar="SESSION_ID",
+        help="print the pane of this session (full id or unique 8-char prefix) and exit; "
+        "non-zero when no live session resolves",
+    )
     a = ap.parse_args()
     if a.jump:
         sys.exit(subprocess.call(["wezterm", "cli", "activate-pane", "--pane-id", a.jump]))
+    if a.pane_for:
+        sys.exit(pane_for(a.pane_for))
 
     pmap = panes()
     # One registry read serves both questions: which sessions are live (the `quiet`

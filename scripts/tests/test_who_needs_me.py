@@ -31,13 +31,16 @@ fails these.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import re
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "who-needs-me.py")
@@ -840,6 +843,112 @@ class NoShadowedDefinitions(unittest.TestCase):
         names = re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)",
                            "def a():\n    pass\n\ndef a():\n    pass\n", re.M)
         self.assertEqual(["a", "a"], names)
+
+
+class PaneFor(unittest.TestCase):
+    """`--pane-for` resolves one session id to its pane, or refuses.
+
+    This is the lookup `/supervisor:fleet-drive` runs to give an escalated row its
+    jump link when the sweep digest carried no pane for it. Every refusal path is
+    asserted on stdout being EMPTY, not just on the exit code: a caller reads the
+    pane off stdout, so a diagnostic that leaked there would be handed to
+    `jump-link.py` as a pane id and produce a link to a pane that does not exist.
+
+    The join is on the session id and the caller passes the 8-char prefix the
+    digest carries, so the prefix cases are the ones that actually run in
+    production -- an ambiguous prefix must refuse rather than pick one.
+    """
+
+    SID_A = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    SID_B = "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+    def setUp(self):
+        self.patches = []
+
+        def patch(name, value):
+            p = mock.patch.object(wnm, name, value)
+            self.patches.append(p)
+            p.start()
+
+        self.records = [
+            {"session_id": self.SID_A, "pane": "204", "kind": "idle", "ts": 1},
+            {"session_id": self.SID_B, "pane": "205", "kind": "idle", "ts": 2},
+        ]
+        patch("load", lambda _suffix: list(self.records))
+        patch("panes", lambda: {"204": {}, "205": {}})
+        patch("read_registry", lambda: {self.SID_A: "a", self.SID_B: "b"})
+        patch("quiet_session_ids", lambda _records, _live: set())
+        self.live = {self.SID_A: True, self.SID_B: True}
+        patch("is_live", lambda rec, _pmap, _quiet: self.live.get(rec["session_id"], False))
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+
+    def run_pane_for(self, arg):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = wnm.pane_for(arg)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_unique_prefix_resolves(self):
+        """The production case: the digest carries 8 chars, not the full id."""
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("204\n", out)
+
+    def test_full_id_resolves(self):
+        rc, out, _ = self.run_pane_for(self.SID_A)
+        self.assertEqual(0, rc)
+        self.assertEqual("204\n", out)
+
+    def test_ambiguous_prefix_refuses(self):
+        """Both ids start `11111111`/`22222222`; a shared prefix must not pick one."""
+        self.records[1]["session_id"] = self.SID_A[:8] + "-cccc-4ccc-8ccc-cccccccccccc"
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("match", err)
+
+    def test_unknown_id_refuses(self):
+        rc, out, err = self.run_pane_for("deadbeef")
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("no session id matches", err)
+
+    def test_dead_session_refuses(self):
+        """A pane id outlives its session; handing one over makes a dead link."""
+        self.live[self.SID_A] = False
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("not live", err)
+
+    def test_record_without_pane_refuses(self):
+        self.records[0].pop("pane")
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("no pane", err)
+
+    def test_pane_is_taken_from_a_sibling_record(self):
+        """The store returns one record per open item; only some carry a pane.
+
+        A session holding two records — the first without a pane — must still
+        resolve off the second. Taking the first record outright would report
+        `no pane` for a session that has one.
+        """
+        self.records.insert(0, {"session_id": self.SID_A, "kind": "tool", "ts": 0})
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("204\n", out)
+
+    def test_empty_id_refuses(self):
+        rc, out, _ = self.run_pane_for("")
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+
+    def test_the_flag_is_registered(self):
+        """The positive control: the mode exists on the CLI, so the command can call it."""
+        with open(_SCRIPT, encoding="utf-8") as handle:
+            self.assertIn('"--pane-for"', handle.read())
 
 
 if __name__ == "__main__":
