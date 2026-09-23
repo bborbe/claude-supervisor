@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`/supervisor:fleet-drive` states it is a fleet-manager verb, never run from a worker session.** The vault-local original gained this operator rule (`docs/fleet-surface.md` § Session roles) after the promotion was ported; the plugin copy lacked it, so a worker could sweep the whole fleet while keeping its task anchor. A worker routes a sweep to its manager instead, and `--dry-run` is called out as suppressing sends, not the role collapse.
+
 ## v0.34.0
 
 - feat: **BREAKING — rename commands by the tier of session that invokes them.** `/manager-*` for manager sessions, `/fleet-*` for the fleet session. `worker-manager` → `manager-loop`, `fleet-manager` → `fleet-loop`, `worker-status` → `manager-status`, `answer` → `manager-answer`, `drain` → `manager-drain`, `spawn` → `manager-spawn`, `workers` → `fleet-workers`; agents `worker-sweep-reader` → `manager-sweep-reader`, `worker-wrangler` → `manager-wrangler`. `jump`, `who-needs-me`, `reset`, `stop` unchanged. The loop state directory `~/.claude/state/worker-manager/` is kept, so running loops are unaffected.
