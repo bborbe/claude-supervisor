@@ -13,7 +13,7 @@ Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 |---|---|---|
 | **Fleet manager** | every session on the machine; one stateful loop | the operator, in a session created for it |
 | **Manager** (goal/topic manager) | ONE goal or ONE topic and its tracked task set | the operator, in a session created for it |
-| **Worker** | ONE anchored task | a manager (`/supervisor:manager-spawn`, or `/open` run from the manager's side) |
+| **Worker** | ONE anchored task | a manager (`/supervisor:manager-spawn`, or `/supervisor:open` run from the manager's side) |
 
 ## Command → tier
 
@@ -36,6 +36,7 @@ other side.
 | `/supervisor:manager-drain` | manager | worker |
 | `/supervisor:stop` | manager — stands down *this* session's manager loop | worker (it has no loop to stop) |
 | `/supervisor:reset` | manager — re-discovers *this* manager's state | worker |
+| `/supervisor:open` | manager — resolves a name, then jumps, resumes or spawns | worker — workers never open sessions |
 | `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `manager-drive`, never by driving a task itself |
 | `/supervisor:read-guides` | any | — |
 | `/supervisor:jump` | any | — |
@@ -53,9 +54,9 @@ Empty output is a pass.
 
 ## The worker boundary
 
-- **`/open` is manager-only.** Opening, resuming or spawning a session is dispatch, and
+- **`/supervisor:open` is manager-only.** Opening, resuming or spawning a session is dispatch, and
   dispatch authority is the manager's (`docs/fleet-surface.md` § Session roles). A worker
-  never runs `/open` — nor `/supervisor:manager-spawn` — and never hands the operator a
+  never runs `/supervisor:open` — nor `/supervisor:manager-spawn` — and never hands the operator a
   session-opening command.
 - **A worker talks to its manager for anything out of scope.** Work outside its anchored task,
   a blocker another session must clear, a content question: the worker sends it to its

@@ -11,14 +11,16 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: add `/supervisor:fleet-verify` and `/supervisor:manager-verify`, moved from the Personal vault's local commands; script paths resolve via `${CLAUDE_PLUGIN_ROOT}`, and manager-verify documents its vault-local `verify-topic` dependency.
+- feat: add `/supervisor:open` — the session launcher (resolve a task/goal/topic, then jump, resume or spawn), moved from the personal `/open` command; spawn shape now referenced from `docs/fleet-surface.md` § Spawn a worker
 
 ## v0.39.1
 
+- fix: **`agents/manager-drive.md` resolves `claude_script` explicitly, so the auto-resume gate can actually fire.** The step said *"resolve the vault's `claude_script` from `vault-cli config list`"* and gave no invocation. A run on 2026-09-23 read `vault-cli config --help` instead — which lists the `current-user` and `list` **subcommands** and never the per-vault **fields** — concluded no `claude_script` was exposed, and withheld the spawn while every gate clause genuinely held, so the branch could not fire on that host at all. The step now carries the exact command, states that the field is invisible to `--help`, and an empty result prints `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` rather than disappearing into a withheld spawn that reads like a failed clause.
+- fix: the auto-resume gate and the orphan verdict now decide liveness from the session registry (`~/.claude/sessions/<pid>.json` against a running pid), not from `pgrep -f` / `ps -eo pid,args`. The argv probes are demoted to confirm-life-only — an empty read is indeterminate, never dead — because a live session usually carries its id in no argv (three live sessions read 0 under both, 2026-09-22/23) (manager-drive agent + command, manager-loop).
 - fix: fleet-drive routine-continue test 4 no longer counts the closer under test as its own `BLOCKED` gate — the attention feed lists every rendered `approve:` closer there, so the table was unreachable (0 routine continues across three live runs).
 
 ## v0.39.0
 
-- fix: the auto-resume gate and the orphan verdict now decide liveness from the session registry (`~/.claude/sessions/<pid>.json` against a running pid), not from `pgrep -f` / `ps -eo pid,args`. The argv probes are demoted to confirm-life-only — an empty read is indeterminate, never dead — because a live session usually carries its id in no argv (three live sessions read 0 under both, 2026-09-22/23) (manager-drive agent + command, manager-loop).
 - feat: `scripts/manager-liveness.py` detects a lapsed manager loop from outside the session. `manager-loop` records each re-arm with its real interval (`--arm`), `/supervisor:stop` writes a `<slug>.stopped` marker (`--stop`), and `--check` (model-free, for a host loop) reports a topic once when its last re-arm is older than 2x its own interval and no stop marker is present.
 
 ## v0.38.2

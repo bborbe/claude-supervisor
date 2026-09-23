@@ -31,11 +31,12 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |
+| `/supervisor:open` | resolve a task, goal or topic by name, then jump to its live session, resume its recorded one, or spawn a new one (manager-only; needs `vault-cli`) |
 | `/supervisor:read-guides` | load every guide in `docs/` — start here to learn which commands your session tier may run |
 
 ## Session tiers
 
-Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `manager-*` for a goal/topic manager, `worker-*` for a worker; `jump`, `who-needs-me` and `read-guides` are cross-tier. A worker never opens or spawns sessions (`/open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
+Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `manager-*` for a goal/topic manager, `worker-*` for a worker; `jump`, `who-needs-me` and `read-guides` are cross-tier. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
 
 ## Two spawn modes
 
@@ -301,6 +302,7 @@ commands/manager-drive.md                        one goal or topic — the act l
 commands/fleet-verify.md                         fleet manager — verify the fleet layer's contract, suggest fixes
 commands/manager-verify.md                       goal/topic manager — verify one subject, suggest fixes
 commands/worker-drive.md                         one worker session — drive its anchored task to done
+commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
