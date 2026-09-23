@@ -10,7 +10,7 @@ Read all claude-supervisor documentation to build full context. Use this before 
 
 Glob `${CLAUDE_PLUGIN_ROOT}/docs/**/*.md` (recursive) and Read every file returned. These include:
 
-- `session-tiers.md` — the three tiers (fleet manager / manager / worker), the command → tier table, the `/open`-is-manager-only rule, and the worker-routes-to-manager rule
+- `session-tiers.md` — the three tiers (fleet manager / manager / worker), the command → tier table, the `/supervisor:open`-is-manager-only rule, and the worker-routes-to-manager rule
 - `fleet-surface.md` — how commands are addressed, session roles, the disarm contract, the spawn shape, the session roster, and the fleet table render spec
 
 ## Step 2: Index supervisor commands (don't read all)
