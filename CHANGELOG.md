@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`/supervisor:manager-drive` states its tier — a manager verb, never run from a worker session.** The command said the opposite: *"Running this command from an ordinary session is fine precisely because it is one pass with no cadence."* That contradicts `docs/session-tiers.md` (`/supervisor:manager-drive` → tier manager, never from a worker) and `docs/fleet-surface.md` § Session roles — a worker session has no end-to-end check of a manager command — and it is the same defect v0.34.1 fixed on `/supervisor:fleet-drive`. One pass limits the cadence, not the blast radius: a drive run reaps, nudges and auto-resumes a whole tracked set. A worker that needs a subject driven routes it to its manager with `SendMessage`; the command is exercised in a manager session's runtime, never from the session that authored it.
+
 ## v0.38.0
 
 - feat: policy allows a chained Bash command (`&&` `||` `;` `|`) when only the catch-all escalated it and every segment is allowed by an anchored `matchType: "command"` rule; exact `2>/dev/null` / `2>&1` tokens are ignored, deny and owner-written escalate rules still win
