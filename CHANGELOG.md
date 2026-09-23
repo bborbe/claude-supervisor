@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: add `docs/session-tiers.md` — the three session tiers (fleet manager / manager / worker), a command → tier table covering every `/supervisor:*` command with "never run from" guidance, and the worker boundary (`/open` is manager-only; workers route out-of-scope work to their manager)
+- feat: add `/supervisor:read-guides` — reads every guide in `docs/` and indexes the commands, mirroring `/vault-cli:read-guides` and `/dark-factory:read-guides`
+
 ## v0.36.0
 
 - fix: bare `/manager-drive` now detects its subject with the same resolution rule as `/manager-loop` and `/manager-status` (session state → session name → conversation → vault's last) and prints `Subject: <name> (from <source>)` first, instead of refusing with "Pass a goal or topic name"; keep-in-sync notes in all participants name it.
