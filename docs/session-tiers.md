@@ -64,6 +64,29 @@ The full worker-side rule is the global rule `worker-does-not-open-sessions`
 (`~/.claude/claude-md-rules/worker-does-not-open-sessions.md`); the two bullets above are the
 summary a session needs to pick its commands, not a second copy of the rule.
 
+## Handing the operator a pane — jump links
+
+When a manager or fleet session needs the operator in another session's pane, it hands over
+a link, never a tab id.
+
+- **Generate it, one line per pane:** `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/jump-link.py <pane-id>`
+  (`--label` prefixes the pane title). With the local fleet-jump server configured it prints
+  `http://127.0.0.1:1337/jump?pane=<N>&t=<token>`, followed with SHIFT+CMD+click; without it,
+  the `/supervisor:jump <N>` command. Either way the line is usable as printed.
+- **Never hand-build the URL.** The token lives in `~/.claude/secrets/jump-token` (0600) and
+  the server refuses a request without it — a hand-typed link with no `t=` returned
+  `Forbidden — Missing or invalid token` (2026-09-23). A hand-built link is either broken or
+  copies the token somewhere it should not be.
+- **`/supervisor:jump` is the executor, not an emitter.** It *follows* a pane id; the
+  managers' status commands emit links and never run it themselves.
+- **A session started before a plugin update keeps the command text it already loaded** — so
+  it can still hand over the old form after the plugin changed. Restart the session to pick
+  up new command text; do not count on `/reload-plugins` for this (measured 2026-09-22, see
+  the vault's *Claude Code Plugin Development Guide*).
+
+The row format each status table uses for these links is `docs/fleet-surface.md` § Sweep
+output — the fleet table.
+
 ## The manager boundary
 
 - **A manager is never started in a worker session**, and starting a manager is a human act —
