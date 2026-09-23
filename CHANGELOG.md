@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`make check-changelog` fails when a released tree has unreleased files and no `## Unreleased` section.** The released-tree branch treated a missing `## Unreleased` as legitimate, which holds only while nothing is unreleased behind it. A merge landing *after* the release cut folds its entry under the released heading and leaves no `## Unreleased` at all — the release watcher then has nothing to cut, so the change can never ship (measured 2026-09-23: #138's entry folded under `## v0.39.1`, and master carried unreleased code with no section to cut it from). The check now asks whether any file other than `CHANGELOG.md` differs from the newest tag: counting commits was too coarse, because a merge can land after the cut carrying nothing unreleased, and repairing a released section's text leaves `CHANGELOG.md` itself differing from the tag. An unanswerable git check is reported as such, never passed silently.
+
 ## v0.40.0
 
 - fix: **`agents/manager-drive.md` resolves `claude_script` explicitly, so the auto-resume gate can actually fire.** The step said *"resolve the vault's `claude_script` from `vault-cli config list`"* and gave no invocation. A run on 2026-09-23 read `vault-cli config --help` instead — which lists the `current-user` and `list` **subcommands** and never the per-vault **fields** — concluded no `claude_script` was exposed, and withheld the spawn while every gate clause genuinely held, so the branch could not fire on that host at all. The step now carries the exact command, states that the field is invisible to `--help`, and an empty result prints `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` rather than disappearing into a withheld spawn that reads like a failed clause.
