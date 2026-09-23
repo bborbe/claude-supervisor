@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.38.1
 
 - fix: **`/supervisor:manager-drive` states its tier — a manager verb, never run from a worker session.** The command said the opposite: *"Running this command from an ordinary session is fine precisely because it is one pass with no cadence."* That contradicts `docs/session-tiers.md` (`/supervisor:manager-drive` → tier manager, never from a worker) and `docs/fleet-surface.md` § Session roles — a worker session has no end-to-end check of a manager command — and it is the same defect v0.34.1 fixed on `/supervisor:fleet-drive`. One pass limits the cadence, not the blast radius: a drive run reaps, nudges and auto-resumes a whole tracked set. A worker that needs a subject driven routes it to its manager with `SendMessage`; the command is exercised in a manager session's runtime, never from the session that authored it.
 - fix: fleet-drive reads each candidate's chat closer from a new sweep-digest `CLOSERS` section (who-needs-me Rendered panels), so a session parked on `pick`/`review:`/`you run:` or a non-routine `approve:` is never revived; a digest without `CLOSERS` makes candidates unverifiable.
