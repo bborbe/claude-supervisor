@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.36.4
 
 - docs: keep-in-sync notes enumerate `/manager-drive`'s vault-resolution paragraph as an allowed difference, so the shared subject-resolution blocks diff only where declared.
 
