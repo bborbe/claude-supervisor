@@ -11,6 +11,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: add `supervisor:open-items` skill — single home of the open-items ledger rules, invoked as `/supervisor:open-items <list|add|answer|note|close>`; `fleet-loop`, `manager-loop` and `fleet-sweep-reader` point at it instead of restating the rules and hardcoding the script path. `scripts/open-items.py` is unchanged at its path (vault-cli `/post-compact` calls it directly).
+- fix: **`fleet-sweep-reader` never produced a `parked` row, so `/supervisor:fleet-drive` had no candidates to drive.** Step 4 resolved task files only for `busy`/`shell` sessions, but the `parked` and `finished` rows are defined on an *idle* session's task file — so every idle row came back unclassified. It now resolves the task file and open-box count for idle sessions too, and each classification row carries `<task file> · <open boxes>`. The drive agent reads both from the row instead of looking up a task it was never given, and treats a digest missing them as a malformed handoff (idle rows → unverifiable) rather than choosing candidates by hand. Found by the first manager-runtime `--dry-run` (5 candidates, all hand-picked, open boxes unknown on every row).
+
+## v0.36.0
+
+- fix: bare `/manager-drive` now detects its subject with the same resolution rule as `/manager-loop` and `/manager-status` (session state → session name → conversation → vault's last) and prints `Subject: <name> (from <source>)` first, instead of refusing with "Pass a goal or topic name"; keep-in-sync notes in all participants name it.
+- fix: remove `/manager-loop`'s one-sweep `report-only` flag — it suppressed only the arming, so a "report" still spawned, resumed and wrote back; use `/manager-status` to look and `/manager-drive` to act once.
 - feat: add `/supervisor:worker-drive` — moved from the personal `~/.claude/commands/worker-drive.md` so the worker tier sits beside `/supervisor:fleet-drive` and `/supervisor:manager-drive`
 
 ## v0.35.3

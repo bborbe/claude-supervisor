@@ -40,7 +40,7 @@ Rationale, measured evidence and incident history for the condensed rules below 
 
 One manager per topic: owns ONE topic's declared goal set (e.g. the *Sentry* topic, the *notification* topic), read from that topic's page. The fleet manager (wide layer) may run above. **Enforced, not merely asserted** — Resolution step 6 confirms no manager already owns the name before arming, and stops on a hit.
 
-⚠️ **Never invoke this command from a worker session.** A worker carries a task; a manager carries a topic or goal plus a loop. Starting a manager is a human act, in a session created for it. `report-only` suppresses only the arming — a report-only sweep may still spawn, auto-resume, auto-compact and write back. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles — who may start what.
+⚠️ **Never invoke this command from a worker session.** A worker carries a task; a manager carries a topic or goal plus a loop. Starting a manager is a human act, in a session created for it. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles — who may start what.
 
 ## Manager contract — a manager manages, it does not build
 
@@ -59,17 +59,17 @@ The manager **manages; it does not build**. It never performs the topic's *work*
   - `/manager-loop Sentry` → reads `23 Topics/Sentry.md`, tracks its `## Goals` members + their tasks
   - `/manager-loop` (bare) → resolve the subject from § Subject resolution below
   - No page resolves → the manager reports it and stops; it never globs a substitute set
-- Optional `report-only`: print one sweep (the status table) without arming the loop.
+- For one look without a loop, run `/manager-status` (read-only); for one act pass, run `/manager-drive`. There is no one-sweep flag: a single sweep still spawns, resumes and writes back, so it was never a read-only look.
 
 ## Subject resolution — when `$1` is omitted
 
-**Keep-in-sync block** — shared with `/manager-status` and `/manager-verify`; the resolution rule is identical in all three. Enumerated differences, never counted: between the two plugin copies — the sibling list here, the STOP line, the "No fallback, ever" clause, and the closing write-contract sentence; `/manager-verify` also differs in the recording paragraphs (prose there, since its `allowed-tools` lacks `Bash(python3:*)` / `Bash(mkdir:*)`). Change one, change the others.
+**Keep-in-sync block** — shared with `/manager-status`, `/manager-drive` and `/manager-verify`; the resolution rule is identical in all four. Enumerated differences, never counted: between the three plugin copies — the sibling list here, the STOP line, the "No fallback, ever" clause, and the closing write-contract sentence; `/manager-verify` also differs in the recording paragraphs (prose there, since its `allowed-tools` lacks `Bash(python3:*)` / `Bash(mkdir:*)`). Change one, change the others.
 
 A bare invocation takes the first source that yields a **real page**:
 
 1. **Session state** — `~/.claude/state/worker-manager/<CLAUDE_CODE_SESSION_ID>.json`, shape `{"subject","vault","branch","resolved_at"}`. Accepted only when `vault` matches the resolved vault **and** `subject` still resolves to a page. This is what makes a subject named once stick across the ticks of one session.
 2. **Session name** — `~/.claude/sessions/$CLAUDE_PID.json` → `.name` (pid-keyed: `CLAUDE_PID`, not `CLAUDE_CODE_SESSION_ID`). Strip leading decoration (`⚙ `); accept only if what remains resolves to a goal or topic page. No match, a task-page match or a missing pid file → silent miss, fall through.
-3. **Conversation** — the priority order `/vault-cli:task-status` uses in its Phase 2: the most recent `/manager-loop`, `/manager-status` or `/manager-verify` argument in this conversation, then the most recent goal/topic page referenced **as a subject** (a wikilink or a read/edited path — not a prose mention).
+3. **Conversation** — the priority order `/vault-cli:task-status` uses in its Phase 2: the most recent `/manager-loop`, `/manager-status`, `/manager-drive` or `/manager-verify` argument in this conversation, then the most recent goal/topic page referenced **as a subject** (a wikilink or a read/edited path — not a prose mention).
 4. **Vault's last subject** — `~/.claude/state/worker-manager/last-<vault>.json`, same shape and same test. Last resort: the only source not about this session.
 5. **Nothing resolves → STOP.** Print `❌ No subject detected. Pass a goal or topic name: /manager-loop "<name>"` and do nothing else.
 

@@ -33,7 +33,7 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
 
 1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: excluded, reported, never nudged — the reap belongs to `fleet-loop` Step 3b. `[unresolved]` rows and rows with no task are **unverifiable**.
 
-2. **Open-box count** per candidate, from the task's own body: `vault-cli task show "<task>" --output json` → `.content`, count `[ ]` + `[/]`. The digest carries none.
+2. **Task and open-box count** per candidate come from the digest row (`<task file basename> · <open boxes>`), read from disk by the sweep-reader this round. A row whose task is `—` is **unverifiable**. A digest with no `parked` row while it has idle rows, or rows missing the task column, is a malformed handoff: report it in the header and treat every idle row as **unverifiable** — never pick candidates by hand.
 
 3. **Load the ledger** — `cat ~/.claude/state/fleet-drive/ledger.json` (absent → empty). Keyed on the digest's session id. **Suppress** a candidate nudged in an earlier round unless its bucket, its open-box count or its blocker's verified state changed. ⚠️ Last-activity age is deliberately **not** an input — for an idle session it only grows, which would permit a re-nudge every round. Report the suppression reason.
 
