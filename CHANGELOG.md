@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: add `/supervisor:open` — the session launcher (resolve a task/goal/topic, then jump, resume or spawn), moved from the personal `/open` command; spawn shape now referenced from `docs/fleet-surface.md` § Spawn a worker
+- fix: fleet-drive routine-continue test 4 no longer counts the closer under test as its own `BLOCKED` gate — the attention feed lists every rendered `approve:` closer there, so the table was unreachable (0 routine continues across three live runs).
 
 ## v0.39.0
 
