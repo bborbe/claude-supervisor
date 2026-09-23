@@ -8,9 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.41.0
+## Unreleased
 
 - fix: **`make check-changelog` fails when a released tree has unreleased files and no `## Unreleased` section.** The released-tree branch treated a missing `## Unreleased` as legitimate, which holds only while nothing is unreleased behind it. A merge landing *after* the release cut folds its entry under the released heading and leaves no `## Unreleased` at all — the release watcher then has nothing to cut, so the change can never ship (measured 2026-09-23: #138's entry folded under `## v0.39.1`, and master carried unreleased code with no section to cut it from). The check now asks whether any file other than `CHANGELOG.md` differs from the newest tag: counting commits was too coarse, because a merge can land after the cut carrying nothing unreleased, and repairing a released section's text leaves `CHANGELOG.md` itself differing from the tag. An unanswerable git check is reported as such, never passed silently.
+
+## v0.41.0
+
 - feat: `/supervisor:attention-next` — the conversational answering arm of the attention stack. Bare, it lists open items with where each answer would route; with `ITEM_ID ANSWER`, it writes `POST /api/1.0/attention/{id}/answer` first and, only on winning the store's compare-and-set, delivers the answer by `SendMessage` to the asking session's name, resolved from `producer_id` through the session registry. A registry miss (asker exited) or a name shared by two sessions is reported as undeliverable, never guessed; `permission`/`ack` items are refused (`scripts/attention-answer.py`).
 - feat: add `/supervisor:fleet-verify` and `/supervisor:manager-verify`, moved from the Personal vault's local commands; script paths resolve via `${CLAUDE_PLUGIN_ROOT}`, and manager-verify documents its vault-local `verify-topic` dependency.
 
