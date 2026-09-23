@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.40.0
 
 - feat: add `/supervisor:open` — the session launcher (resolve a task/goal/topic, then jump, resume or spawn), moved from the personal `/open` command; spawn shape now referenced from `docs/fleet-surface.md` § Spawn a worker
 
