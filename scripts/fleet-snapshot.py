@@ -6,21 +6,78 @@ Key on the session id (`sessionId` from ~/.claude/sessions/<pid>.json), never on
 between sweeps — and diffing one sweep against the next is this file's whole job.
 swept_at is stamped at write time.
 
+An **empty** session list is refused, with a non-zero exit and the existing snapshot
+left byte-identical. Writing it would replace a real snapshot with an empty one and
+still exit 0, so the next round diffs against nothing: every session reads first-seen,
+`stall_count` resets, and the loss is attributed to the fleet rather than to the read
+that failed. Measured 2026-09-23 (v0.39.1): a sweep whose roster read came back empty
+overwrote the snapshot and reported `snapshot written: … - 0 sessions` as success.
+A failed read and a genuinely empty fleet must not produce the same file — the sweep
+can recover from a refused write, never from a clobbered snapshot.
+
 A `scope` field was recorded here until 2026-09-19, so a sweep could be compared only against
 a previous sweep taken at the same scope. The roster is now always machine-wide, so there is
 no scope to record and none to mismatch.
 """
 import sys, json, os, datetime
 
-payload = json.load(sys.stdin)
-sessions = payload["sessions"] if isinstance(payload, dict) and "sessions" in payload else payload
+PATH = os.path.expanduser("~/.claude/state/fleet-snapshot.json")
 
-data = {
-    "swept_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "sessions": sessions,
-}
-path = os.path.expanduser("~/.claude/state/fleet-snapshot.json")
-os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(path, "w") as f:
-    json.dump(data, f, indent=2)
-print("snapshot written:", data["swept_at"], "-", len(sessions), "sessions")
+
+def extract_sessions(payload):
+    """The sessions dict, from either {"sessions": {...}} or the bare dict/list."""
+    if isinstance(payload, dict) and "sessions" in payload:
+        return payload["sessions"]
+    return payload
+
+
+def write_snapshot(sessions, path=None, swept_at=None):
+    """Write the snapshot atomically (tmp + os.replace) and return the document.
+
+    The replace is the same discipline `open-items.py` already documents this
+    script as following, and until now this script did not: a plain `open(path,
+    "w")` truncates first, so a crash or a serialisation error part-way through
+    leaves a truncated or zero-byte snapshot where a valid one stood. That is
+    the same loss as writing an empty payload — the next round diffs against
+    nothing — reached by a different route, which is why the guard alone is not
+    enough. `os.replace` is atomic within a filesystem: a reader sees either the
+    old snapshot or the new one, never a half-written file.
+    """
+    path = path or PATH
+    swept_at = swept_at or datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    data = {"swept_at": swept_at, "sessions": sessions}
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return data
+
+
+def main(stdin=None, path=None):
+    payload = json.load(stdin if stdin is not None else sys.stdin)
+    sessions = extract_sessions(payload)
+    if not sessions:
+        print(
+            "refusing to write an empty snapshot: the payload carries no sessions. "
+            "A failed read and an empty fleet must not look alike; the existing "
+            "snapshot is left unchanged.",
+            file=sys.stderr,
+        )
+        return 1
+    data = write_snapshot(sessions, path=path)
+    print("snapshot written:", data["swept_at"], "-", len(sessions), "sessions")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
