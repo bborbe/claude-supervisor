@@ -81,13 +81,13 @@ The caller owns the **verdict**; you receive orphans it has already confirmed. T
 - task `status: in_progress` AND `phase` is `planning` or `execution`;
 - the task's **id set is non-empty** (`claude_session_id` or any `metrics_sessions` id);
 - **not parked**: frontmatter `flag: true` absent, and phase not `human_review`, status not `hold`;
-- **no process on ANY id in the set** — `pgrep -f "<session_id>"` empty for **every** id, **and** `ps -eo pid,args | grep -F "<session_id>"` empty too. One hit on any id, by either probe, blocks the resume;
+- **no registry entry on ANY id in the set** — the session registry `~/.claude/sessions/<pid>.json` is the liveness instrument: `grep -l "<session_id>" ~/.claude/sessions/*.json` finds no entry for **every** id, or every entry found names a pid that `ps -p <pid>` reports gone (the file name is the pid). An entry against a running pid is **alive**, whether or not any process carries the id in its argv. One live entry on any id blocks the resume. The argv probes (`pgrep -f "<session_id>"`, `ps -eo pid,args | grep -F "<session_id>"`) still run, but a hit **confirms life** (blocks the resume) and an empty read is **indeterminate** — it never establishes death;
 - **not shared**: no id in this task's set appears in any other tracked task's set this run;
 - **not on roster**: no roster entry's *name* matches the task name;
 - **transcript stale**: `find ~/.claude/projects -name "<session_id>.jsonl"` exists and its mtime (`stat -f %m`) is older than **10 min** — dead, not merely quiet;
 - **not terminal**: `status` not `completed`/`aborted`.
 
-⚠️ **`pgrep -f` is not OS-truth for a session in your own ancestor chain — a self-probe reads a false empty.** Measured 2026-09-15: one session's own id matched **2** processes under `ps -eo pid,args | grep -F "<id>"` and **0** under `pgrep -f "<id>"`, while a non-ancestor process carrying a uuid in its argv matched 1 in both. So a hit on **either** probe means alive, and the `ps` cross-check is not optional.
+⚠️ **`pgrep -f` and `ps -eo pid,args` are not OS-truth — they can confirm life, never death.** Both read a command line, and a live Claude Code session usually carries its id in none. Measured 2026-09-22 and re-measured 2026-09-23: three live sessions read `pgrep` **0** and `ps` **0** while each held a registry entry against a running pid; on 2026-09-22 the documented gate would have resumed two live workers, and only the server's own resume guard refused. `pgrep -f` also reads a false empty for a session in your own ancestor chain (2026-09-15: 2 hits under `ps`, 0 under `pgrep`). So: argv hit → alive; argv empty → **indeterminate**; the death verdict rests on **registry absence plus transcript staleness**, never on an empty argv read.
 
 **Gate holds → resume.** Resolve the vault's `claude_script` from `vault-cli config list`, then **re-probe at the spawn site and spawn in one shell** — the earlier probe and the spawn are not atomic, and a claim made minutes earlier is not a claim.
 
@@ -136,7 +136,7 @@ Nudged (1):            ← the caller voices these; a subagent has no TTS
   <task> — stuck 47 min, task file unchanged — <what was sent>
 
 Resumed (1):
-  ♻️ AUTO-RESUMED: <task> — ids <a,b> both dead (pgrep 0, ps 0), transcript stale 634 min
+  ♻️ AUTO-RESUMED: <task> — ids <a,b> both dead (no registry entry; argv 0), transcript stale 634 min
 
 Not resumed (2):
   <task> — gate fails on: transcript stale (mtime 3 min ago) — alive, merely quiet
