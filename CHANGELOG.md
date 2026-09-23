@@ -12,8 +12,13 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - fix: the auto-resume gate and the orphan verdict now decide liveness from the session registry (`~/.claude/sessions/<pid>.json` against a running pid), not from `pgrep -f` / `ps -eo pid,args`. The argv probes are demoted to confirm-life-only — an empty read is indeterminate, never dead — because a live session usually carries its id in no argv (three live sessions read 0 under both, 2026-09-22/23) (manager-drive agent + command, manager-loop).
 
+## v0.38.2
+
+- fix: **`/supervisor:manager-drive` states its tier — a manager verb, never run from a worker session.** The command said the opposite: *"Running this command from an ordinary session is fine precisely because it is one pass with no cadence."* That contradicts `docs/session-tiers.md` (`/supervisor:manager-drive` → tier manager, never from a worker) and `docs/fleet-surface.md` § Session roles — a worker session has no end-to-end check of a manager command — and it is the same defect v0.34.1 fixed on `/supervisor:fleet-drive`. One pass limits the cadence, not the blast radius: a drive run reaps, nudges and auto-resumes a whole tracked set. A worker that needs a subject driven routes it to its manager with `SendMessage`; the command is exercised in a manager session's runtime, never from the session that authored it.
+
 ## v0.38.1
 
+- fix: `stop-probe.py` reports the launchd-hosted gate (`com.bborbe.sweep-gate-notify`) as present when the job is loaded AND its heartbeat is fresh (≤ 2× `StartInterval`); previously it matched only live processes and said "no sweep-gate loop found" between ticks of a healthy job.
 - fix: fleet-drive reads each candidate's chat closer from a new sweep-digest `CLOSERS` section (who-needs-me Rendered panels), so a session parked on `pick`/`review:`/`you run:` or a non-routine `approve:` is never revived; a digest without `CLOSERS` makes candidates unverifiable.
 
 ## v0.38.0
