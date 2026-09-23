@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.36.1
 
 - fix: bare `/manager-drive` now detects its subject with the same resolution rule as `/manager-loop` and `/manager-status` (session state → session name → conversation → vault's last) and prints `Subject: <name> (from <source>)` first, instead of refusing with "Pass a goal or topic name"; keep-in-sync notes in all participants name it.
 - fix: remove `/manager-loop`'s one-sweep `report-only` flag — it suppressed only the arming, so a "report" still spawned, resumed and wrote back; use `/manager-status` to look and `/manager-drive` to act once.
