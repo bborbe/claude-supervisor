@@ -10,6 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: `/supervisor:manager-verify` step 7 names `/supervisor:open` (the bare `/open` it carried no longer resolves) and routes a start recommendation to the subject's manager via `SendMessage` instead of handing the operator an `approve: /supervisor:open` line — ports a vault-side edit made after the v0.41.0 move.
 - fix: fleet-drive fails closed — a candidate with no `CLOSERS` row is unverifiable (a chat-only `pick` was nudged past), revive requires an observed routine-continue closer; the drive ledger is read only from its own file and merged on write, never rebuilt from the digest's open-items line (it had shrunk 37 → 8 entries).
 
 ## v0.41.0
