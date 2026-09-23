@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: add `/supervisor:open` — the session launcher (resolve a task/goal/topic, then jump, resume or spawn), moved from the personal `/open` command; spawn shape now referenced from `docs/fleet-surface.md` § Spawn a worker
+
 ## v0.38.0
 
 - feat: policy allows a chained Bash command (`&&` `||` `;` `|`) when only the catch-all escalated it and every segment is allowed by an anchored `matchType: "command"` rule; exact `2>/dev/null` / `2>&1` tokens are ignored, deny and owner-written escalate rules still win
