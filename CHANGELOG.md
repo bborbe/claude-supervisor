@@ -11,6 +11,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - fix: bare `/manager-drive` resolves its vault from the session cwd (vault-cli config path match) before any subject source, so a session in a non-Personal vault (e.g. Brogrammers "MDM Bugs") detects its subject there instead of refusing.
+- feat: add `docs/session-tiers.md` — the three session tiers (fleet manager / manager / worker), a command → tier table covering every `/supervisor:*` command with "never run from" guidance, and the worker boundary (`/open` is manager-only; workers route out-of-scope work to their manager)
+- feat: add `/supervisor:read-guides` — reads every guide in `docs/` and indexes the commands, mirroring `/vault-cli:read-guides` and `/dark-factory:read-guides`
 
 ## v0.36.1
 

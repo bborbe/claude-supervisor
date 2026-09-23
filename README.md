@@ -28,6 +28,12 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:manager-loop` `/supervisor:manager-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
+| `/supervisor:worker-drive` | a worker drives its own anchored task to done |
+| `/supervisor:read-guides` | load every guide in `docs/` — start here to learn which commands your session tier may run |
+
+## Session tiers
+
+Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `manager-*` for a goal/topic manager, `worker-*` for a worker; `jump`, `who-needs-me` and `read-guides` are cross-tier. A worker never opens or spawns sessions (`/open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
 
 ## Two spawn modes
 
@@ -293,6 +299,8 @@ commands/worker-drive.md                         one worker session — drive it
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
+docs/session-tiers.md                            session tiers + command → tier table (canonical)
+commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/manager-wrangler.md                routine approval loop over headless workers
 agents/manager-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
