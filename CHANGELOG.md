@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: two residual pre-rename names — `manager-drive` names `manager-verify` (was `worker-verify`), `fleet-drive` calls itself a fleet-loop verb.
+
 ## v0.35.2
 
 - docs: `fleet-surface.md` — a worker handing a manager command's live run to its manager must not close WAITING on the reply; an idle manager never drains the message unprompted.
