@@ -58,7 +58,9 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
      | 1 | task `phase:` is `execution` | `grep -m1 '^phase:' "<task file>"` |
      | 2 | closer body (backticks stripped, lower-cased) starts with `proceed`, `continue`, `go ahead`, `start subtask`, or `start the next subtask` — nothing else; a closer naming its own step in free words is a gate | the closer line, quoted verbatim |
      | 3 | the body names none of: `push`, `merge`, `deploy`, `release`, `tag`, `apply`, `buca`, `kubectl`, `delete`, `rm `, `trade`, `session-close`, `prod` | same line |
-     | 4 | the session is not in the digest's `BLOCKED` section | the section |
+     | 4 | the session has no `BLOCKED` row **other than the closer under test** — a permission prompt or an open question is a gate; a `BLOCKED` row whose text is this same `approve:` closer is not a second gate | the section, both rows quoted |
+
+     ⚠️ Test 4 must exclude the closer itself. The attention feed lists a rendered `approve:` closer under `BLOCKED` as well as `CLOSERS`, so "not in `BLOCKED` at all" fails every `approve:` closer by construction and makes this table unreachable — measured 2026-09-23 on v0.38.1: a live run reported `fails routine-continue test 2 and test 4` on a session whose only `BLOCKED` row was its own closer, and 0 routine continues across three runs.
 
      Any test fails → it is a gate, **blocked**. A routine continue is not an answer: the nudge says the operator has not answered and that the worker proceeds only under its own execution rules.
    - **(b) named systems:** probe what the session's last report names — `gh pr view <n> --repo <o/r> --json state,mergeCommit`, a tag via `git ls-remote --tags`, another task's `vault-cli task show … status`. Quote each command and its result.
