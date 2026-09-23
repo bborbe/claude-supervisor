@@ -42,7 +42,7 @@ Parse `$ARGUMENTS`: contains `--dry-run` → `dry-run: true` everywhere below; o
 
    The agent loads the ledger, suppresses re-nudges, verifies each `parked` session's blocker live, assigns revive / blocked / unverifiable / finished, persists the ledger and returns drafted nudges. Its rules live in `agents/fleet-drive.md` and are not restated here.
 
-4. **Send — from this session only.** For each `NUDGES` line, unless `--dry-run`: re-check the target's roster status first — moved to `busy`/`shell` since step 1 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Every send stays in this session because a sub-agent has no cross-session address — a reply to a sub-agent's message lands here after it has returned. Report any failed send; the ledger already counts it as nudged, so the next round suppresses rather than nags.
+4. **Send — from this session only.** Send every `REAPS` line first, then every `NUDGES` line — reap before drive, so a finished session is never told to continue. For each line, unless `--dry-run`: re-check the target's roster status first — moved to `busy`/`shell` since step 1 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Every send stays in this session because a sub-agent has no cross-session address — a reply to a sub-agent's message lands here after it has returned. Report any failed send; the ledger already counts it as nudged, so the next round suppresses rather than nags.
 
 5. **Print** the agent's report verbatim — table, escalation groups, ledger line — then `Sent: <n>` with one line per recipient, and `Skipped: <n>` with reasons. For any escalated operator gate whose pane is known, hand over `/supervisor:jump <pane-id>`; never a command for the operator to run here.
 
@@ -50,6 +50,7 @@ Parse `$ARGUMENTS`: contains `--dry-run` → `dry-run: true` everywhere below; o
 
 - **Never classify, never join names to ids.** Both are `fleet-sweep-reader`'s.
 - **Never send a course correction.** A nudge is read-only context that authorises nothing; anything stronger is drafted for the operator's explicit yes.
-- **Never nudge past an operator gate.** A pending pick, `approve:` line or permission prompt is a blocker, never a revive.
+- **Never nudge past an operator gate.** A pending pick, `review:` / `you run:` line, permission prompt, or an `approve:` line that fails the agent's routine-continue table (`agents/fleet-drive.md` step 4a) is a blocker, never a revive. The table is the agent's alone — not restated here.
+- **Never close a session.** A reap is the disk-evidence message; closing stays the worker's own call.
 - **Never write inside the vault.** The ledger lives at `~/.claude/state/fleet-drive/ledger.json`, written by the agent.
 - **Never `AskUserQuestion` mid-run.** Anything needing a decision goes into the escalation batch.
