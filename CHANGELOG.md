@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.34.1
 
 - fix: **`/supervisor:fleet-drive` states it is a fleet-manager verb, never run from a worker session.** The vault-local original gained this operator rule (`docs/fleet-surface.md` § Session roles) after the promotion was ported; the plugin copy lacked it, so a worker could sweep the whole fleet while keeping its task anchor. A worker routes a sweep to its manager instead, and `--dry-run` is called out as suppressing sends, not the role collapse.
 
