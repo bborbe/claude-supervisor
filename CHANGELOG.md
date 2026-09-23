@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `scripts/manager-liveness.py` detects a lapsed manager loop from outside the session. `manager-loop` records each re-arm with its real interval (`--arm`), `/supervisor:stop` writes a `<slug>.stopped` marker (`--stop`), and `--check` (model-free, for a host loop) reports a topic once when its last re-arm is older than 2x its own interval and no stop marker is present.
+
 ## v0.36.5
 
 - feat: add `supervisor:open-items` skill — single home of the open-items ledger rules, invoked as `/supervisor:open-items <list|add|answer|note|close>`; `fleet-loop`, `manager-loop` and `fleet-sweep-reader` point at it instead of restating the rules and hardcoding the script path. `scripts/open-items.py` is unchanged at its path (vault-cli `/post-compact` calls it directly).

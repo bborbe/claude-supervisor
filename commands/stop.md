@@ -35,6 +35,14 @@ Stand the manager loop **this session** is running down. This is the operator's 
 
    It prints the session id; the subject with its branch and vault; **one line per gate loop found**, each with its pid, uptime and command; the tick file's path, mtime and age; and the ledger's open count. The report below has a slot for every one of those — if a line has no slot, that is this template's defect, not a value to drop.
 
+2b. **Mark the stand-down as deliberate** — when the probe resolved a subject:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py --stop --topic "<subject>"
+   ```
+
+   It writes `<slug>.stopped` beside the tick file, so the host-side liveness watcher reads this manager's silence as a stop, not a lapse. The next `/supervisor:manager-loop` re-arm clears it. No subject → skip and say so; there is no slug to mark. Report it as a `✓ stop marker — <path>` line under `Disarmed`.
+
 3. **Print the report** — this command's own output format, and the only surface the contract does not own:
 
    ```
@@ -55,7 +63,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
 </process>
 
 <constraints>
-- **Write no page and no state file.** `stop` is a disarm, not a bookkeeping act.
+- **Write no page, and no state file except the stop marker (step 2b).** `stop` is a disarm, not a bookkeeping act; the marker exists only so a deliberate stop is not reported as a lapse.
 - End the turn with the session's normal closer. This report is not one.
 </constraints>
 
