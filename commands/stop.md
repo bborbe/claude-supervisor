@@ -48,7 +48,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
        ● tick file  <path>  mtime <iso>  (<age>s ago)
      Session alive
        ● ledger <path> — <n> open of <m>, unchanged by this command
-     Restart: /supervisor:worker-manager "<subject>"
+     Restart: /supervisor:manager-loop "<subject>"
    ```
 
    Print only the forms that occurred. A `●` line whose read came back absent takes its own form from `<error_handling>` instead of a fabricated value — the tick file and the gate loop each have one, and a dropped line reads as "checked and clean" when the truth may be "never looked".

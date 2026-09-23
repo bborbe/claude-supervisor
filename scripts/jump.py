@@ -18,7 +18,7 @@ if it raises a NEW gate in the meantime. Nothing is ever dropped permanently.
   jump.py --dry-run       print the resolved target, activate nothing
 
 The executor for the `wezterm cli activate-tab --tab-id N` lines that
-/fleet-status, /fleet-manager, /topic-status and /topic-manager print but never run.
+/fleet-status, /fleet-loop, /topic-status and /topic-manager print but never run.
 
 Attention data is reused from who-needs-me.py (same hook-written state), not re-derived.
 """

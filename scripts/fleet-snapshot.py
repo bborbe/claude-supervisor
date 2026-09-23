@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persist a fleet snapshot to ~/.claude/state/fleet-snapshot.json (fleet-manager loop).
+"""Persist a fleet snapshot to ~/.claude/state/fleet-snapshot.json (fleet-loop loop).
 stdin: JSON — the sessions dict {"<session id>": {...}}, or {"sessions": {...}}.
 Key on the session id (`sessionId` from ~/.claude/sessions/<pid>.json), never on `[ref]`:
 `[ref]` is computed per roster read, so an unchanged session would read as vanished-and-new

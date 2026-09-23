@@ -242,7 +242,7 @@ class Render(unittest.TestCase):
         self.assertRegex(row, r"headless\s+audit the parser\s*$")
 
     def test_the_original_five_columns_keep_their_positions(self):
-        """`fleet-status` / `fleet-manager` parse SESSION and WORKING ON by name."""
+        """`fleet-status` / `fleet-loop` parse SESSION and WORKING ON by name."""
         row = fs.render_row(12.0, "Personal", SID, "some task", True, None)
         self.assertLess(row.index(SID[:8]), row.index("some task"))
         self.assertLess(row.index("some task"), row.index("unknown"))

@@ -1,5 +1,5 @@
 ---
-name: worker-wrangler
+name: manager-wrangler
 description: Run the routine approval loop over headless supervisor workers so the manager session is not occupied by approvals. Use when headless workers (spawned with interactive:false) are running and their permission prompts should be answered by policy rather than by the operator.
 tools: mcp__supervisor__list_agents, mcp__supervisor__agent_status, mcp__supervisor__await_permission, mcp__supervisor__answer_permission, mcp__supervisor__pending_permissions
 model: haiku
