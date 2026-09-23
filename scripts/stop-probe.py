@@ -161,10 +161,16 @@ def launchd_gate(loaded: bool, age, interval: int, heartbeat_path: str = ""):
     return True, f"launchd {LAUNCHD_LABEL} loaded, heartbeat {age}s ago (limit {limit}s)"
 
 
-def file_age(path: str, now: float = None):
-    """Seconds since the file's mtime, or None when it cannot be stat'd."""
+def file_mtime(path: str):
+    """The file's mtime, or None when it cannot be stat'd.
+
+    One stat, returned — never stat-then-stat-again at the call site. The gate
+    rewrites its tick file, so a second `getmtime` on a path that vanished in
+    between raises out of a probe whose whole contract is to report state without
+    failing: `/supervisor:stop` would lose its entire report to a benign race.
+    """
     try:
-        return int((now if now is not None else time.time()) - os.path.getmtime(path))
+        return os.path.getmtime(path)
     except Exception:
         return None
 
@@ -212,17 +218,17 @@ def main() -> int:
         print("gate     NONE — no sweep-gate loop found; it may never have been armed")
 
     tick = gate_file(vault, subject, "tick.txt")
-    age = file_age(tick) if tick else None
-    if age is not None:
-        stamp = datetime.fromtimestamp(os.path.getmtime(tick)).isoformat(timespec="seconds")
-        print(f"tick     {tick}  {stamp}  ({age}s ago)")
+    mtime = file_mtime(tick)
+    if mtime is not None:
+        stamp = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+        print(f"tick     {tick}  {stamp}  ({int(time.time() - mtime)}s ago)")
     else:
         print(f"tick     ABSENT {tick}".rstrip())
 
     gateledger = gate_file(vault, subject, "ledger.txt")
-    gage = file_age(gateledger) if gateledger else None
-    if gage is not None:
-        print(f"gateledger {gateledger}  {last_line(gateledger)}  ({gage}s ago)")
+    gmtime = file_mtime(gateledger)
+    if gmtime is not None:
+        print(f"gateledger {gateledger}  {last_line(gateledger)}  ({int(time.time() - gmtime)}s ago)")
     else:
         print(f"gateledger ABSENT {gateledger}".rstrip())
 

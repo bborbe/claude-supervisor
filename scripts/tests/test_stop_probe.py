@@ -132,12 +132,22 @@ class LastLineTest(unittest.TestCase):
         self.assertEqual(probe.last_line("/nonexistent/ledger.txt"), "")
 
 
-class FileAgeTest(unittest.TestCase):
+class FileMtimeTest(unittest.TestCase):
     def test_missing_file_is_none(self):
-        self.assertIsNone(probe.file_age("/nonexistent/tick.txt"))
+        self.assertIsNone(probe.file_mtime("/nonexistent/tick.txt"))
 
     def test_empty_path_is_none(self):
-        self.assertIsNone(probe.file_age(""))
+        self.assertIsNone(probe.file_mtime(""))
+
+    def test_reads_the_mtime_once(self):
+        """The call site must never stat-then-stat-again: the gate rewrites its tick
+        file, and a second stat on a vanished path would raise out of the probe."""
+        with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+            fh.write("x")
+        try:
+            self.assertEqual(probe.file_mtime(fh.name), os.path.getmtime(fh.name))
+        finally:
+            os.unlink(fh.name)
 
 
 class IntervalTest(unittest.TestCase):
