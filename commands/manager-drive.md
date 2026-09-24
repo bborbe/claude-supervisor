@@ -89,7 +89,7 @@ json.dump(rec,open(os.path.join(d,os.environ['CLAUDE_CODE_SESSION_ID']+'.json'),
 
    `Task(subagent_type: "supervisor:manager-sweep-reader", prompt: <tracked set + declared-optional set + this run's ListAgents roster verbatim + vault + mode: snapshot + timestamp>)`
 
-   The plugin prefix is required — a bare `manager-sweep-reader` resolves to a personal `~/.claude/agents/` copy, never the plugin agent. The agent owns the task-file read, the seven-bucket classification, the id-set extraction and the orphan **candidates**.
+   The plugin prefix is required — a bare `manager-sweep-reader` resolves to a personal `~/.claude/agents/` copy, never the plugin agent. The agent owns the task-file read, the bucket classification **the vault's Manager Session runbook** declares, the id-set extraction and the orphan **candidates**. Bucket rules: runbook § Step 4.
 
    **If the delegation returns no usable table** — it errored, came back empty, or resolved to something that did not return the report — **stop and say so**. Do not fall back to a hand-rolled classification: `manager-loop` has a `box-table.py` renderer fallback, but that is a second *renderer*, not a second *classifier*, and this command has no renderer to fall back to.
 
