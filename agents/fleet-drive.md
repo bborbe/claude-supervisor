@@ -109,5 +109,7 @@ Carry on each `ESCALATION` row the pane id the digest's `BLOCKED` / `CLOSERS` ro
 session, and `—` when the digest carried none — those digest rows are keyed by name, and this is
 the one place a name is read, only to lift a pane off a row the sweep already resolved. **Never go
 looking for a pane yourself**: no `wezterm cli list`, no title match, no fallback of your own. The
-caller resolves the `—` rows, by session id, and renders `no pane — <reason>` when it cannot.
+caller resolves the `—` rows by session id, and renders `no pane — <reason>` when it cannot. Its own
+title fallback, where it has one, reads the session's current name from the registry at call time —
+that is the caller's business, not yours.
 </output_format>
