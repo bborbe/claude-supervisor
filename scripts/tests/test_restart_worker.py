@@ -119,12 +119,75 @@ class ParseStarted(unittest.TestCase):
             rw.parse_started({"startedAt": "1970-01-01T00:00:10Z"}), 10.0, places=0
         )
 
-    def test_epoch(self):
+    def test_epoch_seconds(self):
         self.assertEqual(rw.parse_started({"startedAt": 12}), 12.0)
+
+    def test_epoch_milliseconds(self):
+        """The live registry writes milliseconds. Read as seconds the date lands
+        ~57,000 years out, so every mtime comparison fails and precondition 4
+        refuses every restart — the check failing in the direction that hides
+        real fixes."""
+        self.assertEqual(rw.parse_started({"startedAt": 1790269714645}), 1790269714.645)
+
+    def test_millisecond_value_compares_correctly_against_a_load_path_mtime(self):
+        """The regression stated as the comparison that actually broke, using the
+        values measured on the real cache 2026-09-24."""
+        started = rw.parse_started({"startedAt": 1790269714645})
+        load_mtime = 1790282384.495  # 0.52.0's directory, installed later
+        self.assertGreater(load_mtime, started)
 
     def test_missing_and_garbage_are_none(self):
         for rec in ({}, {"startedAt": ""}, {"startedAt": "not-a-date"}):
             self.assertIsNone(rw.parse_started(rec), rec)
+
+
+class LoadPathSelection(unittest.TestCase):
+    """The newest load path is chosen by VERSION, never by directory mtime.
+
+    Regression, measured 2026-09-24 on the real cache: `0.51.2` and `0.52.0` were
+    installed in one operation and their directory mtimes differed by 3ms with the
+    **older** one later. An mtime-max therefore selected `0.51.2`, and precondition 4
+    then compared the session against the wrong copy and refused a restart that
+    should have been allowed — the check failing in the direction that hides a real
+    fix.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._saved = rw.LOAD_PATH_ROOT
+        rw.LOAD_PATH_ROOT = self.tmp.name
+
+    def tearDown(self):
+        rw.LOAD_PATH_ROOT = self._saved
+        self.tmp.cleanup()
+
+    def make(self, name, mtime):
+        path = os.path.join(self.tmp.name, name)
+        os.makedirs(path)
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_newer_version_wins_even_when_its_mtime_is_earlier(self):
+        self.make("0.51.2", 2000)
+        newer = self.make("0.52.0", 1000)
+        path, _ = rw.newest_load_path()
+        self.assertEqual(path, newer)
+
+    def test_ordered_numerically_not_lexically(self):
+        """`0.10.0` is newer than `0.9.0`, though it sorts lower as a string."""
+        self.make("0.9.0", 1000)
+        ten = self.make("0.10.0", 1000)
+        path, _ = rw.newest_load_path()
+        self.assertEqual(path, ten)
+
+    def test_stray_directory_cannot_win(self):
+        self.make("0.52.0", 1000)
+        self.make("not-a-version", 9999)
+        path, _ = rw.newest_load_path()
+        self.assertEqual(os.path.basename(path), "0.52.0")
+
+    def test_empty_root_is_none(self):
+        self.assertEqual(rw.newest_load_path(), (None, None))
 
 
 class RefusalCode(unittest.TestCase):
