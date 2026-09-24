@@ -67,12 +67,35 @@ grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' <task-file>        # → 0
 
 Measured 2026-09-19: **four sessions** were parked on that gate at once, every one over a task reading `status: completed`, `phase: done`, zero open boxes.
 
-2. **Then drive — nudge what is stuck or error-marked**
+2. **Then drive — re-check each candidate, then nudge what survives**
 
-For each task the caller classified `stuck`, or carrying an error marker:
+The caller's classification is a **snapshot, and you run after it**: the sweep read the task files, the caller then probed orphan liveness, and only then did it dispatch you. A worker that moved in that window is classified `stuck` and would be nudged anyway — measured 2026-09-23, two of four nudged workers replied that the nudge was wrong, one of them having updated its task file inside the same minute the sweep read it. So **every candidate is re-checked on disk this run, and either check dropping it means no message.** A nudge is a message, never an instruction to invent scope.
 
-- `SendMessage` a nudge to the worker — the observable that made it `stuck`, and the next move left to the worker. A nudge is a message, never an instruction to invent scope;
-- **return a `Nudged` line naming the session, the problem and the suggested fix, for the caller to voice.**
+**Check 1 — freshness: did the task file move since the sweep read it?**
+
+The sweep returns each `stuck` task's observed task-file mtime (its report section 6). Re-read it now with the **`PATH`-independent** command clause 7 uses, never a bare `stat` flag:
+
+```bash
+python3 -c "import os,sys;print(int(os.path.getmtime(sys.argv[1])))" <task-file>
+```
+
+Drop the candidate when the current mtime is **newer** than the sweep's — the worker edited its file between the read and your nudge, so it is working, not stuck. **Fail closed:** if either reading is missing, or is not exactly one integer on exit `0`, do not nudge on freshness' behalf. A `stuck` row that arrived **without** an mtime cannot be checked at all — report it under `Not nudged` naming that, and never nudge it as though the check had passed. Silently dropping a candidate is indistinguishable from one the sweep never classified, which is why both outcomes are reported.
+
+**Check 2 — in flight: is the session executing tools?**
+
+The roster's `idle` word is a point-in-time pane status; it does not describe the tool loop inside the session. Read the session's own in-flight marker, `~/.claude/state/attention/<session_id>.tool.json` — a hook-written file whose `state` is `open` for the duration of a tool call, carrying the call in `detail` and its start in `ts`:
+
+- **`state: "open"` and the call started less than ~20 min ago** → the session is inside a tool call and is working. Drop the candidate.
+- **`state: "open"` for ~20 min or more** → that is the `--stuck-min` reading `scripts/who-needs-me.py` already owns and renders as *probably stuck*. Do **not** drop on this check; the stuck path is what should fire.
+- **no marker, or a cleared one** → the session is between turns. Fall back to the transcript: drop the candidate when its mtime is inside `scripts/who-needs-me.py`'s `LIVE_WINDOW` (5 min) — the same reading clause 7 already takes, read in the opposite direction.
+
+⚠️ **Reuse that shipped reading; do not add a fourth definition of "idle".** `LIVE_WINDOW`, `session_transcript_age()` and `reclassify_idle()` live in `scripts/who-needs-me.py`, and `scripts/fleet-board.py` mirrors its pipeline on purpose — *"one definition, two renderings."* A private threshold here would drift from both.
+
+Only a candidate that survives **both** checks is nudged:
+
+- `SendMessage` it the observable that made it `stuck`, and the next move left to the worker;
+- **return a `Nudged` line naming the session, the problem and the suggested fix, for the caller to voice;**
+- **return a `Not nudged` line** for every candidate a check dropped, naming which check and the value that dropped it. A near-miss is the most useful line in the report — and the operator reads the `Nudged` block to decide whether to trust the drive leg, so a false row costs more than a missing one.
 
 ⚠️ **The voice half is the caller's, not yours, and this is measured rather than assumed.** A subagent has **no TTS**: `mcp__tts__say` is not visible to a subagent in *either* the main env or the isolated one (probed 2026-09-22 — a subagent reported no tool whose name contains `tts`, under any spelling). So the split is deliberate: **you own the message, the caller owns the voice.** Do not attempt a TTS call, and never let the report read as though one happened.
 
@@ -190,7 +213,7 @@ One compact report — see `<output_format>`. You do not render the status table
 Plain markdown, one line per action, in the order you performed them. Omit empty sections.
 
 ```text
-Drive: <subject> — reaped <n> · nudged <n> · resumed <n> · opened <n> · held <n> · blocked <n>
+Drive: <subject> — reaped <n> · nudged <n> · not nudged <n> · resumed <n> · opened <n> · held <n> · blocked <n>
 
 Reaped (2):
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
@@ -198,6 +221,11 @@ Reaped (2):
 
 Nudged (1):            ← the caller voices these; a subagent has no TTS
   <task> — stuck 47 min, task file unchanged — <what was sent>
+
+Not nudged (2):        ← the false-nudge guard: which check dropped the candidate, and the value
+  <task> — freshness: file mtime 1758730800 > sweep's 1758729600 — moved after the sweep read it
+  <task> — in flight: tool.json state=open since 4 min ago (Bash) — working, not stuck
+  <task> — freshness: no mtime on the sweep's stuck row — un-checkable, not nudged
 
 Resumed (1):
   ♻️ AUTO-RESUMED: <task> — ids <a,b> both dead (no registry entry; argv 0), transcript stale 634 min
@@ -228,6 +256,8 @@ Escalated (1):
 
 <success_criteria>
 - **Reaping ran to completion before any nudge or resume was attempted.** A run that nudged a task it later reaped has violated the one ordering constraint in this file.
+- **Every nudged task survived both pre-nudge checks, on disk, this run** — its task file had not moved since the sweep's reading, and its session was neither inside a tool call nor inside the transcript freshness window. A nudge sent on the caller's classification alone is the false nudge this pass exists to stop.
+- **Every candidate a check dropped is reported under `Not nudged`, naming the check and the value that dropped it** — including a `stuck` row that arrived with no mtime and so could not be checked. A silently dropped candidate reads exactly like one the sweep never classified.
 - Every reap decision is backed by the three disk reads — `status`, `phase`, open-box count — taken **this run**, never from a session's claim or its colour.
 - Every auto-resume names all **ten** gate clauses, and any clause that failed is quoted with the value that failed it — including which blocker or which date.
 - Every spawn was preceded by a re-probe at the spawn site in the same shell, and a positive re-probe aborted without writing `last_auto_resume`.
