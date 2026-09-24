@@ -191,8 +191,7 @@ because its dependency is prose-only is a **goal-page** defect; a task invisible
    to a **worker**. Say which each open defect is and who should take it. Merging the two makes a
    manager either over-reach or stall.
 
-7. **START (suggest)** — **recommend** what to start, in order, and state the cap it must respect:
-   **2 per sweep**, **4 per 30 min**, **one at a time headless**. The executor is
+7. **START (suggest)** — **recommend** what to start, in order, and state the cap it must respect. The cap's numbers have **one home** — `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 5; read them there and never restate them here, because a restated copy is the second counter a `grep` cannot tell from a real one. State also the **one at a time headless** constraint, which is this command's own and lives nowhere else. The executor is
    **`/supervisor:open "<task>"`** ([[Manager Session]] Guardrail 2) — headless session + tab in one
    command. **Do not spawn.** Name what should go first and what the cap would hold back.
    ⚠️ **`/supervisor:open` is the manager's executor, never this session's.** Unless this session IS the
