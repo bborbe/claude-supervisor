@@ -30,25 +30,13 @@ import { runAgentLoop } from './agent-loop.mjs'
 // suspension point between messages, so the status can be read mid-stream rather
 // than only once the stream has ended.
 function syntheticStream({ isError = false } = {}) {
-  const messages = [
+  return [
     { type: 'system', subtype: 'init', session_id: 'sess-1' },
     { type: 'assistant', message: { content: 'working' } },
     { type: 'result', subtype: 'success', is_error: isError, result: 'first', num_turns: 1, permission_denials: [] },
     { type: 'assistant', message: { content: 'still working' } },
     { type: 'result', subtype: 'success', is_error: isError, result: 'last', num_turns: 2, permission_denials: [] },
   ]
-
-  const observed = []
-  let delivered = 0
-
-  async function* stream() {
-    for (const message of messages) {
-      delivered += 1
-      yield message
-    }
-  }
-
-  return { stream, observed, messages }
 }
 
 function makeAgent() {
@@ -59,7 +47,7 @@ function makeAgent() {
 // Returns the observations plus the ledger calls the loop made.
 async function drive({ isError = false } = {}) {
   const agent = makeAgent()
-  const { stream, messages } = syntheticStream({ isError })
+  const messages = syntheticStream({ isError })
   const ledgerCalls = []
   const writeLedger = (...args) => {
     ledgerCalls.push(args)
