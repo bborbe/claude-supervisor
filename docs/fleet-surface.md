@@ -409,53 +409,34 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
 
 ## Sweep output — the fleet table
 
-**This section is the single source for the fleet table.** `/supervisor:fleet-loop` and
-`/supervisor:fleet-status` both render it and neither carries its own spec.
+**The frame is owned by the Fleet Manager Session runbook (per-vault) § Sweep output — the
+fleet table, and this file deliberately does not restate it.** The columns, the widths, the
+icons, the tree layout in the Session column, the marker line and the action lines are all
+specified there; `/supervisor:fleet-loop`, `/supervisor:fleet-status` and this file point at
+that one section rather than carrying a second copy. Two files each claiming to be the single
+source is exactly the drift this pointer removes — measured 2026-09-24, both claimed it.
 
-```
-14:30 ✓ Fleet — 42 sessions · 9 running · 23 needs-input · 10 idle · 0 problem · 1 residual · no change
-  ┌────────────────────────────┬──────────────────┬────────────────────────────────────┬─────────────┬───────────┐
-  │ Session                    │ Bucket           │ Vault task                         │ Project     │ Last      │
-  ├────────────────────────────┼──────────────────┼────────────────────────────────────┼─────────────┼───────────┤
-  │ Sentry Manager             │ ⌛ needs-input   │ Map Sentry Projects to the Repo …  │ personal    │ 14m ago   │
-  │ Dark-Factory Refuses …     │ 🔄 running       │ Dark-Factory Refuses to Start …    │ personal    │ 2m ago    │
-  │ Complete Kafka Restore     │ ⏸️ idle          │ Complete Kafka Restore             │ brogrammers │ 5h ago    │
-  │ Wedge Probe                │ ⚠️ problem       │ Wedge Probe                        │ personal    │ 41m ago   │
-  └────────────────────────────┴──────────────────┴────────────────────────────────────┴─────────────┴───────────┘
-```
+What this file still owns is the part that is about the plugin rather than the frame:
 
-- **Columns and widths:** Session 26 · Bucket 16 · Vault task 34 · Project 11 · Last 9 —
-  **112 rendered characters** (`sum(widths) + 3n + 1`) against a 119-column terminal. A box
-  that wraps is worse than a truncated cell. The bucket column **replaced** the old `Status`
-  column rather than joining it — a sixth column lands at 132 — and the raw `busy` / `shell` /
-  `idle` counts still ride the marker line. **`Project` is the column to drop** if task titles
-  need more room; cutting it buys the task column 10 characters.
-- **Bucket** carries the four-way classification, one bucket per live session, in precedence
-  order **problem → needs-input → running → idle** so the classification is **total**: every
-  registry row lands in exactly one bucket. ⚠️ problem · ⌛ needs-input · 🔄 running · ⏸️ idle.
-  Each bucket consults a **second signal** the registry status cannot supply, and
-  `fleet-board.py` is the single source for the rule — `problem` = inside one tool call ≥ 20m;
-  `needs-input` = an open gate in the attention store; `running` = status `busy` or `shell`,
-  the only two the status table calls conclusive; `idle` = everything else, carrying the
-  transcript age. **Orphaned is not a Bucket cell** — it is an action line *below* the box,
-  because it describes the absence of a session rather than a live one's state.
 - **Build the rows with `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py --json`, render them with the same root's `scripts/box-table.py`** —
   stdin `{"header": [...], "rows": [[...]], "widths": [...]}`, with the board's extra keys
-  (`counts`, `residual`, `coverage_ok`) ignored by the renderer. **Never hand-draw the box.**
+  (`counts`, `sessions`, `residual`, `coverage_ok`) ignored by the renderer. **Never hand-draw the box.**
   ⚠️ The board **asserts its own coverage** and exits non-zero rather than printing a table
   that omits a session — one row per registry entry, plus every transcript-fresh session the
-  registry carries present among the rows. A **residual** line reports transcript-fresh
-  sessions the registry does *not* carry (a headless worker holds no registry entry at all).
-  Never read a short table as a clean fleet, and never read an empty one as an empty fleet.
-- **The marker line is timestamped and is always the first line of the tick's output:**
-  `HH:MM ✓ Fleet — N sessions · <count by bucket> · <what changed or "no change">`. Silence
-  is ambiguous — a quiet loop and a dead loop look identical from the outside.
-  `/supervisor:fleet-status` is a one-shot snapshot and carries **no** marker, but indents
-  its box the same two spaces under its own lead line.
+  registry carries present among the rows, plus every session row present **exactly once** in
+  the drawn tree. A **residual** line reports transcript-fresh sessions the registry does
+  *not* carry (a headless worker holds no registry entry at all). Never read a short table as
+  a clean fleet, and never read an empty one as an empty fleet.
+- **`--json` carries one entry per session under `sessions`** — `session_id`, `label`, `role`
+  (`manager` / `worker` / `unmanaged`), `parent` (a session id, or `unmanaged`) and `bucket`.
+  The tree is drawn from `parent`, so a consumer that needs the structure reads the document
+  rather than parsing the glyphs.
+- **The bucket rule's single source is `scripts/fleet-board.py` itself** — its module
+  docstring defines the four buckets and the precedence that makes the classification total.
+  Neither this file nor the runbook restates it.
 - ⚠️ **Do not type a leading glyph.** The harness already bullets assistant output with `⏺`;
   a literal copy renders doubled.
-- Below the box, only the non-empty action lines: the **blocked-by-you jump list**
-  (`⌛ Blocked by you (N waiting …)` with one `jump:` target per row),
+- Below the box, only the non-empty action lines: the **blocked-by-you jump list**,
   `⚠️ ORPHANED: <task> — <why>`, and `⚠️ ACTION NEEDED: <the human decision>`. **Names lead**;
   the `[ref]` and pane id are secondary. Each `jump:` target is the one-line output of
   `scripts/jump-link.py <PANEID>` — a clickable `http://127.0.0.1:1337/jump?pane=<N>&t=…`
