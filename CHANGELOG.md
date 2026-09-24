@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.43.1
 
 - fix: **a refused resume no longer falls back to a second spawn, and `last_auto_resume` is written only after the resume verifiably took.** The auto-resume gate stamped the timestamp *before* the spawn and had no terminal branch for a refusal, so a denied tab-resume fell through to `spawn_agent(resume:<id>, interactive:false)` — a worker in the caller's directory with no pane, its prompt parked on the manager, under a stamp recording a resume that never happened. Measured 2026-09-24 on a hand-run `/supervisor:manager-drive`: two tasks carried `last_auto_resume: 2026-09-24T06:07:57Z` while both prompts were denied and neither worker did any work. `agents/manager-drive.md` now spawns first and stamps second — the registry entry for the resumed id against a running pid is the confirmation — and its refusal branch is **terminal**: `Not resumed`/`Escalated` with the refusal quoted, never a fallback to the other path, a different `cwd`, or `interactive:false`. The same no-fallback rule lands in `docs/fleet-surface.md` § Spawn a worker, which owns the spawn shape and previously said nothing about a refused path, and in the vault-side twin `65 Runbooks/Manager Session.md` § Step 4 — the agent file declares that runbook authoritative, so a plugin-only change would be inert where the two disagree.
 
