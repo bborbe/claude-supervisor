@@ -2,7 +2,7 @@
 description: Jump to a Claude Code session's WezTerm tab. Bare = newest session needing attention; or by tab id, tab:<N>, pane:<N>, or a title substring. The executor for the `/supervisor:jump <pane-id>` lines that the fleet-status, fleet-loop, manager-status and manager-loop commands print but never run — those commands are read-only by contract and must never mutate. **Managers always hand over `/supervisor:jump <pane-id>`, never a raw `wezterm cli activate-tab` line.**
 allowed-tools:
   - Bash(python3:*)
-argument-hint: "[<tab-id> | tab:<N> | pane:<N> | <title substring>] [--oldest] [--list] [--dry-run]"
+argument-hint: "[<tab-id> | tab:<N> | pane:<N> | <title substring>] [--list] [--dry-run]"
 ---
 
 Run exactly:
@@ -18,7 +18,6 @@ Print the output verbatim. Do not add analysis, do not run `ListAgents`, do not 
 | Invocation | Effect |
 |---|---|
 | `/supervisor:jump` | jump to the **newest** session needing attention (permission prompt or open question) |
-| `/supervisor:jump --oldest` | same queue, oldest first |
 | `/supervisor:jump --list` | print the attention queue, jump nothing — the `→` marks what bare `/supervisor:jump` would pick |
 | `/supervisor:jump 5` | activate 5 — the tab if tab 5 exists, else pane 5 |
 | `/supervisor:jump tab:5` | force tab 5 past the ambiguity check |
@@ -28,7 +27,7 @@ Print the output verbatim. Do not add analysis, do not run `ListAgents`, do not 
 
 ## Why newest-first
 
-The attention feed is hook-written and goes stale: a gate the worker has already cleared still sits in the file until its next tool call. The **oldest** entry is therefore the most likely to be an already-cleared gate, and the newest the most likely still open. Flip with `--oldest` when you actually want FIFO.
+The attention feed is hook-written and goes stale: a gate the worker has already cleared still sits in the file until its next tool call. The **newest** entry is therefore the most likely still open, and the oldest the most likely already cleared. That is why bare `/supervisor:jump` picks newest-first.
 
 ## The ambiguity rule
 

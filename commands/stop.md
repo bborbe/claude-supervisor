@@ -33,7 +33,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/stop-probe.py
    ```
 
-   It prints the session id; the subject with its branch and vault; **one line per gate loop found**, each with its pid, uptime and command; the tick file's path, mtime and age; and the ledger's open count. The report below has a slot for every one of those — if a line has no slot, that is this template's defect, not a value to drop.
+   It prints the session id; the subject with its branch and vault; **one line per gate loop found**, each with its pid, uptime and command; the tick file's path, mtime and age; the gate ledger's path, last line and age; and the session ledger's open count. The report below has a slot for every one of those — if a line has no slot, that is this template's defect, not a value to drop.
 
 2b. **Mark the stand-down as deliberate** — when the probe resolved a subject:
 
@@ -41,7 +41,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py --stop --topic "<subject>"
    ```
 
-   It writes `<slug>.stopped` beside the tick file, so the host-side liveness watcher reads this manager's silence as a stop, not a lapse. The next `/supervisor:manager-loop` re-arm clears it. No subject → skip and say so; there is no slug to mark. Report it as a `✓ stop marker — <path>` line under `Disarmed`.
+   It writes `<slug>.stopped` into the liveness state dir, so a deliberate stand-down is not reported as a lapse. The next `/supervisor:manager-loop` re-arm clears it. No subject → skip and say so; there is no slug to mark. Report it as a `✓ stop marker — <path>` line under `Disarmed`.
 
 3. **Print the report** — this command's own output format, and the only surface the contract does not own:
 
@@ -52,8 +52,9 @@ Stand the manager loop **this session** is running down. This is the operator's 
        · <driver> — not armed
        ~ <driver> — <what was done, or why nothing could be>
      Left running — fleet-surface.md § Session end owns this contract
-       ● gate loop  pid <pid>, up <etime>  <command>
-       ● tick file  <path>  mtime <iso>  (<age>s ago)
+       ● gate loop   pid <pid>, up <etime>  <command>
+       ● tick file   <path>  mtime <iso>  (<age>s ago)
+       ● gate ledger <path>  <last line>  (<age>s ago)
      Session alive
        ● ledger <path> — <n> open of <m>, unchanged by this command
      Restart: /supervisor:manager-loop "<subject>"
@@ -70,7 +71,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
 <error_handling>
 - **A driver that refuses to disarm** — print the failure verbatim together with the driver still standing, and say the loop is **not** fully stood down. Reporting success over a live driver is worse than reporting the failure.
 - **No gate loop found**: print `⚠️ no gate loop found` in place of the gate-loop line, and say plainly that it may never have been armed. A fact to report, not to repair.
-- **Tick file absent**: print `· tick file — absent` in place of that line, and say which of the two reasons it is — no subject recorded, so no tick path resolves, or the loop has not written one yet. Neither is a fault in this command.
+- **Tick file or gate ledger absent**: print `· tick file — absent` / `· gate ledger — absent` in place of that line, and say which of the two reasons it is — no subject recorded, so no path resolves, or the loop has not written one yet. Neither is a fault in this command.
 - **No session id resolves**: the header prints `session (unknown)` verbatim, and the ledger line names the path it looked for. Say the id could not be resolved rather than leaving the slot empty — an empty slot reads as a value that was not printed, not as one that does not exist.
 - **No subject recorded**: print the session id and carry on — the loop may have been armed before the subject was written. The branch and vault render as `—` with it, since all three come from the same record.
 </error_handling>

@@ -11,7 +11,7 @@ argument-hint: (no args)
 
 Answer one question: **what is everyone else doing right now?**
 
-This is NOT `/and`. `/and` = what should **I** do next in this session; `/fleet-status` = what is **everyone else** doing across the machine. Different question, different scope — `/and` never surveys peers, `/fleet-status` never recommends this session's next action.
+This is NOT `/supervisor:worker-drive`. `/supervisor:worker-drive` = what should **I** do next in this session; `/fleet-status` = what is **everyone else** doing across the machine. Different question, different scope — `/supervisor:worker-drive` never surveys peers, `/fleet-status` never recommends this session's next action.
 
 ## What this command does
 

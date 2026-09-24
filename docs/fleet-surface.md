@@ -36,6 +36,8 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 ⚠️ **There is no one-sweep mode — use `/manager-status` to look and `/manager-drive` to act once.** `manager-loop` once carried a flag that suppressed the arming and nothing else: the Guardrails still ran, so a single sweep could spawn up to 2 sessions, auto-resume a dead worker, auto-compact one over 70% and reconcile the topic page. **"One sweep" is a cadence limit, not a blast-radius limit.** The flag was removed because its name promised a read-only look it never gave (read that way, and caught, on 2026-09-21); `manager-status` + `manager-drive` split the look from the act honestly.
 
+⚠️ **The fleet side now has the same split — use `/fleet-status` to look and `/fleet-drive` to act once.** `fleet-loop` once required a `loop` argument to repeat; a bare invocation ran one round and stopped, and a round dispatched nothing at all — no drive leg, so parked-but-unblocked sessions sat until someone ran `/fleet-drive` by hand. That is the manager-layer shape missing one leg, not a smaller blast radius: the round still swept, classified and wrote the snapshot, so "one round" was a cadence limit there too. The argument was removed on the same reading as the manager flag — a bare `/supervisor:fleet-loop` repeats by default and dispatches the drive leg every round, and `/fleet-drive` is the by-hand single pass. **The two layers are mirrors: `manager-loop` : `manager-drive` :: `fleet-loop` : `fleet-drive`.**
+
 ⚠️ **A worker session therefore has no end-to-end check of a manager command.** Exercising one belongs to a manager session's own runtime. A change whose verification is "run the manager and watch it behave" is verified by deployment (the installed copy carries the change) plus a lockstep grep across the copies — never by arming a loop from wherever the change was authored. **Handing that run to the manager is not a wait:** an idle manager drains `SendMessage` only on its next turn, and nothing gives it one. Send with `notify_when_idle: true` and close the worker's turn 🔵 READY with `you run: <command>` for the operator to type in the manager's tab — never 🟡 WAITING on the reply. (Measured 2026-09-23: a `/supervisor:reset` handoff sat unread ~4.5 h.)
 
 ## Session end — the disarm contract
@@ -57,7 +59,7 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 **What must survive `stop`:**
 
-- **The model-free gate loop.** Armed outside the session — verified live 2026-09-22: the running loop's parent is a detached supervisor at `ppid 1`, so it outlives the session that started it — it is what keeps `~/.claude/state/sweep-gate/<topic>.tick.txt` and `/manager-status` truthful. `stop` prints its pid and the tick file's mtime as evidence it survived, and never signals it. Killing it leaves the operator a frozen table and a `/manager-status` reporting a tree nobody is watching.
+- **The model-free gate loop.** Hosted by launchd (`com.bborbe.sweep-gate-notify`, a 900s `StartInterval` job) since 2026-09-22, when the detached `sweep-gate-ledger-loop.sh` host was retired. It writes **per-vault** state under `~/.claude/state/sweep-gate-loop/<vault>/` — the launchd host exports `SWEEP_GATE_STATE_DIR` to place it there — and it is what keeps `<vault>/<subject>.tick.txt` and `/manager-status` truthful. `stop` prints the heartbeat's age and the tick file's mtime as evidence it survived, and never signals it. Killing it leaves the operator a frozen table and a `/manager-status` reporting a tree nobody is watching. ⚠️ **The flat `~/.claude/state/sweep-gate/<topic>.*` tree is retired** — nothing writes it any more, and a reader resolving it reports a live gate as missing (verified 2026-09-23: no detached loop running, every topic's state there stale, the per-vault tree fresh at its 900s cadence).
 - **The session.** The cadence is session-scoped, but the asks ledger is keyed by session id — `~/.claude/state/open-items/<session-id>.json` — so closing the session and re-opening the topic mints a new id and an empty ledger, and every open entry vanishes silently, including the `asked-of-you` entries only the operator can resolve. Measured 2026-09-22: session `433c856d` held **10 open entries, 2 of them `asked-of-you`**, and the session that replaced it carries the same 10 re-added **by hand** — the workaround, not a mechanism.
 
 **`stop` is not a close.** It writes no page (its one state write is the `<slug>.stopped` marker, so the liveness watcher reads the silence as a stop rather than a lapse), the topic's `status` is byte-identical before and after, and it never offers `/vault-cli:session-close`. **Restart is the same command that started the loop** — `/supervisor:manager-loop "<subject>"` — so there is no `start` verb and none is needed.
@@ -72,8 +74,16 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 2. **Score it with the `task-auditor` agent** (`vault-cli:task-auditor`) — **the bar is 9/10, and it is the same bar the worker's own gate applies.** A manager gate looser than the worker's gate is decorative: an 8/10 task clears the manager and still parks the worker's `plan-task`.
 3. **Check the three sections exist** before the spawn — `grep -cE '^# (Success Criteria|Definition of Done|Tasks)' <task-file>` returns **3**. A task authored through this path does, by construction; a hand-written one usually does not.
 4. **Keep the split — the gate is readiness, never planning.** *Authoring* — sections, subtask decomposition, DoD, naming and SC evidence shapes — needs no repo access and belongs to the manager. *Execution planning* — which file, which mechanism, what the system actually permits — needs ground truth a manager does not have and stays with the worker. Measured counter-example 2026-09-19: a manager told a worker to "narrow the rule" on *The git push Ask-Rule Fires on Feature Branches*, and the worker found the ask-list does literal-prefix matching only and **cannot express that distinction at all**. A manager-side planning pass would have produced the same wrong plan with no wizard left to catch it.
+5. **Respect the spawn cap.** New-session spawns are capped at **2 per sweep** and **4 per rolling 30 min**, counted **per layer** — the manager-loop for its topic or goal, the fleet-loop fleet-wide (§ Dispatch authority above). **Auto-resumes are excluded**: they answer to the auto-resume gate's own 30-min crash-loop cap, and counting them here would leave a sweep that revived two dead workers unable to start any new one. At the cap, open nothing further and print `⏸️ SPAWN CAP: <n> ready, <m> over cap`; the remainder is picked up next sweep.
+6. **Decide the mode before you spawn — `headless` only on positive evidence, and `interactive` whenever it is unclear.** The task's own `mode:` frontmatter is the storage: a spawn site reads it and passes the argument **whenever the field is present** — `interactive=false` for `headless`, `interactive=true` for `interactive` — and omits it only when the field is absent. ⚠️ **A non-task-anchored spawn — a bare brief with no task file — has no field to read, so it classifies the brief itself and passes the argument explicitly; it never omits.** Omission is reserved for a *task* whose `mode:` is absent, and that case is resolved upstream by Step 0.6 writing the field before the spawn. A bare brief has no such step, so omitting would mean the spawn carried **no decision at all** and reported `mode_source=config` — indistinguishable in the ledger from a site that never decided. Absent, classify the task's body now, write the field back with `vault-cli task set "<task>" mode <interactive|headless>`, and spawn accordingly — never re-derive over a value already on disk. **The classifying question is neither "is this dangerous" nor "can this run unattended".** The first is what a keyword grep measures (`kubectl`, `ssh`, `make apply`, `gh pr merge` say a task is *worth watching*, not that it *cannot run unattended*), and the second nothing in a task body reliably answers — `Cleanup Email Inbox` names no infrastructure command and still needs a human. Ask instead: *does finishing this task raise questions mid-flight that only a human can settle?* Yes, or the body gives no basis to decide → **`interactive`**. `role: human` and `role: manager` both force `interactive` — a person needs a screen, a manager is a tab you jump to — while `role: agent` leaves the question genuinely open.
 
-⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the manager-loop command all point here.
+**What positive evidence looks like** — the task runs a fixed procedure end to end, decides nothing a human would want to weigh in on, and carries no approval step, no triage judgement and no "ask if unsure" in its own body. **Expect this to be rare.** Most recurring work triages, files, or decides something: an inbox sweep judges what is actionable, an alert check judges what to silence. Those are `interactive`, and a classifier that finds many headless rows is mis-reading the bodies, not finding an optimisation.
+
+**The asymmetry is deliberate, and it is measured.** A wrongly-interactive task costs one idle tab the operator closes; a wrongly-headless one burns a whole session on gates nobody can answer (measured 2026-09-20: two workers stranded and four gates expired across three workers in ~90 minutes). The operator's own framing, 2026-09-21: *a session that needs interaction and is headless is hard to manage.* So `interactive` is a **floor, not a tie-break** — *unclear* is not a category that resolves to headless, and neither is *probably fine*.
+
+⚠️ **A headless worker's two standing constraints, and both are the spawner's to carry, not the worker's.** (a) **Its gates park with the session that spawned it** — no other session can answer them, so the spawner must serve them via `await_permission` / `answer_permission`. A spawner that cannot answer a parked prompt must not open a headless worker, because the prompt will outlive it. (b) **Its turn ends at READY, and a turn end is not completion** — continue it with `spawn_agent(resume="<session-id>", interactive=false, cwd="<explicit>")`; a headless worker that has exited is neither finished nor restarted. Both constraints are why the `interactive` fallback is aggressive rather than polite.
+
+⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the manager-loop command all point here. It owns **three constants**: the **readiness bar (9/10)**, the **spawn cap** (item 5 above), and the **mode decision** (item 6 above — the classifier, the `mode:` field, and both headless constraints). Each appears once, there, and is referenced everywhere else. ⚠️ **A restated copy of any of them is not a harmless comment — it is a second counter.** The cap was restated in `commands/manager-loop.md`, `commands/manager-verify.md` and the manager runbook's Guardrail 2 until 2026-09-24: four homes for one number, which is how a single cap becomes two caps the day one home is edited and the others are not, with no error and no diff to catch it. The mode rule carried the mirror-image defect until the same day: it lived in `commands/open.md` § Step 0.6 and was consumed only there, so every other spawn site silently fell through to the fleet config — measured 2026-09-23, **63 new-worker spawns in one day and 0 of them headless**, 57 sourced from `config` rather than from any decision.
 
 **A — `spawn_agent` (preferred).** The prompt is a spawn *argument*, so the task never goes
 over keystrokes:
@@ -91,8 +101,10 @@ editing N instruction files and course-correcting every manager already running 
 that morning: 3 workers killed, 7 more found under two other managers). The file is read
 once at server start — restart the MCP server after editing it. The spawn response reports
 `mode_source` (`argument`/`env`/`config`/`default`) when you need to know which source
-decided. Pass `interactive` only as a per-call override: `true` to watch one worker's screen
-live, `false` to force one headless worker while the fleet runs in tabs.
+decided. Pass `interactive` as a per-call override in one case only: `true` to watch one
+worker's screen live.
+
+⚠️ **The `mode:` case is a carve-out, not an override, and it runs in both directions.** Pass the argument whenever the task's `mode:` field is present — `interactive=false` for `headless`, `interactive=true` for `interactive` (item 6 above). An absent `mode:` still means *omit the argument entirely* — never *pass `interactive`* — so the config keeps deciding for every task that has not opted out, and the one-place-to-change property survives. **If this file writes the field, this file must honour it in both directions.** Passing it only for `headless` — which is what this file did until 2026-09-24 — leaves `mode: interactive` inert: a task that explicitly declared itself interactive flips to headless the moment `spawn.mode` moves, and the omitted argument reports `mode_source=config`, so a **wired spawn becomes indistinguishable from an unwired one in the ledger**. **A `mode:` honoured in one direction is the deleted mode column wearing a different hat.**
 
 ⚠️ **A headless worker is told its own mode — it never has to infer it.** The resolved mode
 and its source are passed into the worker's environment as `SUPERVISOR_WORKER_MODE` and
@@ -237,6 +249,14 @@ system."* That constraint is **phase-scoped, not permanent**; do not delete path
 of it. Under it a proven-dead session resumes via **B**, exactly as an indeterminate one does.
 The row's preference for A is a preference, not a requirement, and it is the only row affected.
 
+⚠️ **A refused path is terminal — never fall back to the other one.** If the chosen path's spawn
+is refused, the resume did not happen: report the refusal and stop. Falling back from B to A (or
+A to B) is not a retry — it is a **second resume the gate never authorised**, and it lands a
+worker in the caller's directory with no pane, its prompt parked on the manager, under a stamp
+that now records a resume that never took. The refusal is the safe direction and it is the
+design: path A already refuses `resume` + `interactive:true` rather than silently downgrading it,
+and a refused resume costs one sweep where a wrong-path spawn corrupts a conversation.
+
 **2 — Drive, by cause of death:**
 
 | The session died… | Then |
@@ -258,6 +278,10 @@ omits `cwd` lands in the caller's directory, so a worker resumed to finish repo 
 starts somewhere else and its first file operation goes to the wrong tree. Pass the original
 task's directory; if you cannot determine it, read `cwd` from the session registry
 (`~/.claude/sessions/<pid>.json`) rather than guessing.
+
+**Confirming a headless spawn took — and what to read instead of `.status` — is owned by
+§ A headless worker exits at turn end.** Do not restate it here: a restated copy is what let
+four surfaces prescribe the same wrong field.
 
 ### The tab name is the join — and it is made unique before the process starts
 
@@ -315,8 +339,9 @@ separates continuing a worker from answering one:
 | **already exited** (timeout, or turn end) | either | a fresh turn | `spawn_agent(resume=<id>, interactive=false, cwd=<explicit>)` |
 
 They do not substitute for one another: `answer_permission` cannot reach a process that has
-exited, and `spawn_agent(resume=…)` cannot answer a question that is still parked. Check which
-state the worker is in — `agent_status` or `pending_permissions` — before choosing.
+exited, and `spawn_agent(resume=…)` cannot answer a question that is still parked. Decide which of the two applies from `agent_status` **plus the transcript's mtime** — never
+from `agent_status` alone, because `.status` is terminal only once the turn has ended
+(`num_turns: 0` beside `subtype: "success"` is the tell that it has not).
 
 ### The two prefixes are not interchangeable
 
@@ -401,53 +426,34 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
 
 ## Sweep output — the fleet table
 
-**This section is the single source for the fleet table.** `/supervisor:fleet-loop` and
-`/supervisor:fleet-status` both render it and neither carries its own spec.
+**The frame is owned by the Fleet Manager Session runbook (per-vault) § Sweep output — the
+fleet table, and this file deliberately does not restate it.** The columns, the widths, the
+icons, the tree layout in the Session column, the marker line and the action lines are all
+specified there; `/supervisor:fleet-loop`, `/supervisor:fleet-status` and this file point at
+that one section rather than carrying a second copy. Two files each claiming to be the single
+source is exactly the drift this pointer removes — measured 2026-09-24, both claimed it.
 
-```
-14:30 ✓ Fleet — 42 sessions · 9 running · 23 needs-input · 10 idle · 0 problem · 1 residual · no change
-  ┌────────────────────────────┬──────────────────┬────────────────────────────────────┬─────────────┬───────────┐
-  │ Session                    │ Bucket           │ Vault task                         │ Project     │ Last      │
-  ├────────────────────────────┼──────────────────┼────────────────────────────────────┼─────────────┼───────────┤
-  │ Sentry Manager             │ ⌛ needs-input   │ Map Sentry Projects to the Repo …  │ personal    │ 14m ago   │
-  │ Dark-Factory Refuses …     │ 🔄 running       │ Dark-Factory Refuses to Start …    │ personal    │ 2m ago    │
-  │ Complete Kafka Restore     │ ⏸️ idle          │ Complete Kafka Restore             │ brogrammers │ 5h ago    │
-  │ Wedge Probe                │ ⚠️ problem       │ Wedge Probe                        │ personal    │ 41m ago   │
-  └────────────────────────────┴──────────────────┴────────────────────────────────────┴─────────────┴───────────┘
-```
+What this file still owns is the part that is about the plugin rather than the frame:
 
-- **Columns and widths:** Session 26 · Bucket 16 · Vault task 34 · Project 11 · Last 9 —
-  **112 rendered characters** (`sum(widths) + 3n + 1`) against a 119-column terminal. A box
-  that wraps is worse than a truncated cell. The bucket column **replaced** the old `Status`
-  column rather than joining it — a sixth column lands at 132 — and the raw `busy` / `shell` /
-  `idle` counts still ride the marker line. **`Project` is the column to drop** if task titles
-  need more room; cutting it buys the task column 10 characters.
-- **Bucket** carries the four-way classification, one bucket per live session, in precedence
-  order **problem → needs-input → running → idle** so the classification is **total**: every
-  registry row lands in exactly one bucket. ⚠️ problem · ⌛ needs-input · 🔄 running · ⏸️ idle.
-  Each bucket consults a **second signal** the registry status cannot supply, and
-  `fleet-board.py` is the single source for the rule — `problem` = inside one tool call ≥ 20m;
-  `needs-input` = an open gate in the attention store; `running` = status `busy` or `shell`,
-  the only two the status table calls conclusive; `idle` = everything else, carrying the
-  transcript age. **Orphaned is not a Bucket cell** — it is an action line *below* the box,
-  because it describes the absence of a session rather than a live one's state.
 - **Build the rows with `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py --json`, render them with the same root's `scripts/box-table.py`** —
   stdin `{"header": [...], "rows": [[...]], "widths": [...]}`, with the board's extra keys
-  (`counts`, `residual`, `coverage_ok`) ignored by the renderer. **Never hand-draw the box.**
+  (`counts`, `sessions`, `residual`, `coverage_ok`) ignored by the renderer. **Never hand-draw the box.**
   ⚠️ The board **asserts its own coverage** and exits non-zero rather than printing a table
   that omits a session — one row per registry entry, plus every transcript-fresh session the
-  registry carries present among the rows. A **residual** line reports transcript-fresh
-  sessions the registry does *not* carry (a headless worker holds no registry entry at all).
-  Never read a short table as a clean fleet, and never read an empty one as an empty fleet.
-- **The marker line is timestamped and is always the first line of the tick's output:**
-  `HH:MM ✓ Fleet — N sessions · <count by bucket> · <what changed or "no change">`. Silence
-  is ambiguous — a quiet loop and a dead loop look identical from the outside.
-  `/supervisor:fleet-status` is a one-shot snapshot and carries **no** marker, but indents
-  its box the same two spaces under its own lead line.
+  registry carries present among the rows, plus every session row present **exactly once** in
+  the drawn tree. A **residual** line reports transcript-fresh sessions the registry does
+  *not* carry (a headless worker holds no registry entry at all). Never read a short table as
+  a clean fleet, and never read an empty one as an empty fleet.
+- **`--json` carries one entry per session under `sessions`** — `session_id`, `label`, `role`
+  (`manager` / `worker` / `unmanaged`), `parent` (a session id, or `unmanaged`) and `bucket`.
+  The tree is drawn from `parent`, so a consumer that needs the structure reads the document
+  rather than parsing the glyphs.
+- **The bucket rule's single source is `scripts/fleet-board.py` itself** — its module
+  docstring defines the four buckets and the precedence that makes the classification total.
+  Neither this file nor the runbook restates it.
 - ⚠️ **Do not type a leading glyph.** The harness already bullets assistant output with `⏺`;
   a literal copy renders doubled.
-- Below the box, only the non-empty action lines: the **blocked-by-you jump list**
-  (`⌛ Blocked by you (N waiting …)` with one `jump:` target per row),
+- Below the box, only the non-empty action lines: the **blocked-by-you jump list**,
   `⚠️ ORPHANED: <task> — <why>`, and `⚠️ ACTION NEEDED: <the human decision>`. **Names lead**;
   the `[ref]` and pane id are secondary. Each `jump:` target is the one-line output of
   `scripts/jump-link.py <PANEID>` — a clickable `http://127.0.0.1:1337/jump?pane=<N>&t=…`

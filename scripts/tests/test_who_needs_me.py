@@ -31,13 +31,16 @@ fails these.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import re
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "who-needs-me.py")
@@ -841,6 +844,182 @@ class NoShadowedDefinitions(unittest.TestCase):
                            "def a():\n    pass\n\ndef a():\n    pass\n", re.M)
         self.assertEqual(["a", "a"], names)
 
+
+class PaneFor(unittest.TestCase):
+    """`--pane-for` resolves one session id to its pane, or refuses.
+
+    This is the lookup `/supervisor:fleet-drive` runs to give an escalated row its
+    jump link when the sweep digest carried no pane for it. Every refusal path is
+    asserted on stdout being EMPTY, not just on the exit code: a caller reads the
+    pane off stdout, so a diagnostic that leaked there would be handed to
+    `jump-link.py` as a pane id and produce a link to a pane that does not exist.
+
+    Two classes of case carry the weight, both measured rather than imagined:
+
+      * **The stale recorded pane.** A pane id is a lease -- WezTerm renumbers and
+        reuses them -- so a live session's attention record can name a pane that no
+        longer exists. Measured 2026-09-24: `MDM Bugs` was live in the registry on
+        pane 1391 while all eight of its records carried pane 85. Asking whether
+        pane 85 still existed called that session dead, hiding a session the
+        operator could have jumped to.
+      * **The ambiguity guards.** A shared session-id prefix and a shared pane
+        title both refuse rather than pick one; either guess hands the operator a
+        link to the wrong tab, which reads as a working one.
+    """
+
+    SID_A = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    SID_B = "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+    def setUp(self):
+        self.patches = []
+
+        def patch(name, value):
+            p = mock.patch.object(wnm, name, value)
+            self.patches.append(p)
+            p.start()
+
+        self.records = [
+            {"session_id": self.SID_A, "pane": "204", "kind": "idle", "ts": 1},
+            {"session_id": self.SID_B, "pane": "205", "kind": "idle", "ts": 2},
+        ]
+        self.registry = {self.SID_A: "Session A", self.SID_B: "Session B"}
+        self.panes = {
+            "204": {"pane_id": 204, "title": "\u2733 Session A"},
+            "205": {"pane_id": 205, "title": "\u2733 Session B"},
+        }
+        patch("load", lambda _suffix: list(self.records))
+        patch("panes", lambda: dict(self.panes))
+        patch("read_registry", lambda: None if self.registry is None else dict(self.registry))
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+
+    def run_pane_for(self, arg):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = wnm.pane_for(arg)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_recorded_pane_is_preferred(self):
+        """The sweep already resolved this pane; while it is live it is used as-is."""
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("204\n", out)
+
+    def test_existing_pane_of_another_session_is_not_used(self):
+        """A recycled pane id: the pane exists but is titled for another session.
+
+        Existence is not ownership -- pane ids are recycled across tab moves and
+        WezTerm restarts. Returning this one would hand the operator a confident
+        link to the wrong tab, which reads as a working one.
+        """
+        self.panes = {
+            "204": {"pane_id": 204, "title": "✳ Some Other Session"},
+            "1391": {"pane_id": 1391, "title": "✳ Session A"},
+        }
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("1391\n", out)
+
+    def test_existing_pane_of_another_session_with_no_match_refuses(self):
+        """Not ours, and no pane is titled ours -> refuse, never fall back to it."""
+        self.panes = {"204": {"pane_id": 204, "title": "✳ Some Other Session"}}
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("no pane resolves", err)
+
+    def test_full_id_resolves(self):
+        rc, out, _ = self.run_pane_for(self.SID_A)
+        self.assertEqual(0, rc)
+        self.assertEqual("204\n", out)
+
+    def test_stale_recorded_pane_falls_back_to_the_current_name(self):
+        """The MDM Bugs case: live session, recorded pane gone, real pane 1391.
+
+        The fallback matches the registry's CURRENT name, which is what makes a
+        `/rename` tracked rather than broken.
+        """
+        self.records[0]["pane"] = "85"
+        self.panes = {"1391": {"pane_id": 1391, "title": "\u2733 Session A"}}
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("1391\n", out)
+
+    def test_status_glyph_is_stripped_on_both_sides(self):
+        """The pane title carries a glyph; the registry name may carry its own."""
+        self.records[0]["pane"] = "85"
+        self.registry[self.SID_A] = "\u2699 Session A"
+        self.panes = {"1391": {"pane_id": 1391, "title": "\u2733 Session A"}}
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("1391\n", out)
+
+    def test_stale_pane_with_no_matching_title_refuses(self):
+        """No title matches -> refuse with the reason, never a guess."""
+        self.records[0]["pane"] = "85"
+        self.panes = {"1391": {"pane_id": 1391, "title": "\u2733 Some Other Session"}}
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("no pane resolves", err)
+
+    def test_ambiguous_title_refuses(self):
+        """Two panes titled alike must not pick one -- that is a wrong-tab link."""
+        self.records[0]["pane"] = "85"
+        self.panes = {
+            "1391": {"pane_id": 1391, "title": "\u2733 Session A"},
+            "1392": {"pane_id": 1392, "title": "\u2733 Session A"},
+        }
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("ambiguous", err)
+
+    def test_pane_is_taken_from_a_sibling_record(self):
+        """The store returns one record per open item; only some carry a pane."""
+        self.records.insert(0, {"session_id": self.SID_A, "kind": "tool", "ts": 0})
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("204\n", out)
+
+    def test_ambiguous_prefix_refuses(self):
+        """Two live ids sharing the prefix must refuse rather than pick one."""
+        twin = self.SID_A[:8] + "-cccc-4ccc-8ccc-cccccccccccc"
+        self.registry = {self.SID_A: "Session A", twin: "Session C"}
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("match", err)
+
+    def test_unknown_id_refuses(self):
+        rc, out, err = self.run_pane_for("deadbeef")
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("no live session id matches", err)
+
+    def test_unreadable_registry_refuses(self):
+        """An unreadable registry cannot prove liveness, so it must not guess."""
+        self.registry = None
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("registry unreadable", err)
+
+    def test_unreadable_panes_refuses(self):
+        self.panes = {}
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("pane list unreadable", err)
+
+    def test_empty_id_refuses(self):
+        rc, out, _ = self.run_pane_for("")
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+
+    def test_the_flag_is_registered(self):
+        """The positive control: the mode exists on the CLI, so the command can call it."""
+        with open(_SCRIPT, encoding="utf-8") as handle:
+            self.assertIn('"--pane-for"', handle.read())
 
 if __name__ == "__main__":
     unittest.main()

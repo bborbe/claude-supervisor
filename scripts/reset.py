@@ -7,7 +7,7 @@ Four steps, in order, each printing what it read and what it changed:
                session's own state file, this session's name. `last-<vault>.json` —
                the cross-session fallback of last resort — is NEVER read for the
                subject; its content is printed only so the skip is visible.
-  2. digest    `~/.claude/state/sweep-gate/<topic>.json`: the digest is REWRITTEN to
+  2. digest    `~/.claude/state/sweep-gate-loop/<vault>/<topic>.json`: the digest is REWRITTEN to
                a `reset-<ts>` sentinel that can never equal a real digest, so the next
                tick is a full sweep. Rewritten rather than deleted, because the same
                file carries `busy_since` — the cross-tick stuck clock — and deleting
@@ -144,8 +144,8 @@ def resolve_subject(args, sid, vcfg):
 
 # ---------------------------------------------------------------- 2. digest
 
-def reset_digest(subject, dry):
-    path = os.path.join(STATE, "sweep-gate", f"{slug(subject)}.json")
+def reset_digest(subject, vault, dry):
+    path = os.path.join(STATE, "sweep-gate-loop", vault.lower(), f"{slug(subject)}.json")
     if not os.path.exists(path):
         return [f"  before   {path} absent", "  after    absent — next tick is a first-run full sweep"]
     data = read_json(path)
@@ -320,7 +320,7 @@ def main():
             {"subject": subject, "vault": vcfg["name"], "branch": branch, "resolved_at": now_iso()},
         )
     print("2. sweep-gate digest")
-    print("\n".join(reset_digest(subject, args.dry_run)))
+    print("\n".join(reset_digest(subject, vcfg["name"], args.dry_run)))
     print("3. ledger re-validation")
     print("\n".join(revalidate(load_open_items(), sid, args.dry_run)))
     print("4. tracked set")

@@ -12,6 +12,14 @@ Order matters in `answer`: the store's open -> answered compare-and-set runs
 first, and a caller that loses it (409) must NOT route its answer -- another arm
 already did. Only the winner prints a TARGET.
 
+The answer carries two identities: `answered_by` names the arm, and `resolved_by`
+names the session that ran it. The session id is read from the environment, so a
+resolution is attributable without the caller passing a flag -- and the invoking
+command stays untouched. An arm with no `CLAUDE_CODE_SESSION_ID` (a spawned child
+is stripped of it) sends no `resolved_by` at all and says so on its own line: an
+empty string would read as a *set* value in the store's split, which is the false
+positive this field exists to close.
+
 Target resolution: the item's `producer_id` is a session id; the session
 registry (`~/.claude/sessions/<pid>.json`) maps it to the session `name`, which
 is the address `SendMessage` takes. One line, three shapes:
@@ -86,10 +94,27 @@ def fetch_item(item_id):
         return json.load(resp)
 
 
-def post_answer(item_id, answered_by):
+def resolved_session_id(environ=None):
+    """The session id of whoever is running this arm, or "".
+
+    Claude Code exports CLAUDE_CODE_SESSION_ID into any Bash a session runs, so
+    the arm's own session is resolvable here without the caller passing a flag.
+    A spawned child is deliberately stripped of it, so "" is a real case rather
+    than a bug, and it is reported rather than papered over: the store's split
+    counts a *set* `resolved_by` as a manager resolution, so a blank string would
+    read as one and reintroduce the false positive this field exists to close.
+    """
+    return (os.environ if environ is None else environ).get("CLAUDE_CODE_SESSION_ID", "")
+
+
+def post_answer(item_id, answered_by, resolved_by=""):
+    body = {"answered_by": answered_by}
+    # Omitted rather than sent empty: downstream, "" is a set value, not an absent one.
+    if resolved_by:
+        body["resolved_by"] = resolved_by
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention/{item_id}/answer",
-        data=json.dumps({"answered_by": answered_by}).encode(),
+        data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -114,14 +139,16 @@ def cmd_next(registry, out=sys.stdout):
     return 0
 
 
-def cmd_answer(item_id, answered_by, registry, out=sys.stdout):
+def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None):
     item = fetch_item(item_id)
     mech = item.get("answer_mechanism")
     if mech != "message":
         print(f"REFUSED: {item_id} is {mech}-class; only message-class items route an answer", file=out)
         return 2
+    if resolved_by is None:
+        resolved_by = resolved_session_id()
     try:
-        answered = post_answer(item_id, answered_by)
+        answered = post_answer(item_id, answered_by, resolved_by)
     except urllib.error.HTTPError as err:
         if err.code == 409:
             # 409 covers both a lost compare-and-set and an item no longer open;
@@ -131,6 +158,8 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout):
             print(f"FAILED: store returned {err.code} for {item_id}", file=out)
         return 1
     print(f"ANSWERED: {item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}", file=out)
+    print(f"RESOLVED_BY: {resolved_by}" if resolved_by else
+          "RESOLVED_BY: unknown -- CLAUDE_CODE_SESSION_ID unset, so this item will read as unresolved", file=out)
     print(target_line(item.get("producer_id", ""), registry), file=out)
     return 0
 

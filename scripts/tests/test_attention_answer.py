@@ -9,6 +9,10 @@ Covers the two decisions that make an answer safe to route:
   * the answer gate -- only the arm that wins the store's compare-and-set may
     print a TARGET. A 409 must never be followed by a route, and a non-message
     item must be refused before the store is written at all.
+  * the answer body -- `resolved_by` must name the arm's own session, and must be
+    omitted rather than sent blank: downstream a "" is a *set* value, so it would
+    count as a manager resolution and manufacture the false positive the field
+    exists to close.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -94,6 +98,64 @@ class AnswerGateTest(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("REFUSED:", out)
         posted.assert_not_called()
+
+    def test_arm_session_reaches_the_body(self):
+        item = {"answer_mechanism": "message", "producer_id": "p1"}
+        with mock.patch.object(aa, "resolved_session_id", return_value="sess-9"):
+            rc, _, posted = self._run(item, post=lambda *_: {"answered_at": "t", "answered_by": "arm"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted.call_args.args[2], "sess-9")
+
+    def test_unknown_session_is_reported_not_silent(self):
+        item = {"answer_mechanism": "message", "producer_id": "p1"}
+        with mock.patch.object(aa, "resolved_session_id", return_value=""):
+            rc, out, _ = self._run(item, post=lambda *_: {"answered_at": "t", "answered_by": "arm"})
+        self.assertEqual(rc, 0)
+        self.assertIn("RESOLVED_BY: unknown", out)
+
+
+class ResolvedSessionIdTest(unittest.TestCase):
+    def test_reads_the_session_env(self):
+        self.assertEqual(aa.resolved_session_id({"CLAUDE_CODE_SESSION_ID": "s1"}), "s1")
+
+    def test_missing_env_is_blank(self):
+        self.assertEqual(aa.resolved_session_id({}), "")
+
+
+class PostAnswerBodyTest(unittest.TestCase):
+    """The body the store actually receives -- asserted, not assumed."""
+
+    def _body(self, *args):
+        captured = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def _urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return _Resp()
+
+        with mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
+            aa.post_answer(*args)
+        return captured["body"]
+
+    def test_resolved_by_rides_beside_answered_by(self):
+        self.assertEqual(
+            self._body("i1", "arm", "sess-9"),
+            {"answered_by": "arm", "resolved_by": "sess-9"},
+        )
+
+    def test_blank_resolved_by_is_omitted_not_sent_empty(self):
+        body = self._body("i1", "arm", "")
+        self.assertEqual(body, {"answered_by": "arm"})
+        self.assertNotIn("resolved_by", body)
 
 
 if __name__ == "__main__":

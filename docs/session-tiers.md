@@ -73,8 +73,11 @@ summary a session needs to pick its commands, not a second copy of the rule.
 When a manager or fleet session needs the operator in another session's pane, it hands over
 a link, never a tab id.
 
-- **Generate it, one line per pane:** `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/jump-link.py <pane-id>`
-  (`--label` prefixes the pane title). With the local fleet-jump server configured it prints
+- **Generate it, one line per pane:** `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py <pane-id>`
+  (`--label` prefixes the pane title). The `:-` fallback is load-bearing, not style:
+  `CLAUDE_PLUGIN_ROOT` is **unset** in a command's Bash (verified 2026-09-23 — it expands to the
+  empty string), so the bare form resolves to `/scripts/jump-link.py` and fails. With the local
+  fleet-jump server configured it prints
   `http://127.0.0.1:1337/jump?pane=<N>&t=<token>`, followed with SHIFT+CMD+click; without it,
   the `/supervisor:jump <N>` command. Either way the line is usable as printed.
 - **Never hand-build the URL.** The token lives in `~/.claude/secrets/jump-token` (0600) and

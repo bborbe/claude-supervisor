@@ -24,8 +24,9 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
 | `/supervisor:attention-next` | what's next on the attention stack — answer an item in chat, delivered to the session that asked |
 | `scripts/jump-link.py` | render a pane's jump target as a clickable link (falls back to `/supervisor:jump <N>` when the local fleet-jump server is not configured) |
+| `scripts/restart-worker.py` | restart ONE stale idle worker session under a narrow allow rule — seven registry-guarded refusals, never a manager, never a broad `kill` |
 | `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
-| `/supervisor:fleet-drive` | one-shot: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
+| `/supervisor:fleet-drive` | one-shot by hand, and dispatched by `/supervisor:fleet-loop` every round: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
 | `/supervisor:fleet-verify` | read-only: verify the fleet layer's own contract, ending in a numbered fix list |
 | `/supervisor:manager-loop` `/supervisor:manager-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
 | `/supervisor:manager-verify` | read-only: verify ONE goal or topic and suggest fixes, ending in a numbered fix list |
@@ -315,7 +316,7 @@ agents/manager-wrangler.md                routine approval loop over headless wo
 agents/manager-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
 agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-loop, read-only by /fleet-drive)
 agents/manager-drive.md                    the worker sweep's act leg (composed by manager-loop, runnable by hand)
-agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive)
+agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive and by /fleet-loop every round)
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
 ```

@@ -1,6 +1,6 @@
 ---
 name: fleet-drive
-description: Perform the fleet sweep's drive leg — take the fleet-sweep-reader digest, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), and return verdicts plus drafted reaps and nudges. Dispatched by `/supervisor:fleet-drive`. Consumes the classification the sweep already produced; never builds a second one, never sends.
+description: Perform the fleet sweep's drive leg — take the fleet-sweep-reader digest, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), and return verdicts plus drafted reaps and nudges. Dispatched by `/supervisor:fleet-drive` and by `/supervisor:fleet-loop` on every round. Consumes the classification the sweep already produced; never builds a second one, never sends.
 model: sonnet
 tools: Read, Bash, Write
 allowed-tools: Bash(vault-cli:*), Bash(gh:*), Bash(grep:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(date:*), Bash(git:*)
@@ -27,14 +27,14 @@ You are the agent half of a command+agent pair, mirroring `manager-drive`: the c
 </constraints>
 
 <inputs>
-The caller passes: the sweep-reader digest verbatim · the caller's own session name and id · the vault path · the round timestamp · `dry-run: true|false`.
+The caller passes: the sweep-reader digest verbatim · the caller's own session name and id · the vault path · the round timestamp.
 </inputs>
 
 <process>
 
 1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `[unresolved]` rows and rows with no task are **unverifiable**.
 
-1b. **Reap the finished — before drafting any nudge.** Same contract as `fleet-loop` Step 3b, which only runs while that loop is armed; measured 2026-09-23 the fleet snapshot had not been written for ~14h and the ledger held two `finished` verdicts that nothing ever messaged. For each finished row, re-read the three disk facts this run:
+1b. **Reap the finished — before drafting any nudge.** This is the reap contract's canonical home: `fleet-loop` Step 3b dispatches this leg on every round and points here rather than restating it. Measured 2026-09-23 the fleet snapshot had not been written for ~14h and the ledger held two `finished` verdicts that nothing ever messaged. For each finished row, re-read the three disk facts this run:
 
    ```bash
    grep -m1 '^status:' "<task file>"                               # want: completed (or aborted)
@@ -42,7 +42,7 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
    grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<task file>"    # want: 0
    ```
 
-   All three hold → draft a **reap** message: the three commands and their output, that the task is terminal on disk, that nothing was authorised and the operator has **not** answered, and that closing (`/vault-cli:sync-progress` then `/vault-cli:session-close`) is the session's own call. Any fact fails → the row is **unverifiable** (digest and disk disagree), never nudged. A manager cannot close a worker's session; the reap is the evidence message, nothing more. No owning-manager skip: the gate-loop state records only a member *count* (`sweep-gate-loop/<subject>.json` → `"members": N`), so "this task belongs to an armed manager" is not derivable here. A second reap message from a manager that also reaps is harmless — it is the same non-authorising evidence — and the ledger (step 3) stops this layer repeating it.
+   All three hold → draft a **reap** message: the three commands and their output, that the task is terminal on disk, that nothing was authorised and the operator has **not** answered, and that closing (`/vault-cli:sync-progress` then `/vault-cli:session-close`) is the session's own call. Any fact fails → the row is **unverifiable** (digest and disk disagree), never nudged. A manager cannot close a worker's session; the reap is the evidence message, nothing more. No owning-manager skip: the gate-loop state records only a member *count* (`sweep-gate-loop/<vault>/<subject>.json` → `"members": N`), so "this task belongs to an armed manager" is not derivable here. A second reap message from a manager that also reaps is harmless — it is the same non-authorising evidence — and the ledger (step 3) stops this layer repeating it.
 
 2. **Task and open-box count** per candidate come from the digest row (`<task file basename> · <open boxes>`), read from disk by the sweep-reader this round. A row whose task is `—` is **unverifiable**. A digest with no `parked` row while it has idle rows, or rows missing the task column, is a malformed handoff: report it in the header and treat every idle row as **unverifiable** — never pick candidates by hand. ⚠️ **Never re-count the boxes.** The row's count is the one authority for this round; a second count from a different read disagrees with it (measured 2026-09-23: row 3, re-count 7, disk 3) and the suppression rule then compares against the wrong value. If you need the task's text for probe (a), open the file named in the row with `Read` — never resolve it through `vault-cli task show "25 Tasks/<file>"`, which 404s on the path form.
 
@@ -81,7 +81,7 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
 
    **Thresholds, numerically.** "Idle" = roster status `idle` (turn ended); this agent adds no age floor — the sweep-reader's `parked` bucket is the idle test. "One tick" = one `fleet-loop` round, ~15 min; the ledger suppression (step 3) keeps a still-idle session from being re-nudged or re-reaped every round.
 
-7. **Persist the ledger** unless `dry-run: true`: `mkdir -p ~/.claude/state/fleet-drive`, write `ledger.json.tmp`, then `mv` it over `ledger.json`. **Merge, never replace:** start from every entry loaded in step 3 and update or add this round's — an entry for a session absent this round is kept as-is, so the written file never has fewer entries than the one read. One entry per candidate of **every** verdict — revive, blocked, unverifiable and finished alike, because step 3's suppression compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
+7. **Persist the ledger**: `mkdir -p ~/.claude/state/fleet-drive`, write `ledger.json.tmp`, then `mv` it over `ledger.json`. **Merge, never replace:** start from every entry loaded in step 3 and update or add this round's — an entry for a session absent this round is kept as-is, so the written file never has fewer entries than the one read. One entry per candidate of **every** verdict — revive, blocked, unverifiable and finished alike, because step 3's suppression compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
 
 </process>
 
@@ -95,13 +95,21 @@ fleet-drive — <N> candidates · <F> finished (reaped) · <R> revive (<C> routi
       ledger: <drafted | suppressed: <reason> | excluded>
 ESCALATION — grouped by cause
   <cause>
-    <name> [<sid8>] — <probe> → <result>   (mark unverified causes "unverified")
+    <name> [<sid8>] · pane <id|—> — <probe> → <result>   (mark unverified causes "unverified")
 REAPS
   TO: <exact roster name> | <evidence message text>
 NUDGES
   TO: <exact roster name> | <message text>
-LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · <written <ts> | not written (dry-run)>
+LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · written <ts>
 ```
 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
+
+Carry on each `ESCALATION` row the pane id the digest's `BLOCKED` / `CLOSERS` row gave for that
+session, and `—` when the digest carried none — those digest rows are keyed by name, and this is
+the one place a name is read, only to lift a pane off a row the sweep already resolved. **Never go
+looking for a pane yourself**: no `wezterm cli list`, no title match, no fallback of your own. The
+caller resolves the `—` rows by session id, and renders `no pane — <reason>` when it cannot. Its own
+title fallback, where it has one, reads the session's current name from the registry at call time —
+that is the caller's business, not yours.
 </output_format>

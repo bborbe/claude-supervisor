@@ -1,5 +1,5 @@
 ---
-description: Force the session through remaining work on the anchored task. The executing twin of /and — /and reports and hands back a lever, /supervisor:worker-drive pulls the lever and keeps pulling until a hard stop. Bans WAIT as an answer after repetition, challenges unfinishable acceptance criteria, and never asks permission for non-forks.
+description: Get a stuck session working again, or tell the operator exactly how to help. Diagnoses the session (waiting on what, task done, drift), then drives the anchored task until a hard stop. Takes no arguments. Absorbs the former /and. Bans WAIT as an answer after repetition, challenges unfinishable acceptance criteria, and never asks permission for non-forks.
 allowed-tools:
   - Read
   - Grep
@@ -12,18 +12,20 @@ allowed-tools:
   - Monitor
   - AskUserQuestion
   - mcp__tts__say
-argument-hint: [--steps N] [--dry] (no args = drive until a hard stop)
+argument-hint: (no args — diagnose, then drive until a hard stop)
 ---
 
 Finish the anchored task. Not report on it — **finish it**.
 
-The user typed this because the session has been *correct* and *not done* at the same time. That is the failure this command exists for: every individual verdict was right, every wait was live, and after two days the task is still open. `/and` is the instrument; `/supervisor:worker-drive` is the actuator.
+The user typed this because the session has been *correct* and *not done* at the same time. That is the failure this command exists for: every individual verdict was right, every wait was live, and after two days the task is still open. This command is both the instrument and the actuator: §0b diagnoses, §1–§6 drive. It replaces the operator's hand-typed restart prompt — *what are we waiting for? is the task completed? how can I help? what do you recommend?* — and every report answers those four questions first (§8).
+
+**No arguments, by design.** One command, one behaviour: diagnose, then drive. There is no diagnose-only mode and no step cap — an option the operator has to remember is a second command in disguise.
 
 **Your product is a state change, not a panel.** A `/supervisor:worker-drive` run that ends having only described the situation has failed, regardless of how accurate the description was.
 
 ## The contract
 
-Run in a loop: **inventory everything still open (§1)**, then pick the highest-leverage *actionable* row, do it, observe, re-pick. The inventory is what keeps a single loud blocker from hiding five doable items. Continue until one of exactly **four hard stops**. Nothing else stops you.
+Run in a loop: **inventory everything still open (§1)**, then pick the highest-leverage *actionable* row, do it, observe, re-pick. The inventory is what keeps a single loud blocker from hiding five doable items. Continue until one of exactly **five hard stops**. Nothing else stops you.
 
 | Hard stop | Test |
 |---|---|
@@ -31,18 +33,30 @@ Run in a loop: **inventory everything still open (§1)**, then pick the highest-
 | **Irreversible outward action** | Prod mutation, merge, release, delete, send. Needs explicit per-action approval. |
 | **Genuine fork** | Two paths with *different objectives or scope* — not two sub-steps of one approved path. |
 | **Done** | Every criterion met, or every remaining one provably belongs to someone else (§5). |
+| **Other-owned** | Every remaining row belongs to another session or an external system, and none is actionable from here. §0b's owner table already permits this — *"Another session / person … **Nothing.** Preempting it sabotages their run. Say so explicitly."* — but the table below had no row for it, so a session that had driven everything had to improvise a stop and flag its own improvisation. Name the owner and stop. |
 
 Not hard stops — drive straight through these: a defect discovered mid-work (fix it), a sub-step of approved work (do it), a mechanical write with evidence already in hand (write it), an unread file (read it), an ambiguous detail with a sane default (assume it, state the assumption, proceed).
 
-**There is no action cap — the four hard stops are what end a run.** Measured 2026-09-05 across the first day of real use: reporting runs came in at 0, 2, 4, 8 and ~16 actions, and every one terminated on a hard stop, never on a budget. A fixed cap either does nothing or interrupts good work mid-stride; two of the longest runs that morning were the most productive.
+**There is no action cap — the five hard stops are what end a run.** Measured 2026-09-05 across the first day of real use: reporting runs came in at 0, 2, 4, 8 and ~16 actions, and every one terminated on a hard stop, never on a budget. A fixed cap either does nothing or interrupts good work mid-stride; two of the longest runs that morning were the most productive.
 
 Use ~15 actions as a **signal, not a limit**: passing it without reaching a hard stop is evidence the task is bigger than one drive. Say so in the report — name what is left and why it did not converge — then keep going or stop deliberately. Do not stop merely because a number was reached.
 
-`--steps N` sets a real cap when you want one. Report once, at the end.
+Report once, at the end.
 
 ## Step 0 — Anchor and load the drive counter
 
-Anchor exactly as `/and` Step 0 (closer panel → wikilink → `vault-cli task list --status in_progress` → daily note). Resolve names via `vault-cli`; never hand-write a path.
+In order, first hit wins:
+
+1. Most recent `🎯 Goal:` / `📌 Task:` closer-panel lines in this conversation.
+2. Most recent `[[Task]]` / `[[Goal]]` wikilink used as a work subject.
+3. `vault-cli task list --status in_progress` — the post-compaction fallback. **Use it whenever 1 and 2 are absent**, which is exactly the stuck/compacted session this command is for.
+4. Daily note's first `[/]` checkbox.
+
+Resolve names via `vault-cli` (`task get` / `goal get`) — never hand-write a plausible path. If nothing resolves: `📌 No task anchor — <reason>`.
+
+Fallbacks 3–4 only count if the task sits under the same goal as recent conversation context; a daily-note mention of another goal is background, not an anchor.
+
+The anchor scopes everything below.
 
 Then read this session's drive state:
 
@@ -65,6 +79,116 @@ Schema — `~/.claude/state/drive-<session-uuid>.json`:
 ```
 
 Per-session file, keyed on the session uuid from the scratchpad path — never a shared name. A sibling session clobbering the counter silently disables the whole escalation ladder.
+
+## Step 0b — Diagnose the session
+
+Before inventorying, find out whether the session is actually stuck and on what. Three failures this catches, all observed: a **dead wait** (daemon exited, monitor timed out — reported 🟡 WAITING when the answer was act now), a **stalled wait** (alive, zero forward progress past its cycle), and **drift** (productive work on something that is no longer the anchor).
+
+Verdict words used below: **ACT** — something is mine to do now; **WAIT** — a verified-alive, progressing wait with a watcher armed; **DRIFTING** — work left the anchor; **DONE** — the anchor reads terminal on disk. A WAIT then enters §2's repetition gate.
+
+### Last progress, loop check, drift check
+
+Before inspecting external waits, inspect **the session itself**. This is the trigger the user actually reacted to.
+
+**Last progress** — name the last *meaningful* thing accomplished or established: a file changed, a test flipped, a root cause found, a decision made. Then:
+
+```
+Last progress:  <concrete thing> (<age, computed from the Step 0 `date -u`>)
+```
+
+Re-asking a question already answered, re-running an identical command, or re-reading the same file is **not** progress.
+
+**Loop check** — if the last N turns produced no state change, say so plainly. A session repeating tool calls with no new information is stuck even when every wait is healthy.
+
+**Anchor re-verify** — re-read the anchor's live status; never carry the panel's earlier line forward:
+
+```bash
+vault-cli task get "<anchor task>" status --output json   # + goal get for its parent
+```
+
+Terminal (`completed` / `aborted`) → the session's work is over: report ⚪ DONE, not another "nothing outstanding". Changed since the previous run → say so; a verdict repeated on a *changed* anchor is stale, not correct.
+
+**Drift check** — compare what the last few turns actually did against the Step 0 anchor. If the work has moved off the anchored goal, that is `DRIFTING`: nothing is broken, nothing is blocked, and the session is still failing. Name what drifted and what the anchor was.
+
+**Approach check** — recommend abandoning the current approach **only with evidence it is wrong** (a disproven assumption, a repeated failure with the same tell, a constraint discovered mid-work). Never speculatively. Absent evidence, the approach stands.
+
+
+### Enumerate every open wait, verify liveness AND progress
+
+List every wait this session believes is outstanding: `Monitor` watchers, `run_in_background` shells, subagents whose completion notification has not arrived, dark-factory daemons and exec containers, remote queues (k8s jobs, CI, PR review bots), and any "I applied X, waiting for it to take effect."
+
+**Verify mechanically — command output from this run, not recollection:**
+
+```bash
+pgrep -fl 'dark-factory daemon' || echo "no daemon"
+docker ps --format '{{.Names}}\t{{.Status}}' || echo "no containers"
+dark-factory status 2>/dev/null | grep -E 'Daemon|Current|Queue|Containers' || true
+kubectl<wrapper> -n <ns> get jobs 2>/dev/null | tail -5
+gh pr checks <n> --json name,bucket 2>/dev/null || true
+```
+
+**`-f` matches the whole command line and `-l` prints it.** MCP processes on this machine carry `Authorization:` headers in their args, so widening the prescribed pattern to cover your own work (`pgrep -fl 'sentry-watcher|nuke'`) copies credentials into the transcript — observed 2026-09-13. Use PIDs only (`pgrep -f`) unless the pattern is narrow enough that nothing else can match; same caution for `ps … -o command=` in `session-close` § Phase 5. Print PIDs, then inspect one by PID if you need its identity.
+
+**Axis 1 — liveness:**
+
+- **ALIVE** — verified running; name the evidence (pid, container status, job `Running`, monitor task-id armed) and its **age**.
+- **DEAD** — believed running, is not. The high-value finding. Treat as an action, not a wait.
+- **UNVERIFIABLE** — no way to check from here. Say so explicitly rather than assuming ALIVE. A wait that cannot be proven alive is not a wait: verdict is ACT (verify it, or re-arm a watcher), never WAIT.
+
+**Axis 2 — progress (only meaningful when ALIVE).** Name each wait's **terminal-state signal** — the thing that proves forward motion (a queue's `Completed` count, a monitor's fire, a review landing) — and confirm it fired within the expected cycle. For a wait on an **agent task**, progress is not enough — confirm the task is *eligible*: a non-empty `assignee`, a `phase` in the executor's trigger set, and budget left in the current `<phase>:<ref[:8]>` scope. A task at its trigger cap in an unchanged scope is skipped silently, and an empty `assignee` excludes it outright.
+
+Single-shot delta is impossible, so **the diagnosis is stateful**. Read the previous run's snapshot, diff, then overwrite.
+
+**The snapshot is per-session, never global.** This user runs a fleet of concurrent Claude sessions; a single shared file means every session clobbers the others' baseline, and the stall diff silently never works. Observed 2026-08-23 on this command's own first smoke test: a sibling session had overwritten the file 2.5 minutes earlier with its own unrelated wait.
+
+Derive the session id from the scratchpad path already present in this session's environment (`.../<session-uuid>/scratchpad`), and key the file on it:
+
+```bash
+SNAP=~/.claude/state/diagnose-snapshot-<session-uuid>.json
+cat "$SNAP" 2>/dev/null || echo "no previous snapshot"
+```
+
+If the session id cannot be determined, fall back to a slug of `pwd` — never to the bare unsuffixed name.
+
+Schema — `~/.claude/state/diagnose-snapshot-<session-uuid>.json`:
+
+```json
+{
+  "session": "<session uuid>",
+  "checked_at": "<ISO8601 UTC>",
+  "anchor_task": "<task file name>",
+  "verdict": "<the verdict this run returned>",
+  "verdict_streak": "<consecutive runs returning that same verdict on an unchanged blocker>",
+  "waits": [
+    {"name": "<wait>", "signal": "<terminal-state signal>", "value": "<count/oid/mtime>", "since": "<ISO8601 UTC>"}
+  ]
+}
+```
+
+Classify:
+
+- **progressing** — the signal's `value` moved since the snapshot, or moved within the expected cycle.
+- **stalled** — ALIVE with an **unchanged `value` for longer than one expected cycle**. A queue with a Running job and no `Completed` growth past ~2× nominal job duration is stalled, not busy.
+- **first-seen** — no prior snapshot for this wait. Not classifiable as stalled yet; record it and say so.
+
+Write the new snapshot at the end of the run (overwrite this session's file only; the old one has been consumed). Never read or write another session's snapshot.
+
+Traps to check every time:
+
+- A **timed-out monitor** is not a wait. Its window closed; nothing will fire. Re-arm or act.
+- An **edit to a file another system owns** may have been reverted. Verify it is still on disk.
+- **Liveness ≠ progress.** A crash-looping job is ALIVE.
+
+### Who owns each live blocker
+
+| Owner | How to recognise it | What is allowed |
+|---|---|---|
+| **Mine** | a process I started, a file I control, a command I can re-run | **Act now.** Never report this as waiting. |
+| **Another session / person** | containers or branches named for other projects; a repo someone else is mid-change in | **Nothing.** Preempting it sabotages their run. Say so explicitly. |
+| **External system** | queue at a concurrency cap, CI, review bot, rate limit, scheduled poll | Usually nothing. If a lever exists, name it *with its cost* (§3). |
+
+Check before asserting — `docker ps` names carry their originating project prefix.
+
 
 ## Step 1 — Inventory the remaining work (the drive table)
 
@@ -132,7 +256,8 @@ Recognise it by the task's origin (a `# Moved to` section pointed here, or a Pro
 1. Verify the watcher is actually armed and alive — a watch task with no running watcher is 🔵 READY with `approve: <re-arm cmd>`, never 🟡 WAITING.
 2. Confirm the observable has not already fired (check it, don't assume).
 3. **Verify the producer can still fire it.** The watcher proves *you* are listening; it says nothing about whether the thing you are waiting for is still coming. Check the upstream that must act — the queued job, the emitted task, the pipeline stage — and confirm it is progressing, not parked. A watch whose producer is stuck is not a wait; it is a silent failure wearing a wait's clothes. Then confirm the task is **eligible**, not merely present: a non-empty `assignee`, a `phase` in the executor's trigger set, and budget left in the current `<phase>:<ref[:8]>` scope. A task at its trigger cap in an unchanged scope is skipped silently — it is not parked, it is excluded.
-4. Report and stop. **No criteria challenge, no §5 audit, no split.**
+4. **A producer that ran as a subagent leaves nothing in your transcript.** The check above assumes the upstream writes somewhere you can read. A subagent's work never lands in the session that spawned it, so the transcript comes back empty on a round that completed — and empty is indistinguishable from a producer that never fired. A manager's sweep and drive legs are subagents: `grep` over the manager session returns nothing for them even when they ran. Read the legs' own transcripts instead — each leg's final assistant turn is its handback, and that is where the round's actual output lives: `ls -t ~/.claude/projects/<project>/<manager-session-id>/subagents/agent-*.jsonl | head`. The path is two levels deeper than the obvious guess — `~/.claude/projects/*/agent-*.jsonl` returns zero files — so a wrong glob reads exactly like a silent producer. Only after reading a leg's handback may you call the producer silent. Observed 2026-09-24: a run read the manager's transcript alone, found no ledger writes and no question prompts, and recorded *"the producer is not firing — measured this run"* as its load-bearing finding; the next run read a completed drive leg's handback reporting *"Of the 12 parked sessions, 5 are waiting on you"* and naming five panes. The producer had been alive the whole time.
+5. Report and stop. **No criteria challenge, no §5 audit, no split.**
 
 `eed76c7d` ran four times in forty minutes; at that rate an un-carved-out watch task churns its own file. Nothing to drive is the correct answer here, and saying so costs one turn.
 
@@ -146,7 +271,7 @@ For each blocker still standing, increment its `count`. Then apply the ladder. *
 
 | count | Rung | Behaviour |
 |---|---|---|
-| 1 | **Wait is legitimate** | Verify liveness + progress (`/and` Step 3 rules). Arm a watcher. Drive parallel work under §6 in the meantime. |
+| 1 | **Wait is legitimate** | Verify liveness + progress (§0b wait rules). Arm a watcher. Drive parallel work under §6 in the meantime. |
 | 2 | **Wait is suspect** | Re-verify from scratch, distrusting the prior diagnosis. Name one lever you have not tried and try it. |
 | 3 | **Wait is banned** | You may not return WAIT on this blocker. Produce a bypass, a scope cut, or a handoff with a deadline. Say which. |
 | 4+ | **The plan is wrong** | Stop treating the blocker as a blocker and treat the *approach* as the defect. §4 and §5 are now mandatory, not optional. |
@@ -157,13 +282,15 @@ Observed basis: `eed76c7d` returned WAITING on the same fleet queue 5 times in 3
 
 ## Step 3 — Hunt the lever before accepting the wait
 
-`/and` Step 4 says an external blocker usually means "do nothing." **That default is wrong here.** Before any WAIT survives count ≥ 2, enumerate levers explicitly and say which you tried:
+§0b's owner table says an external blocker usually means "do nothing." **That default is wrong once driving.** Before any WAIT survives count ≥ 2, enumerate levers explicitly and say which you tried:
 
 - **A blocker that is a decision, not a diagnosis** — before treating a blocker as misdiagnosed, ask *who set it*. A hold the operator put in place **after hearing your argument** is a ruling, and re-defeating its stated premise does not reach it: the ruling rests on the basis they chose, not the one you can disprove. The lever is approval, not re-argument — surface the new evidence and ask. `§5 Axis A` already carries this for splits (*"ownership grants write access, not authority to reverse a stated decision"*); it applies to every blocker, not just splits.
 - **Force / trigger** — a poll interval you can skip (`/github-*-trigger`, an admin endpoint, a `--force` flag).
 - **Bypass** — reach the same end state by another path (do by hand what the automation would do; admin-merge; direct patch; **replay the trigger through the service's own smoke/seed tooling** — a seed/override flag drives the real pipeline with a controlled input, proving routing/delivery/dedup now; see [[Prove an External-Event Pipeline With a Controlled Replay]]).
 - **Unstick the blocker itself** — the queue isn't slow, something upstream is broken. In `eed76c7d` the "opaque fleet queue" was an executor OOM-crashloop; a `rollout undo` cleared 10 hours of "waiting."
-- **Check whether the answer already exists** — before waiting on a job to *produce* evidence, search for evidence already on disk: a prior run of the same config, a sibling artifact, a cached report. A comparator does not have to be freshly generated to be valid, only *comparable*. Ask what would make an existing artifact non-comparable, and whether that difference is actually load-bearing. Observed 2026-09-14: a session waited ~40 min on a US100 baseline backtest while a completed run with the same config and the same end date sat one API call away, differing only by a 14-day start offset on an 8.7-year window. Two `/and` runs and one `/supervisor:worker-drive` run all rated the wait healthy — the lever was found only when the operator said "we are stuck".
+- **Check whether the answer already exists** — before waiting on a job to *produce* evidence, search for evidence already on disk: a prior run of the same config, a sibling artifact, a cached report. A comparator does not have to be freshly generated to be valid, only *comparable*. Ask what would make an existing artifact non-comparable, and whether that difference is actually load-bearing. Observed 2026-09-14: a session waited ~40 min on a US100 baseline backtest while a completed run with the same config and the same end date sat one API call away, differing only by a 14-day start offset on an 8.7-year window. Two diagnose-only runs and one drive run all rated the wait healthy — the lever was found only when the operator said "we are stuck".
+- **Measure the base rate of the awaited event** — before accepting a clock-bound wait, ask how often the thing you are waiting for actually happens, and answer it from the record, not from the design. A criterion gated on "real traffic will populate this" is a foregone conclusion when that traffic has never occurred: measure it, and either the wait is real or the criterion is the bug (§5 Axis B). Observed 2026-09-24: a task waited 24 h for a window of manager-resolved items, and one query showed the answer path had been exercised **4 times in the store's entire history — all fixtures, 0 organic** — so the wait bought a number that could already be stated, and the criterion was split out instead.
+- **A blocker that asserts an ABSENCE** — "no X exists", "the set is empty", "nothing is eligible". Verify it with the **full** test the domain defines, never one clause of it: a single-clause check returns the same empty result on a working system and a broken one, so it cannot tell a real absence from an unasked question. Observed 2026-09-24: the blocker was "no confirmed orphan exists", a registry-absence scan alone agreed, and only applying all **ten** gate clauses surfaced **33** passing candidates — the absence was real *for the caller's tracked set*, but the reason (a documented structural blindness in how that set is built — `23 Topics/Manager Layer.md:65`) was invisible to the one-clause test. One clause of a ten-clause gate is not a check.
 - **Narrow the criterion** — §5.
 - **Ask** — last, not first, and only for a real hard stop.
 
@@ -186,7 +313,7 @@ A fork means **different objective or different scope**. If the user would plaus
 
 ## Step 5 — Challenge the acceptance criteria
 
-At blocker count ≥ 3, audit the *remaining* criteria — `/and` may not do this, and it is frequently the actual cause.
+At blocker count ≥ 3, audit the *remaining* criteria — a diagnosis alone never does this, and it is frequently the actual cause.
 
 Two axes. Both are cases where **the criterion is the bug**, not the session's speed.
 
@@ -296,6 +423,11 @@ So treat the anchor block as the report's *first* emitted lines, written before 
 🎯 Goal: [<name>](obsidian://open?vault=<V>&file=23%20Goals%2F<file>) — <n>/<m> SC · <n>/<m> subtasks · <binding constraint>
 📌 Task: [<name>](obsidian://open?vault=<V>&file=24%20Tasks%2F<file>) — <phase>, session <id-prefix>
 
+Waiting on:       <named wait — ALIVE · progressing | stalled | DEAD — or `nothing`>
+Task done?:       <status + phase read from disk this run · <n>/<m> boxes open>
+How you can help: <the one thing only the operator can do — or `nothing, I'm driving`>
+Recommend:        <one action>
+
 PROBLEM: <one line — the outcome this task exists to produce, in plain terms, no identifiers>
 
 OPEN (<n> items, <n> actionable):
@@ -307,7 +439,7 @@ DROVE (<n> actions, run #<runs> on this task):
 - <action> → <observed result>
 - <action> → <observed result>
 
-STOPPED: <one of the four hard stops, named> | BUDGET (<n>/<n> actions)
+STOPPED: <one of the five hard stops, named>
 Blocker:  <name> — count <n>, rung <n>  (or: none)
 Levers tried this run: <lever> · <lever>
 Criteria audit: <n> unfinishable-by-construction found — <verdict>  (omit if not run)
@@ -319,11 +451,67 @@ ETA:        <duration + projected clock time + basis | n/a — Claude-side | unk
 ⏰ Next:  <concrete trigger: actor/mechanism, never a bare id, never "soon">
 ```
 
+**The four header lines are mandatory, in this order, on every report.** They are the operator's four restart questions; answering them first means the operator never has to type them. Each value comes from this run — the status from disk, the wait from §0b's evidence — never from memory. `How you can help` names a real hard stop (§ The contract) or says `nothing`; it never invents a chore.
+
 `PROBLEM:` is not decoration. A run can be accurate in every line and still leave the operator unable to say what the task is *for* — every other field in the shape reports state, and none restates purpose. Observed 2026-09-14: after hours of correct reports on one task, the operator asked *"what problem we try to solve"* and then *"u lost me"*. Write it in plain terms — no identifiers, no paths, no acceptance-criteria vocabulary: the sentence you would say out loud to someone who had never seen the task.
 
 Then write the updated drive state. If a watcher was armed, name it in `⏰ Next:`.
 
-Speak the outcome per `/and` Step 9 (voice mode gates it, not tool presence; voice `ryan`, English, throwaway lead word, 2–4 word tag). Headline only: what changed and what stopped you. Never claim speech you did not send.
+### Speak the outcome
+
+Headline only: what changed and what stopped you.
+
+**Gate on voice mode, not on tool presence.** `/tts-mcp:voice` is the sole authority on spoken-output volume, and voice is off until someone invokes it:
+
+| Voice mode | What this command does |
+|---|---|
+| `on` / `narrate` | **Speak the verdict.** A verdict is an attention signal, spoken in every mode except `off` and `interview`. |
+| `interview` | **Speak questions, not answers — the verdict stays on screen.** The tts-mcp playbook is explicit — *"⚠️ `interview` speaks questions, not answers"* — and its own enablement table marks the **Answers** column ❌ for this mode. ⚠️ **This row listed `interview` as a speak-the-verdict mode until 2026-09-24**, contradicting the artifact that owns the question; a session following it spoke verdicts in a mode whose contract says answers are screen-only. |
+| `off`, or never invoked this session | Say nothing. Print one line under the panel: `🔇 voice off — /tts-mcp:voice narrate to hear verdicts` |
+| `mcp__tts__say` tool absent entirely | Skip silently, no hint. |
+
+**Detect the mode — do not assume it.** No tool exposes `/tts-mcp:voice`'s session state, so a command that reads "was voice invoked this session?" from memory will answer *off* and stay silent in exactly the sessions voice was turned on for. The TTS server's state endpoint carries the answer — every entry in `recent[]` is tagged with the `sender` that produced it:
+
+```bash
+curl -s --max-time 5 http://127.0.0.1:12000/state | grep -c "\"sender\":\"$CLAUDE_CODE_SESSION_ID\""
+```
+
+Non-zero → this session has spoken before, so voice is on → speak. Zero or unreachable → treat as off and print the hint line. Observed 2026-09-16: the diagnose pass (then `/and`) ran twice in a session where the operator had voice on and stayed silent both times, because the gate had no way to decide; the operator had to ask for the verdict to be spoken, which is the failure the command exists to prevent.
+
+Never speak in a session that has never spoken — that is the exact noise the skill exists to prevent. The hint line makes it discoverable without being noisy.
+
+**What to speak** — the headline, never the panel verbatim:
+
+- The verdict in words ("Verdict: wait" / "Nothing blocked, I can continue").
+- WAIT → what fires, which watcher catches it, roughly when.
+- ACT / WORKING → the single next action.
+- HAND OFF → the exact command and its blast radius.
+- DRIFTING → what drifted, and what the anchor was.
+- A `👤 You:` fork → spell it out: "option one … option two … say one or two."
+
+**How to speak** — `/tts-mcp:voice` § Speaking playbook is authoritative; the minimum reproduced here because the skill may not be loaded when this command runs:
+
+- Voice `ryan`, unless `/tts-mcp:engine` selected a non-qwen3 engine (voice and engine must match or the server 400s).
+- **English always**, even when the user writes German.
+- **Throwaway lead word** — `"Okay."` / `"So,"`. CoreAudio clips the first word; never let a content word lead.
+- **Then a 2–4 word tag**, after the lead word, never first. Source in order: the Step 0 `📌 Task:` anchor → its parent goal → the repo or service. **A run frequently has no anchor** — then use a short description of the work (`"harness config"`, `"inbox triage"`). Never skip the tag; one server serves every session and an untagged utterance is noise.
+- Terse, one idea per sentence. No markdown, URLs, paths, code, or hashes — describe them in words.
+- Lead with the recommendation and say the word "recommended".
+- Fire-and-forget: one `mcp__tts__say` call. Never poll `get_status`, never block on it.
+- **Always pass `sender`** — `$CLAUDE_CODE_SESSION_ID`, the same value the detection step above greps for. It is what the next run's detection finds; a spoken verdict without it is invisible to the gate that decides whether to speak at all, so the session goes quiet after its first utterance.
+
+**If `mcp__tts__say` errors with `No such tool available`**, the session's MCP binding dropped — the server is fine and restarting it will not help. Fall through to HTTP so the verdict is still heard:
+
+```bash
+curl -s -X POST http://127.0.0.1:12000/say \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Okay. <tag> — <verdict headline>.","voice":"ryan","sender":"'"$CLAUDE_CODE_SESSION_ID"'"}'
+```
+
+Every rule above still applies to the fallback text.
+
+**Never describe speech you did not send.** Writing "spoken now" or narrating the utterance in the reply is not the channel — if the tool was not called, the user hears nothing and the text is simply false. This command is the likeliest place for that failure: the spoken verdict is owed on every run, and the intent to speak gets written down instead of executed. Call the tool, or say nothing about speaking.
+
 
 ## Rules
 
@@ -337,7 +525,7 @@ Speak the outcome per `/and` Step 9 (voice mode gates it, not tool presence; voi
 - **Challenge criteria on both axes.** Unfinishable-by-construction *and* faulty-premise (satisfiable but proves nothing). The criterion is the bug more often than the session is slow.
 - **A split emits a well-formed task** — SC + Tasks + DoD + a Progress entry naming the split. Moving work without moving readiness is not a split.
 - **Never tick a moved criterion.** Relocated ≠ met. Move the line out under `# Moved to [[<task>]]`, unchecked, or the completion gate passes on a false count.
-- **Verify, never recall.** Every claim of done needs output from this run. `/and`'s liveness rules apply unchanged.
+- **Verify, never recall.** Every claim of done needs output from this run. §0b's liveness rules apply unchanged.
 - **Never touch another session's work** — containers, branches, worktrees, task framing, prompts.
 - **Never end the session.** No wind-down, no `/vault-cli:session-close` unless the anchor reads `status: completed` on disk, verified this run, with zero `[ ]`/`[/]` boxes. Handed-off, parked, blocked and tidied all look done and are not — a `/supervisor:worker-drive` run that ends by offering session-close on an unfinished task has inverted its own purpose.
 - **One goal per session.** Drive the anchor. Never drift to another goal's tasks, even if the daily note lists them.
