@@ -19,7 +19,7 @@ Finish the anchored task. Not report on it — **finish it**.
 
 The user typed this because the session has been *correct* and *not done* at the same time. That is the failure this command exists for: every individual verdict was right, every wait was live, and after two days the task is still open. This command is both the instrument and the actuator: §0b diagnoses, §1–§6 drive. It replaces the operator's hand-typed restart prompt — *what are we waiting for? is the task completed? how can I help? what do you recommend?* — and every report answers those four questions first (§8).
 
-**`--dry`** — run Step 0 and §0b only, then emit the §8 report and stop. Read-only: no Edit/Write, no commands that change state, no TodoWrite. Ends with one `y`-able lever (`approve:` for one action, `pick` only at a genuine fork). This is the former `/and`.
+**`--dry`** — run Step 0 and §0b only, then emit the §8 report and stop. Read-only: no Edit/Write, no commands that change state, no TodoWrite — the one write is this session's own diagnose snapshot (§0b). Ends with one `y`-able lever (`approve:` for one action, `pick` only at a genuine fork). This is the former `/and`.
 
 **Your product is a state change, not a panel.** A `/supervisor:worker-drive` run that ends having only described the situation has failed, regardless of how accurate the description was.
 
@@ -82,6 +82,8 @@ Per-session file, keyed on the session uuid from the scratchpad path — never a
 ## Step 0b — Diagnose the session
 
 Before inventorying, find out whether the session is actually stuck and on what. Three failures this catches, all observed: a **dead wait** (daemon exited, monitor timed out — reported 🟡 WAITING when the answer was act now), a **stalled wait** (alive, zero forward progress past its cycle), and **drift** (productive work on something that is no longer the anchor).
+
+Verdict words used below: **ACT** — something is mine to do now; **WAIT** — a verified-alive, progressing wait with a watcher armed; **DRIFTING** — work left the anchor; **DONE** — the anchor reads terminal on disk. Under a drive run a WAIT then enters §2's repetition gate; under `--dry` it is reported as-is.
 
 ### Last progress, loop check, drift check
 
