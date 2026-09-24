@@ -186,8 +186,21 @@ from every session. If `mcp__supervisor__*` is unavailable, use path B.
 **B — raw `wezterm cli spawn` (fallback, and the path for resuming a live session).**
 
 ```bash
-wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
+wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
 ```
+
+**`--cwd` is required, and a resume does not inherit it.** The session id names a
+conversation, not a working directory, so `wezterm cli spawn` falls back to *wezterm's own*
+working directory — `$HOME` for a server started from a home directory. Claude Code then stops
+on *"Accessing workspace /Users/&lt;user&gt; — do you trust this folder?"* and registers **no pid
+at all**, so a resume that worked perfectly reads as a no-op: a caller checking the registry
+finds nothing and reads "did not take", a caller checking the exit code reads "took", and
+neither reading names the trust dialog. The value comes from the session registry —
+`~/.claude/sessions/<pid>.json` carries a `cwd` field (verified 2026-09-24: 26 of 26 records on
+this host) — and is resolved **before** the spawn, never guessed or defaulted: a session whose
+record carries no `cwd` is refused rather than resumed into the wrong tree. Path A states the
+same requirement for `spawn_agent` at item 3 below; this is its path-B twin, and the two must
+not drift into two different resolution rules.
 
 **`$WINDOW_ID` and `$CHIP` are a role-resolved PAIR**, read from the published map before
 spawning (`~/.cache/wezterm-role-map.json`): `manager` → Managers / orange, `agent` →
