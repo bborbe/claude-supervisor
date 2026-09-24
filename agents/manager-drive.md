@@ -139,7 +139,7 @@ then print `♻️ AUTO-RESUMED: <task>` and one TTS (voice-mode gated).
 
 4. **Then open ready-to-start rows — verified, never merely listed**
 
-The caller supplies the **ready-to-start rows**; you do not compute the bucket. Opening is the only act in this file that creates a session, so the clauses below run **in order per row** and the **first failure is terminal for that row** — a hold costs one sweep, a wrong open costs a session that has to be unwound.
+The caller supplies the **ready-to-start rows**; you do not compute the bucket. Opening is the only act in this file that creates a session, so the clauses below run **in order per row** and the **first failure is terminal for that row** — a hold costs one sweep, a wrong open costs a session that has to be unwound. Clause (5) is the exception to "per row": the cap is **sweep-global** and is checked before each open.
 
 **(1) Score it.** `vault-cli:task-auditor` via `Skill`, requiring **≥9/10 with zero hard-gate failures**. The bar and its single home are `docs/fleet-surface.md` § Spawn a worker — reference that home, never restate the number. The manager may make **one** structural repair and re-audit once (sections, decomposition, DoD and SC shapes are the manager's act, per that same block); a row still below the bar after that is **held** with the score named. A row already carrying all three sections needs no repair:
 
@@ -153,9 +153,9 @@ grep -cE '^# (Success Criteria|Definition of Done|Tasks)' <row file>   # → 3
 
 **(4) A `role: human` row is never dispatched.** Render it `👤 YOURS` and move on: a person needs a screen, and the manager does not spawn a worker onto a human's task.
 
-**(5) Open — and carry no mode logic.** Open with `/supervisor:open "<task>"` via `Skill`. Do **not** derive or duplicate the headless/interactive decision: `commands/open.md` § Step 0.6 decides `mode` (unclear → `interactive`) and Step 3 consumes it.
+**(5) Respect the spawn cap — checked before every open, never after it.** The numbers and their single home are `docs/fleet-surface.md` § Spawn a worker item 5 — read them there and never restate them here, because a restated copy is the second counter a `grep` cannot tell from a real one. ⚠️ **The cap is a sweep-global guard, not a property of the row.** It is evaluated **before** each open, because a cap checked afterwards has already spent the budget it exists to protect — the row is scored, checked and then held *without* opening, never opened and then found to be over. At the cap → print `⏸️ SPAWN CAP: <n> ready, <m> over cap`, open nothing further, and report the remainder as **held-on-cap** for the caller's next sweep.
 
-**(6) Respect the spawn cap.** The numbers and their single home are `docs/fleet-surface.md` § Spawn a worker item 5 — read them there and never restate them here, because a restated copy is the second counter a `grep` cannot tell from a real one. At the cap → print `⏸️ SPAWN CAP: <n> ready, <m> over cap`, open nothing further, and report the remainder as **held-on-cap** for the caller's next sweep.
+**(6) Open — and carry no mode logic.** Open with `/supervisor:open "<task>"` via `Skill`. Do **not** derive or duplicate the headless/interactive decision: `commands/open.md` § Step 0.6 decides `mode` (unclear → `interactive`) and Step 3 consumes it.
 
 **Confirm the open took, and never report an open you cannot see.** A row is `Opened` only when the registry carries an entry for its session against a **running** pid:
 
