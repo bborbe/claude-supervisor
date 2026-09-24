@@ -8,9 +8,14 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`context-usage.py` no longer prints a pane id it has not confirmed.** Every recorded pane id is resolved against `wezterm cli list` before it reaches the table, and a session without a confirmed pane is never offered as a compaction candidate — the state files are written at event time and never rewritten, so a pane id outlived its pane and was printed with the confidence of a live one (measured 2026-09-20: `--compactable` offered pane 109 for a 72h-old session whose pane did not exist, and `get-text` exited 1). Compaction is a no-ask action, so a phantom candidate is a run that reports success and does nothing. A **failed** `wezterm cli list` is its own answer, distinct from an empty one: ids are withheld and the run says so, because an unreadable query cannot prove a pane is gone any more than it can prove one is live. `scripts/tests/test_context_usage.py` is new — the script had no coverage at all.
+- fix: `fleet-board.py` gives every `needs-input` row its own pane attribution in the `--json` `details` map — the pane id when confirmed, otherwise that row's specific reason (`no pane recorded`, `recorded pane <id> is gone`, `pane unverified`) — so `fleet-verify` check 4 can attribute a bucket to a session instead of reporting UNKNOWN for want of a pane. The previous single `"waiting on an open gate"` string was identical on every row, which is exactly the shape that hid a real bucket/pane mismatch.
+- fix: `/supervisor:manager-verify` step 7 names `/supervisor:open` (the bare `/open` it carried no longer resolves) and routes a start recommendation to the subject's manager via `SendMessage` instead of handing the operator an `approve: /supervisor:open` line — ports a vault-side edit made after the v0.41.0 move. *Restored to `## Unreleased`: the change landed after the v0.41.2 tag was cut, so its bullet had been folded into the released heading and the release watcher had nothing left to cut.*
+
 ## v0.41.2
 
-- fix: `/supervisor:manager-verify` step 7 names `/supervisor:open` (the bare `/open` it carried no longer resolves) and routes a start recommendation to the subject's manager via `SendMessage` instead of handing the operator an `approve: /supervisor:open` line — ports a vault-side edit made after the v0.41.0 move.
 - fix: the manager sweep's `stuck` bucket now also matches an **idle** worker (> ~30 min, `phase: execution`, ≥1 open box, task file unchanged), so `manager-drive` nudges it — previously `stuck` required busy, an idle worker with open boxes was bucketed `progressing` and never nudged, contradicting `manager-drive.md`'s reap-before-drive rationale
 
 ## v0.41.1
