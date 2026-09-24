@@ -3,7 +3,7 @@ description: Which Claude Code sessions need me right now — permission prompts
 allowed-tools:
   - Bash(python3:*)
   - Bash(wezterm cli activate-pane:*)
-argument-hint: "[--stuck-min N] [--idle] [--jump PANE]"
+argument-hint: "[--stuck-min N]"
 ---
 
 Run exactly:
@@ -16,7 +16,7 @@ Print the output verbatim. Do not add analysis, do not run `ListAgents`, do not 
 
 - `Needs you` — sessions blocked on a permission prompt or an `AskUserQuestion`. Oldest first.
 - `Probably stuck` — sessions inside a single tool call longer than the threshold (default 20 min). Usually a PR watch or a build that overran.
-- `Idle` — turn ended, waiting for a prompt. Hidden unless `--idle`.
+- `Idle` — turn ended, waiting for a prompt. Counted on the last line, never listed individually.
 
 Each row ends with the `wezterm cli activate-pane --pane-id N` line. If the user says "jump N" / "go to N", run `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/who-needs-me.py --jump N`.
 

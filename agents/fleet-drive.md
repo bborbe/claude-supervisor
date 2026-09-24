@@ -27,7 +27,7 @@ You are the agent half of a command+agent pair, mirroring `manager-drive`: the c
 </constraints>
 
 <inputs>
-The caller passes: the sweep-reader digest verbatim · the caller's own session name and id · the vault path · the round timestamp · `dry-run: true|false`.
+The caller passes: the sweep-reader digest verbatim · the caller's own session name and id · the vault path · the round timestamp.
 </inputs>
 
 <process>
@@ -81,7 +81,7 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
 
    **Thresholds, numerically.** "Idle" = roster status `idle` (turn ended); this agent adds no age floor — the sweep-reader's `parked` bucket is the idle test. "One tick" = one `fleet-loop` round, ~15 min; the ledger suppression (step 3) keeps a still-idle session from being re-nudged or re-reaped every round.
 
-7. **Persist the ledger** unless `dry-run: true`: `mkdir -p ~/.claude/state/fleet-drive`, write `ledger.json.tmp`, then `mv` it over `ledger.json`. **Merge, never replace:** start from every entry loaded in step 3 and update or add this round's — an entry for a session absent this round is kept as-is, so the written file never has fewer entries than the one read. One entry per candidate of **every** verdict — revive, blocked, unverifiable and finished alike, because step 3's suppression compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
+7. **Persist the ledger**: `mkdir -p ~/.claude/state/fleet-drive`, write `ledger.json.tmp`, then `mv` it over `ledger.json`. **Merge, never replace:** start from every entry loaded in step 3 and update or add this round's — an entry for a session absent this round is kept as-is, so the written file never has fewer entries than the one read. One entry per candidate of **every** verdict — revive, blocked, unverifiable and finished alike, because step 3's suppression compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
 
 </process>
 
@@ -100,7 +100,7 @@ REAPS
   TO: <exact roster name> | <evidence message text>
 NUDGES
   TO: <exact roster name> | <message text>
-LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · <written <ts> | not written (dry-run)>
+LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · written <ts>
 ```
 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
