@@ -904,6 +904,29 @@ class PaneFor(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("204\n", out)
 
+    def test_existing_pane_of_another_session_is_not_used(self):
+        """A recycled pane id: the pane exists but is titled for another session.
+
+        Existence is not ownership -- pane ids are recycled across tab moves and
+        WezTerm restarts. Returning this one would hand the operator a confident
+        link to the wrong tab, which reads as a working one.
+        """
+        self.panes = {
+            "204": {"pane_id": 204, "title": "✳ Some Other Session"},
+            "1391": {"pane_id": 1391, "title": "✳ Session A"},
+        }
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("1391\n", out)
+
+    def test_existing_pane_of_another_session_with_no_match_refuses(self):
+        """Not ours, and no pane is titled ours -> refuse, never fall back to it."""
+        self.panes = {"204": {"pane_id": 204, "title": "✳ Some Other Session"}}
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("no pane resolves", err)
+
     def test_full_id_resolves(self):
         rc, out, _ = self.run_pane_for(self.SID_A)
         self.assertEqual(0, rc)

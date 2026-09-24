@@ -958,8 +958,16 @@ def pane_for(session_id):
         None,
     )
     if recorded and recorded in pmap:
-        print(recorded)
-        return 0
+        # Existence is not ownership. A pane id is recycled across tab moves and
+        # WezTerm restarts, so an existing pane can be *another* session's — the
+        # wrong answer wearing the appearance of a resolved one, which is strictly
+        # worse than a blank. `is_routable` asks for the title as well, for exactly
+        # this reason; the same rule applies here, or this path hands over a
+        # confident link to the wrong tab.
+        title = strip_status_glyph(pmap[recorded].get("title"))
+        if not name or not title or title == name:
+            print(recorded)
+            return 0
 
     if not name:
         sys.stderr.write(
