@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.44.0
 
 - feat: **`/supervisor:worker-drive` absorbs `/and` — one command to restart a stuck session, or tell the operator exactly how to help.** The command previously pointed at `/and` Steps 0, 3, 4 and 9 by reference, but `/and` lived only in one user's `~/.claude/commands/`, so every other install ran with references to steps it could not see; `fleet-status.md` and `fleet-loop.md` pointed at it too. The anchor, the last-progress / loop / drift check, the wait liveness-and-progress rules, the owner table and the voice gate are now inlined as § Step 0b. Every report opens with four fixed lines — `Waiting on` / `Task done?` / `How you can help` / `Recommend` — the operator's hand-typed restart prompt, answered before they have to type it. `--dry` was listed in `argument-hint` but never defined; it now means diagnose-only, read-only, ending in one lever — the former `/and`. The diagnosis snapshot moves to `~/.claude/state/diagnose-snapshot-<session-uuid>.json`.
 
