@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.52.2
 
 - fix: **`restart-worker.py` resumes a worker into its own working directory, not wezterm's.** The resume recipe copied from `commands/open.md` Step 3.1 carries no `--cwd`, and `wezterm cli spawn` otherwise inherits wezterm's own working directory — for a server started from a home directory, `$HOME`. Claude Code then stops on *"Accessing workspace /Users/&lt;user&gt; — do you trust this folder?"* and registers **no pid at all**, so a kill+resume that worked perfectly looked like a no-op. Measured 2026-09-24: a session whose real cwd was `~/Documents/Obsidian/Personal` resumed into `$HOME`, stalled on that dialog, and produced no registry entry. ⚠️ **Only the real end-to-end restart could have found this** — every unit test passed, the mechanical funnel was clean, and a dry run reported success, because none of them spawn a tab. The cwd now comes from the registry record and is passed as `--cwd`; it is read **before** the kill, so a session whose record carries no cwd is refused rather than killed and left stranded. The docs' allow-rule section and the resume-recipe note are unchanged in shape — the recipe simply now carries the one argument it was missing.
 
