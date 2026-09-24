@@ -20,10 +20,16 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-spawn-mode.py"
 
-#: A wired site: references the home AND carries the binding.
+#: A wired site: references the home AND carries the binding in both directions.
 SITE = (
     "See `docs/fleet-surface.md` § Spawn a worker item 6 for the rule.\n"
-    "Pass `interactive=false` when, and only when, the task reads `mode: headless`.\n"
+    "Pass `interactive=false` for `mode: headless`, `interactive=true` for `mode: interactive`.\n"
+)
+#: The one-directional shape this check exists to reject: `mode: interactive` goes unhonoured,
+#: so it flips with the fleet default and reports `mode_source=config`.
+SITE_ONE_DIRECTION = (
+    "See `docs/fleet-surface.md` § Spawn a worker item 6 for the rule.\n"
+    "Pass `interactive=false` when the task reads `mode: headless`.\n"
 )
 SITE_NO_ANCHOR = (
     "The rule is described elsewhere in this file.\n"
@@ -80,6 +86,15 @@ class CheckSpawnModeTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("binding", result.stderr)
+
+    def test_one_directional_site_fails(self):
+        """Passing only `interactive=false` leaves `mode: interactive` inert — the defect
+        this check gained a second assertion for on 2026-09-24."""
+        self.write("commands/manager-loop.md", SITE_ONE_DIRECTION)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("interactive=true", result.stderr)
+        self.assertIn("unhonoured", result.stderr)
 
     def test_unknown_new_worker_site_fails(self):
         self.write("commands/brand-new.md", SITE + NEW_WORKER_CALL)
