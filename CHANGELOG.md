@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.48.2
 
 - fix: **`manager-sweep-reader` now carries the two rules its own runbook has held since 2026-09-18 and it never inherited** — the negative/attribution guardrail (*"print the artifact before asserting a negative or an attribution"*) and the `Met` counting rule (a task row counts **SC + DoD + Tasks**, and a struck `- [ ] ~~[[Task]]~~` row is excluded from every count and every walk). The agent was extracted out of the command on **2026-09-20**, two days *after* the rule landed in the runbook and the command, so the extraction moved the sweep logic and left the rule behind. Two measured misses on 2026-09-22 followed from exactly that gap: a `Met` count off by one (`13/14` against a true `14/15`, because the exclusion keyed on `~~` anywhere in the line and dropped a **ticked** `- [x]` carrying inline strikethrough), and a false negative that two live goal pages had empty `# Tasks` lists (they held 8 and 22 **ordered** items — a `- `-prefix counter reads an ordered list as empty). Both traps are now named in the file, including the narrower struck-row shape and an explicit note that inline strikethrough is **not** it.
 
