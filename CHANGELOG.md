@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.50.4
 
 - fix: **`worker-drive`'s report template counted four hard stops where the contract now names five.** v0.50.3 added the **Other-owned** row and updated both prose references, but the §8 report shape still read `STOPPED: <one of the four hard stops, named>` — the exact line a session had to improvise against when every remaining row belonged to another session, so the one place the new row was most needed still excluded it. ⚠️ **Recorded as a partial sweep, not a fresh defect:** the same change fixed the count in two places and missed the third — the failure mode this command exists to catch, committed by the fix for it. Found by grepping the **deployed load path** for the old wording rather than trusting the merge, which is also why it was found at all.
 
