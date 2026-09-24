@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.50.3
 
 - fix: **`worker-drive` stops contradicting the two artifacts that own its contracts.** Two rows in `commands/worker-drive.md` disagreed with the documents they defer to, both found in one run on 2026-09-24. **(1) Voice mode.** The speak-the-verdict row listed `interview` alongside `on` and `narrate`, while the tts-mcp playbook says in as many words *"⚠️ `interview` speaks questions, not answers"* and marks its own **Answers** column ❌ for that mode — so a session following this command spoke verdicts in a mode whose contract keeps answers on screen. The row now separates `interview` out and names the playbook as the authority. **(2) The hard stops.** The contract read *"Continue until one of exactly **four hard stops**. Nothing else stops you"*, but §0b's owner table already permits stopping when every remaining row belongs to another session — *"Another session / person … **Nothing.** Preempting it sabotages their run. Say so explicitly."* With no row to name that case, a session that had driven everything improvised a stop and had to flag its own improvisation in the report. A fifth row, **Other-owned**, makes it a stop the report shape can carry.
 
