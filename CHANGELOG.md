@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.51.0
 
 - fix: **a non-task-anchored spawn now carries a mode decision instead of silently falling through to the fleet config.** `commands/manager-spawn.md` handles a task-anchored brief by reading the task's `mode:` field, but for the bare case it said only *"reach for this command when the brief is not task-anchored"* — and never what to pass. The shared rule omits the argument only when `mode:` is absent, and a bare brief has no field, so the spawn omitted it and reported `mode_source=config`: **indistinguishable in the ledger from a site that never decided at all.** That matters beyond tidiness — PR #178's own SC3 requires **0** `config`-sourced new-worker spawns over a working day, so a single bare spawn would have failed the measurement for a reason that was a path-mix artefact rather than a wiring defect. The bare path now classifies the brief and passes the argument explicitly — `interactive=false` only on positive evidence the work never needs a human mid-flight, `interactive=true` otherwise — since with no field to store it in, the argument *is* the only record of the decision. Omission stays reserved for a *task* whose `mode:` is absent, which Step 0.6 resolves upstream by writing the field before the spawn. § Spawn a worker item 6 carries the same distinction.
 
