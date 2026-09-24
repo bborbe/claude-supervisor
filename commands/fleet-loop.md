@@ -1,9 +1,14 @@
 ---
-description: Stateful fleet round — snapshot, diff against the previous sweep, classify every peer (progressing / stalled / parked / done), and act within a strict autonomy boundary. Composes /fleet-status; run every ~15 min, never on a tighter loop. Loop mode (loop) = the recurring fleet-loop loop: cadence via ScheduleWakeup, TTS on problems (voice-mode gated), route to managers. (Renamed from /fleet-sweep 2026-09-10 when the two were merged.)
+description: Stateful fleet round — snapshot, diff against the previous sweep, classify every peer (progressing / stalled / parked / done), dispatch the drive leg, and act within a strict autonomy boundary. Composes /fleet-status; repeats by default at ~15 min via ScheduleWakeup, TTS on problems (voice-mode gated), routes to managers. (Renamed from /fleet-sweep 2026-09-10 when the two were merged.)
 allowed-tools:
   - ListAgents
   - SendMessage
+  - Monitor
+  - AskUserQuestion
   - ScheduleWakeup
+  - mcp__supervisor__spawn_agent
+  - mcp__supervisor__list_agents
+  - mcp__supervisor__answer_permission
   - mcp__tts__say
   - Bash(python3:*)
   - Bash(date:*)
@@ -13,6 +18,7 @@ allowed-tools:
   - Bash(mkdir:*)
   - Bash(echo:*)
   - Bash(grep:*)
+  - Bash(pgrep:*)
   - Bash(comm:*)
   - Bash(sort:*)
   - Bash(kubectl*:*)
@@ -25,7 +31,7 @@ allowed-tools:
   - Read
   - Write
   - Edit
-argument-hint: (no args)
+argument-hint: "(no args — repeats by default)"
 ---
 
 Answer one question: **does anything in the fleet need attention right now?**
@@ -51,13 +57,13 @@ The fleet manager never performs the *work*: no code edits, no repo/PR/k8s verif
 - **The PR is the boundary, whatever the file extension.** Editing a doc may be management; opening a PR never is (review loop, merge, release, deploy verification). Test *"what does this change oblige?"*, not *"prose or code?"*. The Build Drift Gate is a crossing trigger: one-shot work that grows a worktree, branch and commits needs its task anchor at the crossing, and goes to a worker.
 - **Task/goal anchored, always.** Nothing is delegated or spawned without a task or goal file behind it. Read-only manager business (snapshot, report, TTS) needs no anchor; anything else gets `/vault-cli:create-task` first.
 
-## Loop mode (`loop`)
+## Cadence
 
-The fleet manager is a role (Fleet Manager Session runbook — the wide/shallow layer over managers); this command is its engine: one invocation = one round, `loop` = the recurring round.
+The fleet manager is a role (Fleet Manager Session runbook — the wide/shallow layer over managers); this command is its engine: one invocation runs one round, and the round re-arms itself. For one look without a loop, run `/fleet-status` (read-only); for one act pass, run `/fleet-drive`. There is no one-sweep flag — a single round still dispatches the drive leg, sends and writes back, so it was never a read-only look. Any argument is ignored; the round repeats by default.
 
-- **One round:** Steps 0–6 below. The default.
-- **Loop:** after a round, `ScheduleWakeup` ~15 min with the same `/fleet-loop loop` prompt. Never tighter than 15 min, never self-re-invoking — cadence belongs to the scheduler.
-- **Loop-only additions:**
+- **One round:** Steps 0–6 below.
+- **Re-arm at the END of every round:** `ScheduleWakeup` ~15 min with the same `/supervisor:fleet-loop` prompt — no argument. Never tighter than 15 min, never self-re-invoking — cadence belongs to the scheduler. A round that prints its output and stops has killed the loop silently: no error, no marker, no stale-loop signal.
+- **Additions on every round** — there is no non-recurring mode left to contrast with:
   - **Needs-input** — the digest's BLOCKED section (from the attention feed) is the primary blocked-session channel; `ListAgents` `waiting` does not say *what* a session waits on. Group into ONE report, never N pings. TTS when a wait exceeds ~30 min continuous, re-TTS at 1h — voice-gated. Names lead; ids are secondary.
     - **Manager first.** Before including an entry, check `ListAgents` for its owning manager; if live, it already reports its `waiting-on-human` sessions (`/manager-loop` step 3) — drop the entry and say so in one line.
     - **Claim before asking — this is what makes it asked ONCE.** Manager-first is not sufficient alone: the fleet and a live manager can both hold the same blocked session and neither sees the other's batch. Claim each subject through the **`supervisor:asked-ledger` skill** — `/supervisor:asked-ledger claim …`, the single home of its rules and the claim contract; follow it verbatim, never restate them here. **Exit 0 → include the subject in the batch; exit 3 → another layer holds it, drop it from the batch** and say so in one line. `resolve` once the answer is relayed.
@@ -126,9 +132,27 @@ The plugin prefix is required — a bare `fleet-sweep-reader` resolves to a pers
   Then report it in the Step 5 batch. **Never draft a stand-down** — that is a course correction and needs the operator's yes.
 - **Unmanaged topic (Step 2d):** **suggest, never auto-spawn** a manager — report the topic, its live workers and the command that would start one. When the operator says go, apply the spawn readiness precondition. If the topic page is absent, suggest creating the page (manager work) together with the spawn.
 
-## Step 3b — Reap the finished
+## Step 3b — Drive: dispatch the drive leg
 
-A finished session does not close itself. For each reap candidate, the digest carries the three disk facts; re-read them this round if acting on one:
+Reap is no longer inlined here — it is the drive leg's, and the ordering is this command's to preserve: **reap runs before drive**, which is why the dispatch sits after the sweep and never before it.
+
+`Task(subagent_type: "supervisor:fleet-drive", prompt: <this round's digest verbatim + this session's name and id + vault path + round timestamp + "dry-run: false">)`
+
+The plugin prefix is required — a bare `fleet-drive` resolves to a personal `~/.claude/agents/` copy. The agent loads the ledger, suppresses re-nudges, verifies each `parked` session's blocker live, reaps the finished (its step 1b), persists the ledger, and returns drafted `REAPS` and `NUDGES` plus a grouped escalation batch. It owns those rules — read them in `agents/fleet-drive.md`; this command does not restate them.
+
+⚠️ **The agent never sends.** It has no cross-session address, so the sends stay here — the same split `commands/fleet-drive.md` uses.
+
+**Send, from this session.** Every `REAPS` line first, then every `NUDGES` line — reap before drive, so a finished session is never told to continue. For each line, re-check the target's roster status first: moved to `busy`/`shell` since Step 0 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Report any failed send — the ledger already counts it as nudged, so the next round suppresses rather than nags.
+
+**Print** the agent's report verbatim — table, escalation groups, ledger line — followed by `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons.
+
+**No usable report** — errored, came back empty, or is not the report — → say so in the round's output. Nothing was reaped and nothing was sent this round; never fall back to a hand-rolled classification, because every verdict would be UNKNOWN and an empty fleet and a dead source must never render the same.
+
+**Every `ESCALATION` row carries its jump link.** Append to each row the one-line output of `python3 $P/jump-link.py <pane-id>`, taking the pane the agent carried on the row. A row the digest gave no pane for is resolved by `python3 $P/who-needs-me.py --pane-for <sid8>` — the session id is the join the sweep already made, and the lookup decides liveness from the session registry, so a session that has exited cannot yield a pane. Emit the link, never a bare `/supervisor:jump <N>` and never a hand-built URL. **Keep-in-sync block** — shared with `commands/fleet-drive.md` step 5, which carries the same rule for the by-hand pass. Enumerated differences, never counted: that copy spells out `${CLAUDE_PLUGIN_ROOT:-…}` where this one uses `$P`. Change one, change the other.
+
+### The reap contract
+
+`agents/fleet-drive.md` step 1b names this section as its reap contract, so the three disk facts stay here for reference — the agent carries its own copy and reads them; this command does not act on them. A finished session does not close itself:
 
 ```bash
 grep -m1 '^status:' "<task file>"                               # want: completed
@@ -138,14 +162,14 @@ grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<task file>"    # want: 0
 
 The file is the fact; the session's claim and its colour (`purple` = operator marked it) are not. Deliberately-open boxes (e.g. two Self-Review reflections) mean **not** complete — never tick a box to pass the gate.
 
-**Two channels reach a worker, and they are not interchangeable.**
+### Two channels reach a worker, and they are not interchangeable
 
 | The worker is… | Whose answer | Channel | Call |
 |---|---|---|---|
 | **headless, parked on a question** | the **operator's** | supervisor permission channel — no pane | `mcp__supervisor__answer_permission(request_id, behavior="deny", message="Operator answer, via supervisor: <option>")` |
 | **headless, parked on a question** | **your own** | supervisor permission channel — no pane | `mcp__supervisor__answer_permission(request_id, behavior="deny", message="Manager answer, via supervisor: <option>")` |
 | **headless, already exited** (turn end, or ~11 min question timeout) | either | a fresh turn | `mcp__supervisor__spawn_agent(prompt="<the answer>", resume="<session-id>", interactive=false, cwd="<explicit>")` — **spawn readiness precondition first** |
-| **a tab worker** | either | its pane — `send_agent_message`, or by hand | the relay protocol (Loop mode) |
+| **a tab worker** | either | its pane — `send_agent_message`, or by hand | the relay protocol (§ Cadence) |
 
 - **The headless channel is primary.** For an `AskUserQuestion`, answer `deny` + `message`, never `allow` (allow runs the tool tty-less and the worker exits unanswered). On a refusal, switch this session to `accept edits` (Shift+Tab) and retry — the refusal is this session's own `auto`-mode classifier.
 - **Pick the prefix that matches who answered.** `Operator answer, via supervisor:` only when the operator answered in this session; `Manager answer, via supervisor:` for your own decision. **Neither releases an irreversible or production-touching action.** Spec: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § The two prefixes are not interchangeable.
@@ -153,11 +177,11 @@ The file is the fact; the session's claim and its colour (`purple` = operator ma
 - **Answer promptly or not at all.** Parked prompts auto-deny after 15 minutes (headless); a worker left waiting stalls silently. Prefer fewer, longer-lived workers over many short ones.
 - **A manager cannot close a worker's session** — `/vault-cli:sync-progress` and `/vault-cli:session-close` read the worker's own conversation, and driving its pane is refused. Do not design a reaping rule that depends on typing into a worker.
 
-So the manager **informs**, which is read-only context and needs no approval:
+So the manager **informs**, which is read-only context and needs no approval — the `REAPS` lines the agent returned **are** that message:
 
-1. Verify the three disk facts above.
-2. `SendMessage` the worker the evidence, explicitly non-authorising — it states the disk state, names that the operator has *not* answered, and leaves the decision with the session.
-3. Report it in Step 5 as **self-closeable** — one line for all N, never N approvals.
+1. The agent verifies the three disk facts above before drafting one.
+2. Send it verbatim, from this session; it states the disk state, names that the operator has **not** answered, and leaves the decision with the session.
+3. Report the finished rows in Step 5 as **self-closeable** — one line for all N, never N approvals.
 
 Where a manager owns the session, it reaps its own — this layer defers.
 
@@ -199,9 +223,10 @@ The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`).
 2. **Classification** — the digest's non-progressing rows: `<name> [<id>] · <status> · <classification>`. Never print the `[ref]`.
 3. **`📋 Open with the operator`** — the ledger, one line per open entry: kind · what · state · age. **Never omitted**; `(none open)` when empty.
 4. **Escalation batch** — grouped, cause-first, only if any `stalled`/`parked`/`orphan` findings exist; orphans as their own group. Omit if nothing needs attention. Mark any cause a sub-agent could not confirm as **unverified**.
-5. **Read-only context sent this sweep** — what and to whom.
-6. **Course-correction drafts awaiting approval** — exact text + target; ask the operator to approve or edit.
-7. **Snapshot written** — path and `swept_at`.
+5. **Drive leg** — the agent's report verbatim (its header line, rows, `ESCALATION`, `LEDGER`) plus `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons. On no usable report, say so here instead.
+6. **Read-only context sent this sweep** — what and to whom.
+7. **Course-correction drafts awaiting approval** — exact text + target; ask the operator to approve or edit.
+8. **Snapshot written** — path and `swept_at`.
 
 ## Rules (non-negotiable)
 
@@ -209,7 +234,7 @@ The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`).
 - **Never preempt a busy peer.** Never ask a `busy`/`shell` session to drop its work; never touch its worktree, branch or containers.
 - **Work is task/goal anchored.** Every delegated message and spawned session names its task or goal.
 - **No permission laundering.** Never ask a peer to run something denied here — route it to the operator.
-- **An operator gate is never the manager's to decide — relaying the operator's own answer is the job.** Whether you may clear a gate at all is [[Manager Session]] § Gate triage — who clears what: standing mandates (spawn, auto-resume, write-back, close, auto-compaction) and gates a quotable written source determines are yours; everything else is the operator's; production-touching and live-trade gates are never relayed. Relay per Loop mode (provenance, exclusions, navigation, verification, `/supervisor:jump <pane-id>` fallback).
+- **An operator gate is never the manager's to decide — relaying the operator's own answer is the job.** Whether you may clear a gate at all is [[Manager Session]] § Gate triage — who clears what: standing mandates (spawn, auto-resume, write-back, close, auto-compaction) and gates a quotable written source determines are yours; everything else is the operator's; production-touching and live-trade gates are never relayed. Relay per § Cadence (provenance, exclusions, navigation, verification, `/supervisor:jump <pane-id>` fallback).
 - **No polling loops.** One round per invocation; nothing re-invokes itself or `ListAgents` on a sub-loop.
 - **Verify before telling a peer something did NOT happen** — "your push did not land", "that tag was never cut", "the PR is unmerged": check the target directly first (`git ls-remote`, `gh pr view --json state,mergeCommit`, the task file). Unverified phrasing: *"verify before re-issuing"*. Same for the operator: never report a peer "blocked for N minutes" from two snapshots joined by inference.
 - **Never forward a claim you did not measure.** A peer's or sub-agent's observation is testimony — quote it as testimony (*"pane 254 reports X"*) or measure it yourself. A sub-agent's caveat about its own sources is a finding.

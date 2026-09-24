@@ -1,6 +1,6 @@
 ---
 name: fleet-drive
-description: Perform the fleet sweep's drive leg — take the fleet-sweep-reader digest, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), and return verdicts plus drafted reaps and nudges. Dispatched by `/supervisor:fleet-drive`. Consumes the classification the sweep already produced; never builds a second one, never sends.
+description: Perform the fleet sweep's drive leg — take the fleet-sweep-reader digest, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), and return verdicts plus drafted reaps and nudges. Dispatched by `/supervisor:fleet-drive` and by `/supervisor:fleet-loop` on every round. Consumes the classification the sweep already produced; never builds a second one, never sends.
 model: sonnet
 tools: Read, Bash, Write
 allowed-tools: Bash(vault-cli:*), Bash(gh:*), Bash(grep:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(date:*), Bash(git:*)
@@ -34,7 +34,7 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
 
 1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `[unresolved]` rows and rows with no task are **unverifiable**.
 
-1b. **Reap the finished — before drafting any nudge.** Same contract as `fleet-loop` Step 3b, which only runs while that loop is armed; measured 2026-09-23 the fleet snapshot had not been written for ~14h and the ledger held two `finished` verdicts that nothing ever messaged. For each finished row, re-read the three disk facts this run:
+1b. **Reap the finished — before drafting any nudge.** Same contract as `fleet-loop` Step 3b, which now dispatches this leg on every round; measured 2026-09-23 the fleet snapshot had not been written for ~14h and the ledger held two `finished` verdicts that nothing ever messaged. For each finished row, re-read the three disk facts this run:
 
    ```bash
    grep -m1 '^status:' "<task file>"                               # want: completed (or aborted)
