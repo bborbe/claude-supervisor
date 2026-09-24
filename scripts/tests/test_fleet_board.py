@@ -437,5 +437,78 @@ class TestVaultParsing(unittest.TestCase):
         self.assertEqual(fb._goals_section_links(text), ["Goal One"])
 
 
+class TestGateAttribution(unittest.TestCase):
+    """Each `needs-input` row must name ITS OWN pane or its own reason.
+
+    Measured 2026-09-23: every `needs-input` detail read the same literal
+    `"waiting on an open gate"`, 4 of 4 rows, so `/supervisor:fleet-verify`
+    check 4 could not tie a bucket to a pane and reported UNKNOWN — which is
+    exactly the shape that hid a real bucket/pane mismatch. A string identical
+    across rows attributes nothing.
+    """
+
+    def gate(self, sid, pane, kind="permission"):
+        return {"session_id": sid, "pane": pane, "kind": kind}
+
+    def test_each_gated_session_carries_its_own_pane(self):
+        panes = fb.gate_attribution(
+            [self.gate(_sid(3), 1039), self.gate(_sid(6), 1040, "question")],
+            {_sid(3), _sid(6)},
+        )
+        self.assertEqual(panes[_sid(3)], "pane 1039 — open permission gate")
+        self.assertEqual(panes[_sid(6)], "pane 1040 — open question gate")
+
+    def test_only_gated_sessions_are_attributed(self):
+        """A record for a session outside `gate_ids` (answered, parked, reapable)
+        is not an open gate and must not lend its pane to the detail."""
+        panes = fb.gate_attribution([self.gate(_sid(2), 1041)], {_sid(3)})
+        self.assertNotIn(_sid(2), panes)
+
+    def test_an_idle_record_lends_nothing_to_a_gated_session(self):
+        """Measured live 2026-09-25: a gated session also holds its `idle` record,
+        and the first cut rendered `open idle, question gates`. `idle` is not a
+        gate kind — it names neither the gate nor, reliably, its pane."""
+        panes = fb.gate_attribution(
+            [self.gate(_sid(3), 1737, "idle"), self.gate(_sid(3), 1737, "question")],
+            {_sid(3)},
+        )
+        self.assertEqual(panes[_sid(3)], "pane 1737 — open question gate")
+
+    def test_several_gates_on_one_session_list_every_pane(self):
+        panes = fb.gate_attribution(
+            [self.gate(_sid(3), 1040), self.gate(_sid(3), 1039, "question")],
+            {_sid(3)},
+        )
+        self.assertEqual(panes[_sid(3)], "panes 1039, 1040 — open permission, question gates")
+
+    def test_rows_carry_distinct_attribution(self):
+        attribution = {_sid(3): "pane 1039 — open permission gate",
+                       _sid(6): "pane 1040 — open question gate"}
+        _, details = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES,
+                                   gate_attribution=attribution)
+        self.assertEqual(details[_sid(3)], attribution[_sid(3)])
+        self.assertEqual(details[_sid(6)], attribution[_sid(6)])
+        self.assertEqual(len(set(details.values())), len(details),
+                         "a detail repeated across rows attributes nothing")
+
+    def test_unattributed_gate_names_its_own_reason_not_a_stub(self):
+        """A gate id with no attribution is a real, reportable situation — say
+        which one, never fall back to one sentence shared by every row."""
+        _, details = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES,
+                                   gate_attribution={_sid(6): "pane 1040 — open question gate"})
+        self.assertIn(_sid(3), details)
+        self.assertIn("no pane", details[_sid(3)])
+        self.assertIn(_sid(3)[:8], details[_sid(3)])
+        self.assertNotEqual(details[_sid(3)], "waiting on an open gate")
+
+    def test_attribution_parses_with_the_feeds_own_pane_pattern(self):
+        """Check 4 joins a detail to a pane; the id must be readable by the same
+        pattern `who-needs-me.py` uses for pane references."""
+        panes = fb.gate_attribution([self.gate(_sid(3), 1039)], {_sid(3)})
+        m = fb.wnm._PANE_REF.search(panes[_sid(3)])
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "1039")
+
+
 if __name__ == "__main__":
     unittest.main()
