@@ -1,5 +1,6 @@
 ---
 description: Open the right thing for a name — resolves it to a task, goal or topic, then jumps to its live session, resumes its recorded session, or starts a new one. Batch mode opens every task flagged for today. Name via $ARGUMENTS; optional --task/--goal/--topic, --vault, --color, --flagged.
+argument-hint: "<name> [--task|--goal|--topic] [--vault <v>] [--color <c>] [--flagged]"
 allowed-tools:
   - Bash(vault-cli:*)
   - Bash(wezterm cli spawn:*)
@@ -30,7 +31,7 @@ The command **resolves** and **dispatches**. It never does the work, never runs 
                              task body, print the table, then open each eligible
                              row in stable order. role: human is SKIPPED; a body
                              with no signal is REFUSED and left unwritten.
-                             mode falls back to interactive whenever unclear.
+                             mode: by § Spawn a worker item 6, never ad hoc.
 ```
 
 ## Arguments
@@ -127,7 +128,7 @@ done
 
 The count is a property of the day, not of the command — **never hardcode it and never treat a row count as a check**. Measured 2026-09-20: 79 tasks in `25 Tasks/` carried `flag: true` and the filter returned 12 at 10:45, then 11, 10 and 7 across the next two hours as workers completed their tasks. A shrinking set is the selector working, not the selector failing.
 
-**No mode is derived, and no mode column is printed.** Every row opens in whatever `~/.config/claude-supervisor/config.json` `spawn.mode` says — `interactive` as of 2026-09-21, verified live. Print one line under the table: `All rows open <mode> — fleet config, not per-task.`
+**`mode` is derived per row and written, and the table carries a `mode` column.** ⚠️ Until 2026-09-24 this paragraph said the opposite — *"no mode is derived, and no mode column is printed"* — which the sample table below and Step 0.6 had both already contradicted; widening Step 0.6 to **every** open (not only the batch) is what made the stale sentence load-bearing. A manager following it would have printed `All rows open interactive — fleet config` for a batch whose `headless` rows Step 0.6 had just written. The truth: Step 0.6 derives `mode` per row and writes it, and **only an absent `mode:` on disk falls through to the fleet config** — which is what the one line under the table reports.
 
 **Removed 2026-09-21 on the operator's instruction, with the reasoning kept because it generalises.** This command used to grep each task for `ssh`, `kubectl`, `make buca`, `make apply`, `gh pr merge`, `update-all.sh`, derive `interactive` on a match and `headless` otherwise, print the verdict with its reason — **and then discard it**, because `spawn_agent` is never passed a mode and the fleet config decides. A column showing a computation nobody consumes is the same defect as the dry run deleted in the section below: **a display shaped like a control.** It cost a reader's attention on every batch and decided nothing.
 
@@ -135,9 +136,9 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 ✅ **Per-task mode came back on 2026-09-21 — as its own `mode:` field, never folded into `role:`.** The operator reinstated it that morning with the fallback rule that makes it safe: *unclear → interactive*, because a session that needs interaction and is headless is hard to manage. Step 0.6 decides and writes it.
 
-⚠️ **Two fields, not one, and the reason is that `role` cannot answer the mode question.** Mode is *mechanism* (wezterm tab vs headless SDK); role is *who the session is for* (human / agent / manager). `SPAWN_MODES` contains no `human`. Check the values: `human` and `manager` both force `interactive` — a person needs a screen, a manager is a tab you jump to — while `agent` leaves the question genuinely open. So role **constrains** mode without **determining** it: a partial function, not the same axis. One field that looked like both is how they got conflated the first time.
+⚠️ **Two fields, not one, and the reason is that `role` cannot answer the mode question.** Mode is *mechanism* (wezterm tab vs headless SDK); role is *who the session is for* (human / agent / manager). `SPAWN_MODES` contains no `human`. So role **constrains** mode without **determining** it: a partial function, not the same axis — which is why one field that looked like both got conflated the first time. **The mapping itself is not restated here** — which `role` values force `interactive`, and what `agent` leaves open, are owned by item 6 of § Spawn a worker.
 
-**The asymmetry that justifies the fleet default staying `interactive`:** a wrongly-interactive task costs one idle tab; a wrongly-headless one burns a whole session on gates nobody answers — measured 2026-09-20, two workers stranded and four gates expired across three workers in ~90 minutes.
+**The asymmetry that justifies the fleet default staying `interactive` is owned by item 6 of § Spawn a worker**, together with the measurement behind it — stated once there rather than restated here.
 
 **No ordering is computed — but blocked rows are surfaced, and that is not the same thing.** The command never derives a sequence: it prints the stable sorted order and states plainly that ordering is not auto-detected. What it *does* read is the `blocked` / `blocked_by` pair the CLI already computes, and it **holds** every row the CLI reports `blocked=True` — mark the row `⛔ HOLD`, print its blockers, and skip it with a stated reason. Surfacing a field the CLI computed is display; inferring an order from prose would be the deferred work. Do not collapse the two.
 
@@ -380,7 +381,7 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 **The one carve-out: pass `interactive=false` when, and only when, the task's own frontmatter says `mode: headless`.** An absent `mode:` still means *omit the argument entirely* — not *pass interactive* — so the config keeps deciding for every task that has not opted out. That is what preserves the one-place-to-change property while letting a single task override it. A `mode:` the spawn never reads would be the same defect as the deleted column: **a display shaped like a control.** If this file writes the field, this file must also honour it. The rule that *produces* the value is not restated here — it has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6; this line is only the consumption.
 
-⚠️ **Writing `mode: headless` today opens a worker into a mechanism with two known, measured defects** — its gates park with the spawning session's server and no one else can answer them, and the resume guard does not guard (a mid-turn headless worker can be resumed, putting two writers on one conversation). That is the standing argument for the interactive fallback being aggressive rather than polite. The operator's own position, recorded in the open-items ledger: headless becomes useful *at the point that permission prompts and questions can be answered remotely*. Until then, `headless` should be rare and never a guess.
+⚠️ **Writing `mode: headless` today opens a worker into a mechanism with two known, measured defects** — its gates park with the spawning session's server and no one else can answer them (**item 6's constraint (a)**; it is the reason a spawner that cannot answer a parked prompt must not open one), and the resume guard does not guard (a mid-turn headless worker can be resumed, putting two writers on one conversation). That is the standing argument for the interactive fallback being aggressive rather than polite. The operator's own position, recorded in the open-items ledger: headless becomes useful *at the point that permission prompts and questions can be answered remotely*. Until then, `headless` should be rare and never a guess.
 
 **Parity is real, not a compromise — measured 2026-09-18.** A headless worker spawned into the Brogrammers vault had `mcp__semantic-search__search_related` and `mcp__obsidian__obsidian_get_file_contents` available and returned a real vault hit (`70 Runbooks/Manager Session.md`). The code is built for it: `settingSources: ['user','project','local']` — the same an interactive session gets — and `resolveMcpServers(launcher)` parses the launcher's `--mcp-config`, so a headless worker inherits the same MCP servers a tab does. (The `spawn_agent` tool description used to claim headless meant "accepting the narrower toolchain"; that was stale and is corrected as of the config-file change.)
 
