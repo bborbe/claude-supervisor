@@ -91,16 +91,15 @@ wezterm cli get-text --pane-id <NEW-PANE-ID>
 
 A pane that came up holding a modal is precisely the state the 2026-09-20 run misread as a live gate. Typing into it turns any keystroke into a menu selection, and handing the operator the pane is the honest alternative to answering for them.
 
-**If the veto clears, deliver the note** — and keep it what it is: *you were restarted, here is what changed underneath you*. It is **not** an answer to anything, and it must not read as one.
+**If the veto clears, deliver the note.** Keep it what it is: *you were restarted, here is what changed underneath you*. It is **not** an answer to anything, and it must not read as one.
 
 ```bash
 wezterm cli send-text --pane-id <NEW-PANE-ID> --no-paste $'You were restarted by /supervisor:worker-restart. Nothing about your task changed — re-read anything you concluded from the old plugin version. This is not an answer to any gate; if you are holding one, it is still yours.'
-wezterm cli send-text --pane-id <NEW-PANE-ID> --no-paste $'\r'   # submit as a separate step
 ```
 
-**Send the text and the submit as two steps, and repeat the bare `\r` until the composer clears** — a trailing `\r` on the text itself is not sufficient (measured 2026-09-16: the message wrapped, the `\r` was swallowed, and the text sat unsubmitted, which reads exactly like a delivered prompt). **Then read the pane back** — a message is not delivered until the composer is empty.
+**How to submit it — and why a trailing `\r` on the text is not enough — is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker. Read it there and follow it.** Do not restate the submission steps here: it is the same recipe every other call site uses, and a second copy is how the two drift.
 
-⚠️ **Typing is legitimate only into the pane this command just spawned, while it is idle.** Answering another session's operator gate by `send-text` stays forbidden.
+⚠️ **Typing is legitimate only into the pane this command just spawned, while it is idle** — the same section's rule. Answering another session's operator gate by `send-text` stays forbidden.
 
 ## Step 5 — Report
 
