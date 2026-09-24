@@ -270,6 +270,10 @@ starts somewhere else and its first file operation goes to the wrong tree. Pass 
 task's directory; if you cannot determine it, read `cwd` from the session registry
 (`~/.claude/sessions/<pid>.json`) rather than guessing.
 
+**Confirming a headless spawn took — and what to read instead of `.status` — is owned by
+§ A headless worker exits at turn end.** Do not restate it here: a restated copy is what let
+four surfaces prescribe the same wrong field.
+
 ### The tab name is the join — and it is made unique before the process starts
 
 A tab worker is a separate process the supervisor does not create, so it never learns that
@@ -326,8 +330,9 @@ separates continuing a worker from answering one:
 | **already exited** (timeout, or turn end) | either | a fresh turn | `spawn_agent(resume=<id>, interactive=false, cwd=<explicit>)` |
 
 They do not substitute for one another: `answer_permission` cannot reach a process that has
-exited, and `spawn_agent(resume=…)` cannot answer a question that is still parked. Check which
-state the worker is in — `agent_status` or `pending_permissions` — before choosing.
+exited, and `spawn_agent(resume=…)` cannot answer a question that is still parked. Decide which of the two applies from `agent_status` **plus the transcript's mtime** — never
+from `agent_status` alone, because `.status` is terminal only once the turn has ended
+(`num_turns: 0` beside `subtype: "success"` is the tell that it has not).
 
 ### The two prefixes are not interchangeable
 
