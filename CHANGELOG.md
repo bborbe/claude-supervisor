@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.47.0
 
 - feat: **the fleet table's Session column is a tree**, so each row's role is readable at a glance — manager, worker, or unmanaged — instead of living only in the tab colour. `fleet-board.py` groups every session under the manager that covers it: a **manager** is a session whose name resolves to a `23 Topics` / `24 Goals` page or whose colour is orange (the `Fleet Manager` session is the root); a **worker**'s parent comes from its task's `goals:` → that goal → the topic listing that goal → the live manager for that topic or goal; a task with no goal link, or no live manager on its chain, groups under the root; and a session with **no task file at all** groups under `Unmanaged`. A manager's subject is resolved from the loop record its manager wrote under `~/.claude/state/sweep-gate/`, then from its registry name against a topic or goal title — never from its `claude_session_id` stamp. `--json` gains a `sessions` array carrying each row's `role` (`manager` / `worker` / `unmanaged`) and `parent` (a session id, or `unmanaged`), and the board now asserts the **drawn tree** carries every session row exactly once — a row that is built and never drawn is the same silent drop the existing coverage assertion guards one step earlier. `docs/fleet-surface.md` § Sweep output is reduced to a pointer at the Fleet Manager Session runbook, which owns the frame; both files claimed to be the single source.
 
