@@ -854,9 +854,17 @@ class PaneFor(unittest.TestCase):
     pane off stdout, so a diagnostic that leaked there would be handed to
     `jump-link.py` as a pane id and produce a link to a pane that does not exist.
 
-    The join is on the session id and the caller passes the 8-char prefix the
-    digest carries, so the prefix cases are the ones that actually run in
-    production -- an ambiguous prefix must refuse rather than pick one.
+    Two classes of case carry the weight, both measured rather than imagined:
+
+      * **The stale recorded pane.** A pane id is a lease -- WezTerm renumbers and
+        reuses them -- so a live session's attention record can name a pane that no
+        longer exists. Measured 2026-09-24: `MDM Bugs` was live in the registry on
+        pane 1391 while all eight of its records carried pane 85. Asking whether
+        pane 85 still existed called that session dead, hiding a session the
+        operator could have jumped to.
+      * **The ambiguity guards.** A shared session-id prefix and a shared pane
+        title both refuse rather than pick one; either guess hands the operator a
+        link to the wrong tab, which reads as a working one.
     """
 
     SID_A = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -874,12 +882,14 @@ class PaneFor(unittest.TestCase):
             {"session_id": self.SID_A, "pane": "204", "kind": "idle", "ts": 1},
             {"session_id": self.SID_B, "pane": "205", "kind": "idle", "ts": 2},
         ]
+        self.registry = {self.SID_A: "Session A", self.SID_B: "Session B"}
+        self.panes = {
+            "204": {"pane_id": 204, "title": "\u2733 Session A"},
+            "205": {"pane_id": 205, "title": "\u2733 Session B"},
+        }
         patch("load", lambda _suffix: list(self.records))
-        patch("panes", lambda: {"204": {}, "205": {}})
-        patch("read_registry", lambda: {self.SID_A: "a", self.SID_B: "b"})
-        patch("quiet_session_ids", lambda _records, _live: set())
-        self.live = {self.SID_A: True, self.SID_B: True}
-        patch("is_live", lambda rec, _pmap, _quiet: self.live.get(rec["session_id"], False))
+        patch("panes", lambda: dict(self.panes))
+        patch("read_registry", lambda: None if self.registry is None else dict(self.registry))
         self.addCleanup(lambda: [p.stop() for p in self.patches])
 
     def run_pane_for(self, arg):
@@ -888,8 +898,8 @@ class PaneFor(unittest.TestCase):
             rc = wnm.pane_for(arg)
         return rc, out.getvalue(), err.getvalue()
 
-    def test_unique_prefix_resolves(self):
-        """The production case: the digest carries 8 chars, not the full id."""
+    def test_recorded_pane_is_preferred(self):
+        """The sweep already resolved this pane; while it is live it is used as-is."""
         rc, out, _ = self.run_pane_for(self.SID_A[:8])
         self.assertEqual(0, rc)
         self.assertEqual("204\n", out)
@@ -899,9 +909,59 @@ class PaneFor(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("204\n", out)
 
+    def test_stale_recorded_pane_falls_back_to_the_current_name(self):
+        """The MDM Bugs case: live session, recorded pane gone, real pane 1391.
+
+        The fallback matches the registry's CURRENT name, which is what makes a
+        `/rename` tracked rather than broken.
+        """
+        self.records[0]["pane"] = "85"
+        self.panes = {"1391": {"pane_id": 1391, "title": "\u2733 Session A"}}
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("1391\n", out)
+
+    def test_status_glyph_is_stripped_on_both_sides(self):
+        """The pane title carries a glyph; the registry name may carry its own."""
+        self.records[0]["pane"] = "85"
+        self.registry[self.SID_A] = "\u2699 Session A"
+        self.panes = {"1391": {"pane_id": 1391, "title": "\u2733 Session A"}}
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("1391\n", out)
+
+    def test_stale_pane_with_no_matching_title_refuses(self):
+        """No title matches -> refuse with the reason, never a guess."""
+        self.records[0]["pane"] = "85"
+        self.panes = {"1391": {"pane_id": 1391, "title": "\u2733 Some Other Session"}}
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("no pane resolves", err)
+
+    def test_ambiguous_title_refuses(self):
+        """Two panes titled alike must not pick one -- that is a wrong-tab link."""
+        self.records[0]["pane"] = "85"
+        self.panes = {
+            "1391": {"pane_id": 1391, "title": "\u2733 Session A"},
+            "1392": {"pane_id": 1392, "title": "\u2733 Session A"},
+        }
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertIn("ambiguous", err)
+
+    def test_pane_is_taken_from_a_sibling_record(self):
+        """The store returns one record per open item; only some carry a pane."""
+        self.records.insert(0, {"session_id": self.SID_A, "kind": "tool", "ts": 0})
+        rc, out, _ = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(0, rc)
+        self.assertEqual("204\n", out)
+
     def test_ambiguous_prefix_refuses(self):
-        """Both ids start `11111111`/`22222222`; a shared prefix must not pick one."""
-        self.records[1]["session_id"] = self.SID_A[:8] + "-cccc-4ccc-8ccc-cccccccccccc"
+        """Two live ids sharing the prefix must refuse rather than pick one."""
+        twin = self.SID_A[:8] + "-cccc-4ccc-8ccc-cccccccccccc"
+        self.registry = {self.SID_A: "Session A", twin: "Session C"}
         rc, out, err = self.run_pane_for(self.SID_A[:8])
         self.assertEqual(1, rc)
         self.assertEqual("", out)
@@ -911,34 +971,22 @@ class PaneFor(unittest.TestCase):
         rc, out, err = self.run_pane_for("deadbeef")
         self.assertEqual(1, rc)
         self.assertEqual("", out)
-        self.assertIn("no session id matches", err)
+        self.assertIn("no live session id matches", err)
 
-    def test_dead_session_refuses(self):
-        """A pane id outlives its session; handing one over makes a dead link."""
-        self.live[self.SID_A] = False
+    def test_unreadable_registry_refuses(self):
+        """An unreadable registry cannot prove liveness, so it must not guess."""
+        self.registry = None
         rc, out, err = self.run_pane_for(self.SID_A[:8])
         self.assertEqual(1, rc)
         self.assertEqual("", out)
-        self.assertIn("not live", err)
+        self.assertIn("registry unreadable", err)
 
-    def test_record_without_pane_refuses(self):
-        self.records[0].pop("pane")
+    def test_unreadable_panes_refuses(self):
+        self.panes = {}
         rc, out, err = self.run_pane_for(self.SID_A[:8])
         self.assertEqual(1, rc)
         self.assertEqual("", out)
-        self.assertIn("no pane", err)
-
-    def test_pane_is_taken_from_a_sibling_record(self):
-        """The store returns one record per open item; only some carry a pane.
-
-        A session holding two records — the first without a pane — must still
-        resolve off the second. Taking the first record outright would report
-        `no pane` for a session that has one.
-        """
-        self.records.insert(0, {"session_id": self.SID_A, "kind": "tool", "ts": 0})
-        rc, out, _ = self.run_pane_for(self.SID_A[:8])
-        self.assertEqual(0, rc)
-        self.assertEqual("204\n", out)
+        self.assertIn("pane list unreadable", err)
 
     def test_empty_id_refuses(self):
         rc, out, _ = self.run_pane_for("")
@@ -949,7 +997,6 @@ class PaneFor(unittest.TestCase):
         """The positive control: the mode exists on the CLI, so the command can call it."""
         with open(_SCRIPT, encoding="utf-8") as handle:
             self.assertIn('"--pane-for"', handle.read())
-
 
 if __name__ == "__main__":
     unittest.main()
