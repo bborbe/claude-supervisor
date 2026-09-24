@@ -67,7 +67,7 @@ The fleet manager is a role (Fleet Manager Session runbook — the wide/shallow 
   - **Needs-input** — the digest's BLOCKED section (from the attention feed) is the primary blocked-session channel; `ListAgents` `waiting` does not say *what* a session waits on. Group into ONE report, never N pings. TTS when a wait exceeds ~30 min continuous, re-TTS at 1h — voice-gated. Names lead; ids are secondary.
     - **Manager first.** Before including an entry, check `ListAgents` for its owning manager; if live, it already reports its `waiting-on-human` sessions (`/manager-loop` step 3) — drop the entry and say so in one line.
     - **Claim before asking — this is what makes it asked ONCE.** Manager-first is not sufficient alone: the fleet and a live manager can both hold the same blocked session and neither sees the other's batch. Claim each subject through the **`supervisor:asked-ledger` skill** — `/supervisor:asked-ledger claim …`, the single home of its rules and the claim contract; follow it verbatim, never restate them here. **Exit 0 → include the subject in the batch; exit 3 → another layer holds it, drop it from the batch** and say so in one line. `resolve` once the answer is relayed.
-    - **Render the consolidated list once per sweep** — `/supervisor:asked-ledger list`, under the needs-input section: every open claim across every layer in one list. That is what makes "one grouped decision" true even though the asks stay per-layer.
+    - **Render the consolidated list once per sweep** — `/supervisor:asked-ledger list`, under the Output shape's **Needs-input** item (where Step 5's blocked set renders): every open claim across every layer in one list. That is what makes "one grouped decision" true even though the asks stay per-layer.
     - **Ask here, relay back — the operator never needs a worker tab.** For each entry no manager covers **and that `claim` returned 0 for**: read the live question with `wezterm cli get-text --pane-id <N>` (the feed can be stale), batch every uncovered blocked session into ONE `AskUserQuestion` (up to 4), then **re-read the pane immediately before relaying** — a gate cleared during the ask is a named branch: record it and report the worker's own resolution instead of sending. Relay each answer verbatim, prefixed `Operator answer, relayed verbatim from the manager session (not a peer inference):`. Never restate an `approve:` line for the operator to run here, and never merely refuse it.
     - **Provenance — all three must hold:** the operator answered in this session, in the current exchange; the relay reproduces the answer as given with the prefix; a peer's claim that the operator decided X is NOT an operator answer.
     - **Two hard exclusions:** never relay approval for a production-touching or irreversible action; a pane showing `Enter to select` is a selection modal — relay by navigation (↑/↓ `\x1b[A` / `\x1b[B`, `\r` to select), per [[Manager Session]] § Relaying into a selection modal, re-reading after every send.
@@ -129,7 +129,7 @@ The plugin prefix is required — a bare `fleet-sweep-reader` resolves to a pers
 
   > "Read-only: `<other session>` also appears to be working on `<shared artifact>`. Flagging so you two don't duplicate or overwrite each other — I have not asked either of you to stop, and I have not decided who owns it."
 
-  Then report it in the Step 5 batch. **Never draft a stand-down** — that is a course correction and needs the operator's yes.
+  Then report it in Step 5's grouped report, as its own group. **Never draft a stand-down** — that is a course correction and needs the operator's yes.
 - **Unmanaged topic (Step 2d):** **suggest, never auto-spawn** a manager — report the topic, its live workers and the command that would start one. When the operator says go, apply the spawn readiness precondition. If the topic page is absent, suggest creating the page (manager work) together with the spawn.
 
 ## Step 3b — Drive: dispatch the drive leg
@@ -173,7 +173,7 @@ So the manager **informs**, which is read-only context and needs no approval —
 
 1. The agent verifies the three disk facts above before drafting one.
 2. Send it verbatim, from this session; it states the disk state, names that the operator has **not** answered, and leaves the decision with the session.
-3. Report the finished rows in Step 5 as **self-closeable** — one line for all N, never N approvals.
+3. Report the finished rows in Step 5's grouped report as **self-closeable** — one line for all N, never N approvals.
 
 Where a manager owns the session, it reaps its own — this layer defers.
 
@@ -199,9 +199,12 @@ Classification runs on status and mtime, current by construction. Cause does not
 
 Independent causes go in one message so they run concurrently. **Never delegate** course-correction drafts. **Keep every `SendMessage` in this session** — a sub-agent has no address, so replies land here regardless.
 
-## Step 5 — Escalate: one batch, grouped by cause
+## Step 5 — Escalate: an ask and a report
 
-Never one interruption per stuck session. Collect every `stalled`, `parked` and `orphan` finding into one grouped report, one entry per distinct cause, presented once at the end of the round.
+Never one interruption per stuck session. A round escalates twice, and both fire here — a round that walks Steps 0–6 and renders the Output shape without either has dropped findings it already holds.
+
+- **The blocked set — an ask, not a report.** Every session the digest's BLOCKED section carries goes into ONE `AskUserQuestion` (up to 4), each subject gated by an `asked-ledger` `claim`. That protocol — manager-first, claim, pane read, the batch, relay, provenance, verify-submission — is § Cadence's **Needs-input**, which owns it and is **not restated here**; a round that skips it has skipped an escalation, not a formatting step. A subject dropped by one of those rules prints the rule and its line.
+- **The sweep's own findings — a report.** Collect them into one grouped report, one entry per distinct cause, presented once at the end of the round. Its members: every `stalled`, `parked` and `orphan` finding (orphans as their own group), the `finished — reap` rows as a single **self-closeable** line, and any Step 2c collision as its own group.
 
 ## Step 6 — Persist the new snapshot
 
@@ -214,11 +217,12 @@ The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`).
    Print one quantitative line with the marker: the colour census `python3 $P/fleet-colours.py --json`, read for `backlog` (green/blue/cyan) with `default` and `purple` reported apart.
 2. **Classification** — the digest's non-progressing rows: `<name> [<id>] · <status> · <classification>`. Never print the `[ref]`.
 3. **`📋 Open with the operator`** — the ledger, one line per open entry: kind · what · state · age. **Never omitted**; `(none open)` when empty.
-4. **Escalation batch** — grouped, cause-first, only if any `stalled`/`parked`/`orphan` findings exist; orphans as their own group. Omit if nothing needs attention. Mark any cause a sub-agent could not confirm as **unverified**.
-5. **Drive leg** — the agent's report verbatim (its header line, rows, `ESCALATION`, `LEDGER`) plus `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons. On no usable report, say so here instead.
-6. **Read-only context sent this sweep** — what and to whom.
-7. **Course-correction drafts awaiting approval** — exact text + target; ask the operator to approve or edit.
-8. **Snapshot written** — path and `swept_at`.
+4. **Needs-input** — the batch over the digest's BLOCKED set, per § Cadence's **Needs-input** (the `AskUserQuestion`, its `asked-ledger` claims, the relays), then the consolidated list beneath it: every open claim across every layer, in one list. **Never omitted** — `(none blocked)` when the digest's BLOCKED section is empty, and a subject one of those rules dropped prints that rule and its line.
+5. **Escalation report** — Step 5's own findings, grouped cause-first: the `stalled`/`parked`/`orphan` rows (orphans as their own group), the `finished — reap` rows as one self-closeable line, and any Step 2c collision as its own group. Omit if nothing needs attention. Mark any cause a sub-agent could not confirm as **unverified**.
+6. **Drive leg** — the agent's report verbatim (its header line, rows, `ESCALATION`, `LEDGER`) plus `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons. On no usable report, say so here instead.
+7. **Read-only context sent this sweep** — what and to whom.
+8. **Course-correction drafts awaiting approval** — exact text + target; ask the operator to approve or edit.
+9. **Snapshot written** — path and `swept_at`.
 
 ## Rules (non-negotiable)
 
