@@ -1,5 +1,5 @@
 ---
-description: Open the right thing for a name — resolves it to a task, goal or topic, then jumps to its live session, resumes its recorded session, or starts a new one. Batch mode opens every task flagged for today. Name via $ARGUMENTS; optional --task/--goal/--topic, --vault, --dir, --dry-run, --flagged.
+description: Open the right thing for a name — resolves it to a task, goal or topic, then jumps to its live session, resumes its recorded session, or starts a new one. Batch mode opens every task flagged for today. Name via $ARGUMENTS; optional --task/--goal/--topic, --vault, --color, --flagged.
 allowed-tools:
   - Bash(vault-cli:*)
   - Bash(wezterm cli spawn:*)
@@ -42,9 +42,7 @@ From `$ARGUMENTS` take:
 - **name (required):** the task / goal / topic title or identifier — everything that is not a recognised flag. May contain spaces; never word-split it, and quote it when passing to `vault-cli`.
 - **`--task` / `--goal` / `--topic` (optional):** force the type, skipping resolution. Use when a name matches more than one kind.
 - **`--vault <name>` (optional):** target vault. **Overrides cwd detection** (Step 0). With `--flagged` it *narrows* the scan to one vault — the default there is **every** vault declaring a `tasks_dir`, not the cwd's.
-- **`--dir <path>` (optional):** directory the new tab starts in. Overrides the vault's `session_project_dir`.
 - **`--color <name>` (optional):** colour for the spawned session. **Default: resolved from the role map (§ 3.0)** — `pink` for an agent, `orange` for a manager, `cyan` for a human. Pass this flag only to override that resolved value. One of `red, blue, green, yellow, purple, orange, pink, cyan, default`.
-- **`--dry-run` (optional):** print the resolved type, target, branch and the exact commands, then stop. No session created, no tab spawned, no jump.
 - **`--flagged` (optional):** batch mode — select every task flagged for today, fill in any missing `role:` and `mode:` by reading each task's body, print the table, and **open every eligible row**. Takes no name; skip Steps 1–4 and go to Step 0.5, then Step 0.6. There is no `--confirm`: opening is the default.
 
 If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a task, goal or topic name.` and STOP.
@@ -84,7 +82,7 @@ vault-cli config list --output json    # → claude_script, session_project_dir,
 
 - **`topics_dir`** — use the vault's value, defaulting to `23 Topics`. A vault without a topics folder (Brogrammers) simply never resolves a topic; that is correct, not a failure — say so if a topic was asked for.
 - **`claude_script`** — the vault's own launcher. `personal` → `cc-personal-deepseek`, `brogrammers` → `cc-brogrammers-deepseek`. Never carry one vault's script into another.
-- **`session_project_dir`** — the new tab's start dir. It is **absent** for `personal` and `brogrammers`, and points at `Personal` for several sibling vaults; the `cc-*` launchers `cd` into their own vault themselves, so an absent value is fine — pass no `cd`, and let `--dir` be the override when the session needs a repo.
+- **`session_project_dir`** — the new tab's start dir. It is **absent** for `personal` and `brogrammers`, and points at `Personal` for several sibling vaults; the `cc-*` launchers `cd` into their own vault themselves, so an absent value is fine — pass no `cd`.
 
 ## Step 0.5 — Flagged batch branch (`--flagged`)
 
@@ -376,7 +374,7 @@ Resolve the vault's launcher and dir from config — **never hardcode them**:
 vault-cli config list --output json      # → claude_script, session_project_dir
 ```
 
-Effective dir = `--dir` when given, else the vault's `session_project_dir`, else no `cd`.
+Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 ⚠️ **Pass `role`, not `window_id`.** `spawn_agent` takes an optional `role` (`manager` / `agent` / `human`, defaulting to `agent`) and resolves **both** the colour and the window from the published map **in-process** (`bborbe/claude-supervisor#67`, released `v0.22.0`), so pass § 3.0's resolved role here. The older `window_id` argument still works and still wins when passed, but it is no longer how a role is routed: a window id has to cross the MCP tool boundary, and `window_id: 0` did not survive that crossing reliably — measured 2026-09-20, it reached the server 4 times in 6 and silently inherited the caller's window the rest, with both failures a run's first spawn and no reproducible trigger found. A `role` is a word, so it cannot be dropped that way, and the id is looked up at the moment of spawn. **Verified 2026-09-20 after release, each from a real spawn passing a role and NO window id:** `manager` → window 0 / orange, `agent` → window 2 / pink, `human` → window 1 / cyan. The response reports the resolved `role` and `window_id`, so **check those fields** rather than inferring routing from where the tab landed.
 

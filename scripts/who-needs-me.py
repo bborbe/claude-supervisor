@@ -17,7 +17,7 @@ Sections:
   Needs you       — permission prompt or open question (oldest first)
   Probably stuck  — inside one tool call longer than --stuck-min (default 20)
   Reapable        — close gate whose anchored task is already finished
-  Idle            — turn ended, waiting for a prompt (only with --idle)
+  Idle            — turn ended, waiting for a prompt (counted, never listed)
 --jump PANE activates that WezTerm pane.
 
 The feed answers "was a gate raised", never "is a gate open" — it is hook-written
@@ -589,8 +589,7 @@ def reclassify_idle(rec):
 
     Handles the two text-only false-positive classes. A closer that is absent,
     `nothing`, or a `later (on <trigger>):` parked wait is left as `idle` — it is
-    genuinely idle, and should still appear under --idle rather than in the gate
-    list.
+    genuinely idle, and stays out of the gate list.
     """
     if rec.get("kind") != "idle":
         return rec
@@ -995,7 +994,6 @@ def pane_for(session_id):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stuck-min", type=int, default=20)
-    ap.add_argument("--idle", action="store_true", help="also list idle (turn ended) sessions")
     ap.add_argument(
         "--all",
         action="store_true",
@@ -1072,12 +1070,7 @@ def main():
     print(f"\nReapable ({len(reapable)})  — finished work on a close gate, yours to close")
     for r in reapable:
         print(row(r, pmap, r["detail"], registry))
-    if a.idle:
-        print(f"\nIdle, turn ended ({len(idle)})")
-        for r in idle:
-            print(row(r, pmap, r["detail"], registry))
-    else:
-        print(f"\nIdle, turn ended: {len(idle)}  (--idle to list)")
+    print(f"\nIdle, turn ended: {len(idle)}")
     if not blocked and not stuck:
         print("\nNothing needs you.")
 
