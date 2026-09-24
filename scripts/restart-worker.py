@@ -302,10 +302,23 @@ def main():
     except ProcessLookupError:
         print(f"   ℹ️ pid {pid} was already gone")
     except PermissionError:
-        return refuse("unknown-session-id", f"not permitted to signal pid {pid}")
+        # An operational failure, NOT one of the seven target refusals: the pid
+        # resolved and the session id is known, the caller simply may not signal it.
+        # Reported under an `error:` prefix so it can never be read as a refusal
+        # token — `unknown-session-id` here would send the operator hunting for a
+        # typo in an id that was in fact found.
+        print(
+            f"❌ error: pid {pid} resolved but cannot be signalled (permission denied) "
+            "— this is an operational failure, not a target refusal"
+        )
+        return 1
 
     title = name or sid[:8]
     chip = (colours.get(sid) or "pink").strip().lower() or "pink"
+    # Both resume-failure paths below return 1 via `refuse()`. There is deliberately
+    # no fall-through to the success `return 0` at the end of main(): a killed pid
+    # whose session was NOT resumed must never read as a successful restart, because
+    # the caller branches on this exit code to decide whether the worker is back.
     try:
         spawned = subprocess.run(
             resume_command(sid, title, chip),

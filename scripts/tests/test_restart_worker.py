@@ -127,6 +127,20 @@ class ParseStarted(unittest.TestCase):
             self.assertIsNone(rw.parse_started(rec), rec)
 
 
+class RefusalCode(unittest.TestCase):
+    """Pin the exit code every refusal routes through.
+
+    Both resume-failure paths in `main()` return via `refuse()`, and there is no
+    fall-through to the success `return 0` — so this single assertion is what
+    guarantees a killed-but-not-resumed session can never read as a successful
+    restart. A review pass misread that control flow as falling through to 0; this
+    test makes the invariant executable rather than a claim in a comment.
+    """
+
+    def test_refuse_returns_nonzero(self):
+        self.assertEqual(rw.refuse("some-token", "some detail"), 1)
+
+
 class Cli(unittest.TestCase):
     """End-to-end against a fixture registry: exit code + reason token."""
 

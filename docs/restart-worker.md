@@ -25,7 +25,7 @@ path is read from `SUPERVISOR_LOAD_PATH`, else
 | Code | Meaning |
 |---|---|
 | `0` | Success — the pid was signalled and the session resumed (or, under `--dry-run`, would have been). |
-| `1` | Refusal. The first line of stdout is the reason token below; the second is the sentence. |
+| `1` | Refusal. The first line of stdout is the reason token below; the second is the sentence. **Or** an operational failure, printed with an `❌ error:` prefix instead of a token — see below. |
 | `2` | Usage error (argparse) — a missing or empty session id, an unknown flag. |
 
 A refusal is a printed reason, never a traceback.
@@ -44,6 +44,15 @@ anything is signalled, so no code path reaches `os.kill` on a target it has not 
 | `manager-target` | The target resolves as a manager. | A manager is NEVER restarted. The mandate is class A for workers only. |
 | `role-undetermined` | No role signal could be read. | Fail closed. An unreadable index proves nothing about a role; never assume worker. |
 | `stale-load-path` | No load-path copy is newer than the session's own start, or the session carries no parseable start time. | Nothing would load differently — the restart buys nothing. |
+
+## Operational failures — not refusals
+
+Exit `1` with an `❌ error:` prefix is an **operational failure**, not a refusal about the
+target. The one case today is `PermissionError` from `os.kill`: the pid resolved and the
+session id is known, but the caller may not signal it. It is deliberately *not* reported
+under a refusal token — reporting it as `unknown-session-id` would send the operator
+hunting for a typo in an id that was in fact found. The seven tokens above stay exactly
+seven; this is a different class of failure, and the prefix is what distinguishes them.
 
 ## How "stale" is decided
 
