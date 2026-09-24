@@ -6,8 +6,9 @@ The rule lives in `docs/fleet-surface.md` § Spawn a worker **item 6**. This che
 not re-read the rule; it asserts the two things that make it *reachable* from a site:
 
   (a) the site **references the home** — a pointer, not a copy
-  (b) the site carries the **binding** — the `mode: headless` condition paired with
-      `interactive=false`
+  (b) the site carries the **binding in both directions** — `mode: headless` →
+      `interactive=false`, and `mode: interactive` → `interactive=true`, with the
+      argument omitted only when `mode:` is absent
 
 Both are required, and neither is sufficient alone. (a) without (b) is a pointer nobody
 follows; (b) without (a) is a second copy of the rule, which is the defect this whole
@@ -59,6 +60,11 @@ RESUME_ONLY = (
 CALL = re.compile(r"spawn_agent\(")
 HEADLESS_CONDITION = re.compile(r"`?mode:`?[^\n]{0,40}headless|headless[^\n]{0,40}`?mode:`?")
 INTERACTIVE_FALSE = "interactive=false"
+#: The other direction. A site that passes only `false` leaves `mode: interactive` inert — a task
+#: that explicitly declared itself interactive flips to headless the moment the fleet default
+#: moves, and its omitted argument reports `mode_source=config`, making a wired spawn
+#: indistinguishable from an unwired one in the ledger.
+INTERACTIVE_TRUE = "interactive=true"
 #: The home must actually define the rule, not merely name it.
 HOME_DEFINES = ("does finishing this task raise questions mid-flight", "floor, not a tie-break")
 
@@ -116,6 +122,11 @@ def check(root):
             failures.append(f"{rel}: no `mode: headless` condition — the binding is missing")
         if INTERACTIVE_FALSE not in text:
             failures.append(f"{rel}: never passes `{INTERACTIVE_FALSE}` — the binding is inert")
+        if INTERACTIVE_TRUE not in text:
+            failures.append(
+                f"{rel}: never passes `{INTERACTIVE_TRUE}` — `mode: interactive` is unhonoured, "
+                f"so it flips with the fleet default and reports `mode_source=config`"
+            )
 
     home_path = root / MODE_HOME
     if not home_path.exists():
@@ -139,7 +150,8 @@ def main():
 
     print(
         f"  spawn-mode ok: {len(SPAWN_SITES)} sites reference {MODE_HOME} item 6 and bind "
-        f"`mode: headless`; {len(sites_with_calls)} new-worker call site(s) accounted for"
+        f"the mode both ways (`headless`→false, `interactive`→true); "
+        f"{len(sites_with_calls)} new-worker call site(s) accounted for"
     )
 
 
