@@ -208,12 +208,21 @@ def parse_started(rec):
         return None
 
 
-def resume_command(sid, title, chip):
-    """The resume recipe, copied from `commands/open.md` Step 3.1.
+def resume_command(sid, title, chip, cwd):
+    """The resume recipe, copied from `commands/open.md` Step 3.1, plus `--cwd`.
 
     A markdown command is not executable, so this is a deliberate copy — see the module
     docstring. The `unset` list matters: a resumed session that inherits the parent's
     messaging socket believes it is the parent.
+
+    `--cwd` is NOT in the copied recipe and must not be dropped from this one.
+    `wezterm cli spawn` otherwise inherits wezterm's own working directory — for a
+    server started from a home directory, `$HOME` — and Claude Code then stops on
+    *"Accessing workspace /Users/<user> — do you trust this folder?"* before it ever
+    registers a pid. Measured 2026-09-24: a restart of a session whose real cwd was
+    `~/Documents/Obsidian/Personal` resumed into `$HOME`, stalled on that dialog and
+    produced no registry entry, so a working kill+resume looked like a no-op. The
+    cwd comes from the registry record, read before the kill.
     """
     script = os.environ.get("CLAUDE_SCRIPT") or "claude"
     inner = (
@@ -221,7 +230,10 @@ def resume_command(sid, title, chip):
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
         f'exec "{script}" --resume {sid} -n "{title}" "/color \'{chip}\'"'
     )
-    return ["wezterm", "cli", "spawn", "--", "bash", "-lc", inner]
+    argv = ["wezterm", "cli", "spawn"]
+    if cwd:
+        argv += ["--cwd", cwd]
+    return argv + ["--", "bash", "-lc", inner]
 
 
 def main():
@@ -327,9 +339,25 @@ def main():
     )
     print(f"   role: worker · status: {status} · load path: {os.path.basename(load_path)}")
 
+    # The cwd the session must resume INTO. Read here, before the kill: a session
+    # resumed without its own cwd lands in wezterm's default working directory and
+    # stalls on Claude Code's workspace-trust dialog, registering no pid at all — so
+    # this is checked BEFORE signalling, never after. An unresumable session must not
+    # be killed, which is the whole reason the guard sits above `os.kill`.
+    cwd = (rec.get("cwd") or "").strip()
+
     if args.dry_run:
         print("   ✅ would kill the pid above and resume the same session id")
+        if cwd:
+            print(f"   ↪ would resume into {cwd}")
         return 0
+
+    if not cwd:
+        print(
+            f"❌ error: registry entry for {sid} carries no cwd, and resuming without "
+            "one strands the session on a workspace-trust dialog — refusing before the kill"
+        )
+        return 1
 
     try:
         os.kill(pid, 15)
@@ -355,7 +383,7 @@ def main():
     # the caller branches on this exit code to decide whether the worker is back.
     try:
         spawned = subprocess.run(
-            resume_command(sid, title, chip),
+            resume_command(sid, title, chip, cwd),
             capture_output=True, text=True, timeout=30,
         )
     except Exception as error:

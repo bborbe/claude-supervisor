@@ -40,6 +40,7 @@ def entry(sid, **over):
         "kind": "interactive",
         "name": "Some Worker",
         "startedAt": "2020-01-01T00:00:00Z",
+        "cwd": "/tmp",
     }
     rec.update(over)
     return rec
@@ -139,6 +140,39 @@ class ParseStarted(unittest.TestCase):
     def test_missing_and_garbage_are_none(self):
         for rec in ({}, {"startedAt": ""}, {"startedAt": "not-a-date"}):
             self.assertIsNone(rw.parse_started(rec), rec)
+
+
+class ResumeCommand(unittest.TestCase):
+    """The resume must carry the session's own cwd.
+
+    Regression, measured 2026-09-24: `wezterm cli spawn` without `--cwd` inherits
+    wezterm's own working directory — a home directory, for a home-started server — so
+    the resumed session stalled on Claude Code's *"do you trust this folder?"* dialog
+    and registered **no pid at all**. A working kill+resume therefore looked like a
+    no-op, and the failure was invisible to every test that did not actually restart a
+    session.
+    """
+
+    def test_cwd_is_passed(self):
+        argv = rw.resume_command("sid", "title", "pink", "/some/dir")
+        self.assertIn("--cwd", argv)
+        self.assertEqual(argv[argv.index("--cwd") + 1], "/some/dir")
+
+    def test_no_cwd_flag_when_empty(self):
+        self.assertNotIn("--cwd", rw.resume_command("sid", "title", "pink", ""))
+
+    def test_resume_target_and_unset_list_intact(self):
+        """The copied recipe's own invariants must survive the --cwd addition."""
+        inner = rw.resume_command("sid", "title", "pink", "/d")[-1]
+        self.assertIn("--resume sid", inner)
+        self.assertIn("-n \"title\"", inner)
+        for var in (
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_CHILD_SESSION",
+        ):
+            self.assertIn(var, inner)
 
 
 class LoadPathSelection(unittest.TestCase):
