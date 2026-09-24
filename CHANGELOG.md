@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.50.5
 
 - fix: **`mode: interactive` is now honoured, not only `mode: headless` — the field was inert in one direction.** PR #178 wired the mode decision to the spawn argument, but only for `headless`: a task carrying `mode: interactive` on disk spawned with the argument **omitted**, so the fleet config decided. The outcome looked correct because the config reads `interactive` — which is exactly why it went unnoticed: right for the wrong reason. Move `spawn.mode` to `headless` and every task that had *explicitly* declared itself interactive flips with it. The omitted argument also reports `mode_source=config`, **indistinguishable from a spawn site that never decided at all**, so no ledger measurement can separate a wired spawn from an unwired one — and #178's own SC3, which requires **0** `config`-sourced new-worker spawns, could not have passed by construction, since the same design says `headless` should be rare. `commands/open.md` § Step 3, `commands/manager-loop.md`, `commands/manager-spawn.md` and § Spawn a worker item 6 now pass the argument whenever `mode:` is present — `false` for `headless`, `true` for `interactive` — omitting it only when the field is absent. `scripts/check-spawn-mode.py` asserts **both** directions, so a one-directional site fails `make precommit`, and a regression test pins that case.
 
