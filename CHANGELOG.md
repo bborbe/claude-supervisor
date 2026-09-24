@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.48.0
 
 - fix: **drop four supervisor flags that no caller uses — `fleet-drive --dry-run`, `open --dir` / `open --dry-run`, `jump --oldest`, `who-needs-me --idle` — together with the script paths that implemented them.** Removing only the documentation would have left the flags working: `commands/jump.md` and `commands/who-needs-me.md` forward `$ARGUMENTS` into `scripts/jump.py` and `scripts/who-needs-me.py`, so `jump --oldest` and `who-needs-me --idle` are gone from both layers, including their consumers (`attention_queue`'s `oldest` parameter and its three call sites; `if a.idle:` and the idle listing). `fleet-drive` also loses the `dry-run: true|false` payload field, its `agents/fleet-drive.md` reader and the ledger gate that branched on it, so the command now takes no arguments — matching `/supervisor:worker-drive`. Two flags are deliberately **kept**: `jump --list` has a live caller (a gate-watcher loop in the `Manager Session` runbook) and `jump --dry-run` is the only non-mutating probe for jump's resolve/activate path. A zero-callers sweep across the repo, the vault and `~/.claude/commands/` found no remaining caller for anything removed.
 
