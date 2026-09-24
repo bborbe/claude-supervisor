@@ -56,6 +56,14 @@ Per task file, read the frontmatter (`status` / `phase` / `claude_session_id` / 
 
 **Keep the parse single-pass and bounded.** The tracked set can run to a hundred-plus files. Measured 2026-09-16: an `awk` scan over 123 tracked tasks was **OOM-killed mid-sweep** and had to be recovered with a single-pass Python read — the tick ran 192 s against a ~60 s baseline. Read each file once, extract what you need in that pass, and never build an unbounded intermediate structure over the whole set.
 
+**Record each task file's mtime in that same pass.** The `stuck` rows carry it to the caller (step 8, section 6) so the act leg can tell a task that moved since your read from one that did not — the freshness bound the nudge path needs, and the reason a candidate's staleness never rests on your classification alone. Read it with a **`PATH`-independent** command, never a bare `stat` flag:
+
+```bash
+python3 -c "import os,sys;print(int(os.path.getmtime(sys.argv[1])))" <task-file>
+```
+
+The BSD `stat -f %m` and GNU `stat -c %Y` spellings are not interchangeable, and this host hands different sessions different `stat` binaries, so each bare flag fails in exactly the sessions the other one serves — the same reason `agents/manager-drive.md` clause 7 gives for the transcript mtime. **Fail closed:** a read that does not yield exactly one integer on stdout with exit `0` is not a reading. Report that row with no mtime rather than with a wrong one — the act leg treats a missing mtime as un-checkable and says so, which is the safe direction.
+
 3. **Extract the full id set — unanchored**
 
 **`claude_session_id` plus every id in `metrics_sessions`.** The frontmatter id is not guaranteed to be the worker's — a task's field can hold a task-creator subagent's transcript id while the real worker runs under a different one, so a set that misses an id reads the wrong session as dead. Any id in the set is a candidate owner.
@@ -179,6 +187,7 @@ Plain markdown, in this order, omitting empty sections:
 3. **Orphan candidates** — one line per task: the task name, its full id set, and why it is a candidate. Never the word `ORPHANED` as a verdict.
 4. **Live collisions** — one line per id: the id, the non-terminal carrier count, and the task names.
 5. **Delta** — against the prior snapshot: buckets that moved, Progress entries added, problems appeared. `no change` when nothing moved — that is a real finding, not a failure to find one.
+6. **`stuck` rows and the mtime you observed** — one line per task you classified `stuck`: the task name, then the task-file mtime from step 2 as a bare epoch second (e.g. `1758729600`). The act leg re-reads that mtime before it nudges and drops any candidate whose file has moved since, so **a row sent without its mtime cannot be freshness-checked at all** — say so on the line rather than leaving it blank, because a blank and a zero look alike to a reader that parses the number. Omit the section entirely when no task was classified `stuck`.
 
 </process>
 
