@@ -188,7 +188,7 @@ def render(doc, link=True):
     return "\n".join(out)
 
 
-def main(argv=None):
+def main():
     print(render(json.load(sys.stdin), link=links_enabled()))
     return 0
 
