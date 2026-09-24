@@ -147,9 +147,11 @@ Measured 2026-09-20: `Rebuild Nuke Cluster - 2026W38-sun` and `Complete Rsync Ba
 
 ## Step 0.6 — Classify and fill the missing `role` and `mode`
 
+⚠️ **This step runs on EVERY open — the batch and the single-task path alike — and until 2026-09-24 it ran only on the batch.** Step 0.5 routes `--flagged` through here before Steps 1–4, but a bare `/supervisor:open "<task>"` went straight to Step 1 with no classification at all: its `mode:` was never decided, so Step 3 omitted the argument and the fleet config picked the tab. Measured 2026-09-23 — **63 new-worker spawns in one day and 0 of them headless**, 57 of them sourced from `config` rather than from any decision. **On the single-task path, every "selected row" below is simply the one resolved task.**
+
 **A missing `role:` is a question to answer, not a row to drop.** Refusing every unroled row is what this section replaced on 2026-09-21. The strict default was right in principle and unsatisfiable in practice — measured that morning, **1 of 4281 task files in `25 Tasks/` carried a `role:` field at all**, and its value was `human`. Zero said `agent`. So the gate refused all ten flagged rows and the batch opened nothing — and would have done so every day, for every task, until the field appeared by some other means. A criterion nothing can satisfy is broken, not strict.
 
-Resolve each selected row in this order:
+Resolve the task in this order — each selected row on the batch path, the single resolved task otherwise:
 
 1. **`role:` present** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once.
 2. **`role:` absent** → classify it now from the task's **body**, then write the result.
@@ -167,23 +169,17 @@ Everything else is `agent`. A task naming `kubectl`, `ssh` or a deploy is still 
 
 ⚠️ **Classify from the BODY, never from the title or the frontmatter.** `Aquascape PWC` reaches this selector as flagged + `in_progress` + due today with no live session — the exact signature of unowned work the spawn mandate acts on — and its title, its frontmatter and its status all read like any other row. Measured 2026-09-20: it was caught **only** because a manager read the body and saw an aquarium water change. The title carries none of that; the first line of the body carries all of it.
 
-### Then decide `mode` — and fall back to `interactive` whenever it is unclear
+### Then decide `mode` — the rule lives in one place, and this is not it
 
-**`role` is resolved first, because it settles most of the mode question by itself:**
+**The classifier is not restated here.** It has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker **item 6** — the classifying question, the `role` → `mode` mapping, what positive evidence looks like, and the asymmetry that makes `interactive` a floor rather than a tie-break. Read it there.
 
-| resolved `role` | `mode` |
-|---|---|
-| `human` | **`interactive`, always.** A person needs a screen; there is nothing to decide. |
-| `manager` | **`interactive`, always.** A manager is a long-lived tab the operator jumps to. |
-| `agent` | the only open case — decide it below |
+What this file owns is the **storage and the write**: resolve `mode` per that rule, write the field, and read it back at Step 3.
 
-**For an `agent` row, write `headless` only on positive evidence that the task never needs a human mid-flight.** Everything else is `interactive`. This is not a tie-break, it is a floor: *unclear* is not a category that resolves to headless, and neither is *probably fine*.
+```bash
+vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
+```
 
-⚠️ **The fallback is asymmetric on purpose, and the asymmetry is measured.** A wrongly-`interactive` task costs one idle tab the operator closes. A wrongly-`headless` one burns a whole session on gates nobody can answer — 2026-09-20: two workers stranded, four gates expired across three workers in ~90 minutes. The operator's own framing, 2026-09-21: *a session that needs interaction and is headless is hard to manage.* So the cost of guessing wrong is not symmetric, and the default must lean to the cheap failure.
-
-**What positive evidence actually looks like** — the task runs a fixed procedure end to end, decides nothing a human would want to weigh in on, and has no approval step, no triage judgement, and no “ask if unsure” in its own body. **Expect this to be rare.** Most recurring work in this vault triages, files, or decides something: an inbox sweep judges what is actionable, an alert check judges what to silence. Those are `interactive`, and a classifier that finds many headless rows is mis-reading the bodies, not finding an optimisation.
-
-⚠️ **Never derive mode from operational weight.** `kubectl`, `ssh`, `make apply` and `gh pr merge` say a task is *worth watching*, not that it *cannot run unattended* — and they say nothing at all about the reverse case, which is the dangerous one: `Cleanup Email Inbox` names no infrastructure command and still needs a human. That inverted proxy is exactly why the keyword derivation was deleted; do not rebuild it under a new field name.
+⚠️ **A restated copy of the rule is not a harmless comment — it is a second counter.** Until 2026-09-24 this section *was* the rule's only home, and the mirror-image defect followed: the other spawn sites never read it, so they fell through to the fleet config — measured 2026-09-23, 63 new-worker spawns in one day and 0 of them headless. Keep it in one place.
 
 **Write both values before opening anything:**
 
@@ -194,7 +190,7 @@ vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 
 Writing them is the point, not a side effect. The next batch reads the fields instead of re-deciding, so one task cannot be classified one way today and the other way tomorrow. It also makes the call reviewable — a wrong value is visible on disk and the operator corrects it with that same one-line command.
 
-**`mode` is consumed, not merely recorded.** Step 3 passes `interactive=false` to `spawn_agent` when and only when the field reads `headless`; an absent field means the argument is omitted and the fleet config decides. A field this command writes and the spawn ignores would be the deleted mode column wearing a different hat.
+**`mode` is consumed, not merely recorded.** Step 3 passes `interactive=false` to `spawn_agent` when and only when the field reads `headless`; an absent field means the argument is omitted and the fleet config decides. A field this command writes and the spawn ignores would be the deleted mode column wearing a different hat. **Where the value comes from is not restated here** — the classifier's single home is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6.
 
 ⚠️ **A machine-written role is indistinguishable from an operator-written one on disk.** Nothing in the frontmatter records who decided. So **print every auto-filled row distinctly** (`🏷️ filled now`) instead of folding it into the opened count. That report line is the only provenance this decision has, and it exists for exactly one read — the first one, while objecting is still cheap.
 
@@ -382,7 +378,7 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 **Do NOT pass `interactive` here — unless the task file itself declares `mode:`. Otherwise the fleet default decides, and it lives in a file.** The server resolves `SUPERVISOR_SPAWN_MODE`, then `spawn.mode` in `~/.config/claude-supervisor/config.json`, then its built-in `interactive`. Passing the argument in this file is exactly what made the config unreachable before: on 2026-09-18 every manager hardcoded `interactive=false`, so changing the fleet's mode meant editing N command files and course-correcting every manager already running — three kills, seven more workers found under two other managers, and a WezTerm restart. Omit it and the operator changes the whole fleet with one edit. The spawn response reports `mode_source` (`argument`/`env`/`config`/`default`) if you need to know which source decided.
 
-**The one carve-out: pass `interactive=false` when, and only when, the task's own frontmatter says `mode: headless`.** An absent `mode:` still means *omit the argument entirely* — not *pass interactive* — so the config keeps deciding for every task that has not opted out. That is what preserves the one-place-to-change property while letting a single task override it. A `mode:` the spawn never reads would be the same defect as the deleted column: **a display shaped like a control.** If this file writes the field, this file must also honour it.
+**The one carve-out: pass `interactive=false` when, and only when, the task's own frontmatter says `mode: headless`.** An absent `mode:` still means *omit the argument entirely* — not *pass interactive* — so the config keeps deciding for every task that has not opted out. That is what preserves the one-place-to-change property while letting a single task override it. A `mode:` the spawn never reads would be the same defect as the deleted column: **a display shaped like a control.** If this file writes the field, this file must also honour it. The rule that *produces* the value is not restated here — it has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6; this line is only the consumption.
 
 ⚠️ **Writing `mode: headless` today opens a worker into a mechanism with two known, measured defects** — its gates park with the spawning session's server and no one else can answer them, and the resume guard does not guard (a mid-turn headless worker can be resumed, putting two writers on one conversation). That is the standing argument for the interactive fallback being aggressive rather than polite. The operator's own position, recorded in the open-items ledger: headless becomes useful *at the point that permission prompts and questions can be answered remotely*. Until then, `headless` should be rare and never a guess.
 
