@@ -146,29 +146,63 @@ def role_of(sid, name, fb, index, slugs, colours):
     return "worker"
 
 
+def _version_key(name):
+    """Sort key for a version dir name, numeric so `0.52.0` sorts above `0.51.2`.
+
+    A non-numeric segment sorts below any numeric one, so a stray directory cannot
+    win the comparison by accident. Segments of the same kind always compare as the
+    same type, so no comparison can raise.
+    """
+    return [(1, int(p)) if p.isdigit() else (0, p) for p in name.split(".")]
+
+
 def newest_load_path():
-    """`(path, mtime)` for the newest load-path version dir, or `(None, None)`."""
-    best, best_mtime = None, None
+    """`(path, mtime)` for the newest load-path version dir, or `(None, None)`.
+
+    Selected by VERSION, never by directory mtime. Two versions installed in one
+    operation get near-identical mtimes and the tie falls either way — measured
+    2026-09-24: `0.51.2` and `0.52.0` differed by 3ms with the **older** one later,
+    so an mtime-max picked `0.51.2` and precondition 4 then compared the session
+    against the wrong copy, refusing a restart that should have been allowed. That
+    is the check failing in the direction that hides a real fix.
+
+    The version is the authority for *which copy is newest*; that directory's own
+    mtime is still what answers *was it installed after this session started*.
+    """
+    candidates = []
     for path in glob.glob(os.path.join(LOAD_PATH_ROOT, "*")):
         if not os.path.isdir(path):
             continue
         try:
-            mtime = os.path.getmtime(path)
+            candidates.append(
+                (_version_key(os.path.basename(path)), path, os.path.getmtime(path))
+            )
         except OSError:
             continue
-        if best_mtime is None or mtime > best_mtime:
-            best, best_mtime = path, mtime
-    return best, best_mtime
+    if not candidates:
+        return None, None
+    _, best, mtime = max(candidates, key=lambda candidate: candidate[0])
+    return best, mtime
 
 
 def parse_started(rec):
-    """The session's start time as an epoch float, or `None` when unparseable."""
+    """The session's start time as an epoch float, or `None` when unparseable.
+
+    `startedAt` is **milliseconds** since the epoch in the live registry — measured
+    2026-09-24: `1790269714645` — while an ISO string is seconds. A bare `float(raw)`
+    therefore reads a millisecond value as a date some 57,000 years out, and every
+    comparison against a filesystem mtime then fails: precondition 4 refuses *every*
+    restart unconditionally, which is the check failing in the direction that hides
+    real fixes. The unit is detected by magnitude — anything past `1e11` is
+    milliseconds, a figure seconds-since-epoch does not reach this century.
+    """
     raw = rec.get("startedAt") or rec.get("procStart")
     if not raw:
         return None
     try:
         if isinstance(raw, (int, float)):
-            return float(raw)
+            value = float(raw)
+            return value / 1000.0 if value > 1e11 else value
         return datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
     except Exception:
         return None
