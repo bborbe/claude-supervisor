@@ -438,7 +438,7 @@ DROVE (<n> actions, run #<runs> on this task):
 - <action> → <observed result>
 - <action> → <observed result>
 
-STOPPED: <one of the four hard stops, named>
+STOPPED: <one of the five hard stops, named>
 Blocker:  <name> — count <n>, rung <n>  (or: none)
 Levers tried this run: <lever> · <lever>
 Criteria audit: <n> unfinishable-by-construction found — <verdict>  (omit if not run)
