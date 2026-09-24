@@ -85,7 +85,13 @@ The caller owns the **verdict**; you receive orphans it has already confirmed. T
 - **not shared**: no id in this task's set appears in any other tracked task's set this run;
 - **not on roster**: no roster entry's *name* matches the task name;
 - **transcript stale**: `find ~/.claude/projects -name "<session_id>.jsonl"` exists and its mtime (`stat -f %m`) is older than **10 min** — dead, not merely quiet;
-- **not terminal**: `status` not `completed`/`aborted`.
+- **not terminal**: `status` not `completed`/`aborted`;
+- **not blocked**: every entry in the task's `blocked_by` list is terminal (`status: completed`). Counted by the canonical rule — a task is blocked while **at least one** named blocker is not `completed`, so an `aborted` blocker counts as non-terminal, since it will never complete. A blocker whose file is missing, unreadable, or carries no parseable `status` counts as **not** completed;
+- **not deferred**: `defer_date` is absent, or names a date that has already passed. **Both stored shapes must parse** — the quoted `"YYYY-MM-DD"` and the unquoted RFC3339 datetime (`2026-09-26T00:00:00Z`) that vault-cli writes when the scalar is left unquoted. A `defer_date` that is present but unparseable **blocks** the resume and is reported by name — never read as absent.
+
+⚠️ **The last two clauses read declarations that already existed and were being ignored.** `blocked_by` is a real, populated list field and `defer_date` is carried by a large set of in-progress tasks; both already mean *not now*, both are machine-readable, and `65 Runbooks/Manager Session.md` § Step 4's ready-to-start bucket already computes `blocked_by`. Before these clauses the gate resumed a deliberately blocked or deferred orphan **against its own declaration** — measured 2026-09-24 on a real tracked task that held all eight of the clauses above while carrying a `defer_date` two days in the future. The fix is a clause, not a new field: adding one would have created a third way to say *not now* that nothing else writes, which is how the fact ended up in manager prose in the first place.
+
+⚠️ **A near-miss is the useful line here.** When the gate fails on `not blocked` or `not deferred`, name the clause **and the declaration that triggered it** — which blocker, or which date — so the caller's table row distinguishes "waiting on a dependency" from "waiting on a clock" from "dead".
 
 ⚠️ **`pgrep -f` and `ps -eo pid,args` are not OS-truth — they can confirm life, never death.** Both read a command line, and a live Claude Code session usually carries its id in none. Measured 2026-09-22 and re-measured 2026-09-23: three live sessions read `pgrep` **0** and `ps` **0** while each held a registry entry against a running pid; on 2026-09-22 the documented gate would have resumed two live workers, and only the server's own resume guard refused. `pgrep -f` also reads a false empty for a session in your own ancestor chain (2026-09-15: 2 hits under `ps`, 0 under `pgrep`). So: argv hit → alive; argv empty → **indeterminate**; the death verdict rests on **registry absence plus transcript staleness**, never on an empty argv read.
 
@@ -117,7 +123,7 @@ then print `♻️ AUTO-RESUMED: <task>` and one TTS (voice-mode gated).
 
 **Crash-loop cap:** if the task's `last_auto_resume` is less than **30 min** old → do **NOT** spawn a second resume. Escalate instead — `⚠️ CRASH-LOOP: <task> — died again within 30 min, not re-spawning` plus TTS (voice-mode gated). One auto-resume per task per 30-min window.
 
-**Parked / terminal / `hold` → never auto-resumed.** Keep the `ORPHANED` row and say so; the caller recommends restart or `mark hold`.
+**Parked / terminal / `hold` / blocked / deferred → never auto-resumed.** Keep the `ORPHANED` row and say so, naming which of the five it is; the caller recommends restart or `mark hold`. A blocked or deferred task is **deliberately waiting**, not dead — do not recommend `mark hold` for it, since `hold` means *no resume date* and a `defer_date` is a date.
 
 4. **Return the action lines**
 
@@ -165,7 +171,7 @@ Escalated (1):
 <success_criteria>
 - **Reaping ran to completion before any nudge or resume was attempted.** A run that nudged a task it later reaped has violated the one ordering constraint in this file.
 - Every reap decision is backed by the three disk reads — `status`, `phase`, open-box count — taken **this run**, never from a session's claim or its colour.
-- Every auto-resume names all eight gate clauses, and any clause that failed is quoted with the value that failed it.
+- Every auto-resume names all **ten** gate clauses, and any clause that failed is quoted with the value that failed it — including which blocker or which date.
 - Every spawn was preceded by a re-probe at the spawn site in the same shell, and a positive re-probe aborted without writing `last_auto_resume`.
 - `last_auto_resume` was written only through `vault-cli task set`, only on an actual resume.
 - No task was resumed that was parked, terminal, `hold`, shared-id, or roster-present.

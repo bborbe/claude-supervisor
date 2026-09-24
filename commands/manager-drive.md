@@ -99,7 +99,7 @@ json.dump(rec,open(os.path.join(d,os.environ['CLAUDE_CODE_SESSION_ID']+'.json'),
 
    `Task(subagent_type: "supervisor:manager-drive", prompt: <subject + tracked set + classification + confirmed orphan verdicts + roster + vault + timestamp>)`
 
-   It reaps, then nudges, then runs the auto-resume gate, and returns the action lines. Its rules — the reap test, the eight gate clauses, the re-probe-at-spawn-site rule, the crash-loop cap — live in `agents/manager-drive.md` and are not restated here.
+   It reaps, then nudges, then runs the auto-resume gate, and returns the action lines. Its rules — the reap test, the ten gate clauses, the re-probe-at-spawn-site rule, the crash-loop cap — live in `agents/manager-drive.md` and are not restated here.
 
 5. **Print what came back, voice the nudges, and escalate.** Reproduce the agent's action lines verbatim, including its `Not resumed` and `Escalated` sections — a near-miss clause is the most useful line in the report. **Voice the `Nudged` lines** with `mcp__tts__say` (voice-mode gated): the agent owns the message, you own the voice, because a subagent has no TTS. Then the operator-facing tail: any gate that needs their decision goes out as **`/supervisor:jump <pane-id>`**, never as a command for them to run here (the approval belongs to the session that raised it).
 
