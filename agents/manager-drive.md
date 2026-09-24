@@ -24,7 +24,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 - ALWAYS verify reaping against **disk this run**: `status: completed`, `phase: done`, zero open boxes. Never against the session's own claim, and never against its colour.
 - ALWAYS treat a **deliberately-open Self-Review box as NOT complete**. The `grep -c` is what separates the two cases, and ticking a box to pass the gate is never the fix.
 - ALWAYS re-probe liveness **at the spawn site**, immediately before spawning, and spawn in the same shell. A probe minutes earlier is not a claim.
-- ALWAYS record `last_auto_resume` through `vault-cli task set` — never by editing the task file directly.
+- ALWAYS record `last_auto_resume` through `vault-cli task set` — never by editing the task file directly — and only **after** the spawn verifiably took (a session-registry entry exists for the resumed id). A refused, errored or aborted spawn writes nothing.
 - NEVER act on a task the caller did not pass you. Membership is declared; it is not yours to widen.
 - NEVER auto-resume a parked, terminal or `hold` task. Those stay reported, never spawned.
 - NEVER resume on a shared id, or when any id in the set has a live process.
@@ -113,13 +113,21 @@ Then **re-probe at the spawn site and spawn in one shell** — the earlier probe
 
 **Residual, and do not overstate what this buys:** the re-probe narrows the window to the gap between two adjacent commands; it does not close it. Closing it needs a claim the *spawned* process holds, so a second actor is refused by the kernel rather than by timing. That primitive exists — vault-cli's per-session flock (`~/.claude/session-locks/<session_id>.lock`), shipped in `v0.118.1` — but this spawn shape and the Vault UI's `_build_resume_command` both bypass it. Treat the re-probe as a narrowing, not a guarantee.
 
-Gate holds and the re-probe is clean →
+Gate holds and the re-probe is clean → **spawn first, stamp second.** Spawn per `docs/fleet-surface.md` § Spawn a worker, then confirm the resume verifiably took — the registry carries an entry for the resumed id against a **running** pid:
+
+```bash
+grep -l "<session_id>" ~/.claude/sessions/*.json   # → <pid>.json; then confirm ps -p <pid>
+```
+
+Only then record the timestamp:
 
 ```bash
 vault-cli task set "<task>" last_auto_resume "<ISO8601>"
 ```
 
 then print `♻️ AUTO-RESUMED: <task>` and one TTS (voice-mode gated).
+
+⚠️ **The stamp follows the spawn, never precedes it.** Written first, it arms the 30-min crash-loop cap against a resume that never happened: the next sweep reads the task as *recently retried* and withholds the retry it actually needs. A refused, errored or aborted spawn leaves `last_auto_resume` **byte-identical** to its pre-attempt value — the record must describe an act that occurred, never one that was attempted.
 
 **Crash-loop cap:** if the task's `last_auto_resume` is less than **30 min** old → do **NOT** spawn a second resume. Escalate instead — `⚠️ CRASH-LOOP: <task> — died again within 30 min, not re-spawning` plus TTS (voice-mode gated). One auto-resume per task per 30-min window.
 
@@ -136,7 +144,7 @@ One compact report — see `<output_format>`. You do not render the status table
 - **A task matches the reap test but has a live session** → still reap (send the evidence). The worker being alive is why the message is sent rather than nothing; it is not a reason to skip.
 - **The gate fails on exactly one clause** → name the clause and the value you read. A near-miss is the most useful line in the report; "not resumed" alone is not.
 - **`claude_script` resolves empty** → print `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` as its own line, and name that as the reason the branch was skipped. Never let it read as a failed gate clause: the gate held, and the launcher is the thing that is missing.
-- **A spawn is refused** → report the refusal verbatim. Under `auto` the refusal is the **caller's** own outgoing call being gated, not a block on the worker; the caller fixes it with Shift+Tab → `accept edits`. Do not respond by changing a mode — `spawn_agent` has no such argument.
+- **A spawn is refused, errors, or aborts** → this branch is **terminal**. Report the refusal verbatim under **`Not resumed`** (or `Escalated` when it needs the caller's hand), spawn **nothing further**, and **write no `last_auto_resume`**. Never fall back to the other path, to a different `cwd`, or to `interactive: false` — a fallback is a resume the gate did not authorise, and it lands a worker in the caller's directory with no pane and its prompt parked on the manager, under a stamp recording a resume that never took. Name which of the two refusal kinds it is: the **tool's own `{error}`** — the server re-probed liveness with a stronger instrument and refused, so the resume did not happen — or the **caller's own outgoing call being gated under `auto`** (`[Create Unsafe Agents]` / `[Auto-Mode Bypass]`), which is not a block on the worker and which the caller fixes with Shift+Tab → `accept edits`. Do not respond by changing a mode — `spawn_agent` has no such argument.
 - **A tool in `tools:` did not bind** — e.g. no `mcp__supervisor__*` namespace in this session, which is a real configuration state rather than a bug of yours — → say so explicitly and report the decisions you would have made, per task. Never let the report read as though the acts happened.
 - **This file and the runbook disagree** → the runbook wins. Report the disagreement as a bug.
 </error_handling>
@@ -157,9 +165,10 @@ Nudged (1):            ← the caller voices these; a subagent has no TTS
 Resumed (1):
   ♻️ AUTO-RESUMED: <task> — ids <a,b> both dead (no registry entry; argv 0), transcript stale 634 min
 
-Not resumed (2):
+Not resumed (3):
   <task> — gate fails on: transcript stale (mtime 3 min ago) — alive, merely quiet
   <task> — gate fails on: not shared — id <x> also on <task B>, neither resumed
+  <task> — spawn refused: <refusal verbatim> — no fallback spawned, last_auto_resume untouched
 
 Escalated (1):
   ⚠️ CRASH-LOOP: <task> — last_auto_resume 12 min ago, not re-spawning
@@ -173,7 +182,7 @@ Escalated (1):
 - Every reap decision is backed by the three disk reads — `status`, `phase`, open-box count — taken **this run**, never from a session's claim or its colour.
 - Every auto-resume names all **ten** gate clauses, and any clause that failed is quoted with the value that failed it — including which blocker or which date.
 - Every spawn was preceded by a re-probe at the spawn site in the same shell, and a positive re-probe aborted without writing `last_auto_resume`.
-- `last_auto_resume` was written only through `vault-cli task set`, only on an actual resume.
+- `last_auto_resume` was written only through `vault-cli task set`, and only **after** a resume verified against the session registry — a refused, errored or aborted spawn left it byte-identical to its pre-attempt value.
 - No task was resumed that was parked, terminal, `hold`, shared-id, or roster-present.
 - No message sent to a worker asserts that a gate is cleared; every reap message states it is non-authorising and that the operator has not answered.
 - No TTS call was attempted, and no report line implies one happened — the voice half belongs to the caller, because a subagent has no TTS.

@@ -237,6 +237,14 @@ system."* That constraint is **phase-scoped, not permanent**; do not delete path
 of it. Under it a proven-dead session resumes via **B**, exactly as an indeterminate one does.
 The row's preference for A is a preference, not a requirement, and it is the only row affected.
 
+⚠️ **A refused path is terminal — never fall back to the other one.** If the chosen path's spawn
+is refused, the resume did not happen: report the refusal and stop. Falling back from B to A (or
+A to B) is not a retry — it is a **second resume the gate never authorised**, and it lands a
+worker in the caller's directory with no pane, its prompt parked on the manager, under a stamp
+that now records a resume that never took. The refusal is the safe direction and it is the
+design: path A already refuses `resume` + `interactive:true` rather than silently downgrading it,
+and a refused resume costs one sweep where a wrong-path spawn corrupts a conversation.
+
 **2 — Drive, by cause of death:**
 
 | The session died… | Then |
