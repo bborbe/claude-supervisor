@@ -16,6 +16,7 @@ import { isAbsolute, join } from 'path'
 import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
+import { runAgentLoop } from './agent-loop.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
@@ -777,46 +778,11 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
   })
   agent.query = q
 
-  ;(async () => {
-    try {
-      for await (const message of q) {
-        agent.transcript.push(message)
-        // The session id arrives with init, which is the first moment a headless
-        // worker's ledger record can be filed — unlike a tab worker it has no registry
-        // name to be found by, so this is the only place the key exists.
-        if (message.type === 'system' && message.subtype === 'init') {
-          agent.sessionId = message.session_id
-          writeLedger(agent)
-        }
-        if (message.type === 'result') {
-          agent.result = {
-            subtype: message.subtype,
-            is_error: message.is_error ?? false,
-            result: typeof message.result === 'string' ? message.result.slice(0, 4000) : undefined,
-            num_turns: message.num_turns,
-            // Omitted rather than reported-and-disclaimed. A README caveat does not
-            // travel with the value: a manager reading this response sees a confident
-            // number describing a billing model its traffic never touched. Absence does
-            // travel. Present only when the worker reached Anthropic itself — see
-            // costFiguresMeaningful in config.mjs.
-            ...(config.costFiguresMeaningful ? { total_cost_usd: message.total_cost_usd } : {}),
-            permission_denials: message.permission_denials?.length ?? 0,
-          }
-          agent.status = message.is_error ? 'error' : 'done'
-          writeLedger(agent, {
-            status: agent.status,
-            ended_at: new Date().toISOString(),
-            result: agent.result,
-          })
-        }
-      }
-      if (agent.status === 'running') agent.status = 'done'
-    } catch (error) {
-      agent.status = 'error'
-      agent.error = String(error)
-      log(`agent ${id} threw: ${error}`)
-    }
-  })()
+  // Fire-and-forget on purpose: a spawn must return its agent id without waiting for
+  // the worker's first turn. The loop itself lives in agent-loop.mjs so a test can
+  // drive it with a synthetic stream and await its completion — this module cannot be
+  // imported by a test at all, since it connects a stdio server at load.
+  void runAgentLoop({ q, agent, writeLedger, log })
 
   return {
     agent_id: id,
