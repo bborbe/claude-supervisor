@@ -15,7 +15,15 @@ in production:
     previous join was done in prose and could miss a session without saying so.
     `coverage_errors()` is the positive control, and
     `test_coverage_control_fails_on_a_dropped_row` proves it can fail — a control
-    that has never failed is indistinguishable from one that cannot.
+    that has never failed is indistinguishable from one that cannot. The tree adds
+    a second place a row can vanish (`build_tree` returning fewer ids than it was
+    given), so `tree_errors()` carries its own positive control.
+
+  * **The grouping rules 1-4 put each session under the right parent.** The four
+    rules are the whole point of the tree, and every one of them can be skipped by
+    an implementation that still renders a plausible-looking board: drop the goal
+    chain and everything lands under the root; drop the colour signal and every
+    manager becomes a worker. The fixtures below make each rule observable.
 
 The fixtures are `constructed`: hand-written to exercise the branches, carrying no
 claim about the live fleet. The live claims belong to `# Results` on the task page,
@@ -34,6 +42,15 @@ _SCRIPT = os.path.join(os.path.dirname(_HERE), "fleet-board.py")
 _spec = importlib.util.spec_from_file_location("fleet_board", _SCRIPT)
 fb = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(fb)
+
+# The renderer, imported the same way, so the no-wrap assertion is made against
+# the thing that actually draws the box rather than a second width model that
+# could disagree with it.
+_BSpec = importlib.util.spec_from_file_location(
+    "box_table", os.path.join(os.path.dirname(_HERE), "box-table.py")
+)
+bt = importlib.util.module_from_spec(_BSpec)
+_BSpec.loader.exec_module(bt)
 
 CWD = "/Users/x/Documents/Obsidian/Personal"
 
@@ -184,6 +201,240 @@ class TestCoverageControl(unittest.TestCase):
         never treated as a coverage failure and never asserted equal."""
         fresh = self.fresh | {"ccccdddd-0000-0000-0000-000000000099"}
         self.assertEqual(fb.coverage_errors(self.row_ids, self.registry_ids, fresh), [])
+
+
+def _group_index():
+    """A `constructed` vault: two topics, two goals, one goal owned by a topic.
+
+    `constructed` — hand-written to exercise the branches, carrying no claim about
+    the live vault. The live claims belong to `# Progress` on the task page, which
+    quotes a real run against the real vault.
+    """
+    return fb.VaultIndex(
+        topics=["Manager Layer", "Attention Routing"],
+        goals=[
+            "A Manager Sweep Costs Nothing When Nothing Changed",
+            "The Operator Never Opens a Worker Tab to Answer a Question",
+        ],
+        task_titles=["Some Task", "Deep Task", "Goal-Less Task"],
+        task_goals={
+            "some task": ["The Operator Never Opens a Worker Tab to Answer a Question"],
+            "deep task": ["A Manager Sweep Costs Nothing When Nothing Changed"],
+        },
+        goal_topics={
+            "the operator never opens a worker tab to answer a question": ["Manager Layer"],
+            "a manager sweep costs nothing when nothing changed": ["Manager Layer"],
+        },
+    )
+
+
+# `constructed` — one session per rule, plus the two specificity cases.
+GROUP_REGISTRY = {
+    _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+    _sid(2): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+    _sid(6): {"status": "idle", "name": "Orange One", "cwd": CWD},
+    _sid(7): {"status": "idle", "name": "A Manager Sweep Costs Nothing When Nothing Changed", "cwd": CWD},
+    _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+    _sid(8): {"status": "idle", "name": "Deep Task", "cwd": CWD},
+    _sid(4): {"status": "idle", "name": "Goal-Less Task", "cwd": CWD},
+    _sid(5): {"status": "idle", "name": "Unstamped Session", "cwd": CWD},
+}
+GROUP_TITLES = {_sid(3): ["Some Task"], _sid(8): ["Deep Task"], _sid(4): ["Goal-Less Task"]}
+GROUP_COLOURS = {_sid(6): "orange"}
+GROUP_AGES = {sid: 5.0 for sid in GROUP_REGISTRY}
+
+
+def _grouping():
+    return fb.build_grouping(GROUP_REGISTRY, _group_index(), GROUP_COLOURS, set(), GROUP_TITLES)
+
+
+def _group_rows():
+    g = _grouping()
+    rows, _ = fb.build_rows(GROUP_REGISTRY, set(), set(), GROUP_TITLES, GROUP_AGES, grouping=g)
+    return g, rows
+
+
+class TestGroupingRules(unittest.TestCase):
+    """Design rules 1-4 — each one observable, so none can be silently skipped."""
+
+    def test_rule_1_the_root_is_the_fleet_manager(self):
+        g = _grouping()
+        self.assertEqual(g.role_of(_sid(9)), "manager")
+        self.assertIsNone(g.parent_of(_sid(9)), "the root answers to nobody")
+
+    def test_rule_1_a_name_resolving_to_a_topic_page_is_a_manager(self):
+        self.assertEqual(_grouping().role_of(_sid(2)), "manager")
+
+    def test_rule_1_colour_alone_makes_a_manager(self):
+        """The signal that catches a manager whose subject cannot be resolved.
+
+        Without it every subject-less manager reads as a worker — the whole class
+        the tree exists to make visible.
+        """
+        g = _grouping()
+        self.assertEqual(g.role_of(_sid(6)), "manager")
+        self.assertIsNone(g.subject_of(_sid(6)), "orange proves a manager, not its scope")
+
+    def test_rule_2_the_goal_chain_nests_a_worker_under_its_manager(self):
+        """goal -> topic listing that goal -> the live manager for that topic."""
+        g = _grouping()
+        self.assertEqual(g.role_of(_sid(3)), "worker")
+        self.assertEqual(g.parent_of(_sid(3)), _sid(2))
+
+    def test_rule_2_a_manager_whose_subject_is_the_goal_beats_the_topic(self):
+        """Both a goal-subject manager and its topic's manager exist; the goal is
+        the more specific parent and must win."""
+        g = _grouping()
+        self.assertEqual(g.parent_of(_sid(8)), _sid(7))
+
+    def test_rule_3_a_goal_less_worker_goes_under_the_root(self):
+        g = _grouping()
+        self.assertEqual(g.role_of(_sid(4)), "worker")
+        self.assertEqual(g.parent_of(_sid(4)), _sid(9))
+
+    def test_rule_3_a_goal_with_no_live_manager_goes_under_the_root(self):
+        """The chain resolves but no manager is live to own it, so the fleet layer
+        does — a worker is never left parentless."""
+        without = {k: v for k, v in GROUP_REGISTRY.items() if k != _sid(2)}
+        g = fb.build_grouping(without, _group_index(), GROUP_COLOURS, set(), GROUP_TITLES)
+        self.assertEqual(g.role_of(_sid(3)), "worker")
+        self.assertEqual(g.parent_of(_sid(3)), _sid(9))
+
+    def test_rule_4_no_task_file_is_unmanaged(self):
+        g = _grouping()
+        self.assertEqual(g.role_of(_sid(5)), "unmanaged")
+        self.assertEqual(g.parent_of(_sid(5)), "unmanaged")
+
+    def test_rule_4_does_not_swallow_a_manager(self):
+        """A manager carries no task stamp either; detection runs first, so the
+        root and every orange manager stay out of `Unmanaged`."""
+        g = _grouping()
+        for sid in (_sid(9), _sid(2), _sid(6), _sid(7)):
+            self.assertEqual(g.role_of(sid), "manager", sid)
+
+
+class TestManagerSubject(unittest.TestCase):
+    """The two sources, in order — and the one signal that is banned."""
+
+    def test_source_one_resolves_through_the_loop_record(self):
+        """A name that matches no page still resolves when the loop's slug does."""
+        self.assertEqual(
+            fb.manager_subject("Manager-Layer", _group_index(), {"manager-layer"}),
+            ("topic", "Manager Layer"),
+        )
+
+    def test_source_two_matches_the_name_exactly_and_case_insensitively(self):
+        self.assertEqual(
+            fb.manager_subject("manager layer", _group_index(), set()),
+            ("topic", "Manager Layer"),
+        )
+
+    def test_source_two_allows_a_manager_suffix(self):
+        self.assertEqual(
+            fb.manager_subject("Manager Layer Manager", _group_index(), set()),
+            ("topic", "Manager Layer"),
+        )
+
+    def test_an_unresolvable_manager_answers_none_rather_than_guessing(self):
+        self.assertIsNone(fb.manager_subject("Vuln Fix Agent", _group_index(), set()))
+
+
+class TestTree(unittest.TestCase):
+    """The drawn tree: every session row exactly once, under the right glyph."""
+
+    def setUp(self):
+        self.grouping, self.rows = _group_rows()
+        self.tree, self.ordered = fb.build_tree(self.rows, self.grouping)
+
+    def cell(self, sid):
+        """The Session cell drawn for one session, whatever its depth."""
+        label = next(x["label"] for x in self.rows if x["session_id"] == sid)
+        return next(r[0] for r in self.tree if label in r[0])
+
+    def test_the_tree_carries_every_session_row_exactly_once(self):
+        self.assertEqual(sorted(self.ordered), sorted(GROUP_REGISTRY))
+        self.assertEqual(len(self.ordered), len(set(self.ordered)))
+
+    def test_a_group_header_is_not_a_session_row(self):
+        """`Unmanaged` names a group; counting it as a session would make the
+        coverage assertion fail on a correct board."""
+        self.assertIn(["Unmanaged", "", "", "", ""], self.tree)
+        self.assertEqual(len(self.tree), len(GROUP_REGISTRY) + 1)
+        self.assertNotIn("Unmanaged", self.ordered)
+
+    def test_the_root_is_flush_and_its_children_branch(self):
+        self.assertEqual(self.tree[0][0], "Fleet Manager")
+        self.assertTrue(self.tree[1][0].startswith("├ "), self.tree[1][0])
+
+    def test_a_grandchild_carries_its_parents_continuation_bar(self):
+        cell = self.cell(_sid(3))
+        self.assertTrue(cell.startswith("│   └ "), cell)
+
+    def test_the_last_child_uses_the_closing_glyph(self):
+        cell = self.cell(_sid(5))
+        self.assertTrue(cell.startswith("└ "), cell)
+
+    def test_a_manager_row_carries_its_subject_kind(self):
+        self.assertTrue(self.cell(_sid(2)).endswith(" (topic)"), self.cell(_sid(2)))
+
+    def test_the_tree_control_can_fail(self):
+        """The positive control. A row that is built but never drawn is the same
+        silent drop `coverage_errors()` guards one step earlier."""
+        ids = [r["session_id"] for r in self.rows]
+        self.assertTrue(fb.tree_errors(self.ordered[:-1], ids), "a missing row must fail")
+        self.assertTrue(fb.tree_errors(self.ordered + [self.ordered[0]], ids), "a duplicate must fail")
+        self.assertTrue(fb.tree_errors(self.ordered + [_sid(1)], ids), "an unbacked row must fail")
+        self.assertEqual(fb.tree_errors(self.ordered, ids), [])
+
+    def test_every_row_fits_the_box_table_contract(self):
+        for row in self.tree:
+            self.assertEqual(len(row), len(fb.HEADER))
+
+    def test_the_rendered_box_never_wraps(self):
+        """SC1's no-wrap clause. The tree's glyphs and the `(topic)` suffix are
+        truncated by the renderer, so the cell — not the row — is where the budget
+        is spent, and only a rendered box can prove it."""
+        doc = {"header": fb.HEADER, "rows": self.tree, "widths": fb.WIDTHS}
+        for line in bt.render(doc, link=False).splitlines():
+            self.assertLessEqual(bt.dwidth(line), 119, line)
+
+
+class TestVaultParsing(unittest.TestCase):
+    """The two parsers whose false positives were measured, not imagined."""
+
+    def test_frontmatter_links_reads_a_list(self):
+        fm = "goals:\n    - '[[Goal One]]'\n    - '[[Goal Two]]'\nstatus: in_progress\n"
+        self.assertEqual(fb.frontmatter_links(fm, "goals"), ["Goal One", "Goal Two"])
+
+    def test_frontmatter_links_treats_an_empty_list_as_no_link(self):
+        """`goals: []` is the explicit "serves no goal" stamp, not a missing key."""
+        self.assertEqual(fb.frontmatter_links("goals: []\nstatus: in_progress\n", "goals"), [])
+
+    def test_frontmatter_links_stops_at_the_next_key(self):
+        fm = "goals:\n    - '[[Goal One]]'\nthemes:\n    - '[[Theme]]'\n"
+        self.assertEqual(fb.frontmatter_links(fm, "goals"), ["Goal One"])
+
+    def test_goals_section_ignores_a_prose_mention(self):
+        """The measured false positive: a note recording that a goal was REMOVED
+        from the list names it, and reading whole lines claimed it as a member."""
+        text = (
+            "## Goals\n\n"
+            "- [[Goal One]] — a real member\n\n"
+            "⚠️ **Scope narrowed.** [[Goal Two]] was removed from this list.\n\n"
+            "## Boundaries\n"
+            "- [[Goal Three]]\n"
+        )
+        self.assertEqual(fb._goals_section_links(text), ["Goal One"])
+
+    def test_goals_section_takes_one_link_per_entry(self):
+        """An entry is `- [[Goal]] — annotation linking [[Other]]`; the entry
+        admits one member and the rest is provenance."""
+        text = "## Goals\n\n- [[Goal One]] — added 2026-09-20, resolving [[Something Else]]\n"
+        self.assertEqual(fb._goals_section_links(text), ["Goal One"])
+
+    def test_goals_section_stops_at_the_next_heading(self):
+        text = "## Goals\n- [[Goal One]]\n\n## Boundaries\n- [[Goal Two]]\n"
+        self.assertEqual(fb._goals_section_links(text), ["Goal One"])
 
 
 if __name__ == "__main__":
