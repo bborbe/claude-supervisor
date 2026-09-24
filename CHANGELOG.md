@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.48.3
 
 - fix: **the auto-resume gate's transcript-staleness clause reads its mtime `PATH`-independently, and fails closed when the read yields nothing.** `agents/manager-drive.md` clause 7 and its `65 Runbooks/Manager Session.md` twin evaluated staleness with `stat -f %m` — the BSD spelling of *mtime in epoch seconds* — while GNU coreutils reads `-f` as *filesystem status* and takes a filename. This host hands different sessions different `stat` binaries (39 BSD-first against 32 GNU-first across the shell snapshots on disk), so the documented form was evaluable in roughly half of sessions and not in the other half, and it failed **dirty**: under the wrong `stat`, `%m` parses as a path and the read returns block/inode statistics where a timestamp was expected, so a reader taking the first word gets a plausible integer that is not a time. Clause 7 is the only clause that turns registry absence into a death verdict — the argv probes can only ever confirm life — so an unevaluable read stalls the orphan path and the task looks owned forever. Both documents now read the mtime with `python3 -c "import os,sys;print(int(os.path.getmtime(sys.argv[1])))" <file>`, which does not depend on which binary wins, and both carry an explicit **fail-closed** rule beside the clause: a read that does not yield exactly one integer on stdout with exit `0` is not a staleness verdict, so do not resume on it and never read an unreadable mtime as *fresh*.
 
