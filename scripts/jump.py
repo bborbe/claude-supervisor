@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Jump to a Claude Code session's WezTerm tab.
 
-  jump.py                 newest session needing attention (--oldest to flip)
+  jump.py                 newest session needing attention
   jump.py <N>             activate N — the tab if tab N exists, else pane N. Refuses
                           only when both exist and disagree (`tab:` / `pane:` force it)
   jump.py tab:<N>         activate that tab explicitly (forces past the ambiguity check)
@@ -184,8 +184,8 @@ def pane_sessions(pmap):
     return out
 
 
-def attention_queue(wnm, pmap, oldest=False):
-    """Blocked sessions (permission / open question) joined to live panes, newest-first by default.
+def attention_queue(wnm, pmap):
+    """Blocked sessions (permission / open question) joined to live panes, newest-first.
 
     The caller's own pane is excluded: jumping to yourself is a no-op, and the
     entry is usually not even yours — a headless supervisor worker inherits
@@ -238,7 +238,7 @@ def attention_queue(wnm, pmap, oldest=False):
     kept = [r for r in blocked if owned(r)]
     dropped = len(blocked) - len(kept)
 
-    kept.sort(key=lambda r: r["ts"], reverse=not oldest)
+    kept.sort(key=lambda r: r["ts"], reverse=True)
     if dropped:
         print(f"   \u00b7 {dropped} stale attention row(s) hidden — their pane id now "
               f"belongs to a different session", file=sys.stderr)
@@ -389,8 +389,6 @@ def resolve_session_ref(ref, tabs):
 def main():
     ap = argparse.ArgumentParser(description="Jump to a Claude Code session's WezTerm tab.")
     ap.add_argument("target", nargs="?", help="a number (tab if tab N exists, else pane N), tab:<N>, pane:<N>, a tab-title substring, or a sessionId prefix")
-    ap.add_argument("--oldest", action="store_true",
-                    help="no-arg case: pick the oldest blocked session instead of the newest")
     ap.add_argument("--list", action="store_true", help="print the attention queue, activate nothing")
     ap.add_argument("--dry-run", action="store_true", help="print the resolved target, activate nothing")
     ap.add_argument("--cooldown", type=float, default=COOLDOWN_DEFAULT_MIN, metavar="MIN",
@@ -415,12 +413,11 @@ def main():
 
     if a.list:
         wnm = load_wnm()
-        q = attention_queue(wnm, pmap, a.oldest)
+        q = attention_queue(wnm, pmap)
         if not q:
             print("Nothing needs you.")
             return 0
-        order = "oldest" if a.oldest else "newest"
-        print(f"Needs you ({len(q)}, {order} first)")
+        print(f"Needs you ({len(q)}, newest first)")
         visited = load_visited()
         cooldown_s = a.cooldown * 60
         nxt, skipped = pick_next(q, visited, cooldown_s)
@@ -439,7 +436,7 @@ def main():
 
     if a.target is None:
         wnm = load_wnm()
-        q = attention_queue(wnm, pmap, a.oldest)
+        q = attention_queue(wnm, pmap)
         if not q:
             print("Nothing needs you — nothing to jump to.")
             return 0

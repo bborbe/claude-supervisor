@@ -1,19 +1,19 @@
 ---
-description: Restart stalled-but-unblocked fleet sessions — compose the fleet sweep read-only, verify each parked session's blocker live, nudge only the verified-unblocked, escalate the rest grouped by cause. One-shot; arms nothing.
+description: Restart stalled-but-unblocked fleet sessions — compose the fleet sweep read-only, verify each parked session's blocker live, nudge only the verified-unblocked, escalate the rest grouped by cause. Takes no arguments. One-shot; arms nothing.
 allowed-tools:
   - Task
   - SendMessage
   - ListAgents
   - Read
   - Bash(python3:*)
-argument-hint: "[--dry-run] — no argument performs the sweep; --dry-run verifies and drafts but sends nothing and writes no ledger"
+argument-hint: "(no args — one drive pass: verify, draft, send)"
 ---
 
 Fleet drive slash command — the fleet layer's **drive** verb, run once, by hand.
 
 The fleet has a show (`/supervisor:fleet-status`) and an act loop (`/supervisor:fleet-loop`), which dispatches this leg on every round. This command is that same leg, run once, by hand — for a pass between rounds, or when the loop is not armed. It is the fleet sibling of `/supervisor:manager-drive`: a thin command dispatching an agent that carries the logic.
 
-⚠️ **A fleet-loop verb — never run it from a worker session.** A worker carries a *task*; a manager carries a topic or goal and a loop. Running a fleet-wide sweep inside a worker collapses the two roles silently: the session keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker that wants a sweep routes it to its manager with `SendMessage` and says so. A change to this command is exercised in a manager session's runtime, never from the session that authored it — `--dry-run` suppresses the sends, not the role collapse.
+⚠️ **A fleet-loop verb — never run it from a worker session.** A worker carries a *task*; a manager carries a topic or goal and a loop. Running a fleet-wide sweep inside a worker collapses the two roles silently: the session keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker that wants a sweep routes it to its manager with `SendMessage` and says so. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
 
 ⚠️ **One-shot.** It arms no cadence and schedules nothing. `/supervisor:fleet-loop` dispatches the same agent on every round; this command is the by-hand single pass, mirroring `/manager-drive`.
 
@@ -21,9 +21,7 @@ The fleet has a show (`/supervisor:fleet-status`) and an act loop (`/supervisor:
 
 ## Arguments
 
-- **`--dry-run` (optional):** verify and draft, print what would be sent, send nothing, write no ledger.
-
-Parse `$ARGUMENTS`: contains `--dry-run` → `dry-run: true` everywhere below; otherwise `dry-run: false`. Any other token → print `❌ Unknown argument: <token>` and stop.
+**No arguments, by design.** One command, one behaviour: compose the sweep, verify each parked session, draft the nudges, send them. There is no verify-only mode — a pass that drafts but sends nothing is a second command in disguise, and `/supervisor:fleet-status` already covers the read-only case.
 
 ## Procedure
 
@@ -39,11 +37,11 @@ Parse `$ARGUMENTS`: contains `--dry-run` → `dry-run: true` everywhere below; o
 
 3. **Dispatch the drive leg.**
 
-   `Task(subagent_type: "supervisor:fleet-drive", prompt: <digest verbatim + this session's name and id + vault path + round timestamp + "dry-run: true|false">)`
+   `Task(subagent_type: "supervisor:fleet-drive", prompt: <digest verbatim + this session's name and id + vault path + round timestamp>)`
 
    The agent loads the ledger, suppresses re-nudges, verifies each `parked` session's blocker live, assigns revive / blocked / unverifiable / finished, persists the ledger and returns drafted nudges. Its rules live in `agents/fleet-drive.md` and are not restated here.
 
-4. **Send — from this session only.** Send every `REAPS` line first, then every `NUDGES` line — reap before drive, so a finished session is never told to continue. For each line, unless `--dry-run`: re-check the target's roster status first — moved to `busy`/`shell` since step 1 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Every send stays in this session because a sub-agent has no cross-session address — a reply to a sub-agent's message lands here after it has returned. Report any failed send; the ledger already counts it as nudged, so the next round suppresses rather than nags.
+4. **Send — from this session only.** Send every `REAPS` line first, then every `NUDGES` line — reap before drive, so a finished session is never told to continue. For each line, re-check the target's roster status first — moved to `busy`/`shell` since step 1 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Every send stays in this session because a sub-agent has no cross-session address — a reply to a sub-agent's message lands here after it has returned. Report any failed send; the ledger already counts it as nudged, so the next round suppresses rather than nags.
 
 5. **Print** the agent's report verbatim — table, escalation groups, ledger line — with the one addition below, then `Sent: <n>` with one line per recipient, and `Skipped: <n>` with reasons.
 
