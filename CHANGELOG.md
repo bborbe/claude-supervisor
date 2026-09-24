@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.43.0
 
 - feat: **shared asked-ledger — a blocked session is now asked exactly once across layers.** `fleet-loop` and `manager-loop` each batch their own set, so a session both layers hold reached the operator as two questions (measured twice on 2026-09-20). New `scripts/asked-ledger.py` keyed on the **blocked session** — the only join both layers can agree on: `claim` exits **3** when another layer already holds the subject, so the caller drops it from its batch, and `list` renders every open claim across all layers as **one consolidated list**. Prune is by age and liveness, **never by sweep-absence** — "absent from my sweep" is a claim about one layer's partial view, so a shared file pruned that way would let the fleet's sweep delete a manager's marks, re-introducing the per-layer bug this replaces. Deliberately distinct from `notify-gate.py`'s ledger, which marks the gate **notification** and stays per layer on purpose; the two are not merged. Rules live in the new `supervisor:asked-ledger` skill — `fleet-loop` and `manager-loop` point at it rather than restating them, per the `supervisor:open-items` precedent. Covered by `scripts/tests/test_asked_ledger.py`.
 
