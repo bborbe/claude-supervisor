@@ -209,13 +209,13 @@ def parse_started(rec):
 
 
 def resume_command(sid, title, chip, cwd):
-    """The resume recipe, copied from `commands/open.md` Step 3.1, plus `--cwd`.
+    """The resume recipe, copied from `commands/open.md` Step 3.1.
 
     A markdown command is not executable, so this is a deliberate copy — see the module
     docstring. The `unset` list matters: a resumed session that inherits the parent's
     messaging socket believes it is the parent.
 
-    `--cwd` is NOT in the copied recipe and must not be dropped from this one.
+    `--cwd` is in the recipe as of 2026-09-24 and must not be dropped from either copy.
     `wezterm cli spawn` otherwise inherits wezterm's own working directory — for a
     server started from a home directory, `$HOME` — and Claude Code then stops on
     *"Accessing workspace /Users/<user> — do you trust this folder?"* before it ever
