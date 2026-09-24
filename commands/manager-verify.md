@@ -193,8 +193,12 @@ because its dependency is prose-only is a **goal-page** defect; a task invisible
 
 7. **START (suggest)** — **recommend** what to start, in order, and state the cap it must respect:
    **2 per sweep**, **4 per 30 min**, **one at a time headless**. The executor is
-   **`/open "<task>"`** ([[Manager Session]] Guardrail 2) — headless session + tab in one
+   **`/supervisor:open "<task>"`** ([[Manager Session]] Guardrail 2) — headless session + tab in one
    command. **Do not spawn.** Name what should go first and what the cap would hold back.
+   ⚠️ **`/supervisor:open` is the manager's executor, never this session's.** Unless this session IS the
+   subject's manager, route the start recommendation to that manager via `SendMessage` (task,
+   status on disk, why first, cap) — never as an `approve: /supervisor:open …` line for the operator.
+   Observed 2026-09-23: operator corrected *"send this to the manager ... worker dont open new sessions"*.
 </process>
 
 <output_format>

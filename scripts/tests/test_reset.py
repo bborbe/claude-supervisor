@@ -104,8 +104,8 @@ class Digest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self._state = reset.STATE
         reset.STATE = self.tmp
-        os.makedirs(os.path.join(self.tmp, "sweep-gate"))
-        self.path = os.path.join(self.tmp, "sweep-gate", "my-topic.json")
+        os.makedirs(os.path.join(self.tmp, "sweep-gate-loop", "personal"))
+        self.path = os.path.join(self.tmp, "sweep-gate-loop", "personal", "my-topic.json")
 
     def tearDown(self):
         reset.STATE = self._state
@@ -113,14 +113,22 @@ class Digest(unittest.TestCase):
     def test_rewrites_digest_keeps_busy_since(self):
         with open(self.path, "w") as fh:
             json.dump({"digest": "abc", "busy_since": {"x": "t"}}, fh)
-        reset.reset_digest("My Topic", dry=False)
+        reset.reset_digest("My Topic", "personal", dry=False)
         data = json.load(open(self.path))
         self.assertNotEqual(data["digest"], "abc")
         self.assertTrue(data["digest"].startswith("reset-"))
         self.assertEqual(data["busy_since"], {"x": "t"})
 
+    def test_lowercases_a_display_case_vault(self):
+        """Records written before 2026-09-23 carry `Personal`; the directory is
+        lowercase. A strict join rewrites a digest the gate never reads."""
+        with open(self.path, "w") as fh:
+            json.dump({"digest": "abc"}, fh)
+        reset.reset_digest("My Topic", "Personal", dry=False)
+        self.assertNotEqual(json.load(open(self.path))["digest"], "abc")
+
     def test_absent_stays_absent(self):
-        lines = reset.reset_digest("My Topic", dry=False)
+        lines = reset.reset_digest("My Topic", "personal", dry=False)
         self.assertFalse(os.path.exists(self.path))
         self.assertIn("absent", lines[0])
 

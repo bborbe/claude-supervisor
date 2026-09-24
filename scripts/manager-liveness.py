@@ -9,18 +9,24 @@ evidence on disk itself. This script writes that evidence and checks it.
 
 Three verbs, one file each, all in the sweep-gate state dir:
 
-  --arm   --topic T --interval S   <slug>.cadence = "<S>\\n"; clears <slug>.stopped.
-                                    Run by the manager at EVERY re-arm, so the file's
-                                    mtime marks the last re-arm that actually happened
-                                    and its content is the delay the manager chose.
-                                    The interval is recorded, never assumed: managers
-                                    change it at runtime (a 20-min idle tick was set
-                                    2026-09-22), so a fixed limit false-positives.
+  --arm   --topic T --interval S   <slug>.cadence = "<S>\\n" and an epoch appended to
+                                    <slug>.arms; clears <slug>.stopped. Run by the
+                                    manager at EVERY re-arm, so the cadence file's mtime
+                                    marks the last re-arm that actually happened and
+                                    <slug>.arms is the history the limit is measured
+                                    against. The interval is recorded, never assumed:
+                                    managers change it at runtime (a 20-min idle tick
+                                    was set 2026-09-22), so a fixed limit false-positives.
   --stop  --topic T                <slug>.stopped. Run by `/supervisor:stop`, so a
                                     deliberately stood-down manager is not reported
                                     as a lapse. The next --arm clears it.
   --check                          every <slug>.cadence -> OK / STALE / STOPPED.
-                                    STALE = no marker AND age > 2 x interval + SLACK.
+                                    STALE = no marker AND age > 2 x PERIOD + SLACK,
+                                    where PERIOD is the manager's observed median
+                                    arm-to-arm gap (>=3 gaps), falling back to the
+                                    reported interval until that history exists.
+                                    A re-arm after a stand-down resets the history,
+                                    so an outage gap never counts as cadence.
                                     Prints one line per topic that TURNED stale (or
                                     recovered) since the last check; exits 10 if any
                                     turned stale, else 0. The notified set lives in
@@ -32,11 +38,18 @@ turns exit 10 into a push.
 """
 import argparse, json, os, re, sys, time
 
+# This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
+# through it, so its reads and writes agree — it is a live namespace, not a retired
+# one, and it is deliberately NOT the gate's per-vault tree. Converting it to
+# `sweep-gate-loop/<vault>/` would need a --vault on all three verbs and would turn
+# `check`'s single listdir into a walk of per-vault subdirs, for no defect to fix.
+# (Audited 2026-09-23 alongside the stop-probe path fix; left flat on purpose.)
 STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_LIVENESS_STATE_DIR", "~/.claude/state/sweep-gate")
 )
 NOTIFIED = "liveness-notified.json"
 SLACK = 60  # seconds: covers the tick's own runtime before the re-arm lands
+ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable median
 EXIT_STALE = 10
 
 
@@ -57,9 +70,35 @@ def write_atomic(p: str, text: str) -> None:
     os.replace(tmp, p)
 
 
+def read_arms(s: str) -> list:
+    try:
+        with open(path(s, "arms"), encoding="utf-8") as fh:
+            return [float(x) for x in fh.read().split()]
+    except (OSError, ValueError):
+        return []
+
+
+def observed_interval(s: str):
+    """Median arm-to-arm gap in seconds, or None when there is too little history."""
+    vals = read_arms(s)[-ARMS_KEEP:]
+    if len(vals) < 4:
+        return None
+    gaps = sorted(b - a for a, b in zip(vals, vals[1:]))
+    if len(gaps) < 3:
+        return None
+    return gaps[len(gaps) // 2]
+
+
 def arm(topic: str, interval: int) -> int:
     s = slug(topic)
     write_atomic(path(s, "cadence"), f"{interval}\n")
+    # A re-arm after a stand-down starts a NEW cadence sample. The outage gap is not
+    # cadence, and it cannot be filtered at read time: the marker that records when
+    # the stop happened is deleted a few lines below, so by the time `check` runs
+    # there is nothing left to compare the gap against. Drop the stale history here.
+    prior = [] if os.path.exists(path(s, "stopped")) else read_arms(s)
+    arms = (prior + [time.time()])[-ARMS_KEEP:]
+    write_atomic(path(s, "arms"), "".join(f"{v:.0f}\n" for v in arms))
     try:
         os.remove(path(s, "stopped"))
     except FileNotFoundError:
@@ -86,8 +125,16 @@ def classify(s: str, now: float) -> tuple:
         age = int(now - os.path.getmtime(p))
     except (OSError, ValueError) as exc:
         return "INVALID", f"unreadable cadence file ({exc})"
-    limit = 2 * interval + SLACK
-    detail = f"age={age}s limit={limit}s interval={interval}s"
+    # Measure against the manager's OBSERVED period, never the delay it reports. A
+    # tick costs real time on top of the delay, so a limit built from the delay alone
+    # sits below the true period and fires on a live manager every cycle. Measured
+    # 2026-09-23: reported 300 s, real arm-to-arm 17 min — five false pushes in 32 min.
+    observed = observed_interval(s)
+    if observed:
+        limit, basis = 2 * observed + SLACK, f"period={int(observed)}s(observed)"
+    else:
+        limit, basis = 2 * interval + SLACK, f"period={interval}s(reported)"
+    detail = f"age={age}s limit={limit}s {basis}"
     return ("STALE" if age > limit else "OK"), detail
 
 

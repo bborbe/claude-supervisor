@@ -136,6 +136,8 @@ stdin is `{"header": [...], "rows": [[...]], "widths": [...]}`. The column width
 
 The key follows the source's columns. It is **not** a global rule, and the same premise ("no id column here") does not licence the same conclusion elsewhere.
 
+⚠️ **You supply the cell as text; the renderer adds the link.** Since 2026-09-24 `box-table.py` wraps a `[<sid8>]`-shaped cell in an OSC 8 hyperlink to its jump target, resolving it through `who-needs-me.py --pane-for` and `jump-link.py`. That is the renderer's act, not yours: **emit `[<sid8>]` and nothing else** — no URL, no escape, no join. Building the link here would double-wrap the cell, and it would put the jump token in your own output where the renderer keeps it inside the escape. The paragraph above still holds exactly as written: *this cell* performs no join, because the join that turns a prefix into a pane happens downstream of you.
+
 **The frame differs by mode, and getting it wrong is the divergence this agent exists to prevent:**
 
 - **`mode: tick`** — the **liveness marker leads, and the box hangs two spaces under it.** The marker is the first line of output, shaped `<timestamp from your input> ✓ <Topic> — <n> tasks · <counts> · <delta>`. Do **not** prefix it with a glyph: the harness already bullets assistant output, so a literal glyph renders doubled. Do **not** read the clock to build it — the caller passes the timestamp (input 6); if none arrived, report the omission rather than calling `date`.

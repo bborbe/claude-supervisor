@@ -891,6 +891,107 @@ def capped(rows, show_all):
     return rows[:CAP], len(rows) - CAP
 
 
+def pane_for(session_id):
+    """Print the pane of one live session, or exit non-zero.
+
+    Liveness comes from the **session registry**, never from the recorded pane. An
+    entry is deleted when its session exits, so presence means live — the authority
+    `session-liveness.md` names. Asking instead whether the *recorded* pane still
+    exists answers a different question, and gets it wrong in the direction that
+    costs the operator a jump: a pane id is a lease, WezTerm renumbers and reuses
+    them, so a live session whose item predates a renumber carries a pane that is
+    gone. Measured 2026-09-24: `MDM Bugs` was live in the registry on pane 1391
+    while all eight of its attention records carried pane 85, and the old check
+    reported the session **dead** — a refusal that hid a session the operator could
+    have jumped to, which is the exact failure this path exists to prevent.
+
+    Resolution order, and the reason for it:
+
+      1. the recorded pane, when it still exists — it is the pane the sweep itself
+         resolved, so it is preferred whenever it is still good;
+      2. otherwise the registry's **current** name against the WezTerm titles.
+
+    Step 2 is a name match, which is only sound because of *which* name: it is read
+    from the registry at call time, so `/rename` is tracked rather than broken. A
+    name carried in from anywhere else — a task title, an enrichment snapshot, the
+    caller's prompt — is the stale join that goes wrong silently, and is not used.
+
+    The caller passes the 8-char prefix the sweep digest carries, so a unique prefix
+    resolves and an ambiguous one refuses rather than guesses. Two panes sharing a
+    title refuse too. Every failure names what it saw: the caller renders
+    `no pane — <reason>`, so a vague reason leaves the operator with a dead end.
+    """
+    sid = (session_id or "").strip().lower()
+    if not sid:
+        sys.stderr.write("pane-for: no session id given\n")
+        return 1
+
+    registry = read_registry()
+    if registry is None:
+        sys.stderr.write("pane-for: session registry unreadable — cannot decide liveness\n")
+        return 1
+    matches = sorted(str(i) for i in registry if str(i).lower().startswith(sid))
+    if not matches:
+        sys.stderr.write("pane-for: no live session id matches %s\n" % sid)
+        return 1
+    if len(matches) > 1:
+        sys.stderr.write(
+            "pane-for: %d live session ids match %s — pass the full id\n" % (len(matches), sid)
+        )
+        return 1
+    full = matches[0]
+    name = strip_status_glyph(registry.get(full))
+
+    pmap = panes()
+    if not pmap:
+        sys.stderr.write("pane-for: WezTerm pane list unreadable\n")
+        return 1
+
+    # A session holds several records at once — the store returns one item per open
+    # item, and `load` folds the event log per item — so take the first that carries
+    # a pane rather than the first record outright, which may have none while a
+    # sibling does.
+    records = load("needs")
+    recorded = next(
+        (str(r["pane"]) for r in records
+         if r.get("session_id") == full and r.get("pane")),
+        None,
+    )
+    if recorded and recorded in pmap:
+        # Existence is not ownership. A pane id is recycled across tab moves and
+        # WezTerm restarts, so an existing pane can be *another* session's — the
+        # wrong answer wearing the appearance of a resolved one, which is strictly
+        # worse than a blank. `is_routable` asks for the title as well, for exactly
+        # this reason; the same rule applies here, or this path hands over a
+        # confident link to the wrong tab.
+        title = strip_status_glyph(pmap[recorded].get("title"))
+        if not name or not title or title == name:
+            print(recorded)
+            return 0
+
+    if not name:
+        sys.stderr.write(
+            "pane-for: session %s is live but carries no name, and its recorded pane %s is gone\n"
+            % (full[:8], recorded or "(none)")
+        )
+        return 1
+    hits = sorted(pid for pid, p in pmap.items() if strip_status_glyph(p.get("title")) == name)
+    if len(hits) == 1:
+        print(hits[0])
+        return 0
+    if not hits:
+        sys.stderr.write(
+            "pane-for: session %s is live but no pane resolves — recorded pane %s is gone and no "
+            "WezTerm pane is titled %r\n" % (full[:8], recorded or "(none)", name)
+        )
+        return 1
+    sys.stderr.write(
+        "pane-for: session %s is live but %d WezTerm panes are titled %r — ambiguous\n"
+        % (full[:8], len(hits), name)
+    )
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stuck-min", type=int, default=20)
@@ -901,9 +1002,17 @@ def main():
         help=f"list every open item instead of the first {CAP}",
     )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
+    ap.add_argument(
+        "--pane-for",
+        metavar="SESSION_ID",
+        help="print the pane of this session (full id or unique 8-char prefix) and exit; "
+        "non-zero when no live session resolves",
+    )
     a = ap.parse_args()
     if a.jump:
         sys.exit(subprocess.call(["wezterm", "cli", "activate-pane", "--pane-id", a.jump]))
+    if a.pane_for:
+        sys.exit(pane_for(a.pane_for))
 
     pmap = panes()
     # One registry read serves both questions: which sessions are live (the `quiet`

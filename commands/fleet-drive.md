@@ -5,6 +5,7 @@ allowed-tools:
   - SendMessage
   - ListAgents
   - Read
+  - Bash(python3:*)
 argument-hint: "[--dry-run] — no argument performs the sweep; --dry-run verifies and drafts but sends nothing and writes no ledger"
 ---
 
@@ -44,7 +45,13 @@ Parse `$ARGUMENTS`: contains `--dry-run` → `dry-run: true` everywhere below; o
 
 4. **Send — from this session only.** Send every `REAPS` line first, then every `NUDGES` line — reap before drive, so a finished session is never told to continue. For each line, unless `--dry-run`: re-check the target's roster status first — moved to `busy`/`shell` since step 1 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Every send stays in this session because a sub-agent has no cross-session address — a reply to a sub-agent's message lands here after it has returned. Report any failed send; the ledger already counts it as nudged, so the next round suppresses rather than nags.
 
-5. **Print** the agent's report verbatim — table, escalation groups, ledger line — then `Sent: <n>` with one line per recipient, and `Skipped: <n>` with reasons. For any escalated operator gate whose pane is known, hand over `/supervisor:jump <pane-id>`; never a command for the operator to run here.
+5. **Print** the agent's report verbatim — table, escalation groups, ledger line — with the one addition below, then `Sent: <n>` with one line per recipient, and `Skipped: <n>` with reasons.
+
+   **Every `ESCALATION` row carries its jump link.** Append to each row the one-line output of `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py <pane-id>`, taking the pane the agent carried on the row. A row the digest gave no pane for is resolved by `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/who-needs-me.py --pane-for <sid8>` — the session id is the join the sweep already made, and the lookup decides liveness from the **session registry**, so a session that has exited cannot yield a pane.
+
+   The lookup prefers the session's recorded pane, and falls back to the **registry's current name** against the pane titles when that pane is gone — a pane id is a lease, WezTerm renumbers and reuses them, so a live session's record can name a pane that no longer exists. The fallback's name is read from the registry at call time, which is what makes `/rename` tracked rather than broken; a name carried in from anywhere else is the stale join that fails silently. An ambiguous match refuses rather than picks. A row that still resolves to no pane prints `no pane — <reason>`; never a blank, never `—`.
+
+   Emit the link, never a bare `/supervisor:jump <N>` and never a hand-built URL — `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/docs/session-tiers.md` § *Handing the operator a pane* (keep-in-sync).
 
 ## What this command must never do
 
