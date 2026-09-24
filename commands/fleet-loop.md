@@ -224,6 +224,40 @@ The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`).
 8. **Course-correction drafts awaiting approval** — exact text + target; ask the operator to approve or edit.
 9. **Snapshot written** — path and `swept_at`.
 
+## The saturation reading — the ratio, not tok/s
+
+Every tick prints the fleet working ratio beside the marker line:
+
+    saturation: 3/6 (busy + shell over live sessions)
+
+Read it from `python3 $P/fleet-board.py --json` → `saturation`, which carries
+`numerator`, `denominator` and `ratio`. The numerator counts the registry
+**status** (`busy` + `shell`), not the board's `running` bucket — the buckets
+apply a precedence, so a `busy` session holding an open gate is bucketed
+`needs-input` and would be dropped from a bucket-based count. `ratio` is `None`
+for an empty fleet; print it as absent, never as `0%`.
+
+**The ratio is the signal, not tok/s.** Measured 2026-09-20 (Fleet Manager session
+`b700c650`): output throughput swung 629 → 905 tok/s in 45 minutes while the ratio
+moved only 44% → 42%. Throughput tracks whichever model happens to be mid-response
+at the moment of the read; the ratio does not. Print the tok/s figure beside it for
+context only — `~/.claude/scripts/claude-metrics.sh` reads `out_tok/s` — and never
+act on it as the number.
+
+A low ratio is often a **human-queue** signal, not a capacity signal: at the 42%
+reading, 14 of 24 sessions were idle or waiting, and most of those were waiting on
+the operator. Spawning more agents then lengthens the human queue rather than using
+idle compute, which is what makes a fixed "target N agents" rule worse than no rule.
+
+**Open Question 1 — what ratio threshold, if any, should trigger a spawn.** n=2
+readings establishes the ratio is steadier than tok/s; it does not establish that
+any particular number means "spawn". Unresolved — never infer a threshold from this
+line.
+
+**Open Question 2 — whether the output should be a spawn trigger at all**, versus a
+read-only saturation line. The measurement argues for read-only first. Unresolved —
+this line is read-only until the question is answered.
+
 ## Rules (non-negotiable)
 
 - **An operator ask lives on disk from the moment it is said** — `/supervisor:open-items add` it before replying, render every round, close only on Step 4's evidence.

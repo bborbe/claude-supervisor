@@ -167,6 +167,53 @@ def _dwidth(s):
     return total
 
 
+class TestSaturation(unittest.TestCase):
+    """The working ratio counts the RAW STATUS, never the `running` bucket.
+
+    The two disagree on this fixture by construction: three sessions carry a
+    running status, but only one is bucketed `running` — the other two are
+    `problem` and `needs-input` by precedence. A numerator read off
+    `counts["running"]` reports 1/6 where the fleet is working 3/6, dropping
+    exactly the sessions the reading exists to show.
+    """
+
+    def test_numerator_counts_status_not_bucket(self):
+        """The collision case, and the one a plausible implementation gets wrong."""
+        s = fb.fleet_saturation(REGISTRY)
+        self.assertEqual(s["numerator"], 3, "three sessions carry a running status")
+        self.assertEqual(s["denominator"], 6)
+        rows, _ = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES)
+        running_bucket = sum(1 for r in rows if r["bucket"] == "running")
+        self.assertEqual(running_bucket, 1, "the bucket disagrees with the status")
+        self.assertNotEqual(s["numerator"], running_bucket)
+
+    def test_shell_counts_and_waiting_and_idle_do_not(self):
+        """`shell` is the second conclusive status; `waiting` is transient and
+        explicitly not blocked-on-a-human, so it must not inflate the numerator."""
+        reg = {
+            _sid(1): {"status": "shell", "name": "Shell", "cwd": CWD},
+            _sid(2): {"status": "waiting", "name": "Waiting", "cwd": CWD},
+            _sid(3): {"status": "idle", "name": "Idle", "cwd": CWD},
+        }
+        s = fb.fleet_saturation(reg)
+        self.assertEqual(s["numerator"], 1)
+        self.assertEqual(s["denominator"], 3)
+
+    def test_an_empty_fleet_is_none_not_zero(self):
+        """An empty fleet answers None, never 0.0 — no live sessions and nothing
+        working are different readings and must not render alike."""
+        self.assertIsNone(fb.fleet_saturation({})["ratio"])
+
+    def test_a_fully_working_fleet_is_one(self):
+        reg = {_sid(1): {"status": "busy", "name": "Busy", "cwd": CWD}}
+        self.assertEqual(fb.fleet_saturation(reg)["ratio"], 1.0)
+
+    def test_a_missing_status_is_not_working(self):
+        """An unreadable status must not be counted as work."""
+        reg = {_sid(1): {"name": "No Status", "cwd": CWD}}
+        self.assertEqual(fb.fleet_saturation(reg)["numerator"], 0)
+
+
 class TestCoverageControl(unittest.TestCase):
     """SC3 — the assertion that makes a silently-dropped row impossible."""
 
