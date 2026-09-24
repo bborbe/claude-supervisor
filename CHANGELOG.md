@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.48.1
 
 - docs: **`/supervisor:worker-drive` §3 gains a lever for clock-bound waits: measure the base rate of the awaited event.** The lever list is what gets consulted before a WAIT survives, and it had no entry for the case where the awaited thing has never happened at all — so a criterion gated on "real traffic will populate this" reads as a genuine wait when it is a foregone conclusion. The new bullet says to answer "how often does this actually happen?" from the record rather than from the design, and names the outcome: either the wait is real, or the criterion is the bug (§5 Axis B). Recorded case: a task waited 24 h for a window of manager-resolved items while one query would have shown the answer path had been exercised **4 times in the store's entire history — all fixtures, 0 organic**.
 
