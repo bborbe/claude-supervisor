@@ -73,13 +73,7 @@ The caller's classification is a **snapshot, and you run after it**: the sweep r
 
 **Check 1 — freshness: did the task file move since the sweep read it?**
 
-The sweep returns each `stuck` task's observed task-file mtime (its report section 6). Re-read it now with the **`PATH`-independent** command clause 7 uses, never a bare `stat` flag:
-
-```bash
-python3 -c "import os,sys;print(int(os.path.getmtime(sys.argv[1])))" <task-file>
-```
-
-Drop the candidate when the current mtime is **newer** than the sweep's — the worker edited its file between the read and your nudge, so it is working, not stuck. **Fail closed:** if either reading is missing, or is not exactly one integer on exit `0`, do not nudge on freshness' behalf. A `stuck` row that arrived **without** an mtime cannot be checked at all — report it under `Not nudged` naming that, and never nudge it as though the check had passed. Silently dropping a candidate is indistinguishable from one the sweep never classified, which is why both outcomes are reported.
+The sweep returns each `stuck` task's observed task-file mtime (its report section 6). Re-read it now — **on the task file, not the transcript** — using the `PATH`-independent command and the fail-closed rule that **clause 7 owns**; that clause is this form's one home, so read it there rather than restating it here. Drop the candidate when the current mtime is **newer** than the sweep's — the worker edited its file between the read and your nudge, so it is working, not stuck. **Fail closed:** if either reading is missing, or is not exactly one integer on exit `0`, do not nudge on freshness' behalf. A `stuck` row that arrived **without** an mtime cannot be checked at all — report it under `Not nudged` naming that, and never nudge it as though the check had passed. Silently dropping a candidate is indistinguishable from one the sweep never classified, which is why both outcomes are reported.
 
 **Check 2 — in flight: is the session executing tools?**
 
