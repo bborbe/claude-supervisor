@@ -1,5 +1,5 @@
 ---
-description: Get a stuck session working again, or tell the operator exactly how to help. Diagnoses the session (waiting on what, task done, drift), then drives the anchored task until a hard stop; --dry diagnoses only. Absorbs the former /and. Bans WAIT as an answer after repetition, challenges unfinishable acceptance criteria, and never asks permission for non-forks.
+description: Get a stuck session working again, or tell the operator exactly how to help. Diagnoses the session (waiting on what, task done, drift), then drives the anchored task until a hard stop. Takes no arguments. Absorbs the former /and. Bans WAIT as an answer after repetition, challenges unfinishable acceptance criteria, and never asks permission for non-forks.
 allowed-tools:
   - Read
   - Grep
@@ -12,14 +12,14 @@ allowed-tools:
   - Monitor
   - AskUserQuestion
   - mcp__tts__say
-argument-hint: [--steps N] [--dry] (no args = diagnose, then drive until a hard stop; --dry = diagnose and report only)
+argument-hint: (no args — diagnose, then drive until a hard stop)
 ---
 
 Finish the anchored task. Not report on it — **finish it**.
 
 The user typed this because the session has been *correct* and *not done* at the same time. That is the failure this command exists for: every individual verdict was right, every wait was live, and after two days the task is still open. This command is both the instrument and the actuator: §0b diagnoses, §1–§6 drive. It replaces the operator's hand-typed restart prompt — *what are we waiting for? is the task completed? how can I help? what do you recommend?* — and every report answers those four questions first (§8).
 
-**`--dry`** — run Step 0 and §0b only, then emit the §8 report and stop. Read-only: no Edit/Write, no commands that change state, no TodoWrite — the one write is this session's own diagnose snapshot (§0b). Ends with one `y`-able lever (`approve:` for one action, `pick` only at a genuine fork). This is the former `/and`.
+**No arguments, by design.** One command, one behaviour: diagnose, then drive. There is no diagnose-only mode and no step cap — an option the operator has to remember is a second command in disguise.
 
 **Your product is a state change, not a panel.** A `/supervisor:worker-drive` run that ends having only described the situation has failed, regardless of how accurate the description was.
 
@@ -40,7 +40,7 @@ Not hard stops — drive straight through these: a defect discovered mid-work (f
 
 Use ~15 actions as a **signal, not a limit**: passing it without reaching a hard stop is evidence the task is bigger than one drive. Say so in the report — name what is left and why it did not converge — then keep going or stop deliberately. Do not stop merely because a number was reached.
 
-`--steps N` sets a real cap when you want one. Report once, at the end.
+Report once, at the end.
 
 ## Step 0 — Anchor and load the drive counter
 
@@ -83,7 +83,7 @@ Per-session file, keyed on the session uuid from the scratchpad path — never a
 
 Before inventorying, find out whether the session is actually stuck and on what. Three failures this catches, all observed: a **dead wait** (daemon exited, monitor timed out — reported 🟡 WAITING when the answer was act now), a **stalled wait** (alive, zero forward progress past its cycle), and **drift** (productive work on something that is no longer the anchor).
 
-Verdict words used below: **ACT** — something is mine to do now; **WAIT** — a verified-alive, progressing wait with a watcher armed; **DRIFTING** — work left the anchor; **DONE** — the anchor reads terminal on disk. Under a drive run a WAIT then enters §2's repetition gate; under `--dry` it is reported as-is.
+Verdict words used below: **ACT** — something is mine to do now; **WAIT** — a verified-alive, progressing wait with a watcher armed; **DRIFTING** — work left the anchor; **DONE** — the anchor reads terminal on disk. A WAIT then enters §2's repetition gate.
 
 ### Last progress, loop check, drift check
 
@@ -188,8 +188,6 @@ Traps to check every time:
 
 Check before asserting — `docker ps` names carry their originating project prefix.
 
-
-Under `--dry`, stop here and go to §8.
 
 ## Step 1 — Inventory the remaining work (the drive table)
 
@@ -311,7 +309,7 @@ A fork means **different objective or different scope**. If the user would plaus
 
 ## Step 5 — Challenge the acceptance criteria
 
-At blocker count ≥ 3, audit the *remaining* criteria — `--dry` never does this, and it is frequently the actual cause.
+At blocker count ≥ 3, audit the *remaining* criteria — a diagnosis alone never does this, and it is frequently the actual cause.
 
 Two axes. Both are cases where **the criterion is the bug**, not the session's speed.
 
@@ -437,7 +435,7 @@ DROVE (<n> actions, run #<runs> on this task):
 - <action> → <observed result>
 - <action> → <observed result>
 
-STOPPED: <one of the four hard stops, named> | BUDGET (<n>/<n> actions)
+STOPPED: <one of the four hard stops, named>
 Blocker:  <name> — count <n>, rung <n>  (or: none)
 Levers tried this run: <lever> · <lever>
 Criteria audit: <n> unfinishable-by-construction found — <verdict>  (omit if not run)
@@ -449,7 +447,7 @@ ETA:        <duration + projected clock time + basis | n/a — Claude-side | unk
 ⏰ Next:  <concrete trigger: actor/mechanism, never a bare id, never "soon">
 ```
 
-**The four header lines are mandatory, in this order, on every report including `--dry`.** They are the operator's four restart questions; answering them first means the operator never has to type them. Each value comes from this run — the status from disk, the wait from §0b's evidence — never from memory. `How you can help` names a real hard stop (§ The contract) or says `nothing`; it never invents a chore.
+**The four header lines are mandatory, in this order, on every report.** They are the operator's four restart questions; answering them first means the operator never has to type them. Each value comes from this run — the status from disk, the wait from §0b's evidence — never from memory. `How you can help` names a real hard stop (§ The contract) or says `nothing`; it never invents a chore.
 
 `PROBLEM:` is not decoration. A run can be accurate in every line and still leave the operator unable to say what the task is *for* — every other field in the shape reports state, and none restates purpose. Observed 2026-09-14: after hours of correct reports on one task, the operator asked *"what problem we try to solve"* and then *"u lost me"*. Write it in plain terms — no identifiers, no paths, no acceptance-criteria vocabulary: the sentence you would say out loud to someone who had never seen the task.
 
@@ -457,7 +455,7 @@ Then write the updated drive state. If a watcher was armed, name it in `⏰ Next
 
 ### Speak the outcome
 
-Headline only: what changed and what stopped you (under `--dry`: the verdict and the lever).
+Headline only: what changed and what stopped you.
 
 **Gate on voice mode, not on tool presence.** `/tts-mcp:voice` is the sole authority on spoken-output volume, and voice is off until someone invokes it:
 
@@ -491,7 +489,7 @@ Never speak in a session that has never spoken — that is the exact noise the s
 - Voice `ryan`, unless `/tts-mcp:engine` selected a non-qwen3 engine (voice and engine must match or the server 400s).
 - **English always**, even when the user writes German.
 - **Throwaway lead word** — `"Okay."` / `"So,"`. CoreAudio clips the first word; never let a content word lead.
-- **Then a 2–4 word tag**, after the lead word, never first. Source in order: the Step 0 `📌 Task:` anchor → its parent goal → the repo or service. **A `--dry` run frequently has no anchor** — then use a short description of the work (`"harness config"`, `"inbox triage"`). Never skip the tag; one server serves every session and an untagged utterance is noise.
+- **Then a 2–4 word tag**, after the lead word, never first. Source in order: the Step 0 `📌 Task:` anchor → its parent goal → the repo or service. **A run frequently has no anchor** — then use a short description of the work (`"harness config"`, `"inbox triage"`). Never skip the tag; one server serves every session and an untagged utterance is noise.
 - Terse, one idea per sentence. No markdown, URLs, paths, code, or hashes — describe them in words.
 - Lead with the recommendation and say the word "recommended".
 - Fire-and-forget: one `mcp__tts__say` call. Never poll `get_status`, never block on it.

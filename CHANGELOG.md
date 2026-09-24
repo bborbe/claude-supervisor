@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`/supervisor:worker-drive` takes no arguments.** `--dry` (diagnose-only, added in v0.44.0) and `--steps N` (action cap) are removed: one command, one behaviour — diagnose, then drive until a hard stop. An option the operator has to remember is a second command in disguise, which is what merging `/and` in was meant to end. The report's `BUDGET` stop reason goes with `--steps`.
+
 ## v0.45.0
 
 - feat: **the attention answer caller stamps `resolved_by`, so a manager resolution becomes attributable.** `attention-answer.py` sent only `answered_by` — an arm label — so the store's manager-vs-operator split was reachable in principle and empty in practice: no live caller supplied the field, and it could only ever be populated by a hand-written body. The script now resolves the answering session from `CLAUDE_CODE_SESSION_ID` and sends it as `resolved_by` beside `answered_by`. The invoking command is untouched and no new flag is added — `--by` keeps supplying the arm label, which is what the two fields must be able to tell apart. A blank identity is **omitted rather than sent empty**, because downstream a `""` is a *set* value: it would count as a manager resolution and manufacture the false positive the field exists to close. That case is reported instead, as `RESOLVED_BY: unknown` on the arm's own output. `post_answer` and `cmd_answer` each gain one defaulted parameter, so existing call sites and tests are unaffected; the POST body is now asserted by a test, where it previously was not.
