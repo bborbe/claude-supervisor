@@ -152,15 +152,7 @@ The plugin prefix is required — a bare `fleet-drive` resolves to a personal `~
 
 ### The reap contract
 
-`agents/fleet-drive.md` step 1b names this section as its reap contract, so the three disk facts stay here for reference — the agent carries its own copy and reads them; this command does not act on them. A finished session does not close itself:
-
-```bash
-grep -m1 '^status:' "<task file>"                               # want: completed
-grep -m1 '^phase:'  "<task file>"                               # want: done
-grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<task file>"    # want: 0
-```
-
-The file is the fact; the session's claim and its colour (`purple` = operator marked it) are not. Deliberately-open boxes (e.g. two Self-Review reflections) mean **not** complete — never tick a box to pass the gate.
+`agents/fleet-drive.md` step 1b owns it — the three disk reads, the rule that the file is the fact and the session's claim is not, and the deliberately-open-box carve-out. This command does not act on it and does not restate it; read it there.
 
 ### Two channels reach a worker, and they are not interchangeable
 
