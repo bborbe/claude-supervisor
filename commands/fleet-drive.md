@@ -11,11 +11,11 @@ argument-hint: "[--dry-run] — no argument performs the sweep; --dry-run verifi
 
 Fleet drive slash command — the fleet layer's **drive** verb, run once, by hand.
 
-The fleet has a show (`/supervisor:fleet-status`) and an act loop (`/supervisor:fleet-loop`), but nothing restarts a session that is idle with open work and nothing blocking it. This command does, for one pass. It is the fleet sibling of `/supervisor:manager-drive`: a thin command dispatching an agent that carries the logic.
+The fleet has a show (`/supervisor:fleet-status`) and an act loop (`/supervisor:fleet-loop`), which dispatches this leg on every round. This command is that same leg, run once, by hand — for a pass between rounds, or when the loop is not armed. It is the fleet sibling of `/supervisor:manager-drive`: a thin command dispatching an agent that carries the logic.
 
 ⚠️ **A fleet-loop verb — never run it from a worker session.** A worker carries a *task*; a manager carries a topic or goal and a loop. Running a fleet-wide sweep inside a worker collapses the two roles silently: the session keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker that wants a sweep routes it to its manager with `SendMessage` and says so. A change to this command is exercised in a manager session's runtime, never from the session that authored it — `--dry-run` suppresses the sends, not the role collapse.
 
-⚠️ **One-shot.** It arms no cadence and schedules nothing. Wiring it into the `fleet-loop` loop is separate work.
+⚠️ **One-shot.** It arms no cadence and schedules nothing. `/supervisor:fleet-loop` dispatches the same agent on every round; this command is the by-hand single pass, mirroring `/manager-drive`.
 
 ⚠️ **It never classifies and never joins.** The classification and the roster-name → `sessionId` join both belong to `supervisor:fleet-sweep-reader`; this command composes them. A second copy of either drifts silently.
 
