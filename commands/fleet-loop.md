@@ -30,7 +30,7 @@ argument-hint: (no args)
 
 Answer one question: **does anything in the fleet need attention right now?**
 
-Not `/and` (session-scoped) and not `/fleet-status` (stateless). `/fleet-loop` is the stateful round on top of `/fleet-status`: it remembers the last sweep, diffs against it, and acts only on evidence. It has side effects — a message consumes a peer's turn — so it never runs tighter than ~15 minutes and is never invoked back-to-back by a polling loop.
+Not `/supervisor:worker-drive` (session-scoped) and not `/fleet-status` (stateless). `/fleet-loop` is the stateful round on top of `/fleet-status`: it remembers the last sweep, diffs against it, and acts only on evidence. It has side effects — a message consumes a peer's turn — so it never runs tighter than ~15 minutes and is never invoked back-to-back by a polling loop.
 
 **Why each rule below exists — the incidents, measurements and superseded readings — lives in the Fleet Manager Session runbook (per-vault) § Fleet-Manager Command — Rationale and Measured History.** Read it before changing a rule; this file carries only what a sweep executes. Design source, do not re-derive: the Claude Code cross-session messaging notes (operator's vault) § Orchestration design, mirrored in `~/.claude/commands/first-mate.md` § The sweep loop.
 
