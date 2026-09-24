@@ -25,7 +25,7 @@ The user typed this because the session has been *correct* and *not done* at the
 
 ## The contract
 
-Run in a loop: **inventory everything still open (§1)**, then pick the highest-leverage *actionable* row, do it, observe, re-pick. The inventory is what keeps a single loud blocker from hiding five doable items. Continue until one of exactly **four hard stops**. Nothing else stops you.
+Run in a loop: **inventory everything still open (§1)**, then pick the highest-leverage *actionable* row, do it, observe, re-pick. The inventory is what keeps a single loud blocker from hiding five doable items. Continue until one of exactly **five hard stops**. Nothing else stops you.
 
 | Hard stop | Test |
 |---|---|
@@ -33,10 +33,11 @@ Run in a loop: **inventory everything still open (§1)**, then pick the highest-
 | **Irreversible outward action** | Prod mutation, merge, release, delete, send. Needs explicit per-action approval. |
 | **Genuine fork** | Two paths with *different objectives or scope* — not two sub-steps of one approved path. |
 | **Done** | Every criterion met, or every remaining one provably belongs to someone else (§5). |
+| **Other-owned** | Every remaining row belongs to another session or an external system, and none is actionable from here. §0b's owner table already permits this — *"Another session / person … **Nothing.** Preempting it sabotages their run. Say so explicitly."* — but the table below had no row for it, so a session that had driven everything had to improvise a stop and flag its own improvisation. Name the owner and stop. |
 
 Not hard stops — drive straight through these: a defect discovered mid-work (fix it), a sub-step of approved work (do it), a mechanical write with evidence already in hand (write it), an unread file (read it), an ambiguous detail with a sane default (assume it, state the assumption, proceed).
 
-**There is no action cap — the four hard stops are what end a run.** Measured 2026-09-05 across the first day of real use: reporting runs came in at 0, 2, 4, 8 and ~16 actions, and every one terminated on a hard stop, never on a budget. A fixed cap either does nothing or interrupts good work mid-stride; two of the longest runs that morning were the most productive.
+**There is no action cap — the five hard stops are what end a run.** Measured 2026-09-05 across the first day of real use: reporting runs came in at 0, 2, 4, 8 and ~16 actions, and every one terminated on a hard stop, never on a budget. A fixed cap either does nothing or interrupts good work mid-stride; two of the longest runs that morning were the most productive.
 
 Use ~15 actions as a **signal, not a limit**: passing it without reaching a hard stop is evidence the task is bigger than one drive. Say so in the report — name what is left and why it did not converge — then keep going or stop deliberately. Do not stop merely because a number was reached.
 
@@ -463,7 +464,8 @@ Headline only: what changed and what stopped you.
 
 | Voice mode | What this command does |
 |---|---|
-| `on` / `narrate` / `interview` | **Speak the verdict.** A verdict is an attention signal, spoken in every mode except off. |
+| `on` / `narrate` | **Speak the verdict.** A verdict is an attention signal, spoken in every mode except `off` and `interview`. |
+| `interview` | **Speak questions, not answers — the verdict stays on screen.** The tts-mcp playbook is explicit — *"⚠️ `interview` speaks questions, not answers"* — and its own enablement table marks the **Answers** column ❌ for this mode. ⚠️ **This row listed `interview` as a speak-the-verdict mode until 2026-09-24**, contradicting the artifact that owns the question; a session following it spoke verdicts in a mode whose contract says answers are screen-only. |
 | `off`, or never invoked this session | Say nothing. Print one line under the panel: `🔇 voice off — /tts-mcp:voice narrate to hear verdicts` |
 | `mcp__tts__say` tool absent entirely | Skip silently, no hint. |
 
