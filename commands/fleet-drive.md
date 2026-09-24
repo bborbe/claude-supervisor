@@ -6,7 +6,7 @@ allowed-tools:
   - ListAgents
   - Read
   - Bash(python3:*)
-argument-hint: (no args — one drive pass: verify, draft, send)
+argument-hint: "(no args — one drive pass: verify, draft, send)"
 ---
 
 Fleet drive slash command — the fleet layer's **drive** verb, run once, by hand.
