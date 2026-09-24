@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.48.5
 
 - fix: **the spawn-confirmation prescription drops `last_message` — it read as a liveness signal and is not one.** v0.48.4's correction replaced `.status` with "`agent_status.last_message` and the transcript file's mtime advancing", and a live exercise on 0.48.4 falsified half of it: `last_message` read `null` at 95 and at 106 transcript lines of a running turn. **The reported mechanism was wrong and the conclusion right** — it is not a completion artifact (assistant text arrived at record 107, roughly 40s *before* the turn ended), it is null *until the worker writes assistant text*, and a tool-heavy worker writes none for most of a turn: **11 of the 15 assistant records** in that transcript were `tool_use`-only. So it reads exactly like the idle case, which is the failure this whole defect is about. The prescription now names **the transcript file's mtime advancing** alone, and says plainly why `.status` and `last_message` are each wrong. Found by evidence rather than by audit — the third self-caught error on this defect, and the only one no amount of re-reading could have found.
 
