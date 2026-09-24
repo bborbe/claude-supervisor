@@ -436,10 +436,12 @@ Then pass the pair to whichever spawn path runs:
 ### 3.1 Spawn — the wezterm path (fallback, and always the resume branch)
 
 ```bash
-wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
+wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
 ```
 
 **`--window-id` is what puts the tab in the right window** — without it the new tab inherits `WEZTERM_PANE` from the calling session (see the note at the end of this step), which is exactly how a human-only task landed in the Agents window. `${WINDOW_ID:+...}` keeps the flag off entirely when the map is unavailable, so the fallback degrades to the old behaviour rather than passing an empty `--window-id`.
+
+**`--cwd` is the other half of the same trap, and it is not inherited either.** Without it the tab inherits *wezterm's* working directory — `$HOME` for a server started from a home directory — and Claude Code stops on *"Accessing workspace /Users/&lt;user&gt; — do you trust this folder?"* before registering a pid, so a resume that worked reads as a no-op. Read the value from the session registry (`~/.claude/sessions/<pid>.json`, field `cwd`) and resolve it **before** the spawn; never guess it, and refuse rather than spawn into the wrong tree when the record carries none. The requirement's single home is `docs/fleet-surface.md` § Spawn a worker — do not state a second resolution rule here.
 
 **Order matters here: pass `/color` as the spawn prompt → send the work command after.** The colour is the *only* thing that belongs in this spawn's prompt argument: it runs in ~1s and leaves the session idle at its prompt, ready for the real command. Do NOT pass the work prompt there — a session spawned with it is busy from its first instant, and anything sent afterwards queues behind it instead of submitting.
 
