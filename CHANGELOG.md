@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.48.4
 
 - fix: **the spawn-confirmation prescription now names a signal that actually works — on all four surfaces that carried the wrong one.** `commands/manager-loop.md`, `docs/fleet-surface.md` and two manager runbooks told a manager that a headless worker's liveness "comes from `agent_status` (`.status`, `.session_id`)". `.status` is set to `done` on **any** SDK `result` message (`server/supervisor.mjs`), so a resumed worker measured reporting `done` with `num_turns: 0` was read as finished while its transcript kept growing — and the obvious next act, a retry, puts two writers on one conversation, the corruption the resume guard exists to prevent. The prescription now names the **transcript** — `agent_status.last_message` and the transcript file's mtime advancing — and states that `.status` is terminal only once the turn has ended. ⚠️ **The registry is not the alternative**: a same-server headless worker holds no registry entry at all (`server/liveness.mjs` header), so pointing readers there would trade one wrong instrument for another. ⚠️ **`current_tool_call` is not a liveness signal either** — it is non-null only while a `tool_use` is in flight, so a live worker thinking between calls reads `null`; it stays named only for its real job, which call and how long held. § Spawn a worker gains a one-line cross-reference rather than a fifth copy, because a restated sentence is how one wrong field reached four surfaces.
 
