@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.53.0
 
 - feat: **`fleet-board.py` emits a `saturation` value — the fleet working ratio, `(busy + shell) / live sessions` — as the fleet's saturation signal in place of router tok/s.** The numerator counts the **raw registry status**, deliberately not `counts["running"]`: the buckets apply a precedence (`problem` → `needs-input` → `running` → `idle`), so a `busy` session holding an open gate is bucketed `needs-input` and a bucket-based numerator would drop it — undercounting precisely the sessions that *are* working. On the board's own fixtures the two readings disagree, 3 of 6 against 1 of 6, and that gap is what `TestSaturation` pins. The raw status is also what `ListAgents` reports, which is what makes the printed numerator/denominator cross-checkable by hand against the same moment. `ratio` is `None`, never `0.0`, for an empty fleet, so "no live sessions" and "nothing working" cannot render alike. Offline by construction: the tok/s figure that sits beside the ratio stays the caller's job (`commands/fleet-loop.md` reads it from `claude-metrics.sh`), because resolving it here would make a script that runs every sweep tick depend on six credentialed Prometheus sources and break the pure-fixture tests the board is built on.
 
