@@ -121,8 +121,11 @@ jq -r '.permissions.allow[]' ~/.claude/settings.json | grep -E 'Bash\([^)]*p?kil
   operator decision, not a manager one.
 - **It does not fix the headless resume guard.** Headless workers are refused, not handled.
 - **It is not the orchestrator.** `commands/worker-restart.md` collapses kill → resume →
-  re-orient into one verb and must call THIS script for the kill+resume leg rather than
-  reimplementing it, so exactly one kill+resume mechanism exists.
+  re-orient into one verb and calls THIS script for the kill+resume leg rather than
+  reimplementing it, so exactly one kill+resume mechanism exists. Its read-only pre-kill
+  probe is the sibling `scripts/restart-precheck.py`, which owns the worktree check and the
+  cause-of-death classification; the two scripts share the registry read but not the
+  refusal vocabulary — the seven tokens above stay exactly seven.
 
 ## The one deliberate copy
 

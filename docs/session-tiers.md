@@ -5,6 +5,15 @@ prefix names that tier: `fleet-*` for the fleet manager, `manager-*` for a goal/
 `worker-*` for a worker. Two bare verbs are cross-tier. Ask one question — *which session am I
 in?* — and the table below answers what you may run.
 
+⚠️ **One command breaks the prefix rule, and it is named in the table so it cannot be
+mistaken for an oversight: `/supervisor:worker-restart`.** Its prefix names its **target**,
+not its invoker — it is run by a manager, and the `worker-*` tier is the one tier whose own
+rule forbids resuming or spawning a session. It cannot move tiers: a worker cannot restart
+itself, because `restart-worker.py` refuses a `busy-target` and a session running the command
+is by definition mid-turn. The name is kept because it is already fixed by three shipped
+artifacts (the script's docstring, `docs/restart-worker.md`, and the task that built them);
+the exception is recorded here rather than paid for with a rename.
+
 Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 
 ## The three tiers
@@ -38,6 +47,7 @@ other side.
 | `/supervisor:reset` | manager — re-discovers *this* manager's state | worker |
 | `/supervisor:open` | manager — resolves a name, then jumps, resumes or spawns | worker — workers never open sessions |
 | `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `manager-drive`, never by driving a task itself |
+| `/supervisor:worker-restart` | fleet manager, manager — **the one exception to the prefix rule: `worker-` names the TARGET, not the invoker** | worker — it cannot restart itself (the script refuses `busy-target`, and a session running the command is mid-turn) |
 | `/supervisor:read-guides` | any | — |
 | `/supervisor:jump` | any | — |
 | `/supervisor:who-needs-me` | any | — |

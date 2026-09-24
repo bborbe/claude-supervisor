@@ -282,6 +282,29 @@ indistinguishable from the session id alone — read the transcript tail before 
 error is not symmetric: an undriven mid-work resume wastes a session, a driven gate-death
 resume **answers a question on the operator's behalf**.
 
+**The discriminator is the transcript tail, and the pane then vetoes.** The tail decides the
+branch: its last `👤 You:` line classifies, and a closer that is absent, `nothing`, or a parked
+`later (on …)` means **mid-work** — nothing is waiting on a human. Only a real `pick` /
+`approve:` / `you run:` / `review:` line is **gate-held**.
+
+⚠️ **There is no third branch for the restart-request death, and none is needed.** The
+2026-09-20 case — a session that died holding a gate that was its own restart request,
+satisfied by the restart itself — lands in **mid-work** by construction: a harness
+`restart Claude Code` gate is not a `👤 You:` line, so the tail reads as "nothing waiting". Do
+not add a restart-detection heuristic to catch it; the classifier already agrees.
+
+⚠️ **The pane text vetoes the tail, and the veto wins.** Read the resumed pane before typing
+anything. A selection modal (`Enter to select`) or a non-empty composer means **type
+nothing** — a keystroke into a modal selects a menu option, and a resume landing on one is
+exactly the state the 2026-09-20 run misread as a live gate. The signals can disagree: the
+tail is what the session *wrote*, the pane is what it is *holding*. Report the veto and hand
+over the pane instead of answering for it.
+
+Both halves are implemented in `scripts/restart-precheck.py` (its `classification:` line),
+with the orchestration in `commands/worker-restart.md`. Do not restate the classifier
+elsewhere — two copies of a transcript-tail read drift silently, because both keep returning a
+string.
+
 **3 — `cwd` is not inherited on a resume — pass it explicitly.**
 
 `spawn_agent(resume="<id>", interactive=false, cwd="<dir>")`. The resumed session starts in the

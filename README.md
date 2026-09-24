@@ -33,6 +33,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |
+| `/supervisor:worker-restart` | restart ONE named worker in one verb — kill, resume, and tell it what changed only when that is safe |
 | `/supervisor:open` | resolve a task, goal or topic by name, then jump to its live session, resume its recorded one, or spawn a new one (manager-only; needs `vault-cli`) |
 | `/supervisor:read-guides` | load every guide in `docs/` — start here to learn which commands your session tier may run |
 
@@ -305,6 +306,9 @@ commands/manager-drive.md                        one goal or topic — the act l
 commands/fleet-verify.md                         fleet manager — verify the fleet layer's contract, suggest fixes
 commands/manager-verify.md                       goal/topic manager — verify one subject, suggest fixes
 commands/worker-drive.md                         one worker session — drive its anchored task to done
+commands/worker-restart.md                       restart ONE named worker — kill, resume, re-orient in one verb
+scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
+scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
 commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
