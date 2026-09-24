@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.52.1
 
 - fix: **`restart-worker.py` can now actually reach its precondition-4 check — two bugs made it refuse every restart.** Both were found by running the deployed `0.52.0` copy against live sessions, which is precisely what the end-to-end step exists for; neither is visible from the unit tests, and the first is invisible from a synthetic `startedAt`. **(1) `startedAt` is milliseconds.** The live registry writes `1790269714645`, but `parse_started()` read a bare number as *seconds*, placing the session's start some 57,000 years out — so `load_mtime > started` was false for every session and `stale-load-path` refused unconditionally. That is the check failing in the direction that hides real fixes: it never once permitted a restart, and every refusal it produced read as correct. The unit is now detected by magnitude (past `1e11` is milliseconds). **(2) The newest load path was chosen by directory mtime.** Two versions installed in one operation get near-identical mtimes and the tie falls either way — measured: `0.51.2` and `0.52.0` differed by 3ms with the *older* one later, so an mtime-max selected `0.51.2` and precondition 4 then compared the session against the wrong copy. Selection is now by version, ordered numerically (`0.10.0` > `0.9.0`), with that directory's own mtime still answering "was it installed after this session started". Verified against live sessions: an idle worker now clears (`role: worker · status: idle · load path: 0.52.0`) while a busy target still refuses `busy-target`.
 
