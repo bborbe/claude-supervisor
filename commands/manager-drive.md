@@ -13,6 +13,8 @@ allowed-tools:
   - Bash(mkdir:*)
   - Bash(date:*)
   - ListAgents
+  - mcp__supervisor__spawn_agent
+  - mcp__tts__say
 argument-hint: "[goal|topic] (detected when omitted)"
 ---
 
@@ -66,9 +68,16 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
    `Task(subagent_type: "supervisor:manager-drive", prompt: <subject + tracked set + classification + confirmed orphan verdicts + roster + vault + timestamp>)`
 
-   It reaps, then nudges, then runs the auto-resume gate, and returns the action lines. Its rules — the reap test, the ten gate clauses, the re-probe-at-spawn-site rule, the crash-loop cap — live in `agents/manager-drive.md` and are not restated here.
+   It reaps, then nudges, then decides the auto-resume gate, and returns the action lines — **decisions, not acts**: the agent holds no spawn tool, so its `To open` and `To resume` rows are yours to execute. Its rules — the reap test, the ten gate clauses, the re-probe-at-hand-off rule, the crash-loop cap — live in `agents/manager-drive.md` and are not restated here.
 
-5. **Print what came back, voice the nudges, and escalate.** Reproduce the agent's action lines verbatim, including its `Not resumed` and `Escalated` sections — a near-miss clause is the most useful line in the report. **Voice the `Nudged` lines** with `mcp__tts__say` (voice-mode gated): the agent owns the message, you own the voice, because a subagent has no TTS. Then the operator-facing tail: any gate that needs their decision goes out as **`/supervisor:jump <pane-id>`**, never as a command for them to run here (the approval belongs to the session that raised it).
+5. **Execute the rows it handed over — the spawn is yours, and so is the mode argument.** The agent decided each row and wrote its `mode:` to disk; you are the one that creates the session.
+
+   - **`To resume`** → **re-probe liveness first.** The agent probed at its hand-off site; the window between that report and this spawn is yours to close, and a stale probe here puts two writers on one conversation. Then `mcp__supervisor__spawn_agent(prompt="<the next instruction>", resume="<session_id>", cwd="<the cwd the agent reported>", …)` — `cwd` is required and is **not** inherited by a resume. Only **after** the registry shows an entry for the resumed id against a **running** pid, write `vault-cli task set "<task>" last_auto_resume "<ISO8601>"`. A refused, errored or aborted spawn writes nothing.
+   - **`To open`** → read the row's `mode:` back off disk and pass the argument per `docs/fleet-surface.md` § Spawn a worker item 6: `interactive=false` when it reads `mode: headless`, `interactive=true` when it reads `mode: interactive`. Then spawn with `prompt='/vault-cli:work-on-task "<task>"'`, `cwd=<dir>`, `label="<task>"`. ⚠️ **A row whose `mode:` is absent was never decided — hold it and say so.** Spawning without the argument is exactly the `mode_source=config` defect this leg exists to remove, and the ledger cannot tell it from a site that never decided at all.
+
+   ⚠️ **Never route these through a `Skill`-invoked `/supervisor:open`, and never fall back to the wezterm path.** `/supervisor:open` requires `mcp__supervisor__*` in the *invoking* session and falls back to wezterm without it — a tab by construction, which cannot produce a headless worker and writes **no ledger row**, so the measurement this whole change serves would pass vacuously.
+
+6. **Print what came back, voice the nudges, and escalate.** Reproduce the agent's action lines verbatim, including its `Not resumed` and `Escalated` sections — a near-miss clause is the most useful line in the report. **Voice the `Nudged` lines** with `mcp__tts__say` (voice-mode gated): the agent owns the message, you own the voice, because a subagent has no TTS. Then the operator-facing tail: any gate that needs their decision goes out as **`/supervisor:jump <pane-id>`**, never as a command for them to run here (the approval belongs to the session that raised it).
 
 ## What this command must never do
 
