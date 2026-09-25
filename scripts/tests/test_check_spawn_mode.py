@@ -125,6 +125,20 @@ class CheckSpawnModeTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_raw_wezterm_spawn_grant_is_also_a_spawn_route(self):
+        """The second surface of the same class, found 2026-09-25. `agents/manager-drive.md`
+        had its supervisor grant removed and still granted `Bash(wezterm cli spawn:*)` — a raw
+        terminal spawn the tool-only pattern could not see, and the exact bypass the change
+        existed to close. The grant dimension enumerates the routes, so a file granting either
+        one must point at the rule."""
+        self.write("agents/new-agent.md",
+                   "---\nallowed-tools:\n  - Bash(wezterm cli spawn:*)\n---\n"
+                   "Open a tab with `wezterm cli spawn`.\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("wezterm cli spawn", result.stderr)
+        self.assertIn("new-agent.md", result.stderr)
+
     def test_unknown_new_worker_site_fails(self):
         self.write("commands/brand-new.md", SITE + NEW_WORKER_CALL)
         result = self.run_check()

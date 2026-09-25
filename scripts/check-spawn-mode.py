@@ -69,10 +69,27 @@ RESUME_ONLY = (
 )
 
 #: The dimension a text scan cannot reach. A tool grant permits a spawn whether or not the
-#: prose describes one, so every file whose frontmatter grants it must at least carry the
+#: prose describes one, so every file whose frontmatter grants one must at least carry the
 #: pointer to the rule's home — otherwise a reader (or an agent) following that file has no
 #: route to the rule at all. This is what `agents/manager-drive.md` was missing.
-GRANT_TOOL = "mcp__supervisor__spawn_agent"
+#:
+#: ⚠️ **Every route, not the first one found.** This was a single string until 2026-09-25,
+#: when a second surface of the same class turned up: `agents/manager-drive.md` had its
+#: `mcp__supervisor__spawn_agent` grant removed, and **still** granted
+#: `Bash(wezterm cli spawn:*)` — a raw terminal spawn the tool-only pattern could not see, and
+#: the exact bypass the change existed to close. A defect class returning one surface further
+#: out is enumerated, not patched at the instance.
+#:
+#: **What this widening does not cover.** The grant dimension asks only whether a granting
+#: file can *reach* the rule. It cannot ask whether a file is *allowed* to grant a spawn route
+#: at all — that is a property of the file's contract, and for `agents/manager-drive.md` it is
+#: carried by the task criterion (its served `tools:` / `allowed-tools` must name no spawn
+#: route), not by a prose scan. Do not read a pass here as proof that no file holds a grant it
+#: should not.
+GRANT_TOOLS = (
+    "mcp__supervisor__spawn_agent",
+    "Bash(wezterm cli spawn:*)",
+)
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 
 CALL = re.compile(r"spawn_agent\(")
@@ -118,9 +135,10 @@ def check(root):
             # worker must point at the rule even when its prose shows no `spawn_agent(prompt=`
             # call at all, which is exactly how `agents/manager-drive.md` bypassed the wiring.
             fm = FRONTMATTER.match(text)
-            if fm and GRANT_TOOL in fm.group(1) and rel not in SPAWN_SITES and MODE_ANCHOR not in text:
+            granted = [g for g in GRANT_TOOLS if fm and g in fm.group(1)]
+            if granted and rel not in SPAWN_SITES and MODE_ANCHOR not in text:
                 failures.append(
-                    f"{rel}: its frontmatter grants `{GRANT_TOOL}` — which permits opening a "
+                    f"{rel}: its frontmatter grants `{granted[0]}` — which permits opening a "
                     f"worker — but it carries no reference to the rule's home ({MODE_ANCHOR!r}), "
                     f"so a reader following this file has no route to the mode rule"
                 )
