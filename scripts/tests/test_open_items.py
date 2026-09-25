@@ -300,6 +300,86 @@ class JsonShape(Base):
         self.assertEqual(states, ["ok", "unresolvable", "none"])
 
 
+class PaneHeldAskedOfYou(Base):
+    """A gate the operator releases in a worker's own pane is not a ledger entry.
+
+    `asked-of-you`'s only close path is `answer`, and `answer` needs THIS session to
+    receive the operator's words. For a gate in a tab worker's pane the manager is
+    forbidden from receiving them — "a relay never releases a gate" — so the entry is
+    unclosable by construction: it sits open forever, indistinguishable from a question
+    genuinely still outstanding, and the ledger answers "what is still asked of me"
+    wrongly and permanently.
+
+    Measured 2026-09-21 in the `Phase-Gated Topic Flow` manager session: entries
+    `7fbcec86`, `d1161bc4` and `4f79f16e` were created for pane gates and not one could
+    close on its own — all three were eventually cleared by a manual batch pick that
+    stamped them `operator answered in session: y`, an attribution a later reader cannot
+    tell from a genuine answer. `f9c512c1` is still open over a gate whose pane no longer
+    exists.
+
+    The flag asserts where the ask lives, so the refusal follows from a fact rather than
+    a special case: on `asked-of-me` / `pushed` a pane origin is ordinary provenance,
+    because those kinds close on their task file.
+    """
+
+    def test_refuses_an_asked_of_you_held_in_a_workers_pane(self):
+        code, _, err = self.add(
+            "--kind",
+            "asked-of-you",
+            "--text",
+            "apply the auditor's two Critical fixes to prompt 2, then re-audit",
+            "--held-in-pane",
+            "766",
+        )
+        # The refusal must be the RULE's refusal, not argparse's, and the two are
+        # distinguishable here rather than by "non-zero exit": argparse exits with the
+        # integer 2 and writes "unrecognized arguments" to stderr, while the rule exits
+        # with the message itself — `sys.exit(str)` carries it as the exit code, and the
+        # harness catches SystemExit before the interpreter can print it. An assertion on
+        # the exit code alone would pass against the pre-change script and pin nothing.
+        self.assertIsInstance(code, str)
+        self.assertNotIn("unrecognized arguments", code)
+        self.assertIn("jump-link.py 766", code)
+        self.assertIn("never releases a gate", code)
+        self.assertEqual(err, "")
+        self.assertEqual(self.ledger(), [])
+
+    def test_an_asked_of_you_answered_here_still_adds(self):
+        """Negative control: the guard must subtract only the pane-held case.
+
+        A question this session can receive the answer to closes normally — a relayable
+        non-gate question, or a headless worker's gate answered over the supervisor's
+        permission channel. A check that refused everything would satisfy the positive
+        case above while catching nothing.
+        """
+        code, out, _ = self.add(
+            "--kind",
+            "asked-of-you",
+            "--text",
+            "should the PR carry the daemon's regenerated specs?",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("added", out)
+        self.assertEqual(len(self.ledger()), 1)
+
+    def test_a_pane_origin_is_recorded_on_the_kinds_that_close_on_their_task(self):
+        self.task_file("Ship the ledger fix")
+        code, _, _ = self.add(
+            "--kind",
+            "asked-of-me",
+            "--text",
+            "stop the vault UI 500s",
+            "--task",
+            "Ship the ledger fix",
+            "--held-in-pane",
+            "766",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self.ledger()[0]["held_in_pane"], "766")
+        _, out, _ = self.listing()
+        self.assertIn("pane: 766", out)
+
+
 class Resolution(unittest.TestCase):
     def test_resolve_task_returns_none_for_an_empty_title(self):
         self.assertIsNone(oi.resolve_task(None, []))
