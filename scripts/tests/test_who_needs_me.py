@@ -37,6 +37,7 @@ import io
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 import unittest
@@ -1151,8 +1152,14 @@ class SupersededCloserPanel(unittest.TestCase):
         return path
 
     def registry(self, entries):
-        """A temp registry dir in the real shape: one `<pid>.json` per live session."""
+        """A temp registry dir in the real shape: one `<pid>.json` per live session.
+
+        Registered for cleanup like `transcript()` does -- `mkdtemp` is not
+        self-cleaning, so without this every run of the two registry cases leaves a
+        directory behind.
+        """
         d = tempfile.mkdtemp(prefix="wnm-registry-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         for i, (sid, status) in enumerate(entries):
             with open(os.path.join(d, f"{2000 + i}.json"), "w", encoding="utf-8") as handle:
                 json.dump({"pid": 2000 + i, "sessionId": sid, "status": status}, handle)
