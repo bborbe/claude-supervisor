@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.57.1
 
 - fix: **the necessity read now emits a row per task, so it answers *which* and not only *how many*.** Step 8's report listed rows only for `not needed` and `product`, so a run that judged every task necessary printed a bare summary line — and a reader could not tell which task had been checked against which criterion. Measured 2026-09-25 against the released `v0.57.0`: the read fired correctly and separated 34 per-alert tasks, but the whole output was `93 needed · 34 product · 0 not needed`, naming no task at all. A `needed:` row is now mandatory, naming the task and the criterion it advances; every `not needed` and `product` row is still required in full, and sampling is permitted on `needed` alone. A verdict that names no task is a count, not a finding.
 
