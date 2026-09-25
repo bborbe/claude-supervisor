@@ -9,6 +9,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * PATCH version when you make backwards-compatible bug fixes.
 
 ## Unreleased
+- fix: who-needs-me no longer lists a rendered closer whose session has started a new turn
 
 - fix: **the necessity read must name the criterion a `needed` task advances, not merely count how many do.** The row was already mandatory, but a run can satisfy the letter with a prose summary — and one did: measured 2026-09-26 against the released `v0.57.2`, the output was *"75 tasks advance a goal's success criteria, 34 are the pipeline's own output, and 18 advance nothing"*, three correct buckets summing to 127 with a named `not needed` task, but **no `needed:` row at all**, so no criterion was ever named for the 75. A count of tasks that advance *some* criterion does not say which task advances which, and that citation is the reason this read exists rather than a tally. The rule now states it explicitly, with the measured run as the worked counter-example, and adds the consequence: a task whose criterion cannot be named is not `needed`.
 
