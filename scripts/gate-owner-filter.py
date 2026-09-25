@@ -107,13 +107,24 @@ def live_ids(registry_dir=REGISTRY):
     return out
 
 
-def open_items(state_dir=STATE):
-    """Currently-open items from the event logs, newest write per item.
+def log_items(state_dir=STATE):
+    """Every item the event logs carry, newest write per item, open or closed.
 
     The log is append-only and never rewritten: an `open` line carries the item,
     a later `close` line carrying only its `item_id` clears it. Folded here
     rather than read from the record, so the `pane` and `session_id` always come
     from the same line.
+
+    ⚠️ CLOSED items are returned too, and that is load-bearing. This reader is
+    the pane→session hop only — whether the gate is still open was already
+    decided upstream by `who-needs-me.py`, which is slow (it globs every
+    session's log and reads the attention store and transcripts) and can take
+    seconds. Requiring the item to still be open here re-derives a fact the
+    caller was already given, against a log that may have moved on in between.
+    Measured 2026-09-25: a gate the feed reported on pane 1908 had all **29** of
+    its items closed by the time this read ran, so the hop returned None, the
+    filter failed open, and it emitted a pane owned by another live manager —
+    the one case the filter exists to drop.
     """
     items = []
     for path in glob.glob(os.path.join(state_dir, "*.events.jsonl")):
@@ -138,17 +149,17 @@ def open_items(state_dir=STATE):
         except OSError:
             continue
         for item_id, rec in opened.items():
-            if item_id not in closed:
-                items.append(rec)
+            items.append(dict(rec, state="answered" if item_id in closed else "open"))
     return items
 
 
 def session_for_pane(pane, items):
     """The session that raised the gate on `pane`, or None.
 
-    Pane ids are reused, so a stale open item can wear a live pane's id. The
-    caller pairs this with the feed's own liveness read; here the newest open
-    item for the pane wins.
+    Pane ids are reused, so the newest item for the pane wins — regardless of
+    whether that item is still open, for the reason `log_items` records.
+    Absent stays absent: a pane with no item at all returns None and the caller
+    treats it as unowned, which is a real answer rather than a failure.
     """
     hits = [r for r in items if str(r.get("pane")) == str(pane)]
     if not hits:
@@ -222,7 +233,7 @@ def main():
 
     ledger = load_ledger(args.ledger_dir)
     live = live_ids(args.registry_dir)
-    items = open_items(args.state_dir)
+    items = log_items(args.state_dir)
 
     panes = list(args.pane)
     if args.feed:
