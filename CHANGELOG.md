@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.56.3
 
 - fix: **the gate owner filter dropped its own pane→session hop when the gate had already closed, and woke a manager for another manager's pane.** `session_for_pane()` folded the event log's open/close lines and took the newest **open** item, so a gate the feed reported but whose items had all closed by the time the filter read the log resolved to no session — and the filter failed open to `unowned`, emitting exactly the pane it exists to drop. Measured 2026-09-25 in Fleet Manager session `64b4a415`: `emit unowned pane 1908 session=None spawner=None` after 20 consecutive polls dropping the same pane as `peer-manager session=82bf6c3a spawner=56021d2e` — and **all 29** of that pane's items were closed at read time. The hop now resolves pane→session from the newest item **regardless of open state**: whether the gate is still open was already decided upstream by `who-needs-me.py`, which is slow (every session's log, the attention store, transcripts) and can take seconds, so re-deriving it here raced a log that had moved on. ⚠️ Deliberately **not** fixed by failing closed on an unresolved session — that would silently drop real gates, the broken-watcher-looks-quiet failure this module exists to avoid. Two alternative sources were ruled out by measurement rather than assumption: no `.needs.json` carries the affected panes, and the attention store held no item for that producer.
 
