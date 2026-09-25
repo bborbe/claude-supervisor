@@ -128,7 +128,7 @@ class SessionForPane(unittest.TestCase):
         self.assertEqual(gf.session_for_pane(476, [{"pane": "476", "session_id": "s"}]), "s")
 
 
-class OpenItems(unittest.TestCase):
+class LogItems(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.dir = self._tmp.name
@@ -139,26 +139,47 @@ class OpenItems(unittest.TestCase):
             for line in lines:
                 handle.write(json.dumps(line) + "\n")
 
-    def test_open_then_closed_is_not_open(self):
+    def test_closed_item_is_still_returned(self):
+        """The defect this guards: dropping closed items breaks the pane hop.
+
+        Measured 2026-09-25 — a gate the feed reported on pane 1908 had all 29 of
+        its items closed by the time this read ran, so excluding them returned no
+        session and the filter failed open, emitting a pane owned by another live
+        manager. Whether the gate is open was already decided upstream.
+        """
         self.log("a.events.jsonl", [
-            {"type": "open", "item_id": "1", "pane": "5"},
+            {"type": "open", "item_id": "1", "pane": "5", "session_id": "s"},
             {"type": "close", "item_id": "1"},
         ])
-        self.assertEqual(gf.open_items(self.dir), [])
+        items = gf.log_items(self.dir)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["state"], "answered")
+        self.assertEqual(gf.session_for_pane("5", items), "s")
 
-    def test_open_without_close_is_open(self):
+    def test_open_item_is_marked_open(self):
         self.log("a.events.jsonl", [{"type": "open", "item_id": "1", "pane": "5"}])
-        self.assertEqual(len(gf.open_items(self.dir)), 1)
+        items = gf.log_items(self.dir)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["state"], "open")
 
     def test_torn_line_is_skipped_not_fatal(self):
         """The hook appends while this reads, so a torn final line is expected."""
         with open(os.path.join(self.dir, "a.events.jsonl"), "w", encoding="utf-8") as handle:
             handle.write(json.dumps({"type": "open", "item_id": "1", "pane": "5"}) + "\n")
             handle.write('{"type": "open", "item_id": "2"')
-        self.assertEqual(len(gf.open_items(self.dir)), 1)
+        self.assertEqual(len(gf.log_items(self.dir)), 1)
 
     def test_missing_dir_is_empty(self):
-        self.assertEqual(gf.open_items(os.path.join(self.dir, "nope")), [])
+        self.assertEqual(gf.log_items(os.path.join(self.dir, "nope")), [])
+
+    def test_closed_item_still_resolves_its_pane(self):
+        """The end-to-end shape of the race: feed says gated, log says closed."""
+        self.log("a.events.jsonl", [
+            {"type": "open", "item_id": "1", "pane": "1908", "session_id": "82bf6c3a", "ts": 1},
+            {"type": "close", "item_id": "1"},
+        ])
+        items = gf.log_items(self.dir)
+        self.assertEqual(gf.session_for_pane("1908", items), "82bf6c3a")
 
 
 class PanesFromFeed(unittest.TestCase):

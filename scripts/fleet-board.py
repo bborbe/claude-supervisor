@@ -397,6 +397,42 @@ def classify(status, sid, stuck_ids, gate_ids):
     return "idle"
 
 
+def gate_attribution(needs, gate_ids):
+    """`session id -> "pane <id> — open <kind> gate"` for every gated session.
+
+    Pure. `needs` are the live gate records `collect_signals()` already holds —
+    each passed `is_live()`, so its pane was in `wezterm cli list` at read time and
+    no second lookup is needed. The pane was being discarded, and every
+    `needs-input` detail read the same literal sentence (measured 2026-09-23: 4 of
+    4 rows), which ties no bucket to any pane — `/supervisor:fleet-verify` check 4
+    reported UNKNOWN for want of one.
+
+    The `pane <id>` form is the one `who-needs-me.py`'s `_PANE_REF` parses, so the
+    string a reader joins on is the string the feed already speaks.
+    """
+    panes, kinds = {}, {}
+    for r in needs:
+        sid = r.get("session_id")
+        if sid not in gate_ids or r.get("pane") in (None, ""):
+            continue
+        # Only a gate kind attributes a gate; an `idle` record of a gated session
+        # is not one.
+        if r.get("kind") not in ("permission", "question"):
+            continue
+        panes.setdefault(sid, set()).add(str(r["pane"]))
+        kinds.setdefault(sid, set()).add(r["kind"])
+    out = {}
+    for sid, ps in panes.items():
+        ids = sorted(ps, key=lambda p: (len(p), p))
+        ks = sorted(kinds[sid])
+        if len(ids) == 1 and len(ks) == 1:
+            out[sid] = f"pane {ids[0]} — open {ks[0]} gate"
+        else:
+            noun = "panes" if len(ids) > 1 else "pane"
+            out[sid] = f"{noun} {', '.join(ids)} — open {', '.join(ks)} gates"
+    return out
+
+
 def fleet_saturation(registry):
     """The fleet working ratio: how much of the live fleet is actually working.
 
@@ -426,7 +462,7 @@ def fleet_saturation(registry):
 
 
 def collect_signals(stuck_min):
-    """The two independent signals, keyed by session id.
+    """The two independent signals, keyed by session id, plus each gate's pane.
 
     Mirrors `who-needs-me.py`'s own pipeline (its `main()`), so the gate predicate
     and the stuck predicate are the same ones the operator's `Needs you` section
@@ -444,16 +480,19 @@ def collect_signals(stuck_min):
         for r in needs
         if wnm.is_open_gate(r, task_status=wnm.task_status_from_closer)
     }
-    gate_ids = {
-        r["session_id"]
-        for r in needs
+    # The gate records themselves, not every record of a gated session: a gated
+    # session also holds its `idle` record, which is not a gate and must not lend
+    # its kind or its pane to the attribution.
+    gates = [
+        r for r in needs
         if wnm.is_open_gate(
             r, open_panes=open_panes, task_status=wnm.task_status_from_closer
         )
-    }
+    ]
+    gate_ids = {r["session_id"] for r in gates}
     cutoff = time.time() - stuck_min * 60
     stuck_ids = {r["session_id"] for r in wnm.load("tool") if live(r) and r["ts"] < cutoff}
-    return gate_ids, stuck_ids
+    return gate_ids, stuck_ids, gate_attribution(gates, gate_ids)
 
 
 def transcript_fresh_ids(window=None):
@@ -616,14 +655,18 @@ def build_grouping(registry, index, colours, slugs, task_titles):
     return Grouping(root, roles, parents, subjects)
 
 
-def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, grouping=None):
+def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, grouping=None,
+               gate_attribution=None):
     """One row per registry entry, sorted by bucket precedence then name.
 
     Pure: every input is passed in, so the bucket fixtures in
     `scripts/tests/test_fleet_board.py` exercise this directly without a live
     fleet. `grouping` is optional so a caller with no vault to read still gets a
-    complete, flat board.
+    complete, flat board. `gate_attribution` maps a gated session to its own pane
+    (see `gate_attribution()`); a gated session missing from it is reported with
+    its own reason, never a sentence shared by every row.
     """
+    gate_attribution = gate_attribution or {}
     widths = widths or WIDTHS
     rows, details = [], {}
     for sid, rec in registry.items():
@@ -657,7 +700,9 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
             }
         )
         if bucket == "needs-input":
-            details[sid] = "waiting on an open gate"
+            details[sid] = gate_attribution.get(sid) or (
+                f"no pane — gate for {sid[:8]} carries no pane id in the attention store"
+            )
     rows.sort(key=lambda r: (BUCKET_ORDER.index(r["bucket"]), r["label"].lower()))
     return rows, details
 
@@ -736,11 +781,12 @@ def main():
         print("fleet-board: session registry unreadable — refusing to render a table", file=sys.stderr)
         return 1
 
-    gate_ids, stuck_ids = collect_signals(a.stuck_min)
+    gate_ids, stuck_ids, attribution = collect_signals(a.stuck_min)
     task_titles = fs.build_work_map()
     ages = {sid: wnm.session_transcript_age(sid) for sid in registry}
     grouping = build_grouping(registry, vault_index(), colour_census(), loop_slugs(), task_titles)
-    rows, details = build_rows(registry, gate_ids, stuck_ids, task_titles, ages, grouping=grouping)
+    rows, details = build_rows(registry, gate_ids, stuck_ids, task_titles, ages, grouping=grouping,
+                               gate_attribution=attribution)
     tree, ordered = build_tree(rows, grouping)
 
     fresh = transcript_fresh_ids()

@@ -358,13 +358,32 @@ def load_events():
     return out
 
 
-def panes():
+def wezterm_panes():
+    """The live panes as `pane id -> the wezterm record`, or `None` if the query failed.
+
+    `None` is a distinct answer from `{}` — a failed `wezterm cli list` cannot prove
+    a pane is gone any more than it can prove one is live, so no caller may read it
+    as "no panes exist". Same convention as `read_registry()` below, same reason.
+    """
     try:
-        raw = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
-                             capture_output=True, text=True, timeout=5).stdout
-        return {str(p["pane_id"]): p for p in json.loads(raw)}
+        r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        return {str(p["pane_id"]): p for p in json.loads(r.stdout)}
     except Exception:
-        return {}
+        return None
+
+
+def panes():
+    """The live panes; `{}` when the query failed, for callers that only filter."""
+    return wezterm_panes() or {}
+
+
+def live_pane_ids():
+    """Confirmed pane ids, or `None` when the query failed — see `wezterm_panes()`."""
+    p = wezterm_panes()
+    return None if p is None else set(p)
 
 
 def read_registry(sessions_dir=None):
