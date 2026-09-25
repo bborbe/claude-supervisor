@@ -385,7 +385,15 @@ def wezterm_panes():
 
 
 def panes():
-    """The live panes; `{}` when the query failed, for callers that only filter."""
+    """The live panes; `{}` when the query failed, for callers that only filter.
+
+    ⚠️ `{}` here is a *conflation*: it is what a failed `wezterm cli list` returns
+    and also what a reachable WezTerm holding no panes returns. A caller that must
+    tell those apart — anything deciding liveness, since `is_live()` drops every
+    record on an empty map — has to call `wezterm_panes()` and test `is None`
+    instead. `main()` does. `pane_for()` and `fleet-board.py` still do not, and
+    read a broken transport as "no panes" (tracked as a follow-up, not fixed here).
+    """
     return wezterm_panes() or {}
 
 
@@ -1129,7 +1137,24 @@ def main():
     if a.pane_for:
         sys.exit(pane_for(a.pane_for))
 
-    pmap = panes()
+    # `wezterm_panes()` directly, not `panes()`: the latter folds a failed query into
+    # `{}`, and every record below is filtered through `is_live()`, whose test is
+    # membership in this map. A failed `wezterm cli list` therefore drops *every*
+    # record and this command prints `Needs you (0)` / `Nothing needs you.` and exits
+    # 0 — a confident clear fleet, certified by the success code, for a transport it
+    # never reached. Measured 2026-09-25: with the mux socket unreachable the feed
+    # lost 4 rendered panels and 16 idle rows and still exited 0 with an empty
+    # stderr. The `is None` test is deliberate, not `not pmap`: a reachable WezTerm
+    # with no panes is a real empty answer and must keep rendering, which is the
+    # same distinction `wezterm_panes()` documents.
+    pmap = wezterm_panes()
+    if pmap is None:
+        sys.stderr.write(
+            "who-needs-me: WezTerm pane list unreadable — the mux socket is not "
+            "answering, so no record can be proven live. Refusing to print a feed "
+            "that would read as an empty queue.\n"
+        )
+        sys.exit(1)
     # One registry read serves both questions: which sessions are live (the `quiet`
     # pass) and what each is called now (the ownership check). Reading it twice would
     # let the two disagree about which entries exist.
