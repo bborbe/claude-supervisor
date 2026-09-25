@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.56.4
 
 - fix: **an unroutable attention row was a dead end, and a nameless one wore its spawner's pane title as its identity.** `who-needs-me.py` rendered `unroutable — pane N does not resolve to this session` and stopped: the gate was real, open and answerable, but the row never named how. Measured 2026-09-25 by deliberately parking a headless worker (session `50193c14`, `spawn_agent(interactive=false)`): it inherited its spawner's `WEZTERM_PANE` (pane 0, the Fleet Manager's own tab), so the row was correctly refused a jump by the 2026-09-22 ownership check — and then handed the operator nothing. An unroutable row now also renders the command that answers it, `attention-answer.py answer <STORE item_id> --decision allow|deny`, and `normalize_store_item()` now carries the **store's** `item_id` for it: it had kept only the hook log's `dedup_key`, so a handover built from the row's own `item_id` would have been unresolvable by construction. The same measurement exposed a second hole behind the first — `is_routable()` proves ownership by comparing the pane title to the session's *name*, so a nameless session reached `return True` by design and kept a confident jump to a pane it did not own; a pane provably belonging to another registry session is now refused before that test, which cannot see the case at all. `name_of()` refuses the same borrow, so a nameless row renders its own session id rather than the spawner's name. A routable row is untouched: one jump line, no answer line.
 
