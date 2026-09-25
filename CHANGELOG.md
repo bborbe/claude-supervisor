@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.56.5
 
 - fix: **`gate-relay-read` triaged the same closer pane as `question` on one run and `no-gate` on the next.** A finished turn whose `👤 You:` line asks the operator something (`pick —`, `approve:`, `you run:`, `review:`) sits at an idle prompt, and the triage called an idle prompt `no-gate` without saying which reading wins. Measured 2026-09-25 on 0.56.4: panes 1925 and 1942 read `question` at 17:02:58Z and `no-gate` at 17:04:45Z. Plain-text closers are the only class the send leg may relay, so the flip made the relay path unreliable exactly where it applies. An asking closer line is now a plain question, and the rule is checked before `no-gate`. `👤 You: nothing` and `later (on …):` stay `no-gate`.
 
