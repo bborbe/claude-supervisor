@@ -220,13 +220,18 @@ Plain markdown, in this order, omitting empty sections:
 4. **Live collisions** — one line per id: the id, the non-terminal carrier count, and the task names.
 5. **Delta** — against the prior snapshot: buckets that moved, Progress entries added, problems appeared. `no change` when nothing moved — that is a real finding, not a failure to find one.
 6. **`stuck` rows and the mtime you observed** — one line per task you classified `stuck`: the task name, then the task-file mtime from step 2 as a bare epoch second (e.g. `1758729600`). The act leg re-reads that mtime before it nudges and drops any candidate whose file has moved since, so **a row sent without its mtime cannot be freshness-checked at all** — say so on the line rather than leaving it blank, because a blank and a zero look alike to a reader that parses the number. Omit the section entirely when no task was classified `stuck`.
-7. **Necessity** — only when the caller passed member goals (step 8). One line per task whose verdict is **not** `needed`, then one summary line:
+7. **Necessity** — only when the caller passed member goals (step 8). **One row per task you judged — all three verdicts, not just the two negative ones** — then one summary line:
 
    ```
+   needed: <task> — advances <goal> SC<n>
    not needed: <task> — checked against <criteria>
    product: <task> — output of <goal> SC<n>
-   Necessity: <M> needed · <K> not needed · <P> product — inverted set <M+K+P> of <N> tracked — over <topic page> (<member goals>)
+   needed: <task> — advances <goal> SC<n>
+Necessity: <M> needed · <K> not needed · <P> product — inverted set <M+K+P> of <N> tracked — over <topic page> (<member goals>)
    ```
+
+   ⚠️ **At least one `needed:` row is mandatory, naming a task and the criterion it advances.** This is the row an earlier revision omitted, and its absence is why the section could only ever answer *how many* and never *which*: with rows emitted only for `not needed` and `product`, a run that judged every task necessary printed a bare summary, and a reader could not tell which task had been checked against which criterion. A verdict that names no task is a count, not a finding. On a set too large to list in full, list **every** `not needed` and `product` row and **at least one** `needed` row — the sampling is allowed on `needed` alone, never on the other two.
+   ⚠️ **A run that judged everything necessary must still print its `needed:` row and its summary**, with `0 not needed · 0 product`. Those zeros are measurements, not omissions — and the `needed:` row is what makes the difference between "the read ran and found nothing wrong" and "the read did not run".
 
    ⚠️ **Emit the summary line in that shape, verbatim.** The tokens `needed`, `not needed` and `product`, **both sizes**, and the `over <topic page> (<member goals>)` clause are each required — a paraphrase in prose is not the line. Measured 2026-09-25 on the first e2e run against `Sentry Agent`: the read fired correctly and separated 34 per-alert tasks, but the line came back as *"93 needed · 34 are the goal's own output (the daily Triage and Fan-Out tasks) · 0 not needed"* — right substance, wrong shape: no `inverted set … of … tracked`, the `product` token replaced by prose, and no criterion cited. The substance is what the read exists for; the shape is what makes two runs comparable and what a reader greps for.
    ⚠️ **`<N>` is the tracked-set size and `<M+K+P>` the inverted set — both are required, and they differ whenever a tracked task names no member goal.** Printing only one of the two is the failure this slot exists to stop: a bare `3 needed · 1 not needed · 2 product` cannot be told from a run that judged six tasks out of forty and never saw the rest.
@@ -264,6 +269,7 @@ Plain markdown, in this order, omitting empty sections:
 Candidates: <task> — ids <a,b,c> — <reason>
 Collisions: <id> — <n> non-terminal carriers — <task A>, <task B>
 Delta: <what moved, or "no change">
+needed: <task> — advances <goal> SC<n>
 Necessity: <M> needed · <K> not needed · <P> product — inverted set <M+K+P> of <N> tracked — over <topic page> (<member goals>)
 ```
 
@@ -282,6 +288,7 @@ Tracked (4): <task> · <task> · <task> · <task>
 Candidates: <task> — ids <a,b,c> — <reason>
 Collisions: <id> — <n> non-terminal carriers — <task A>, <task B>
 Delta: <what moved, or "no change">
+needed: <task> — advances <goal> SC<n>
 Necessity: <M> needed · <K> not needed · <P> product — inverted set <M+K+P> of <N> tracked — over <topic page> (<member goals>)
 ```
 
