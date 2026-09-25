@@ -1280,12 +1280,17 @@ def main():
     # the quiet pass would double that cost.
     records = load("needs")
     quiet = quiet_session_ids(records, live_ids)
-    # The supersession signals, read once for the same reason: one registry pass, and one
-    # transcript-tail read per session rather than one per record.
+    # The registry half of supersession rides the same read as `quiet` — one glob pass,
+    # no second look at the directory.
     busy = busy_session_ids()
-    resumed = resumed_session_ids(records)
     live = lambda r: is_live(r, pmap, quiet)
     needs = [reclassify_idle(r) for r in records if live(r)]
+    # The transcript half is deferred until after the liveness filter, and that ordering
+    # is load-bearing: the read is a 200KB tail seek per session, and `records` holds
+    # every session the store has ever seen. A superseded row must be live to be listed
+    # at all, so a dead session's tail can never change the answer — reading it would be
+    # pure cost in a manager's sweep.
+    resumed = resumed_session_ids(needs)
     tools = [r for r in load("tool") if live(r)]
 
     # Two passes: the pane set that carries a gate is computed without peer-dedup,
