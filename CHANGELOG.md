@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.54.2
 
 - fix: **a spawn site can be defined by a tool grant rather than by its text — and the mode rule now reaches those too.** `agents/manager-drive.md` holds `mcp__supervisor__spawn_agent` for its auto-resume path, and nothing at the tool boundary stopped it calling the tool to *open* a row instead. Measured 2026-09-24: it opened two directly (`agent_143`, `agent_144`, 22:19Z, parent `1217e759`), each carrying `mode: interactive` **on disk** yet reporting `mode_source=config` — the field written and the spawn ignoring it, which is precisely the defect the mode rule exists to remove. Its own prose said *"Open with `/supervisor:open` via `Skill`. Do not derive or duplicate the headless/interactive decision"*, and it bypassed that anyway: **the grant permitted what the prose forbade.** The file now states that `spawn_agent` is for `resume=` only, and that a direct open must classify and pass the argument because it has no Step 0.6 behind it; `commands/fleet-loop.md` carries the same note for the same reason. `scripts/check-spawn-mode.py` gains a **grant dimension** — any file whose frontmatter grants the tool must reference the rule's home — because a text scan reads what a file *says* and cannot see a site defined by what it is *permitted*. `agents/manager-drive.md` joins `SPAWN_SITES` for the same reason, and two regression tests pin the grant case. ⚠️ Recorded as a limit of the enforcement, not only a bug in one file: the check that shipped in #178 verified prose, and this site was never prose.
 
