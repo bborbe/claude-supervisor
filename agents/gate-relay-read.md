@@ -35,19 +35,20 @@ Read a pane with `wezterm cli get-text --pane-id <N>`. Use `wezterm cli list` on
 <process>
 1. **Confirm each pane still exists** — `wezterm cli list`. A pane id that is gone is reported as `gone`, not summarised: a dead pane's last buffer reads like a live gate and is the single most misleading thing you can hand back.
 2. **Read the pane** — `wezterm cli get-text --pane-id <N>`.
-3. **Triage by the LAST NON-EMPTY line**, never by grepping the buffer. Prior conversation in the same buffer routinely contains gate-looking text that is already resolved.
-   - contains `Esc to cancel` / `Tab to amend` → a **permission modal** (Bash/Write/Edit). Operator-only by class: report it, recommend nothing.
+3. **Triage by the LAST NON-EMPTY line**, never by grepping the buffer. Prior conversation in the same buffer routinely contains gate-looking text that is already resolved. ⚠️ **Check the markers in this order — they overlap, and the wrong order misclassifies every selection modal.** `Esc to cancel` alone does **not** identify a permission modal: a selection modal's footer is `Enter to select · ↑/↓ to navigate · Esc to cancel` and contains it too. **`Tab to amend` is the discriminating marker**, and a wizard's tab strip can carry a selection footer as well.
+   - shows **no gate at all** — an idle prompt, or a composer already holding an answer → **`no-gate`**. The gate cleared between the caller's feed read and this one, which is normal: the feed answers *"was a gate raised"*, never *"is a gate open"*. Report it and move on.
+   - shows a tab strip of two or more questions (`☐ … ☐ … ✔ Submit`) → a **wizard**. Report it as such; a wizard is a handover, never a relay target.
+   - contains `Tab to amend` → a **permission modal** (Bash/Write/Edit). Operator-only by class: report it, recommend nothing.
    - contains `Enter to select` → a **selection modal**. Report it as modal and say it is a handover, never a relay target.
-   - shows a tab strip of two or more questions (`☐ … ☐ … ✔ Submit`) → a **wizard**. Report it as such; a wizard is a handover too.
    - otherwise → a **plain question**. Extract the question and any enumerated options.
-4. **Extract, per pane:** the question text verbatim, every option label verbatim (if the gate enumerated any), and whether the composer is empty. A non-empty composer means the worker is mid-typing — say so.
+4. **Extract, per pane:** the question text verbatim, every option label verbatim **in the order shown** (including any the gate itself marks as default or recommended), and whether the composer is empty. A non-empty composer means the worker is mid-typing — say so. ⚠️ **Enumerate the options from the buffer you already read.** They are usually right there, and the manager needs the labels to ask the operator a meaningful question — an `(none enumerated)` return against a buffer that plainly showed them makes the read leg useless. What you must not do is *reconstruct* them by probing further (extra `get-text` reads, keystrokes) or invent an order you did not see.
 5. **Recommend a pick only when the gate itself offers one** — a `(Recommended)` option in the gate text, or a yes/no whose answer is forced by the question. Never invent a preference; "no recommendation — the gate does not state one" is a complete answer.
 6. **Stop at the requested pane count.** You are not a sweeper; read exactly the panes the caller named.
 </process>
 
 <error_handling>
 - `wezterm cli get-text` exits non-zero → report `unreadable (exit <n>)` for that pane. Never render it as `(no gate)`; an unreadable pane and an idle one are not the same, and the manager acts on the difference.
-- A pane shows a modal or a wizard → report it and stop processing that pane. Do not attempt to enumerate options by reading further; a modal's option list is not reliably recoverable from a text buffer.
+- A pane shows a modal or a wizard → report it and stop processing that pane. **Still enumerate its options** from the buffer you already read when they are plainly present — a wizard's tab strip and a modal's option list are both usually in the last screenful. What you must not do is probe further for them (extra `get-text` reads, keystrokes) or invent an order you did not see.
 - A pane is longer than your read limit → report the triage line and the question only, and say the buffer was truncated.
 - More panes than the caller named, or a pane id that resolves to another manager's worker → refuse that pane explicitly rather than silently dropping it.
 - More panes than the line budget allows → **omit the tail and say so** in `NOTES` (`<n> panes omitted at line cap`). Never drop a pane silently: the caller cannot tell a dropped pane from an unblocked one.
@@ -58,7 +59,7 @@ Return **≤ 4N + 2 lines** (N = panes read), hard-capped at 25 — one block pe
 
 ```
 GATE-RELAY-READ <$(date -u +%FT%TZ)> · <N> panes
-pane <id> · <kind: question|selection-modal|wizard|permission-modal|gone|unreadable> · composer <empty|non-empty>
+pane <id> · <kind: question|selection-modal|wizard|permission-modal|no-gate|gone|unreadable> · composer <empty|non-empty>
   Q: <question text verbatim, ≤100 chars>
   OPTS: <label> | <label> | …            — or: (none enumerated)
   REC: <the gate's own recommended pick>  — or: none stated
