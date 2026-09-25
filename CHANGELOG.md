@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.54.1
 
 - fix: **the resume recipe passes the colour chip unquoted, so a restarted worker comes up pink instead of default.** `resume_command()` wrote `"/color 'pink'"` — the single quotes are *shell* syntax in `commands/open.md` Step 3.1, where they break out of the outer `bash -lc '…'` string so `$CHIP` expands. This string is built in Python, where there is no outer quoting to break out of, so the copied escape became a **literal** quote and Claude Code rejected the argument — `Invalid color "'pink'"`. Found by the first live run of `/supervisor:worker-restart`: both restarts (one mid-work, one gate-held) came up with the rejected chip and kept the default colour. It matters because the colour is the fleet's only role cue — `open.md` calls it *"the only fleet-wide cue for which role a session plays"* — and a restarted worker that should be pink is exactly the mis-coloured session that nearly got a manager relaunched as a worker on 2026-09-18. The quotes are dropped, deliberately, and the copy's divergence from the recipe is now documented in the function's own docstring so a future re-copy does not reintroduce them.
 
