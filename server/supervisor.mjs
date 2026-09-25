@@ -17,6 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
+import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord } from './heartbeat.mjs'
 import { startAttentionPoll } from './attention-poll.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
@@ -35,6 +36,47 @@ import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decisi
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
 const agents = new Map() // id -> agent record
+
+// A headless worker's liveness, published where a process that did NOT spawn it can read it.
+//
+// The `agents` Map above answers this question correctly and only for this server's own
+// workers, which is precisely the gap: the manager that must decide whether to resume a
+// worker is the one caller that has no access to this process. So the answer is written to
+// disk while the worker runs, and read back by whoever needs it. See heartbeat.mjs.
+//
+// ⚠️ The refresh timer is the load-bearing half. A stamp written once at start and removed at
+// the end answers only the graceful case — `kill -9` leaves it behind forever, and a worker
+// that reads live for good is the defect this replaces. Re-stamping every INTERVAL means the
+// stamp goes stale on its own, so the ungraceful case needs no separate handling.
+const heartbeat = {
+  timers: new Map(),
+  start(sessionId) {
+    this.stop(sessionId)
+    this.stamp(sessionId)
+    const timer = setInterval(() => this.stamp(sessionId), HEARTBEAT_INTERVAL_MS)
+    // Unref'd so a pending refresh never holds the process open after its work is done.
+    timer.unref?.()
+    this.timers.set(sessionId, timer)
+  },
+  stop(sessionId) {
+    const timer = this.timers.get(sessionId)
+    if (timer) {
+      clearInterval(timer)
+      this.timers.delete(sessionId)
+    }
+    clearStamp(sessionId, { dir: heartbeatDir })
+  },
+  stamp(sessionId) {
+    try {
+      stampRecord(heartbeatDir, { sessionId, pid: process.pid, mode: 'headless' })
+    } catch (error) {
+      // A worker whose stamp cannot be written still runs. Losing the heartbeat degrades a
+      // manager's verdict to "could not tell" — which is the honest answer — whereas failing
+      // the spawn would turn an unwritable state directory into a broken fleet.
+      log(`WARNING: cannot stamp heartbeat for ${sessionId}: ${error.message}`)
+    }
+  },
+}
 const pending = new Map() // requestId -> permission record
 const waiters = new Set() // resolvers waiting for the next permission
 let seq = 0
@@ -885,7 +927,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // the worker's first turn. The loop itself lives in agent-loop.mjs so a test can
   // drive it with a synthetic stream and await its completion — this module cannot be
   // imported by a test at all, since it connects a stdio server at load.
-  void runAgentLoop({ q, agent, writeLedger, log })
+  void runAgentLoop({ q, agent, writeLedger, log, heartbeat })
 
   return {
     agent_id: id,

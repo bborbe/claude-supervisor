@@ -27,13 +27,18 @@
 // folded into "not live" — an unguarded resume corrupts a conversation, so a caller
 // must be able to tell "confirmed closed" from "could not tell".
 //
-// A same-server headless worker is invisible to this module by construction, and the
-// supervisor supplies that half itself: see the in-process `agents` Map check in
-// `spawnAgent`, which is the only channel that can see a worker this server spawned.
+// A headless worker is still invisible to the REGISTRY by construction — it is an in-process
+// SDK `query()` with no pid of its own to key a registry entry on. This module covers it with
+// a second probe instead: the heartbeat store (`heartbeat.mjs`), refreshed by the owning
+// server while the worker is live and readable by ANY process, which is the half a
+// non-spawning manager needs. The supervisor still supplies the same-server half from its
+// in-process `agents` Map — that answers without touching the filesystem, but only for the
+// server's own workers.
 
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { config } from './config.mjs'
+import { HEARTBEAT_TTL_MS, heartbeatDir, readLive } from './heartbeat.mjs'
 
 // Read from the config module rather than the environment: a library module has no
 // business consulting ambient process state, and a default resolved here would make
@@ -145,17 +150,45 @@ export function uniqueTabName(baseName, { dir = SESSIONS_DIR, registry = readReg
 // `live: true` is the only answer that forbids a resume; `live: null` is "could not
 // tell" and belongs to the caller to resolve, never to be read as false.
 //
-// The caller supplies the other half of the answer, and must: a headless worker this
-// server spawned is invisible here, so `spawnAgent` checks its own in-process `agents`
-// Map before trusting a `false`. See the header for why that half cannot live here.
+// Two probes, and they answer different halves. The registry sees every session that holds a
+// socket — which is every interactive one — and the heartbeat sees the headless workers the
+// registry structurally cannot. A non-spawning manager needs the second, and before it
+// existed both halves of its answer were unavailable: no registry entry (a headless worker
+// has no pid), and no access to the spawning server's `agents` Map.
 export function checkLiveness(sessionId, opts = {}) {
   const registered = registeredAsLive(sessionId, opts)
+  const beat = readLive(sessionId, {
+    dir: opts.heartbeatDir ?? heartbeatDir,
+    ttlMs: opts.heartbeatTtlMs ?? HEARTBEAT_TTL_MS,
+    now: opts.now,
+  })
 
-  if (registered === null) {
-    return { live: null, probes: [], reason: 'the session registry could not be read' }
+  // A fresh heartbeat is decisive ON ITS OWN, and is reported even when the registry could
+  // not be read: a positive from one channel is an answer, and "could not tell" is not.
+  if (beat.live === true) {
+    return {
+      live: true,
+      probes: registered === null ? ['heartbeat'] : ['registry', 'heartbeat'],
+      reason: `a live headless worker — ${beat.reason}`,
+    }
   }
   if (registered === true) {
     return { live: true, probes: ['registry'], reason: 'the session registry lists it against a running pid' }
   }
-  return { live: false, probes: ['registry'], reason: 'no registry entry against a running pid' }
+
+  // No probe said live. If EITHER could not be read, the honest answer is "could not tell",
+  // because the caller acts on `false` by ALLOWING a resume — folding an unreadable channel
+  // into a negative turns an I/O error into permission to put a second writer on one
+  // conversation.
+  const blind = []
+  if (registered === null) blind.push('the session registry')
+  if (beat.live === null) blind.push('the heartbeat store')
+  if (blind.length) {
+    return { live: null, probes: [], reason: `${blind.join(' and ')} could not be read` }
+  }
+  return {
+    live: false,
+    probes: ['registry', 'heartbeat'],
+    reason: 'no registry entry against a running pid, and no fresh heartbeat',
+  }
 }
