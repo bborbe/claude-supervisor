@@ -133,6 +133,22 @@ export const config = Object.freeze({
   // names a bad value both belong to the server's own logger, not to this module.
   permissionMode: ENV.SUPERVISOR_PERMISSION_MODE || null,
 
+  // The attention store this server reads `permission` answers from — the delivery half of
+  // the arm in `scripts/attention-answer.py`, which writes them.
+  //
+  // Two env names, deliberately, and they mean ONE thing rather than two: the arm reads
+  // `ATTENTION_STORE_URL`, so an operator who moves the store must not have to discover a
+  // second name for the same address — a server polling the old URL would log a connection
+  // error every two seconds while the arm wrote happily to the new one.
+  //
+  // `off` is a value, not an absence, following permissionLog above: unset takes the
+  // default, while `off` stops the loop entirely. That is what a deployment with no
+  // attention stack wants, rather than a poll that fails forever.
+  attentionStoreUrl:
+    ENV.SUPERVISOR_ATTENTION_STORE === 'off'
+      ? null
+      : ENV.SUPERVISOR_ATTENTION_STORE || ENV.ATTENTION_STORE_URL || 'http://localhost:18080',
+
   claudeCmd: ENV.SUPERVISOR_CLAUDE_CMD || null,
   mcpConfig: ENV.SUPERVISOR_MCP_CONFIG || null,
 

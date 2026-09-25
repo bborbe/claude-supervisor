@@ -7,8 +7,13 @@ Covers the two decisions that make an answer safe to route:
     must read as undeliverable (the asker exited), and a name shared by two
     sessions must be refused: a bare name would reach the wrong one.
   * the answer gate -- only the arm that wins the store's compare-and-set may
-    print a TARGET. A 409 must never be followed by a route, and a non-message
-    item must be refused before the store is written at all.
+    print a TARGET. A 409 must never be followed by a route, and an `ack` item
+    must be refused before the store is written at all.
+  * the permission branch -- a permission-class item needs an explicit
+    --decision. Without one it is refused rather than defaulted, because
+    neither an implicit allow nor an implicit deny is safe; with one it prints
+    DELIVERY and never TARGET, because a session cannot release another
+    session's parked gate.
   * the answer body -- `resolved_by` must name the arm's own session, and must be
     omitted rather than sent blank: downstream a "" is a *set* value, so it would
     count as a manager resolution and manufacture the false positive the field
@@ -71,11 +76,11 @@ class LoadRegistryTest(unittest.TestCase):
 class AnswerGateTest(unittest.TestCase):
     REG = [_session("p1", "Asker")]
 
-    def _run(self, item, post=None):
+    def _run(self, item, post=None, decision=""):
         out = io.StringIO()
         with mock.patch.object(aa, "fetch_item", return_value=item), \
              mock.patch.object(aa, "post_answer", side_effect=post) as posted:
-            rc = aa.cmd_answer("i1", "arm", self.REG, out=out)
+            rc = aa.cmd_answer("i1", "arm", self.REG, out=out, decision=decision)
         return rc, out.getvalue(), posted
 
     def test_winner_prints_target(self):
@@ -93,8 +98,58 @@ class AnswerGateTest(unittest.TestCase):
         self.assertIn("LOST:", out)
         self.assertNotIn("TARGET", out)
 
-    def test_permission_item_refused_before_write(self):
-        rc, out, posted = self._run({"answer_mechanism": "permission", "producer_id": "p1"})
+    def test_permission_without_a_decision_is_refused_before_write(self):
+        rc, out, posted = self._run(
+            {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out)
+        self.assertIn("--decision", out)
+        posted.assert_not_called()
+
+    def test_permission_with_an_unknown_decision_is_refused_before_write(self):
+        rc, out, posted = self._run(
+            {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"},
+            decision="maybe",
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out)
+        posted.assert_not_called()
+
+    def test_permission_with_a_decision_prints_delivery_never_target(self):
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        rc, out, _ = self._run(
+            item, post=lambda *_: {"answered_at": "t", "answered_by": "arm"}, decision="allow"
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED:", out)
+        self.assertIn("DECISION: allow", out)
+        self.assertIn("DELIVERY:", out)
+        # The load-bearing assertion of this whole branch: a TARGET line here
+        # would make the wrapping command SendMessage, which is exactly the
+        # Claude-session relay this path exists to remove.
+        self.assertNotIn("TARGET", out)
+
+    def test_permission_deny_reaches_the_body(self):
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        rc, _, posted = self._run(
+            item, post=lambda *_: {"answered_at": "t", "answered_by": "arm"}, decision="deny"
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(posted.call_args.args[3], "deny")
+
+    def test_lost_permission_race_never_delivers(self):
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        err = urllib.error.HTTPError("u", 409, "conflict", {}, None)
+        rc, out, _ = self._run(item, post=err, decision="allow")
+        self.assertEqual(rc, 1)
+        self.assertIn("LOST:", out)
+        self.assertNotIn("DELIVERY", out)
+
+    def test_ack_item_is_still_refused(self):
+        rc, out, posted = self._run(
+            {"item_id": "i1", "answer_mechanism": "ack", "producer_id": "p1"}
+        )
         self.assertEqual(rc, 2)
         self.assertIn("REFUSED:", out)
         posted.assert_not_called()
@@ -156,6 +211,20 @@ class PostAnswerBodyTest(unittest.TestCase):
         body = self._body("i1", "arm", "")
         self.assertEqual(body, {"answered_by": "arm"})
         self.assertNotIn("resolved_by", body)
+
+    def test_decision_rides_beside_answered_by(self):
+        self.assertEqual(
+            self._body("i1", "arm", "sess-9", "allow"),
+            {"answered_by": "arm", "resolved_by": "sess-9", "decision": "allow"},
+        )
+
+    def test_blank_decision_is_omitted_not_sent_empty(self):
+        # The same rule as resolved_by, and it matters more: the schema adds no
+        # write-time rejection for an omitted decision, so a "" here would store
+        # a *present* field holding no verdict rather than an absent one.
+        body = self._body("i1", "arm", "sess-9", "")
+        self.assertEqual(body, {"answered_by": "arm", "resolved_by": "sess-9"})
+        self.assertNotIn("decision", body)
 
 
 if __name__ == "__main__":
