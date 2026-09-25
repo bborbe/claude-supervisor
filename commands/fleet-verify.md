@@ -88,10 +88,19 @@ render the same.
    match on the `claude_session_id:` frontmatter field** — never by a prefix substring, and never
    by a body grep. A prefix search over the file's opening characters picks whichever file happens
    to come first, which is how a busy session with open boxes was once told its work was done.
-   For every stamp in `<tasks_dir>`, count the files it resolves to and **report any stamp matching
-   0 or 2+ files**, naming the stamp and the count. Read the field from the frontmatter block only
-   — `awk '/^---$/{n++; next} n==1' <file>` then match `^claude_session_id:` — so a stamp quoted
-   inside a task's body is not mistaken for a declaration.
+   Apply the **stamp rule** ([`docs/fleet-surface.md` § Session stamps](../docs/fleet-surface.md)):
+   a session may carry many stamps, but **at most one on an open task**. Run
+   `python3 "$S/stamp-check.py" "<tasks_dir>" --json` and report from its document — never count
+   stamps by hand. **FAIL** on any `violations` entry (one stamp on 2+ open tasks), naming the stamp
+   and every open file. List `suspects` as findings without failing — a creating session's stamp
+   left on an open task that `metrics_sessions` shows someone else worked. Report the `permitted`
+   count too: it is the positive control that the check still *sees* multi-file stamps, so a
+   PASS with `permitted 0` on a vault known to carry history is a blind check, not a clean one.
+   ⚠️ **"2+ files" is not the defect.** Measured 2026-09-25: counting it flagged 33 stamps, 30 of
+   them one ended session's finished tasks in turn — history that records who did the work, and
+   must never be rewritten to clear a count. Exit 2 (missing dir, no task files) is **UNKNOWN**.
+   The script reads the field from the frontmatter block only, and an empty `claude_session_id:`
+   is no stamp — a `\s*` parse crossed its newline and read `goals:` as a stamp shared by three files.
 
 4. **CLASSIFICATION vs PANE READ (read).** For **every** session in the board's `needs-input`
    bucket — not a sample — compare the board's bucket against that pane's last non-empty line.
@@ -125,7 +134,7 @@ wrote, the scratch file path it created — because an unconditional-FAIL branch
 |---|---|---|
 | 1 | a board stub whose `needs-input` count is inflated against a fixed pane list | FAIL, quoting the delta |
 | 2 | a phantom pane id **not** among the live defects, injected into a scratch pane list | FAIL, naming the injected id |
-| 3 | a stamp copied into a scratch task file so it resolves to 2+ files | FAIL, naming the stamp and the count |
+| 3 | a scratch tasks dir holding two **open** task files that share one stamp (plus a finished one sharing it, which must stay permitted) | FAIL, naming the stamp and both open files |
 | 4 | a board stub bucketing a session `needs-input` whose pane read shows otherwise | FAIL, quoting both readings |
 | 5 | a source stubbed to exit non-zero | UNKNOWN, quoting the exit code |
 
@@ -141,7 +150,7 @@ Sources: board <ok|exit N> · panes <ok|exit N> · context <ok|exit N> · colour
 
   1 Board count ....... PASS | FAIL | UNKNOWN — board <N> · live <M> · delta <±D>
   2 Phantom panes ..... PASS | FAIL | UNKNOWN — <n> reported · <n> live · <n> phantom
-  3 Exact resolution .. PASS | FAIL | UNKNOWN — <n> stamps · <n> matching 0 or 2+ files
+  3 Exact resolution .. PASS | FAIL | UNKNOWN — <n> stamps · <n> violating · <n> suspect · <n> permitted multi-file
   4 Classification .... PASS | FAIL | UNKNOWN — <n> in needs-input · <n> disagreeing
   5 Exit codes ........ PASS | FAIL | UNKNOWN — <n> of 4 sources failed
 
@@ -183,7 +192,7 @@ which fixture was used and the artifact the FAIL quoted.
 - All five checks are checked, or reported SKIPPED/UNKNOWN with a reason — never silently PASS
 - Each verdict line names the check, its verdict, the evidence behind it, and the source command
 - Check 1 reports the delta **and its direction**, not a bare pass/fail
-- Check 2 names every phantom pane id; check 3 names every stamp matching 0 or 2+ files
+- Check 2 names every phantom pane id; check 3 names every stamp on 2+ open tasks, and every suspect
 - Check 4 covers **every** session in the `needs-input` bucket, not a sample
 - Check 5 reports a failed source as UNKNOWN, never as clean
 - **Nothing was mutated** — no file written inside the vault, nothing spawned

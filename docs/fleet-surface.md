@@ -505,6 +505,33 @@ What this file still owns is the part that is about the plugin rather than the f
 The table is the dashboard; TTS stays problem-only and voice-mode gated; the action lines
 appear only when non-empty.
 
+## Session stamps
+
+A task's `claude_session_id` names the session working it, and a session answers "what am I
+working on" by resolving that stamp. Reading a stamp as ownership — whose task it is, and when a
+foreign one blocks you — is [[One Task Per Session Contract]]'s rule. This section is the
+multiplicity rule: how many stamps one session may carry.
+
+- **A session may carry many stamps, but at most one on an open task.** A session that finished
+  task A and moved on to task B legitimately stamps both, and the stamp on A records who did the
+  work, so it is **never rewritten to clear a count**. Two *open* tasks behind one stamp are an
+  ambiguous answer to the resolution question, and that is the defect.
+- **Task creation never stamps.** The session that works a task stamps it, not the session that
+  wrote the file. Session-connect writes a stamp only when the field is empty, so a creator's
+  stamp is never replaced by the real worker's — the worker never takes ownership.
+- **A manager never stamps a worker's task.** Managers route work; they do not claim it.
+
+Measured 2026-09-25 over `25 Tasks/`: 33 stamps spanned 2+ files. Zero were manager stamps; 30
+were one ended session's finished tasks in turn (permitted history); 3 were a creating session's
+stamp on an open task, one of them later worked by a different session whose id the task never
+took. Counting "2+ files" called all 33 defects. The rule calls none of the 30 a defect.
+
+`scripts/stamp-check.py <tasks_dir>` applies the rule. It exits 1 on a **violation** (one stamp on 2+
+open tasks) and lists a **suspect** without failing: a stamp on one open task whose
+`metrics_sessions` names other workers but not the stamp. `/supervisor:fleet-verify` check 3 reads
+it. The field is read from the frontmatter block only, and an empty `claude_session_id:` is no
+stamp.
+
 ## Referencing vault notes
 
 Several fleet commands cite the operator's Obsidian runbooks. The rule is a **wikilink by
