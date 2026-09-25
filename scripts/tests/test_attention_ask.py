@@ -222,6 +222,31 @@ class PollTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("OPEN", text)
 
+    def poll_error(self, code, body=b""):
+        # fetch_item passes a URL string to urlopen, not a Request, so the fake
+        # takes a str — reading `.full_url` here would be an AttributeError, not
+        # a raised HTTPError.
+        def fake(url, timeout=None):
+            raise urllib.error.HTTPError(url, code, "err", None, io.BytesIO(body))
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake):
+            out = io.StringIO()
+            rc = ask.cmd_poll("abc123", out=out)
+        return rc, out.getvalue()
+
+    def test_missing_item_names_the_item(self):
+        rc, text = self.poll_error(404)
+        self.assertEqual(rc, 1)
+        self.assertIn("no such item abc123", text)
+
+    def test_store_error_names_the_item_and_carries_the_detail(self):
+        # A poll runs unattended on a loop tick, so a bare "store returned 500"
+        # naming no item is not something a manager can act on.
+        rc, text = self.poll_error(500, b'{"error":"boom"}')
+        self.assertEqual(rc, 1)
+        self.assertIn("abc123", text)
+        self.assertIn("boom", text)
+
 
 if __name__ == "__main__":
     unittest.main()

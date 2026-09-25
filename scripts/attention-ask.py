@@ -181,7 +181,20 @@ def cmd_post(args, out=sys.stdout):
 
 
 def cmd_poll(item_id, out=sys.stdout):
-    item = fetch_item(item_id)
+    try:
+        item = fetch_item(item_id)
+    except urllib.error.HTTPError as err:
+        # Handled here rather than in main so the message can name the item and
+        # carry the store's explanation. A poll runs unattended on a loop tick,
+        # so "FAILED: store returned 500" naming nothing is not something a
+        # manager can act on. The 404 is the ordinary case: the item was
+        # answered, closed or pruned between ticks.
+        if err.code == 404:
+            print(f"FAILED: no such item {item_id}", file=out)
+        else:
+            detail = err.read().decode(errors="replace")
+            print(f"FAILED: store returned {err.code} for {item_id} -- {detail}", file=out)
+        return 1
     described = describe_answer(item)
     if described is None:
         print("OPEN", file=out)
@@ -218,10 +231,13 @@ def main(argv=None):
             return cmd_post(args)
         return cmd_poll(args.item_id)
     except urllib.error.HTTPError as err:
-        if err.code == 404:
-            print(f"FAILED: no such item {args.item_id}")
-        else:
-            print(f"FAILED: store returned {err.code}")
+        # Each command handles its own HTTP errors, so reaching here means the
+        # failure predates the item lookup — which is why no item is named: this
+        # branch cannot know one. It previously read `args.item_id`, which only
+        # `poll` carries; that was unreachable rather than live, because
+        # `cmd_post` catches its own HTTPError first. It was one refactor away
+        # from an AttributeError, not a defect in the shipped path.
+        print(f"FAILED: store returned {err.code}")
         return 1
     except (urllib.error.URLError, OSError) as err:
         print(f"FAILED: attention store unreachable at {STORE} ({err})")
