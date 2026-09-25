@@ -3,7 +3,7 @@ name: manager-verify
 description: Run the seven gated checks for ONE subject — a goal or a topic — and return the report plus a numbered fix list. Dispatched by `/supervisor:manager-verify` (operator, by hand). It owns the seven per-step forks and the report shape; it mutates nothing.
 model: sonnet
 tools: Read, Bash
-allowed-tools: Bash(find:*), Bash(awk:*), Bash(grep:*), Bash(stat:*)
+allowed-tools: Bash(find:*), Bash(awk:*), Bash(grep:*)
 color: blue
 ---
 
@@ -31,7 +31,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 - ⚠️ **Step 7's executor is the manager's, never this run's.** `/supervisor:open` belongs to the subject's manager; unless the caller *is* that manager, route the start recommendation to it via `SendMessage` — never as an `approve: /supervisor:open …` line for the operator. Observed 2026-09-23: the operator corrected *"send this to the manager ... worker dont open new sessions"*. ⚠️ You hold no `SendMessage` tool: **return the recommendation as a line for the caller to route**, and say so rather than implying you sent it.
 - **No user prompts during execution** — never `AskUserQuestion` mid-run. The run only reads and advises.
 - ⚠️ **A tool that did not bind is reported, never smoothed.** If a Bash call or a read is unavailable, say so for the step it served and mark that step `UNKNOWN — <tool> not bound`. Never let the report read as though the step ran.
-- ⚠️ **Both folder names are literals, and that is a known defect left in place.** The resolution chain already hardcodes `23 Topics/` rather than resolving `topics_dir` from `vault-cli config` — the exact fault `verify-topic.md:18` fixed for its own path. Repairing that class belongs to `[[Vault-Cli Slash Commands Resolve Folders From Config, Not Literals]]`, not to this extraction. If you must re-probe a page path, use `-iname`, never a shell glob — a plain `ls` glob is case-sensitive under zsh, so a lowercase name resolves nothing against Title Case filenames.
+- ⚠️ **Both folder names are literals in the *caller's* resolution chain, and that is a known defect left in place.** It hardcodes `23 Topics/` rather than resolving `topics_dir` from `vault-cli config` — the exact fault `verify-topic.md:18` fixed for its own path. ⚠️ **This file carries no branch probe of its own**; the note is here only so a reader does not mistake the caller's literal for this file's. Repairing the class belongs to `[[Vault-Cli Slash Commands Resolve Folders From Config, Not Literals]]`, not to this extraction. When you read a page path, use `-iname`, never a shell glob — a plain `ls` glob is case-sensitive under zsh, so a lowercase name resolves nothing against Title Case filenames.
 </constraints>
 
 <process>
@@ -95,7 +95,7 @@ Branch: <goal|topic> (<path>)   Steps: <n>/7 checked
   2 Prune ......... <n> to re-home · <n> to abort — 0 deleted
   3 Gap ........... PASS | FAIL — <n> criteria with no task
   4 Fill .......... <n> to author (bar: auditor >=9/10)
-  5 Ready ......... PASS | FAIL — <n> missing sections
+  5 Ready ......... PASS | FAIL | UNKNOWN — <n> missing sections / no recorded verdict
   6 Plan .......... <n> for the manager · <n> for a worker
   7 Start ......... <n> to start (cap read from fleet-surface.md) · <n> the cap would hold
 Issues:
