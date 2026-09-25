@@ -15,9 +15,12 @@ cannot silently fail to reach this surface.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.dirname(_HERE)
@@ -151,6 +154,91 @@ class AttentionQueueMatchesTheFeed(unittest.TestCase):
         feed = sorted(str(r["pane"]) for r in needs
                       if wnm.is_open_gate(r, open_panes=open_panes, task_status=status))
         self.assertEqual(sorted(self.queue(records, status=status)), feed)
+
+
+class _WnmStub:
+    """The slice of who-needs-me.py's surface the `--list` path reaches."""
+
+    def name_of(self, _rec, _pmap):
+        return "Session"
+
+    def age(self, _ts):
+        return "1m"
+
+
+class JumpTransportTest(unittest.TestCase):
+    """jump.py's three pane-read states, end to end through `main()`.
+
+    `wezterm_panes()` returned `{}` for both a failed `wezterm cli list` and a
+    reachable WezTerm holding no panes, so `main()`'s `if not pmap:` gate could not
+    tell them apart and refused both with the same message and the same exit code.
+    Measured 2026-09-26 against origin/master: with the mux socket unreachable and
+    with a reachable-but-empty transport, stderr was byte-identical (71B) and both
+    exited 1 -- a healthy empty fleet reported as a broken transport.
+
+    All three states are asserted together because any two of them can be satisfied
+    by a wrong implementation: refusing on `not pmap` passes the broken case and
+    fails the empty one; never refusing passes both healthy cases and fails the
+    broken one.
+    """
+
+    # `wezterm_panes()` returns `pane_id -> pane`, not the raw array `wezterm` prints.
+    PANES = {"5": {"pane_id": 5, "tab_id": 1, "window_id": 0, "title": "Session",
+                   "tty_name": "/dev/ttys001"}}
+
+    def run_jump(self, panes):
+        """Run `main()` with `--list` against a stubbed transport; (rc, out, err)."""
+        records = [rec(5, PICK)]
+        patches = [
+            mock.patch.object(jmp, "wezterm_panes", lambda: panes),
+            mock.patch.object(jmp, "load_wnm", _WnmStub),
+            # No live panes means no live session means no attention row -- which is
+            # why the empty case must print an empty queue, not a refusal.
+            mock.patch.object(jmp, "attention_queue",
+                              lambda _w, pmap: list(records) if pmap else []),
+            mock.patch.object(jmp, "load_visited", dict),
+            mock.patch.object(jmp.sys, "argv", ["jump.py", "--list"]),
+        ]
+        out, err = io.StringIO(), io.StringIO()
+        for p in patches:
+            p.start()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = jmp.main()
+        finally:
+            for p in patches:
+                p.stop()
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_unreadable_transport_is_attributed_to_the_read(self):
+        """`None` from the transport refuses, and says the READ failed."""
+        rc, out, err = self.run_jump(None)
+        self.assertEqual(1, rc)
+        self.assertIn("wezterm cli list` unreadable", err)
+        self.assertEqual("", out)
+
+    def test_healthy_transport_with_panes_is_unchanged(self):
+        """The healthy path is untouched: the queue prints and the exit stays 0."""
+        rc, out, err = self.run_jump(self.PANES)
+        self.assertEqual(0, rc, err)
+        self.assertIn("Needs you (1, newest first)", out)
+
+    def test_empty_but_reachable_transport_is_not_a_failure(self):
+        """A reachable WezTerm with no panes is an answer, not a broken query.
+
+        The control for the `is None` test: refusing on `not pmap` would pass the
+        broken-transport case above and wrongly fail this one.
+        """
+        rc, out, err = self.run_jump({})
+        self.assertEqual(0, rc, err)
+        self.assertEqual("", err)
+        self.assertIn("Nothing needs you.", out)
+
+    def test_broken_and_empty_are_distinguishable(self):
+        """The defect itself: the two states must not answer identically."""
+        broken, empty = self.run_jump(None), self.run_jump({})
+        self.assertNotEqual(broken[0], empty[0])
+        self.assertNotEqual(broken[2], empty[2])
 
 
 if __name__ == "__main__":

@@ -566,7 +566,7 @@ def colour_census():
     empty map is "not recorded", which is why it must not be read as "no managers".
     """
     try:
-        return {r["session_id"]: (r.get("colour") or "") for r in fc.census(None)}
+        return {r["session_id"]: (r.get("colour") or "") for r in fc.census(None)[0]}
     except Exception:
         return {}
 

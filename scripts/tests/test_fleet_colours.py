@@ -20,7 +20,9 @@ guards a defect the census could actually ship:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -147,6 +149,130 @@ class BacklogExcludesNonBacklog(unittest.TestCase):
     def test_purple_is_not_in_the_backlog_tuple(self):
         self.assertNotIn("purple", fc.BACKLOG)
         self.assertNotIn(fc.DEFAULT, fc.BACKLOG)
+
+
+class _Proc:
+    """Stand-in for `subprocess.run`'s result: the two fields the scripts read."""
+
+    def __init__(self, stdout, returncode=0):
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+class CensusTransportTest(unittest.TestCase):
+    """fleet-colours.py's three pane-read states, end to end through `main()`.
+
+    `pane_titles()` returned `{}` for both a failed `wezterm cli list` and a
+    reachable WezTerm holding no panes, so `census()` turned a broken transport into
+    a per-row claim: every session's `pane` became `None`, `render()` printed
+    `N headless`, the `--json` branch emitted `"paned": 0`, and the process exited 0.
+    Measured 2026-09-26 against origin/master with the mux socket unreachable: the
+    human and `--json` outputs were byte-identical to the reachable-but-empty run --
+    a broken transport reported as a measured zero, certified by the success code.
+
+    All three states are asserted together because any two of them can be satisfied
+    by a wrong implementation: warning unconditionally passes the broken case and
+    fails both healthy ones; never warning passes the healthy cases and fails the
+    broken one.
+    """
+
+    PANES = [{"pane_id": 5, "tab_id": 1, "window_id": 0, "title": "Session",
+              "tty_name": "/dev/ttys001"}]
+
+    def setUp(self):
+        self._run = fc.subprocess.run
+        self._sessions, self._projects = fc.SESSIONS, fc.PROJECTS
+        self.addCleanup(self._restore)
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fc.SESSIONS = Path(d.name)
+        fc.PROJECTS = Path(d.name) / "projects"
+        fc.PROJECTS.mkdir(parents=True, exist_ok=True)
+        (fc.SESSIONS / "s1.json").write_text(
+            json.dumps({"sessionId": "s1", "name": "S1", "cwd": "/tmp", "pid": 101}),
+            encoding="utf-8")
+
+    def _restore(self):
+        fc.subprocess.run = self._run
+        fc.SESSIONS, fc.PROJECTS = self._sessions, self._projects
+
+    def run_census(self, panes, argv=()):
+        """Run `main()` against a stubbed transport; (rc, stdout, stderr)."""
+        def fake_run(args, **_kwargs):
+            if args[0] == "ps":
+                return _Proc("  101 ttys001 claude\n")
+            if args[0] == "wezterm":
+                # A non-zero exit is how a broken transport actually presents: empty
+                # stdout, rc 1. Passing `None` here would test a shape wezterm never
+                # emits, so the broken state is built from the real one.
+                return _Proc("", returncode=1) if panes is None else _Proc(json.dumps(panes))
+            raise AssertionError(args)
+
+        fc.subprocess.run = fake_run
+        saved_argv = fc.sys.argv
+        fc.sys.argv = ["fleet-colours.py", *argv]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = fc.main()
+        finally:
+            fc.sys.argv = saved_argv
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_unreadable_transport_withholds_the_headless_count(self):
+        """`None` from the transport must not be rendered as `N headless`."""
+        rc, out, err = self.run_census(None)
+        self.assertEqual(0, rc)
+        self.assertIn("pane membership withheld", out)
+        self.assertNotRegex(out, r"\d+ headless")
+
+    def test_unreadable_transport_withholds_the_paned_count_in_json(self):
+        """`"paned": 0` is the false claim; the key must not carry a number."""
+        rc, out, err = self.run_census(None, ("--json",))
+        self.assertEqual(0, rc)
+        self.assertNotRegex(out, r'"paned":\s*\d')
+        doc = json.loads(out)
+        self.assertIsNone(doc["paned"])
+        self.assertFalse(doc["panes_read"])
+
+    def test_healthy_transport_with_panes_is_unchanged(self):
+        """The healthy path is untouched: a real paned count, unchanged count line.
+
+        Asserted verbatim, so this passes against the pre-fix script too -- that is
+        what makes it a positive control rather than a restatement of the fix.
+        """
+        rc, out, err = self.run_census(self.PANES)
+        self.assertEqual(0, rc, err)
+        self.assertIn("1 live sessions · 1 in a wezterm pane · 0 headless", out)
+        rc, out, err = self.run_census(self.PANES, ("--json",))
+        self.assertEqual(1, json.loads(out)["paned"])
+
+    def test_empty_but_reachable_transport_still_reads_as_empty(self):
+        """A reachable WezTerm with no panes is a measured zero, not a failure.
+
+        The control for the `is None` test: warning on `not panes` would pass the
+        broken case above and wrongly fail this one. Passes pre-fix too, for the
+        same reason as the healthy-with-panes case.
+        """
+        rc, out, err = self.run_census([])
+        self.assertEqual(0, rc, err)
+        self.assertIn("1 live sessions · 0 in a wezterm pane · 1 headless", out)
+        # The marker, not the bare word: the transcript column legitimately prints
+        # "(no transcript — colour unreadable)", which is a different unreadable.
+        self.assertNotIn("pane membership withheld", out)
+        rc, out, err = self.run_census([], ("--json",))
+        self.assertEqual(0, json.loads(out)["paned"])
+
+    def test_panes_read_is_true_whenever_the_query_succeeded(self):
+        """The field the broken case sets false is true on both healthy states."""
+        for panes in (self.PANES, []):
+            with self.subTest(panes=panes):
+                _rc, out, _err = self.run_census(panes, ("--json",))
+                self.assertTrue(json.loads(out)["panes_read"])
+
+    def test_broken_and_empty_are_distinguishable(self):
+        """The defect itself: the two states must not answer identically."""
+        self.assertNotEqual(self.run_census(None)[1], self.run_census([])[1])
 
 
 if __name__ == "__main__":
