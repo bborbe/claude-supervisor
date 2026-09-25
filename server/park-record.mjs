@@ -13,6 +13,39 @@
 
 export const PARK_FIELD = 'parked_permission'
 
+export const REDACTED = '[REDACTED]'
+
+// Secret-shaped *keys*, mirroring the hook's `_SECRET` in
+// `~/.claude/hooks/attention-log.py` — the sibling path that already persists tool
+// detail. Same list, so the two cannot drift on what counts as a secret.
+const SECRET_KEY = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api[-_]?key|access[-_]?token|refresh[-_]?token|bearer|password|passwd|secret|private[-_]?key|client[-_]?secret)$/i
+
+// A bare bearer token with no `name:` prefix — `Bearer eyJ…` sitting in a command line.
+const BEARER = /\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/gi
+
+// Scrub secrets from a tool input while keeping its SHAPE.
+//
+// Shape matters here in a way it does not for a log line: this record is what a resume
+// replays, so flattening the object to a redacted string would trade a leak for a
+// resume that no longer works. The value is redacted, never the field — the same choice
+// the hook makes and for the same reason: an absent field and a redacted one are not
+// the same fact.
+//
+// A redacted secret cannot be replayed, and that is the correct outcome: a token that
+// had to be scrubbed before it could be written is a token a resume must not re-send.
+export function redactInput(input) {
+  if (typeof input === 'string') return input.replace(BEARER, `Bearer ${REDACTED}`)
+  if (Array.isArray(input)) return input.map(redactInput)
+  if (input && typeof input === 'object') {
+    const out = {}
+    for (const [k, v] of Object.entries(input)) {
+      out[k] = SECRET_KEY.test(k) ? REDACTED : redactInput(v)
+    }
+    return out
+  }
+  return input
+}
+
 // The park as persisted — a projection of the in-memory `pending` record built at park
 // time in `supervisor.mjs` `makeCanUseTool`, never a re-derivation.
 export function buildParkRecord({
@@ -28,9 +61,12 @@ export function buildParkRecord({
   return {
     request_id: requestId,
     tool: toolName,
-    // The FULL input, not the 200-char prose the hook log truncates to. Carrying the
-    // reason this record exists rather than a summary of it is the point.
-    input: input ?? null,
+    // The FULL input, not the 200-char prose the hook log truncates to — carrying the
+    // reason this record exists rather than a summary of it is the point. Redacted,
+    // because this is a new place a tool input lands on disk and the hook that already
+    // persists tool detail scrubs it first; "full" and "unredacted" are different
+    // properties, and only the first is needed to resume.
+    input: redactInput(input ?? null),
     reason: decisionReason,
     blocked_path: blockedPath,
     requested_at: requestedAt ?? new Date().toISOString(),
