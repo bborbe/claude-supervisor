@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Tests for scripts/attention-ask.py.
+
+Covers the three decisions that make a posted question answerable:
+
+  * the producer gate -- a post with no producer id is refused rather than
+    sent. An item's `producer_id` is the only thing that can poll it back, so
+    an item with none is a question asked into a void: it can never be read,
+    and nothing downstream would report it as lost.
+  * the option rules -- at most one recommendation, and `--recommend` must name
+    one of the `--option` labels. The store enforces both too; checking here is
+    what lets the failure name the fix instead of quoting a store payload.
+  * the omitted-vs-empty body rule -- `context`, `options` and `expires_at` are
+    omitted when empty, never sent as "". The schema reads an absent value as
+    optional/pre-change and a present "" as a value, so sending blank would
+    store a field holding nothing rather than no field at all.
+
+  * the poll shapes -- OPEN while unanswered; the stored `answer` rendered as
+    `kind: value`; and a `skip` rendered as the bare word, since `skip ` with
+    nothing after it reads as a truncated option answer.
+
+Run: python3 -m unittest discover -s scripts/tests -v
+"""
+
+import importlib.util
+import io
+import json
+import os
+import unittest
+import urllib.error
+from unittest import mock
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SCRIPT = os.path.join(os.path.dirname(_HERE), "attention-ask.py")
+
+_spec = importlib.util.spec_from_file_location("attention_ask", _SCRIPT)
+ask = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ask)
+
+
+class FakeResponse:
+    """Minimal context-manager stand-in for urlopen's return value."""
+
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode()
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def post_args(**overrides):
+    defaults = dict(
+        dedup_key="q1",
+        payload="Which surface?",
+        context="",
+        option=[],
+        recommend="",
+        producer_id="session-a",
+        producer_kind="session",
+        liveness_ref="",
+        interrupt_class="pick",
+        expires_at="",
+    )
+    defaults.update(overrides)
+    return mock.Mock(**defaults)
+
+
+class BuildOptionsTest(unittest.TestCase):
+    def test_marks_the_named_option_recommended(self):
+        options = ask.build_options(["the board", "the tab"], "the board")
+        self.assertEqual(
+            options,
+            [
+                {"label": "the board", "recommended": True},
+                {"label": "the tab", "recommended": False},
+            ],
+        )
+
+    def test_no_recommendation_marks_none(self):
+        options = ask.build_options(["a", "b"], "")
+        self.assertEqual([o["recommended"] for o in options], [False, False])
+
+    def test_recommend_outside_the_labels_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            ask.build_options(["a", "b"], "c")
+        self.assertIn("not one of the --option labels", str(ctx.exception))
+
+    def test_empty_label_is_refused(self):
+        with self.assertRaises(ValueError):
+            ask.build_options(["a", "  "], "")
+
+
+class PostTest(unittest.TestCase):
+    def test_refuses_without_a_producer_id(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            rc = ask.cmd_post(post_args(producer_id=""), out=out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED", out.getvalue())
+        self.assertIn("poll it back", out.getvalue())
+
+    def test_posts_the_declaration_and_prints_the_item_id(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": "abc123"})
+
+        out = io.StringIO()
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            rc = ask.cmd_post(
+                post_args(option=["the board", "the tab"], recommend="the board"),
+                out=out,
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(captured["url"].endswith("/api/1.0/attention"))
+        body = captured["body"]
+        self.assertEqual(body["producer_id"], "session-a")
+        # The liveness ref is derived from the producer, so a manager posting
+        # from its own session needs to declare nothing.
+        self.assertEqual(body["liveness_ref"], "session:session-a")
+        self.assertEqual(body["answer_mechanism"], "message")
+        self.assertEqual(body["options"][0], {"label": "the board", "recommended": True})
+        self.assertIn("ITEM_ID: abc123", out.getvalue())
+
+    def test_empty_optionals_are_omitted_not_sent_blank(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": "abc123"})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(post_args(), out=io.StringIO())
+
+        body = captured["body"]
+        for key in ("context", "options", "expires_at"):
+            self.assertNotIn(key, body, f"{key} must be omitted when empty, not sent as ''")
+
+    def test_present_optionals_are_sent(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": "abc123"})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(
+                post_args(context="why", option=["a"], expires_at="2026-10-01T00:00:00Z"),
+                out=io.StringIO(),
+            )
+
+        body = captured["body"]
+        self.assertEqual(body["context"], "why")
+        self.assertEqual(body["expires_at"], "2026-10-01T00:00:00Z")
+        self.assertEqual(len(body["options"]), 1)
+
+    def test_store_rejection_is_reported_with_its_detail(self):
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", None, io.BytesIO(b'{"error":"options not allowed"}')
+            )
+
+        out = io.StringIO()
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            rc = ask.cmd_post(post_args(), out=out)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("400", out.getvalue())
+        self.assertIn("options not allowed", out.getvalue())
+
+
+class PollTest(unittest.TestCase):
+    def poll(self, item):
+        with mock.patch.object(
+            ask.urllib.request, "urlopen", lambda req, timeout=None: FakeResponse(item)
+        ):
+            out = io.StringIO()
+            rc = ask.cmd_poll("abc123", out=out)
+        return rc, out.getvalue()
+
+    def test_open_item_reads_as_open(self):
+        rc, text = self.poll({"item_id": "abc123", "state": "open"})
+        self.assertEqual(rc, 0)
+        self.assertIn("OPEN", text)
+
+    def test_option_answer_is_rendered_with_its_value(self):
+        rc, text = self.poll(
+            {
+                "item_id": "abc123",
+                "state": "answered",
+                "answer": {"kind": "option", "value": "the board"},
+                "answered_by": "attention-board",
+            }
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: option: the board", text)
+        self.assertIn("ANSWERED_BY: attention-board", text)
+
+    def test_skip_is_rendered_without_a_trailing_value(self):
+        _, text = self.poll(
+            {"item_id": "abc123", "state": "answered", "answer": {"kind": "skip"}}
+        )
+        self.assertIn("ANSWERED: skip", text)
+        # A trailing colon-space would read as a truncated option answer.
+        self.assertNotIn("skip:", text)
+
+    def test_answer_absent_reads_as_open_even_when_state_says_answered(self):
+        # A permission-class item is answered with a `decision` and carries no
+        # `answer`, so the poll must not report content that is not there.
+        rc, text = self.poll(
+            {"item_id": "abc123", "state": "answered", "decision": "allow"}
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("OPEN", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
