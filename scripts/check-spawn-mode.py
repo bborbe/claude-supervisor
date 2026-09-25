@@ -44,18 +44,29 @@ MODE_HOME = "docs/fleet-surface.md"
 MODE_ANCHOR = "Spawn a worker item 6"
 
 #: Files that document opening a NEW worker. Each must reference the home.
+#: ⚠️ `agents/manager-drive.md` is listed here even though its prose only ever shows `resume=`
+#: calls — its `tools:` grant permits an OPEN, and on 2026-09-24 it used that to open two rows
+#: directly, writing `mode: interactive` to each task and then omitting the argument, so both
+#: reported `mode_source=config`. A site defined by a grant is invisible to a text scan.
 SPAWN_SITES = (
     "commands/open.md",
     "commands/manager-loop.md",
     "commands/manager-spawn.md",
+    "agents/manager-drive.md",
 )
 
 #: Resume-only sites. Excluded on purpose — they are not new-worker sites and must not
 #: be re-classified. Listed so that a *new* file joining this set is a deliberate edit.
 RESUME_ONLY = (
     "commands/fleet-loop.md",
-    "agents/manager-drive.md",
 )
+
+#: The dimension a text scan cannot reach. A tool grant permits a spawn whether or not the
+#: prose describes one, so every file whose frontmatter grants it must at least carry the
+#: pointer to the rule's home — otherwise a reader (or an agent) following that file has no
+#: route to the rule at all. This is what `agents/manager-drive.md` was missing.
+GRANT_TOOL = "mcp__supervisor__spawn_agent"
+FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 
 CALL = re.compile(r"spawn_agent\(")
 HEADLESS_CONDITION = re.compile(r"`?mode:`?[^\n]{0,40}headless|headless[^\n]{0,40}`?mode:`?")
@@ -95,6 +106,18 @@ def check(root):
         for path in sorted((root / sub).rglob("*.md")):
             rel = str(path.relative_to(root))
             text = path.read_text(encoding="utf-8")
+
+            # The grant dimension runs before the call-shape filter: a file that can open a
+            # worker must point at the rule even when its prose shows no `spawn_agent(prompt=`
+            # call at all, which is exactly how `agents/manager-drive.md` bypassed the wiring.
+            fm = FRONTMATTER.match(text)
+            if fm and GRANT_TOOL in fm.group(1) and rel not in SPAWN_SITES and MODE_ANCHOR not in text:
+                failures.append(
+                    f"{rel}: its frontmatter grants `{GRANT_TOOL}` — which permits opening a "
+                    f"worker — but it carries no reference to the rule's home ({MODE_ANCHOR!r}), "
+                    f"so a reader following this file has no route to the mode rule"
+                )
+
             if not any(is_new_worker(s) for s in call_spans(text)):
                 continue
             sites_with_calls.add(rel)
