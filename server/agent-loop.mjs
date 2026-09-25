@@ -38,7 +38,11 @@ import { config } from './config.mjs'
  * @param {Function} args.log         `(...parts) => void` — the server's stderr/file log
  * @returns {Promise<void>}
  */
-export async function runAgentLoop({ q, agent, writeLedger, log }) {
+// The no-op a caller that does not publish liveness gets, so the loop stays drivable from a
+// test with a synthetic stream and no filesystem.
+const NO_HEARTBEAT = { start() {}, stop() {} }
+
+export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_HEARTBEAT }) {
   try {
     for await (const message of q) {
       agent.transcript.push(message)
@@ -47,6 +51,10 @@ export async function runAgentLoop({ q, agent, writeLedger, log }) {
       // name to be found by, so this is the only place the key exists.
       if (message.type === 'system' && message.subtype === 'init') {
         agent.sessionId = message.session_id
+        // The first moment this worker can be published as live to a process that did not
+        // spawn it. The stamp is keyed by session id and the id does not exist until here,
+        // so this cannot happen at spawn. See heartbeat.mjs.
+        heartbeat.start(agent.sessionId)
         writeLedger(agent)
       }
       // Captured, NOT settled. An SDK `result` message is not the end of the turn:
@@ -88,5 +96,11 @@ export async function runAgentLoop({ q, agent, writeLedger, log }) {
     agent.status = 'error'
     agent.error = String(error)
     log(`agent ${agent.id} threw: ${error}`)
+  } finally {
+    // Covers BOTH endings — the settle above and the throw here — so a worker that errors
+    // does not keep a live stamp behind it. This is the graceful half ONLY: a server killed
+    // with `kill -9` never reaches this line, and the stamp it leaves is read as stale by
+    // age. That asymmetry is the design, not an omission — see heartbeat.mjs.
+    if (agent.sessionId) heartbeat.stop(agent.sessionId)
   }
 }

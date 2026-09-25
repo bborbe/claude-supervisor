@@ -15,9 +15,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { HEARTBEAT_TTL_MS, stampPath, stampRecord } from './heartbeat.mjs'
 import {
   checkLiveness,
   findRegisteredByName,
@@ -126,101 +127,139 @@ test('a session id mentioned in some other process command line does not read as
 })
 
 test('checkLiveness reports "could not tell" when the registry is unreadable', () => {
-  const verdict = checkLiveness(SESSION, { dir: '/nonexistent/supervisor/sessions' })
-  assert.equal(verdict.live, null, 'unreadable must never be folded into "closed"')
-  assert.deepEqual(verdict.probes, [], 'no probe ran, so the caller cannot read this as "confirmed closed"')
+  // Hermetic: the heartbeat dir is a fixture too, so this asserts the unreadable-registry
+  // path rather than whatever happens to be stamped on the machine running the suite.
+  const beats = mkdtempSync(join(tmpdir(), 'hb-'))
+  try {
+    const verdict = checkLiveness(SESSION, { dir: '/nonexistent/supervisor/sessions', heartbeatDir: beats })
+    assert.equal(verdict.live, null, 'unreadable must never be folded into "closed"')
+    assert.deepEqual(verdict.probes, [], 'no probe produced a verdict, so the caller cannot read this as "confirmed closed"')
+  } finally {
+    rmSync(beats, { recursive: true, force: true })
+  }
 })
 
 test('checkLiveness reports closed only when a probe ran and found nothing', () => {
   const dir = registryWithout(OTHER)
+  const beats = mkdtempSync(join(tmpdir(), 'hb-'))
   try {
-    const verdict = checkLiveness(SESSION, { dir })
+    const verdict = checkLiveness(SESSION, { dir, heartbeatDir: beats })
     assert.equal(verdict.live, false)
-    assert.deepEqual(verdict.probes, ['registry'], 'a probe ran and found nothing — this is a real "closed"')
+    assert.deepEqual(
+      verdict.probes,
+      ['registry', 'heartbeat'],
+      'both probes ran and found nothing — this is a real "closed", not an unreadable store',
+    )
   } finally {
     rmSync(dir, { recursive: true, force: true })
+    rmSync(beats, { recursive: true, force: true })
   }
 })
 
 // ---------------------------------------------------------------------------
-// The cross-server blind spot — [[A Non-Spawning Session Cannot Decide a
+// The cross-server blind spot, CLOSED — [[A Non-Spawning Session Cannot Decide a
 // Headless Worker's Liveness]].
 //
 // A headless worker is an in-process SDK `query()` owned by the supervisor server
 // that spawned it. It writes no registry entry (it holds no socket), so the
-// registry — now the ONLY probe — cannot see it at all. The spawning server knows
-// it is live from its own `agents` Map, and `supervisor.mjs` consults that Map
-// after this module returns `false`.
+// registry cannot see it at all — and the spawning server's `agents` Map, which
+// can, is per-process, so the manager that did not spawn the worker has neither
+// channel. It read the same decisive `false` for a worker genuinely mid-turn and
+// for one that finished an hour ago, and the guard acts on `false` by ALLOWING the
+// resume. Two writers landed on one conversation.
 //
-// That Map is per-server. A manager that did not spawn the worker has neither
-// channel: the registry has no entry, and its own Map has no record. So it reads
-// the same decisive `false` for a worker that is genuinely mid-turn and for one
-// that finished an hour ago — and the guard acts on `false` by ALLOWING the
-// resume. Two writers land on one conversation.
+// These two tests used to CHARACTERISE that blind spot: both cases had to produce
+// the same verdict, and the file said the first assertion would fail once a
+// decisive cross-server probe landed — "that failure is the signal the fix works,
+// so update it deliberately rather than deleting it". The heartbeat store
+// (`heartbeat.mjs`) is that probe, so they are updated here rather than removed.
 //
-// These tests CHARACTERISE the blind spot rather than assert a fix: both cases
-// must produce the same verdict today, which is the defect. When a decisive
-// cross-server probe lands, the live case stops matching the finished case and
-// the first assertion below fails — that failure is the signal the fix works, so
-// update it deliberately rather than deleting it.
+// What they now assert is the property the fix buys: the live case and the
+// finished case READ DIFFERENTLY. That is the whole claim, and it is deliberately
+// the assertion the old pair could not make.
 
-test('a cross-server headless worker reads as closed whether it is live or finished', () => {
-  // The registry does not know this id — which is exactly what a headless worker
-  // looks like from any server that did not spawn it. Both the live worker and the
-  // finished one are represented by the same fixture, because from here they are
-  // the same thing: invisible.
+test('a live cross-server headless worker reads as live from a server that did not spawn it', () => {
+  // The registry still does not know this id — that is unchanged, and it is what a
+  // headless worker looks like from any server that did not spawn it. What changed is
+  // that the owning server's knowledge is now on disk: a fresh stamp is the worker
+  // saying "still being worked" through a channel every process can read.
   const dir = registryWithout(OTHER)
+  const beats = mkdtempSync(join(tmpdir(), 'hb-'))
   try {
-    const asSeenFromAnotherServer = checkLiveness(SESSION, { dir })
+    stampRecord(beats, { sessionId: SESSION, pid: process.pid, mode: 'headless' })
+    const asSeenFromAnotherServer = checkLiveness(SESSION, { dir, heartbeatDir: beats })
 
     assert.equal(
       asSeenFromAnotherServer.live,
-      false,
-      'THE DEFECT: a genuinely live headless worker reads as closed from a non-spawning server',
+      true,
+      'THE FIX: a genuinely live headless worker is visible to a non-spawning server',
     )
-    assert.deepEqual(
-      asSeenFromAnotherServer.probes,
-      ['registry'],
-      'a probe ran and found nothing, so this is not the honest "could not tell" — it is a decisive negative',
-    )
-    assert.notEqual(
-      asSeenFromAnotherServer.live,
-      null,
-      'null is reserved for an unreadable probe; this verdict is a confident "closed", which is what the guard acts on',
+    assert.ok(
+      asSeenFromAnotherServer.probes.includes('heartbeat'),
+      'the heartbeat is the probe that found it — the registry has no entry to find',
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
+    rmSync(beats, { recursive: true, force: true })
   }
 })
 
-test('the registry cannot separate a live headless worker from a finished one', () => {
-  // Stated as the property the fix must break: give this module every cross-server
-  // channel it actually has — the registry — and ask it about a live headless worker
-  // and a finished one. The two answers are identical, so no caller can branch on
-  // them. `live: false` here is not evidence about the worker; it is evidence about
-  // where the worker's liveness is recorded (the spawner's process).
+test('the heartbeat separates a live headless worker from a finished one', () => {
+  // The property the fix must establish, stated as the thing the registry could not do:
+  // give this module both channels and ask it about a live headless worker and a finished
+  // one. The two answers must now DIFFER, so a caller can branch on them.
   //
-  // The registry holds an UNRELATED session, so a probe genuinely runs and finds
-  // nothing for both ids — the decisive-negative case, not the unreadable one. If
-  // the fixture instead registered `OTHER`, the finished case would read `true` and
-  // the test would compare a real hit against a real miss, proving nothing.
+  // The registry holds an UNRELATED session, so the registry probe genuinely runs and finds
+  // nothing for both ids — the decisive-negative case, not the unreadable one. The ONLY
+  // difference between the two ids is the stamp, which is exactly the variable under test.
   const dir = fixture({ '1.json': { pid: process.pid, sessionId: 'a1b2c3d4-0000-4000-8000-000000000000' } })
+  const beats = mkdtempSync(join(tmpdir(), 'hb-'))
   try {
-    const liveHeadlessWorker = checkLiveness(SESSION, { dir })
-    const finishedHeadlessWorker = checkLiveness(OTHER, { dir })
+    stampRecord(beats, { sessionId: SESSION, pid: process.pid, mode: 'headless' })
 
-    assert.deepEqual(
-      liveHeadlessWorker.probes,
-      ['registry'],
-      'a probe must have run, or this compares two unreadable answers instead of the blind spot',
-    )
-    assert.equal(
+    const liveHeadlessWorker = checkLiveness(SESSION, { dir, heartbeatDir: beats })
+    const finishedHeadlessWorker = checkLiveness(OTHER, { dir, heartbeatDir: beats })
+
+    assert.equal(liveHeadlessWorker.live, true, 'the stamped worker is live')
+    assert.equal(finishedHeadlessWorker.live, false, 'the unstamped worker is not')
+    assert.notEqual(
       liveHeadlessWorker.live,
       finishedHeadlessWorker.live,
-      'THE DEFECT: the registry returns one answer for both, so a non-spawning server cannot decide',
+      'THE FIX: the two cases no longer read the same, so a non-spawning server can decide',
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
+    rmSync(beats, { recursive: true, force: true })
+  }
+})
+
+test('a stale stamp reads not-alive without anyone clearing it', () => {
+  // The kill -9 case, and the reason the stamp is a heartbeat rather than a flag. Nothing
+  // unlinks this file — the owning server was killed mid-turn and never ran its clear — so
+  // the verdict has to come from the stamp's AGE. A write-at-spawn / delete-on-graceful-exit
+  // design passes every graceful case and fails exactly here, which is why this test exists.
+  const dir = registryWithout(OTHER)
+  const beats = mkdtempSync(join(tmpdir(), 'hb-'))
+  try {
+    stampRecord(beats, { sessionId: SESSION, pid: process.pid, mode: 'headless' })
+
+    // Read as of a moment past the TTL, with the file still on disk and nothing having
+    // deleted it. `now` is injected rather than slept for: the property under test is the
+    // age comparison, not the clock.
+    const afterTtl = checkLiveness(SESSION, {
+      dir,
+      heartbeatDir: beats,
+      now: Date.now() + HEARTBEAT_TTL_MS + 1000,
+    })
+
+    assert.equal(afterTtl.live, false, 'a stamp older than the TTL is not evidence of life')
+    assert.ok(
+      existsSync(stampPath(beats, SESSION)),
+      'the file is still there — the verdict came from its age, not from its absence',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(beats, { recursive: true, force: true })
   }
 })
 

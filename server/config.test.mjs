@@ -71,6 +71,7 @@ test('the config object is a frozen, complete surface', () => {
     'claudeCmd',
     'mcpConfig',
     'workerColor',
+    'heartbeatDir',
   ]) {
     assert.ok(key in config, `config.${key} is missing — the surface must be enumerable`)
   }

@@ -129,6 +129,14 @@ export const config = Object.freeze({
   // how a reader ends up pointing the ledger at Claude Code's directory.
   ledgerDir: ENV.SUPERVISOR_LEDGER_DIR || join(STATE_DIR, 'sessions'),
 
+  // The headless-worker heartbeat store: one transient file per live worker, whose mtime is
+  // refreshed by the server that owns it and read by any process that must decide whether
+  // that worker is still being worked. A SIBLING of the ledger above, never a field inside
+  // it — the ledger is append-only, and stamping liveness into it would make an append-only
+  // log a live-state source. Same XDG state home, deliberately: both describe this server's
+  // workers, and an operator moving the state dir must not have to find a second name.
+  heartbeatDir: ENV.SUPERVISOR_HEARTBEAT_DIR || join(STATE_DIR, 'live'),
+
   // Raw and deliberately unvalidated here: the allowed-mode list and the warning that
   // names a bad value both belong to the server's own logger, not to this module.
   permissionMode: ENV.SUPERVISOR_PERMISSION_MODE || null,
