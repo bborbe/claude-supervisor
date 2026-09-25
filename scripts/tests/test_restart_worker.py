@@ -161,6 +161,22 @@ class ResumeCommand(unittest.TestCase):
     def test_no_cwd_flag_when_empty(self):
         self.assertNotIn("--cwd", rw.resume_command("sid", "title", "pink", ""))
 
+    def test_colour_chip_carries_no_literal_quotes(self):
+        """The shell quotes in `open.md`'s recipe are syntax, not value.
+
+        Regression, measured 2026-09-25 on the first live `/supervisor:worker-restart` run:
+        a byte-for-byte copy of Step 3.1 wrote `"/color 'pink'"` — the `\\'` in the Python
+        f-string is a *literal* quote, because there is no outer `bash -lc '…'` to break out
+        of here. Claude Code rejected it (`Invalid color "'pink'"`) and every restarted
+        worker kept the default colour instead of pink. The colour is the fleet's only role
+        cue, so a restarted worker that should be pink is exactly the mis-coloured session
+        that nearly got a manager relaunched as a worker on 2026-09-18.
+        """
+        inner = rw.resume_command("sid", "title", "pink", "/d")[-1]
+        self.assertIn('"/color pink"', inner)
+        self.assertNotIn("'/color", inner)
+        self.assertNotIn("pink'", inner)
+
     def test_resume_target_and_unset_list_intact(self):
         """The copied recipe's own invariants must survive the --cwd addition."""
         inner = rw.resume_command("sid", "title", "pink", "/d")[-1]

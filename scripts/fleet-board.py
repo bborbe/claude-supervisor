@@ -3,8 +3,8 @@
 
 Emits box-table JSON on stdout — `{"header", "rows", "widths", ...}` — for
 `box-table.py`. Extra keys are safe there: it reads only `header`, `rows` and
-`widths` (`data[...]` and `data.get(...)`), so the counts, the per-row detail and
-the coverage assertion ride in the same document.
+`widths` (`data[...]` and `data.get(...)`), so the counts, the saturation ratio,
+the per-row detail and the coverage assertion ride in the same document.
 
 The row set is the SESSION REGISTRY, `~/.claude/sessions/<pid>.json` — one row per
 entry, which is what makes the row count checkable at all. `fleet-sessions.py` is
@@ -433,6 +433,34 @@ def gate_attribution(needs, gate_ids):
     return out
 
 
+def fleet_saturation(registry):
+    """The fleet working ratio: how much of the live fleet is actually working.
+
+    The numerator counts the RAW REGISTRY STATUS in `RUNNING_STATUSES`, never
+    `counts["running"]`. The buckets apply a precedence (`problem` -> `needs-input`
+    -> `running` -> `idle`), so a `busy` session holding an open gate is bucketed
+    `needs-input` and a bucket-based numerator would drop it — undercounting
+    precisely the sessions that are working. The raw status is also what
+    `ListAgents` reports, which is what makes the printed numerator/denominator
+    cross-checkable by hand against the same moment.
+
+    `ratio` is `None`, not `0.0`, for an empty fleet: "no live sessions" and "no
+    session working" are different answers and must not render alike.
+
+    Offline by construction — no Prometheus, no credentials. The tok/s figure that
+    sits beside this ratio is the caller's job (`claude-metrics.sh` resolves six
+    credentialed sources); reading it here would make a script that runs every
+    sweep tick depend on them.
+    """
+    numerator = sum(1 for rec in registry.values() if rec.get("status") in RUNNING_STATUSES)
+    denominator = len(registry)
+    return {
+        "numerator": numerator,
+        "denominator": denominator,
+        "ratio": (numerator / denominator) if denominator else None,
+    }
+
+
 def collect_signals(stuck_min):
     """The two independent signals, keyed by session id, plus each gate's pane.
 
@@ -775,6 +803,7 @@ def main():
         "rows": tree,
         "widths": WIDTHS,
         "counts": counts,
+        "saturation": fleet_saturation(registry),
         "registry_count": len(registry),
         "row_count": len(rows),
         "tree_rows": len(tree),

@@ -223,12 +223,24 @@ def resume_command(sid, title, chip, cwd):
     `~/Documents/Obsidian/Personal` resumed into `$HOME`, stalled on that dialog and
     produced no registry entry, so a working kill+resume looked like a no-op. The
     cwd comes from the registry record, read before the kill.
+
+    ⚠️ **The colour chip is NOT a byte-for-byte copy, and the difference is load-bearing.**
+    `commands/open.md` Step 3.1 writes `"/color '"$CHIP"'"` — those single quotes are *shell*
+    syntax that breaks out of the outer `bash -lc '…'` single-quoted string so `$CHIP` expands.
+    That string is built in Python here, where there is no outer quoting to break out of, so a
+    copied `\\'` becomes a **literal** quote in the value and Claude Code rejects it:
+    `Invalid color "'pink'"`. Measured 2026-09-25 on the first live run of
+    `/supervisor:worker-restart`: both restarts came up with the rejected chip and kept the
+    default colour instead of pink. It matters because the colour is the fleet's only role cue
+    (`open.md`: *"The colour is the only fleet-wide cue for which role a session plays"*) — a
+    restarted worker that should be pink is exactly the mis-coloured session that nearly got a
+    manager relaunched as a worker on 2026-09-18. The quotes are dropped here, deliberately.
     """
     script = os.environ.get("CLAUDE_SCRIPT") or "claude"
     inner = (
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
-        f'exec "{script}" --resume {sid} -n "{title}" "/color \'{chip}\'"'
+        f'exec "{script}" --resume {sid} -n "{title}" "/color {chip}"'
     )
     argv = ["wezterm", "cli", "spawn"]
     if cwd:

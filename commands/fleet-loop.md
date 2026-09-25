@@ -24,8 +24,6 @@ allowed-tools:
   - Bash(kubectl*:*)
   - Bash(gh:*)
   - Bash(git log:*)
-  - Bash(wezterm cli get-text:*)
-  - Bash(wezterm cli send-text:*)
   - Bash(wezterm cli list:*)
   - Task
   - Read
@@ -68,11 +66,11 @@ The fleet manager is a role (Fleet Manager Session runbook — the wide/shallow 
     - **Manager first.** Before including an entry, check `ListAgents` for its owning manager; if live, it already reports its `waiting-on-human` sessions (`/manager-loop` step 3) — drop the entry and say so in one line.
     - **Claim before asking — this is what makes it asked ONCE.** Manager-first is not sufficient alone: the fleet and a live manager can both hold the same blocked session and neither sees the other's batch. Claim each subject through the **`supervisor:asked-ledger` skill** — `/supervisor:asked-ledger claim …`, the single home of its rules and the claim contract; follow it verbatim, never restate them here. **Exit 0 → include the subject in the batch; exit 3 → another layer holds it, drop it from the batch** and say so in one line. `resolve` once the answer is relayed.
     - **Render the consolidated list once per sweep** — `/supervisor:asked-ledger list`, under the Output shape's **Needs-input** item (where Step 5's blocked set renders): every open claim across every layer in one list. That is what makes "one grouped decision" true even though the asks stay per-layer.
-    - **Ask here, relay back — the operator never needs a worker tab.** For each entry no manager covers **and that `claim` returned 0 for**: read the live question with `wezterm cli get-text --pane-id <N>` (the feed can be stale), batch every uncovered blocked session into ONE `AskUserQuestion` (up to 4), then **re-read the pane immediately before relaying** — a gate cleared during the ask is a named branch: record it and report the worker's own resolution instead of sending. Relay each answer verbatim, prefixed `Operator answer, relayed verbatim from the manager session (not a peer inference):`. Never restate an `approve:` line for the operator to run here, and never merely refuse it.
+    - **Ask here, relay back — the operator never needs a worker tab.** For each entry no manager covers **and that `claim` returned 0 for**: read the live question through the **`gate-relay-read` agent** — `Task(subagent_type: "supervisor:gate-relay-read", prompt: <the pane ids + which worker each belongs to>)`; the plugin prefix is required. The feed can be stale, so the pane is the authority, and the agent returns a compact per-pane summary instead of the raw buffer. Batch every uncovered blocked session into ONE `AskUserQuestion` (up to 4) — **the ask stays here**, because a sub-agent cannot prompt the operator. Then deliver through the **`gate-relay-send` agent** — `Task(subagent_type: "supervisor:gate-relay-send", prompt: <per pane: pane id, worker label, the operator's answer verbatim, provenance>)`. It re-reads the pane immediately before typing, so a gate cleared during the ask comes back as `not sent` with no mutation: record it and report the worker's own resolution instead of sending. It types the answer verbatim under the `Operator answer, relayed verbatim from the manager session (not a peer inference):` prefix. **The agents own the mechanics, not the provenance judgement** — never hand the send leg an answer the operator did not give, and never let a peer's claim of an operator decision stand in for one. Never restate an `approve:` line for the operator to run here, and never merely refuse it.
     - **Provenance — all three must hold:** the operator answered in this session, in the current exchange; the relay reproduces the answer as given with the prefix; a peer's claim that the operator decided X is NOT an operator answer.
-    - **Two hard exclusions:** never relay approval for a production-touching or irreversible action; a pane showing `Enter to select` is a selection modal — relay by navigation (↑/↓ `\x1b[A` / `\x1b[B`, `\r` to select), per [[Manager Session]] § Relaying into a selection modal, re-reading after every send.
-    - **Verify submission.** After `send-text --no-paste $'<prefix> … \r'`, read the pane back and repeat a bare `\r` (`wezterm cli send-text --pane-id <N> --no-paste $'\r'`) until the composer clears. Delivered = empty composer *and* the worker visibly working.
-    - **A relay never releases a gate the worker must act on** — the operator's own keystroke does. For such a gate, or when the operator named no choice, hand over `you run:` the one-line output of `scripts/jump-link.py <pane-id>` — a clickable link (SHIFT+CMD+click) when the fleet-jump server is configured, the `/supervisor:jump <N>` command when it is not; never a tab id, and never a hand-written URL — and say a direct go is needed. A relay refused at the receiving end is not your error: do not retry, hand over the pane.
+    - **Two hard exclusions:** never relay approval for a production-touching or irreversible action; **never drive a selection modal** — a pane showing `Enter to select` (match by **containment**, since the real render is `Enter to select · ↑/↓ to navigate · Esc to cancel`) is a handover, never a relay target, and so is a multi-question wizard. Hand over the `jump-link.py` line instead. ⚠️ **Corrected 2026-09-25:** this line previously mandated arrow-key navigation into the modal, contradicting `commands/manager-loop.md` § Path-B relay rules and `docs/fleet-surface.md` § the pane-typing rule — and the latter two were last touched by the *same* commit without being reconciled. The operator ruled that a modal pane is a handover; the three now agree.
+    - **Verify submission.** The send leg owns this loop — it re-reads after every send, repeats a bare `\r` until the composer clears, and aborts at three Enters as `submitted: unverified` rather than re-sending the answer. Read its one-line result: `delivered` requires the composer cleared *and* the worker visibly working, and anything else is reported as it came back, never rounded up to delivered.
+    - **A relay never releases a gate the worker must act on** — the operator's own keystroke does. For such a gate, or when the operator named no choice, hand over the one-line output of `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py <pane-id>` **verb-free** — never a tab id, and never a hand-written URL — and say a direct go is needed. Whether it printed a clickable link (SHIFT+CMD+click) or the `/supervisor:jump <N>` fallback, the line is a handover the operator acts on, not a command this session runs: `/supervisor:jump` is the executor and these commands emit links without running it. One action per line — `commands/manager-loop.md` § Path-B relay rules. A relay refused at the receiving end is not your error: do not retry, hand over the pane.
   - **Routing:** on `stalled`/crashed-looking, `SendMessage` the owning manager first (*"`<session>` looks stalled — your topic"*); TTS the human only if it persists — voice-gated.
   - **Attention watcher:** arm ONE `Monitor` over the attention feed at loop start, alongside the tick. Doorbell only — emits `NEW GATE tab <N>` / `CLEARED tab <N>`; read `/who-needs-me` on a firing. A `CLEARED` is not progress until verified (read the pane, or the feed's total moved). Snippet and traps: [[Manager Session]] § Cadence mechanics.
   - **Auto-compaction:** the digest's CONTEXT section lists sessions over 70%. On an idle one **no manager covers**, compact it yourself — no operator ask — following [[Manager Session]] § Auto-compaction (gates, three-send sequence, verify). Where a manager owns the area, defer.
@@ -97,7 +95,7 @@ The fleet manager is a role (Fleet Manager Session runbook — the wide/shallow 
 
 A round reads four channels and none replaces another — the attention feed (**who is blocked**, `who-needs-me.py`), the `ListAgents` roster (**who exists**), `fleet-sessions.py` (**task mapping + mtime**), and `context-usage.py --compactable --threshold 70` (**who is filling up**). `fleet-sessions.py` is ~2000 lines raw: never let an uncompacted dump reach this context. Steps 0b–3 read all of them inside the `fleet-sweep-reader` sub-agent, so only its digest reaches this session.
 
-- ⚠️ **The feed answers "was a gate raised", never "is a gate open".** Read the pane (`wezterm cli get-text --pane-id <N>`) before reporting any gate as open.
+- ⚠️ **The feed answers "was a gate raised", never "is a gate open".** Confirm a gate is open by reading the pane through the `gate-relay-read` agent before reporting it as open — this command holds no pane-read grant of its own.
 
 ## The open-items ledger — the operator's asks
 
@@ -163,6 +161,8 @@ The plugin prefix is required — a bare `fleet-drive` resolves to a personal `~
 | **headless, already exited** (turn end, or ~11 min question timeout) | either | a fresh turn | `mcp__supervisor__spawn_agent(prompt="<the answer>", resume="<session-id>", interactive=false, cwd="<explicit>")` — **spawn readiness precondition first** |
 | **a tab worker** | either | its pane — `send_agent_message`, or by hand | the relay protocol (§ Cadence) |
 
+⚠️ **The `resume=` row is the only reason this file holds `mcp__supervisor__spawn_agent` — and the grant also permits an *open*.** Never use it to open a worker: route opens through `/supervisor:open`, whose § Step 0.6 decides `mode` and Step 3 consumes it. If a case ever appears that genuinely cannot route there, classify and pass the argument explicitly — `interactive=false` for `mode: headless`, `interactive=true` otherwise — because a direct open has **no Step 0.6 behind it**. A worker opened with the argument omitted reports `mode_source=config`, indistinguishable in the ledger from a site that never decided. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6.
+
 - **The headless channel is primary.** For an `AskUserQuestion`, answer `deny` + `message`, never `allow` (allow runs the tool tty-less and the worker exits unanswered). On a refusal, switch this session to `accept edits` (Shift+Tab) and retry — the refusal is this session's own `auto`-mode classifier.
 - **Pick the prefix that matches who answered.** `Operator answer, via supervisor:` only when the operator answered in this session; `Manager answer, via supervisor:` for your own decision. **Neither releases an irreversible or production-touching action.** Spec: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § The two prefixes are not interchangeable.
 - **The tab relay is the fallback** — only where the headless channel cannot reach the same effect.
@@ -223,6 +223,40 @@ The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`).
 7. **Read-only context sent this sweep** — what and to whom.
 8. **Course-correction drafts awaiting approval** — exact text + target; ask the operator to approve or edit.
 9. **Snapshot written** — path and `swept_at`.
+
+## The saturation reading — the ratio, not tok/s
+
+Every tick prints the fleet working ratio beside the marker line:
+
+    saturation: 3/6 (busy + shell over live sessions)
+
+Read it from `python3 $P/fleet-board.py --json` → `saturation`, which carries
+`numerator`, `denominator` and `ratio`. The numerator counts the registry
+**status** (`busy` + `shell`), not the board's `running` bucket — the buckets
+apply a precedence, so a `busy` session holding an open gate is bucketed
+`needs-input` and would be dropped from a bucket-based count. `ratio` is `None`
+for an empty fleet; print it as absent, never as `0%`.
+
+**The ratio is the signal, not tok/s.** Measured 2026-09-20 (Fleet Manager session
+`b700c650`): output throughput swung 629 → 905 tok/s in 45 minutes while the ratio
+moved only 44% → 42%. Throughput tracks whichever model happens to be mid-response
+at the moment of the read; the ratio does not. Print the tok/s figure beside it for
+context only — `~/.claude/scripts/claude-metrics.sh` reads `out_tok/s` — and never
+act on it as the number.
+
+A low ratio is often a **human-queue** signal, not a capacity signal: at the 42%
+reading, 14 of 24 sessions were idle or waiting, and most of those were waiting on
+the operator. Spawning more agents then lengthens the human queue rather than using
+idle compute, which is what makes a fixed "target N agents" rule worse than no rule.
+
+**Open Question 1 — what ratio threshold, if any, should trigger a spawn.** n=2
+readings establishes the ratio is steadier than tok/s; it does not establish that
+any particular number means "spawn". Unresolved — never infer a threshold from this
+line.
+
+**Open Question 2 — whether the output should be a spawn trigger at all**, versus a
+read-only saturation line. The measurement argues for read-only first. Unresolved —
+this line is read-only until the question is answered.
 
 ## Rules (non-negotiable)
 

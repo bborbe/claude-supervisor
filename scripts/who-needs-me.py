@@ -462,14 +462,16 @@ def live_session_ids(sessions_dir=None):
 def session_transcript_age(sid):
     """Seconds since the session's transcript was last written; `inf` if absent.
 
-    The second signal of the liveness rule. Reuses `fleet-sessions.py`'s own
-    `last_message_ts()` rather than re-deriving the read, so the two cannot drift on
-    what "last written" means — it reads the tail of the jsonl and falls back to
-    mtime. An absent transcript returns `inf` so it reads as stale, which is the
-    honest answer: nothing has been written for a session with no transcript.
+    The second signal of the liveness rule. Unlike `fleet-sessions.py`'s
+    `last_message_ts()`, which prefers the last transcript line's embedded
+    `timestamp`, this reads the transcript file's own mtime — so `touch` moves this
+    reading and not that one. The two answer different questions on purpose, and the
+    idle check in `agents/manager-drive.md` reads this one. An absent transcript
+    returns `inf` so it reads as stale, which is the honest answer: nothing has been
+    written for a session with no transcript.
 
     Memoized: `quiet_session_ids()` asks per record, and several records share a
-    session, so without this the same file is tail-read once per item.
+    session, so without this the same file is stat'ed once per item.
     """
     if sid in _AGE_CACHE:
         return _AGE_CACHE[sid]

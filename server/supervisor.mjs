@@ -17,6 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
+import { startAttentionPoll } from './attention-poll.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
@@ -24,8 +25,12 @@ import { resolveSpawnMode, unknownKeyWarnings, workerEnvFor } from './spawn-mode
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
-import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
+import { buildRecord, parentSessionId, readRecord, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
+import { findLiveHolder } from './resume-guard.mjs'
+import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
+import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
+import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -47,6 +52,20 @@ const log = (...a) => {
   try {
     appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}`)
   } catch {}
+}
+
+// ── attention-store delivery ────────────────────────────────────────────────
+// An operator answers a `permission` item on the attention stack; the store records the
+// verdict; nothing pushes it here, because this process is stdio with no inbound
+// listener. So it reads — and that read is what makes the answer arrive without a Claude
+// session relaying it, which is the whole point: `answer_permission` exists only for a
+// session, and a session cannot release another session's parked gate.
+//
+// Started once at load and deliberately never stopped: the loop's lifetime is the
+// process's, which is also `pending`'s lifetime, so there is nothing to outlive. Absent
+// when the store is switched off (`SUPERVISOR_ATTENTION_STORE=off`) — see config.mjs.
+if (config.attentionStoreUrl) {
+  startAttentionPoll({ storeUrl: config.attentionStoreUrl, agents, pending, log })
 }
 
 // ── policy layer ────────────────────────────────────────────────────────────
@@ -282,6 +301,10 @@ function makeCanUseTool(agent) {
         clearTimeout(timer)
         pending.delete(requestId)
         if (agent.status === 'blocked-on-permission') agent.status = 'running'
+        // The park is over, so the durable record must stop advertising it — on every
+        // settle, not only on the answer: a timeout, a deny and an allow all end the
+        // park, and a record left behind would offer a resume a decision nobody made.
+        writeLedger(agent, clearParkPatch())
         resolve(result)
       }
       const record = {
@@ -303,9 +326,49 @@ function makeCanUseTool(agent) {
         settle({ behavior: 'deny', message: 'Supervisor did not answer within 15 minutes.' })
       }, PERMISSION_TIMEOUT_MS)
 
+      // A decision carried by a resume answers the gate it names, instead of parking a
+      // second time. Measured 2026-09-25: without this the resumed worker re-raised the
+      // identical call and parked again, so a carried `deny` re-asked rather than stopped
+      // — the decision had reached the transcript and not the gate. There is no original
+      // promise left to settle; it died with the spawner, and this is the gate that
+      // matters now.
+      //
+      // Consumed once — a decision answers one park, not the worker's whole future — and
+      // a carried `allow` is NOT auto-applied here (`serverWouldAllow: false`), because
+      // honouring one without the live policy check would make this a laundering path
+      // with a new spelling. A carried `deny` only ever withholds, so it always applies.
+      const carried = settleFromCarried(agent.carriedDecision, { toolName, blockedPath: opts.blockedPath ?? null })
+      if (carried && mayApplyAllow(agent.carriedDecision, { serverWouldAllow: false })) {
+        agent.carriedDecision = null
+        log(`permission ${requestId} answered from the decision ${agent.id} carried: ${carried.behavior} for ${carried.item_id}`)
+        settle({ behavior: carried.behavior, message: carried.message ?? undefined })
+        return
+      }
+
       pending.set(requestId, record)
       agent.status = 'blocked-on-permission'
       agent.permissions.push(requestId)
+      // The durable half. `pending` dies with this process, and the spawner exiting is
+      // the case this exists for, so the park lands on the per-worker ledger record —
+      // already keyed on session_id, already outliving the process. Best-effort in both
+      // directions: `writeLedger` logs and returns when the session id has not resolved
+      // yet (so an early park is not durable *yet*, rather than fatal), and the build is
+      // guarded because a park that cannot describe itself must not take the gate down
+      // with it.
+      try {
+        writeLedger(agent, {
+          [PARK_FIELD]: buildParkRecord({
+            requestId,
+            toolName,
+            input,
+            decisionReason: opts.decisionReason,
+            blockedPath: opts.blockedPath,
+            requestedAt: record.requestedAt,
+          }),
+        })
+      } catch (error) {
+        log(`WARNING: could not build the park record for ${requestId}: ${error.message}`)
+      }
       log(`permission requested by ${agent.id}: ${toolName} (${requestId})`)
       for (const waiter of [...waiters]) waiter(publicPerm(record))
     })
@@ -562,7 +625,7 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId, chip })
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, which is
 // what the guard below — see liveness.mjs — refuses rather than silently producing.
-async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: policyPath, windowId, role }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role }) {
   const id = `agent_${++seq}`
 
   // Resolved first, because every guard below asks which way this worker opens and they
@@ -626,6 +689,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
     resolvedPolicyPath = resolved.path
   }
 
+  let carriedDecision = null
   if (resume) {
     const { live, probes, reason } = checkLiveness(resume)
     if (live === true) {
@@ -633,23 +697,34 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
         error: `session ${resume} is still running (${reason}) — close it before resuming, or you will have two writers on one conversation`,
       }
     }
-    // The half `checkLiveness` cannot see, and the only channel that can see it: a
-    // headless worker this server spawned is an in-process SDK `query()`, so it has no
-    // pid for the registry and no argv for any process probe. Its record here is the
-    // sole evidence it is running, and `status` genuinely closes — `running` is set at
-    // spawn and cleared to `done`/`error` when the query ends — unlike the ledger's
-    // `running`, which never closes at all.
+    // The channel that answers for this server's own spawns: a headless worker here is
+    // an in-process SDK `query()`, and its record in this table is authoritative for
+    // *this* server. `status` genuinely closes — set at spawn and cleared to
+    // `done`/`error` when the query ends — unlike the ledger's `running`, which never
+    // closes at all.
+    //
+    // ⚠️ Corrected 2026-09-25 by measurement. This comment used to claim a headless
+    // worker "has no pid for the registry and no argv for any process probe", and the
+    // guard's scope was reasoned from that. Measured instead: it DOES have a pid — the
+    // SDK's own `claude-agent-sdk-*` binary — and DOES register in `~/.claude/sessions/`
+    // while it is alive, carrying `kind: interactive` like any tab worker, so `kind`
+    // cannot tell the two apart. `checkLiveness` therefore answers `live: true` and
+    // refuses a parked worker at the registry probe first. This guard is a second line,
+    // not the first — it stays because it is the only one for a worker the registry
+    // cannot see.
     //
     // Without this, a `false` from the registry would be read as "closed" and a live
     // worker resumed: two writers on one conversation, the corruption this guard
     // exists to prevent. Scoped to this server's own spawns by construction; a worker
     // spawned by a different server process is not visible here.
-    const running = [...agents.values()].find(
-      (a) => a.sessionId === resume && a.status === 'running',
-    )
-    if (running) {
+    //
+    // The test is finished-vs-not, NOT `running` — see resume-guard.mjs. A parked
+    // worker carries `blocked-on-permission` while it is blocked inside a tool call,
+    // so matching only `running` let it through and left a parked worker resumable.
+    const holder = findLiveHolder(agents.values(), resume)
+    if (holder) {
       return {
-        error: `session ${resume} is still running (worker ${running.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`,
+        error: `session ${resume} is still running (worker ${holder.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`,
       }
     }
     // Neither probe could be read. Fail CLOSED: "could not tell" and "confirmed
@@ -662,6 +737,32 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
       }
     }
     log(`resume of ${resume} allowed: ${reason} [probes: ${probes.join(', ') || 'none'}]`)
+
+    // A decision can only ride a resume, and only one that names the park on record.
+    //
+    // The record is this server's own evidence that a park happened: written at park
+    // time and — in the case this exists for — never cleared, because the `settle` that
+    // would clear it lives in the spawner that died. That is what makes it the durable
+    // half of the answer, and why this check reads it rather than the attention store.
+    if (decision) {
+      const record = readRecord(config.ledgerDir, resume)
+      const verdict = validateDecision({ decision, parkRecord: record?.[PARK_FIELD] ?? null, sessionId: resume })
+      if (!verdict.ok) {
+        log(`refusing a decision on resume ${resume}: ${verdict.error}`)
+        return { error: verdict.error }
+      }
+      // The decision is information for the worker's next turn, not a re-run of the
+      // tool: the gate was already answered, and replaying the call would be a second
+      // attempt at something the operator settled once.
+      prompt = `${renderResumePrompt({ decision: verdict.decision, parkRecord: record[PARK_FIELD] })}\n\n${prompt ?? ''}`.trim()
+      log(`resume of ${resume} carries a ${verdict.decision.behavior} for ${verdict.decision.item_id}`)
+      // Carried on the AGENT, not just in the prompt. The decision has to reach the gate
+      // the resumed worker re-raises — measured 2026-09-25: without this the worker came
+      // back and parked on the identical tool call, so a carried `deny` re-asked instead
+      // of stopping. There is no original promise left to settle: it died with the
+      // spawner. The gate worth answering is the one raised in THIS server.
+      carriedDecision = buildCarriedDecision({ decision: verdict.decision, parkRecord: record[PARK_FIELD] })
+    }
   }
 
   const agent = {
@@ -680,6 +781,8 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
     // id, so the two fields together are what tell the operator which conversation
     // they are now in.
     resumedFrom: resume ?? null,
+    // The decision this resume carried, if any — consumed by the first matching gate.
+    carriedDecision,
     // The spawn edge, resolved once: the manager session that called spawn_agent, found
     // by walking up from our own pid to the nearest ancestor the live registry knows.
     // NOT our direct parent — `.mcp.json` starts this server through a `bun run`
@@ -900,6 +1003,17 @@ const TOOLS = [
           description:
             'Session id to continue. Requires interactive:false — a tab worker cannot honour it (the tab path launches the cc-* launcher, which is never handed the flag) and the call is refused rather than quietly opening a fresh conversation. The session MUST be closed: resuming a live one puts two writers on one conversation, so a session found still running is refused, and so is one whose liveness cannot be determined. The resumed worker is created here, so unlike the original session it IS supervised and its prompts park for the manager.',
         },
+        decision: {
+          type: 'object',
+          description:
+            'The answer to carry into the resumed worker — for a worker that was parked on a permission when its spawner died, which is the one case `resume` alone cannot help with. Shape: { item_id, behavior: "allow"|"deny", message? }. `item_id` must name the park on that session\'s ledger record: a bare `allow` with no `item_id` is refused, and so is a decision naming a different park. The worker is TOLD the decision; the tool is not re-run, because the gate was already answered once. Requires `resume`.',
+          properties: {
+            item_id: { type: 'string' },
+            behavior: { type: 'string', enum: ['allow', 'deny'] },
+            message: { type: 'string' },
+          },
+          required: ['item_id', 'behavior'],
+        },
         policy: {
           type: 'string',
           description:
@@ -1022,6 +1136,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // an explicit mode on every call and never consult anything else.
           interactive: typeof args.interactive === 'boolean' ? args.interactive : undefined,
           resume: args.resume,
+          decision: args.decision,
           policy: args.policy,
           // Passed through raw and validated in role-map.mjs, which owns the legal values
           // and the refusal message — the same split as the spawn mode below.

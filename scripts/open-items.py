@@ -12,6 +12,14 @@ Kinds:
                 the operator can resolve by replying.
   pushed        a task filed/spawned on the operator's behalf; resolves on status: completed
 
+An `asked-of-you` whose ask is HELD IN A WORKER'S PANE cannot be a ledger entry, and `add`
+REFUSES one. The operator releases such a gate with their own keystroke in that pane, and a
+relay never releases a gate — so this session never receives the words `answer` needs, and
+the entry could never close: it would sit open forever, indistinguishable from a question
+genuinely still outstanding. Surface the gate and hand over the pane instead. The same fact
+is ordinary provenance on `asked-of-me` / `pushed`, which close on their task file, so
+`--held-in-pane` is accepted and stored there.
+
 Subcommands: add | answer | note | close | list
 
 `--task` is resolved to a vault file on both write and read. `add` stores the path it
@@ -257,6 +265,7 @@ def migrate(item):
     before = dict(item)
     item.setdefault("note", None)
     item.setdefault("noted_at", None)
+    item.setdefault("held_in_pane", None)
     if item["kind"] != "asked-of-you":
         # Only an asked-of-you may carry `answer` / `answered_at` — on any other kind they
         # assert an operator reply that never happened. Two broken shapes exist and BOTH are
@@ -383,6 +392,31 @@ def task_dirs_for(args):
 
 def cmd_add(args):
     sid = session_id(args)
+    if args.kind == "asked-of-you" and args.held_in_pane:
+        # REFUSE, and write nothing at all — not even the heal `load` would do. This is
+        # the one `add` that is refused rather than warned about, because the entry is
+        # provably unclosable rather than merely unverified: `answer` is this kind's only
+        # close path, `answer` needs this session to RECEIVE the operator's words, and a
+        # gate in a worker's pane is released by the operator's own keystroke there — the
+        # manager is forbidden from receiving it ("a relay never releases a gate"). Warn-
+        # and-record, the shape used for an unresolvable --task, would leave an entry that
+        # can never close: indistinguishable from a question genuinely still outstanding,
+        # which is the misreading this ledger exists to prevent.
+        sys.exit(
+            "error: an `asked-of-you` held in pane %s is not a ledger entry — nothing "
+            "written.\n"
+            "  Its only close path is `answer`, which needs THIS session to receive the\n"
+            "  operator's words. A gate in a worker's pane is released by the operator's\n"
+            "  own keystroke there, and a relay never releases a gate — so this session\n"
+            "  never receives them, and the entry would sit open forever.\n"
+            "  Surface the gate and hand over the pane instead, saying a direct go is\n"
+            "  needed — the jump link, never a relay:\n"
+            "    python3 ${CLAUDE_PLUGIN_ROOT}/scripts/jump-link.py %s\n"
+            "  Omit --held-in-pane for a question this session CAN receive the answer to:\n"
+            "  a relayable non-gate question, or a headless worker's gate answered over\n"
+            "  the supervisor's permission channel. Those close normally."
+            % (args.held_in_pane, args.held_in_pane)
+        )
     data = load(sid)
     dirs = task_dirs_for(args)
     item = {
@@ -397,6 +431,11 @@ def cmd_add(args):
         # repeated search, and a title the vault sanitised on disk is matched at the
         # moment the operator can still be told the target is missing.
         "task_path": resolve_task(args.task, dirs),
+        # Provenance: which pane the ask lives in, when it is not this session's. On
+        # `asked-of-me` / `pushed` this is a fact a later reader needs — the instruction
+        # was given to a worker, not here. On `asked-of-you` it can never be set; see the
+        # refusal above.
+        "held_in_pane": args.held_in_pane,
         "state": "open",
         "answer": None,
         "answered_at": None,
@@ -550,6 +589,8 @@ def cmd_list(args):
             )
         if item.get("resolves_on"):
             detail.append("resolves on: %s" % item["resolves_on"])
+        if item.get("held_in_pane"):
+            detail.append("pane: %s" % item["held_in_pane"])
         if item.get("answer"):
             detail.append("answer: %s" % item["answer"])
         if item.get("note"):
@@ -581,6 +622,14 @@ def main():
     p_add.add_argument("--text", required=True, help="what was asked, verbatim where possible")
     p_add.add_argument("--task", help="vault task this resolves through")
     p_add.add_argument("--resolves-on", dest="resolves_on", help="what closes this entry")
+    p_add.add_argument(
+        "--held-in-pane",
+        dest="held_in_pane",
+        help="the pane this ask is held in, when it lives in a worker's pane rather than "
+        "in this session. REFUSED on --kind asked-of-you: a gate the operator releases by "
+        "their own keystroke there never reaches this session, so the entry could never "
+        "close — hand over the pane instead. Accepted as provenance on the other kinds.",
+    )
     p_add.set_defaults(func=cmd_add)
 
     p_answer = sub.add_parser(

@@ -20,6 +20,7 @@ Run exactly that. The script derives the session id from `$CLAUDE_CODE_SESSION_I
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py list                                  # render
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py add --kind asked-of-me --text "<verbatim>" --task "<task>"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py add --kind asked-of-me --text "<verbatim>" --held-in-pane <pane-id>   # the ask lives in a worker's pane, not here — refused on asked-of-you
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py answer --id <id> --answer "<the operator's words>"
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py note   --id <id> --text "<evidence / progress>"
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py close  --id <id> --evidence "<the on-disk fact>"
@@ -32,7 +33,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py close  --id <id> --evidence 
 | Kind | What it is | Resolves on |
 |---|---|---|
 | `asked-of-me` | an operator instruction | its task file reads `status: completed`, or the operator withdraws it |
-| `asked-of-you` | a question the manager put to the operator | the operator's explicit answer — nothing else |
+| `asked-of-you` | a question the manager put to the operator | the operator's explicit answer — nothing else. ⚠️ **Never for a gate held in a worker's pane** — see Rules |
 | `pushed` | a task the manager filed or spawned on their behalf | that task file reads `status: completed` |
 
 ## Rules
@@ -40,6 +41,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py close  --id <id> --evidence 
 - **An instruction becomes an entry THE MOMENT IT IS SAID** — `add` it *before* replying, not after deciding what to do about it. A task is an entry's resolution path, never its start.
 - **Read at sweep/round start, render every sweep** under the fixed heading `📋 Open with the operator` — one line per open entry, `kind · what · state · age`. **Never omitted**, including on a no-change tick; print `(none open)` when the ledger is empty.
 - **Act every sweep** on `asked-of-me` / `pushed`: no task → file one and name it on the entry; task with no worker → spawn (standing mandate, its cap); stalled owner → nudge; task reads `status: completed` → verify on disk this sweep, then `close --evidence`. `asked-of-you` → re-surface until answered; record the answer with `answer` in that turn, which closes it.
+- ⚠️ **A gate held in a worker's pane is handed over, never added as an `asked-of-you`.** This kind's only close path is `answer`, and `answer` needs *this* session to receive the operator's words — but a gate in a tab worker's pane is released by the operator's own keystroke there, and **a relay never releases a gate**, so this session never receives them and the entry could never close. It would sit open forever, indistinguishable from a question genuinely still outstanding. **Surface the gate and hand over the pane** (the `jump-link.py` output) and say a direct go is needed. Nothing is lost: a tab worker's gate is a *blocked session*, so `notify-gate.py` publishes it to the phone and the sweep renders it in the `waiting-on-human` bucket. `add --held-in-pane <pane-id>` **refuses** an `asked-of-you` for exactly this reason — pass the flag only on `asked-of-me` / `pushed`, where a pane origin is ordinary provenance because those kinds close on their task file. A question this session *can* receive the answer to — a relayable non-gate question, or a headless worker's gate answered over the supervisor's permission channel — is still an ordinary `asked-of-you`.
 - ⚠️ **`answer` is only for the OPERATOR's words — anything else is `note`.** On `asked-of-you`, `answer` writes `closed_evidence: "operator answered in session: …"`; using it for anything else forges an operator attribution a later reader cannot tell from a real one. On the other two kinds `answer` records a note and leaves the entry open. Reach for `note` by default.
 - **`close` requires `--evidence` — an on-disk fact**, never belief and never a peer's claim of an operator decision. ⚠️ A `resolves_on` containing AND → verify every half on disk.
 - **`⚠️ UNRESOLVABLE` on a `list` line** means the entry's `--task` backs no vault file — its close condition can never fire. Fix the entry's task; do not wait on it.

@@ -33,6 +33,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |
+| `/supervisor:worker-restart` | restart ONE named worker in one verb — kill, resume, and tell it what changed only when that is safe |
 | `/supervisor:open` | resolve a task, goal or topic by name, then jump to its live session, resume its recorded one, or spawn a new one (manager-only; needs `vault-cli`) |
 | `/supervisor:read-guides` | load every guide in `docs/` — start here to learn which commands your session tier may run |
 
@@ -305,18 +306,25 @@ commands/manager-drive.md                        one goal or topic — the act l
 commands/fleet-verify.md                         fleet manager — verify the fleet layer's contract, suggest fixes
 commands/manager-verify.md                       goal/topic manager — verify one subject, suggest fixes
 commands/worker-drive.md                         one worker session — drive its anchored task to done
+commands/worker-restart.md                       restart ONE named worker — kill, resume, re-orient in one verb
+scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
+scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
 commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
+docs/subject-resolution.md                      the four-source subject chain the four manager commands share
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/manager-wrangler.md                routine approval loop over headless workers
 agents/manager-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
 agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-loop, read-only by /fleet-drive)
 agents/manager-drive.md                    the worker sweep's act leg (composed by manager-loop, runnable by hand)
+agents/manager-verify.md                  the seven-step verify fork + report shape (dispatched by /manager-verify)
 agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive and by /fleet-loop every round)
+agents/gate-relay-read.md                the manager's gate relay, read leg — pane id in, ≤15-line per-pane summary out; declares no write tool at all
+agents/gate-relay-send.md                the manager's gate relay, send leg — the operator's answer into a tab worker's pane; never drives a selection modal
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
 ```
