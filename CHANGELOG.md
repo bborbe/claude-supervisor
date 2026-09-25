@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the necessity read must name the criterion a `needed` task advances, not merely count how many do.** The row was already mandatory, but a run can satisfy the letter with a prose summary — and one did: measured 2026-09-26 against the released `v0.57.2`, the output was *"75 tasks advance a goal's success criteria, 34 are the pipeline's own output, and 18 advance nothing"*, three correct buckets summing to 127 with a named `not needed` task, but **no `needed:` row at all**, so no criterion was ever named for the 75. A count of tasks that advance *some* criterion does not say which task advances which, and that citation is the reason this read exists rather than a tally. The rule now states it explicitly, with the measured run as the worked counter-example, and adds the consequence: a task whose criterion cannot be named is not `needed`.
+
 ## v0.57.2
 
 - fix: **a skipped necessity read is now reported instead of silently absent.** Step 8 runs only when the caller passes the topic's member goals, and the rule for a missing input was to *"skip it, omit its report section, and say nothing"* — so a caller that failed to pass them disabled the whole read and left a report indistinguishable from one that judged every task and found nothing wrong. Measured 2026-09-25 against the released `v0.57.1`: a run returned a complete sweep — buckets, optional-list findings, a collision read, a count discrepancy it flagged itself — with **no Necessity section anywhere in it**, and nothing in the output said whether the read had run clean or not run at all. The skip now prints `Necessity: SKIPPED — the caller passed no member goals` and is reported as a caller bug, matching the declared-optional-set rule that already treats a caller-side omission as reportable rather than absorbable.
