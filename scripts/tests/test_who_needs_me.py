@@ -784,6 +784,72 @@ class PaneOwnership(unittest.TestCase):
         self.assertFalse(wnm.is_routable(rec, {"1": {}}, {"s": "worker-verify"}))
 
 
+class UnroutableHandover(unittest.TestCase):
+    """An unroutable row hands over the way to answer, and never a borrowed identity.
+
+    Two holes behind one another, both measured 2026-09-25 by deliberately parking a
+    headless worker (session `50193c14`). It inherited its spawner's `WEZTERM_PANE`
+    (pane 0, the Fleet Manager's tab), so:
+
+      * `is_routable()` proves ownership by comparing the pane title to the session's
+        *name* — a test a NAMELESS session cannot run, so it fell to `return True` by
+        design and kept a confident jump to a pane it did not own;
+      * `name_of()` had no name either, so it borrowed the pane title and rendered the
+        SPAWNER's name as the row's identity.
+
+    The fixtures below therefore build the NO-NAME state deliberately. A *named*
+    headless worker passes against the pre-fix script (it mismatches on the name and is
+    already refused), so a named fixture would assert nothing.
+    """
+
+    BORROWED = {"session_id": "50193c14-4729-41be-90c4-ee84f24e76cd", "pane": "0", "ts": 0,
+                "cwd": "/tmp/x", "kind": "permission", "detail": "d",
+                "store_item_id": "0f701f0b4b654e3338dcc97d9be8b314"}
+    # The spawner's pane. Its title must DIFFER from the session id, or the
+    # "never the spawner's pane title" assertion would pass vacuously.
+    SPAWNER_PANE = {"0": {"title": "◐ Fleet Manager"}}
+    SPAWNER_REG = {"spawner-session": "Fleet Manager"}
+
+    def test_a_nameless_session_keeps_no_jump_to_another_sessions_pane(self):
+        """The hole the name-mismatch test cannot see: no name, so no comparison."""
+        self.assertFalse(wnm.is_routable(self.BORROWED, self.SPAWNER_PANE, self.SPAWNER_REG))
+
+    def test_a_nameless_row_wears_its_own_session_id_not_the_pane_title(self):
+        """The identity half. Asserts the parsed field, not a substring of the row."""
+        self.assertEqual("session 50193c14",
+                         wnm.name_of(self.BORROWED, self.SPAWNER_PANE, self.SPAWNER_REG))
+
+    def test_an_unroutable_row_hands_over_the_store_keyed_answer_command(self):
+        """The handover half: the STORE id, since that is what the endpoint resolves."""
+        rendered = wnm.row(self.BORROWED, self.SPAWNER_PANE, "d", self.SPAWNER_REG)
+        self.assertIn("attention-answer.py answer 0f701f0b4b654e3338dcc97d9be8b314", rendered)
+        self.assertIn("--decision allow|deny", rendered)
+        self.assertNotIn("activate-pane", rendered)
+
+    def test_an_unprovable_owner_still_keeps_its_row(self):
+        """Absence is not a verdict — an empty registry must not strip the jump."""
+        rec = dict(self.BORROWED, pane="9")
+        self.assertTrue(wnm.is_routable(rec, {"9": {"title": "◐ unregistered"}}, {}))
+
+    def test_a_routable_row_is_untouched(self):
+        """The positive control: one jump line, and no answer line bolted onto it."""
+        rec = {"session_id": "s2", "pane": "7", "ts": 0, "cwd": "/tmp/y", "kind": "permission",
+               "detail": "d", "session_name": "worker-verify", "store_item_id": "abc123"}
+        pmap, reg = {"7": {"title": "◐ worker-verify"}}, {"s2": "worker-verify"}
+        rendered = wnm.row(rec, pmap, "d", reg)
+        self.assertIn("wezterm cli activate-pane --pane-id 7", rendered)
+        self.assertNotIn("attention-answer.py", rendered)
+
+    def test_the_store_id_is_carried_apart_from_the_log_join_key(self):
+        """`item_id` stays the LOG key the classifiers join on; the store id rides beside it."""
+        item = {"answer_mechanism": "permission", "producer_id": "s", "dedup_key": "LOGID",
+                "item_id": "STOREID", "payload": "d", "state": "open",
+                "created_at": "2026-09-25T15:24:07Z"}
+        rec = wnm.normalize_store_item(item, {})
+        self.assertEqual("LOGID", rec["item_id"])
+        self.assertEqual("STOREID", rec["store_item_id"])
+
+
 class ProvenanceRendering(unittest.TestCase):
     """The row carries its provenance, and an absent value renders as absent.
 
