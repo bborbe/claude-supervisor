@@ -26,6 +26,7 @@ import { resolveRole } from './role-map.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
+import { findLiveHolder } from './resume-guard.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -636,20 +637,22 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
     // The half `checkLiveness` cannot see, and the only channel that can see it: a
     // headless worker this server spawned is an in-process SDK `query()`, so it has no
     // pid for the registry and no argv for any process probe. Its record here is the
-    // sole evidence it is running, and `status` genuinely closes — `running` is set at
-    // spawn and cleared to `done`/`error` when the query ends — unlike the ledger's
-    // `running`, which never closes at all.
+    // sole evidence it is alive, and `status` genuinely closes — set at spawn and
+    // cleared to `done`/`error` when the query ends — unlike the ledger's `running`,
+    // which never closes at all.
     //
     // Without this, a `false` from the registry would be read as "closed" and a live
     // worker resumed: two writers on one conversation, the corruption this guard
     // exists to prevent. Scoped to this server's own spawns by construction; a worker
     // spawned by a different server process is not visible here.
-    const running = [...agents.values()].find(
-      (a) => a.sessionId === resume && a.status === 'running',
-    )
-    if (running) {
+    //
+    // The test is finished-vs-not, NOT `running` — see resume-guard.mjs. A parked
+    // worker carries `blocked-on-permission` while it is blocked inside a tool call,
+    // so matching only `running` let it through and left a parked worker resumable.
+    const holder = findLiveHolder(agents.values(), resume)
+    if (holder) {
       return {
-        error: `session ${resume} is still running (worker ${running.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`,
+        error: `session ${resume} is still running (worker ${holder.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`,
       }
     }
     // Neither probe could be read. Fail CLOSED: "could not tell" and "confirmed
