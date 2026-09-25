@@ -314,12 +314,14 @@ commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
+docs/subject-resolution.md                      the four-source subject chain the four manager commands share
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/manager-wrangler.md                routine approval loop over headless workers
 agents/manager-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
 agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-loop, read-only by /fleet-drive)
 agents/manager-drive.md                    the worker sweep's act leg (composed by manager-loop, runnable by hand)
+agents/manager-verify.md                  the seven-step verify fork + report shape (dispatched by /manager-verify)
 agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive and by /fleet-loop every round)
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
