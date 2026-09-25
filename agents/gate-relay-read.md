@@ -27,7 +27,7 @@ Canonical rationale for every rule below: `[[Manager Session]]` § Gate triage �
 </constraints>
 
 <inputs>
-The caller passes: one or more **pane ids**, and the operator-facing batch context (which worker each pane belongs to).
+The caller passes: **every** pane id for this round in one dispatch, and the operator-facing batch context (which worker each pane belongs to). Expect several panes per call — the caller batches deliberately, because each dispatch carries ~2.2 KB of fixed overhead, so a one-pane dispatch costs more than reading the pane by hand.
 
 Read a pane with `wezterm cli get-text --pane-id <N>`. Use `wezterm cli list` only to confirm a pane still exists before reporting on it.
 </inputs>

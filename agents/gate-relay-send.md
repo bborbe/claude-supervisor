@@ -29,7 +29,7 @@ Canonical rationale: `[[Manager Session]]` § Gate triage — who clears what (c
 </constraints>
 
 <inputs>
-The caller passes, per pane: the **pane id**, the **worker label**, the **operator's answer verbatim**, and the **provenance** (the operator answered in the manager session, in the current exchange). Any one missing → refuse that pane and report it; do not send.
+The caller passes **every** answer for this round in one dispatch — for each pane: the **pane id**, the **worker label**, the **operator's answer verbatim**, and the **provenance** (the operator answered in the manager session, in the current exchange). Any one missing → refuse that pane and report it; do not send.
 
 The caller does **not** pass a gate-triage class. You derive it yourself at step 4b; a caller-supplied class is a hint, never a substitute.
 
