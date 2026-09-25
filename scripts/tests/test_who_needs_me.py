@@ -1289,5 +1289,92 @@ class SupersededCloserPanel(unittest.TestCase):
         self.assertEqual(wnm.busy_session_ids("/nonexistent/registry"), set())
 
 
+class FeedTransportTest(unittest.TestCase):
+    """The feed's three transport states, end to end through `main()`.
+
+    A failed `wezterm cli list` used to fold into `{}` (`panes()`), so `is_live()`
+    dropped every record and the feed printed `Needs you (0)` / `Nothing needs you.`
+    and exited 0 -- a clear fleet certified by the success code, for a transport it
+    never reached. Measured 2026-09-25 against the installed 0.57.0: with the mux
+    socket unreachable the feed lost 4 rendered panels and 16 idle rows and still
+    exited 0 with an empty stderr.
+
+    All three states are asserted together because any two of them can be satisfied
+    by a wrong implementation: refusing unconditionally passes the broken case and
+    fails both healthy ones; rendering unconditionally passes the healthy ones and
+    fails the broken one. The third state is the control for the `is None` test --
+    a reachable WezTerm holding no panes is an answer, not a broken query, so a fix
+    that refused on `not pmap` would wrongly fail it.
+    """
+
+    GATES = [c["record"] for c in CASES
+             if c["class"] == "genuine" and c["provenance"] == "live"
+             and c["expect"]["in_feed"]]
+
+    def run_feed(self, panes, records):
+        """Run `main()` against a stubbed transport; return (rc, stdout, stderr)."""
+        registry = {r["session_id"]: "Session %s" % r["pane"] for r in records}
+        patches = [
+            mock.patch.object(wnm, "wezterm_panes", lambda: panes),
+            # Takes the optional dir the real `read_registry(sessions_dir=None)` takes:
+            # `busy_session_ids()` passes one through, as `live_session_ids()` already
+            # did -- so a zero-arg stub would fail on a caller that mirrors the real
+            # signature rather than on the code under test.
+            mock.patch.object(wnm, "read_registry", lambda *_a, **_k: dict(registry)),
+            mock.patch.object(
+                wnm, "load",
+                lambda suffix: list(records) if suffix == "needs" else []),
+            mock.patch.object(wnm, "reclassify_idle", lambda rec: rec),
+            mock.patch.object(wnm, "task_status_from_closer", lambda _rec: None),
+            mock.patch.object(wnm.sys, "argv", ["who-needs-me.py"]),
+        ]
+        out, err = io.StringIO(), io.StringIO()
+        for patch in patches:
+            patch.start()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    wnm.main()
+                    rc = 0
+                except SystemExit as exc:
+                    rc = exc.code if isinstance(exc.code, int) else 1
+        finally:
+            for patch in patches:
+                patch.stop()
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_unreadable_transport_refuses_instead_of_reporting_zero(self):
+        """`None` from the transport must never render as an empty queue."""
+        rc, out, err = self.run_feed(None, self.GATES)
+        self.assertNotEqual(0, rc)
+        self.assertIn("pane list unreadable", err)
+        self.assertIn("mux socket", err)
+        # The lie this fix exists to stop: a confident zero, carrying exit 0.
+        self.assertNotIn("Needs you (0)", out)
+        self.assertNotIn("Nothing needs you.", out)
+
+    def test_healthy_transport_with_gates_still_renders(self):
+        """The healthy path is unchanged: the gates print and the exit stays 0."""
+        panes = {str(r["pane"]): {"pane_id": int(r["pane"]), "title": "Session"}
+                 for r in self.GATES}
+        rc, out, err = self.run_feed(panes, self.GATES)
+        self.assertEqual(0, rc, err)
+        self.assertNotIn("Needs you (0)", out)
+        self.assertIn("Needs you (%d)" % len(self.GATES), out)
+        self.assertNotIn("Nothing needs you.", out)
+
+    def test_empty_but_reachable_transport_is_not_a_failure(self):
+        """A reachable WezTerm with no panes is an answer, not a broken query.
+
+        The control for the `is None` test: refusing on `not pmap` would pass the
+        broken-transport case above and wrongly fail this one.
+        """
+        rc, out, err = self.run_feed({}, [])
+        self.assertEqual(0, rc, err)
+        self.assertEqual("", err)
+        self.assertIn("Needs you (0)", out)
+        self.assertIn("Nothing needs you.", out)
+
+
 if __name__ == "__main__":
     unittest.main()
