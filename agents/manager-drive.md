@@ -2,8 +2,8 @@
 name: manager-drive
 description: Perform the worker sweep's act leg for ONE subject — reap the finished, nudge stuck or error-marked workers, run the auto-resume gate on confirmed orphans. Reap runs BEFORE drive, always. Dispatched by `/supervisor:manager-drive` (operator, by hand) and by `/supervisor:manager-loop` (every tick, after its sweep). It consumes the classification the sweep already produced and never builds a second one.
 model: sonnet
-tools: Read, Bash, SendMessage, Skill, Task, mcp__supervisor__spawn_agent
-allowed-tools: Bash(grep:*), Bash(vault-cli:*), Bash(pgrep:*), Bash(ps:*), Bash(find:*), Bash(stat:*), Bash(python3:*), Bash(date:*), Bash(wezterm cli spawn:*)
+tools: Read, Bash, SendMessage, Task
+allowed-tools: Bash(grep:*), Bash(vault-cli:*), Bash(pgrep:*), Bash(ps:*), Bash(find:*), Bash(stat:*), Bash(python3:*), Bash(date:*)
 color: red
 ---
 
@@ -23,14 +23,14 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 - ALWAYS reap BEFORE you drive. This is the one ordering constraint and it is load-bearing, not stylistic — see `<process>` step 1.
 - ALWAYS verify reaping against **disk this run**: `status: completed`, `phase: done`, zero open boxes. Never against the session's own claim, and never against its colour.
 - ALWAYS treat a **deliberately-open Self-Review box as NOT complete**. The `grep -c` is what separates the two cases, and ticking a box to pass the gate is never the fix.
-- ALWAYS re-probe liveness **at the spawn site**, immediately before spawning, and spawn in the same shell. A probe minutes earlier is not a claim.
-- ALWAYS record `last_auto_resume` through `vault-cli task set` — never by editing the task file directly — and only **after** the spawn verifiably took (a session-registry entry exists for the resumed id). A refused, errored or aborted spawn writes nothing.
+- ALWAYS re-probe liveness **at the hand-off site**, immediately before emitting a `To resume` row. A probe minutes earlier is not a claim — and the caller re-probes again immediately before it spawns, because the window between your report and its spawn is not yours to close.
+- NEVER write `last_auto_resume` yourself — it is the **caller's** stamp, and it follows a spawn the caller verified (a session-registry entry exists for the resumed id). Written from here it would record an act that did not occur; a refused, errored or aborted spawn writes nothing.
 - NEVER act on a task the caller did not pass you. Membership is declared; it is not yours to widen.
-- ALWAYS **hold rather than open** when any open-gate clause fails. A hold costs one sweep; a wrong open costs a session that has to be unwound. Opening is the only act in this file that creates a session, so every clause is checked on disk **this run**, in order, and the first failure is terminal for that row.
+- ALWAYS **hold rather than hand over** when any open-gate clause fails. A hold costs one sweep; a wrong hand-over costs the caller a session that has to be unwound. Handing a row over is the only act in this file that can lead to a session, so every clause is checked on disk **this run**, in order, and the first failure is terminal for that row.
 - NEVER derive the headless/interactive decision. `commands/open.md` § Step 0.6 decides `mode` and Step 3 consumes it; a computation here would be a second home for a rule that already has one — and the wrong one, since the fallback's asymmetry is measured rather than stylistic.
 - NEVER write a row's `status` yourself to make an open look like it took. An open is confirmed by a session-registry entry against a running pid; a state write cannot distinguish the writer.
 - NEVER commit, stash or revert another worker's in-flight edits to clear a collision. The collision is the hold's reason, not an obstacle to remove.
-- NEVER use `Task` for anything but the readiness audit. It is a generic dispatch primitive and `vault-cli:task-auditor` is its **only** permitted target here — an open dispatched through `Task` would bypass `commands/open.md` § Step 0.6, so the row's `mode` is never decided, which is the same defect that forbids the `spawn_agent` fallback below.
+- NEVER use `Task` for anything but the readiness audit. It is a generic dispatch primitive and `vault-cli:task-auditor` is its **only** permitted target here — an open dispatched through `Task` would bypass `commands/open.md` § Step 0.6, so the row's `mode` is never decided. You hold no spawn tool at all (clause (6)), so a dispatched sub-agent would be the one route left by which this file could create a session, and it is forbidden for that same reason.
 - NEVER auto-resume a parked, terminal or `hold` task. Those stay reported, never spawned.
 - NEVER resume on a shared id, or when any id in the set has a live process.
 - NEVER claim you closed a worker's session. You cannot — `/vault-cli:sync-progress` and `/vault-cli:session-close` read the parent conversation, and every route into a worker's pane is refused.
@@ -94,7 +94,7 @@ Only a candidate that survives **both** checks is nudged:
 
 ⚠️ **The voice half is the caller's, not yours, and this is measured rather than assumed.** A subagent has **no TTS**: `mcp__tts__say` is not visible to a subagent in *either* the main env or the isolated one (probed 2026-09-22 — a subagent reported no tool whose name contains `tts`, under any spelling). So the split is deliberate: **you own the message, the caller owns the voice.** Do not attempt a TTS call, and never let the report read as though one happened.
 
-By contrast `mcp__supervisor__*` **does** bind inside a subagent — all five declared names were visible to the same probe, and two were called successfully. That is why `spawn_agent` stays in your `tools:` while `mcp__tts__say` does not.
+By contrast `mcp__supervisor__*` **does** bind inside a subagent — all five names in that namespace were visible to the same probe, and two were called successfully. ⚠️ **That is precisely why this file now declares none of them.** `mcp__supervisor__spawn_agent` was dropped from `tools:` on 2026-09-25: a bound tool is a capability, and holding it is what let this agent *open* a worker directly and skip the mode decision. **You decide; the caller spawns** — see clause (6) and `<error_handling>`.
 
 3. **Then run the auto-resume gate on confirmed orphans**
 
@@ -111,7 +111,7 @@ The caller owns the **verdict**; you receive orphans it has already confirmed. T
 - **not blocked**: every entry in the task's `blocked_by` list is terminal (`status: completed`). Counted by the canonical rule — a task is blocked while **at least one** named blocker is not `completed`, so an `aborted` blocker counts as non-terminal, since it will never complete. A blocker whose file is missing, unreadable, or carries no parseable `status` counts as **not** completed;
 - **not deferred**: `defer_date` is absent, or names a date that has already passed. **Both stored shapes must parse** — the quoted `"YYYY-MM-DD"` and the unquoted RFC3339 datetime (`2026-09-26T00:00:00Z`) that vault-cli writes when the scalar is left unquoted. A `defer_date` that is present but unparseable **blocks** the resume and is reported by name — never read as absent.
 
-⚠️ **The last two clauses read declarations that already existed and were being ignored.** `blocked_by` is a real, populated list field and `defer_date` is carried by a large set of in-progress tasks; both already mean *not now*, both are machine-readable, and `65 Runbooks/Manager Session.md` § Step 4's ready-to-start bucket already computes `blocked_by`. Before these clauses the gate resumed a deliberately blocked or deferred orphan **against its own declaration** — measured 2026-09-24 on a real tracked task that held all eight of the clauses above while carrying a `defer_date` two days in the future. The fix is a clause, not a new field: adding one would have created a third way to say *not now* that nothing else writes, which is how the fact ended up in manager prose in the first place.
+⚠️ **The last two clauses read declarations that already existed and were being ignored.** `blocked_by` is a real, populated list field and `defer_date` is carried by a large set of in-progress tasks; both already mean *not now*, both are machine-readable, and `65 Runbooks/Manager Session.md` § Step 4's ready-to-start bucket already computes `blocked_by`. Before these clauses the gate resumed a deliberately blocked or deferred orphan **against its own declaration** — measured 2026-09-24 on a real tracked task that held the other eight clauses above while carrying a `defer_date` two days in the future. The fix is a clause, not a new field: adding one would have created a third way to say *not now* that nothing else writes, which is how the fact ended up in manager prose in the first place.
 
 ⚠️ **A near-miss is the useful line here.** When the gate fails on `not blocked` or `not deferred`, name the clause **and the declaration that triggered it** — which blocker, or which date — so the caller's table row distinguishes "waiting on a dependency" from "waiting on a clock" from "dead".
 
@@ -129,35 +129,25 @@ print(next((e.get('claude_script','') for e in json.load(sys.stdin) if str(e.get
 
 **An empty result is a reportable fact, never a silent skip.** Print `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` and carry it to the caller: a withheld spawn with no line of its own is indistinguishable from a failed gate clause, which is exactly how the 2026-09-23 run lost it.
 
-Then **re-probe at the spawn site and spawn in one shell** — the earlier probe and the spawn are not atomic, and a claim made minutes earlier is not a claim.
+Then **re-probe at the hand-off site** — the earlier probe and the hand-off are not atomic, and a claim made minutes earlier is not a claim. The caller re-probes again immediately before it spawns; this one is what stops you handing over a row that came alive while you were deciding.
 
-**A positive re-probe aborts.** Print `⛔ RESUME ABORTED: <task> — a process appeared between probe and spawn`, spawn nothing, and **do not write `last_auto_resume`** — the resume did not happen, so the crash-loop cap must not be armed against its own retry. Observed 2026-09-14 10:27: a probe read `pgrep` 0 and a 634-min-stale transcript, every clause genuinely held, the task genuinely orphaned — and by 10:41 `pgrep -f` was **2**. Nothing was wrong with the probe; the gap was temporal.
+**A positive re-probe aborts.** Print `⛔ RESUME ABORTED: <task> — a process appeared between probe and hand-off`, hand over nothing, and **arm no cap** — the resume did not happen, so the crash-loop cap must not be armed against its own retry. Observed 2026-09-14 10:27: a probe read `pgrep` 0 and a 634-min-stale transcript, every clause genuinely held, the task genuinely orphaned — and by 10:41 `pgrep -f` was **2**. Nothing was wrong with the probe; the gap was temporal.
 
 **Residual, and do not overstate what this buys:** the re-probe narrows the window to the gap between two adjacent commands; it does not close it. Closing it needs a claim the *spawned* process holds, so a second actor is refused by the kernel rather than by timing. That primitive exists — vault-cli's per-session flock (`~/.claude/session-locks/<session_id>.lock`), shipped in `v0.118.1` — but this spawn shape and the Vault UI's `_build_resume_command` both bypass it. Treat the re-probe as a narrowing, not a guarantee.
 
-Gate holds and the re-probe is clean → **spawn first, stamp second.** Spawn per `docs/fleet-surface.md` § Spawn a worker, then confirm the resume verifiably took — the registry carries an entry for the resumed id against a **running** pid:
+Gate holds and the re-probe is clean → **hand the resume to the caller — you do not spawn it.** You hold no spawn tool. Emit one `To resume` line carrying the task, the session id to resume, the **explicit `cwd`** read from the session registry (a resume does not inherit it), and the resolved mode; the caller spawns it and verifies.
 
-```bash
-grep -l "<session_id>" ~/.claude/sessions/*.json   # → <pid>.json; then confirm ps -p <pid>
-```
+⚠️ **The re-probe stays yours, and it is the decision rather than the act.** It runs at the hand-off site, so a row that came alive while you were deciding aborts here rather than becoming a second writer. Say in the `To resume` line that the caller must re-probe again before it spawns — the window between your report and its spawn is not yours to close, and a caller that assumes you closed it will put two writers on one conversation.
 
-Only then record the timestamp:
+⚠️ **`last_auto_resume` is the caller's write, and it follows a spawn the caller verified — never this report.** Written here it would arm the 30-min crash-loop cap against a resume that never took: the next sweep reads the task as *recently retried* and withholds the retry it actually needs. The record must describe an act that occurred, never one that was attempted — and from this file, nothing has occurred yet.
 
-```bash
-vault-cli task set "<task>" last_auto_resume "<ISO8601>"
-```
-
-then print `♻️ AUTO-RESUMED: <task>` and one TTS (voice-mode gated).
-
-⚠️ **The stamp follows the spawn, never precedes it.** Written first, it arms the 30-min crash-loop cap against a resume that never happened: the next sweep reads the task as *recently retried* and withholds the retry it actually needs. A refused, errored or aborted spawn leaves `last_auto_resume` **byte-identical** to its pre-attempt value — the record must describe an act that occurred, never one that was attempted.
-
-**Crash-loop cap:** if the task's `last_auto_resume` is less than **30 min** old → do **NOT** spawn a second resume. Escalate instead — `⚠️ CRASH-LOOP: <task> — died again within 30 min, not re-spawning` plus TTS (voice-mode gated). One auto-resume per task per 30-min window.
+**Crash-loop cap:** if the task's `last_auto_resume` is less than **30 min** old → do **NOT** hand over a second resume. Escalate instead — `⚠️ CRASH-LOOP: <task> — died again within 30 min, not re-handed` — and leave it for the caller to voice. One auto-resume per task per 30-min window.
 
 **Parked / terminal / `hold` / blocked / deferred → never auto-resumed.** Keep the `ORPHANED` row and say so, naming which of the five it is; the caller recommends restart or `mark hold`. A blocked or deferred task is **deliberately waiting**, not dead — do not recommend `mark hold` for it, since `hold` means *no resume date* and a `defer_date` is a date.
 
-4. **Then open ready-to-start rows — verified, never merely listed**
+4. **Then decide ready-to-start rows — verified, never merely listed**
 
-The caller supplies the **ready-to-start rows**; you do not compute the bucket. Opening is the only act in this file that creates a session, so the clauses below run **in order per row** and the **first failure is terminal for that row** — a hold costs one sweep, a wrong open costs a session that has to be unwound. Clause (5) is the exception to "per row": the cap is **sweep-global** and is checked before each open.
+The caller supplies the **ready-to-start rows**; you do not compute the bucket. Handing a row over is the only act in this file that can lead to a session, so the clauses below run **in order per row** and the **first failure is terminal for that row** — a hold costs one sweep, a wrong hand-over costs the caller a session that has to be unwound. Clause (5) is the exception to "per row": the cap is **sweep-global** and is checked before each open.
 
 **(1) Score it.** Dispatch the `vault-cli:task-auditor` **agent** via `Task`, and read the `READINESS:` line it returns — requiring **≥9/10 with zero hard-gate failures**. ⚠️ **`task-auditor` is an agent, not a skill.** `Skill("vault-cli:task-auditor")` answers `Unknown skill: vault-cli:task-auditor` and scores nothing — measured 2026-09-24 on the drive E2E fixture run, all 4 rows held with no score. `Task` is the only tool that addresses a `subagent_type`; the similarly-named `vault-cli:audit-task` is the *command* that dispatches this same agent, so routing through `Skill` adds a hop and changes nothing about the target. **Use the readiness prompt whose single home is `commands/open.md` § Step 1.5 — read it there and never restate its gates or its terminal line here.** The bar and its single home are `docs/fleet-surface.md` § Spawn a worker — reference that home, never restate the number. The manager may make **one** structural repair and re-audit once (sections, decomposition, DoD and SC shapes are the manager's act, per that same block); a row still below the bar after that is **held** with the score named. A row already carrying all three sections needs no repair:
 
@@ -171,21 +161,19 @@ grep -cE '^# (Success Criteria|Definition of Done|Tasks)' <row file>   # → 3
 
 **(4) A `role: human` row is never dispatched.** Render it `👤 YOURS` and move on: a person needs a screen, and the manager does not spawn a worker onto a human's task.
 
-**(5) Respect the spawn cap — checked before every open, never after it.** The numbers and their single home are `docs/fleet-surface.md` § Spawn a worker item 5 — read them there and never restate them here, because a restated copy is the second counter a `grep` cannot tell from a real one. ⚠️ **The cap is a sweep-global guard, not a property of the row.** It is evaluated **before** each open, because a cap checked afterwards has already spent the budget it exists to protect — the row is scored, checked and then held *without* opening, never opened and then found to be over. At the cap → print `⏸️ SPAWN CAP: <n> ready, <m> over cap`, open nothing further, and report the remainder as **held-on-cap** for the caller's next sweep.
+**(5) Respect the spawn cap — checked before every hand-over, never after it.** The numbers and their single home are `docs/fleet-surface.md` § Spawn a worker item 5 — read them there and never restate them here, because a restated copy is the second counter a `grep` cannot tell from a real one. ⚠️ **The cap is a sweep-global guard, not a property of the row.** It is evaluated **before** each open, because a cap checked afterwards has already spent the budget it exists to protect — the row is scored, checked and then held *without* opening, never opened and then found to be over. At the cap → print `⏸️ SPAWN CAP: <n> ready, <m> over cap`, open nothing further, and report the remainder as **held-on-cap** for the caller's next sweep.
 
-**(6) Check the row is still worth opening, then open with an explicit mode.** Two things run before the open, and both are yours — the caller's sweep snapshot is stale by construction, the same rule step 2's freshness check applies to nudges.
+**(6) Decide the row's worth and its mode, then hand it to the caller — you do not open it.** You hold no spawn tool. Every decision in this clause is still yours; the **act** is the caller's, and a row you have decided belongs under **`To open`** in your report, carrying everything the caller needs to execute it.
 
-**First, re-read the row on disk.** The ready-to-start bucket comes from the caller's sweep; a row that went terminal or parked since then is still in your list. Read `status`, `phase` and the open-box count, and **hold** the row when it reads `completed` / `aborted` / `done`, or when it is parked. An open is the only act in this file that creates a session — a row opened after it finished costs a whole session that has to be unwound, the same cost clause (1)'s readiness bar exists to avoid.
+**First, re-read the row on disk.** The ready-to-start bucket comes from the caller's sweep; a row that went terminal or parked since then is still in your list. Read `status`, `phase` and the open-box count, and **hold** the row when it reads `completed` / `aborted` / `done`, or when it is parked. A row handed over after it finished costs the caller a whole session that has to be unwound, the same cost clause (1)'s readiness bar exists to avoid.
 
-**Second, open with an explicit mode — never omit it.** Open with `/supervisor:open "<task>"` via `Skill`; that path reads the row's `mode:` and passes it (§ Step 0.6 decides, Step 3 consumes). ⚠️ **A direct `spawn_agent` call is permitted, and it must carry the argument.** Nothing at the tool boundary stops you calling it, so the rule here is a requirement rather than a prohibition — measured 2026-09-24: two rows opened directly by this agent (`agent_143`, `agent_144`, both 22:19Z, parent `1217e759`) carried `mode: interactive` **on disk** yet reported `mode_source=config`, the field written and the spawn ignoring it. So when you call it directly, classify the row yourself: read its `mode:`, and when the field is absent classify per `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6 and write it back with `vault-cli task set "<task>" mode <interactive|headless>` — then pass `interactive=false` when the field reads `mode: headless`, and `interactive=true` when it reads `mode: interactive`. **A direct call has no Step 0.6 behind it, so the argument IS the record of the decision**: omit it and the spawn reports `mode_source=config`, indistinguishable in the ledger from a site that never decided at all — the defect this rule exists to remove. `spawn_agent` in your grant also serves `resume=`.
+**Second, resolve the mode and write it back — that write IS the decision the ledger reads.** Read the row's `mode:`; when the field is absent, classify per `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6 and write it with `vault-cli task set "<task>" mode <interactive|headless>` — never re-derive over a value already on disk. The caller passes `interactive=false` when the field reads `mode: headless` and `interactive=true` when it reads `mode: interactive`, so the field you write is the argument it passes. ⚠️ **The value is yours, the argument is the caller's, and the ledger cannot tell which of you decided** — omit the write and the spawn reports `mode_source=config`, indistinguishable from a site that never decided at all. Measured 2026-09-24, **before the grant was removed on 2026-09-25**: two rows this agent opened directly (`agent_143`, `agent_144`, both 22:19Z, parent `1217e759`) carried `mode: interactive` **on disk** yet reported `mode_source=config` — the field written and the spawn ignoring it.
 
-**Confirm the open took, and never report an open you cannot see.** A row is `Opened` only when the registry carries an entry for its session against a **running** pid:
+⚠️ **Why the hand-off and not a `Skill`-invoked `/supervisor:open` — measured, not preferred, and no longer even reachable.** `Skill` is not in your `tools:` either, so the route is unavailable rather than merely forbidden; the measurement is recorded because it is *why* the grant was not kept. That command requires `mcp__supervisor__*` **in the invoking session** (`commands/open.md:400`) and otherwise falls back to the wezterm path, which the same file states *"cannot produce a headless worker — a wezterm spawn is a tab by construction"* (`:404`). A `Skill` invoked from here would have run with **your** grant, which holds no supervisor tool — so every open routed that way would have returned a **tab**, and a wezterm spawn writes **no ledger row**, which would make the very measurement this clause serves pass vacuously.
 
-```bash
-grep -l "<session_id>" ~/.claude/sessions/*.json   # → <pid>.json; then confirm ps -p <pid>
-```
+**You never write an `Opened` line, because you never open.** `Opened` is the caller's claim, and it is backed by a registry entry against a **running** pid — a `To open` line is a decision, not a claim that a session exists. Report the row and stop; the caller's own confirmation step is where that check runs.
 
-⚠️ **A refusal, an error, or a tool that failed to bind lands under `Held` or `Escalated` with the reason quoted — never as an `Opened` line, and never retried through `mcp__supervisor__spawn_agent`.** That fallback is the defect the resume branch already forbids, one branch over: it opens a worker the gate did not authorise, and it bypasses `commands/open.md` § Step 0.6, so the row's `mode` is never decided at all.
+⚠️ **A row you could not finish deciding — an unbound `Task`, an unscored row, an unreadable disk read — lands under `Held` or `Escalated` with the reason quoted, never under `To open`.** Handing over a row you did not decide pushes the gate's cost onto a caller with less context than you have.
 
 5. **Return the action lines**
 
@@ -198,12 +186,12 @@ One compact report — see `<output_format>`. You do not render the status table
 - **A task matches the reap test but has a live session** → still reap (send the evidence). The worker being alive is why the message is sent rather than nothing; it is not a reason to skip.
 - **The gate fails on exactly one clause** → name the clause and the value you read. A near-miss is the most useful line in the report; "not resumed" alone is not.
 - **`claude_script` resolves empty** → print `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` as its own line, and name that as the reason the branch was skipped. Never let it read as a failed gate clause: the gate held, and the launcher is the thing that is missing.
-- **A spawn is refused, errors, or aborts** → this branch is **terminal**. Report the refusal verbatim under **`Not resumed`** (or `Escalated` when it needs the caller's hand), spawn **nothing further**, and **write no `last_auto_resume`**. Never fall back to the other path, to a different `cwd`, or to `interactive: false` — a fallback is a resume the gate did not authorise, and it lands a worker in the caller's directory with no pane and its prompt parked on the manager, under a stamp recording a resume that never took. Name which of the two refusal kinds it is: the **tool's own `{error}`** — the server re-probed liveness with a stronger instrument and refused, so the resume did not happen — or the **caller's own outgoing call being gated under `auto`** (`[Create Unsafe Agents]` / `[Auto-Mode Bypass]`), which is not a block on the worker and which the caller fixes with Shift+Tab → `accept edits`. Do not respond by changing a mode — `spawn_agent` has no such argument.
-- **A tool in `tools:` did not bind** — e.g. no `mcp__supervisor__*` namespace in this session, which is a real configuration state rather than a bug of yours — → say so explicitly and report the decisions you would have made, per task. Never let the report read as though the acts happened.
-- **A ready row scores below the bar after the one permitted repair** → hold it, naming the score and the gate that failed. Never open it, and never repair it a second time.
+- **The caller reports a refused or errored spawn** → the row is **terminal for this sweep**: it goes under **`Not resumed`** (or `Escalated` when it needs the caller's hand) with the refusal quoted verbatim, and the caller writes **no `last_auto_resume`**. ⚠️ **The refusal is the caller's to report, not yours** — you never spawn, so you never see one; what you must never do is *re-hand the same row* in the same sweep as though a retry were free. A re-handed row is a resume the gate did not re-authorise. When the caller names a refusal kind, keep its wording: the **tool's own `{error}`** (the server re-probed liveness with a stronger instrument and refused) is a different fact from the **caller's outgoing call being gated under `auto`** (`[Create Unsafe Agents]` / `[Auto-Mode Bypass]`), which is not a block on the worker and which the caller fixes with Shift+Tab → `accept edits`.
+- **A tool in `tools:` did not bind** — `Task`, or `SendMessage`, each a real configuration state rather than a bug of yours — → say so explicitly and report the decisions you would have made, per task. Never let the report read as though the acts happened. ⚠️ **A missing `mcp__supervisor__*` is no longer a failure of this file** — it declares none by design (clause (6)), so its absence is the expected state and never a reason to skip a row.
+- **A ready row scores below the bar after the one permitted repair** → hold it, naming the score and the gate that failed. Never hand it over, and never repair it a second time.
 - **A ready row is held on a prose blocker or a collision** → these are the two holds the manager may **not** repair. Do not offer a repair, and do not re-check them within the same sweep.
-- **The spawn cap is reached** → print `⏸️ SPAWN CAP: <n> ready, <m> over cap` as its own line; the remainder is **held-on-cap** for the caller's next sweep. Never open past it to finish the sweep — the cap exists because a sweep that opens everything it finds is how a topic gets four sessions at once.
-- **An open is refused or errors** → terminal for that row: `Held` (or `Escalated` when it needs the caller's hand) with the refusal quoted verbatim, and **no fallback through `mcp__supervisor__spawn_agent`**. Same rule as the resume branch and for the same reason: a fallback is an open the gate did not authorise, and it bypasses `commands/open.md` § Step 0.6, so the row's `mode` is never decided.
+- **The spawn cap is reached** → print `⏸️ SPAWN CAP: <n> ready, <m> over cap` as its own line; the remainder is **held-on-cap** for the caller's next sweep. Never hand over past it to finish the sweep — the cap exists because a sweep that opens everything it finds is how a topic gets four sessions at once.
+- **A `To open` row the caller refuses, or that errors** → terminal for that row: `Held` (or `Escalated` when it needs the caller's hand) with the refusal quoted verbatim. ⚠️ **Never re-hand it in the same sweep, and never hand it to a second route** — a fallback is an open the gate did not authorise, and any route other than the caller bypasses `commands/open.md` § Step 0.6, so the row's `mode` is never decided.
 - **`Task`, or `vault-cli:task-auditor` within it, did not bind** → say so explicitly and report the decisions you would have made, per row. Never let the report read as though rows were scored or opened. ⚠️ An unbound dispatch and a low score are **different failures** and the report must not merge them: the first is a configuration state with no score taken, the second is a verdict about the task.
 - **This file and the runbook disagree** → the runbook wins. Report the disagreement as a bug.
 </error_handling>
@@ -212,7 +200,7 @@ One compact report — see `<output_format>`. You do not render the status table
 Plain markdown, one line per action, in the order you performed them. Omit empty sections.
 
 ```text
-Drive: <subject> — reaped <n> · nudged <n> · not nudged <n> · resumed <n> · opened <n> · held <n> · blocked <n>
+Drive: <subject> — reaped <n> · nudged <n> · not nudged <n> · to resume <n> · to open <n> · held <n> · blocked <n>
 
 Reaped (2):
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
@@ -226,31 +214,31 @@ Not nudged (2):        ← the false-nudge guard: which check dropped the candid
   <task> — in flight: tool.json state=open since 4 min ago (Bash) — working, not stuck
   <task> — freshness: no mtime on the sweep's stuck row — un-checkable, not nudged
 
-Resumed (1):
-  ♻️ AUTO-RESUMED: <task> — ids <a,b> both dead (no registry entry; argv 0), transcript stale 634 min
+To resume (1):         ← the caller spawns these, verifies, then writes last_auto_resume
+  ♻️ RESUME: <task> — ids <a,b> both dead (no registry entry; argv 0), transcript stale 634 min · resume=<session_id> · cwd=<explicit> · mode=<interactive|headless> · caller re-probes before spawning
 
-Opened (1):
-  🚀 OPENED: <task> — audit 9/10 · registry <pid>.json live
+To open (1):           ← the caller spawns these; mode= is the field you wrote to disk this run
+  🚀 OPEN: <task> — audit 9/10 · mode=<interactive|headless> · re-read on disk: status in_progress, phase planning, 3 open boxes
 
 Held (3):              ← one line per held row, naming the clause and the value that held it
   <task> — audit 7/10 (bar 9) — <which gate failed>
   <task> — prose blocker: depends on [[X]]
   <task> — collides with <worker> on <file>
   <task> — 👤 YOURS (role: human) — not dispatched
-  <task> — held-on-cap (2 opened this sweep)
+  <task> — held-on-cap (2 handed over this sweep)
 
 Not resumed (3):
   <task> — gate fails on: transcript stale (mtime 3 min ago) — alive, merely quiet
   <task> — gate fails on: not shared — id <x> also on <task B>, neither resumed
-  <task> — spawn refused: <refusal verbatim> — no fallback spawned, last_auto_resume untouched
+  <task> — caller reported: spawn refused — <refusal verbatim> — not re-handed, last_auto_resume untouched
 
 Escalated (1):
-  ⚠️ CRASH-LOOP: <task> — last_auto_resume 12 min ago, not re-spawning
+  ⚠️ CRASH-LOOP: <task> — last_auto_resume 12 min ago, not re-handed
 ```
 
 **The `Drive:` line is the ordering evidence.** A caller checking the reap-before-drive constraint reads it first: a task appearing under **both** `Reaped` and `Nudged` in one run is a bug in your own ordering, and you should report it as one rather than emitting the line.
 
-⚠️ **`Opened` is a claim about the world, not about your intent.** Every line under it is backed by a registry entry against a running pid; a row whose open was refused, errored, or whose `Skill` did not bind belongs under `Held`/`Escalated` with the reason, never here. The one failure a reader cannot detect from your report is an `Opened` line with no session behind it.
+⚠️ **`To open` is a decision, not a claim about the world — and this file cannot make the latter.** Every row you hand over has been decided and mode-stamped, but **no session exists yet**: the caller's spawn is what creates one, and the caller's own confirmation step is where the registry check runs. A row you could not decide belongs under `Held`/`Escalated` with the reason, never here. The one failure a reader cannot detect from your report is a `To open` line whose mode field was never written to disk.
 </output_format>
 
 <success_criteria>
@@ -259,8 +247,9 @@ Escalated (1):
 - **Every candidate a check dropped is reported under `Not nudged`, naming the check and the value that dropped it** — including a `stuck` row that arrived with no mtime and so could not be checked. A silently dropped candidate reads exactly like one the sweep never classified.
 - Every reap decision is backed by the three disk reads — `status`, `phase`, open-box count — taken **this run**, never from a session's claim or its colour.
 - Every auto-resume names all **ten** gate clauses, and any clause that failed is quoted with the value that failed it — including which blocker or which date.
-- Every spawn was preceded by a re-probe at the spawn site in the same shell, and a positive re-probe aborted without writing `last_auto_resume`.
-- `last_auto_resume` was written only through `vault-cli task set`, and only **after** a resume verified against the session registry — a refused, errored or aborted spawn left it byte-identical to its pre-attempt value.
+- Every `To resume` row was preceded by a re-probe at the hand-off site, and a positive re-probe aborted the row without arming the crash-loop cap.
+- No `last_auto_resume` was written by this file. The stamp is the caller's, written only through `vault-cli task set` and only **after** a spawn it verified against the session registry — this file hands over a decision and records no act.
+- Every `To open` row carries a `mode:` field written to disk this run, and **no `Opened` line appears in this report** — that claim is the caller's.
 - No task was resumed that was parked, terminal, `hold`, shared-id, or roster-present.
 - No message sent to a worker asserts that a gate is cleared; every reap message states it is non-authorising and that the operator has not answered.
 - No TTS call was attempted, and no report line implies one happened — the voice half belongs to the caller, because a subagent has no TTS.
@@ -268,7 +257,7 @@ Escalated (1):
 - Every open was gated by all **six** clauses, checked on disk **this run**, in order, and the first failure was terminal for that row.
 - No row below the bar was opened, and every hold names its clause **and the value that held it** — the score, the blocker line, or the colliding file. "held" alone is not a line.
 - No headless/interactive logic exists in this file. A `grep` for a `mode` derivation returns only the reference to `commands/open.md` § Step 0.6, never a computation — the rule has one home and this is not it.
-- Every `Opened` line is backed by a session-registry entry against a running pid. A refused, errored or unbound open appears under `Held`/`Escalated` with its reason, never under `Opened`.
+- Every row handed over appears under `To open` or `To resume` with the decision that produced it — the mode field written to disk, the re-read values, the resume id and its explicit `cwd`. A row you could not decide appears under `Held`/`Escalated` with its reason, never under `To open`.
 - The cap was checked **before every** open, and any row it withheld is reported as held-on-cap rather than dropped from the report.
 - No worker's in-flight edits were committed, stashed or reverted to clear a collision.
 - One subject, one pass. You run once and exit — cadence is the caller's (`ScheduleWakeup` is per-session state).
