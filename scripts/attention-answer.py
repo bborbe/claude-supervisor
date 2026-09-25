@@ -29,10 +29,25 @@ is the address `SendMessage` takes. One line, three shapes:
   UNDELIVERABLE: name ambiguous ...  >1 session shares the name; a bare name
                                      would reach the wrong one, so refuse
 
-Only `message`-class items route an answer. `permission` and `ack` items are
-listed but refused by `answer` -- they have their own paths.
+Two classes route an answer, and they route it differently:
 
-Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM]
+  message     the answer is text for a session. The wrapping command delivers
+              it by SendMessage, to the name on the TARGET line printed here.
+  permission  the answer is a verdict, given with --decision allow|deny. The
+              spawning supervisor server delivers it by polling the store, so
+              this script prints a DELIVERY line and never a TARGET: there is
+              no session to send to, and printing one would invite a relay.
+
+`ack` items are listed but refused -- they ask nothing, so there is nothing to
+route.
+
+A `permission` answer without an explicit --decision is REFUSED, never
+defaulted. Neither default is safe: an implicit allow would release a gate
+nobody approved, and an implicit deny would refuse one nobody refused. That
+refusal is the whole guard -- it is what keeps this arm from becoming a path
+that settles an irreversible prompt without an operator-supplied decision.
+
+Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision allow|deny]
 """
 
 import argparse
@@ -49,6 +64,10 @@ STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 SESSIONS_DIR = os.environ.get("CLAUDE_SESSIONS_DIR") or os.path.expanduser("~/.claude/sessions")
 DEFAULT_ARM = "supervisor:attention-next"
 PAYLOAD_WIDTH = 160
+# The only verdicts a permission-class item can be answered with. Kept here as
+# the arm's own guard rather than only as documentation: the store rejects an
+# unknown value too, but a local refusal costs no round trip and names the fix.
+DECISIONS = ("allow", "deny")
 
 
 def load_registry(sessions_dir=None):
@@ -107,11 +126,16 @@ def resolved_session_id(environ=None):
     return (os.environ if environ is None else environ).get("CLAUDE_CODE_SESSION_ID", "")
 
 
-def post_answer(item_id, answered_by, resolved_by=""):
+def post_answer(item_id, answered_by, resolved_by="", decision=""):
     body = {"answered_by": answered_by}
     # Omitted rather than sent empty: downstream, "" is a set value, not an absent one.
     if resolved_by:
         body["resolved_by"] = resolved_by
+    # The same rule as resolved_by, and it matters more here: the schema adds no
+    # write-time rejection for an omitted decision, so sending "" would store a
+    # *present* field holding no verdict instead of an absent one.
+    if decision:
+        body["decision"] = decision
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention/{item_id}/answer",
         data=json.dumps(body).encode(),
@@ -132,6 +156,10 @@ def cmd_next(registry, out=sys.stdout):
         mech = item.get("answer_mechanism", "?")
         if mech == "message":
             route = target_line(item.get("producer_id", ""), registry)
+        elif mech == "permission":
+            # No session to name: the spawning server polls the store for the
+            # verdict, so what the operator needs is the way in, not a recipient.
+            route = "answerable here with --decision allow|deny (delivered by supervisor poll)"
         else:
             route = f"not answerable here ({mech})"
         print(f"{n}. [{item.get('interrupt_class', '?')}] {item.get('item_id')} -- {payload}", file=out)
@@ -139,11 +167,13 @@ def cmd_next(registry, out=sys.stdout):
     return 0
 
 
-def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None):
+def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None, decision=""):
     item = fetch_item(item_id)
     mech = item.get("answer_mechanism")
+    if mech == "permission":
+        return cmd_answer_permission(item, answered_by, resolved_by, decision, out)
     if mech != "message":
-        print(f"REFUSED: {item_id} is {mech}-class; only message-class items route an answer", file=out)
+        print(f"REFUSED: {item_id} is {mech}-class; it asks nothing, so there is nothing to route", file=out)
         return 2
     if resolved_by is None:
         resolved_by = resolved_session_id()
@@ -164,6 +194,43 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None)
     return 0
 
 
+def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdout):
+    """Answer a permission-class item with a verdict, and name how it is delivered.
+
+    The delivery is the spawning supervisor server polling the store, so this
+    prints DELIVERY and never TARGET. A TARGET line here would be actively
+    harmful rather than merely useless: the wrapping command branches on it, and
+    a session cannot release another session's parked gate -- a relay is
+    permission laundering even when the action looks small.
+    """
+    item_id = item.get("item_id")
+    if decision not in DECISIONS:
+        choices = "|".join(DECISIONS)
+        given = decision if decision else "nothing"
+        print(
+            f"REFUSED: {item_id} is permission-class and needs --decision {choices}; "
+            f"got {given!r}. Neither default is safe, so this arm has none.",
+            file=out,
+        )
+        return 2
+    if resolved_by is None:
+        resolved_by = resolved_session_id()
+    try:
+        answered = post_answer(item_id, answered_by, resolved_by, decision)
+    except urllib.error.HTTPError as err:
+        if err.code == 409:
+            print(f"LOST: {item_id} already answered or no longer open -- do not deliver", file=out)
+        else:
+            print(f"FAILED: store returned {err.code} for {item_id}", file=out)
+        return 1
+    print(f"ANSWERED: {item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}", file=out)
+    print(f"RESOLVED_BY: {resolved_by}" if resolved_by else
+          "RESOLVED_BY: unknown -- CLAUDE_CODE_SESSION_ID unset, so this item will read as unresolved", file=out)
+    print(f"DECISION: {decision}", file=out)
+    print("DELIVERY: supervisor poll -- no session to send to, so do NOT SendMessage", file=out)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -171,12 +238,16 @@ def main(argv=None):
     ans = sub.add_parser("answer")
     ans.add_argument("item_id")
     ans.add_argument("--by", default=DEFAULT_ARM)
+    # Deliberately no `choices=` and no default: argparse must not supply a
+    # verdict on the caller's behalf, and the refusal belongs to this script so
+    # its wording stays testable rather than becoming an argparse usage dump.
+    ans.add_argument("--decision", default="")
     args = parser.parse_args(argv)
     registry = load_registry()
     try:
         if args.cmd == "next":
             return cmd_next(registry)
-        return cmd_answer(args.item_id, args.by, registry)
+        return cmd_answer(args.item_id, args.by, registry, decision=args.decision)
     except urllib.error.HTTPError as err:
         print(f"FAILED: store returned {err.code}")
         return 1
