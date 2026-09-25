@@ -86,6 +86,10 @@ _ENRICHED_CACHE = {}
 # registry is read once per run and asked two questions of the same read — which
 # sessions are live, and what each is called now.
 _REGISTRY_CACHE = {}
+# The same glob pass's `status` field, kept beside the names so `busy_session_ids()`
+# reads the registry zero extra times. Two reads of this directory could disagree
+# about which entries exist, which is why `read_registry()` shares one pass.
+_REGISTRY_STATUS_CACHE = {}
 
 # Closer verbs describing a parked wait rather than an open gate. `later (on
 # <trigger>):` names the event that resumes the work; until it fires there is
@@ -425,18 +429,21 @@ def read_registry(sessions_dir=None):
     # `None`. Checked explicitly because the silent-empty shape is indistinguishable
     # from a real empty registry downstream.
     out = None
+    status = None
     if os.path.isdir(d):
         try:
-            out = {}
+            out, status = {}, {}
             for path in glob.glob(os.path.join(d, "*.json")):
                 with open(path, encoding="utf-8") as f:
                     rec = json.load(f)
                 sid = rec.get("sessionId")
                 if sid:
                     out[sid] = rec.get("name") or ""
+                    status[sid] = rec.get("status") or ""
         except Exception:
-            out = None
+            out, status = None, None
     _REGISTRY_CACHE[d] = out
+    _REGISTRY_STATUS_CACHE[d] = status
     return out
 
 
@@ -531,6 +538,117 @@ def quiet_session_ids(records, live_ids):
         if session_transcript_age(sid) > LIVE_WINDOW:
             quiet.add(sid)
     return quiet
+
+
+def busy_session_ids(sessions_dir=None):
+    """Session ids the registry marks `busy`; `set()` when that cannot be told.
+
+    `busy` is the working state. A session parked on a prompt reads `waiting`, and one
+    that has ended its turn reads `idle` -- so `busy` cannot be a session waiting on the
+    operator, which is what makes it usable as a supersession signal. Measured
+    2026-09-25 over the live registry: `idle` 15, `shell` 9, `busy` 4, `waiting` 1.
+
+    Reads the same single glob pass as `read_registry()`, so the two can never disagree
+    about which entries exist.
+
+    `set()` on an unreadable registry, matching `quiet_session_ids()`: a failed read
+    proves nothing, so the caller drops nothing.
+    """
+    d = sessions_dir if sessions_dir is not None else SESSIONS_DIR
+    read_registry(d)
+    status = _REGISTRY_STATUS_CACHE.get(d)
+    if status is None:
+        return set()
+    return {sid for sid, value in status.items() if value == "busy"}
+
+
+def turn_after_closer(rec):
+    """True when the transcript holds a user or tool turn after its last closer line.
+
+    A **position** read, not a contains read. Every real turn has tool calls in it, so
+    "the transcript mentions a tool call" would supersede every panel; what matters is
+    whether one lands *after* the closer. The closer is written by the `Stop` hook at
+    the end of a turn, so anything after it is a new turn and the closer is stale.
+
+    A later closer resets the reading: a session that took a turn and then parked again
+    holds a fresh closer, and that panel is live.
+
+    `False` when the transcript is unreadable -- the same rule as the registry reads: an
+    absent probe proves nothing, so the row is kept rather than dropped.
+    """
+    sid = rec.get("session_id")
+    path = rec.get("transcript")
+    if not path and sid:
+        path = next(iter(glob.glob(os.path.expanduser(
+            f"~/.claude/projects/*/{sid}.jsonl"))), None)
+    if not path or not os.path.exists(path):
+        return False
+    closer_at = -1
+    superseded = False
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - 200_000))
+            for i, line in enumerate(f.read().decode("utf-8", "replace").splitlines()):
+                try:
+                    j = json.loads(line)
+                except Exception:
+                    continue
+                kind = j.get("type")
+                if kind == "assistant":
+                    blocks = j.get("message", {}).get("content") or []
+                    if any(isinstance(c, dict) and c.get("type") == "text"
+                           and "👤 You:" in (c.get("text") or "") for c in blocks):
+                        closer_at, superseded = i, False
+                    elif closer_at >= 0 and any(isinstance(c, dict)
+                                                and c.get("type") == "tool_use"
+                                                for c in blocks):
+                        superseded = True
+                elif kind == "user" and closer_at >= 0:
+                    superseded = True
+    except Exception:
+        return False
+    return superseded
+
+
+def resumed_session_ids(records):
+    """Sessions whose transcript shows a turn after their closer -- one read per session.
+
+    Deduped deliberately: `records` carries several rows per session, and the tail read
+    is a 200KB seek, so reading per record would repeat it for no new information.
+    """
+    seen = {}
+    for rec in records:
+        sid = rec.get("session_id")
+        if sid and sid not in seen:
+            seen[sid] = turn_after_closer(rec)
+    return {sid for sid, resumed in seen.items() if resumed}
+
+
+def is_superseded(rec, busy_ids=frozenset(), resumed_ids=frozenset()):
+    """A rendered closer whose session has moved on -- nothing waits on the operator.
+
+    Two independent signals, either sufficient:
+
+      * the registry says the session is `busy` -- it is inside a turn; or
+      * its transcript shows a user or tool turn after the closer.
+
+    Each half covers what the other misses. The registry alone cannot speak for a
+    headless worker (an in-process SDK `query()` holds no registry entry at all --
+    measured 2026-09-21: 0 of 21 in the registry), which the transcript half covers;
+    the transcript alone cannot speak for a session whose file is unreadable, which
+    the registry covers.
+
+    Deliberately **not** a parser. A session that is genuinely blocked emits the
+    identical closer string, so no text rule can separate the two -- the signal has to
+    come from session/turn state, which is why this reads neither `detail` nor the
+    closer text.
+
+    `False` for a record with no session id: there is nothing to look up, so it is kept.
+    """
+    sid = rec.get("session_id")
+    if not sid:
+        return False
+    return sid in busy_ids or sid in resumed_ids
 
 
 def is_live(rec, pmap, quiet):
@@ -777,6 +895,29 @@ def is_open_gate(rec, open_panes=frozenset(), task_status=None, include_panels=F
     if is_rendered_panel(rec) and not include_panels:
         return False
     return True
+
+
+def rendered_panels(records, open_panes=frozenset(), task_status=None,
+                    busy_ids=frozenset(), resumed_ids=frozenset()):
+    """The Rendered-panels list: closers still waiting on the operator, oldest first.
+
+    One home for the composition, so `main()`'s render and any test asking "is this row
+    listed" cannot drift apart -- the same reason `is_open_gate(include_panels=True)` is
+    already shared between the block count and this list rather than written twice.
+
+    A superseded row leaves the list. The sibling rule that forbids hiding panes
+    ("panel rows stay visible ... a panel disappearing from the render is a failure of
+    this criterion, not a pass") protects a **live** closer panel; a superseded row is
+    no longer a panel row, so removing it is a reclassification, not a hidden pane. The
+    `busy`/`resumed` sets are the only input that can remove one, and both are empty
+    when their probe fails -- so a blind reader lists more, never fewer.
+    """
+    return sorted([r for r in records
+                   if is_rendered_panel(r) and not answered(r)
+                   and not is_superseded(r, busy_ids, resumed_ids)
+                   and is_open_gate(r, open_panes=open_panes, task_status=task_status,
+                                    include_panels=True)],
+                  key=lambda r: r["ts"])
 
 
 def age(ts):
@@ -1139,6 +1280,10 @@ def main():
     # the quiet pass would double that cost.
     records = load("needs")
     quiet = quiet_session_ids(records, live_ids)
+    # The supersession signals, read once for the same reason: one registry pass, and one
+    # transcript-tail read per session rather than one per record.
+    busy = busy_session_ids()
+    resumed = resumed_session_ids(records)
     live = lambda r: is_live(r, pmap, quiet)
     needs = [reclassify_idle(r) for r in records if live(r)]
     tools = [r for r in load("tool") if live(r)]
@@ -1154,11 +1299,7 @@ def main():
     # block count and the panel list can never disagree about which rows are panels.
     # They stay VISIBLE — the soft signal is what this command is for — and are
     # simply not counted as blocks.
-    panels = sorted([r for r in needs
-                     if is_rendered_panel(r) and not answered(r)
-                     and is_open_gate(r, open_panes=open_panes,
-                                      task_status=task_status_from_closer, include_panels=True)],
-                    key=lambda r: r["ts"])
+    panels = rendered_panels(needs, open_panes, task_status_from_closer, busy, resumed)
     reapable = sorted([r for r in needs if not answered(r)
                        and is_reapable(r, task_status_from_closer)], key=lambda r: r["ts"])
     stuck = sorted([r for r in tools if time.time() - r["ts"] > a.stuck_min * 60], key=lambda r: r["ts"])
