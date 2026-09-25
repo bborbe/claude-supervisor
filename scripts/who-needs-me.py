@@ -213,7 +213,16 @@ def normalize_store_item(item, events):
     # what makes the event-time fields recoverable at all.
     ev = events.get(item.get("dedup_key") or "") or {}
     rec = {
+        # The LOG's item_id, and the join key every classifier above already reads.
+        # It is deliberately NOT the store's: `events` is keyed by the log's value,
+        # so repointing this would silently break the event-time join.
         "item_id": item.get("dedup_key") or item.get("item_id"),
+        # The STORE's own id, kept separately because it is the key that answers the
+        # item. `attention-answer.py answer ITEM_ID` POSTs
+        # /api/1.0/attention/{ITEM_ID}/answer, which resolves only against the store's
+        # id — measured 2026-09-25, the two differ (`0f701f0b…` vs `f064a3c6…`), and a
+        # handover built from `item_id` would be unresolvable by construction.
+        "store_item_id": item.get("item_id") or "",
         "session_id": item.get("producer_id") or "",
         "kind": kind,
         "detail": item.get("payload") or "",
@@ -812,18 +821,60 @@ def current_session_name(rec, registry=None):
     return rec.get("session_name") or ""
 
 
+def pane_owner(rec, pmap, registry=None):
+    """The registry session whose name the recorded pane's title matches, or "".
+
+    Ownership by elimination, and the complement of `is_routable()`: that proves a pane
+    is *this* session's by matching its title to this session's name, and is silent
+    when the session has no name to compare. This asks the other question — whose pane
+    is it — which is the one that survives a nameless session.
+
+    It exists because a nameless row used to borrow the pane's title as its identity,
+    and a headless worker inherits its spawner's `WEZTERM_PANE`. Measured 2026-09-25:
+    session `50193c14` (headless) carried pane 0, whose title is `◐ Fleet Manager`, so
+    the fallback rendered the SPAWNER's name as the worker's row identity.
+
+    Only a registry match counts. A title matching no registered session proves nothing,
+    and treating that as a borrow would strip identity from every row whose pane belongs
+    to a session the registry cannot speak for — the same false-positive shape
+    `is_routable()`'s docstring records for renames.
+    """
+    if not registry:
+        return ""
+    title = strip_status_glyph(pmap.get(str(rec.get("pane")), {}).get("title"))
+    if not title:
+        return ""
+    for sid, name in registry.items():
+        if sid != rec.get("session_id") and strip_status_glyph(name) == title:
+            return sid
+    return ""
+
+
+def short_id(sid):
+    """A session id as a row's identity, for a row that has no name to render."""
+    return f"session {(sid or '?')[:8]}"
+
+
 def name_of(rec, pmap, registry=None):
     """The session's name, preferring the name it actually holds.
 
     A store row carries `session_name` from the watcher's enrichment record, but that
     is a snapshot taken at event time and a rename never reaches it — so the registry's
     current name is preferred and the snapshot is the fallback for a session the
-    registry cannot speak for. Rows with neither fall through to the pane title,
-    unchanged.
+    registry cannot speak for.
+
+    Rows with neither fall back to the pane title ONLY when that pane is not provably
+    another session's. Borrowing it otherwise renders a different session's name as this
+    row's identity — the mis-attribution measured 2026-09-25 — so a borrowed pane's
+    title is refused and the row carries its own session id instead. A pane whose owner
+    cannot be established keeps the old fallback: an absence is not a verdict, and
+    stripping identity from an unprovable row would be a regression dressed as a fix.
     """
     name = current_session_name(rec, registry)
     if name:
         return name
+    if pane_owner(rec, pmap, registry):
+        return short_id(rec.get("session_id"))
     p = pmap.get(str(rec.get("pane")))
     if p:
         return strip_status_glyph(p.get("title")) or os.path.basename(rec.get("cwd", ""))
@@ -858,6 +909,16 @@ def is_routable(rec, pmap, registry=None):
     pane = rec.get("pane")
     if not pane or str(pane) not in pmap:
         return False
+    # Provably ANOTHER session's pane, refused before the name test below — which
+    # cannot see this case at all. That test needs a name to compare, so a nameless
+    # session reaches `return True` by design ("an absence is not a verdict") and
+    # keeps a jump to a pane it does not own. Measured 2026-09-25 by exercising the
+    # nameless branch directly: the row rendered `activate-pane --pane-id 0` — the
+    # spawner's tab — which is the confident-wrong-direction defect this reader exists
+    # to prevent, and it survived the name-mismatch fix precisely because that fix
+    # only fires when a name is present.
+    if pane_owner(rec, pmap, registry):
+        return False
     name = current_session_name(rec, registry)
     if not name:
         return True
@@ -883,16 +944,51 @@ def provenance_of(rec):
     return f"{host}:{cwd} · {tool}"
 
 
+# The reader and the answering arm ship in the same plugin, so the handover resolves the
+# script exactly as a command does: `CLAUDE_PLUGIN_ROOT` when set, the marketplace clone
+# otherwise. Measured 2026-09-25 — the variable is EMPTY in a command's Bash, so the
+# fallback is the branch that actually fires.
+ANSWER_SCRIPT = ("${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/"
+                 "claude-supervisor}/scripts/attention-answer.py")
+
+
+def answer_handover(rec):
+    """The command that answers this item, or "" when there is nothing to answer.
+
+    Rendered only where there is no pane this session provably owns. There is no jump
+    to hand over, and stopping at `unroutable` told the operator the row could not be
+    reached without ever saying how to clear it — the gate is real, open, and
+    answerable, so the row must name the way (measured 2026-09-25, session `50193c14`).
+
+    The id is the STORE's, never the row's `item_id` — see `normalize_store_item`; the
+    row's value is the log's join key and does not resolve against the answer endpoint.
+    A `permission` item needs an explicit verdict and neither default is safe, so both
+    are named and neither is chosen, matching the refusal `attention-answer.py` enforces.
+    """
+    item = rec.get("store_item_id")
+    if not item or rec.get("kind") not in ("permission", "question"):
+        return ""
+    cmd = f"answer: python3 {ANSWER_SCRIPT} answer {item}"
+    return cmd + " --decision allow|deny" if rec.get("kind") == "permission" else cmd
+
+
 def row(rec, pmap, what, registry=None):
     pane = rec.get("pane")
     if pane and is_routable(rec, pmap, registry):
         jump = f"wezterm cli activate-pane --pane-id {pane}"
-    elif pane:
-        # Present but unvalidatable. Never rendered as a route: the id may now
-        # belong to a different session entirely.
-        jump = f"unroutable — pane {pane} does not resolve to this session"
     else:
-        jump = "unroutable — no pane recorded for this item"
+        if pane:
+            # Present but unvalidatable. Never rendered as a route: the id may now
+            # belong to a different session entirely.
+            jump = f"unroutable — pane {pane} does not resolve to this session"
+        else:
+            jump = "unroutable — no pane recorded for this item"
+        # This branch is where the dead end used to be: no jump to hand over, and the
+        # gate is still real. Name the way out of it — and ONLY here, so a routable row
+        # is untouched and keeps the single jump line it has always rendered.
+        answer = answer_handover(rec)
+        if answer:
+            jump = f"{jump}\n         {answer}"
     return (f"  [{pane or '?':>4}] {age(rec['ts']):>6}  "
             f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
             f"         {provenance_of(rec)}\n"
