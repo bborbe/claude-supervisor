@@ -44,14 +44,21 @@ MODE_HOME = "docs/fleet-surface.md"
 MODE_ANCHOR = "Spawn a worker item 6"
 
 #: Files that document opening a NEW worker. Each must reference the home.
-#: ⚠️ `agents/manager-drive.md` is listed here even though its prose only ever shows `resume=`
-#: calls — its `tools:` grant permits an OPEN, and on 2026-09-24 it used that to open two rows
-#: directly, writing `mode: interactive` to each task and then omitting the argument, so both
-#: reported `mode_source=config`. A site defined by a grant is invisible to a text scan.
+#: ⚠️ `agents/manager-drive.md` is listed here even though it no longer opens at all: it
+#: **decides** the mode and writes `mode:` to disk, which is the half a text scan can still
+#: hold to the rule. Until 2026-09-25 it also *opened* — its `tools:` grant permitted it, and
+#: on 2026-09-24 it used that to open two rows directly, writing `mode: interactive` to each
+#: task and then omitting the argument, so both reported `mode_source=config`. A site defined
+#: by a grant is invisible to a text scan, which is why the grant is gone and the decision
+#: stayed.
+#: ⚠️ `commands/manager-drive.md` joined on 2026-09-25 for the opposite reason: the spawn
+#: moved *out* of the agent and into its caller, so the command that executes the hand-off
+#: rows is now a spawn site and must carry the binding.
 SPAWN_SITES = (
     "commands/open.md",
     "commands/manager-loop.md",
     "commands/manager-spawn.md",
+    "commands/manager-drive.md",
     "agents/manager-drive.md",
 )
 

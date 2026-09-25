@@ -71,7 +71,7 @@ class CheckSpawnModeTest(unittest.TestCase):
         shutil.copy(SCRIPT, pathlib.Path(self.dir) / "scripts" / "check-spawn-mode.py")
         self.write("docs/fleet-surface.md", HOME)
         for site in ("commands/open.md", "commands/manager-loop.md", "commands/manager-spawn.md",
-                     "agents/manager-drive.md"):
+                     "commands/manager-drive.md", "agents/manager-drive.md"):
             self.write(site, SITE)
 
     def write(self, relpath, text):
