@@ -54,7 +54,7 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 2. **Compose the sweep — do not rebuild it.** This command owns no classification. Dispatch the same agent `/manager-loop` does:
 
-   `Task(subagent_type: "supervisor:manager-sweep-reader", prompt: <tracked set + declared-optional set + this run's ListAgents roster verbatim + vault + mode: snapshot + timestamp>)`
+   `Task(subagent_type: "supervisor:manager-sweep-reader", prompt: <tracked set + declared-optional set + the topic's member goals + this run's ListAgents roster verbatim + vault + mode: snapshot + timestamp>)`
 
    The plugin prefix is required — a bare `manager-sweep-reader` resolves to a personal `~/.claude/agents/` copy, never the plugin agent. The agent owns the task-file read, the bucket classification **the vault's Manager Session runbook** declares, the id-set extraction and the orphan **candidates**. Bucket rules: runbook § Step 4.
 

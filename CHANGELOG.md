@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- feat: `manager-sweep-reader` gains a topic-level **necessity read** (step 8) — enumerates by each task's `goals:` frontmatter rather than a goal's curated `# Tasks` section (measured 42% coverage), reports the size of the set it inverted, and returns exactly three verdicts: `needed`, `product`, `not needed`. Adds the **product clause** that neither `verify-topic` checks 5–6 nor the two vault-cli anchors carry, so a per-alert output task is reportable as the goal's product instead of silently clean. Carries an explicit `<constraints>` carve-out and a matching `<error_handling>` rule so the reporting path never widens the swept set, and a necessity verdict never changes a bucket, an icon, a count or a section placement.
+- feat: `manager-sweep-reader` gains a topic-level **necessity read** (step 8) — enumerates by each task's `goals:` frontmatter rather than a goal's curated `# Tasks` section (measured 42% coverage), reports the size of the set it inverted, and returns exactly three verdicts: `needed`, `product`, `not needed`. Adds the **product clause** that neither `verify-topic` checks 5–6 nor the two vault-cli anchors carry, so a per-alert output task is reportable as the goal's product instead of silently clean. Carries an explicit `<constraints>` carve-out and a matching `<error_handling>` rule so the reporting path never widens the swept set, and a necessity verdict never changes a bucket, an icon, a count or a section placement. Wires the three callers — `manager-loop`, `manager-status` and `manager-drive` — to pass the topic's member goals, without which step 8 is gated off and never fires.
 
 ## v0.56.3
 
