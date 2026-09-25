@@ -44,13 +44,21 @@ def load_wnm():
 
 
 def wezterm_panes():
-    """{pane_id(str): {tab_id, window_id, title}} or {} when wezterm is unreachable."""
+    """{pane_id(str): {tab_id, window_id, title}}, or `None` when the query failed.
+
+    ⚠️ `None`, never `{}`: a failed `wezterm cli list` cannot prove a pane is gone any
+    more than it can prove one is live, so no caller may read it as "no panes exist".
+    `{}` is reserved for a WezTerm that answered with zero panes — a real empty answer
+    that must keep working. Same convention as `who-needs-me.py`'s `wezterm_panes()`.
+    """
     try:
-        raw = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
-                             capture_output=True, text=True, timeout=5).stdout
-        return {str(p["pane_id"]): p for p in json.loads(raw)}
+        r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        return {str(p["pane_id"]): p for p in json.loads(r.stdout)}
     except Exception:
-        return {}
+        return None
 
 
 def build_tabs(pmap):
@@ -406,8 +414,13 @@ def main():
         return 0
 
     pmap = wezterm_panes()
-    if not pmap:
-        print("❌ wezterm unreachable (no panes) — is this session inside WezTerm?", file=sys.stderr)
+    if pmap is None:
+        # `is None`, never `not pmap`: a reachable WezTerm holding no panes is a real
+        # empty answer and must keep working. Only a failed read is a refusal — and it
+        # is the read that failed, not the fleet that is empty, so say so.
+        print("❌ `wezterm cli list` unreadable — the pane list failed, so no pane can "
+              "be resolved. Is this session inside WezTerm, and is "
+              "WEZTERM_UNIX_SOCKET set correctly?", file=sys.stderr)
         return 1
     tabs = build_tabs(pmap)
 
