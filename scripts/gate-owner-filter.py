@@ -41,9 +41,10 @@ and unowned panes all emit.
 
 ⚠️ A filter that silently matches nothing is indistinguishable from a quiet
 fleet ([[A Broken Watcher Looks Exactly Like a Quiet One]]). So `--explain`
-prints the reason for every verdict, and `--check` reports the drop count, which
-is what makes an empty result legible as "nothing to filter" rather than
-"the filter is broken".
+prints the reason for every verdict, and every run prints a
+`gates: N  emit: N  dropped(peer-manager): N` line on stderr — which is what
+makes an empty result legible as "nothing to filter" rather than "the filter is
+broken".
 """
 
 import argparse
