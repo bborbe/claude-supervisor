@@ -323,6 +323,8 @@ agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b�
 agents/manager-drive.md                    the worker sweep's act leg (composed by manager-loop, runnable by hand)
 agents/manager-verify.md                  the seven-step verify fork + report shape (dispatched by /manager-verify)
 agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive and by /fleet-loop every round)
+agents/gate-relay-read.md                the manager's gate relay, read leg — pane id in, ≤15-line per-pane summary out; declares no write tool at all
+agents/gate-relay-send.md                the manager's gate relay, send leg — the operator's answer into a tab worker's pane; never drives a selection modal
 server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see § The approval policy)
 ```
