@@ -7,6 +7,7 @@ allowed-tools:
   - Skill
   - Bash(find:*)
   - Bash(awk:*)
+  - Bash(grep:*)
 ---
 
 <objective>
