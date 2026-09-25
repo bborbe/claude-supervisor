@@ -3,8 +3,6 @@ description: Verify one topic or goal and suggest the fixes — seven gated chec
 argument-hint: "[topic-or-goal-name-or-path] — omit the name to resolve it from the session, like /supervisor:manager-status"
 allowed-tools:
   - Read
-  - Grep
-  - Glob
   - Task
   - Skill
   - Bash(find:*)
@@ -33,11 +31,11 @@ Verify ONE subject — **a topic or a goal** — and **suggest** the fixes. Reso
 
 **Print the source.** The first output line is `Subject: <name> (from <explicit|session|name|conversation|last>)`, so a wrong pick is interruptable before the report runs — the same reason `/vault-cli:task-status` prints `Detected task:`.
 
-**Record per the shared doc's contract** — which files, and on which resolution. ⚠️ This copy's `allowed-tools` deliberately omits `Bash(python3:*)` and `Bash(mkdir:*)`, so the shared doc's runnable block is not available to it — **follow the contract, not the snippet.**
+⚠️ **This copy can run neither half of the shared doc's executable contract, and that is deliberate — but both halves must be stated, not just one.** Its 2026-09-20 read-only re-scope trimmed `Bash(python3:*)`, `Bash(mkdir:*)` **and `Bash(vault-cli:*)`**, so the vault lookup and the recording block are both unavailable here. So it **resolves the vault the way it always has** — from cwd, through the literal `24 Goals/` / `23 Topics/` probes in § Branch detection, which already assume the vault root — and **records nothing**. Neither divergence is a regression: this command could never run either block. Both are named in `docs/subject-resolution.md` § *Recording*, which carries the same carve-out.
 
 ## Branch detection — never assume one
 
-Probe with the resolved `$SUBJECT`, never `$ARGUMENTS` (under detection `$ARGUMENTS` is empty and every probe would match nothing):
+Probe with the resolved `$SUBJECT`, never the raw argument (under detection the argument is empty and every probe would match nothing). ⚠️ **This probe is the documented exception to `agent-cmd/command-thin`** — the branch must be known *before* the `Skill` dispatch, and `Skill` exists only in the REPL, so the probe cannot move into the agent. Do not re-file it as leaked logic:
 
 - `find "24 Goals" -maxdepth 1 -iname "$SUBJECT.md"`, confirm `page_type: goal` in the frontmatter block (`awk '/^---$/{n++; next} n==1' <page> | grep -q '^page_type: goal'` — unscoped would match a guide's YAML template) → **goal branch**.
 - `find "23 Topics" -maxdepth 1 -iname "$SUBJECT.md"`, confirm `page_type: topic` the same way → **topic branch**.

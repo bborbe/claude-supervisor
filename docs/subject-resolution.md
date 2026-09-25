@@ -14,7 +14,7 @@ VAULT=$(vault-cli config list --output json | python3 -c "import json,sys,os;cwd
 
 Every page test below (`24 Goals/`, the vault's `topics_dir`) runs inside that vault. No match → STOP with `❌ cwd is not a configured vault — pass a goal or topic name and run from the vault root`; **never fall back to `personal`**.
 
-⚠️ Commands that carry their own `## Resolution` section derive the vault from it instead and skip this paragraph; `manager-drive` carries it because it has no such section.
+⚠️ **Who runs this paragraph, and who cannot.** `/manager-loop` and `/manager-status` derive the vault from their own `## Resolution` section and skip it. `/manager-drive` has no such section, so it carries the paragraph and runs it — it holds `Bash(python3:*)` and `Bash(vault-cli:*)`. ⚠️ **`/manager-verify` is the third case: it has no `## Resolution` section either, and its 2026-09-20 read-only re-scope trimmed `Bash(python3:*)`, `Bash(mkdir:*)` and `Bash(vault-cli:*)`** — so it can run neither this lookup nor the recording block below. It resolves the vault from cwd through its own literal `24 Goals/` / `23 Topics/` probes, which already assume the vault root, and records nothing. **That is not a regression** — it could never run either block; the extraction only made the gap visible. Its body states both divergences.
 
 ## The four sources
 
@@ -61,4 +61,4 @@ for n in (os.environ['CLAUDE_CODE_SESSION_ID']+'.json','last-'+vault+'.json'):
 
 **On a `last-<vault>` resolution, write neither.** A subject taken from that file was itself only inferred, and promoting it would widen the same way. The asymmetry is deliberate: session-local sources may be recorded, the cross-session one may not.
 
-⚠️ **A command whose `allowed-tools` omits `Bash(python3:*)` / `Bash(mkdir:*)` cannot run the block above** — `manager-verify` is the one such copy, because its read-only re-scope trimmed its tool surface. It follows the **contract** (which files, which cases) rather than the snippet, and says so in its own body. That difference is intentional and is the only region where its copy legitimately diverges.
+⚠️ **`/manager-verify` cannot run the block above, and the divergence covers two halves, not one.** Its `allowed-tools` omits `Bash(python3:*)`, `Bash(mkdir:*)` **and `Bash(vault-cli:*)`**, so it can run neither the vault lookup nor the recording write. It follows the **contract** (which files, which cases) rather than the snippet, and states both divergences in its own body. Intentional, and the only region where its copy legitimately diverges.
