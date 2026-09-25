@@ -17,6 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
+import { startAttentionPoll } from './attention-poll.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
@@ -50,6 +51,20 @@ const log = (...a) => {
   try {
     appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}`)
   } catch {}
+}
+
+// ── attention-store delivery ────────────────────────────────────────────────
+// An operator answers a `permission` item on the attention stack; the store records the
+// verdict; nothing pushes it here, because this process is stdio with no inbound
+// listener. So it reads — and that read is what makes the answer arrive without a Claude
+// session relaying it, which is the whole point: `answer_permission` exists only for a
+// session, and a session cannot release another session's parked gate.
+//
+// Started once at load and deliberately never stopped: the loop's lifetime is the
+// process's, which is also `pending`'s lifetime, so there is nothing to outlive. Absent
+// when the store is switched off (`SUPERVISOR_ATTENTION_STORE=off`) — see config.mjs.
+if (config.attentionStoreUrl) {
+  startAttentionPoll({ storeUrl: config.attentionStoreUrl, agents, pending, log })
 }
 
 // ── policy layer ────────────────────────────────────────────────────────────
