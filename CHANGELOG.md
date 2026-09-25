@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.57.2
 
 - fix: **a skipped necessity read is now reported instead of silently absent.** Step 8 runs only when the caller passes the topic's member goals, and the rule for a missing input was to *"skip it, omit its report section, and say nothing"* — so a caller that failed to pass them disabled the whole read and left a report indistinguishable from one that judged every task and found nothing wrong. Measured 2026-09-25 against the released `v0.57.1`: a run returned a complete sweep — buckets, optional-list findings, a collision read, a count discrepancy it flagged itself — with **no Necessity section anywhere in it**, and nothing in the output said whether the read had run clean or not run at all. The skip now prints `Necessity: SKIPPED — the caller passed no member goals` and is reported as a caller bug, matching the declared-optional-set rule that already treats a caller-side omission as reportable rather than absorbable.
 
