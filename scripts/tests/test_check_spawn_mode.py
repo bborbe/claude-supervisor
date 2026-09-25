@@ -50,6 +50,19 @@ RESUME_CALL = 'mcp__supervisor__spawn_agent(prompt="<the answer>", resume="<sid>
 NEW_WORKER_CALL = 'mcp__supervisor__spawn_agent(\n  prompt="/vault-cli:work-on-task \\"<task>\\"",\n  cwd="<dir>",\n)\n'
 
 
+#: A resume-only file that GRANTS the spawn tool. Its prose shows no spawn call at all, which
+#: is exactly how `agents/manager-drive.md` opened two workers directly on 2026-09-24 while
+#: its own text said to route through `/supervisor:open` — a site defined by a grant, not text.
+GRANT_NO_ANCHOR = (
+    "---\nallowed-tools:\n  - mcp__supervisor__spawn_agent\n---\n"
+    "Resume an exited worker with `spawn_agent(resume=<id>)`.\n"
+)
+GRANT_WITH_ANCHOR = (
+    "---\nallowed-tools:\n  - mcp__supervisor__spawn_agent\n---\n"
+    "Never open with it; see `docs/fleet-surface.md` § Spawn a worker item 6 for the rule.\n"
+)
+
+
 class CheckSpawnModeTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -57,7 +70,8 @@ class CheckSpawnModeTest(unittest.TestCase):
         (pathlib.Path(self.dir) / "scripts").mkdir()
         shutil.copy(SCRIPT, pathlib.Path(self.dir) / "scripts" / "check-spawn-mode.py")
         self.write("docs/fleet-surface.md", HOME)
-        for site in ("commands/open.md", "commands/manager-loop.md", "commands/manager-spawn.md"):
+        for site in ("commands/open.md", "commands/manager-loop.md", "commands/manager-spawn.md",
+                     "agents/manager-drive.md"):
             self.write(site, SITE)
 
     def write(self, relpath, text):
@@ -95,6 +109,21 @@ class CheckSpawnModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("interactive=true", result.stderr)
         self.assertIn("unhonoured", result.stderr)
+
+    def test_grant_without_the_anchor_fails(self):
+        """The dimension a text scan cannot reach. A file whose frontmatter grants the spawn
+        tool can OPEN a worker even when its prose only ever shows `resume=` calls, so it must
+        point at the rule — the gap that let `manager-drive` bypass the wiring."""
+        self.write("agents/new-agent.md", GRANT_NO_ANCHOR)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("grants", result.stderr)
+        self.assertIn("new-agent.md", result.stderr)
+
+    def test_grant_with_the_anchor_passes(self):
+        self.write("agents/new-agent.md", GRANT_WITH_ANCHOR)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_unknown_new_worker_site_fails(self):
         self.write("commands/brand-new.md", SITE + NEW_WORKER_CALL)
