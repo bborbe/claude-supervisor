@@ -30,6 +30,7 @@ import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatu
 import { findLiveHolder } from './resume-guard.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
+import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -324,6 +325,25 @@ function makeCanUseTool(agent) {
         log(`permission ${requestId} timed out -> deny`)
         settle({ behavior: 'deny', message: 'Supervisor did not answer within 15 minutes.' })
       }, PERMISSION_TIMEOUT_MS)
+
+      // A decision carried by a resume answers the gate it names, instead of parking a
+      // second time. Measured 2026-09-25: without this the resumed worker re-raised the
+      // identical call and parked again, so a carried `deny` re-asked rather than stopped
+      // — the decision had reached the transcript and not the gate. There is no original
+      // promise left to settle; it died with the spawner, and this is the gate that
+      // matters now.
+      //
+      // Consumed once — a decision answers one park, not the worker's whole future — and
+      // a carried `allow` is NOT auto-applied here (`serverWouldAllow: false`), because
+      // honouring one without the live policy check would make this a laundering path
+      // with a new spelling. A carried `deny` only ever withholds, so it always applies.
+      const carried = settleFromCarried(agent.carriedDecision, { toolName, blockedPath: opts.blockedPath ?? null })
+      if (carried && mayApplyAllow(agent.carriedDecision, { serverWouldAllow: false })) {
+        agent.carriedDecision = null
+        log(`permission ${requestId} answered from the decision ${agent.id} carried: ${carried.behavior} for ${carried.item_id}`)
+        settle({ behavior: carried.behavior, message: carried.message ?? undefined })
+        return
+      }
 
       pending.set(requestId, record)
       agent.status = 'blocked-on-permission'
@@ -669,6 +689,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     resolvedPolicyPath = resolved.path
   }
 
+  let carriedDecision = null
   if (resume) {
     const { live, probes, reason } = checkLiveness(resume)
     if (live === true) {
@@ -735,6 +756,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // attempt at something the operator settled once.
       prompt = `${renderResumePrompt({ decision: verdict.decision, parkRecord: record[PARK_FIELD] })}\n\n${prompt ?? ''}`.trim()
       log(`resume of ${resume} carries a ${verdict.decision.behavior} for ${verdict.decision.item_id}`)
+      // Carried on the AGENT, not just in the prompt. The decision has to reach the gate
+      // the resumed worker re-raises — measured 2026-09-25: without this the worker came
+      // back and parked on the identical tool call, so a carried `deny` re-asked instead
+      // of stopping. There is no original promise left to settle: it died with the
+      // spawner. The gate worth answering is the one raised in THIS server.
+      carriedDecision = buildCarriedDecision({ decision: verdict.decision, parkRecord: record[PARK_FIELD] })
     }
   }
 
@@ -754,6 +781,8 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // id, so the two fields together are what tell the operator which conversation
     // they are now in.
     resumedFrom: resume ?? null,
+    // The decision this resume carried, if any — consumed by the first matching gate.
+    carriedDecision,
     // The spawn edge, resolved once: the manager session that called spawn_agent, found
     // by walking up from our own pid to the nearest ancestor the live registry knows.
     // NOT our direct parent — `.mcp.json` starts this server through a `bun run`
