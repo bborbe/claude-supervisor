@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.54.6
 
 - fix: **a resume could land on a worker parked on a permission, putting two writers on one conversation.** The in-process resume guard matched `status === 'running'` only, but a worker blocked inside a tool call carries `blocked-on-permission` — so a parked worker slipped the guard, fell through to `checkLiveness`, which answers `live: false` for a headless worker (no pid, no registry entry, and the registry holds none of them), and was resumable while still parked. The test is now finished-vs-not, extracted to `server/resume-guard.mjs` with tests, so a new status is a deliberate edit there rather than a silent pass-through. Surfaced while planning a decision-carrying resume, which would have widened the same hole.
 
