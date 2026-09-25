@@ -25,10 +25,20 @@ state) nor on cwd (every vault session shares one, so cwd collides).
 The census is ALWAYS every live session — there is no project scope to get
 wrong, so a count can never silently undercount the fleet.
 
+Panes are read through `pane_titles()`, which returns `None` when the query failed
+and `{}` only when WezTerm genuinely answered with no panes. Those are different
+answers — a failed read cannot prove any session is headless — so every `--json`
+document carries `panes_read`, and `paned` is `null` rather than `0` when it is
+false. A `0` there is exactly what a broken transport used to report as a
+measurement.
+
 Usage: fleet-colours.py [--session ID] [--json]
   --session ID  resolve one session only (full id or unique prefix); prints its
                 colour and exits 0, for scripting.
-  --json        machine-readable output instead of the table.
+  --json        machine-readable output instead of the table. Both forms emit a
+                document — `{"sessions": [...], "panes_read": <bool>}` — and the
+                fleet-wide `counts` / `backlog` / `paned` / `total` are added when
+                no `--session` is given.
 
 The retired scoping flags (`--all`, `--vault NAME`) are accepted and ignored
 (removed 2026-09-19). They used to narrow the census to one project, which
@@ -148,14 +158,23 @@ def pid_ttys() -> dict[int, str]:
     return out
 
 
-def pane_titles() -> dict[str, dict]:
-    """tty_name → pane, for every pane wezterm reports."""
+def pane_titles() -> dict[str, dict] | None:
+    """tty_name → pane, for every pane wezterm reports; `None` when the query failed.
+
+    ⚠️ `None`, never `{}`: a failed `wezterm cli list` cannot prove a session is in no
+    pane any more than it can prove one is, so no caller may read it as "the fleet is
+    headless". `{}` is reserved for a WezTerm that answered with zero panes — a real
+    empty answer that must keep working. Same convention as `who-needs-me.py`'s
+    `wezterm_panes()`.
+    """
     try:
-        out = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
-                             capture_output=True, text=True, timeout=10).stdout
-        panes = json.loads(out)
+        r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return None
+        panes = json.loads(r.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return {}
+        return None
     return {p["tty_name"]: p for p in panes if p.get("tty_name")}
 
 
@@ -166,9 +185,16 @@ def project_label(cwd: str) -> str:
     return "/".join(parts[-2:]) if len(parts) >= 2 else (parts[-1] if parts else "—")
 
 
-def census(session: str | None) -> list[dict]:
+def census(session: str | None) -> tuple[list[dict], bool]:
+    """`(rows, panes_read)`. `panes_read` is `False` when the pane query failed, in
+    which case every row's `pane` is `None` because it is UNKNOWN — not because the
+    session is headless. The two states are one field apart on purpose: a consumer
+    that reads `paned` must read `panes_read` first, or a broken transport reads as
+    a measured zero.
+    """
     ttys = pid_ttys()
     panes = pane_titles()
+    panes_read = panes is not None
     rows = []
     for rec in registry():
         sid = rec["session_id"]
@@ -179,7 +205,7 @@ def census(session: str | None) -> list[dict]:
         colour = UNKNOWN if transcript is None else (last_colour(transcript) or DEFAULT)
         # pid → tty → pane. The registry carries the pid; wezterm exposes the tty.
         tty = ttys.get(rec["pid"]) if isinstance(rec["pid"], int) else None
-        pane = panes.get(tty) if tty else None
+        pane = (panes or {}).get(tty) if tty else None
         rows.append({
             "session_id": sid,
             "colour": colour,
@@ -188,7 +214,7 @@ def census(session: str | None) -> list[dict]:
             "transcript": str(transcript) if transcript else "",
             "pane": pane["pane_id"] if pane else None,
         })
-    return rows
+    return rows, panes_read
 
 
 def counts_of(rows: list[dict]) -> dict[str, int]:
@@ -198,7 +224,7 @@ def counts_of(rows: list[dict]) -> dict[str, int]:
     return counts
 
 
-def render(rows: list[dict]) -> None:
+def render(rows: list[dict], panes_read: bool) -> None:
     # The transcript path is a column, not decoration: it is the provenance of
     # every colour printed, so a reader can re-read the same file and check it.
     print(f"{'COLOUR':<9} {'SESSION':<10} {'PROJECT':<20} NAME")
@@ -219,7 +245,16 @@ def render(rows: list[dict]) -> None:
         print(f"other:                      {sum(other.values())}   (" +
               " · ".join(f"{k} {v}" for k, v in sorted(other.items())) + ")")
     print(f"unknown (no transcript):    {counts.get(UNKNOWN, 0)}")
-    print(f"\n{len(rows)} live sessions · {paned} in a wezterm pane · {len(rows) - paned} headless")
+    if panes_read:
+        print(f"\n{len(rows)} live sessions · {paned} in a wezterm pane · {len(rows) - paned} headless")
+    else:
+        # In place of the count, never beside it: `27 headless` with a caveat next to
+        # it still reads as a measurement, and the count line is where the false claim
+        # lived. The session count stays because this run did measure it — only the
+        # pane half is withheld.
+        print(f"\n{len(rows)} live sessions · ⚠️  `wezterm cli list` unreadable — pane "
+              "membership withheld. A session that cannot be checked is UNKNOWN: not "
+              "in a pane, and not headless either.")
 
 
 def main() -> int:
@@ -232,29 +267,35 @@ def main() -> int:
         return 2
 
     if session:
-        rows = census(session)
+        rows, panes_read = census(session)
         if not rows:
             print(f"no live session matching {session!r}", file=sys.stderr)
             return 1
         if as_json:
-            print(json.dumps(rows, indent=2))
+            # Same document shape as the census form. A bare array here would carry
+            # `"pane": null` with no `panes_read` anywhere, which is the ambiguity
+            # this whole change exists to remove.
+            print(json.dumps({"sessions": rows, "panes_read": panes_read}, indent=2))
         else:
             for r in rows:
                 print(r["colour"])
         return 0
 
-    rows = census(None)
+    rows, panes_read = census(None)
     if as_json:
         counts = counts_of(rows)
         print(json.dumps({
             "sessions": rows,
             "counts": counts,
             "backlog": sum(counts.get(c, 0) for c in BACKLOG),
-            "paned": sum(1 for r in rows if r["pane"] is not None),
+            # `None`, never `0`: a failed read cannot count panes, and `0` is exactly
+            # what a broken transport used to report as a measured fact.
+            "paned": sum(1 for r in rows if r["pane"] is not None) if panes_read else None,
+            "panes_read": panes_read,
             "total": len(rows),
         }, indent=2))
         return 0
-    render(rows)
+    render(rows, panes_read)
     return 0
 
 
