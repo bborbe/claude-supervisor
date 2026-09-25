@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.54.5
 
 - fix: **a jump handover named a command and an actor instead of handing over the link.** `commands/manager-loop.md` told a manager to *"batch a `you run: /supervisor:jump <pane-id>` line"*, while the same file's `**A relay never releases a gate**` clause and `commands/fleet-loop.md` hand over the one-line output of `scripts/jump-link.py` — verb-free, as `manager-status` / `fleet-status` render their `jump:` rows. The command form is the one that failed: measured 2026-09-21, an operator answered a bare `y` against `you run: /supervisor:jump 1121` and released nothing, twice, the second time with the gate genuinely open. `/supervisor:jump` is the **executor** and these commands **emit links without running it** (`commands/jump.md:2`, `docs/session-tiers.md:97-98`), so the handover now takes the verb-free link form at all three sites, with the gate release stated as the operator's **own keystroke in that pane**. The passage also gains a **one-action-per-line** rule, so a second action (e.g. `/reload-plugins`) can never be bundled onto the handover and make the operator's reply ambiguous between them. Not a namespace change — `/jump` → `/supervisor:jump` was fixed separately. ⚠️ This does **not** settle the standing ask *"jump me to a raised gate without asking when exactly one is open"* — that describes the manager running the jump, a separate behaviour with no command home yet.
 
