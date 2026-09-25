@@ -30,48 +30,15 @@ It resolves its subject **exactly as `/manager-loop` does** — same branch dete
 
 ## Subject resolution — when `$1` is omitted
 
-**This block is shared with `/manager-loop`, `/manager-drive` and `/manager-verify`. The resolution rule is identical in all four commands; the sentences that legitimately differ are enumerated here rather than counted** — a count is the part that rots: this line read *"exactly four"* for two copies, and any third consumer edits it again, which makes it a liability rather than a guarantee. **Between the three plugin copies exactly four differ** — the sibling names on this line, the STOP line, the clause ending "No fallback, ever", and the closing sentence about which contract the write changes. **`/manager-verify` differs additionally in exactly one region** — the recording paragraphs, which stay prose there because its `allowed-tools` deliberately omits `Bash(python3:*)` and `Bash(mkdir:*)`, so the runnable blocks below are not available to it. `/manager-drive` also carries a leading **vault-resolution paragraph** (cwd → vault-cli config path), because it has no `## Resolution` section of its own to derive the vault in. Change one, change the others; the keep-in-sync contract is the same one `/vault-cli:prepare-compact` and `/vault-cli:post-compact` carry for their check blocks. Three commands that resolve a subject differently will disagree about which tree is being reported, and the disagreement is silent.
+**The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the vault resolution, the four-source chain, the case-insensitive vault test, the "no fallback, ever" clause, the `Subject:` line, and the recording contract (which files, on which resolution). Read it there; **it is not restated here.**
 
-A bare invocation takes the first source that yields a **real page**:
+**Only source 3 stays inline**, because it is the one source no agent can be handed — a subagent runs in a fresh context and cannot see the parent conversation:
 
-1. **Session state** — `~/.claude/state/worker-manager/<CLAUDE_CODE_SESSION_ID>.json`, shape `{"subject","vault","branch","resolved_at"}`. Accepted only when `vault` matches the resolved vault **and** `subject` still resolves to a page. Compare **case-insensitively** — the vault is the lowercase vault-cli config `name` (`personal`), but state files written before 2026-09-23 may carry display case (`Personal`); a strict match silently drops to source 2. This is what makes a subject named once stick across the ticks of one session.
-2. **Session name** — the name this session carries, read from `~/.claude/sessions/$CLAUDE_PID.json` → `.name`. **`CLAUDE_PID`, not `CLAUDE_CODE_SESSION_ID`** — that directory is pid-keyed, so the session-id key the source above uses does not address it; both variables are exported, and this is the one lookup that needs the pid. Strip leading decoration before matching (`⚙ ` prefixes 11 of 47 live names), then accept only when the stripped name resolves to a goal or topic page — the same test every other source uses. A name that resolves to nothing, a name that resolves only to a **task** page, and a missing pid file are all **silent misses**: fall through to the next source, never error. Pid files are transient (the record this rule was filed from was gone hours later), and most session names are task names — measured over the 24 named Personal sessions on disk, 1 resolved to a topic, 0 to a goal, 20 to a task. **The source is narrow by construction.** It does not exist to resolve most sessions; it exists so that a session named after its own subject can never be overruled by another session's leftovers.
-3. **Conversation** — the priority order `/vault-cli:task-status` uses in its Phase 2: the most recent `/manager-loop`, `/manager-status`, `/manager-drive` or `/manager-verify` argument in this conversation, then the most recent goal/topic page referenced **as a subject** (a wikilink or a read/edited path — not a prose mention).
-4. **Vault's last subject** — `~/.claude/state/worker-manager/last-<vault>.json`, same shape and same test. **The fallback of last resort** — below this session's own state, below its own name, below the conversation. It still earns its place: it carries a subject named in one session into another, and the vault in the filename is why two vaults never clobber each other. It ranks last because it is the only source that is not about *this* session. On 2026-09-18 a session named *Dark Factory Pipeline Hygiene* rendered a full, correct-looking snapshot of **Notification System** — this file had been written that morning by a different session, and at position 2 it outranked both the session's own name and the conversation.
-5. **Nothing resolves → STOP.** Print `❌ No subject detected. Pass a goal or topic name: /manager-status "<name>"` and do nothing else.
+3. **Conversation** — the most recent `/supervisor:manager-loop`, `/supervisor:manager-status`, `/supervisor:manager-drive` or `/supervisor:manager-verify` argument in this conversation, then the most recent goal/topic page referenced **as a subject** (a wikilink or a read/edited path — not a prose mention).
 
-**No fallback, ever.** Never a filename glob, a `goals:` scan, a theme match, or a content grep. The `$1` no-fallback rule exists because scope-by-globbing is the failure it prevents; a silent guess at the *subject* is the same failure one level up, and worse here — a snapshot rendered against the wrong tree reads exactly like a correct one.
+**Nothing resolves → STOP.** Print `❌ No subject detected. Pass a goal or topic name: /manager-status "<name>"` and do nothing else.
 
-**Print the source.** The first output line is `Subject: <name> (from <explicit|session|name|conversation|last>)`, so a wrong pick is interruptable before the report runs — the same reason `/vault-cli:task-status` prints `Detected task:` before its report.
-
-**Record on explicit use.** When `$1` is supplied and resolves, write **both** files before proceeding:
-
-```bash
-mkdir -p ~/.claude/state/worker-manager && python3 -c "
-import json,os,sys,datetime
-subject,vault,branch=sys.argv[1:4]; vault=vault.lower()
-d=os.path.expanduser('~/.claude/state/worker-manager'); os.makedirs(d,exist_ok=True)
-rec={'subject':subject,'vault':vault,'branch':branch,'resolved_at':datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
-for n in (os.environ['CLAUDE_CODE_SESSION_ID']+'.json','last-'+vault+'.json'):
-    json.dump(rec,open(os.path.join(d,n),'w'),indent=2)
-" "$SUBJECT" "$VAULT" "$BRANCH"
-```
-
-**Record a session-local resolution too — but only the session file.** When a bare invocation resolves from the **session name** or the **conversation**, write `<CLAUDE_CODE_SESSION_ID>.json` and **never** `last-<vault>.json`, so the subject sticks across this session's later ticks without republishing this session's identity to every other session in the vault:
-
-```bash
-mkdir -p ~/.claude/state/worker-manager && python3 -c "
-import json,os,sys,datetime
-subject,vault,branch=sys.argv[1:4]; vault=vault.lower()
-d=os.path.expanduser('~/.claude/state/worker-manager'); os.makedirs(d,exist_ok=True)
-rec={'subject':subject,'vault':vault,'branch':branch,'resolved_at':datetime.datetime.now().astimezone().isoformat(timespec='seconds')}
-json.dump(rec,open(os.path.join(d,os.environ['CLAUDE_CODE_SESSION_ID']+'.json'),'w'),indent=2)
-" "$SUBJECT" "$VAULT" "$BRANCH"
-```
-
-**Never write on a `last-<vault>` resolution — neither file.** A subject taken from that file was itself only inferred, and promoting it into session state would pin it above this session's own name for every later tick. The widening is asymmetric on purpose: session-local sources may be recorded, the cross-session one may not.
-
-**A bare invocation writes at most the session file** — `<CLAUDE_CODE_SESSION_ID>.json`, and only on a session-local resolution; never `last-<vault>`, never anything in the vault. That is why this command's contract reads "no vault writes, no messages, no loop" rather than "zero side effects": the one file it can write lives under `~/.claude/state/`, and it is keyed to this session alone.
+**Print the source.** The first output line is `Subject: <name> (from <explicit|session|name|conversation|last>)`, so a wrong pick is interruptable before the report runs.
 
 ## Resolution — detect the branch, then read the declared set (same as manager-loop)
 
