@@ -27,6 +27,7 @@ import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
+import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -283,6 +284,10 @@ function makeCanUseTool(agent) {
         clearTimeout(timer)
         pending.delete(requestId)
         if (agent.status === 'blocked-on-permission') agent.status = 'running'
+        // The park is over, so the durable record must stop advertising it — on every
+        // settle, not only on the answer: a timeout, a deny and an allow all end the
+        // park, and a record left behind would offer a resume a decision nobody made.
+        writeLedger(agent, clearParkPatch())
         resolve(result)
       }
       const record = {
@@ -307,6 +312,27 @@ function makeCanUseTool(agent) {
       pending.set(requestId, record)
       agent.status = 'blocked-on-permission'
       agent.permissions.push(requestId)
+      // The durable half. `pending` dies with this process, and the spawner exiting is
+      // the case this exists for, so the park lands on the per-worker ledger record —
+      // already keyed on session_id, already outliving the process. Best-effort in both
+      // directions: `writeLedger` logs and returns when the session id has not resolved
+      // yet (so an early park is not durable *yet*, rather than fatal), and the build is
+      // guarded because a park that cannot describe itself must not take the gate down
+      // with it.
+      try {
+        writeLedger(agent, {
+          [PARK_FIELD]: buildParkRecord({
+            requestId,
+            toolName,
+            input,
+            decisionReason: opts.decisionReason,
+            blockedPath: opts.blockedPath,
+            requestedAt: record.requestedAt,
+          }),
+        })
+      } catch (error) {
+        log(`WARNING: could not build the park record for ${requestId}: ${error.message}`)
+      }
       log(`permission requested by ${agent.id}: ${toolName} (${requestId})`)
       for (const waiter of [...waiters]) waiter(publicPerm(record))
     })
@@ -634,12 +660,21 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
         error: `session ${resume} is still running (${reason}) — close it before resuming, or you will have two writers on one conversation`,
       }
     }
-    // The half `checkLiveness` cannot see, and the only channel that can see it: a
-    // headless worker this server spawned is an in-process SDK `query()`, so it has no
-    // pid for the registry and no argv for any process probe. Its record here is the
-    // sole evidence it is alive, and `status` genuinely closes — set at spawn and
-    // cleared to `done`/`error` when the query ends — unlike the ledger's `running`,
-    // which never closes at all.
+    // The channel that answers for this server's own spawns: a headless worker here is
+    // an in-process SDK `query()`, and its record in this table is authoritative for
+    // *this* server. `status` genuinely closes — set at spawn and cleared to
+    // `done`/`error` when the query ends — unlike the ledger's `running`, which never
+    // closes at all.
+    //
+    // ⚠️ Corrected 2026-09-25 by measurement. This comment used to claim a headless
+    // worker "has no pid for the registry and no argv for any process probe", and the
+    // guard's scope was reasoned from that. Measured instead: it DOES have a pid — the
+    // SDK's own `claude-agent-sdk-*` binary — and DOES register in `~/.claude/sessions/`
+    // while it is alive, carrying `kind: interactive` like any tab worker, so `kind`
+    // cannot tell the two apart. `checkLiveness` therefore answers `live: true` and
+    // refuses a parked worker at the registry probe first. This guard is a second line,
+    // not the first — it stays because it is the only one for a worker the registry
+    // cannot see.
     //
     // Without this, a `false` from the registry would be read as "closed" and a live
     // worker resumed: two writers on one conversation, the corruption this guard
