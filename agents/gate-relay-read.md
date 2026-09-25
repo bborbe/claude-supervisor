@@ -58,12 +58,14 @@ Read a pane with `wezterm cli get-text --pane-id <N>`. Use `wezterm cli list` on
 Return **≤ 4N + 2 lines** (N = panes read), hard-capped at 25 — one block per pane, in this exact shape:
 
 ```
-GATE-RELAY-READ <$(date -u +%FT%TZ)> · <N> panes
+GATE-RELAY-READ <timestamp> · <N> panes
 pane <id> · <kind: question|selection-modal|wizard|permission-modal|no-gate|gone|unreadable> · composer <empty|non-empty>
   Q: <question text verbatim, ≤100 chars>
   OPTS: <label> | <label> | …            — or: (none enumerated)
   REC: <the gate's own recommended pick>  — or: none stated
 ```
+
+`<timestamp>` is the output of running `date -u +%FT%TZ` via Bash **this run** — execute it and paste the result. Never write a placeholder (`00:00:00Z`, `13:xx:xxZ`) or copy the command text: measured 2026-09-25, both agents emitted placeholders while holding the `date` grant, which makes every header un-orderable against the pane reads it reports.
 
 Then one closing line: `NOTES  <truncations, refusals, omitted panes, runbook disagreements, or (none)>`.
 

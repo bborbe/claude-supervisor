@@ -71,9 +71,11 @@ For each pane, in the order given:
 Return **≤ 12 lines**, one line per pane, then a closing NOTES line:
 
 ```
-GATE-RELAY-SEND <$(date -u +%FT%TZ)> · <N> panes
+GATE-RELAY-SEND <timestamp> · <N> panes
 pane <id> · <worker> · delivered|not sent (<why>)|handover (<kind>)|gone|send failed|submitted: unverified · <one-line detail>
 ```
+
+`<timestamp>` is the output of running `date -u +%FT%TZ` via Bash **this run** — execute it and paste the result. Never write a placeholder (`00:00:00Z`, `13:xx:xxZ`) or copy the command text: measured 2026-09-25, both agents emitted placeholders while holding the `date` grant, which makes every header un-orderable against the pane reads it reports.
 
 `delivered` requires both halves: the composer cleared **and** the worker is visibly working. A cleared composer alone is not delivery.
 `not sent` carries one of four causes, never a bare form: `gate cleared` · `question changed` · `pane gone` · `unclassifiable`.
