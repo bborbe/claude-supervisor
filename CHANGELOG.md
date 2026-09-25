@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `manager-sweep-reader` gains a topic-level **necessity read** (step 8) — enumerates by each task's `goals:` frontmatter rather than a goal's curated `# Tasks` section (measured 42% coverage), reports the size of the set it inverted, and returns exactly three verdicts: `needed`, `product`, `not needed`. Adds the **product clause** that neither `verify-topic` checks 5–6 nor the two vault-cli anchors carry, so a per-alert output task is reportable as the goal's product instead of silently clean. Carries an explicit `<constraints>` carve-out and a matching `<error_handling>` rule so the reporting path never widens the swept set, and a necessity verdict never changes a bucket, an icon, a count or a section placement.
+
 ## v0.56.3
 
 - fix: **the gate relay dispatched once per pane, which costs more than relaying by hand.** `commands/fleet-loop.md` said *"For each entry … read the live question through the `gate-relay-read` agent"*, and `manager-loop.md` dispatched the send leg per pane, so a round with N blocked panes paid N dispatches. Each dispatch carries **~2.2 KB of fixed main-context overhead** before any content — the async launch stub (~1.1 KB) plus the hand-back's harness wrapper (~1 KB). Measured 2026-09-25 on 0.56.0 over 4 real gates: a single-gate read+send relay cost **5,527 B** against the **3,944 B** hand-rolled baseline, while one read covering two panes cost **1,760 B per gate**; overall 3,154 B/gate, a ~20% saving instead of the ≥50% the change was for. Both commands and both agents now require **one read dispatch and one send dispatch per round**, carrying every pane and every answer; the fleet-loop check that confirms a gate is open folds into the same read rather than dispatching per report. No behaviour change inside either agent — both already processed a pane list.
