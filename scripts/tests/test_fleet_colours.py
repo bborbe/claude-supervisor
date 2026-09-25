@@ -270,9 +270,23 @@ class CensusTransportTest(unittest.TestCase):
                 _rc, out, _err = self.run_census(panes, ("--json",))
                 self.assertTrue(json.loads(out)["panes_read"])
 
+    def test_session_json_carries_panes_read_too(self):
+        """The `--session` document must not drop the flag the census form carries.
+
+        A bare row array here would carry `"pane": null` with no `panes_read`
+        anywhere, which is the ambiguity this change exists to remove — on the one
+        output the census form does not cover.
+        """
+        _rc, out, _err = self.run_census(None, ("--session", "s1", "--json"))
+        self.assertFalse(json.loads(out)["panes_read"])
+        _rc, out, _err = self.run_census(self.PANES, ("--session", "s1", "--json"))
+        self.assertTrue(json.loads(out)["panes_read"])
+
     def test_broken_and_empty_are_distinguishable(self):
         """The defect itself: the two states must not answer identically."""
         self.assertNotEqual(self.run_census(None)[1], self.run_census([])[1])
+        self.assertNotEqual(self.run_census(None, ("--json",))[1],
+                            self.run_census([], ("--json",))[1])
 
 
 if __name__ == "__main__":

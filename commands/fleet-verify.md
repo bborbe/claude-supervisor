@@ -82,7 +82,9 @@ render the same.
    from its text output and intersect against the live pane ids; **name every id that does not
    exist**, with the session name and usage next to it. Take the live id set from
    `wezterm cli list --format json` (`pane_id`). `fleet-colours.py --json` carries a real `pane`
-   int or `null` per session and is the cleanest join for attributing an id back to a session.
+   int or `null` per session and is the cleanest join for attributing an id back to a session —
+   but read its `panes_read` flag first: when that is `false` the pane read itself failed, so
+   every `null` means UNKNOWN rather than "headless" and the join proves nothing.
 
 3. **EXACT SESSION→TASK RESOLUTION (read).** A session's task must be found by an **exact full-id
    match on the `claude_session_id:` frontmatter field** — never by a prefix substring, and never

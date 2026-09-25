@@ -25,10 +25,20 @@ state) nor on cwd (every vault session shares one, so cwd collides).
 The census is ALWAYS every live session — there is no project scope to get
 wrong, so a count can never silently undercount the fleet.
 
+Panes are read through `pane_titles()`, which returns `None` when the query failed
+and `{}` only when WezTerm genuinely answered with no panes. Those are different
+answers — a failed read cannot prove any session is headless — so every `--json`
+document carries `panes_read`, and `paned` is `null` rather than `0` when it is
+false. A `0` there is exactly what a broken transport used to report as a
+measurement.
+
 Usage: fleet-colours.py [--session ID] [--json]
   --session ID  resolve one session only (full id or unique prefix); prints its
                 colour and exits 0, for scripting.
-  --json        machine-readable output instead of the table.
+  --json        machine-readable output instead of the table. Both forms emit a
+                document — `{"sessions": [...], "panes_read": <bool>}` — and the
+                fleet-wide `counts` / `backlog` / `paned` / `total` are added when
+                no `--session` is given.
 
 The retired scoping flags (`--all`, `--vault NAME`) are accepted and ignored
 (removed 2026-09-19). They used to narrow the census to one project, which
@@ -154,8 +164,8 @@ def pane_titles() -> dict[str, dict] | None:
     ⚠️ `None`, never `{}`: a failed `wezterm cli list` cannot prove a session is in no
     pane any more than it can prove one is, so no caller may read it as "the fleet is
     headless". `{}` is reserved for a WezTerm that answered with zero panes — a real
-    empty answer that must keep working. Same convention as `jump-link.py` and
-    `who-needs-me.py`'s `wezterm_panes()`.
+    empty answer that must keep working. Same convention as `who-needs-me.py`'s
+    `wezterm_panes()`.
     """
     try:
         r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
@@ -214,7 +224,7 @@ def counts_of(rows: list[dict]) -> dict[str, int]:
     return counts
 
 
-def render(rows: list[dict], panes_read: bool = True) -> None:
+def render(rows: list[dict], panes_read: bool) -> None:
     # The transcript path is a column, not decoration: it is the provenance of
     # every colour printed, so a reader can re-read the same file and check it.
     print(f"{'COLOUR':<9} {'SESSION':<10} {'PROJECT':<20} NAME")
@@ -239,11 +249,12 @@ def render(rows: list[dict], panes_read: bool = True) -> None:
         print(f"\n{len(rows)} live sessions · {paned} in a wezterm pane · {len(rows) - paned} headless")
     else:
         # In place of the count, never beside it: `27 headless` with a caveat next to
-        # it still reads as a measurement, and the count line is exactly where the
-        # false claim lived.
-        print("\n⚠️  `wezterm cli list` unreadable — pane membership withheld. "
-              "A session that cannot be checked is UNKNOWN: not in a pane, and not "
-              "headless either.")
+        # it still reads as a measurement, and the count line is where the false claim
+        # lived. The session count stays because this run did measure it — only the
+        # pane half is withheld.
+        print(f"\n{len(rows)} live sessions · ⚠️  `wezterm cli list` unreadable — pane "
+              "membership withheld. A session that cannot be checked is UNKNOWN: not "
+              "in a pane, and not headless either.")
 
 
 def main() -> int:
@@ -256,12 +267,15 @@ def main() -> int:
         return 2
 
     if session:
-        rows, _ = census(session)
+        rows, panes_read = census(session)
         if not rows:
             print(f"no live session matching {session!r}", file=sys.stderr)
             return 1
         if as_json:
-            print(json.dumps(rows, indent=2))
+            # Same document shape as the census form. A bare array here would carry
+            # `"pane": null` with no `panes_read` anywhere, which is the ambiguity
+            # this whole change exists to remove.
+            print(json.dumps({"sessions": rows, "panes_read": panes_read}, indent=2))
         else:
             for r in rows:
                 print(r["colour"])
