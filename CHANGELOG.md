@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.56.2
 
 - fix: **a decision carried by a resume now answers the gate, instead of re-asking it.** Measured 2026-09-25: a worker parked on a permission, its spawner was killed, and it was resumed carrying a `deny`. It came back and **re-raised the identical tool call**, parking a second time — the decision had reached the transcript and not the gate. The framing that misleads here is "settle the original promise": that promise died with the spawner's process, so for a spawner-gone worker there is nothing left to settle. The gate worth answering is the one the resumed worker raises in the server that now hosts it, and `server/decision-settle.mjs` decides which carried decision may answer it. Deliberately narrow: a different tool never matches, and a park that named a blocked path requires that path — because applying a decision to a gate it never answered is the replay failure the resume validation already refuses one level up. **Consumed once**, so a decision answers one park and not the worker's whole future, and a carried **`allow` is not auto-applied** — honouring one without the live policy check would make this a laundering path with a new spelling. A carried `deny` only ever withholds, so it always applies.
 
