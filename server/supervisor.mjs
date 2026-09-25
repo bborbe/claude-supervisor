@@ -24,10 +24,11 @@ import { resolveSpawnMode, unknownKeyWarnings, workerEnvFor } from './spawn-mode
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
-import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
+import { buildRecord, parentSessionId, readRecord, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
+import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -589,7 +590,7 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId, chip })
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, which is
 // what the guard below — see liveness.mjs — refuses rather than silently producing.
-async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: policyPath, windowId, role }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role }) {
   const id = `agent_${++seq}`
 
   // Resolved first, because every guard below asks which way this worker opens and they
@@ -700,6 +701,26 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, policy: pol
       }
     }
     log(`resume of ${resume} allowed: ${reason} [probes: ${probes.join(', ') || 'none'}]`)
+
+    // A decision can only ride a resume, and only one that names the park on record.
+    //
+    // The record is this server's own evidence that a park happened: written at park
+    // time and — in the case this exists for — never cleared, because the `settle` that
+    // would clear it lives in the spawner that died. That is what makes it the durable
+    // half of the answer, and why this check reads it rather than the attention store.
+    if (decision) {
+      const record = readRecord(config.ledgerDir, resume)
+      const verdict = validateDecision({ decision, parkRecord: record?.[PARK_FIELD] ?? null, sessionId: resume })
+      if (!verdict.ok) {
+        log(`refusing a decision on resume ${resume}: ${verdict.error}`)
+        return { error: verdict.error }
+      }
+      // The decision is information for the worker's next turn, not a re-run of the
+      // tool: the gate was already answered, and replaying the call would be a second
+      // attempt at something the operator settled once.
+      prompt = `${renderResumePrompt({ decision: verdict.decision, parkRecord: record[PARK_FIELD] })}\n\n${prompt ?? ''}`.trim()
+      log(`resume of ${resume} carries a ${verdict.decision.behavior} for ${verdict.decision.item_id}`)
+    }
   }
 
   const agent = {
@@ -938,6 +959,17 @@ const TOOLS = [
           description:
             'Session id to continue. Requires interactive:false — a tab worker cannot honour it (the tab path launches the cc-* launcher, which is never handed the flag) and the call is refused rather than quietly opening a fresh conversation. The session MUST be closed: resuming a live one puts two writers on one conversation, so a session found still running is refused, and so is one whose liveness cannot be determined. The resumed worker is created here, so unlike the original session it IS supervised and its prompts park for the manager.',
         },
+        decision: {
+          type: 'object',
+          description:
+            'The answer to carry into the resumed worker — for a worker that was parked on a permission when its spawner died, which is the one case `resume` alone cannot help with. Shape: { item_id, behavior: "allow"|"deny", message? }. `item_id` must name the park on that session\'s ledger record: a bare `allow` with no `item_id` is refused, and so is a decision naming a different park. The worker is TOLD the decision; the tool is not re-run, because the gate was already answered once. Requires `resume`.',
+          properties: {
+            item_id: { type: 'string' },
+            behavior: { type: 'string', enum: ['allow', 'deny'] },
+            message: { type: 'string' },
+          },
+          required: ['item_id', 'behavior'],
+        },
         policy: {
           type: 'string',
           description:
@@ -1060,6 +1092,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // an explicit mode on every call and never consult anything else.
           interactive: typeof args.interactive === 'boolean' ? args.interactive : undefined,
           resume: args.resume,
+          decision: args.decision,
           policy: args.policy,
           // Passed through raw and validated in role-map.mjs, which owns the legal values
           // and the refusal message — the same split as the spawn mode below.
