@@ -20,15 +20,25 @@ written before 2026-09-23 carry display case (`Personal`), and a strict join res
 a directory that does not exist. The subject is the record's own, slugged by the
 gate's `slug()`.
 
-**The flat `sweep-gate/<topic>.*` tree is retired — do not read it.** It was the
-detached `sweep-gate-ledger-loop.sh` host's state, keyed by topic alone with no vault
-segment. That loop was retired when the launchd host landed (2026-09-22 22:20), and
-the launchd host exports `SWEEP_GATE_STATE_DIR` to write the per-vault tree instead.
-Verified 2026-09-23 21:06: no detached loop running (`pgrep -f sweep-gate-ledger-loop`
-empty), the flat tree stale for every topic (`manager-layer` 13:13, `notification-system`
-Sep 20, `strategy-candidate-pipeline` Sep 22) while the per-vault tree was fresh at its
-900s cadence. The code still supports a detached loop — `GATE_SCRIPTS` names it, and the
+**The flat `sweep-gate/<topic>.*` tree is not where the gate writes — do not resolve gate
+state there.** It was the detached `sweep-gate-ledger-loop.sh` host's state, keyed by topic
+alone with no vault segment. That loop was retired when the launchd host landed (2026-09-22
+22:20), and the launchd host exports `SWEEP_GATE_STATE_DIR` to write the per-vault tree
+instead. The code still supports a detached loop — `GATE_SCRIPTS` names it, and the
 `ps` match above reports it — but its state tree is no longer where the gate writes.
+
+⚠️ **Corrected 2026-09-26: the flat tree is NOT dead, and this paragraph used to say it was.**
+It read *"the flat tree is retired — do not read it"* and cited *"the flat tree stale for
+every topic (verified 2026-09-23 21:06)"*. Re-measured: the tree is **live** —
+`attention-routing.tick.txt` written 17:43, `attention-routing.{arms,cadence,json}` at
+17:43–17:44 — so something still writes it. What survives from the old claim is the *kind*
+of state: the flat tree carries **loop-cadence records** (`.cadence` / `.arms` / `.stopped`,
+see `docs/restart-worker.md:83`), not gate state, and none of the three gate scripts resolves
+it (`sweep-gate-notify-tick.sh:52` and `sweep-gate-notify-stale.sh:13` both
+`BASE="$HOME/.claude/state/sweep-gate-loop"`; `sweep-gate-adhoc.py:49` likewise). Resolving
+**gate** state there still finds nothing — but a `.tick.txt` in that tree is real for a live
+topic, and **its writer is unidentified**. Treat the writer as open, and never let a
+flat-tree absence test stand in for a gate-state check.
 Reading the flat path is what made this probe report a live gate as missing.
 
 **The gate probe matches the script ARGUMENT's basename, never a substring of the
