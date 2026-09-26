@@ -1,0 +1,29 @@
+name: Changelog Fold Guard
+
+# A release cut renames `## Unreleased` to `## vX.Y.Z`. A PR branched before the
+# cut still carries `## Unreleased`, and GitHub's merge resolution matches the
+# bullet list rather than the heading — so the PR's bullets are spliced into the
+# already-released section. The merge is clean, nothing warns, and the changelog
+# claims work the tag does not contain. With no `## Unreleased` left, the release
+# watcher has nothing to cut and this repo silently stops releasing. Six such
+# folds were repaired by hand here and in two sibling repos before this guard.
+#
+# WHY `push` ON MASTER, AND WHY THE TRIGGER LIVES HERE:
+# the fold happens in GitHub's merge resolution, after the branch is already
+# final. A pull-request check runs against that branch and is structurally blind
+# to it, so this cannot be a `pull_request` job — and it cannot be a rule in
+# bborbe/coding's rule base either, because the pr-review bot evaluates rules on
+# the PR. `push` on master is the only event that sees the folded state.
+#
+# `@master` rather than a pinned tag is deliberate: the guard is one tool with one
+# source of truth, and a stale pin would silently keep an older check running.
+#
+# The guard tool ships from bborbe/coding; this file is only the wiring.
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  changelog-fold:
+    uses: bborbe/coding/.github/workflows/changelog-fold-guard.yml@master
