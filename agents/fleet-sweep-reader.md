@@ -62,6 +62,22 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 7. **Unmanaged topics (Step 2d).** Primary signal: the sentence `No manager session resolves for this topic` in any pane read or gate preamble you saw. Secondary: a 2c subject group with **≥2 live workers** and no roster row resolving as that topic's manager (the ≥2 is a guess, not a measurement). For each, check the topic page exists under the vault's `topics_dir`; report topic, workers, page present/absent.
 
+7b. **Render the jump link on every escalation-bearing row — this is what keeps the per-row pane read out of the manager's context.** The manager used to resolve one pane per `ESCALATION` row itself (`commands/fleet-loop.md` Step 3b, `commands/fleet-drive.md` step 5); that read now happens here, once, using the same two scripts the sweep already has.
+
+   ```bash
+   python3 $P/jump-link.py "$(python3 $P/who-needs-me.py --pane-for <sid8>)"   # → the rendered link
+   ```
+
+   `who-needs-me.py --pane-for <sid8>` prints the bare pane id on success and exits non-zero with a reason on failure; `jump-link.py` turns that id into the one-line rendered link (a clickable URL, or the `/supervisor:jump <N>` fallback when the token is absent). ⚠️ **Never pass `--label`** — it costs an extra pane-list query per row, which is the per-row cost this step exists to remove.
+
+   Three cases, and the reason string is **never** emitted without an attempt:
+
+   - **A row already carrying `pane <id>`** (`BLOCKED`, `CLOSERS`) → render from that id; no lookup needed.
+   - **A `CLASSIFICATION` row of class `parked` with no pane** — the drive agent's candidates, and the case that regresses silently if skipped → **attempt `--pane-for <sid8>` first**; render the link on the `CLASSIFICATION` row when it succeeds.
+   - **Only when that lookup fails** → emit `no pane — <the reason who-needs-me.py printed>`, and quote the command and its non-zero exit in NOTES. A reason emitted without an attempt is indistinguishable from a stub and strips the jump link from rows that *are* resolvable today.
+
+   ⚠️ **No new tool grant is needed** — the sweep already holds `Bash(python3:*)` and already runs `who-needs-me.py` (step 1). Never query the pane list directly; that lookup belongs to `who-needs-me.py`'s `pane_for()`, which owns the session-registry + pane-list join. This agent's `allowed-tools` gains nothing.
+
 8. **Classify (Step 3).**
 
    | Signal | Reading |
@@ -89,11 +105,11 @@ Return **≤ 40 lines**, exactly these sections, each printed as `(none)` rather
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
 CLASSIFICATION  <counts per class>                 — or: UNKNOWN (pass not run)
-  <name> [<session id 8>] · <status> · <class> · <task file basename | —> · <open boxes | —>        ← only non-progressing rows
+  <name> [<session id 8>] · <status> · <class> · <task file basename | —> · <open boxes | —> · <link | —>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)
-  <name> · pane <id> · <gate text, ≤80 chars>
+  <name> · pane <id> · <link> · <gate text, ≤80 chars>
 CLOSERS (rendered panels — last-turn closer line)
-  <name> · pane <id> · <closer text, ≤80 chars>                     ← only for rows in CLASSIFICATION
+  <name> · pane <id> · <link> · <closer text, ≤80 chars>            ← only for rows in CLASSIFICATION
 ORPHAN CANDIDATES (park filter + 7d bound applied)  — or: UNKNOWN (check failed)
   <task> · claimed by <session id 8> · file age <h>
 REAP CANDIDATES (3 disk facts read this run)
@@ -108,4 +124,6 @@ LEDGER (open)
   <id> · <kind> · <what> · <state> · <age>          — or: (none) / UNKNOWN (read failed)
 NOTES   runbook/command disagreements, unreadable inputs
 ```
+
+⚠️ **The `<link>` column is what removes the manager's per-row pane read** — it is the rendered one-line link from step 7b, and it is the field `agents/fleet-drive.md` copies onto its `ESCALATION` rows. Carry it on **every** row that has a resolvable pane: `BLOCKED`, `CLOSERS`, and a `parked` `CLASSIFICATION` row. Emit `—` only where step 7b's lookup genuinely failed, and quote that failure in NOTES. **The link is inline on an existing row, so it costs characters, not lines** — the ≤ 40-line cap still holds; keep the link and trim the row's prose if a section runs long.
 </output_format>
