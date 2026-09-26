@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.3
 
 - fix: pass the snapshot provenance to the drive leg from both dispatch templates. `agents/manager-drive.md` holds any row whose provenance the caller did not name, but the templates that *are* the caller — `commands/manager-drive.md` step 6 and `commands/manager-loop.md` — listed the prompt as *subject + tracked set + classification + orphan verdicts + roster + vault + timestamp*, with no `recorded_at` and no prior per-bucket sets. A manager following the command verbatim therefore **could not** satisfy the requirement: measured 2026-09-26, a live pass returned no `recorded_at` and no prior sets, and the agent named the omission itself. Both templates now carry the two fields and say why they are required.
 - fix: enforce the provenance hold as clause (0) of `agents/manager-drive.md` step 4, not only as a `<constraints>` bullet. The same live pass read the constraint, quoted it — *"I could not independently verify `recorded_at`"* — and then **acted anyway**, deciding two `To open` rows and writing `mode: interactive` to disk. The clauses that actually decide rows had no provenance step, so nothing terminal fired. It is now a **batch-level** gate like (5)'s sweep-global cap, because provenance is a property of the list rather than of a row. A rule no clause enforces is a rule a run will narrate and then ignore.
