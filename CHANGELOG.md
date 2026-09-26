@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: add `scripts/transport-read-walk.py` — a call-graph walk that enumerates every in-repo consumer of a transport read, to closure, for the transport-read audit
+- docs: add `docs/pane-reads.md`, the rule every transport read follows and the four severities a collapse takes
 
 ## v0.57.7
 
