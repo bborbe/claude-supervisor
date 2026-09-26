@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.5
 
 - docs: correct the boundary the attribution predicate states about itself. `v0.59.4`'s bullet and `answered-attribution.py`'s docstring both read as though a scripted browser click cannot release a gate. **It can.** A Playwright/CDP-driven Chrome reports `navigator.webdriver === false` — verified in-page on the deployed board 2026-09-26, not inferred from a record — so a scripted click stores `automation: false` and prints `ANSWERED:` exactly as the operator's own click does, with the same Chrome `user_agent`. What the predicate closes is narrower and still real: the **no-client** case (65 pre-field answers on the live store) and **`automation: true`**, both live-verified. The module docstring and `attention-ask.py`'s now say so, because the old wording invited a reader to treat `operator_answered()` as proof the operator acted — and it is not. ⚠️ Released history is deliberately not amended: the correction lands here rather than rewriting `v0.59.4`.
 
