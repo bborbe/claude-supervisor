@@ -58,6 +58,45 @@ export function decisionOf(item) {
   return { ok: true, decision }
 }
 
+// Whether the answer was DELIVERED BY AN ARM rather than clicked on a surface.
+//
+// ⚠️ This is the operator's ruling of 2026-09-26, and it is deliberately narrow:
+// a `permission` gate is released only by an arm answer. The reason is asymmetry —
+// a permission approval EXECUTES a command, so it is the one class a script must
+// not be able to take, while a scripted answer to a `message` card costs little
+// and the operator keeps the board flow there. Message and question cards are
+// therefore unchanged by this guard.
+//
+// The evidence is `resolved_by`, which `attention-answer.py` sources from its OWN
+// `CLAUDE_CODE_SESSION_ID` rather than from a caller argument. The board never
+// sends it, so a board click cannot produce it.
+//
+// ⚠️ What this does NOT do, stated so it is not read as broader than it is: the
+// board renders no answer controls on a `permission` card at all and its JS never
+// sends `decision`, so a board click could not release a permission gate before
+// this guard either. This hardens the path against a DIRECT API POST. It is NOT a
+// fix for the falsified-probe threat on message cards — a real Playwright click
+// stores `automation: false` and is indistinguishable from the operator's — which
+// the operator accepted as residual.
+//
+// ⚠️ A missing `resolved_by` is refused, never waved through, and the refusal is
+// logged with its reason rather than swallowed. An arm run by a child stripped of
+// `CLAUDE_CODE_SESSION_ID` therefore cannot release a park through the store —
+// that is the cost of the rule, and it is a real case rather than a bug. It is
+// bounded by `answer_permission`, the MCP tool, which releases a park directly
+// and does not travel through the store at all, so no worker is stranded.
+export function armDelivery(item) {
+  const resolvedBy = item?.resolved_by
+  if (typeof resolvedBy !== 'string' || resolvedBy === '') {
+    return {
+      ok: false,
+      reason:
+        'the item carries no resolved_by, so no arm delivered this answer, and a permission gate releases only on an arm answer',
+    }
+  }
+  return { ok: true, resolvedBy }
+}
+
 // Which parked promise does this item settle?
 //
 // The join is `item.producer_id` -> the agent this server spawned with that session id ->
@@ -143,6 +182,14 @@ export function startAttentionPoll({
         const verdict = decisionOf(item)
         if (!verdict.ok) {
           log(`attention item ${itemId} is answered but unsettleable: ${verdict.reason}`)
+          continue
+        }
+        // A verdict alone does not release a permission gate — the operator's
+        // ruling is that only an ARM answer does. Checked after `decisionOf` so a
+        // verdict-less item is still reported by its own, more specific reason.
+        const delivery = armDelivery(item)
+        if (!delivery.ok) {
+          log(`attention item ${itemId} carries ${verdict.decision} but was not arm-delivered: ${delivery.reason}`)
           continue
         }
         const target = selectParked({ item, agents, pending })
