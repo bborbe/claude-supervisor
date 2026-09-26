@@ -57,7 +57,7 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 2. **Pre-dispatch check — decide whether this run is worth a dispatch at all.** Run the gate first. Measured 2026-09-25 on a 26-task tree with 25 done: the sweep-reader cost **91,598 tokens** and the drive leg **71,275**, for zero new information — three times in one session the manager bypassed the agents by hand to avoid it.
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --print
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --print
    ```
 
    - **exit 0 — nothing changed.** The gate has already printed the stored table under its `NO-CHANGE` marker. **Reproduce that output as this command's whole result and STOP** — dispatch no agent, run no step below. The stored table carries **no jump coordinates**, so say in one line that pane ids must be re-resolved by a fresh run; never present a replayed link as live.
@@ -100,7 +100,7 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
    **Then persist the snapshot — it is what makes the next run free.** First token `python3`, so the call matches this command's `Bash(python3:*)` grant and raises no prompt:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --save <<'TABLE'
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --save <<'TABLE'
    <the rendered table>
    TABLE
    ```
