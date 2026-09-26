@@ -162,6 +162,12 @@ def pane_sessions(pmap):
     through the tty: `ps` gives pid -> tty, wezterm gives pane -> tty_name. A pane
     absent from the result is simply unidentifiable, which the caller treats as
     "no evidence", never as "mismatch".
+
+    `None` when the `ps` failed — distinct from `{}`, which means the join ran and
+    identified nothing. The caller's ownership filter fails open either way, but
+    only `None` means the filter never ran, and it must say so: a filter that
+    silently did not run produces the same output as one that ran and found no
+    disagreement, which is the difference between a checked jump and a lucky one.
     """
     sid_by_pid = {}
     for f in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
@@ -177,7 +183,7 @@ def pane_sessions(pmap):
         ps = subprocess.run(["ps", "-axo", "pid=,tty="],
                             capture_output=True, text=True, timeout=5).stdout
     except Exception:
-        return {}
+        return None
     tty_by_pid = {}
     for line in ps.splitlines():
         parts = line.split()
@@ -240,7 +246,12 @@ def attention_queue(wnm, pmap):
     # Fail OPEN: only a positive disagreement drops a row. An unidentifiable pane
     # keeps its row, because losing a real gate is worse than a rare wrong jump.
     owners = pane_sessions(pmap)
+    if owners is None:
+        print("   · ⚠️ `ps` unreadable — the ownership filter did not run; every "
+              "attention row below is kept unchecked", file=sys.stderr)
     def owned(r):
+        if owners is None:
+            return True          # no evidence either way — keep the row
         cur = owners.get(str(r.get("pane")))
         return cur is None or not r.get("session_id") or cur == r["session_id"]
     kept = [r for r in blocked if owned(r)]

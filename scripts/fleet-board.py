@@ -467,12 +467,17 @@ def collect_signals(stuck_min):
     Mirrors `who-needs-me.py`'s own pipeline (its `main()`), so the gate predicate
     and the stuck predicate are the same ones the operator's `Needs you` section
     is built from — one definition, two renderings.
+
+    The fourth return value is whether the pane read succeeded. A failed read is
+    `None`, which `is_live()` keeps every row on — the board degrades to the
+    registry's own verdict rather than rendering a false empty — but it must say
+    so, or a board whose pane filter never ran looks identical to one that ran.
     """
     registry = wnm.read_registry()
     live_ids = None if registry is None else set(registry)
     records = wnm.load("needs")
     quiet = wnm.quiet_session_ids(records, live_ids)
-    pmap = wnm.panes()
+    pmap = wnm.wezterm_panes()
     live = lambda r: wnm.is_live(r, pmap, quiet)
     needs = [wnm.reclassify_idle(r) for r in records if live(r)]
     open_panes = {
@@ -492,7 +497,7 @@ def collect_signals(stuck_min):
     gate_ids = {r["session_id"] for r in gates}
     cutoff = time.time() - stuck_min * 60
     stuck_ids = {r["session_id"] for r in wnm.load("tool") if live(r) and r["ts"] < cutoff}
-    return gate_ids, stuck_ids, gate_attribution(gates, gate_ids)
+    return gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap is not None
 
 
 def transcript_fresh_ids(window=None):
@@ -781,7 +786,14 @@ def main():
         print("fleet-board: session registry unreadable — refusing to render a table", file=sys.stderr)
         return 1
 
-    gate_ids, stuck_ids, attribution = collect_signals(a.stuck_min)
+    gate_ids, stuck_ids, attribution, panes_read = collect_signals(a.stuck_min)
+    if not panes_read:
+        print(
+            "fleet-board: ⚠️ `wezterm cli list` unreadable — pane data withheld. Every row is kept "
+            "on the session registry's verdict alone: a pane that cannot be checked is UNKNOWN, "
+            "not gone. The table below is not evidence that the fleet is quiet.",
+            file=sys.stderr,
+        )
     task_titles = fs.build_work_map()
     ages = {sid: wnm.session_transcript_age(sid) for sid in registry}
     grouping = build_grouping(registry, vault_index(), colour_census(), loop_slugs(), task_titles)
