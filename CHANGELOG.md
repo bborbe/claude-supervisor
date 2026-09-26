@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.57.4
 - chore: a post-merge **Changelog Fold Guard** job now runs on every push to master, calling the reusable guard that ships from `bborbe/coding`. It compares each released section against its own tag and fails when a bullet sits under a release that does not contain its merge. A pull-request check cannot see this: the fold happens in the merge, after the branch is already final, and the merge is clean — nothing warns. Wired after this repo's `## v0.57.2` was found claiming two fixes that no tag contains.
 
 ## v0.57.3
