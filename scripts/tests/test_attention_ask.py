@@ -178,6 +178,16 @@ class PostTest(unittest.TestCase):
         self.assertIn("options not allowed", out.getvalue())
 
 
+def answered_lines(text):
+    """Only the lines that ARE an answer.
+
+    ⚠️ A bare `assertNotIn("ANSWERED:", text)` is not this check:
+    `NOT_OPERATOR_ANSWERED:` contains `ANSWERED:`, so it would fail on exactly
+    the output it is meant to accept.
+    """
+    return [line for line in text.splitlines() if line.startswith("ANSWERED:")]
+
+
 class PollTest(unittest.TestCase):
     def poll(self, item):
         with mock.patch.object(
@@ -199,6 +209,15 @@ class PollTest(unittest.TestCase):
                 "state": "answered",
                 "answer": {"kind": "option", "value": "the board"},
                 "answered_by": "attention-board",
+                # An operator answer carries the store-read client record. It is
+                # in the fixture because the poll now gates on it: without one
+                # the same payload reads NOT_OPERATOR_ANSWERED, which is the
+                # fail-closed rule and not a rendering change.
+                "answered_client": {
+                    "user_agent": "Mozilla/5.0 (Macintosh) Chrome/153.0.0.0",
+                    "remote_addr": "127.0.0.1:63415",
+                    "automation": False,
+                },
             }
         )
         self.assertEqual(rc, 0)
@@ -207,11 +226,74 @@ class PollTest(unittest.TestCase):
 
     def test_skip_is_rendered_without_a_trailing_value(self):
         _, text = self.poll(
-            {"item_id": "abc123", "state": "answered", "answer": {"kind": "skip"}}
+            {
+                "item_id": "abc123",
+                "state": "answered",
+                "answer": {"kind": "skip"},
+                "answered_client": {"user_agent": "curl/8.7.1", "remote_addr": "127.0.0.1:1"},
+            }
         )
         self.assertIn("ANSWERED: skip", text)
         # A trailing colon-space would read as a truncated option answer.
         self.assertNotIn("skip:", text)
+
+    def test_answer_with_no_client_is_not_operator_answered(self):
+        # ⚠️ The fail-closed case, and the one this change exists for: an answer
+        # recorded before `answered_client` existed, or posted by a client the
+        # store could not describe. It must NOT satisfy a caller's gate.
+        rc, text = self.poll(
+            {
+                "item_id": "abc123",
+                "state": "answered",
+                "answer": {"kind": "option", "value": "the board"},
+                "answered_by": "attention-board",
+                "answered_at": "2026-09-26T20:19:18Z",
+            }
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(answered_lines(text), [])
+        self.assertIn("NOT_OPERATOR_ANSWERED: option: the board", text)
+
+    def test_automation_true_is_not_operator_answered(self):
+        # The positive control for a scripted click: the page reports
+        # navigator.webdriver, the store records it, and the gate stays shut.
+        _, text = self.poll(
+            {
+                "item_id": "abc123",
+                "state": "answered",
+                "answer": {"kind": "option", "value": "the board"},
+                "answered_by": "attention-board",
+                "answered_client": {
+                    "user_agent": "Mozilla/5.0 (Macintosh) Chrome/153.0.0.0",
+                    "remote_addr": "127.0.0.1:55022",
+                    "automation": True,
+                },
+            }
+        )
+        self.assertEqual(answered_lines(text), [])
+        self.assertIn("NOT_OPERATOR_ANSWERED:", text)
+        self.assertIn("automation: true", text)
+
+    def test_ack_close_with_no_client_is_not_operator_answered(self):
+        # The close path, which writes `answered_by` and never `answered_at`.
+        # A consumer reading `closed` as resolved would release the gate here.
+        _, text = self.poll(
+            {
+                "item_id": "abc123",
+                "state": "closed",
+                "answered_by": "attention-board",
+            }
+        )
+        self.assertIn("NOT_OPERATOR_ANSWERED: closed", text)
+
+    def test_reaped_close_with_no_actor_reads_as_open(self):
+        # The dominant closed shape in the live store is a reap: no
+        # answered_at, no answered_by, no client. It is not an act by anyone,
+        # so it must not be reported as an answer in either direction.
+        rc, text = self.poll({"item_id": "abc123", "state": "closed"})
+        self.assertEqual(rc, 0)
+        self.assertIn("OPEN", text)
+        self.assertNotIn("NOT_OPERATOR_ANSWERED", text)
 
     def test_answer_absent_reads_as_open_even_when_state_says_answered(self):
         # A permission-class item is answered with a `decision` and carries no
