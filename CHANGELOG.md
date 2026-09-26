@@ -12,6 +12,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - feat: add `scripts/transport-read-walk.py` — a call-graph walk that enumerates every in-repo consumer of a transport read, to closure, for the transport-read audit
 - docs: add `docs/pane-reads.md`, the rule every transport read follows and the four severities a collapse takes
+- fix: seven transport reads no longer report a broken transport as an empty fleet — `who-needs-me.py`'s lossy `panes()` wrapper is deleted, `pane_for()` and `fleet-board.py` call `wezterm_panes()` and test `is None`, and the `ps` reads in `fleet-colours.py`, `jump.py`, `fleet-sessions.py` and `stop-probe.py` return `None` instead of `{}` / `[]` / `(0, set())`, each with a named marker where the failure would otherwise have printed a confident count
 
 ## v0.57.7
 

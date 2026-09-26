@@ -388,19 +388,6 @@ def wezterm_panes():
         return None
 
 
-def panes():
-    """The live panes; `{}` when the query failed, for callers that only filter.
-
-    ⚠️ `{}` here is a *conflation*: it is what a failed `wezterm cli list` returns
-    and also what a reachable WezTerm holding no panes returns. A caller that must
-    tell those apart — anything deciding liveness, since `is_live()` drops every
-    record on an empty map — has to call `wezterm_panes()` and test `is None`
-    instead. `main()` does. `pane_for()` and `fleet-board.py` still do not, and
-    read a broken transport as "no panes" (tracked as a follow-up, not fixed here).
-    """
-    return wezterm_panes() or {}
-
-
 def live_pane_ids():
     """Confirmed pane ids, or `None` when the query failed — see `wezterm_panes()`."""
     p = wezterm_panes()
@@ -459,7 +446,7 @@ def live_session_ids(sessions_dir=None):
     """Session ids currently registered as live, or `None` if that cannot be told.
 
     A pane id is a lease, not an identifier — WezTerm renumbers and reuses them, so
-    `str(rec["pane"]) in panes()` answers "is some pane wearing this id", never "is
+    `str(rec["pane"]) in wezterm_panes()` answers "is some pane wearing this id", never "is
     the session that raised this item still running". A session killed without
     emitting `SessionEnd` (OOM, a killed worker, a crash) leaves its item open
     forever and its pane still alive, so pane-existence alone renders an item the
@@ -666,9 +653,12 @@ def is_live(rec, pmap, quiet):
     Both conditions are necessary. The pane check alone is what leaked the orphans;
     the session check alone would keep a row the operator cannot jump to, and the
     jump line is this feed's payload. `quiet` is a set of ids, and `None` (an
-    unreadable registry) reads as empty — drop nothing.
+    unreadable registry) reads as empty — drop nothing. `pmap` follows the same
+    convention: `None` is an unreadable `wezterm cli list`, which cannot prove a
+    pane is gone, so the row is kept. Only a *readable* map that lacks the pane
+    drops it — `{}` is a real "no panes exist" answer and still drops everything.
     """
-    if str(rec.get("pane")) not in pmap:
+    if pmap is not None and str(rec.get("pane")) not in pmap:
         return False
     return not quiet or rec.get("session_id") not in quiet
 
@@ -1207,8 +1197,8 @@ def pane_for(session_id):
     full = matches[0]
     name = strip_status_glyph(registry.get(full))
 
-    pmap = panes()
-    if not pmap:
+    pmap = wezterm_panes()
+    if pmap is None:
         sys.stderr.write("pane-for: WezTerm pane list unreadable\n")
         return 1
 

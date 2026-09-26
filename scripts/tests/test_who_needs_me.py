@@ -955,7 +955,7 @@ class PaneFor(unittest.TestCase):
             "205": {"pane_id": 205, "title": "\u2733 Session B"},
         }
         patch("load", lambda _suffix: list(self.records))
-        patch("panes", lambda: dict(self.panes))
+        patch("wezterm_panes", lambda: None if self.panes is None else dict(self.panes))
         patch("read_registry", lambda: None if self.registry is None else dict(self.registry))
         self.addCleanup(lambda: [p.stop() for p in self.patches])
 
@@ -1072,11 +1072,28 @@ class PaneFor(unittest.TestCase):
         self.assertIn("registry unreadable", err)
 
     def test_unreadable_panes_refuses(self):
-        self.panes = {}
+        """`None` is a failed read — the only thing that may claim "unreadable"."""
+        self.panes = None
         rc, out, err = self.run_pane_for(self.SID_A[:8])
         self.assertEqual(1, rc)
         self.assertEqual("", out)
         self.assertIn("pane list unreadable", err)
+
+    def test_healthy_empty_fleet_is_not_reported_as_unreadable(self):
+        """The control: `{}` is a reachable WezTerm holding no panes — a real answer.
+
+        This case previously asserted the opposite (`self.panes = {}` expecting
+        "pane list unreadable"), which was the conflation itself: it could not tell a
+        broken transport from an empty fleet, so it passed while `pane_for()` refused
+        a healthy-but-empty WezTerm. A fix that warns on `not pmap` still passes the
+        case above and fails only here.
+        """
+        self.panes = {}
+        rc, out, err = self.run_pane_for(self.SID_A[:8])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+        self.assertNotIn("unreadable", err)
+        self.assertIn("no pane resolves", err)
 
     def test_empty_id_refuses(self):
         rc, out, _ = self.run_pane_for("")

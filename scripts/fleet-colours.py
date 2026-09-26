@@ -139,13 +139,21 @@ def last_colour(path: Path) -> str | None:
     return colour
 
 
-def pid_ttys() -> dict[int, str]:
-    """pid → tty, for every live `claude` process. `??` (no tty) is dropped."""
+def pid_ttys() -> dict[int, str] | None:
+    """pid → tty, for every live `claude` process; `None` when the query failed.
+
+    ⚠️ `None`, never `{}`, for the same reason as `pane_titles()` below: a failed
+    `ps` cannot prove a session has no tty any more than it can prove one has, so no
+    caller may read it as "nothing is attached". `{}` is reserved for a `ps` that
+    answered with no matching process — a real empty answer. The two halves of the
+    pid → tty → pane chain fail independently, so `census()` requires **both** to
+    have been read before it will report a pane count at all.
+    """
     try:
         ps = subprocess.run(["ps", "-eo", "pid=,tty=,comm="],
                             capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
-        return {}
+        return None
     out = {}
     for line in ps.splitlines():
         parts = line.split(None, 2)
@@ -194,7 +202,11 @@ def census(session: str | None) -> tuple[list[dict], bool]:
     """
     ttys = pid_ttys()
     panes = pane_titles()
-    panes_read = panes is not None
+    # Both halves of pid → tty → pane must have been read. A failed `ps` leaves the
+    # tty map unknown, which makes every row's pane unknown too — so the pane count
+    # is not a measurement, and reporting one would be the same false zero the pane
+    # half was fixed for.
+    panes_read = panes is not None and ttys is not None
     rows = []
     for rec in registry():
         sid = rec["session_id"]
@@ -204,7 +216,7 @@ def census(session: str | None) -> tuple[list[dict], bool]:
         transcript = find_transcript(sid)
         colour = UNKNOWN if transcript is None else (last_colour(transcript) or DEFAULT)
         # pid → tty → pane. The registry carries the pid; wezterm exposes the tty.
-        tty = ttys.get(rec["pid"]) if isinstance(rec["pid"], int) else None
+        tty = ttys.get(rec["pid"]) if (ttys is not None and isinstance(rec["pid"], int)) else None
         pane = (panes or {}).get(tty) if tty else None
         rows.append({
             "session_id": sid,

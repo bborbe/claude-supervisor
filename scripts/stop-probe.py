@@ -87,15 +87,21 @@ def read_json(path: str) -> dict:
         return {}
 
 
-def gate_processes() -> list:
-    """(pid, etime, command) for every live sweep-gate loop, or []."""
+def gate_processes() -> list | None:
+    """(pid, etime, command) for every live sweep-gate loop; `None` when `ps` failed.
+
+    ⚠️ `None`, never `[]`. The caller's empty branch prints *"gate NONE — no
+    sweep-gate loop found; it may never have been armed"*, which is a positive
+    claim about the machine — so a failed `ps` must not be able to reach it. `[]`
+    stays reserved for a `ps` that answered and matched nothing.
+    """
     try:
         out = subprocess.run(
             ["ps", "-eo", "pid=,etime=,command="],
             capture_output=True, text=True, timeout=15,
         ).stdout
     except Exception:
-        return []
+        return None
     rows = []
     for line in out.splitlines():
         parts = line.split(None, 2)
@@ -206,15 +212,19 @@ def main() -> int:
     )
 
     rows = gate_processes()
-    for pid, etime, command in rows:
-        print(f"gate     pid {pid}  up {etime}  {command}")
+    if rows is None:
+        print("gate     ⚠️ `ps` unreadable — the sweep-gate loop could not be checked. "
+              "This is not a report that none is armed.")
+    else:
+        for pid, etime, command in rows:
+            print(f"gate     pid {pid}  up {etime}  {command}")
     heartbeat = gate_file(vault, subject, "heartbeat")
     present, detail = launchd_gate(
         launchd_loaded(), heartbeat_age(heartbeat), launchd_interval(), heartbeat
     )
-    if present or not rows:
+    if present or (rows is not None and not rows):
         print(f"gate     {detail}")
-    if not rows and not present:
+    if rows is not None and not rows and not present:
         print("gate     NONE — no sweep-gate loop found; it may never have been armed")
 
     tick = gate_file(vault, subject, "tick.txt")
