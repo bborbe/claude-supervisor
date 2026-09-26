@@ -18,7 +18,7 @@ import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
 import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord } from './heartbeat.mjs'
-import { startAttentionPoll } from './attention-poll.mjs'
+import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
@@ -107,7 +107,18 @@ const log = (...a) => {
 // process's, which is also `pending`'s lifetime, so there is nothing to outlive. Absent
 // when the store is switched off (`SUPERVISOR_ATTENTION_STORE=off`) — see config.mjs.
 if (config.attentionStoreUrl) {
-  startAttentionPoll({ storeUrl: config.attentionStoreUrl, agents, pending, log })
+  startAttentionPoll({
+    storeUrl: config.attentionStoreUrl,
+    agents,
+    pending,
+    log,
+    // The store is a decider, and this is the only site that records it as one. Without
+    // this the store-settled park writes nothing at all, so its release is
+    // indistinguishable in permissions.jsonl from a policy allow — the attribution this
+    // delivery path exists to make auditable.
+    onSettled: ({ requestId, agentId, decision, park }) =>
+      logPermission(storeDecisionRecord({ requestId, agentId, decision, park })),
+  })
 }
 
 // ── policy layer ────────────────────────────────────────────────────────────
