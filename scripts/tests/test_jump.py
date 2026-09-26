@@ -49,7 +49,7 @@ CLOSE = "approve: /vault-cli:session-close"
 
 class AttentionQueueMatchesTheFeed(unittest.TestCase):
     def setUp(self):
-        self._load, self._panes = wnm.load, wnm.panes
+        self._load, self._panes = wnm.load, wnm.wezterm_panes
         self._live_ids, self._age = wnm.live_session_ids, wnm.session_transcript_age
         self._sessions = jmp.pane_sessions
         jmp.pane_sessions = lambda _pmap: {}
@@ -58,7 +58,7 @@ class AttentionQueueMatchesTheFeed(unittest.TestCase):
         self.addCleanup(self._restore)
 
     def _restore(self):
-        wnm.load, wnm.panes = self._load, self._panes
+        wnm.load, wnm.wezterm_panes = self._load, self._panes
         wnm.live_session_ids, wnm.session_transcript_age = self._live_ids, self._age
         jmp.pane_sessions = self._sessions
         wnm._AGE_CACHE.clear()
@@ -78,7 +78,7 @@ class AttentionQueueMatchesTheFeed(unittest.TestCase):
         dead_panes = {str(p) for p in dead}
         pmap = {str(r["pane"]): {"pane_id": int(r["pane"]), "title": "t"} for r in records}
         wnm.load = lambda _suffix: records
-        wnm.panes = lambda: pmap
+        wnm.wezterm_panes = lambda: pmap
         wnm.live_session_ids = lambda _d=None: {
             r["session_id"] for r in records if str(r["pane"]) not in dead_panes
         }
@@ -131,7 +131,7 @@ class AttentionQueueMatchesTheFeed(unittest.TestCase):
         records = [rec(846, PICK)]
         pmap = {"846": {"pane_id": 846, "title": "t"}}
         wnm.load = lambda _s: records
-        wnm.panes = lambda: pmap
+        wnm.wezterm_panes = lambda: pmap
         wnm.live_session_ids = lambda _d=None: set()          # absent, as headless is
         wnm.session_transcript_age = lambda _sid: 30          # ...but writing right now
         wnm.task_status_from_closer = lambda _rec: None
@@ -146,7 +146,7 @@ class AttentionQueueMatchesTheFeed(unittest.TestCase):
         status = lambda r: "completed" if r["pane"] == "230" else None
         pmap = {str(r["pane"]): {} for r in records}
         wnm.load = lambda _suffix: records
-        wnm.panes = lambda: pmap
+        wnm.wezterm_panes = lambda: pmap
         wnm.task_status_from_closer = status
 
         needs = [wnm.reclassify_idle(r) for r in records]
