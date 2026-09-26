@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.2
 - fix: resolve the pre-dispatch gate's script path through the `${CLAUDE_PLUGIN_ROOT:-…}` fallback. Both commands invoked it as `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py`, and `CLAUDE_PLUGIN_ROOT` is **unset** in the shell a command's bash line runs in — so the path expanded to `/scripts/manager-predispatch.py`, which does not exist. Every other executable reference in this repo already uses the fallback form (40 occurrences); these four were the only bare ones. They appeared to work because the model resolved the path itself during the e2e run, which is exactly why a latent path defect survives a passing exercise. Same fix in `commands/manager-drive.md` (steps 2 and 8) and `commands/manager-status.md` (steps 1 and 8).
 
 ## v0.59.1
