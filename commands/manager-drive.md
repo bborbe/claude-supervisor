@@ -52,9 +52,27 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 ## Procedure
 
-1. **Resolve the subject (§ Subject resolution) and read its declared set.** Dispatch `Task(subagent_type: "vault-cli:work-on-goal-assistant")` is **not** the path here — read the page directly and take the declared set the way `/manager-loop` § Resolution does: a topic's `## Goals` members plus every task whose `goals:` names one (all three declaration shapes), or a goal's own tasks. Print `Tracked (N): <task> · <task> …`. **Never widen it** — no glob, no theme match, no content grep.
+1. **Resolve the subject (§ Subject resolution).** This prints the `Subject:` line and nothing more — the declared-set read is step 3, deliberately after the gate, so a no-change run never pays for it.
 
-2. **Compose the sweep — do not rebuild it.** This command owns no classification. Dispatch the same agent `/manager-loop` does:
+2. **Pre-dispatch check — decide whether this run is worth a dispatch at all.** Run the gate first. Measured 2026-09-25 on a 26-task tree with 25 done: the sweep-reader cost **91,598 tokens** and the drive leg **71,275**, for zero new information — three times in one session the manager bypassed the agents by hand to avoid it.
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --print
+   ```
+
+   - **exit 0 — nothing changed.** The gate has already printed the stored table under its `NO-CHANGE` marker. **Reproduce that output as this command's whole result and STOP** — dispatch no agent, run no step below. The stored table carries **no jump coordinates**, so say in one line that pane ids must be re-resolved by a fresh run; never present a replayed link as live.
+   - **exit 10 — something changed, or the gate could not tell.** Continue to step 3, and persist the fresh snapshot once the table is rendered (step 8).
+   - **exit 2 — usage error.** A malformed invocation (missing `--vault`, bad flag), not a verdict. Fix the call; do not read it as "changed".
+
+   ⚠️ **The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py` — the digest inputs, why liveness is in them, why mtime is not, the fail-open cases, and the reason this store is not the loop's. Read it there; it is **not** restated here. What stays inline is only what this command does with the verdict.
+
+   ⚠️ **This block is shared with `/manager-status` step 1.** The two copies must keep in sync in: this exit-code branch (0/10/2), the pointer above, and the no-jump-coordinates rule. They legitimately differ in the intro measurement and in the step numbers each exit-10 branch targets. Any other difference is drift — the fail-open clause below is shared and must stay byte-identical.
+
+   ⚠️ **Fail-open is the contract.** A missing state file, an unreadable one, a parse error, an unresolvable subject and a failed write all exit 10 — a gate that reports "no change" when it cannot tell makes a manager blind to its own subject. Never treat a non-zero exit as an error to route around, and never hand-roll a second classifier here: this gate is the only pre-dispatch decision.
+
+3. **Read the declared set.** Dispatch `Task(subagent_type: "vault-cli:work-on-goal-assistant")` is **not** the path here — read the page directly and take the declared set the way `/manager-loop` § Resolution does: a topic's `## Goals` members plus every task whose `goals:` names one (all three declaration shapes), or a goal's own tasks. Print `Tracked (N): <task> · <task> …`. **Never widen it** — no glob, no theme match, no content grep.
+
+4. **Compose the sweep — do not rebuild it.** This command owns no classification. Dispatch the same agent `/manager-loop` does:
 
    `Task(subagent_type: "supervisor:manager-sweep-reader", prompt: <tracked set + declared-optional set + the topic's member goals + this run's ListAgents roster verbatim + vault + mode: snapshot + timestamp>)`
 
@@ -62,22 +80,34 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
    **If the delegation returns no usable table** — it errored, came back empty, or resolved to something that did not return the report — **stop and say so**. Do not fall back to a hand-rolled classification: `manager-loop` has a `box-table.py` renderer fallback, but that is a second *renderer*, not a second *classifier*, and this command has no renderer to fall back to.
 
-3. **Confirm the orphan verdicts — this part is yours.** The sweep-reader returns **candidates** and stops by design; it cannot probe liveness without inheriting the caller's own ancestor-chain blind spot. For each candidate, probe every id in its set against the **session registry** first — `grep -l "<id>" ~/.claude/sessions/*.json`, then `ps -p <pid>` on the file's pid — and treat the task as alive if **any** id holds an entry against a running pid. Then run `pgrep -f "<id>"` and `ps -eo pid,args | grep -F "<id>"`: a hit on either also means alive, but an empty argv read is **indeterminate, never dead** — a live session usually carries its id in no argv (measured 2026-09-22/23: three live sessions read 0 under both). Death needs registry absence plus the drive leg's transcript-staleness clause. Also collect the id sets across the whole tracked set first and flag any id on **two or more non-terminal** tasks as a shared collision — resume **neither**.
+5. **Confirm the orphan verdicts — this part is yours.** The sweep-reader returns **candidates** and stops by design; it cannot probe liveness without inheriting the caller's own ancestor-chain blind spot. For each candidate, probe every id in its set against the **session registry** first — `grep -l "<id>" ~/.claude/sessions/*.json`, then `ps -p <pid>` on the file's pid — and treat the task as alive if **any** id holds an entry against a running pid. Then run `pgrep -f "<id>"` and `ps -eo pid,args | grep -F "<id>"`: a hit on either also means alive, but an empty argv read is **indeterminate, never dead** — a live session usually carries its id in no argv (measured 2026-09-22/23: three live sessions read 0 under both). Death needs registry absence plus the drive leg's transcript-staleness clause. Also collect the id sets across the whole tracked set first and flag any id on **two or more non-terminal** tasks as a shared collision — resume **neither**.
 
-4. **Dispatch the act leg.**
+6. **Dispatch the act leg.**
 
    `Task(subagent_type: "supervisor:manager-drive", prompt: <subject + tracked set + classification + confirmed orphan verdicts + roster + vault + timestamp>)`
 
    It reaps, then nudges, then decides the auto-resume gate, and returns the action lines — **decisions, not acts**: the agent holds no spawn tool, so its `To open` and `To resume` rows are yours to execute. Its rules — the reap test, the ten gate clauses, the re-probe-at-hand-off rule, the crash-loop cap — live in `agents/manager-drive.md` and are not restated here.
 
-5. **Execute the rows it handed over — the spawn is yours, and so is the mode argument.** The agent decided each row and wrote its `mode:` to disk; you are the one that creates the session.
+7. **Execute the rows it handed over — the spawn is yours, and so is the mode argument.** The agent decided each row and wrote its `mode:` to disk; you are the one that creates the session.
 
    - **`To resume`** → **re-probe liveness first.** The agent probed at its hand-off site; the window between that report and this spawn is yours to close, and a stale probe here puts two writers on one conversation. Then `mcp__supervisor__spawn_agent(prompt="<the next instruction>", resume="<session_id>", cwd="<the cwd the agent reported>", …)` — `cwd` is required and is **not** inherited by a resume. Only **after** the registry shows an entry for the resumed id against a **running** pid, write `vault-cli task set "<task>" last_auto_resume "<ISO8601>"`. A refused, errored or aborted spawn writes nothing.
    - **`To open`** → read the row's `mode:` back off disk and pass the argument per `docs/fleet-surface.md` § Spawn a worker item 6: `interactive=false` when it reads `mode: headless`, `interactive=true` when it reads `mode: interactive`. Then spawn with `prompt='/vault-cli:work-on-task "<task>"'`, `cwd=<dir>`, `label="<task>"`. ⚠️ **A row whose `mode:` is absent was never decided — hold it and say so.** Spawning without the argument is exactly the `mode_source=config` defect this leg exists to remove, and the ledger cannot tell it from a site that never decided at all.
 
    ⚠️ **Never route these through a `Skill`-invoked `/supervisor:open`, and never fall back to the wezterm path.** `/supervisor:open` requires `mcp__supervisor__*` in the *invoking* session and falls back to wezterm without it — a tab by construction, which cannot produce a headless worker and writes **no ledger row**, so the measurement this whole change serves would pass vacuously.
 
-6. **Print what came back, voice the nudges, and escalate.** Reproduce the agent's action lines verbatim, including its `Not resumed` and `Escalated` sections — a near-miss clause is the most useful line in the report. **Voice the `Nudged` lines** with `mcp__tts__say` (voice-mode gated): the agent owns the message, you own the voice, because a subagent has no TTS. Then the operator-facing tail: any gate that needs their decision goes out as **`/supervisor:jump <pane-id>`**, never as a command for them to run here (the approval belongs to the session that raised it).
+8. **Print what came back, voice the nudges, and escalate.** Reproduce the agent's action lines verbatim, including its `Not resumed` and `Escalated` sections — a near-miss clause is the most useful line in the report. **Voice the `Nudged` lines** with `mcp__tts__say` (voice-mode gated): the agent owns the message, you own the voice, because a subagent has no TTS. Then the operator-facing tail: any gate that needs their decision goes out as **`/supervisor:jump <pane-id>`**, never as a command for them to run here (the approval belongs to the session that raised it).
+
+   **Then persist the snapshot — it is what makes the next run free.** First token `python3`, so the call matches this command's `Bash(python3:*)` grant and raises no prompt:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --save <<'TABLE'
+   <the rendered table>
+   TABLE
+   ```
+
+   ⚠️ **`--save` exits 10 on success** — that code means "this run saw a change", which is exactly why it saved. Do not read it as a failure, and do not retry.
+
+   ⚠️ **An empty table is refused and reports CHANGE** rather than clobbering a good snapshot — a snapshot with no table can never be replayed, so a failed render must leave the previous one standing and force the next run to re-sweep. Never write the snapshot by hand, and never save a table you did not print. The gate strips OSC 8 jump links before storing, so the persisted copy carries no jump token.
 
 ## What this command must never do
 

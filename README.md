@@ -25,6 +25,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 | `/supervisor:attention-next` | what's next on the attention stack — answer an item in chat, delivered to the session that asked |
 | `scripts/jump-link.py` | render a pane's jump target as a clickable link (falls back to `/supervisor:jump <N>` when the local fleet-jump server is not configured) |
 | `scripts/restart-worker.py` | restart ONE stale idle worker session under a narrow allow rule — seven registry-guarded refusals, never a manager, never a broad `kill` |
+| `scripts/manager-predispatch.py` | the **pre-dispatch gate** `/supervisor:manager-drive` and `/supervisor:manager-status` run first — when the tracked tree has not moved it replays the stored table and dispatches **no agent**; a worker dying counts as movement, because session liveness is in the digest |
 | `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
 | `/supervisor:fleet-drive` | one-shot by hand, and dispatched by `/supervisor:fleet-loop` every round: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
 | `/supervisor:fleet-verify` | read-only: verify the fleet layer's own contract, ending in a numbered fix list |
@@ -315,6 +316,7 @@ commands/reset.md + scripts/reset.py             re-discover its state; never de
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the four manager commands share
+scripts/manager-predispatch.py                   the pre-dispatch gate both manager commands run first (state: ~/.claude/state/manager-predispatch/)
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/manager-wrangler.md                routine approval loop over headless workers
