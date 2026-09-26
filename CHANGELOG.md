@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.58.0
 
 - feat: add `scripts/transport-read-walk.py` — a call-graph walk that enumerates every in-repo consumer of a transport read, to closure, for the transport-read audit
 - docs: add `docs/pane-reads.md`, the rule every transport read follows and the four severities a collapse takes
