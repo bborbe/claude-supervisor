@@ -9,16 +9,23 @@ instead of blocking its whole turn on AskUserQuestion.
   poll   GET /api/1.0/attention/{ITEM_ID}, print the answer, or OPEN
 
 **Three poll terminals, not two.** `OPEN` means still unanswered, and
-`ANSWERED:` means the answer is attributable to the operator. A third,
-`NOT_OPERATOR_ANSWERED:`, covers the item that moved on evidence the operator
-did not supply — no `answered_client` on the record, or a client that reported
-`automation: true`. A caller gating on this must read that the way it reads
-`OPEN`: **the gate is not released.** Reading only `ANSWERED` is the defect this
-terminal exists to close — the board's controls post a caller-declared
-`answered_by` and nothing in the request separates a pointer event from a
-synthesised one, so a scripted click otherwise reads as *the operator saw it*.
-The rule lives in `answered-attribution.py` and is deliberately shared with the
-other consumers rather than restated per script.
+`ANSWERED:` means the item carries client evidence that is not positively
+flagged as automated. A third, `NOT_OPERATOR_ANSWERED:`, covers the item that
+moved on evidence the operator did not supply — no `answered_client` on the
+record, or a client that reported `automation: true`. A caller gating on this
+must read that the way it reads `OPEN`: **the gate is not released.** Reading
+only `ANSWERED` is the defect this terminal exists to narrow — the board's
+controls post a caller-declared `answered_by` and nothing in the request
+separates a pointer event from a synthesised one.
+
+⚠️ **`ANSWERED:` is not proof the operator answered, and this arm does not claim
+it is.** A Playwright/CDP-driven browser reports `navigator.webdriver === false`
+(verified in-page 2026-09-26), so a scripted click stores `automation: false` and
+prints `ANSWERED:` exactly as the operator's own click does. What is closed here
+is the two decidable cases; a scripted browser click is **not** one of them, and
+closing it needs something a scripted click cannot produce. The rule lives in
+`answered-attribution.py`, which carries the full boundary — read it before
+relying on this terminal.
 
 **Why a manager polls rather than being sent to.** The asking session is the
 item's `producer_id`, so it can read its own item back; no cross-session

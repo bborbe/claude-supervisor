@@ -158,6 +158,36 @@ class ClassifyTest(unittest.TestCase):
                     attribution.UNATTRIBUTED,
                 )
 
+    def test_a_scripted_browser_click_passes_the_predicate(self):
+        """⚠️ The boundary, pinned as a test so it cannot be over-read later.
+
+        This is the record a REAL Playwright/CDP click produced on the deployed
+        board on 2026-09-26: the operator's Chrome user-agent and
+        `automation: false`, because `navigator.webdriver` is `false` under
+        Playwright. It is byte-for-byte the shape an operator click produces, so
+        the predicate returns ATTRIBUTED and the gate IS released.
+
+        The assertion is deliberately that it passes. A future change that makes
+        this fail is a real improvement, and it should fail loudly here rather
+        than be discovered by re-deriving the whole probe.
+        """
+        verdict, reason = attribution.classify(
+            {
+                "state": "answered",
+                "answered_at": "2026-09-26T21:16:33Z",
+                "answered_by": "attention-board",
+                "answered_client": {
+                    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/153.0.0.0 Safari/537.36",
+                    "remote_addr": "127.0.0.1:50694",
+                    "automation": False,
+                },
+            }
+        )
+        self.assertEqual(verdict, attribution.ATTRIBUTED)
+        self.assertTrue(reason.strip())
+
     def test_automation_false_does_not_exonerate_but_does_attributed(self):
         # ⚠️ The boundary, pinned so it is not over-read later: a `false` only
         # fails to incriminate. It is not proof the operator answered, and this

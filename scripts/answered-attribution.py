@@ -18,15 +18,26 @@ consumer has, and it is deliberately weak:
   ⚠️ **Only `remote_addr` is unspoofable.** `user_agent` is server-*read* yet
   caller-*set*, so it sits in the same weaker class as `automation`, and a
   `user_agent` match is not evidence about *who* answered.
-  ⚠️ **A `false` does not exonerate the client.** An extension driving Chrome
-  through `chrome.debugger` need not set `navigator.webdriver`, so a `false`
-  only fails to incriminate — it never clears.
+  ⚠️ **A `false` does not exonerate the client — and that is the common case,
+  measured rather than assumed.** A Playwright/CDP-driven Chrome reports
+  `navigator.webdriver === false` (verified in-page 2026-09-26), so a scripted
+  click stores `automation: false` and is **indistinguishable** from the
+  operator's own click by every field this module reads. An extension driving
+  Chrome through `chrome.debugger` behaves the same way. A `false` only fails
+  to incriminate; it never clears.
 
-So this module does not try to *prove* the operator answered; that proof does
-not exist here. It answers the weaker, sufficient question: **is the answer
-attributable at all?** and it fails CLOSED, because the two mistakes are not
-symmetric — a re-asked gate costs the operator a glance, a silently dropped one
-costs a stuck worker.
+So this module does not try to *prove* the operator answered, and it does not
+claim to catch a scripted browser click — **it cannot.** What it answers is
+narrower than "did the operator answer": *is there any client evidence at all,
+and is it positively flagged?* It refuses the two cases that are decidable — no
+client record, and `automation: true` — and it fails CLOSED on them, because the
+two mistakes are not symmetric: a re-asked gate costs the operator a glance, a
+silently dropped one costs a stuck worker.
+
+⚠️ **Read that boundary before relying on this predicate.** A caller that treats
+`operator_answered()` as proof the operator acted will be wrong for exactly the
+case the surrounding work exists for. Closing that case needs something a
+scripted click cannot produce; it is not a stronger predicate here.
 
   answered + client present + not positively automated  ->  attributed
   answered + no client at all                           ->  unattributed
@@ -118,9 +129,16 @@ def classify(item):
 
 
 def operator_answered(item):
-    """True only when the answer is attributable to the operator.
+    """True when the answer carries client evidence and is not positively flagged.
 
-    The predicate a consumer gates on. ⚠️ It is deliberately not
+    ⚠️ **The name is the claim, and it is stronger than what this can prove.**
+    It does NOT mean "the operator answered": a scripted browser click stores
+    `automation: false` and passes this predicate (see the module docstring).
+    It means *the answer is attributable at all* — there is a client record and
+    nothing in it is positively flagged as automation. Callers must not read it
+    as proof, and the two cases it does refuse are the decidable ones.
+
+    The predicate a consumer gates on. It is deliberately not
     `state == "answered"` — see the module docstring for why that reading is the
     defect, and `was_acted_on` for why `closed` alone is not evidence either.
     """
