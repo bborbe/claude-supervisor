@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.58.1
 
 - fix: give the drive leg a named read path and forbid the sweep-gate tick files. `agents/manager-drive.md` now names this sweep's snapshot — `~/.claude/state/sweep-gate-loop/<vault>/<subject>.snapshot.json`, with its append-only `.snapshot.history.jsonl` beside it — and forbids both tick files (the flat `~/.claude/state/sweep-gate/<topic>.tick.txt` and the per-vault `…/<subject>.tick.txt`). Rows handed over without snapshot provenance — the snapshot's `recorded_at` plus the prior record's per-bucket name sets, which a caller reading a hand-named stand-in such as `/tmp/<slug>-buckets.json` cannot produce — are **Held** with the omission named. Measured 2026-09-24/25: an act leg took its ready rows from a stale tick file, offered an already-completed task, and stopped after 2 rows with 4 audit attempts left.
 - fix: require the walk's stopping bound to be **named and its value quoted** in the `Held` line. A walk legitimately ends on either the spawn cap or the audit budget (one `task-auditor` dispatch per ready row), and at a cap of 2, stopping at two is *correct* — so the count alone can never separate a correct stop from the measured defect, which stopped at two naming **no bound at all**. Attribution is the observable.
