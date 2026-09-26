@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.1
 
 - fix: **record the attention store as the decider when its poll releases a parked permission.** A store-settled park wrote **no `permissions.jsonl` record at all** — the poll called the park's own `settle()` directly, while `logPermission(… decided_by:)` was written only on the `answer_permission` path — so a release the store made was indistinguishable from a policy allow. Measured 2026-09-25 on the delivery path's own e2e window: 2 records, both `decided_by: 'escalated'` with `decision: null`, and the settle that released the park produced neither. The poll now reports each release to an `onSettled` callback — fired **after** the settle, so a recorder that throws cannot withhold the decision — and `server/supervisor.mjs` writes the same record shape `answer_permission` writes, with **`decided_by: 'store'`**. That value is new: reusing `policy` / `escalated` / `manager` would attribute the release to an actor that did not make it, which is the false positive the field exists to prevent. `attention-poll.mjs` gained `STORE_DECIDER` and `storeDecisionRecord()`, built there rather than at the call site so the new value is unit-testable (`supervisor.mjs` cannot be imported in-process). Both directions are tested: a store-released park is recorded as the store's, and an open item, a missing verdict, a verdict outside the enum, and an ambiguous park are each asserted to record nothing — a one-directional check would pass on a recorder that fires unconditionally.
 
