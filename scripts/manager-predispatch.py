@@ -1,0 +1,710 @@
+#!/usr/bin/env python3
+"""manager-predispatch.py — the pre-dispatch gate for `/manager-drive` and `/manager-status`.
+
+Why this exists
+---------------
+Both commands dispatch a full sweep agent on every run. Measured 2026-09-25 in the
+Attention Routing manager session on a 26-task tree with 25 done: the
+`supervisor:manager-sweep-reader` agent cost 91,598 tokens, the drive leg 71,275, and a
+`manager-status` snapshot 125,423 — for zero new information. Three times in one session
+the manager bypassed the agents by hand to avoid the cost.
+
+The sweep is not the cost; the dispatch is. So this gate runs FIRST, model-free, and
+answers one question: has anything the sweep would report actually moved since the last
+persisted snapshot? If not, the command replays the stored table and dispatches nothing.
+
+Contract — ported, not invented
+-------------------------------
+This is a PORT of `Personal/.claude/scripts/sweep-gate.py`, which gates the *loop* tick.
+The loop gate could not be reused as a file: it lives in the vault while this plugin is
+vault-agnostic (commands resolve vaults via `vault-cli config` and reference notes by
+title, never path). What carries over is the contract — the digest inputs, the state key,
+the exit codes and the fail-open rule — reused verbatim so the two gates cannot drift
+into disagreeing about what "unchanged" means.
+
+  manager-predispatch.py --vault <path> --subject <name> --check
+  manager-predispatch.py --vault <path> --subject <name> --print
+  manager-predispatch.py --vault <path> --subject <name> --save     # table on stdin
+
+⚠️ Why this store is not the loop's store — checked before building, 2026-09-26
+--------------------------------------------------------------------------------
+A live per-subject snapshot already exists: `~/.claude/state/sweep-gate-loop/<vault>/
+<subject>.snapshot.json`, written every 900 s by the vault-side launchd job
+`com.bborbe.sweep-gate-notify`. It was read and compared field-for-field, and the result
+is worth keeping because it cuts both ways:
+
+  IT CARRIES the digest inputs — `status`, `phase`, `progress_hash`, `session`,
+  `liveness`, `stuck` per task. That is the exact set `digest_of()` below hashes, so the
+  contract is CONFIRMED rather than merely assumed: the loop's writer and this gate agree
+  on what "unchanged" means, which is the property that keeps two gates from drifting.
+
+  IT LACKS the rendered table, and it has no member list. The no-change branch must
+  replay the table (the operator sees the frame on every run — silence would be
+  ambiguous, and a quiet run and a dead run look identical from outside), and the loop
+  snapshot carries no `table` key; the loop's table lives in the sibling
+  `<subject>.tick.txt` instead.
+
+  IT IS LOOP-ONLY AND VAULT-SIDE. It exists for subjects with an armed loop, in vaults
+  where that launchd job is installed. This plugin is vault-agnostic and both commands
+  run against arbitrary subjects, so reading it would fail open on every unarmed subject
+  — a full sweep every run, reading as armed while saving nothing. That is the same
+  failure `[[The Frozen-Tree Remedy Cannot Be Armed on a Goal Branch]]` closed for the
+  loop, and reintroducing it here would be a regression dressed as reuse.
+
+So: same contract, different surface. This gate owns its own store, and the two cannot
+disagree about a tree because they hash the same inputs.
+
+Exit codes (same three the loop gate uses)
+  0   digest equal to the stored one — nothing changed, dispatch no agent
+  10  digest differs, OR any fail-open case fired — run the full sweep
+  2   usage error
+
+Fail-open, by design
+--------------------
+A missing state file (first-ever run), an unreadable state file, a parse error, an
+unresolvable subject, and a failed write all force a full sweep rather than reporting
+"no change". A gate that silently reports "no change" when it cannot tell makes a
+manager blind to its own subject, which is the one failure worth spending a dispatch
+to avoid. A failed `--save` is the same shape: it returns CHANGE rather than passing
+quietly, because failing to record the digest must never read as "no change" next run.
+
+Digest inputs — verbatim from the loop gate
+  per tracked task: name, status, phase, claude_session_id, a hash of its `# Progress`
+  section, its Session-column liveness word, and its stuck verdict — plus the sorted
+  member-name list, so a task added to or removed from the tracked set moves the digest
+  even if every remaining task is untouched.
+
+⚠️ mtime is deliberately EXCLUDED. A touch with no content change is not a change the
+sweep reports, and including it would wake the model on every unrelated rewrite.
+
+⚠️ Liveness is in the digest ON PURPOSE, and this is the criterion the whole gate is
+graded on. A worker dying changes session liveness; a digest over `status`/`phase`/mtime
+alone would see the dead worker's task as unchanged and replay the stored table straight
+over the death. Liveness is therefore computed HERE, in the gate — never inside the
+dispatched `manager-sweep-reader` agent, which is forbidden to probe liveness
+(`agents/manager-sweep-reader.md`) and could not see it anyway.
+
+⚠️ The liveness verdict must not be over-eager, and that is a graded case too. Deciding
+"dead" by heartbeat age alone satisfies "a dead worker is reported" while mis-reporting
+live workers as dead. The registry is consulted first and is authoritative when it holds
+a live pid; the heartbeat is the fallback for headless workers the registry structurally
+cannot see. Both halves are exercised by the paired probe in the task's SC3.
+
+Liveness is model-free and read from plain files
+------------------------------------------------
+  `~/.claude/sessions/<pid>.json` — the registry. Pruned on exit, so a record with a live
+  pid is a POSITIVE signal; absence proves nothing (a headless worker has none).
+  `<XDG_STATE_HOME>/claude-supervisor/live/<sid>.json` — the headless heartbeat, written
+  by this plugin's own `server/heartbeat.mjs`. The verdict is the stamp's AGE against the
+  TTL, never the file's existence: a server killed with `kill -9` never clears its stamps,
+  so a stale file is a DEAD worker.
+  `~/.claude/state/attention/*.needs.json` — the park probe, using the feed's own rule. A
+  park is a RAISED gate; `state: "open"` alone is not a park (the dominant record shape is
+  `kind: idle, state: open`, "turn ended, waiting for a prompt").
+
+Both subject kinds
+------------------
+The loop gate is `--topic`-required and fail-opens on a goal, which is correct there (its
+remedy is topic-only by an already-taken decision). This gate is not topic-only: both
+commands it serves auto-detect a goal OR a topic, so a goal-branch manager must get the
+same saving rather than fail-opening on every run while reading as armed.
+
+State
+-----
+`~/.claude/state/manager-predispatch/<slug>.json`, keyed on the subject slug. Never inside
+a repo — a file in a repo tree trips dirty-tree checks during somebody else's commit. The
+stored table is what a no-change run replays, so the operator still sees the frame on
+every run.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime
+
+STATE_DIR = os.path.expanduser(
+    os.environ.get("MANAGER_PREDISPATCH_STATE_DIR", "~/.claude/state/manager-predispatch")
+)
+REGISTRY_DIR = os.path.expanduser("~/.claude/sessions")
+FEED_DIR = os.path.expanduser("~/.claude/state/attention")
+
+# The headless-worker heartbeat store, written by this plugin's `server/heartbeat.mjs`.
+HEARTBEAT_DIR = os.environ.get("SUPERVISOR_HEARTBEAT_DIR") or os.path.join(
+    os.environ.get("XDG_STATE_HOME")
+    or os.path.join(os.path.expanduser("~"), ".local", "state"),
+    "claude-supervisor",
+    "live",
+)
+# Mirrors HEARTBEAT_TTL_MS in the server, exactly as the loop gate mirrors it. Two copies of
+# one number, paid knowingly: this gate runs model-free and must not depend on a checkout
+# being present, so it cannot import the constant. Changing one without the other fails in
+# the safe direction — a longer TTL here reads a dead worker live, suppressing a report
+# rather than inviting a duplicate spawn.
+HEARTBEAT_TTL_SECONDS = 60
+
+EXIT_NOCHANGE = 0
+EXIT_CHANGE = 10
+EXIT_USAGE = 2
+
+STUCK_SECONDS = 30 * 60
+
+LIVENESS_LIVE = "live"
+LIVENESS_PARKED = "parked"
+LIVENESS_NONE = "none"
+
+NO_CHANGE_MARKER = "NO-CHANGE"
+
+
+# --------------------------------------------------------------------------- #
+# vault reading
+# --------------------------------------------------------------------------- #
+
+_FM = re.compile(r"^---\n(.*?)\n---", re.S)
+_PROGRESS = re.compile(r"^# Progress\s*\n(.*?)(?=\n# |\Z)", re.S | re.M)
+_CHECKBOX = re.compile(r"^\s*-\s*\[([ xX/])\]", re.M)
+_LIST_ITEM = re.compile(r"^\s*-\s*\[\[(.+?)\]\]")
+
+
+def split_frontmatter(text: str) -> str | None:
+    m = _FM.match(text)
+    return m.group(1) if m else None
+
+
+def fm_scalar(fm: str, key: str) -> str:
+    m = re.search(rf"^{re.escape(key)}:\s*(.*)$", fm, re.M)
+    return m.group(1).strip() if m else ""
+
+
+def fm_wikilinks(fm: str, key: str) -> list[str]:
+    """All [[...]] under `key:`, whether inline (`key: ['[[X]]']`) or block.
+
+    All three shapes the vault writes must resolve: inline list, block list, and
+    empty/absent. Block form is `key:` then indented `- '[[X]]'` lines.
+    """
+    m = re.search(rf"^{re.escape(key)}:(.*)$", fm, re.M)
+    if not m:
+        return []
+    rest = m.group(1)
+    if rest.strip() and rest.strip() != "[]":
+        return re.findall(r"\[\[(.+?)\]\]", rest)
+    block = re.search(rf"^{re.escape(key)}:\s*\n((?:[ \t]+-.*\n?)*)", fm, re.M)
+    if not block:
+        return []
+    return re.findall(r"\[\[(.+?)\]\]", block.group(1))
+
+
+def progress_hash(text: str) -> str:
+    """A hash of the task's `# Progress` section — the sweep's change signal.
+
+    Hashing the section is what lets the digest move on a Progress write that leaves
+    status and phase alone, and what lets the stuck verdict honestly assert "no Progress
+    entry" rather than "no frontmatter change".
+    """
+    m = _PROGRESS.search(text)
+    return hashlib.sha256((m.group(1) if m else "").encode()).hexdigest()[:16]
+
+
+def checkbox_count(text: str, section: str | None = None) -> str:
+    """`n/m` ticked-vs-total checkboxes, optionally scoped to a `# <section>`.
+
+    A section with no checkboxes returns `—` rather than `0/0`, which would read as a
+    real reading of nothing.
+    """
+    body = text
+    if section:
+        m = re.search(rf"^# {re.escape(section)}\s*\n(.*?)(?=\n# |\Z)", text, re.S | re.M)
+        if not m:
+            return "—"
+        body = m.group(1)
+    boxes = _CHECKBOX.findall(body)
+    if not boxes:
+        return "—"
+    return f"{sum(1 for b in boxes if b in 'xX')}/{len(boxes)}"
+
+
+def read_task(path: str) -> dict | None:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    fm = split_frontmatter(text)
+    if fm is None:
+        return None
+    return {
+        "name": os.path.basename(path)[:-3],
+        "status": fm_scalar(fm, "status"),
+        "phase": fm_scalar(fm, "phase"),
+        "session": fm_scalar(fm, "claude_session_id").strip("'\""),
+        "goals": fm_wikilinks(fm, "goals"),
+        "progress_hash": progress_hash(text),
+        "met": checkbox_count(text),
+    }
+
+
+def declared_members(topic_path: str) -> list[str]:
+    """Read a topic page's `## Goals` list — declared membership, never inferred.
+
+    Only list items count. Prose wikilinks inside the section are NOT members: a topic
+    page names sibling pages inside a bullet's prose, and a naive `[[...]]` sweep over
+    the section admits those as members.
+    """
+    with open(topic_path, encoding="utf-8") as fh:
+        text = fh.read()
+    m = re.search(r"^## Goals\s*\n(.*?)(?=\n#{2,3} |\n# |\Z)", text, re.S | re.M)
+    if not m:
+        raise ValueError(f"no `## Goals` section in {topic_path}")
+    members = []
+    for line in m.group(1).splitlines():
+        hit = _LIST_ITEM.match(line)
+        if hit:
+            members.append(hit.group(1).strip())
+    return members
+
+
+def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
+    """A member may be a goal (admits tasks whose `goals:` name it) or a task.
+
+    Vault-only and pure: it never touches the registry, so a fixture can run it against a
+    throwaway vault and get the same values the live run gets.
+    """
+    tasks_dir = os.path.join(vault, "25 Tasks")
+    member_set = set(members)
+    tracked: list[dict] = []
+    for entry in sorted(os.listdir(tasks_dir)):
+        if not entry.endswith(".md"):
+            continue
+        task = read_task(os.path.join(tasks_dir, entry))
+        if task is None:
+            continue
+        if task["name"] in member_set:  # declared directly as a task entry
+            tracked.append(task)
+        elif member_set.intersection(task["goals"]):
+            tracked.append(task)
+    return sorted(tracked, key=lambda t: t["name"])
+
+
+def page_type_of(path: str) -> str:
+    """The `page_type:` frontmatter value, scoped to the frontmatter block.
+
+    Unscoped it would match a guide's YAML template quoted in prose.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            fm = split_frontmatter(fh.read())
+    except OSError:
+        return ""
+    return fm_scalar(fm, "page_type") if fm else ""
+
+
+def resolve_subject(vault: str, subject: str) -> tuple[str, list[str]]:
+    """-> (branch, members). Raises ValueError unless exactly one page resolves.
+
+    Both commands auto-detect goal vs topic; this gate must resolve the same way or it
+    would gate a different tree than the command sweeps. Both-match and no-match are both
+    refusals — never a silent preference, which is the failure the commands' own
+    resolution section exists to prevent.
+    """
+    goal_path = os.path.join(vault, "24 Goals", f"{subject}.md")
+    topic_path = os.path.join(vault, "23 Topics", f"{subject}.md")
+    is_goal = os.path.exists(goal_path) and page_type_of(goal_path) == "goal"
+    is_topic = os.path.exists(topic_path) and page_type_of(topic_path) == "topic"
+    if is_goal and is_topic:
+        raise ValueError(f"ambiguous subject: both {goal_path} and {topic_path} resolve")
+    if is_goal:
+        return "goal", [subject]
+    if is_topic:
+        return "topic", declared_members(topic_path)
+    raise ValueError(f"no subject page for {subject!r} in 24 Goals/ or 23 Topics/")
+
+
+# --------------------------------------------------------------------------- #
+# liveness — model-free, from the registry, the heartbeat store and the feed
+# --------------------------------------------------------------------------- #
+
+PARKED_VERBS = ("later (on ",)
+_ENTITY = re.compile(r"&(?:nbsp|#160|#xa0);", re.I)
+
+# Distinguishes "read the store for me" from a caller passing its own verdict — including
+# one that is `None`, which is a real answer ("could not read") and must not be mistaken
+# for "you read it".
+_HEARTBEAT_UNREAD = object()
+
+
+def heartbeat_live(sid: str, now: float | None = None) -> bool | None:
+    """True / False / None for one session id. None is "could not read", never "not live".
+
+    ⚠️ The verdict is the stamp's AGE against the TTL, never the file's existence — see the
+    module docstring. None and False stay distinct so an I/O error is never folded into a
+    confident negative.
+    """
+    now = time.time() if now is None else now
+    try:
+        age = now - os.stat(os.path.join(HEARTBEAT_DIR, f"{sid}.json")).st_mtime
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    return age < HEARTBEAT_TTL_SECONDS
+
+
+def read_registry() -> dict[str, dict]:
+    """`~/.claude/sessions/<pid>.json` -> {sessionId: {pid, status, name, alive}}.
+
+    The registry is pruned on exit, so a record with a live pid is a positive signal. A
+    missing record proves nothing: a headless worker has none.
+    """
+    out: dict[str, dict] = {}
+    for path in glob.glob(os.path.join(REGISTRY_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        sid = d.get("sessionId")
+        if not sid:
+            continue
+        pid = d.get("pid")
+        alive = False
+        if isinstance(pid, int):
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except PermissionError:  # exists, but not ours -> alive
+                alive = True
+            except OSError:
+                alive = False
+        out[sid] = {
+            "pid": pid,
+            "status": d.get("status", ""),
+            "name": d.get("name", ""),
+            "alive": alive,
+        }
+    return out
+
+
+def read_feed() -> dict[str, dict]:
+    """`~/.claude/state/attention/*.needs.json` -> {sessionId: record}."""
+    out: dict[str, dict] = {}
+    for path in glob.glob(os.path.join(FEED_DIR, "*.needs.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        sid = d.get("session_id")
+        if sid:
+            out[sid] = d
+    return out
+
+
+def is_open_gate(rec: dict | None) -> bool:
+    """The attention feed's own park rule. A park is a RAISED gate the operator has not
+    answered — `state: "open"` alone is not a park, since the dominant record shape is
+    `kind: idle, state: open`, meaning "turn ended, waiting for a prompt"."""
+    if not rec:
+        return False
+    if rec.get("state") == "answered":
+        return False
+    if rec.get("kind") not in ("permission", "question"):
+        return False
+    detail = " ".join(_ENTITY.sub(" ", rec.get("detail") or "").split())
+    return not detail.startswith(PARKED_VERBS)
+
+
+def liveness_of(
+    sid: str, registry: dict, feed: dict, heartbeat: bool | None = _HEARTBEAT_UNREAD
+) -> str:
+    """live / parked / none for one session id, from the registry PLUS the heartbeat.
+
+    The registry answers for every session that holds a socket — every interactive one —
+    and the heartbeat answers for the headless workers it structurally cannot see.
+    Neither substitutes for the other, and the registry is consulted FIRST: it carries a
+    real pid and a real status, so it outranks a heartbeat age threshold and is what keeps
+    a live worker with a stale heartbeat from being reported dead.
+    """
+    if not sid:
+        return LIVENESS_NONE
+    rec = registry.get(sid)
+    if not rec or not rec["alive"]:
+        beat = heartbeat_live(sid) if heartbeat is _HEARTBEAT_UNREAD else heartbeat
+        if beat is not True:
+            return LIVENESS_NONE
+        return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
+    if is_open_gate(feed.get(sid)) or rec["status"] == "waiting":
+        return LIVENESS_PARKED
+    return LIVENESS_LIVE
+
+
+def enrich_liveness(tracked: list[dict], registry: dict, feed: dict) -> None:
+    for t in tracked:
+        t["liveness"] = liveness_of(t["session"], registry, feed)
+
+
+def apply_stuck(tracked: list[dict], registry: dict, prev_busy: dict, now_ts: float) -> dict:
+    """Set `t['stuck']` and return the busy-since map to persist.
+
+    The registry gives a session's current status but not how long it has held it, so the
+    clock is observed across runs; a Progress write resets it, which is what keeps a
+    working worker off the stuck row.
+    """
+    new_busy: dict[str, dict] = {}
+    for t in tracked:
+        rec = registry.get(t["session"]) if t["session"] else None
+        busy = bool(rec and rec["alive"] and rec["status"] == "busy")
+        if not busy:
+            t["stuck"] = False
+            continue
+        prev = prev_busy.get(t["name"])
+        if prev and prev.get("progress") == t["progress_hash"]:
+            since = float(prev.get("since", now_ts))
+            t["stuck"] = (now_ts - since) >= STUCK_SECONDS
+            new_busy[t["name"]] = {"since": since, "progress": t["progress_hash"]}
+        else:
+            t["stuck"] = False
+            new_busy[t["name"]] = {"since": now_ts, "progress": t["progress_hash"]}
+    return new_busy
+
+
+# --------------------------------------------------------------------------- #
+# digest
+# --------------------------------------------------------------------------- #
+
+
+def digest_of(tracked: list[dict]) -> str:
+    """What the sweep would render, plus the Progress signal it reports.
+
+    `liveness` and `stuck` are set by the caller before this runs; both default to absent
+    so a caller that has not enriched them (a fixture) still gets a stable digest.
+    """
+    h = hashlib.sha256()
+    for t in sorted(tracked, key=lambda x: x["name"]):
+        h.update(
+            (
+                f"{t['name']}|{t['status']}|{t['phase']}|{t['session']}"
+                f"|{t.get('progress_hash', '')}|{t.get('liveness', LIVENESS_NONE)}"
+                f"|{int(bool(t.get('stuck')))}\n"
+            ).encode()
+        )
+    h.update(b"--members--\n")
+    for t in sorted(tracked, key=lambda x: x["name"]):
+        h.update(f"{t['name']}\n".encode())
+    return h.hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# stored state + fail-open
+# --------------------------------------------------------------------------- #
+
+
+def slug(subject: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")
+
+
+def state_path(subject: str) -> str:
+    return os.path.join(STATE_DIR, f"{slug(subject)}.json")
+
+
+def load_state(subject: str) -> dict:
+    """The raw stored payload, or {} — used for the cross-run busy-since map."""
+    try:
+        with open(state_path(subject), encoding="utf-8") as fh:
+            data = json.loads(fh.read())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_stored(subject: str) -> tuple[str | None, str, str | None]:
+    """-> (digest, stored_table, fail_reason). fail_reason set => force a full sweep."""
+    path = state_path(subject)
+    if not os.path.exists(path):
+        return None, "", "first run — no state file"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        return None, "", f"state unreadable ({exc.strerror or exc})"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, "", f"state parse error ({exc.msg})"
+    if not isinstance(data, dict) or "digest" not in data:
+        return None, "", "state parse error (no digest key)"
+    table = data.get("table") or ""
+    if not isinstance(table, str) or not table.strip():
+        # A snapshot with no table cannot be replayed, so it cannot make a run free.
+        return None, "", "state has no stored table"
+    return str(data["digest"]), table, None
+
+
+def strip_links(text: str) -> str:
+    """Drop OSC 8 hyperlink escapes, keeping the text they wrapped.
+
+    The jump link's URI carries the jump token, so anything written to disk must not
+    carry the escape — and the stored table IS written to disk, to be copied, synced or
+    pasted. `box-table.py` emits OSC8_OPEN + url + OSC8_ST + text + OSC8_OPEN + OSC8_ST,
+    so removing the sequences leaves the visible table intact and the token absent. Same
+    function, same reason, as the loop gate's.
+    """
+    return re.sub(r"\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+
+
+def save_stored(
+    subject: str, branch: str, digest: str, table: str, tracked: list[dict], busy: dict
+) -> None:
+    """Persist atomically (tmp + os.replace).
+
+    The replace is the same discipline `fleet-snapshot.py` documents: a plain
+    `open(path, "w")` truncates first, so a crash or a serialisation error part-way
+    through leaves a truncated snapshot where a valid one stood — and the next run then
+    diffs against nothing. `os.replace` is atomic within a filesystem: a reader sees
+    either the old snapshot or the new one, never a half-written file.
+    """
+    os.makedirs(STATE_DIR, exist_ok=True)
+    payload = {
+        "subject": subject,
+        "branch": branch,
+        "digest": digest,
+        # Stored link-free — see strip_links. The replay prints this text, so a stored
+        # OSC 8 escape would hand the operator a jump coordinate resolved at the earlier
+        # render, and pane ids are renumbered by a WezTerm restart without moving any
+        # digest input. The no-change branch therefore replays no coordinates at all.
+        "table": strip_links(table),
+        "members": len(tracked),
+        "busy_since": busy,
+        "recorded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    tmp = state_path(subject) + ".tmp"
+    try:
+        # 0600 at creation rather than by a chmod after it: the file is never
+        # world-readable, not even for the instant between the write and the chmod.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        os.replace(tmp, state_path(subject))
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+# --------------------------------------------------------------------------- #
+# verdict
+# --------------------------------------------------------------------------- #
+
+
+def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
+    """-> (changed, reason, payload, stored_table).
+
+    Every failure path returns `changed=True` — the fail-open rule. A gate that reports
+    "no change" when it cannot tell is the one failure worth a dispatch to avoid.
+    """
+    try:
+        branch, members = resolve_subject(vault, subject)
+    except (ValueError, OSError) as exc:
+        return True, f"fail-open: subject unresolvable ({exc})", {}, ""
+
+    try:
+        tracked = resolve_tracked(vault, members)
+    except OSError as exc:
+        return True, f"fail-open: tracked set unreadable ({exc})", {}, ""
+
+    registry = read_registry()
+    feed = read_feed()
+    stored, stored_table, fail_reason = load_stored(subject)
+    prev = load_state(subject)
+    prev_busy = prev.get("busy_since") or {}
+
+    now_ts = time.time()
+    enrich_liveness(tracked, registry, feed)
+    busy = apply_stuck(tracked, registry, prev_busy, now_ts)
+    digest = digest_of(tracked)
+
+    changed = fail_reason is not None or stored != digest
+    reason = fail_reason or ("digest differs" if changed else "digest equal")
+    payload = {
+        "branch": branch,
+        "digest": digest,
+        "tracked": tracked,
+        "busy": busy,
+        "recorded_at": prev.get("recorded_at", ""),
+    }
+    return changed, reason, payload, stored_table
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description="manager pre-dispatch change gate")
+    ap.add_argument("--subject", required=True, help="goal or topic name")
+    ap.add_argument("--vault", required=True, help="vault root")
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true", help="verdict only")
+    mode.add_argument(
+        "--print", action="store_true", help="verdict; replay the stored table on no-change"
+    )
+    mode.add_argument(
+        "--save", action="store_true", help="persist the digest + the table on stdin"
+    )
+    args = ap.parse_args(argv)
+
+    changed, reason, payload, stored_table = evaluate(args.vault, args.subject)
+
+    if args.save:
+        table = sys.stdin.read()
+        if not table.strip():
+            # Same discipline as fleet-snapshot.py's empty guard: a failed render must not
+            # clobber a good snapshot, and a snapshot with no table can never be replayed.
+            print(
+                "refusing to save an empty table: the snapshot is left unchanged, and this "
+                "run reports CHANGE so the next one re-sweeps rather than replaying nothing.",
+                file=sys.stderr,
+            )
+            return EXIT_CHANGE
+        if changed:
+            try:
+                save_stored(
+                    args.subject,
+                    payload["branch"],
+                    payload["digest"],
+                    table,
+                    payload["tracked"],
+                    payload["busy"],
+                )
+            except OSError as exc:
+                print(f"fail-open: could not record state ({exc})", file=sys.stderr)
+                return EXIT_CHANGE
+            print(f"SAVED {reason}")
+            return EXIT_CHANGE
+        print(f"SAVED no-change ({reason})")
+        return EXIT_NOCHANGE
+
+    if args.check:
+        print(("CHANGE " + reason) if changed else "NOCHANGE")
+        return EXIT_CHANGE if changed else EXIT_NOCHANGE
+
+    # --print: the whole point. On no-change the operator still sees the frame — silence
+    # would be ambiguous, and a quiet run and a dead run look identical from outside.
+    if changed:
+        print(f"CHANGE {reason}")
+        return EXIT_CHANGE
+
+    print(
+        f"⏸ {NO_CHANGE_MARKER} since {payload['recorded_at'] or 'the last sweep'} — "
+        "prior sweep replayed, 0 agents dispatched"
+    )
+    print(stored_table.rstrip("\n"))
+    return EXIT_NOCHANGE
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
