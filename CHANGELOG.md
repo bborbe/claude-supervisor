@@ -8,6 +8,9 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+- fix: correct the falsified measurement in the resume-guard comments in `server/supervisor.mjs` and `server/decision-settle.mjs`. The run both comments cited carried no decision, so the guard was never observed to fire; the comments now name `renderResumePrompt` as the mechanism that stops the re-ask and scope the guard to what was observed. Comment-only — no behaviour change.
+
 ## v0.57.5
 - chore: unfold seven bullets that sat under a release which does not contain them. Each was moved into the section for the tag that actually contains its merge — **not** into `## Unreleased`, since all seven shipped in a later release and moving them here would duplicate the entry in the next one. Found by the `Changelog Fold Guard` job on its first unattended run against this repo.
 

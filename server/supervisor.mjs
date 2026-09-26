@@ -368,12 +368,15 @@ function makeCanUseTool(agent) {
         settle({ behavior: 'deny', message: 'Supervisor did not answer within 15 minutes.' })
       }, PERMISSION_TIMEOUT_MS)
 
-      // A decision carried by a resume answers the gate it names, instead of parking a
-      // second time. Measured 2026-09-25: without this the resumed worker re-raised the
-      // identical call and parked again, so a carried `deny` re-asked rather than stopped
-      // — the decision had reached the transcript and not the gate. There is no original
-      // promise left to settle; it died with the spawner, and this is the gate that
-      // matters now.
+      // A decision carried by a resume answers the gate it names, rather than letting the
+      // worker park it a second time. The motivating run (`spawner-exit-resume`) did not
+      // demonstrate this — it was resumed with a bare `Continue.` and carried no decision,
+      // so its re-raise is just what a worker does when resumed with no information. What
+      // stopped the re-ask in the run that DID carry a decision is `renderResumePrompt`'s
+      // closing line: the worker read it and declined to re-run the call. This guard is the
+      // second line for a worker that ignores that note — correct, narrow and unit-tested,
+      // but no observed live run has made it fire. There is no original promise left to
+      // settle; it died with the spawner, and this is the gate that matters now.
       //
       // Consumed once — a decision answers one park, not the worker's whole future — and
       // a carried `allow` is NOT auto-applied here (`serverWouldAllow: false`), because
