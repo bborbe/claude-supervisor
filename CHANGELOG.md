@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.57.6
 - fix: correct the falsified measurement in the resume-guard comments in `server/supervisor.mjs` and `server/decision-settle.mjs`. The run both comments cited carried no decision, so the guard was never observed to fire; the comments now name `renderResumePrompt` as the mechanism that stops the re-ask and scope the guard to what was observed. Comment-only — no behaviour change.
 
 ## v0.57.5
