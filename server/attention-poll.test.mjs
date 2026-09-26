@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { decisionOf, selectParked, startAttentionPoll, storeDecisionRecord, STORE_DECIDER } from './attention-poll.mjs'
+import { armDelivery, decisionOf, selectParked, startAttentionPoll, storeDecisionRecord, STORE_DECIDER } from './attention-poll.mjs'
 
 function agentsOf(...entries) {
   return new Map(entries.map(([id, sessionId]) => [id, { id, sessionId }]))
@@ -43,6 +43,23 @@ test('decisionOf refuses a verdict outside the enum', () => {
   const got = decisionOf({ decision: 'maybe' })
   assert.equal(got.ok, false)
   assert.match(got.reason, /not one of allow\/deny/)
+})
+
+test('armDelivery accepts an answer an arm delivered', () => {
+  const got = armDelivery({ resolved_by: '11111111-2222-3333-4444-555555555555' })
+  assert.equal(got.ok, true)
+  assert.equal(got.resolvedBy, '11111111-2222-3333-4444-555555555555')
+})
+
+test('armDelivery refuses an answer with no resolved_by', () => {
+  // ⚠️ The guard the operator's ruling turns on. A verdict alone is not enough
+  // for a permission gate: the board never sends `resolved_by`, so an answer
+  // carrying a verdict but no arm provenance is not an operator decision.
+  for (const item of [{}, { resolved_by: '' }, { resolved_by: null }, { resolved_by: 7 }, null]) {
+    const got = armDelivery(item)
+    assert.equal(got.ok, false, `expected refusal for ${JSON.stringify(item)}`)
+    assert.match(got.reason, /no resolved_by/)
+  }
 })
 
 test('selectParked joins producer to the one parked prompt', () => {
@@ -137,7 +154,9 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
 test('an answered allow settles the parked promise', async () => {
   const { ticks, pending } = harness({
     open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
-    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    // `resolved_by` is in the fixture because a permission gate releases only on
+    // an ARM answer. Without it the same item is refused — see the guard's spec.
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-1' } },
   })
   await ticks[0]()
   assert.equal(pending.get('perm_7').settled.length, 1)
@@ -147,7 +166,7 @@ test('an answered allow settles the parked promise', async () => {
 test('an answered deny settles as a deny, not an allow', async () => {
   const { ticks, pending } = harness({
     open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
-    items: { i1: { item_id: 'i1', state: 'answered', decision: 'deny', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'deny', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-1' } },
   })
   await ticks[0]()
   assert.equal(pending.get('perm_7').settled[0].behavior, 'deny')
@@ -172,6 +191,33 @@ test('an answered item with no verdict is reported, not defaulted', async () => 
   await ticks[0]()
   assert.equal(pending.get('perm_7').settled.length, 0)
   assert.match(logged.join('\n'), /no decision/)
+})
+
+test('a verdict with no arm provenance does not settle — and says why', async () => {
+  // ⚠️ This is the operator's ruling: a permission gate releases only on an ARM
+  // answer. The item below is well-formed and carries a valid verdict, so
+  // `decisionOf` passes it — the refusal is `armDelivery`'s, and the park stays
+  // parked rather than being released by something that is not an operator
+  // decision. It is LOGGED, never silently refused.
+  const logged = []
+  const { ticks, pending } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: {
+      i1: {
+        item_id: 'i1',
+        state: 'answered',
+        decision: 'allow',
+        answered_by: 'attention-board',
+        answer_mechanism: 'permission',
+        producer_id: 'sess-1',
+      },
+    },
+    log: (m) => logged.push(m),
+  })
+  await ticks[0]()
+  assert.equal(pending.get('perm_7').settled.length, 0)
+  assert.match(logged.join('\n'), /not arm-delivered/)
+  assert.match(logged.join('\n'), /no resolved_by/)
 })
 
 test('a message-class item is never watched', async () => {
@@ -215,7 +261,7 @@ test('a verdict arriving after its park settled is reported, not crashed on', as
   const logged = []
   const { ticks, pending } = harness({
     open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
-    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-1' } },
     log: (m) => logged.push(m),
   })
   pending.delete('perm_7')
@@ -270,7 +316,7 @@ test('the loop reports a store-released park, with the park itself', async () =>
   const seen = []
   const { ticks } = harness({
     open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
-    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-1' } },
     onSettled: (e) => seen.push(e),
   })
   await ticks[0]()
@@ -307,7 +353,7 @@ test('onSettled is not called when the park is ambiguous', async () => {
   const seen = []
   const { ticks, pending } = harness({
     open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
-    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-1' } },
     onSettled: (e) => seen.push(e),
     pendingEntries: [['perm_7', 'a1'], ['perm_8', 'a1']],
   })
@@ -320,7 +366,7 @@ test('onSettled is not called when the park is ambiguous', async () => {
 test('onSettled fires after the settle, so a failing recorder cannot withhold the decision', async () => {
   const { ticks, pending } = harness({
     open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
-    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-1' } },
     onSettled: () => {
       throw new Error('recorder exploded')
     },
