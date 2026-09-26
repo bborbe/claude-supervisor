@@ -95,7 +95,7 @@ fleet-drive — <N> candidates · <F> finished (reaped) · <R> revive (<C> routi
       ledger: <drafted | suppressed: <reason> | excluded>
 ESCALATION — grouped by cause
   <cause>
-    <name> [<sid8>] · pane <id|—> — <probe> → <result>   (mark unverified causes "unverified")
+    <name> [<sid8>] · pane <id|—> · <link|no pane — <reason>> — <probe> → <result>   (mark unverified causes "unverified")
 REAPS
   TO: <exact roster name> | <evidence message text>
 NUDGES
@@ -105,11 +105,14 @@ LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · written <ts>
 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
 
-Carry on each `ESCALATION` row the pane id the digest's `BLOCKED` / `CLOSERS` row gave for that
-session, and `—` when the digest carried none — those digest rows are keyed by name, and this is
-the one place a name is read, only to lift a pane off a row the sweep already resolved. **Never go
-looking for a pane yourself**: no `wezterm cli list`, no title match, no fallback of your own. The
-caller resolves the `—` rows by session id, and renders `no pane — <reason>` when it cannot. Its own
-title fallback, where it has one, reads the session's current name from the registry at call time —
-that is the caller's business, not yours.
+Carry on each `ESCALATION` row the **rendered link** the digest gave for that session — off its
+`BLOCKED` / `CLOSERS` row, or off the `CLASSIFICATION` row when the candidate is `parked` and only
+that row carries one. Those digest rows are keyed by name, and this is the one place a name is read,
+only to lift a value off a row the sweep already resolved. When the digest carries a
+`no pane — <reason>` instead of a link, **carry that string verbatim** — never a bare `—`, which the
+manager can no longer resolve. **Never go looking for a pane yourself**: no `wezterm cli list`, no
+title match, no fallback of your own — and never render a link, which needs `python3` this agent
+does not hold. The sweep resolves and renders; the caller prints what you hand it. Its own title
+fallback, where it has one, reads the session's current name from the registry at call time — that
+is the sweep's business, not yours.
 </output_format>
