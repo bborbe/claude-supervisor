@@ -8,6 +8,18 @@ instead of blocking its whole turn on AskUserQuestion.
   post   POST /api/1.0/attention, then print the item id it created
   poll   GET /api/1.0/attention/{ITEM_ID}, print the answer, or OPEN
 
+**Three poll terminals, not two.** `OPEN` means still unanswered, and
+`ANSWERED:` means the answer is attributable to the operator. A third,
+`NOT_OPERATOR_ANSWERED:`, covers the item that moved on evidence the operator
+did not supply — no `answered_client` on the record, or a client that reported
+`automation: true`. A caller gating on this must read that the way it reads
+`OPEN`: **the gate is not released.** Reading only `ANSWERED` is the defect this
+terminal exists to close — the board's controls post a caller-declared
+`answered_by` and nothing in the request separates a pointer event from a
+synthesised one, so a scripted click otherwise reads as *the operator saw it*.
+The rule lives in `answered-attribution.py` and is deliberately shared with the
+other consumers rather than restated per script.
+
 **Why a manager polls rather than being sent to.** The asking session is the
 item's `producer_id`, so it can read its own item back; no cross-session
 SendMessage is involved. A browser button cannot send one, and neither can a
@@ -36,11 +48,25 @@ Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L].
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(_HERE, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+attribution = _load("answered_attribution", "answered-attribution.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 # Local store; a hung one must cost a clear failure, never a stalled loop tick.
@@ -128,20 +154,57 @@ def fetch_item(item_id):
         return json.load(resp)
 
 
-def describe_answer(item):
-    """Render the stored answer, or None when the item is still open.
+def describe_one(answer):
+    """Render one `answer` / `answers` entry, or None when it carries no kind.
 
-    The shape is the schema's `answer`: `{kind: option|skip|text, value}`. A
-    `skip` carries no value, so it is rendered as the bare word rather than as
+    The shape is the schema's `answer`: `{kind: option|skip|text, value, values}`.
+    A `skip` carries no value, so it is rendered as the bare word rather than as
     an empty one — printing `skip ` with nothing after it reads as a truncated
-    option answer.
+    option answer. `values` is a `multiple` question's several labels, and it is
+    carried by the answer shape rather than by the `answers` entry alone.
     """
-    answer = item.get("answer") or {}
+    answer = answer or {}
     kind = answer.get("kind")
     if not kind:
         return None
+    values = answer.get("values") or []
+    if values:
+        return f"{kind}: {', '.join(str(v) for v in values)}"
     value = answer.get("value") or ""
     return f"{kind}: {value}" if value else kind
+
+
+def describe_answer(item):
+    """Render the stored answer, or None when the item carries no answer content.
+
+    ⚠️ **Two fields carry the operator's content and they are mutually
+    exclusive by construction**, so a reader that stops at one is reading half
+    the schema: `answer` holds a **single-question** item's content, and
+    `answers` holds a **multi-question** item's, one entry per tab. The rule is
+    the store's, not this arm's — an item carrying `questions` is answered
+    through `answers` and an item carrying both is rejected — and it means an
+    arm that read only `answer` would report a multi-question item as having no
+    answer at all, which is the state a manager polls to escape.
+
+    `decision` is deliberately NOT read here even though it is the third shape
+    a store item can carry: it holds a `permission` item's **verdict**, and the
+    schema is explicit that `decision` and `answer` *"neither substitutes for
+    the other"*. Folding a verdict into a function named for the answer would
+    blur exactly the distinction that sentence draws, and `poll` is not the
+    permission reader anyway — `cmd_answer` refuses a permission item outright.
+    Such an item still reaches the attributed branch and is named as
+    contentless there rather than being silently reported as `OPEN`.
+    """
+    answers = item.get("answers")
+    if isinstance(answers, list) and answers:
+        rendered = [
+            f"{a.get('question')}: {d}"
+            for a in answers
+            if (d := describe_one(a)) is not None
+        ]
+        if rendered:
+            return "; ".join(rendered)
+    return describe_one(item.get("answer"))
 
 
 def cmd_post(args, out=sys.stdout):
@@ -195,12 +258,32 @@ def cmd_poll(item_id, out=sys.stdout):
             detail = err.read().decode(errors="replace")
             print(f"FAILED: store returned {err.code} for {item_id} -- {detail}", file=out)
         return 1
+    verdict, reason = attribution.classify(item)
     described = describe_answer(item)
-    if described is None:
+    # `OPEN` is the one terminal that means "still unanswered", and it is
+    # reached only when the record carries neither an answer nor an act. An
+    # item that moved but whose mover cannot be attributed falls through to
+    # NOT_OPERATOR_ANSWERED rather than being read as open — failing closed in
+    # that direction is what keeps a re-ask from looking like a lost gate.
+    if verdict == attribution.NOTHING and described is None:
         print("OPEN", file=out)
         return 0
-    print(f"ANSWERED: {described}", file=out)
     answered_by = item.get("answered_by") or ""
+    # `state`, never the word "closed": an attributed item that renders no
+    # content is `answered` with nothing this renderer reads, and naming the
+    # other state would misdescribe the transition that happened.
+    content = described or f"(no answer content recorded; item is {item.get('state')})"
+    if verdict == attribution.ATTRIBUTED:
+        print(f"ANSWERED: {content}", file=out)
+        if answered_by:
+            print(f"ANSWERED_BY: {answered_by}", file=out)
+        return 0
+    # ⚠️ Not a failure of the poll — the poll succeeded and the item DID move.
+    # It is a refusal to treat that movement as the operator's answer, so a
+    # caller gating on this must read it the way it reads `OPEN`: the gate is
+    # not released. Both terminals return 0 for that reason; a non-zero exit
+    # would read as a broken poll and invite a retry.
+    print(f"NOT_OPERATOR_ANSWERED: {content} -- {reason}", file=out)
     if answered_by:
         print(f"ANSWERED_BY: {answered_by}", file=out)
     return 0
