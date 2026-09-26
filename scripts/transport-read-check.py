@@ -71,6 +71,24 @@ def _empty(*_a, **_k):
     return _Proc(stdout="[]", returncode=0)
 
 
+# What a healthy transport holding content answers, per reader. Each accessor
+# parses a different shape — a JSON array for the wezterm reads, a whitespace
+# column layout for each `ps` read — so no single canned payload serves them all.
+# Without this state the check cannot see a fix that returns `None` or an empty
+# container unconditionally: both would satisfy the broken and healthy-empty
+# assertions while breaking every working read.
+POPULATED = {
+    ("wnm", "wezterm_panes"): '[{"pane_id": "204", "title": "t"}]',
+    ("wnm", "live_pane_ids"): '[{"pane_id": "204", "title": "t"}]',
+    ("fc", "pane_titles"): '[{"pane_id": "204", "tty_name": "/dev/ttys001", "title": "t"}]',
+    ("fc", "pid_ttys"): "101 /dev/ttys001 claude",
+    ("jmp", "wezterm_panes"): '[{"pane_id": "204", "title": "t"}]',
+    ("jmp", "pane_sessions"): "101 ttys001",
+    ("fs", "live_processes"): "claude --settings {} --model m",
+    ("sp", "gate_processes"): "101 00:01 sweep-gate",
+}
+
+
 class _SubprocessStub:
     """Stands in for the module's `subprocess`, overriding only `run`.
 
@@ -97,12 +115,22 @@ def load_module(path, name):
     return mod
 
 
-def probe(mod, fn_name, broken, args=()):
-    """Call `mod.<fn_name>(*args)` with its `subprocess` replaced. Returns (ok, value)."""
+def probe(mod, fn_name, broken, args=(), stdout=None):
+    """Call `mod.<fn_name>(*args)` with its `subprocess` replaced. Returns (ok, value).
+
+    `broken` forces the failure. Otherwise `stdout` decides what the healthy
+    transport answered — `None` for "nothing", a payload for "content".
+    """
     if mod is None or not hasattr(mod, fn_name):
         return False, "absent"
     original = mod.subprocess
-    mod.subprocess = _SubprocessStub(_broken if broken else _empty)
+    if broken:
+        runner = _broken
+    elif stdout is None:
+        runner = _empty
+    else:
+        runner = lambda *_a, _s=stdout, **_k: _Proc(stdout=_s, returncode=0)
+    mod.subprocess = _SubprocessStub(runner)
     try:
         return True, getattr(mod, fn_name)(*args)
     except Exception as exc:  # a raise is itself a failure to distinguish
@@ -114,6 +142,8 @@ def probe(mod, fn_name, broken, args=()):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("tree", nargs="?", default=os.path.dirname(HERE))
+    ap.add_argument("--capture", action="store_true",
+                    help="print each site's raw three-state values and exit")
     args = ap.parse_args()
     scripts = os.path.join(os.path.abspath(args.tree), "scripts")
 
@@ -143,6 +173,14 @@ def main():
         ("jmp", "wezterm_panes", ()), ("jmp", "pane_sessions", ({},)),
         ("fs", "live_processes", ()), ("sp", "gate_processes", ()),
     ]
+    if args.capture:
+        print(f"== three-state captures — {os.path.abspath(args.tree)}")
+        for key, fn, fn_args in accessors:
+            print(f"  {key}.{fn}")
+            print(f"    broken        -> {probe(mods[key], fn, broken=True, args=fn_args)[1]!r}")
+            print(f"    healthy-empty -> {probe(mods[key], fn, broken=False, args=fn_args)[1]!r}")
+        return 0
+
     for key, fn, fn_args in accessors:
         ok, value = probe(mods[key], fn, broken=True, args=fn_args)
         if not ok:
@@ -173,6 +211,21 @@ def main():
             value is not None,
             "returned None for a reachable transport holding nothing — "
             "an empty fleet now reads as a failure",
+        )
+
+    # --- healthy-with-content must not be reported as a failure either ----------
+    for key, fn, fn_args in accessors:
+        payload = POPULATED.get((key, fn))
+        if payload is None:
+            continue
+        ok, value = probe(mods[key], fn, broken=False, args=fn_args, stdout=payload)
+        if not ok:
+            continue
+        expect(
+            f"{key}.{fn} healthy-with-content",
+            value is not None,
+            "returned None for a transport that answered with content — "
+            "the read is broken on the working path",
         )
 
     # --- `is_live` keeps the row when the pane map is unreadable ----------------

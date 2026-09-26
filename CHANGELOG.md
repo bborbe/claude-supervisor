@@ -15,6 +15,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - fix: seven transport reads no longer report a broken transport as an empty fleet — `who-needs-me.py`'s lossy `panes()` wrapper is deleted, `pane_for()` and `fleet-board.py` call `wezterm_panes()` and test `is None`, and the `ps` reads in `fleet-colours.py`, `jump.py`, `fleet-sessions.py` and `stop-probe.py` return `None` instead of `{}` / `[]` / `(0, set())`, each with a named marker where the failure would otherwise have printed a confident count
 - test: add `scripts/transport-read-check.py`, the three-state check that drives every enumerated transport read through broken / healthy-with-content / healthy-empty and fails on the pre-audit revision for each site this change fixes, while the sibling-repaired accessors pass
 - test: wire the transport-read check into `make test`, so a site that re-collapses a failed read fails CI rather than waiting for someone to run the check by hand
+- test: drive the transport-read check's third state — healthy-with-content — so a fix that returns `None` unconditionally, and breaks every working read, cannot pass on the broken and healthy-empty assertions alone
 
 ## v0.57.8
 
