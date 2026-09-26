@@ -74,13 +74,23 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 4. **Compose the sweep — do not rebuild it.** This command owns no classification. Dispatch the same agent `/manager-loop` does:
 
-   `Task(subagent_type: "supervisor:manager-sweep-reader", prompt: <tracked set + declared-optional set + the topic's member goals + this run's ListAgents roster verbatim + vault + mode: snapshot + timestamp>)`
+   `Task(subagent_type: "supervisor:manager-sweep-reader", prompt: <tracked set + declared-optional set + the topic's member goals + vault + mode: snapshot + timestamp>)`
+
+   ⚠️ **The roster is no longer passed, and that is the change.** This command used to read `ListAgents` and paste it into the prompt verbatim, so the roster entered the manager's own context as a **tool_result** it then re-wrote into a **dispatch prompt**. The agent now reads it itself — `mcp__supervisor__list_agents` is declared in its `tools:` — so the manager pays for neither. The roster is a point-in-time reading, and the agent's read is as current as the caller's would have been. **Honour the distinction this preserves:** a read that is a *join* can move to the agent; a read that is a *verdict* cannot (step 5). The roster is a join.
 
    The plugin prefix is required — a bare `manager-sweep-reader` resolves to a personal `~/.claude/agents/` copy, never the plugin agent. The agent owns the task-file read, the bucket classification **the vault's Manager Session runbook** declares, the id-set extraction and the orphan **candidates**. Bucket rules: runbook § Step 4.
 
    **If the delegation returns no usable table** — it errored, came back empty, or resolved to something that did not return the report — **stop and say so**. Do not fall back to a hand-rolled classification: `manager-loop` has a `box-table.py` renderer fallback, but that is a second *renderer*, not a second *classifier*, and this command has no renderer to fall back to.
 
-5. **Confirm the orphan verdicts — this part is yours.** The sweep-reader returns **candidates** and stops by design; it cannot probe liveness without inheriting the caller's own ancestor-chain blind spot. For each candidate, probe every id in its set against the **session registry** first — `grep -l "<id>" ~/.claude/sessions/*.json`, then `ps -p <pid>` on the file's pid — and treat the task as alive if **any** id holds an entry against a running pid. Then run `pgrep -f "<id>"` and `ps -eo pid,args | grep -F "<id>"`: a hit on either also means alive, but an empty argv read is **indeterminate, never dead** — a live session usually carries its id in no argv (measured 2026-09-22/23: three live sessions read 0 under both). Death needs registry absence plus the drive leg's transcript-staleness clause. Also collect the id sets across the whole tracked set first and flag any id on **two or more non-terminal** tasks as a shared collision — resume **neither**.
+5. **Confirm the orphan verdicts — this part is yours, and the clause below says why it stays.**
+
+   ⚠️ **The liveness probes stay with the manager — all four of them — and this is a decision, not a residue of history.** Three reasons, each sufficient alone:
+
+   1. **The verdict is atomic.** Death needs registry absence *plus* transcript staleness; life needs *any* id holding an entry against a running pid *or* an argv hit. Splitting those reads across two actors splits **one verdict across two contexts**, and a caller handed half a probe cannot tell a partial answer from a complete one.
+   2. **The argv half inherits the blind spot rather than escaping it.** `pgrep -f` reads a **false empty** for a session in the prober's own ancestor chain (measured 2026-09-15: 2 hits under `ps`, 0 under `pgrep`). A subagent's ancestor chain **contains the caller's**, so moving the probe down inherits the blind spot *and adds its own*.
+   3. **The `ps` half is not the agent's to run.** `agents/manager-sweep-reader.md` § `<constraints>` bans `pgrep`/`ps` outright, and that ban is load-bearing for reason 2.
+
+   So the agent reports candidates and the caller decides. **The roster read at step 4 is the opposite case and has moved** — a read that is a *join* can move to the agent; a read that is a *verdict* cannot. The line is drawn **per read, never per agent.** For each candidate, probe every id in its set against the **session registry** first — `grep -l "<id>" ~/.claude/sessions/*.json`, then `ps -p <pid>` on the file's pid — and treat the task as alive if **any** id holds an entry against a running pid. Then run `pgrep -f "<id>"` and `ps -eo pid,args | grep -F "<id>"`: a hit on either also means alive, but an empty argv read is **indeterminate, never dead** — a live session usually carries its id in no argv (measured 2026-09-22/23: three live sessions read 0 under both). Death needs registry absence plus the drive leg's transcript-staleness clause. Also collect the id sets across the whole tracked set first and flag any id on **two or more non-terminal** tasks as a shared collision — resume **neither**.
 
 6. **Dispatch the act leg.**
 
