@@ -10,7 +10,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decisionOf, selectParked, startAttentionPoll } from './attention-poll.mjs'
+import { readFileSync } from 'node:fs'
+import { decisionOf, selectParked, startAttentionPoll, storeDecisionRecord, STORE_DECIDER } from './attention-poll.mjs'
 
 function agentsOf(...entries) {
   return new Map(entries.map(([id, sessionId]) => [id, { id, sessionId }]))
@@ -108,15 +109,16 @@ test('selectParked ignores another agent\'s parks', () => {
 
 // --- the loop -------------------------------------------------------------------------
 
-function harness({ items = {}, open = [], log = () => {} } = {}) {
+function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, pendingEntries = [['perm_7', 'a1']] } = {}) {
   const agents = agentsOf(['a1', 'sess-1'])
-  const pending = pendingOf(['perm_7', 'a1'])
+  const pending = pendingOf(...pendingEntries)
   const ticks = []
   const stop = startAttentionPoll({
     storeUrl: 'http://store',
     agents,
     pending,
     log,
+    onSettled,
     setTimeoutImpl: (fn) => {
       ticks.push(fn)
       return ticks.length
@@ -219,4 +221,129 @@ test('a verdict arriving after its park settled is reported, not crashed on', as
   pending.delete('perm_7')
   await ticks[0]()
   assert.match(logged.join('\n'), /no parked prompt/)
+})
+
+// --- the store arm's own record ---------------------------------------------------------
+//
+// The distinction this exists to pin: a park the STORE released must be recorded as the
+// store's, and a park the store did NOT release must never acquire that value. Both
+// directions are tested, because a one-directional check passes on a recorder that fires
+// unconditionally — and that recorder would mislabel every manager-answered park, which is
+// exactly the false attribution `decided_by` is there to prevent.
+
+const EXISTING_DECIDERS = ['policy', 'escalated', 'manager']
+
+test('storeDecisionRecord names the store arm, not one of the existing deciders', () => {
+  const record = storeDecisionRecord({
+    requestId: 'perm_7',
+    agentId: 'a1',
+    decision: 'allow',
+    park: { toolName: 'Bash', input: { command: 'ls' }, requestedAt: '2026-09-26T10:00:00.000Z' },
+    now: new Date('2026-09-26T10:00:02.000Z'),
+  })
+  assert.equal(record.decided_by, STORE_DECIDER)
+  assert.ok(
+    !EXISTING_DECIDERS.includes(record.decided_by),
+    'the store arm must not reuse a value that already means another actor',
+  )
+})
+
+test('storeDecisionRecord carries the park fields a mined rule needs', () => {
+  const record = storeDecisionRecord({
+    requestId: 'perm_7',
+    agentId: 'a1',
+    decision: 'deny',
+    park: { toolName: 'Bash', input: { command: 'rm -rf /tmp/x' }, requestedAt: '2026-09-26T10:00:00.000Z' },
+    now: new Date('2026-09-26T10:00:02.000Z'),
+  })
+  assert.equal(record.tool, 'Bash')
+  assert.equal(record.key, 'rm -rf /tmp/x')
+  assert.equal(record.decision, 'deny')
+  assert.equal(record.matched_rule, null)
+  assert.equal(record.request_id, 'perm_7')
+  assert.equal(record.agent, 'a1')
+  assert.equal(record.latency_ms, 2000)
+  assert.equal(record.ts, '2026-09-26T10:00:02.000Z')
+})
+
+test('the loop reports a store-released park, with the park itself', async () => {
+  const seen = []
+  const { ticks } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    onSettled: (e) => seen.push(e),
+  })
+  await ticks[0]()
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].requestId, 'perm_7')
+  assert.equal(seen[0].agentId, 'a1')
+  assert.equal(seen[0].decision, 'allow')
+  assert.equal(seen[0].itemId, 'i1')
+  // The park is passed because `settle` has already removed it from `pending` — without it
+  // the caller cannot build a minable record, and an unminable record is not worth writing.
+  assert.equal(seen[0].park.requestId, 'perm_7')
+})
+
+test('onSettled is not called when the store released nothing', async () => {
+  for (const [name, item] of [
+    ['an open item', { state: 'open', decision: 'allow' }],
+    ['an answered item with no verdict', { state: 'answered' }],
+    ['a verdict outside the enum', { state: 'answered', decision: 'maybe' }],
+  ]) {
+    const seen = []
+    const { ticks } = harness({
+      open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+      items: { i1: { item_id: 'i1', answer_mechanism: 'permission', producer_id: 'sess-1', ...item } },
+      onSettled: (e) => seen.push(e),
+    })
+    await ticks[0]()
+    assert.equal(seen.length, 0, `${name} must not be recorded as a store decision`)
+  }
+})
+
+test('onSettled is not called when the park is ambiguous', async () => {
+  // Two parks on one agent: the verdict cannot be attributed to either, so nothing settles
+  // — and nothing may be recorded as the store's decision either.
+  const seen = []
+  const { ticks, pending } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    onSettled: (e) => seen.push(e),
+    pendingEntries: [['perm_7', 'a1'], ['perm_8', 'a1']],
+  })
+  await ticks[0]()
+  assert.equal(seen.length, 0)
+  assert.equal(pending.get('perm_7').settled.length, 0)
+  assert.equal(pending.get('perm_8').settled.length, 0)
+})
+
+test('onSettled fires after the settle, so a failing recorder cannot withhold the decision', async () => {
+  const { ticks, pending } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    onSettled: () => {
+      throw new Error('recorder exploded')
+    },
+  })
+  await ticks[0]()
+  // The park is released regardless: the decision is the critical path, the record is not.
+  assert.equal(pending.get('perm_7').settled.length, 1)
+  assert.equal(pending.get('perm_7').settled[0].behavior, 'allow')
+})
+
+test('the manager-settled path keeps its own decider, distinct from the store arm', () => {
+  // `supervisor.mjs` cannot be imported — importing it starts the MCP server, which is why
+  // `policy.mjs` exists as a separate module at all — so the manager-settled path is pinned
+  // by reading its source. That is weaker than the behavioural tests above and is recorded
+  // as such: it catches the one edit that matters, a manager site repointed at the store
+  // value (which would mislabel every manager answer), not a behavioural regression inside
+  // it. A behavioural test needs the harness that does not exist.
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(src, /decided_by: 'manager'/, 'the answer_permission site must keep its own decider')
+  assert.doesNotMatch(
+    src,
+    /decided_by: STORE_DECIDER/,
+    'the store value must be written at the poll site only, never by a second site',
+  )
+  assert.notEqual(STORE_DECIDER, 'manager')
 })

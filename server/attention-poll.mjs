@@ -10,7 +10,37 @@
 // settle? That question is pure — no HTTP, no clock, no store — so it is testable on its
 // own. The polling and the settling are the caller's.
 
+import { inputKey } from './policy.mjs'
+
 export const DECISIONS = ['allow', 'deny']
+
+// The `decided_by` value a store-settled park carries.
+//
+// Distinct from `policy`, `escalated` and `manager` on purpose. A store release is its own
+// actor: reusing `manager` would attribute it to a session that never answered, which is
+// the false positive `decided_by` exists to prevent — and a park that writes no record at
+// all is indistinguishable from a policy allow, which is the attribution gap this closes.
+export const STORE_DECIDER = 'store'
+
+// The `permissions.jsonl` record for a park the store released.
+//
+// Shaped to match what `answer_permission` writes (`server/supervisor.mjs`), so the two are
+// comparable in one log: the same keys, with `decided_by` the field that differs. Built
+// here rather than at the call site so the value this task exists to introduce is unit-
+// testable — `supervisor.mjs` cannot be imported in-process.
+export function storeDecisionRecord({ requestId, agentId, decision, park, now = new Date() }) {
+  return {
+    ts: now.toISOString(),
+    agent: agentId,
+    tool: park.toolName,
+    key: inputKey(park.input),
+    matched_rule: null,
+    decision,
+    decided_by: STORE_DECIDER,
+    request_id: requestId,
+    latency_ms: now.getTime() - Date.parse(park.requestedAt),
+  }
+}
 
 // The verdict a store item carries, or a reason it carries none.
 //
@@ -75,6 +105,12 @@ export function startAttentionPoll({
   agents,
   pending,
   log = () => {},
+  // Called once a park has been released by a store verdict, so the caller can record who
+  // decided. Fired AFTER the settle, never before: the decision is the critical path, and a
+  // recorder that throws must not be able to withhold it. The caller gets the park record
+  // because `settle` removes it from `pending` — this is the last moment its own fields
+  // (tool, input, requestedAt) are reachable, and a log record without them is not minable.
+  onSettled = () => {},
   intervalMs = 2000,
   fetchImpl = globalThis.fetch,
   setTimeoutImpl = globalThis.setTimeout,
@@ -118,10 +154,14 @@ export function startAttentionPoll({
         // same tick with no await in between, so nothing can have settled it. A guard here
         // would be unreachable, and an unreachable guard reads as coverage.
         log(`permission ${target.requestId} ${verdict.decision.toUpperCase()}ED by the attention store (item ${itemId})`)
-        pending.get(target.requestId).settle({
+        const park = pending.get(target.requestId)
+        park.settle({
           behavior: verdict.decision,
           message: `Attention store answer (item ${itemId}).`,
         })
+        // `settle` deletes the park from `pending` but does not mutate the record, so the
+        // fields the caller needs are still readable off the captured reference.
+        onSettled({ requestId: target.requestId, agentId: target.agentId, decision: verdict.decision, itemId, park })
       }
     } catch (error) {
       log(`attention poll failed (${error.message}) — parks still auto-deny at the timeout`)
