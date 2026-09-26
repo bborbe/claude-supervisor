@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.57.8
 
 - fix: rename the drive report's `Not nudged` section to `Freshness / in-flight drops`, and require each row's leading token to name the check that **dropped** it. The old label read as a catch-all — *"anything we chose not to nudge"* — so parked and waiting-on-human rows were filed under a section whose membership rule is narrow (`agents/manager-drive.md` scopes it to *"every candidate a check dropped"*), and the false-nudge guard it exists to be became unreadable. The label now names the two pre-nudge checks, the `Drive:` count line follows it, and the prefix rule is explicit: a row that passed check 1 and was dropped by check 2 leads with `in flight:`, never with the passing check. Measured 2026-09-24 — a check-2 drop rendered prefixed `freshness:`. Behaviour is untouched: no candidate is dropped, kept, or ordered differently. The same wording landed in `65 Runbooks/Manager Session.md` § Step 5, which wins on disagreement.
 
