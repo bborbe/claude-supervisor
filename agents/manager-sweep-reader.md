@@ -235,9 +235,10 @@ Plain markdown, in this order, omitting empty sections:
    needed: <task> — advances <goal> SC<n>
    not needed: <task> — checked against <criteria>
    product: <task> — output of <goal> SC<n>
-   needed: <task> — advances <goal> SC<n>
-Necessity: <M> needed · <K> not needed · <P> product — inverted set <M+K+P> of <N> tracked — over <topic page> (<member goals>)
+   Necessity: <M> needed · <K> not needed · <P> product — inverted set <M+K+P> of <N> tracked — over <topic page> (<member goals>)
    ```
+
+   ⚠️ **The ROWS are the deliverable; the summary line is a footer.** Emit one row per task for **every** verdict — all `product` and all `not needed` rows in full, and at least one `needed` row. The summary line never replaces a row. ⚠️ **Measured twice, against two released versions, and it is the one failure this section keeps reproducing:** the `v0.57.2` run emitted a prose summary with no rows at all, and the `v0.57.3` run — *after* the rows were made mandatory — still emitted `"81 tasks needed · 43 are the goals' own output · 3 not needed"` as a **count for the `product` bucket, not rows**. That single behaviour starves two separate criteria: a count cannot be reconciled against a hand-count (a one-task discrepancy is unlocalizable when the tasks are not named), and a counted `needed` bucket can never cite the criterion a given task advances. **If you find yourself writing a number where a task name belongs, the section has failed** — a count is a tally, and this read exists to answer *which*.
 
    ⚠️ **At least one `needed:` row is mandatory, naming a task and the criterion it advances.** This is the row an earlier revision omitted, and its absence is why the section could only ever answer *how many* and never *which*: with rows emitted only for `not needed` and `product`, a run that judged every task necessary printed a bare summary, and a reader could not tell which task had been checked against which criterion. A verdict that names no task is a count, not a finding. On a set too large to list in full, list **every** `not needed` and `product` row and **at least one** `needed` row — the sampling is allowed on `needed` alone, never on the other two.
    ⚠️ **A run that judged everything necessary must still print its `needed:` row and its summary**, with `0 not needed · 0 product`. Those zeros are measurements, not omissions — and the `needed:` row is what makes the difference between "the read ran and found nothing wrong" and "the read did not run".

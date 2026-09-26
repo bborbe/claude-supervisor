@@ -1,9 +1,13 @@
 // decision-settle.mjs — answering the gate a RESUMED worker raises again.
 //
-// The problem this closes, measured 2026-09-25: a worker parked on a permission, its
-// spawner died, and it was resumed carrying a decision. It came back and **re-raised the
-// identical tool call**, parking a second time — so a carried `deny` re-asked instead of
-// stopping. The decision had reached the transcript and not the gate.
+// What this closes: a worker parked on a permission, its spawner died, and it was resumed
+// carrying a decision. The motivating run (`spawner-exit-resume`) did not demonstrate this
+// — it was resumed with a bare `Continue.` and carried no decision, so its re-raise is
+// just what a worker does when resumed with no information. What stopped the re-ask in the
+// run that DID carry a decision is `renderResumePrompt`'s closing line: the worker read it
+// and declined to re-run the call. These functions are the second line for a worker that
+// ignores that note — correct, narrow and unit-tested, but no observed live run has made
+// them fire.
 //
 // Note what this module is NOT: it does not settle the *original* promise. That promise
 // died with the spawner's process, and for a spawner-gone worker there is nothing left to
