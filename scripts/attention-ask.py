@@ -154,20 +154,57 @@ def fetch_item(item_id):
         return json.load(resp)
 
 
-def describe_answer(item):
-    """Render the stored answer, or None when the item is still open.
+def describe_one(answer):
+    """Render one `answer` / `answers` entry, or None when it carries no kind.
 
-    The shape is the schema's `answer`: `{kind: option|skip|text, value}`. A
-    `skip` carries no value, so it is rendered as the bare word rather than as
+    The shape is the schema's `answer`: `{kind: option|skip|text, value, values}`.
+    A `skip` carries no value, so it is rendered as the bare word rather than as
     an empty one — printing `skip ` with nothing after it reads as a truncated
-    option answer.
+    option answer. `values` is a `multiple` question's several labels, and it is
+    carried by the answer shape rather than by the `answers` entry alone.
     """
-    answer = item.get("answer") or {}
+    answer = answer or {}
     kind = answer.get("kind")
     if not kind:
         return None
+    values = answer.get("values") or []
+    if values:
+        return f"{kind}: {', '.join(str(v) for v in values)}"
     value = answer.get("value") or ""
     return f"{kind}: {value}" if value else kind
+
+
+def describe_answer(item):
+    """Render the stored answer, or None when the item carries no answer content.
+
+    ⚠️ **Two fields carry the operator's content and they are mutually
+    exclusive by construction**, so a reader that stops at one is reading half
+    the schema: `answer` holds a **single-question** item's content, and
+    `answers` holds a **multi-question** item's, one entry per tab. The rule is
+    the store's, not this arm's — an item carrying `questions` is answered
+    through `answers` and an item carrying both is rejected — and it means an
+    arm that read only `answer` would report a multi-question item as having no
+    answer at all, which is the state a manager polls to escape.
+
+    `decision` is deliberately NOT read here even though it is the third shape
+    a store item can carry: it holds a `permission` item's **verdict**, and the
+    schema is explicit that `decision` and `answer` *"neither substitutes for
+    the other"*. Folding a verdict into a function named for the answer would
+    blur exactly the distinction that sentence draws, and `poll` is not the
+    permission reader anyway — `cmd_answer` refuses a permission item outright.
+    Such an item still reaches the attributed branch and is named as
+    contentless there rather than being silently reported as `OPEN`.
+    """
+    answers = item.get("answers")
+    if isinstance(answers, list) and answers:
+        rendered = [
+            f"{a.get('question')}: {d}"
+            for a in answers
+            if (d := describe_one(a)) is not None
+        ]
+        if rendered:
+            return "; ".join(rendered)
+    return describe_one(item.get("answer"))
 
 
 def cmd_post(args, out=sys.stdout):
@@ -232,8 +269,12 @@ def cmd_poll(item_id, out=sys.stdout):
         print("OPEN", file=out)
         return 0
     answered_by = item.get("answered_by") or ""
+    # `state`, never the word "closed": an attributed item that renders no
+    # content is `answered` with nothing this renderer reads, and naming the
+    # other state would misdescribe the transition that happened.
+    content = described or f"(no answer content recorded; item is {item.get('state')})"
     if verdict == attribution.ATTRIBUTED:
-        print(f"ANSWERED: {described or 'closed'}", file=out)
+        print(f"ANSWERED: {content}", file=out)
         if answered_by:
             print(f"ANSWERED_BY: {answered_by}", file=out)
         return 0
@@ -242,7 +283,7 @@ def cmd_poll(item_id, out=sys.stdout):
     # caller gating on this must read it the way it reads `OPEN`: the gate is
     # not released. Both terminals return 0 for that reason; a non-zero exit
     # would read as a broken poll and invite a retry.
-    print(f"NOT_OPERATOR_ANSWERED: {described or 'closed'} -- {reason}", file=out)
+    print(f"NOT_OPERATOR_ANSWERED: {content} -- {reason}", file=out)
     if answered_by:
         print(f"ANSWERED_BY: {answered_by}", file=out)
     return 0

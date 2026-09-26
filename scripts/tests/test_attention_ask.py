@@ -178,6 +178,14 @@ class PostTest(unittest.TestCase):
         self.assertIn("options not allowed", out.getvalue())
 
 
+OPERATOR_CLIENT = {
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+    "remote_addr": "127.0.0.1:63415",
+    "automation": False,
+}
+
+
 def answered_lines(text):
     """Only the lines that ARE an answer.
 
@@ -284,7 +292,74 @@ class PollTest(unittest.TestCase):
                 "answered_by": "attention-board",
             }
         )
-        self.assertIn("NOT_OPERATOR_ANSWERED: closed", text)
+        self.assertIn("NOT_OPERATOR_ANSWERED:", text)
+        self.assertIn("item is closed", text)
+
+    def test_multi_question_answer_is_rendered_from_answers(self):
+        # ⚠️ `answer` and `answers` are mutually exclusive by construction: an
+        # item carrying `questions` is answered through `answers`, one entry per
+        # tab. A renderer that read only `answer` would call this item
+        # contentless, which is the state a manager polls to escape.
+        _, text = self.poll(
+            {
+                "item_id": "abc123",
+                "state": "answered",
+                "answered_at": "2026-09-26T21:01:27Z",
+                "answered_by": "attention-board",
+                "answered_client": OPERATOR_CLIENT,
+                "questions": [{"tab": "Only", "payload": "Pick one?"}],
+                "answers": [{"question": "Only", "kind": "option", "value": "A"}],
+            }
+        )
+        self.assertIn("ANSWERED: Only: option: A", text)
+
+    def test_multiple_pick_answer_renders_its_values(self):
+        _, text = self.poll(
+            {
+                "item_id": "abc123",
+                "state": "answered",
+                "answered_at": "2026-09-26T21:01:27Z",
+                "answered_client": OPERATOR_CLIENT,
+                "answers": [
+                    {"question": "Chores", "kind": "option",
+                     "values": ["Broken wikilinks", "Huge pages"]},
+                ],
+            }
+        )
+        self.assertIn("ANSWERED: Chores: option: Broken wikilinks, Huge pages", text)
+
+    def test_answered_permission_item_is_not_reported_as_open(self):
+        # A permission item carries a `decision` and never an `answer`, and the
+        # schema keeps the two apart on purpose — so `describe_answer` reads
+        # neither for it. It must still not read OPEN: the item DID move, and
+        # `OPEN` would invite a caller to keep polling a settled gate.
+        _, text = self.poll(
+            {
+                "item_id": "abc123",
+                "state": "answered",
+                "answered_at": "2026-09-26T21:01:27Z",
+                "answered_by": "attention-board",
+                "answered_client": OPERATOR_CLIENT,
+                "decision": "allow",
+            }
+        )
+        self.assertIn("ANSWERED:", text)
+        self.assertNotIn("\nOPEN", text)
+        self.assertIn("item is answered", text)
+
+    def test_attributed_item_with_no_content_names_its_state_not_closed(self):
+        # `closed` is a different transition. Saying it here would misdescribe
+        # what happened to the item.
+        _, text = self.poll(
+            {
+                "item_id": "abc123",
+                "state": "answered",
+                "answered_at": "2026-09-26T21:01:27Z",
+                "answered_client": OPERATOR_CLIENT,
+            }
+        )
+        self.assertIn("item is answered", text)
+        self.assertNotIn("item is closed", text)
 
     def test_reaped_close_with_no_actor_reads_as_open(self):
         # The dominant closed shape in the live store is a reap: no
