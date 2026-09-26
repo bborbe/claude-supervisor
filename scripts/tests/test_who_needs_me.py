@@ -37,6 +37,7 @@ import io
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 import unittest
@@ -1087,6 +1088,207 @@ class PaneFor(unittest.TestCase):
         with open(_SCRIPT, encoding="utf-8") as handle:
             self.assertIn('"--pane-for"', handle.read())
 
+
+class SupersededCloserPanel(unittest.TestCase):
+    """Class 6 -- a rendered closer whose session has already started a new turn.
+
+    The Rendered-panels pass lists a closer that was true when it was written and is
+    stale by the time a manager reads it: the session has since taken a new user or
+    tool turn, so nothing is waiting on the operator. Measured 2026-09-25 on 0.56.5 by
+    gate-relay-read triage -- one batch listed 5 panes with 2 real gates, another 4
+    with 1, a 2-4x overstatement.
+
+    Distinct from the two fixed siblings, and neither fix touches this case:
+    [[who-needs-me.py Counts Cleared Gates]] fixed the *headline count* including
+    already-answered gates, and [[Closer Panels and Real Blocks]] fixed closers
+    rendering indistinguishably from blocks. Here the closer is stale, not merely
+    unlabelled or uncleared -- so the signal must come from session/turn state, never
+    from parsing the closer text. A genuinely blocked session emits an identical string.
+
+    `is_superseded()` stays a pure predicate (record, busy set, resumed set); the two
+    machine-reading halves are `busy_session_ids()` and `turn_after_closer()`.
+
+    Scope: this removes *superseded* rows only. The sibling task's SC2 --
+    "panel rows stay visible ... the command must not start hiding panes" -- protects a
+    **live** closer panel, and a superseded row is no longer a panel row, so dropping
+    it is a reclassification rather than a hidden pane. The asymmetry cases below are
+    what hold that line: a fix that drops every panel fails them.
+    """
+
+    SID = "dddddddd-4444-4444-8444-dddddddddddd"
+    OTHER = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee"
+
+    def setUp(self):
+        self._turn = wnm.turn_after_closer
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        wnm.turn_after_closer = self._turn
+
+    def rec(self, detail="pick — 1. do the thing", event="Stop", state="open"):
+        """A `Stop`-written closer panel -- the record class this defect lives on."""
+        return {"session_id": self.SID, "pane": "7", "cwd": "/tmp",
+                "kind": "question", "event": event, "state": state,
+                "detail": detail, "ts": time.time()}
+
+    def listed(self, rec, busy=(), resumed=()):
+        """main()'s Rendered-panels membership, through the composed pass it uses.
+
+        Asserted through `rendered_panels()` rather than by re-composing the three
+        predicates here: a second copy of that composition would drift from main()'s,
+        and both would keep returning a list while they disagreed.
+        """
+        return [r["session_id"] for r in
+                wnm.rendered_panels([rec], frozenset(), None, set(busy), set(resumed))]
+
+    def transcript(self, entries):
+        """A real `.jsonl` tail, so the machine reader is exercised, not stubbed."""
+        fd, path = tempfile.mkstemp(prefix="wnm-transcript-", suffix=".jsonl")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as handle:
+            for entry in entries:
+                handle.write(json.dumps(entry) + "\n")
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def registry(self, entries):
+        """A temp registry dir in the real shape: one `<pid>.json` per live session.
+
+        Registered for cleanup like `transcript()` does -- `mkdtemp` is not
+        self-cleaning, so without this every run of the two registry cases leaves a
+        directory behind.
+        """
+        d = tempfile.mkdtemp(prefix="wnm-registry-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for i, (sid, status) in enumerate(entries):
+            with open(os.path.join(d, f"{2000 + i}.json"), "w", encoding="utf-8") as handle:
+                json.dump({"pid": 2000 + i, "sessionId": sid, "status": status}, handle)
+        return d
+
+    def closer_line(self, text="…\n\U0001F464 You: pick — 1. do the thing"):
+        return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+
+    # --- SC1: the defect, closer followed by a new turn ----------------------
+
+    def test_closer_followed_by_a_user_turn_is_not_listed(self):
+        """THE REGRESSION CASE. The session took a new user turn after its closer."""
+        self.assertEqual(self.listed(self.rec(), resumed={self.SID}), [])
+
+    def test_closer_followed_by_a_tool_turn_is_not_listed(self):
+        """A tool turn supersedes it too -- the transcript half's other branch."""
+        self.assertEqual(self.listed(self.rec(), resumed={self.SID}), [])
+
+    def test_closer_on_a_busy_session_is_not_listed(self):
+        """`busy` is inside-a-turn, so the closer is stale by construction.
+
+        The registry's status vocabulary is `idle` / `shell` / `busy` / `waiting`. A
+        session parked on a prompt reads `waiting`, and one that has ended its turn
+        reads `idle` -- so `busy` cannot be a session waiting on the operator, which is
+        what makes it usable here.
+        """
+        self.assertEqual(self.listed(self.rec(), busy={self.SID}), [])
+
+    # --- the asymmetry: a fix that drops every panel fails these -------------
+
+    def test_closer_with_nothing_after_it_is_still_listed(self):
+        """The sibling's SC2, as a control: a live panel row stays visible."""
+        self.assertEqual(self.listed(self.rec()), [self.SID])
+
+    def test_closer_on_an_idle_session_is_still_listed(self):
+        """`idle` is the panel's own case -- turn ended, waiting. Not superseded."""
+        self.assertEqual(self.listed(self.rec()), [self.SID])
+
+    def test_a_different_sessions_supersession_does_not_leak(self):
+        """Keyed by session, not global: another pane's turn must not hide this row."""
+        self.assertEqual(self.listed(self.rec(), busy={self.OTHER}, resumed={self.OTHER}),
+                         [self.SID])
+
+    def test_answered_record_is_not_listed(self):
+        """The pre-existing cleared-gate path still applies, unchanged."""
+        self.assertEqual(self.listed(self.rec(state="answered")), [])
+
+    def test_non_panel_gate_is_not_listed(self):
+        """A `Notification` elicitation is a parked gate, never a rendered panel."""
+        self.assertEqual(self.listed(self.rec(event="Notification")), [])
+
+    def test_supersession_does_not_touch_the_block_predicate(self):
+        """Scope guard: `is_open_gate()` takes no busy/resumed input at all.
+
+        The change is scoped to the Rendered-panels list. A parked gate on a session
+        that is merely busy must stay answerable, so the block predicate cannot learn
+        about supersession by accident.
+        """
+        self.assertTrue(wnm.is_open_gate(self.rec(), include_panels=True))
+
+    # --- machine-reading half 1: the transcript tail -------------------------
+
+    def test_turn_after_closer_reads_a_real_transcript(self):
+        path = self.transcript([
+            self.closer_line(),
+            {"type": "user", "message": {"content": [{"type": "text", "text": "go on"}]}},
+        ])
+        self.assertTrue(wnm.turn_after_closer({"session_id": self.SID, "transcript": path}))
+
+    def test_tool_turn_after_closer_is_detected(self):
+        path = self.transcript([
+            self.closer_line(),
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}},
+        ])
+        self.assertTrue(wnm.turn_after_closer({"session_id": self.SID, "transcript": path}))
+
+    def test_closer_as_the_last_line_has_no_turn_after_it(self):
+        path = self.transcript([
+            {"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}},
+            self.closer_line(),
+        ])
+        self.assertFalse(wnm.turn_after_closer({"session_id": self.SID, "transcript": path}))
+
+    def test_a_turn_before_the_closer_does_not_supersede(self):
+        """Position, not mere presence -- a tool turn earlier in the turn is normal.
+
+        This is the case that makes the check a position read rather than a
+        transcript-contains-a-tool-call read: every real turn has tool calls in it, so
+        the naive version would drop every panel.
+        """
+        path = self.transcript([
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "content": "ok"}]}},
+            self.closer_line(),
+        ])
+        self.assertFalse(wnm.turn_after_closer({"session_id": self.SID, "transcript": path}))
+
+    def test_a_later_closer_resets_the_turn(self):
+        """A second closer after a turn is a fresh closer, not a superseded one."""
+        path = self.transcript([
+            self.closer_line(),
+            {"type": "user", "message": {"content": [{"type": "text", "text": "again"}]}},
+            self.closer_line("…\n\U0001F464 You: approve: /vault-cli:session-close"),
+        ])
+        self.assertFalse(wnm.turn_after_closer({"session_id": self.SID, "transcript": path}))
+
+    def test_missing_transcript_is_not_superseded(self):
+        """An unreadable transcript proves nothing, so the row is kept."""
+        self.assertFalse(wnm.turn_after_closer(
+            {"session_id": self.SID, "transcript": "/nonexistent/nope.jsonl"}))
+
+    # --- machine-reading half 2: the registry status -------------------------
+
+    def test_busy_session_ids_reads_the_registry(self):
+        d = self.registry([(self.SID, "busy"), (self.OTHER, "idle")])
+        self.assertEqual(wnm.busy_session_ids(d), {self.SID})
+
+    def test_waiting_session_is_not_busy(self):
+        """A session parked on a prompt reads `waiting`; its gate is still real."""
+        self.assertEqual(wnm.busy_session_ids(self.registry([(self.SID, "waiting")])), set())
+
+    def test_unreadable_registry_is_not_busy(self):
+        """Same rule as `quiet_session_ids()`: a failed read proves nothing."""
+        self.assertEqual(wnm.busy_session_ids("/nonexistent/registry"), set())
+
+
 class FeedTransportTest(unittest.TestCase):
     """The feed's three transport states, end to end through `main()`.
 
@@ -1114,7 +1316,11 @@ class FeedTransportTest(unittest.TestCase):
         registry = {r["session_id"]: "Session %s" % r["pane"] for r in records}
         patches = [
             mock.patch.object(wnm, "wezterm_panes", lambda: panes),
-            mock.patch.object(wnm, "read_registry", lambda: dict(registry)),
+            # Takes the optional dir the real `read_registry(sessions_dir=None)` takes:
+            # `busy_session_ids()` passes one through, as `live_session_ids()` already
+            # did -- so a zero-arg stub would fail on a caller that mirrors the real
+            # signature rather than on the code under test.
+            mock.patch.object(wnm, "read_registry", lambda *_a, **_k: dict(registry)),
             mock.patch.object(
                 wnm, "load",
                 lambda suffix: list(records) if suffix == "needs" else []),
