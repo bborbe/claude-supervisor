@@ -57,7 +57,7 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 2. **Pre-dispatch check — decide whether this run is worth a dispatch at all.** Run the gate first. Measured 2026-09-25 on a 26-task tree with 25 done: the sweep-reader cost **91,598 tokens** and the drive leg **71,275**, for zero new information — three times in one session the manager bypassed the agents by hand to avoid it.
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --print
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --print
    ```
 
    - **exit 0 — nothing changed.** The gate has already printed the stored table under its `NO-CHANGE` marker. **Reproduce that output as this command's whole result and STOP** — dispatch no agent, run no step below. The stored table carries **no jump coordinates**, so say in one line that pane ids must be re-resolved by a fresh run; never present a replayed link as live.
@@ -84,7 +84,11 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 6. **Dispatch the act leg.**
 
-   `Task(subagent_type: "supervisor:manager-drive", prompt: <subject + tracked set + classification + confirmed orphan verdicts + roster + vault + timestamp>)`
+   `Task(subagent_type: "supervisor:manager-drive", prompt: <subject + tracked set + classification + confirmed orphan verdicts + roster + vault + timestamp + snapshot provenance: this sweep's `recorded_at` and the prior record's per-bucket name sets>)`
+
+   ⚠️ **The provenance fields are required, not decoration — omit them and every row comes back `Held`.** `agents/manager-drive.md` holds a row whose provenance the caller did not name, because an unlabelled list is indistinguishable from the wrong one. Measured 2026-09-26: a live pass that omitted them returned **SC2 failed** — no `recorded_at`, no prior sets — and the agent named the omission itself. Both values come from the snapshot the sweep wrote (`~/.claude/state/sweep-gate-loop/<vault>/<subject>.snapshot.json`): `recorded_at` from the new record, the per-bucket name sets from the **prior** record in its `.snapshot.history.jsonl`. The prior record exists only if the previous run's step 8 persisted it — see the `--vault` note there.
+
+   ⚠️ **Two different things are called "vault" in this command, and the prompt's `vault` is the NAME.** The dispatch passes the vault **name** — it is the `<vault>` segment of the snapshot path above, lowercased, not a path. The `--vault` argument at steps 2 and 8 is the vault **root path**, which is why that placeholder now reads `<vault-root>`. Passing a name to the script fails open; passing a path to the snapshot path segment resolves a directory that does not exist. Neither is interchangeable with the other.
 
    It reaps, then nudges, then decides the auto-resume gate, and returns the action lines — **decisions, not acts**: the agent holds no spawn tool, so its `To open` and `To resume` rows are yours to execute. Its rules — the reap test, the ten gate clauses, the re-probe-at-hand-off rule, the crash-loop cap — live in `agents/manager-drive.md` and are not restated here.
 
@@ -100,12 +104,14 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
    **Then persist the snapshot — it is what makes the next run free.** First token `python3`, so the call matches this command's `Bash(python3:*)` grant and raises no prompt:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --save <<'TABLE'
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --save <<'TABLE'
    <the rendered table>
    TABLE
    ```
 
    ⚠️ **`--save` exits 10 on success** — that code means "this run saw a change", which is exactly why it saved. Do not read it as a failure, and do not retry.
+
+   ⚠️ **`--vault` takes the vault ROOT PATH, never the vault name — and a name fails open silently.** The script's own help says *"vault root"*. Measured **2026-09-26**: `--vault "Personal"` returns `CHANGE fail-open: subject unresolvable (no subject page for 'Manager Layer' in 24 Goals/ or 23 Topics/)`, while the absolute path returns a real verdict. This call site previously wrote `--vault "<vault>"`, which reads as the vault *name* everywhere else in this command — so a manager filling it verbatim got a fail-open on **every** run and **no snapshot was ever saved**. The failure is silent in the worst way: it reports `CHANGE`, the run proceeds, and the prior record the next sweep diffs against never comes into existence. Pass the path the vault paragraph resolved.
 
    ⚠️ **An empty table is refused and reports CHANGE** rather than clobbering a good snapshot — a snapshot with no table can never be replayed, so a failed render must leave the previous one standing and force the next run to re-sweep. Never write the snapshot by hand, and never save a table you did not print. The gate strips OSC 8 jump links before storing, so the persisted copy carries no jump token.
 

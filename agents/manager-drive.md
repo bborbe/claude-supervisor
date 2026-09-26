@@ -149,7 +149,9 @@ Gate holds and the re-probe is clean → **hand the resume to the caller — you
 
 4. **Then decide ready-to-start rows — verified, never merely listed**
 
-The caller supplies the **ready-to-start rows**; you do not compute the bucket. Handing a row over is the only act in this file that can lead to a session, so the clauses below run **in order per row** and the **first failure is terminal for that row** — a hold costs one sweep, a wrong hand-over costs the caller a session that has to be unwound. Clause (5) is the exception to "per row": the cap is **sweep-global** and is checked before each open.
+The caller supplies the **ready-to-start rows**; you do not compute the bucket. Handing a row over is the only act in this file that can lead to a session, so the clauses below run **in order per row** and the **first failure is terminal for that row** — a hold costs one sweep, a wrong hand-over costs the caller a session that has to be unwound. **Two clauses are the exception to "per row":** clause **(0)** is **batch-level** — provenance is a property of the list, not of a row, so it is decided once before any per-row clause runs — and clause **(5)** is **sweep-global**, checked before each open. Every other clause is per-row and terminal for its own row.
+
+**(0) Refuse the whole ready-to-start batch when the caller named no provenance.** Before any per-row clause runs: if the dispatch carried **either** half missing — no snapshot `recorded_at`, **or** no prior record's per-bucket sets — **every ready-to-start row is Held**, with one `Held` line naming **which half was missing** — and no clause below runs. ⚠️ **"Either", not "both"** — the earlier wording here required both halves absent, which made the gate *narrower than the rule it enforces*: a dispatch carrying `recorded_at` but no prior per-bucket sets would have passed, and that is the half `<constraints>` calls the harder one to fabricate. A gate that admits a case its own rule rejects is the read-one-way/act-another gap this clause exists to close. This is a **batch-level** gate like (5)'s sweep-global cap and unlike (1)–(4): provenance is a property of the *list*, not of a row, so it cannot be decided row by row. ⚠️ **Measured 2026-09-26 — this clause exists because naming the omission was not enough.** A live pass reported *"the caller's dispatch did not quote the snapshot's `recorded_at` … I could not independently verify `recorded_at`"* and then **acted anyway**: it decided two `To open` rows and wrote `mode: interactive` to disk. The constraint was read and quoted aloud; the steps that actually decide rows had no clause for it, so nothing terminal fired. **A rule in `<constraints>` that no clause enforces is a rule the run will narrate and then ignore** — which is also why this clause is numbered (0) rather than left as prose above the sequence.
 
 **(1) Score it.** Dispatch the `vault-cli:task-auditor` **agent** via `Task`, and read the `READINESS:` line it returns — requiring **≥9/10 with zero hard-gate failures**. ⚠️ **`task-auditor` is an agent, not a skill.** `Skill("vault-cli:task-auditor")` answers `Unknown skill: vault-cli:task-auditor` and scores nothing — measured 2026-09-24 on the drive E2E fixture run, all 4 rows held with no score. `Task` is the only tool that addresses a `subagent_type`; the similarly-named `vault-cli:audit-task` is the *command* that dispatches this same agent, so routing through `Skill` adds a hop and changes nothing about the target. **Use the readiness prompt whose single home is `commands/open.md` § Step 1.5 — read it there and never restate its gates or its terminal line here.** The bar and its single home are `docs/fleet-surface.md` § Spawn a worker — reference that home, never restate the number. The manager may make **one** structural repair and re-audit once (sections, decomposition, DoD and SC shapes are the manager's act, per that same block); a row still below the bar after that is **held** with the score named. A row already carrying all three sections needs no repair:
 
@@ -204,6 +206,8 @@ Plain markdown, one line per action, in the order you performed them. Omit empty
 
 ```text
 Drive: <subject> — reaped <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · held <n> · blocked <n>
+Provenance: recorded_at=<the snapshot's recorded_at> · prior sets: <bucket>{<task>, …} · <bucket>{…}
+Batch held — no snapshot provenance (missing: <which half>) — no per-row clause ran   ← clause (0); ONE line for the whole batch, never one per row
 
 Reaped (2):
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
@@ -230,7 +234,6 @@ Held (3):              ← one line per held row, naming the clause and the valu
   <task> — 👤 YOURS (role: human) — not dispatched
   <task> — held-on-cap: spawn cap 2 (4 ready this sweep, 2 handed over)
   <task> — held-on-budget: audit budget spent (3 of 3 ready rows audited)
-  <task> — no snapshot provenance: the caller passed no `recorded_at` — held, delta unverifiable
 
 Not resumed (3):
   <task> — gate fails on: transcript stale (mtime 3 min ago) — alive, merely quiet
@@ -259,7 +262,8 @@ Escalated (1):
 - No message sent to a worker asserts that a gate is cleared; every reap message states it is non-authorising and that the operator has not answered.
 - No TTS call was attempted, and no report line implies one happened — the voice half belongs to the caller, because a subagent has no TTS.
 - The report contains no claim of an act that did not happen — including a tool that failed to bind.
-- Every open was gated by all **six** clauses, checked on disk **this run**, in order, and the first failure was terminal for that row.
+- The **batch gate ran before any per-row clause**: when the caller named no provenance, every ready-to-start row was `Held` in one batch-level line and **no clause (1)–(6) ran at all**. This is the criterion the branch's own defect would otherwise pass — a run that reads the rule, narrates it, and proceeds anyway satisfies every other box here.
+- Every open was gated by all **six** per-row clauses (1)–(6), checked on disk **this run**, in order, and the first failure was terminal for that row. ⚠️ Clause (0) is a check on the **dispatch payload**, not an on-disk read, so "checked on disk" covers (1)–(6) and not (0) — the batch gate has its own criterion above.
 - No row below the bar was opened, and every hold names its clause **and the value that held it** — the score, the blocker line, or the colliding file. "held" alone is not a line.
 - Every row acted on came from **this sweep's snapshot**, and no tick file was read or fallen back to — flat or per-vault. A run that cannot say which snapshot its rows came from has failed this file's first constraint.
 - Every report **quotes the snapshot's `recorded_at` and the prior record's per-bucket name sets**, and a row handed over without that provenance is `Held` with the omission named — never acted on. A delta against an unidentified list is indistinguishable from a delta against the wrong one.

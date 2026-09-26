@@ -82,7 +82,7 @@ The `Subject:` line leads so a mis-resolution is visible before the table render
 1. **Pre-dispatch check — decide whether this snapshot is worth a dispatch at all.** Run the gate first. Measured 2026-09-25 on a 26-task tree with 25 done, one snapshot cost **125,423 tokens** for zero new information.
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --print
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --print
    ```
 
    - **exit 0 — nothing changed.** The gate has already printed the stored table under its `NO-CHANGE` marker. **Reproduce that output as this snapshot's result and STOP** — dispatch no agent, run no step below. Two things the replay cannot carry, and both are said in the output rather than left to be discovered: the **blocked-by-you jump list** is step 6 and is not persisted, and the stored table carries **no jump coordinates** — pane ids are renumbered by a WezTerm restart without moving any digest input, so a replayed link can be dead while nothing reports a change. Say in one line that a fresh run re-resolves both. Never present a replayed link as live, and never let the missing jump list pass unmentioned — the frontmatter advertises it.
@@ -119,7 +119,7 @@ The `Subject:` line leads so a mis-resolution is visible before the table render
 8. **Persist the snapshot — it is what makes the next run free.** First token `python3`, so the call matches this command's `Bash(python3:*)` grant and raises no prompt:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault>" --subject "<subject>" --save <<'TABLE'
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --save <<'TABLE'
    <the rendered table>
    TABLE
    ```
