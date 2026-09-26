@@ -233,13 +233,16 @@ def attribution(rec: dict | None) -> str:
         return agent
     return UNKNOWN
 
-def live_processes() -> tuple[int, set[str]]:
+def live_processes() -> tuple[int, set[str]] | None:
     """Returns (count of running `claude --model` sessions, resumed-session ids).
 
     Definitive per-PID → session mapping isn't available: a process keeps neither
     its transcript open nor the session id in env/argv (except --resume), and cwd
     is shared across sessions so it can't disambiguate. So `●` = exact --resume
     match only; for everyone else, transcript recency is the liveness signal.
+
+    `None` when the `ps` failed — never `(0, set())`. A zero here is a measurement
+    the caller prints as fact, so a failed read must not be able to produce one.
     """
     count, resumed = 0, set()
     try:
@@ -252,7 +255,7 @@ def live_processes() -> tuple[int, set[str]]:
             m = re.search(r"--resume\s+(" + UUID_RE.pattern + ")", line)
             if m: resumed.add(m.group(1))
     except Exception:
-        pass
+        return None
     return count, resumed
 
 def human_age(sec: float) -> str:
@@ -278,7 +281,8 @@ def main():
         print("no ~/.claude/projects"); return
     work = build_work_map()
     ledger = read_ledger()
-    proc_count, resumed = live_processes()
+    live = live_processes()
+    proc_count, resumed = (None, set()) if live is None else live
 
     rows = []
     for jsonl in PROJECTS.glob("*/*.jsonl"):
@@ -296,7 +300,10 @@ def main():
         working = titles[0] if titles else "—"
         print(render_row(age, proj, sid, working, sid in resumed, ledger.get(sid)))
     utc_n, local_n = spawn_counts(ledger, now)
-    print(f"\n{proc_count} live `claude` sessions (ps, machine-wide) · scope: all projects · "
+    count_field = ("⚠️ `ps` unreadable — live `claude` session count withheld, not zero"
+                   if proc_count is None
+                   else f"{proc_count} live `claude` sessions (ps, machine-wide)")
+    print(f"\n{count_field} · scope: all projects · "
           f"● = confirmed via --resume · "
           f"age = last transcript message (liveness proxy; <~5m ≈ active, hours ≈ stale)")
     print(f"ledger: {len(ledger)} records at {ledger_dir()} · "
