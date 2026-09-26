@@ -31,6 +31,26 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Every transport read site the enumeration derived (2026-09-26, against 88ed821).
+# SC6(c): the mechanisms are re-run against the target tree, and every site they
+# derive must appear here. A site outside this list means the mechanism and the
+# recorded enumeration disagree — the disagreement the criterion exists to surface,
+# and the reason the enumeration is written as a search rather than a list.
+SITE_LIST = {
+    # transport call sites — the walk's seeds
+    ("fleet-colours.py", "pane_titles"), ("fleet-colours.py", "pid_ttys"),
+    ("fleet-sessions.py", "live_processes"), ("jump-link.py", "pane_title"),
+    ("jump.py", "activate_pane_by_id"), ("jump.py", "activate_tab"),
+    ("jump.py", "current_window"), ("jump.py", "main"),
+    ("jump.py", "pane_sessions"), ("jump.py", "wezterm_panes"),
+    ("stop-probe.py", "gate_processes"),
+    ("who-needs-me.py", "main"), ("who-needs-me.py", "wezterm_panes"),
+    # in-repo callers that hold no transport call of their own
+    ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change
+    ("who-needs-me.py", "pane_for"), ("who-needs-me.py", "live_pane_ids"),
+    ("fleet-board.py", "collect_signals"),
+}
+
 
 class _Proc:
     """The slice of `subprocess.CompletedProcess` the accessors touch."""
@@ -200,21 +220,47 @@ def main():
             f"reported a reachable empty fleet as unreadable: {err.getvalue().strip()!r}",
         )
 
-    # --- the walk's edge list still names the caller shape (SC6(c)) -------------
+    # --- SC6(c): re-run the mechanism and check it derives nothing new ----------
     walk = os.path.join(scripts, "transport-read-walk.py")
     if os.path.isfile(walk):
         out = subprocess.run(
             [sys.executable, walk, "--json"], capture_output=True, text=True, cwd=os.path.dirname(scripts)
         ).stdout
         try:
-            edges = json.loads(out)["edges"]
+            report = json.loads(out)
         except Exception:
-            edges = []
+            report = {}
+        edges = report.get("edges", [])
+        seeds = report.get("seeds", [])
+        reached = report.get("reached", [])
+
+        # The walk must name the caller shape, or a shallow or empty walk satisfies
+        # the criterion vacuously.
         expect(
             "walk names the caller edge",
-            any(e["from_file"] == "fleet-board.py" and e["to_function"] == "panes" for e in edges)
-            or any(e["from_file"] == "fleet-board.py" and e["to_function"] == "wezterm_panes" for e in edges),
+            any(e["from_file"] == "fleet-board.py" and e["to_function"] in ("panes", "wezterm_panes")
+                for e in edges),
             "no fleet-board caller edge — a shallow or empty walk satisfies the criterion vacuously",
+        )
+
+        # Enumeration completeness: every transport call site the mechanism derives
+        # is one the enumeration recorded. The seeds *are* the derivation — the
+        # closure beyond them is callers, which are found by inspection and listed
+        # separately in SITE_LIST.
+        derived = {(s["file"], s["function"]) for s in seeds}
+        outside = sorted(derived - SITE_LIST)
+        expect(
+            "mechanism derives no site outside the list",
+            not outside,
+            f"derived {outside!r} — the mechanism and the enumeration disagree",
+        )
+
+        # And the caller shape specifically: a consumer holding no transport call of
+        # its own, which a call-site-only search cannot reach at any depth.
+        expect(
+            "walk reaches the caller shape",
+            any(r["file"] == "fleet-board.py" and r["function"] == "collect_signals" for r in reached),
+            "the walk never reached fleet-board.py:collect_signals",
         )
 
     tree = os.path.abspath(args.tree)
