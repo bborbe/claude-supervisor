@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the necessity read's rows are the deliverable, and a count is not a row.** Measured against two released versions: the `v0.57.2` run emitted a prose summary with no rows, and the `v0.57.3` run — *after* the rows had been made mandatory — still emitted `"81 tasks needed · 43 are the goals' own output · 3 not needed"`, a **count for the `product` bucket rather than rows**. One behaviour, two starved criteria: a count cannot be reconciled against an independent hand-count (a one-task discrepancy is unlocalizable when no task is named — measured this run, 44 tracked named-subset tasks against the reported 43), and a counted `needed` bucket can never cite the criterion a given task advances. The section now states that the rows are the deliverable and the summary is a footer, carries both measured counter-examples, and adds the tell: a number written where a task name belongs means the section failed. Also repairs a duplicated `needed:` line and a lost indent in the template, both introduced by an earlier edit.
+
 ## v0.57.6
 - fix: correct the falsified measurement in the resume-guard comments in `server/supervisor.mjs` and `server/decision-settle.mjs`. The run both comments cited carried no decision, so the guard was never observed to fire; the comments now name `renderResumePrompt` as the mechanism that stops the re-ask and scope the guard to what was observed. Comment-only — no behaviour change.
 
