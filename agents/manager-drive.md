@@ -74,7 +74,7 @@ The caller's classification is a **snapshot, and you run after it**: the sweep r
 
 **Check 1 — freshness: did the task file move since the sweep read it?**
 
-The sweep returns each `stuck` task's observed task-file mtime (its report section 6). Re-read it now — **on the task file, not the transcript** — using the `PATH`-independent command and the fail-closed rule that **clause 7 owns**; that clause is this form's one home, so read it there rather than restating it here. Drop the candidate when the current mtime is **newer** than the sweep's — the worker edited its file between the read and your nudge, so it is working, not stuck. **Fail closed:** if either reading is missing, or is not exactly one integer on exit `0`, do not nudge on freshness' behalf. A `stuck` row that arrived **without** an mtime cannot be checked at all — report it under `Not nudged` naming that, and never nudge it as though the check had passed. Silently dropping a candidate is indistinguishable from one the sweep never classified, which is why both outcomes are reported.
+The sweep returns each `stuck` task's observed task-file mtime (its report section 6). Re-read it now — **on the task file, not the transcript** — using the `PATH`-independent command and the fail-closed rule that **clause 7 owns**; that clause is this form's one home, so read it there rather than restating it here. Drop the candidate when the current mtime is **newer** than the sweep's — the worker edited its file between the read and your nudge, so it is working, not stuck. **Fail closed:** if either reading is missing, or is not exactly one integer on exit `0`, do not nudge on freshness' behalf. A `stuck` row that arrived **without** an mtime cannot be checked at all — report it under `Freshness / in-flight drops` naming that, and never nudge it as though the check had passed. Silently dropping a candidate is indistinguishable from one the sweep never classified, which is why both outcomes are reported.
 
 **Check 2 — in flight: is the session executing tools?**
 
@@ -90,7 +90,7 @@ Only a candidate that survives **both** checks is nudged:
 
 - `SendMessage` it the observable that made it `stuck`, and the next move left to the worker;
 - **return a `Nudged` line naming the session, the problem and the suggested fix, for the caller to voice;**
-- **return a `Not nudged` line** for every candidate a check dropped, naming which check and the value that dropped it. A near-miss is the most useful line in the report — and the operator reads the `Nudged` block to decide whether to trust the drive leg, so a false row costs more than a missing one.
+- **return a `Freshness / in-flight drops` line** for every candidate a check dropped, naming which check and the value that dropped it. ⚠️ **The line's leading token is the check that *dropped* the row — never the first check you happened to evaluate.** A row that passed check 1 and was dropped by check 2 leads with `in flight:`, even though the freshness reading was taken first; leading with the passing check misnames the cause and leaves the reason string unusable as a pass test. A near-miss is the most useful line in the report — and the operator reads the `Nudged` block to decide whether to trust the drive leg, so a false row costs more than a missing one.
 
 ⚠️ **The voice half is the caller's, not yours, and this is measured rather than assumed.** A subagent has **no TTS**: `mcp__tts__say` is not visible to a subagent in *either* the main env or the isolated one (probed 2026-09-22 — a subagent reported no tool whose name contains `tts`, under any spelling). So the split is deliberate: **you own the message, the caller owns the voice.** Do not attempt a TTS call, and never let the report read as though one happened.
 
@@ -200,7 +200,7 @@ One compact report — see `<output_format>`. You do not render the status table
 Plain markdown, one line per action, in the order you performed them. Omit empty sections.
 
 ```text
-Drive: <subject> — reaped <n> · nudged <n> · not nudged <n> · to resume <n> · to open <n> · held <n> · blocked <n>
+Drive: <subject> — reaped <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · held <n> · blocked <n>
 
 Reaped (2):
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
@@ -209,7 +209,7 @@ Reaped (2):
 Nudged (1):            ← the caller voices these; a subagent has no TTS
   <task> — stuck 47 min, task file unchanged — <what was sent>
 
-Not nudged (2):        ← the false-nudge guard: which check dropped the candidate, and the value
+Freshness / in-flight drops (2):   ← the false-nudge guard: which check dropped the candidate, and the value
   <task> — freshness: file mtime 1758730800 > sweep's 1758729600 — moved after the sweep read it
   <task> — in flight: tool.json state=open since 4 min ago (Bash) — working, not stuck
   <task> — freshness: no mtime on the sweep's stuck row — un-checkable, not nudged
@@ -244,7 +244,7 @@ Escalated (1):
 <success_criteria>
 - **Reaping ran to completion before any nudge or resume was attempted.** A run that nudged a task it later reaped has violated the one ordering constraint in this file.
 - **Every nudged task survived both pre-nudge checks, on disk, this run** — its task file had not moved since the sweep's reading, and its session was neither inside a tool call nor inside the transcript freshness window. A nudge sent on the caller's classification alone is the false nudge this pass exists to stop.
-- **Every candidate a check dropped is reported under `Not nudged`, naming the check and the value that dropped it** — including a `stuck` row that arrived with no mtime and so could not be checked. A silently dropped candidate reads exactly like one the sweep never classified.
+- **Every candidate a check dropped is reported under `Freshness / in-flight drops`, naming the check and the value that dropped it** — including a `stuck` row that arrived with no mtime and so could not be checked. A silently dropped candidate reads exactly like one the sweep never classified.
 - Every reap decision is backed by the three disk reads — `status`, `phase`, open-box count — taken **this run**, never from a session's claim or its colour.
 - Every auto-resume names all **ten** gate clauses, and any clause that failed is quoted with the value that failed it — including which blocker or which date.
 - Every `To resume` row was preceded by a re-probe at the hand-off site, and a positive re-probe aborted the row without arming the crash-loop cap.
