@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.62.5
 
 - docs: **`docs/fleet-surface.md` § A plugin install does not reach a running session now reads the probe as the newest `.in_use` entry by mtime — the command it shipped returned several paths and could not be read after a reload.** The section shipped in `v0.62.4` with `ls -d …/*/.in_use/"$CLAUDE_PID"`, correct only for a session that has never reloaded: a reload **writes a new entry and never removes the old one**, so the pid sits in several version directories at once. Measured 2026-09-27 on one session — before `/reload-plugins` its pid `83726` was in `0.61.1/` alone (mtime 18:13); after, it was in **both** `0.61.1/` (18:13) and `0.62.4/` (20:15), with `0.62.4` installed. Multi-membership is the normal case, not an edge: the same inventory shows pid `56704` in nine version directories. The probe is now `ls -dt … | head -1`, and the section says why `-t` is load-bearing rather than style. ⚠️ **The same run settles what the section may claim about the lever:** the reload moved that entry to the installed version, so the probe reports **recovery** as well as staleness — the property that lets the section promise `/reload-plugins` as a remedy at all. ⚠️ **It also records a limit the operator should see:** `/reload-plugins` is a built-in CLI command, not a Skill, so no tool available to a session can invoke it — the recovery can only be triggered by the human in that session. Change set: `docs/fleet-surface.md`.
 
