@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.9
 
 - docs: **`gate-owner-filter.py`'s header now states that a predecessor manager is not a peer manager, and that the resulting blindness is a documented limitation with a bounded, self-closing window.** After a handover the outgoing manager is still live and still owns the spawn records of every worker it started, so hops 3 and 4 read it as a live manager and its workers drop as `peer-manager` although they belong to the subject the watcher serves — measured 2026-09-26 on a Manager Layer handover at `gates: 6  emit: 1  dropped(peer-manager): 5`, four of them that topic's own workers (spawner `1217e759`). ⚠️ **The window closes itself:** hop 4 already keeps a dead manager's panes, so the blindness ends the moment the outgoing session exits — measured 2026-09-27, when those same four panes read `emit dead-manager` with no code change. **No predicate change ships, and the header says why:** a topic-scoped filter would need a subject source that does not exist for a manager that armed no loop (`worker-manager/<sid>.json` is absent for exactly that session) and would reintroduce the session-name convention hop 3 exists to avoid; inheriting the predecessor's spawn records either falsifies provenance or, while both managers are live, moves the blindness to the other session. The compensating control is the tick's direct feed read — read `who-needs-me.py` directly on the first tick after taking a topic over — now named in both the header and `65 Runbooks/Manager Session.md` § Cadence mechanics.
 
