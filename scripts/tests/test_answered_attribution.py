@@ -12,24 +12,27 @@ counts the 2026-09-27 rules move:
     answered + answered_at + actor           90   of which only 4 carry resolved_by
     open                                      2
 
-⚠️ **Two rules landed on 2026-09-27, and both change what this module answers.**
+⚠️ **One rule landed on 2026-09-27; a second landed and was withdrawn the same
+day.**
 
-  ⚠️ **A close without an answer is not a release.** The close path stamps
+  ✅ **A close without an answer is not a release.** The close path stamps
   `answered_by` and never `answered_at`. It stays an *act* — the card moved —
   but nothing was routed back, so the asking session is still frozen and
   releasing on it opens a gate nobody answered. `answered_at` is the
   discriminator, which is why an item answered and closed *afterwards* still
   releases. 65 rows move, 63 of them `attention-board`.
 
-  ⚠️ **A gate releases only on `resolved_by`.** Attribution cannot carry this:
-  a real Playwright/CDP click stores the operator's own Chrome UA with
-  `automation: false`, byte-for-byte the operator's own click. `resolved_by` is
-  sourced by the arm from its own `CLAUDE_CODE_SESSION_ID` and the board's
-  JavaScript never sends it, so a click on any control the board renders cannot
-  produce it. 86 of 90 `answered` rows move.
+  ❌ **A gate releases only on `resolved_by` — WITHDRAWN.** It was unforgeable by
+  a board click, which was the point, but the board's JavaScript never sends it,
+  so it refused **the operator's own board answer** as well. With the board's
+  form restored (`attention-controller` PR #49) that made the board record an
+  answer and release nothing — the silent failure this module exists to remove,
+  inverted, and worse because it looks like success. The two specs below pin the
+  withdrawal.
 
-⚠️ The 11,838 reaps are unaffected by either rule — they carry no actor and
-already read as NOTHING — which is why the count that moves is 151, not 12,000.
+⚠️ The 11,838 reaps are unaffected — they carry no actor and already read as
+NOTHING — which is why the count that moved under the withdrawn rule was 151,
+and why it moves back.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -87,11 +90,13 @@ class ClassifyTest(unittest.TestCase):
             attribution.ATTRIBUTED,
         )
 
-    def test_a_board_answer_without_resolved_by_does_not_release(self):
-        """⚠️ The whole point, 2026-09-27: the board's JavaScript never sends
-        `resolved_by`, so the record an operator's own click produces and the
-        record a Playwright click produces are the same record — and neither
-        releases the gate."""
+    def test_a_board_answer_releases_the_gate_again(self):
+        """⚠️ The `resolved_by` requirement was withdrawn 2026-09-27, hours after
+        it shipped. It refused this exact record — the operator's own board
+        answer — which is the answer the board exists to take. The record a
+        Playwright click produces is still the same record; that is the accepted
+        cost, and what carries the case now is that the agents that would forge
+        it run off this machine."""
         verdict, reason = attribution.classify(
             {
                 "state": "answered",
@@ -100,8 +105,8 @@ class ClassifyTest(unittest.TestCase):
                 "answered_client": OPERATOR_CLIENT,
             }
         )
-        self.assertEqual(verdict, attribution.UNATTRIBUTED)
-        self.assertIn("resolved_by", reason)
+        self.assertEqual(verdict, attribution.ATTRIBUTED)
+        self.assertIn("board answer is trusted", reason)
 
     def test_a_close_is_a_clear_not_an_answer(self):
         """⚠️ The close path stamps `answered_by` and never `answered_at`. It is
@@ -161,10 +166,11 @@ class ClassifyTest(unittest.TestCase):
             attribution.ATTRIBUTED,
         )
 
-    def test_a_curl_answer_without_resolved_by_does_not_release(self):
-        # ⚠️ A direct API POST is no more evidence of the operator than a click
-        # is. It carries no provenance, so it fails closed like everything else
-        # that cannot produce `resolved_by`.
+    def test_a_curl_answer_without_resolved_by_releases_too(self):
+        # ⚠️ Withdrawn 2026-09-27 with the `resolved_by` rule: a direct API POST
+        # carrying a client record and no automation flag releases, exactly as a
+        # board answer does. `resolved_by` is still *reported* when an arm sends
+        # it — provenance worth keeping — but it no longer decides the verdict.
         self.assertEqual(
             self.verdict(
                 {
@@ -174,7 +180,7 @@ class ClassifyTest(unittest.TestCase):
                     "answered_client": CURL_CLIENT,
                 }
             ),
-            attribution.UNATTRIBUTED,
+            attribution.ATTRIBUTED,
         )
 
     # --- the fail-closed cases ----------------------------------------------
@@ -232,7 +238,7 @@ class ClassifyTest(unittest.TestCase):
                     attribution.UNATTRIBUTED,
                 )
 
-    def test_a_scripted_browser_click_no_longer_takes_the_gate(self):
+    def test_a_scripted_browser_click_takes_the_gate_again(self):
         """⚠️ The boundary, pinned as a test so it cannot be over-read later.
 
         This is the record a REAL Playwright/CDP click produced on the deployed
@@ -241,13 +247,17 @@ class ClassifyTest(unittest.TestCase):
         Playwright. It is byte-for-byte the shape the operator's own board click
         produces.
 
-        ⚠️ **This spec used to assert the opposite, and its own docstring asked
-        for this day:** *"A future change that makes this fail is a real
-        improvement, and it should fail loudly here rather than be discovered by
-        re-deriving the whole probe."* 2026-09-27 is that change. The assertion
-        is **inverted rather than deleted**, so the falsified expectation stays
-        on the record: attribution still cannot tell these two apart — what
-        changed is that the gate no longer rests on attribution.
+        ⚠️ **This spec has now been inverted twice, and the second inversion is
+        the operator's ruling.** On 2026-09-26 it asserted `ATTRIBUTED` — the
+        defect. On 2026-09-27 it was inverted to `UNATTRIBUTED` when the
+        `resolved_by` requirement landed, with a docstring that asked for a
+        future change to fail loudly here. **That requirement was withdrawn the
+        same day** — it refused the operator's own board answer, which is the
+        answer the board exists to take — so the spec returns to `ATTRIBUTED`,
+        and it is once again a **defect pin**, not a boundary. Attribution cannot
+        tell these two records apart; nothing in the store can. What carries the
+        case is that the agent which would forge this click runs off the machine,
+        per the vault's Agent Security Design Guide.
         """
         verdict, reason = attribution.classify(
             {
@@ -263,14 +273,15 @@ class ClassifyTest(unittest.TestCase):
                 },
             }
         )
-        self.assertEqual(verdict, attribution.UNATTRIBUTED)
-        self.assertIn("resolved_by", reason)
+        self.assertEqual(verdict, attribution.ATTRIBUTED)
+        self.assertIn("board answer is trusted", reason)
 
     def test_automation_false_does_not_exonerate(self):
         # ⚠️ The boundary, pinned so it is not over-read later: a `false` only
-        # fails to incriminate. It is not proof the operator answered — and it is
-        # no longer sufficient to release a gate either; the answer must also
-        # carry the arm's provenance.
+        # fails to incriminate. It is not proof the operator answered. It *is*
+        # sufficient to release, since the `resolved_by` requirement was withdrawn
+        # 2026-09-27 — this case carries provenance and would release with or
+        # without it.
         verdict, reason = attribution.classify(
             {
                 "state": "answered",
@@ -282,7 +293,11 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(verdict, attribution.ATTRIBUTED)
         self.assertIn("no positive automation flag", reason)
 
-    def test_automation_false_without_provenance_does_not_release(self):
+    def test_automation_false_without_provenance_releases(self):
+        # ⚠️ Withdrawn 2026-09-27 with the `resolved_by` rule: a client record
+        # reporting `automation: false` and nothing positively automated releases
+        # whether or not provenance is present. A `false` fails to incriminate,
+        # and that is now the whole of the test.
         verdict, _ = attribution.classify(
             {
                 "state": "answered",
@@ -290,7 +305,7 @@ class ClassifyTest(unittest.TestCase):
                 "answered_client": dict(OPERATOR_CLIENT, automation=False),
             }
         )
-        self.assertEqual(verdict, attribution.UNATTRIBUTED)
+        self.assertEqual(verdict, attribution.ATTRIBUTED)
 
     def test_every_reason_names_the_evidence_that_was_missing(self):
         for item in (

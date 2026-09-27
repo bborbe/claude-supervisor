@@ -26,21 +26,29 @@ consumer has, and it is deliberately weak:
   Chrome through `chrome.debugger` behaves the same way. A `false` only fails
   to incriminate; it never clears.
 
-⚠️ **Attribution cannot carry this, and from 2026-09-27 it does not have to.**
-This module still refuses the two decidable cases — no client record, and
-`automation: true` — but the case the surrounding work exists for is now closed
-by **provenance rather than by a stronger predicate here**: a gate releases only
-on an answer carrying `resolved_by`, a field the arm sources from its own
-`CLAUDE_CODE_SESSION_ID` and the board's JavaScript never sends. A click on any
-control the board renders therefore cannot release a gate, whatever
-`answered_client` says about it.
+⚠️ **Attribution cannot carry this — and a provenance rule could not either, so
+it was withdrawn the day it shipped.** This module refuses the two decidable
+cases — no client record, and `automation: true` — and that is the whole of its
+enforcement. From 2026-09-27 it briefly also required `resolved_by`, a field the
+arm sources from its own `CLAUDE_CODE_SESSION_ID` and the board's JavaScript
+never sends. ⚠️ **That refused the operator's own board answer** — the answer the
+board exists to take. With the board's form restored (`attention-controller`
+PR #49) the card read `answered`, this module printed `NOT_OPERATOR_ANSWERED`,
+and the asking session stayed frozen: the same silent failure this module exists
+to remove, inverted, and worse because it looks like success.
 
-  answered + `resolved_by` + not positively automated   ->  attributed
-  answered + no `resolved_by`                           ->  unattributed
-  answered + `resolved_by` but no client at all         ->  unattributed
-  answered + `resolved_by` + `automation: true`         ->  automated
+  answered + a client + not positively automated        ->  attributed
+  answered + no client at all                           ->  unattributed
+  answered + `automation: true`                         ->  automated
   closed (a clear, not an answer)                       ->  nothing
   nothing recorded                                      ->  open / reaped
+
+⚠️ **What carries the case instead is placement, not a predicate.** Every field
+the store holds is producible by a scripted click, so no reading of the record
+separates the operator from a script — but a script has to run *somewhere*, and
+an agent running off this machine cannot reach a board on it. See the vault's
+Agent Security Design Guide. Until the agents move, these refusals are
+best-effort and a board answer is trusted.
 
 ⚠️ **A close is not a gate release.** `open` -> `closed` records that a card was
 **cleared**: `answered_at` and `decision` stay unset and no answer is routed, so
@@ -157,37 +165,45 @@ def classify(item):
             "the answering client reported automation: true, so a scripted browser drove this",
         )
 
-    # The enforcement, and the reason it is not a sharper reading of the same
-    # record: `resolved_by` is sourced by the arm from its own
-    # CLAUDE_CODE_SESSION_ID and the board's JavaScript never sends it, so a
-    # click on any control the board renders cannot produce this field. Every
-    # other field the store holds is producible by a scripted click — a real
-    # Playwright click records the operator's own Chrome UA with
-    # `automation: false`.
+    # ⚠️ **The `resolved_by` requirement was withdrawn on 2026-09-27, hours after
+    # it shipped.** It was unforgeable by a board click, which was its whole
+    # point — but the board's JavaScript never sends it, so it refused the
+    # operator's own board answer too. With the board's form restored
+    # (`attention-controller` PR #49) that made the board record an answer and
+    # release nothing: the card read `answered`, this module printed
+    # NOT_OPERATOR_ANSWERED, and the asking session stayed frozen. A gate the
+    # product's primary flow cannot satisfy is not a fix; it is the feature
+    # deleted.
+    #
+    # `resolved_by` is still reported when an arm sends it — provenance worth
+    # keeping — but it no longer decides the verdict. What decides it from here
+    # is where the agent runs, not what the record says: see the module
+    # docstring and the vault's Agent Security Design Guide.
     resolved_by = item.get("resolved_by")
-    if not isinstance(resolved_by, str) or resolved_by == "":
+    if isinstance(resolved_by, str) and resolved_by:
         return (
-            UNATTRIBUTED,
-            "the item carries no resolved_by, so no arm delivered this answer — "
-            "the board's JavaScript never sends that field, and a gate releases "
-            "only on an arm answer",
+            ATTRIBUTED,
+            f"answered by an arm carrying resolved_by ({resolved_by!r}) with no positive automation flag",
         )
 
     return (
         ATTRIBUTED,
-        f"answered by an arm carrying resolved_by ({resolved_by!r}) with no positive automation flag",
+        "answered by a client reporting no positive automation flag, so the answer "
+        "stands (a board answer is trusted until the agents move off this machine)",
     )
 
 
 def operator_answered(item):
     """True when an arm delivered the answer and nothing is positively flagged.
 
-    ⚠️ **The name is the claim, and it is still stronger than what this proves.**
-    It does NOT mean "the operator personally answered": an arm answer is
-    attributable to *an arm*, and an arm may be driven by a script. What it does
-    mean, from 2026-09-27, is that the answer carries `resolved_by` — provenance
-    a board click cannot produce — which is the enforcement the surrounding work
-    settled on after attribution was measured to be insufficient.
+    ⚠️ **The name is the claim, and it is stronger than what this proves.** It
+    does NOT mean "the operator personally answered": a board answer carries the
+    operator's own signature whether a person or a script produced it, and an arm
+    answer is attributable to *an arm* that a script may drive. What it means is
+    the weaker, honest thing — an answer was recorded, with a client record
+    present and no positive automation flag. ⚠️ The `resolved_by` requirement
+    that briefly made this stronger was withdrawn on 2026-09-27, because it
+    refused the operator's own board answer.
 
     The predicate a consumer gates on. It is deliberately not
     `state == "answered"` — see the module docstring for why that reading is the
