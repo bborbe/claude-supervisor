@@ -415,5 +415,127 @@ class TestVaultRootBoundary(Base):
         self.assertIn("no subject page", out)
 
 
+class TestTrackedArtifacts(Base):
+    """The three modes the dispatch path depends on: the tracked set travels as a file,
+    the bucket half is persisted, and a set that disagrees with the gate's own membership
+    is reported rather than accepted."""
+
+    def setUp(self):
+        super().setUp()
+        # `--compare-tracked` derives the loop snapshot path from SWEEP_GATE_BASE. Point it
+        # at a per-test dir so a real ~/.claude/state/sweep-gate-loop is never read — a test
+        # that reads live state passes or fails on the fleet's mood, not on the code.
+        os.environ["SWEEP_GATE_BASE"] = os.path.join(self.tmp, "loop")
+
+    def tracked(self, subject, names):
+        return self.run_gate(
+            "--subject", subject, "--write-tracked", stdin="\n".join(names) + "\n"
+        )
+
+    def buckets(self, subject, payload):
+        return self.run_gate(
+            "--subject", subject, "--write-buckets", stdin=json.dumps(payload)
+        )
+
+    def snapshot(self, subject, names):
+        d = os.path.join(os.environ["SWEEP_GATE_BASE"], os.path.basename(self.vault).lower())
+        os.makedirs(d, exist_ok=True)
+        with open(
+            os.path.join(d, "%s.snapshot.json" % self.m.slug(subject)), "w", encoding="utf-8"
+        ) as fh:
+            json.dump({"tasks": {n: {} for n in names}}, fh)
+
+    def test_write_tracked_prints_the_path_it_wrote(self):
+        rc, out = self.tracked("ATopic", ["ATask", "AGoalTask"])
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        path = out.strip()
+        self.assertEqual(path, self.m.tracked_path("ATopic"))
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "ATask\nAGoalTask\n")
+
+    def test_write_tracked_refuses_an_empty_set_and_leaves_the_previous_file(self):
+        self.tracked("ATopic", ["ATask"])
+        rc, _ = self.tracked("ATopic", [])
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        with open(self.m.tracked_path("ATopic"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "ATask\n")
+
+    def test_write_buckets_refuses_a_count_where_names_are_required(self):
+        """The shape check that earns its keep: a bucket mapped to a count *looks* like a
+        classification and gates nothing."""
+        rc, _ = self.buckets("ATopic", {"done": 5})
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_write_buckets_refuses_an_empty_object(self):
+        rc, _ = self.buckets("ATopic", {})
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_save_records_the_bucket_sets_under_the_key(self):
+        rc, out = self.buckets(
+            "ATopic", {"done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out = self.run_gate(
+            "--subject", "ATopic", "--save", "--buckets", out.strip(), stdin="t\n"
+        )
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertEqual(
+            json.loads(self.read_state("ATopic"))["bucket_sets"],
+            {"done": ["ATask"], "ready-to-start": ["AGoalTask"]},
+        )
+
+    def test_save_without_buckets_leaves_the_key_absent(self):
+        """Absent, not empty: a record that lacks the half must read as "not persisted"
+        rather than as "persisted and empty"."""
+        self.save("ATopic")
+        self.assertNotIn("bucket_sets", json.loads(self.read_state("ATopic")))
+
+    def test_save_with_an_unreadable_buckets_path_is_a_usage_error(self):
+        """Deliberately NOT a fail-open. The gate's fail-open rule exists so an unreadable
+        *state* file re-sweeps; here the caller believes it supplied the half, and a record
+        written without it would read back as persisted when it is not."""
+        rc, out = self.run_gate(
+            "--subject",
+            "ATopic",
+            "--save",
+            "--buckets",
+            os.path.join(self.tmp, "nope.json"),
+            stdin="t\n",
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+
+    def test_compare_reports_identical_memberships_with_both_counts(self):
+        self.tracked("ATopic", ["ATask", "AGoalTask"])
+        self.snapshot("ATopic", ["ATask", "AGoalTask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertIn("caller 2 names", out)
+        self.assertIn("gate 2 names", out)
+        self.assertIn("identical", out)
+
+    def test_compare_reports_a_divergence_in_both_directions(self):
+        self.tracked("ATopic", ["ATask", "OnlyMine"])
+        self.snapshot("ATopic", ["ATask", "OnlyGate"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("DIVERGENCE", out)
+        self.assertIn("caller-only: OnlyMine", out)
+        self.assertIn("gate-only: OnlyGate", out)
+
+    def test_compare_never_reports_agreement_when_it_could_not_read(self):
+        """An absent snapshot shares exit 10 with a divergence and must never exit 0:
+        "I could not check" and "they match" are precisely the two states this mode
+        exists to tell apart."""
+        self.tracked("ATopic", ["ATask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("unavailable", out)
+        self.assertIn("NOT compared", out)
+
+    def test_compare_without_a_staged_set_is_a_usage_error(self):
+        rc, _ = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+
 if __name__ == "__main__":
     unittest.main()
