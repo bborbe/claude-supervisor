@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: replace the per-manager spawn cap with **one fleet-wide concurrent-worker limit**, read from the single config value `spawn.maxConcurrent` in `~/.config/claude-supervisor/config.json`. The cap's 2-per-sweep / 4-per-30-min budget is removed from every home it was restated in, and the print token becomes `⏸️ CONCURRENCY LIMIT: <n> running, <limit> allowed`. ⚠️ **The value ships unset**, and unset means unlimited — the correct shipped state per the operator's ruling of 2026-09-27 (*"These limits are artificial and should be removed … For now there is no global limit"*), not a gap awaiting input. Auto-resumes remain excluded, answering to the auto-resume gate's own 30-min crash-loop cap
+
 ## v0.61.0
 
 - feat: `agent_status` returns `open_cards` — the session's open attention-store cards, so a manager can see a tab worker's live permission prompt (absent from `pending_permissions` by construction) and the `item_id` to answer it with
