@@ -8,6 +8,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  MAX_CONCURRENT_ENV,
+  resolveMaxConcurrent,
   resolveSpawnMode,
   unknownKeyWarnings,
   workerEnvFor,
@@ -167,4 +169,56 @@ test('a missing mode leaves the environment untouched rather than exporting "und
   assert.deepEqual(workerEnvFor({ env: { PATH: '/usr/bin' } }), { PATH: '/usr/bin' })
   assert.deepEqual(workerEnvFor(), {})
   assert.equal(workerEnvFor({ env: {} })[WORKER_MODE_ENV], undefined)
+})
+
+// --- the fleet-wide concurrent limit --------------------------------------------------
+//
+// The limit's shipped state is UNSET, and unset means unlimited. That is not an
+// unexercised branch — it is what every spawn does today, and a resolver that reported a
+// number here would invent a limit the operator did not set.
+
+test('resolveMaxConcurrent: unset everywhere is unlimited, and says so', () => {
+  assert.deepEqual(resolveMaxConcurrent({}), { limit: null, source: 'unset' })
+  assert.deepEqual(resolveMaxConcurrent({ env: null, file: {} }), { limit: null, source: 'unset' })
+  assert.deepEqual(resolveMaxConcurrent({ env: '', file: { spawn: {} } }), { limit: null, source: 'unset' })
+})
+
+test('resolveMaxConcurrent: the file decides when the env is silent', () => {
+  assert.deepEqual(resolveMaxConcurrent({ file: { spawn: { maxConcurrent: 6 } } }), { limit: 6, source: 'config' })
+  // A numeric string is accepted: config.json is JSON, but the env source is always a string.
+  assert.deepEqual(resolveMaxConcurrent({ file: { spawn: { maxConcurrent: '6' } } }), { limit: 6, source: 'config' })
+})
+
+test('resolveMaxConcurrent: the env wins over the file, and the loser is still validated', () => {
+  assert.deepEqual(resolveMaxConcurrent({ env: '3', file: { spawn: { maxConcurrent: 6 } } }), { limit: 3, source: 'env' })
+  // The losing source is a typo and the spawn is refused anyway. This is the module's whole
+  // discipline: a bad value in the file must not stay invisible because this spawn happened
+  // to be decided by the environment.
+  const { error } = resolveMaxConcurrent({ env: '3', file: { spawn: { maxConcurrent: 'lots' } } })
+  assert.match(error, /spawn\.maxConcurrent/)
+  assert.match(error, /"lots"/)
+})
+
+test('resolveMaxConcurrent: 0 is unlimited, not a zero-worker limit', () => {
+  // 0 is the value an operator reaches for to turn a limit OFF. Refusing it would make the
+  // off switch a syntax error; reading it as "zero workers" would stop the fleet dead.
+  assert.deepEqual(resolveMaxConcurrent({ env: '0' }), { limit: null, source: 'env' })
+  assert.deepEqual(resolveMaxConcurrent({ file: { spawn: { maxConcurrent: 0 } } }), { limit: null, source: 'config' })
+})
+
+test('resolveMaxConcurrent: an unusable value refuses rather than coercing', () => {
+  // `true` is the case worth naming: Number(true) is 1, so a blind coercion would read a
+  // stray boolean in config.json as "one worker at a time" and never say so.
+  for (const bad of ['-1', '2.5', 'many', true, {}, []]) {
+    const { error } = resolveMaxConcurrent({ file: { spawn: { maxConcurrent: bad } } })
+    assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
+    assert.match(error, /spawn\.maxConcurrent/)
+  }
+  assert.match(resolveMaxConcurrent({ env: 'lots' }).error, new RegExp(MAX_CONCURRENT_ENV))
+})
+
+test('maxConcurrent is a known spawn key — it does not warn as unknown', () => {
+  // Without this the key is accepted, reported as applied, and silently ignored — the
+  // failure this repo shipped twice (policy.json v0.3.0, permissionMode before mode.mjs).
+  assert.deepEqual(unknownKeyWarnings({ spawn: { mode: 'interactive', maxConcurrent: 6 } }, 'x.json'), [])
 })

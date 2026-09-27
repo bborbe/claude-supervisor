@@ -17,12 +17,12 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord } from './heartbeat.mjs'
+import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, listLive, stampRecord } from './heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { resolveSpawnMode, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { resolveMaxConcurrent, resolveSpawnMode, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
@@ -704,6 +704,44 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const roleResolution = resolveRole({ role, map: readRoleMap() })
   if (roleResolution.error) return { error: roleResolution.error }
   if (roleResolution.warning) log(`WARNING: worker ${id}: ${roleResolution.warning}`)
+
+  // The fleet-wide concurrent-worker limit — resolved and enforced HERE, with the other
+  // guards, before a worker, a tab or a ledger record exists. A limit checked after the
+  // spawn has already spent the budget it exists to protect.
+  //
+  // The count is live WORKERS, read from the heartbeat store the spawner stamps for every
+  // worker it opens — not every live session in the registry, which would include the
+  // operator's own sessions and the manager's and would make a small limit unusable.
+  const maxConcurrent = resolveMaxConcurrent({
+    env: config.maxConcurrent,
+    file: config.configFileContents,
+    path: config.configFile,
+  })
+  if (maxConcurrent.error) return { error: maxConcurrent.error }
+  if (maxConcurrent.limit !== null) {
+    const live = listLive()
+    // `null` is "the store could not be read", which is NOT "no worker is live". Refusing
+    // on it is the same asymmetry the mode rule carries: a limit that cannot count must not
+    // open, because opening past an uncountable limit is how the limit silently stops
+    // existing — and a manager acting on the other reading spawns onto live work.
+    if (live === null) {
+      return {
+        error:
+          `the concurrent-worker limit is set to ${maxConcurrent.limit} but the heartbeat store could not be ` +
+          `read, so the live-worker count is unknown — refusing rather than opening past a limit that cannot ` +
+          `be counted. Point SUPERVISOR_HEARTBEAT_DIR at the store if it lives elsewhere.`,
+      }
+    }
+    if (live.length >= maxConcurrent.limit) {
+      return {
+        error:
+          `the fleet-wide concurrent-worker limit is reached: ${live.length} live, ${maxConcurrent.limit} ` +
+          `allowed (source: ${maxConcurrent.source}). Open nothing further and report the remainder as ` +
+          `held-on-limit; it is picked up next sweep. Raise spawn.maxConcurrent in ${config.configFile}, or ` +
+          `remove the key for unlimited.`,
+      }
+    }
+  }
 
   // An explicit window id WINS — the caller may need a window the map does not describe.
   // Otherwise the role decides, in-process, and no window id crosses the tool boundary.

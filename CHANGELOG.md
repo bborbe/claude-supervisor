@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: replace the per-manager spawn cap with **one fleet-wide concurrent-worker limit**, read from the single config value `spawn.maxConcurrent` in `~/.config/claude-supervisor/config.json`. The cap's 2-per-sweep / 4-per-30-min budget is removed from every home it was restated in, and the print token becomes `⏸️ CONCURRENCY LIMIT: <n> running, <limit> allowed`. ⚠️ **The value ships unset**, and unset means unlimited — the correct shipped state per the operator's ruling of 2026-09-27 (*"These limits are artificial and should be removed … For now there is no global limit"*), not a gap awaiting input. Auto-resumes remain excluded, answering to the auto-resume gate's own 30-min crash-loop cap
+- feat: the fleet-wide concurrent limit is now **consulted, not merely documented**. `spawn.maxConcurrent` (env `SUPERVISOR_MAX_CONCURRENT`) is resolved in `server/spawn-mode.mjs` and enforced in `spawnAgent` before any worker, tab or ledger record exists — a limit checked after the spawn has already spent the budget it protects. The count is live **workers**, read from the heartbeat store, so the limit bounds the fleet's open workers rather than every live session (the registry includes the operator's own and the manager's, which would make a small limit unusable). Unset or `0` means unlimited; an unusable value refuses the spawn and names the file; an unreadable heartbeat store refuses rather than opening past a limit it cannot count
 
 ## v0.61.0
 
