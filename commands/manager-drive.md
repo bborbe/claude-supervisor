@@ -115,7 +115,7 @@ It prints **both counts** and, on a disagreement, the symmetric difference under
 
    ⚠️ **Two different things are called "vault" in this command, and the prompt's `vault` is the NAME.** The dispatch passes the vault **name** — it is the `<vault>` segment of the snapshot path above, lowercased, not a path. The `--vault` argument at steps 2 and 8 is the vault **root path**, which is why that placeholder now reads `<vault-root>`. Passing a name to the script fails open; passing a path to the snapshot path segment resolves a directory that does not exist. Neither is interchangeable with the other.
 
-   It reaps, then nudges, then decides the auto-resume gate, and returns the action lines — **decisions, not acts**: the agent holds no spawn tool, so its `To open` and `To resume` rows are yours to execute. Its rules — the reap test, the ten gate clauses, the re-probe-at-hand-off rule, the crash-loop cap — live in `agents/manager-drive.md` and are not restated here.
+   It reaps, then nudges, then decides the auto-resume gate, and returns the action lines — **decisions, not acts**: the agent holds no spawn tool, so its `To open` and `To resume` rows are yours to execute. Its rules — the reap test, the eleven gate clauses, the re-probe-at-hand-off rule, the crash-loop cap — live in `agents/manager-drive.md` and are not restated here.
 
 7. **Execute the rows it handed over — the spawn is yours, and so is the mode argument.** The agent decided each row and wrote its `mode:` to disk; you are the one that creates the session.
 
