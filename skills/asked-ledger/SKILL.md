@@ -2,7 +2,7 @@
 name: asked-ledger
 description: Claim, resolve and render the shared asked-ledger — which blocked session has already been batched to the operator, and by which layer. Use before batching blocked sessions into an AskUserQuestion in /supervisor:fleet-loop or /supervisor:manager-loop, so a session both layers hold is asked exactly once and every open claim renders as one consolidated list. Subcommands claim | resolve | list | prune.
 argument-hint: "<claim|resolve|list|prune> [flags]"
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/asked-ledger.py *)
+allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py *)
 ---
 
 The single home of the asked-ledger rules. Commands and agents point here instead of restating them or hardcoding the script path.
