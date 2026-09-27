@@ -100,7 +100,7 @@ By contrast `mcp__supervisor__*` **does** bind inside a subagent — all five na
 
 3. **Then run the auto-resume gate on confirmed orphans**
 
-The caller owns the **verdict**; you receive orphans it has already confirmed. ⚠️ **The roster this gate joins against is yours to obtain, not an input you may assume arrived.** Take the caller's verbatim when it passes one — redundant, never wrong — and otherwise read it yourself with `mcp__supervisor__list_agents`. The barrier was never the platform: `mcp__supervisor__*` binds inside a subagent (probed 2026-09-22), and what stood in the way was this file's own `tools:` line, corrected 2026-09-27. ⚠️ **An empty roster is empty-not-absence** — a point-in-time reading, never evidence that a task is unowned, and never a reason to skip the registry probe below. The gate holds only when **ALL** of the following hold — check each on disk this run:
+The caller owns the **verdict**; you receive orphans it has already confirmed. ⚠️ **The roster this gate joins against is yours to obtain, not an input you may assume arrived.** Take the caller's verbatim when it passes one — redundant, never wrong — and otherwise read it yourself with `mcp__supervisor__list_agents`. **Step 2 above is the one home for why that call binds here and why this file declares that name and no other** — read it there rather than here. ⚠️ **An empty roster is empty-not-absence** — a point-in-time reading, never evidence that a task is unowned, and never a reason to skip the registry probe below. The gate holds only when **ALL** of the following hold — check each on disk this run:
 
 - task `status: in_progress` AND `phase` is `planning` or `execution`;
 - the task's **id set is non-empty** (`claude_session_id` or any `metrics_sessions` id);
