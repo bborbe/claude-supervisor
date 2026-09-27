@@ -99,6 +99,8 @@ export const config = Object.freeze({
   // Raw and deliberately unvalidated, exactly like permissionMode below: the legal
   // values and the message naming a bad one belong to the module that owns the meaning.
   spawnMode: ENV.SUPERVISOR_SPAWN_MODE || null,
+  // Unset means unlimited, which is the shipped state — see resolveMaxConcurrent.
+  maxConcurrent: ENV.SUPERVISOR_MAX_CONCURRENT || null,
 
   // Whether a reported cost figure describes the traffic that actually ran. See the
   // note above the resolution — this is a property of the deployment, not of a turn.
