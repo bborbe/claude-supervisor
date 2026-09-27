@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.16
 
 - fix: **The board's Jump button now brings WezTerm to the front.** `jump.py` `raise_pane()` only wrote the OSC `SetUserVar=raise` escape; the `wezterm.lua` hook's `pane:activate()` + `window:focus()` selects the pane but does not reliably activate the WezTerm app on macOS — four direct calls on 2026-09-27: Telegram frontmost ×2 stayed frontmost, Chrome / Firefox frontmost raised. Because `raise_pane()` reports the write, not the effect, the board still answered "Jumped.", so the button presented as silently inert. `raise_pane()` now runs `open -a WezTerm` after the escape (darwin only, best effort). Verified live: Telegram frontmost → `jump.py pane:1963` → frontmost `wezterm-gui`, focused pane 1963.
 
