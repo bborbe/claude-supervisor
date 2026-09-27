@@ -234,7 +234,7 @@ Freshness / in-flight drops (2):   ← the false-nudge guard: which check droppe
 
 To resume (1):         ← the caller spawns these, verifies, then writes last_auto_resume
   ♻️ RESUME: <task> — ids <a,b> both dead (no registry entry; argv 0), transcript stale 634 min · resume=<session_id> · cwd=<explicit> · mode=headless · caller re-probes before spawning
-  ⚠️ **`mode=interactive` never appears on a RESUME row.** Path A is headless-only by construction, so the resume is refused by `resumeSupportError` and the refusal is terminal — a row the caller cannot execute is not a decision, it is a stall. A task carrying `mode: interactive` goes to **`Escalated`** instead, naming `mode=interactive` and the manual path-B route, and the caller never falls back to it. Single home: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6.
+  ⚠️ **`mode=interactive` never appears on a RESUME row.** Path A is headless-only by construction, so the resume is refused by `resumeSupportError` and the refusal is terminal — a row the caller cannot execute is not a decision, it is a stall. A task carrying `mode: interactive` goes to **`Not resumed`** instead — the gate **fails on clause 11**, and a gate failure lands there uniformly with clauses 9 and 10, per the near-miss rule below — naming `mode=interactive` and offering the manual path-B route, and the caller never falls back to it. Single home: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6.
 
 To open (1):           ← the caller spawns these; mode= is the field you wrote to disk this run
   🚀 OPEN: <task> — audit 9/10 · mode=<interactive|headless> · re-read on disk: status in_progress, phase planning, 3 open boxes
