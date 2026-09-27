@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.63.2
 
 - fix: **An operator-facing hard stop is handed over as the artifact they would actually use, never a scratch fixture.** `commands/worker-drive.md` named *when* to stop at the `Credential / console / click` row and said nothing about *what to hand over*, so the natural move — build a small fixture that isolates the criterion — produced a step the operator could not perform: a `/tmp` file is not a clickable surface, and a synthetic table is not the one they use. Verified 2026-09-24 — three fixtures were built for a "click the cell" criterion, each unable to exercise the predicate, and the session read the operator's failure to act as a pending wait rather than a broken hand-off. Change set: `commands/worker-drive.md`.
 
