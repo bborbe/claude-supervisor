@@ -12,7 +12,6 @@ allowed-tools:
   - Bash(python3:*)
   - Bash(mkdir:*)
   - Bash(date:*)
-  - ListAgents
   - mcp__supervisor__spawn_agent
   - mcp__tts__say
 argument-hint: "[goal|topic] (detected when omitted)"
@@ -93,7 +92,9 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 6. **Dispatch the act leg.**
 
-   `Task(subagent_type: "supervisor:manager-drive", prompt: <subject + tracked set + classification + confirmed orphan verdicts + roster + vault + timestamp + snapshot provenance: this sweep's `recorded_at` and this sweep's own per-bucket name sets>)`
+   `Task(subagent_type: "supervisor:manager-drive", prompt: <subject + tracked set + classification + confirmed orphan verdicts + vault + timestamp + snapshot provenance: this sweep's `recorded_at` and this sweep's own per-bucket name sets>)`
+
+   ⚠️ **The roster is no longer passed here either, and that completes the change step 4 began.** Step 4 stopped paying for the roster on the sweep's behalf; this step stopped on the act's. It was the same read, paid twice — once as a **tool_result** the manager held, and again re-written into a **dispatch prompt** — and both halves are now the agent's own `mcp__supervisor__list_agents` call. **This command therefore no longer reads `ListAgents` at all**, which is why it is gone from the `allowed-tools` above; the read was a *join*, and a join may move where a verdict may not (step 5). ⚠️ **`manager-loop` still passes its roster verbatim and that is deliberate, not an oversight** — the loop owns its own roster read for the fleet-manager handoff, and `agents/manager-drive.md` **honours a roster it is passed**. So the loop path is untouched and this lands once, not once per command.
 
    ⚠️ **The provenance fields are required, not decoration — omit them and every row comes back `Held`.** `agents/manager-drive.md` holds a row whose provenance the caller did not name, because an unlabelled list is indistinguishable from the wrong one. Measured 2026-09-26: a live pass that omitted them returned **SC2 failed** — no `recorded_at`, no per-bucket sets — and the agent named the omission itself. The two halves come from **different producers**: `recorded_at` from the snapshot the sweep wrote (`~/.claude/state/sweep-gate-loop/<vault>/<subject>.snapshot.json`) — ⚠️ **not** the manager-predispatch record, which is a different file on a different cadence — and the per-bucket name sets from **this run's own classification** — the set step 4's sweep-reader computed. ⚠️ **Never from `.snapshot.history.jsonl`** — the snapshot schema carries no bucket concept, so a per-bucket set is never obtainable from it (single home: `docs/fleet-surface.md` § Session end).
 
