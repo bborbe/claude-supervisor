@@ -171,7 +171,7 @@ grep -cE '^# (Success Criteria|Definition of Done|Tasks)' <row file>   # → 3
 
 ⚠️ The collision count the sweep reader reports is **shared-session** — one id on two tasks — not file overlap. ⚠️ **Both halves take declared paths as their input, so neither covers a worker editing a file it has not declared** — a real and separate blind spot, not the shared-directory one (3a) closes.
 
-**(4) A `role: human` row is never dispatched.** Render it `👤 YOURS` and move on: a person needs a screen, and the manager does not spawn a worker onto a human's task.
+**(4) A `role: human` or `role: manager` row is never dispatched.** Render it `👤 YOURS` and move on — **neither role is a spawn target**: a person needs a screen, and a manager is a session that manages others, so a manager does not spawn managers.
 
 **(5) Respect the spawn cap — checked before every hand-over, never after it.** The numbers and their single home are `docs/fleet-surface.md` § Spawn a worker item 5 — read them there and never restate them here, because a restated copy is the second counter a `grep` cannot tell from a real one. ⚠️ **The cap is a sweep-global guard, not a property of the row.** It is evaluated **before** each open, because a cap checked afterwards has already spent the budget it exists to protect — the row is scored, checked and then held *without* opening, never opened and then found to be over. At the cap → print `⏸️ SPAWN CAP: <n> ready, <m> over cap`, open nothing further, and report the remainder as **held-on-cap** for the caller's next sweep. ⚠️ **Name the bound that stopped the walk and quote its value — the attribution is the observable, not the count.** A walk can legitimately end on **either** of two bounds: the spawn cap above, or the **audit budget** (one `task-auditor` dispatch per ready row). Report which one it was and the number it read, in the `Held` line, so a reader can tell a correct stop from a premature one. This is the clause that separates the measured defect from correct behaviour: measured 2026-09-24/25, an act leg stopped after 2 rows with **4 audit attempts left** and named **no bound at all** — and at a cap of 2, stopping at two is correct, so the count alone can never make that call. A row walked-and-held with its bound named is a pass; a stop with no bound named is the failure, whatever the count.
 
@@ -240,7 +240,7 @@ Held (<n>):            ← one line per held row, naming the clause and the valu
   <task> — prose blocker: depends on [[X]]
   <task> — collides with <worker> on <file>
   <task> — declared path collision: <path> shared with <task B>
-  <task> — 👤 YOURS (role: human) — not dispatched
+  <task> — 👤 YOURS (role: human|manager) — not dispatched
   <task> — held-on-cap: spawn cap 2 (4 ready this sweep, 2 handed over)
   <task> — held-on-budget: audit budget spent (3 of 3 ready rows audited)
 
