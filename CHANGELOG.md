@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.63.3
 
 - fix: a board answer releases a gate again, by withdrawing the `resolved_by` requirement — it refused the operator's own answer, which is the answer the board exists to take
 
