@@ -35,6 +35,13 @@ Run in a loop: **inventory everything still open (§1)**, then pick the highest-
 | **Done** | Every criterion met, or every remaining one provably belongs to someone else (§5). |
 | **Other-owned** | Every remaining row belongs to another session or an external system, and none is actionable from here. §0b's owner table already permits this — *"Another session / person … **Nothing.** Preempting it sabotages their run. Say so explicitly."* — but the table below had no row for it, so a session that had driven everything had to improvise a stop and flag its own improvisation. Name the owner and stop. |
 
+⚠️ **When the hard stop is an operator action, hand over a step they would
+actually perform.** A scratch fixture built to exercise it is not evidence:
+a `/tmp` file is not a clickable surface, and a synthetic table is not the
+one they use. Verified 2026-09-24 — three fixtures were built for a "click
+the cell" criterion, each unable to exercise the predicate, because the
+artifact was a file rather than the rendered thing.
+
 Not hard stops — drive straight through these: a defect discovered mid-work (fix it), a sub-step of approved work (do it), a mechanical write with evidence already in hand (write it), an unread file (read it), an ambiguous detail with a sane default (assume it, state the assumption, proceed).
 
 **There is no action cap — the five hard stops are what end a run.** Measured 2026-09-05 across the first day of real use: reporting runs came in at 0, 2, 4, 8 and ~16 actions, and every one terminated on a hard stop, never on a budget. A fixed cap either does nothing or interrupts good work mid-stride; two of the longest runs that morning were the most productive.
