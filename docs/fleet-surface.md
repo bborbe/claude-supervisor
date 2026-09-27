@@ -78,18 +78,29 @@ job needs.
 **The probe: a running session can read which version it loaded.** The harness writes
 `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/.in_use/<pid>` at session start — a
 JSON file `{"pid":<n>,"procStart":"<date>"}` naming the version directory that session holds.
-`CLAUDE_PID` is exported into the session's own Bash, so the directory holding your own pid is
-the version you are serving:
+`CLAUDE_PID` is exported into the session's own Bash, so the version you are serving is the
+**newest** entry carrying your own pid:
 
 ```bash
-ls -d ~/.claude/plugins/cache/claude-supervisor/supervisor/*/.in_use/"$CLAUDE_PID"
+ls -dt ~/.claude/plugins/cache/claude-supervisor/supervisor/*/.in_use/"$CLAUDE_PID" | head -1
 ```
 
-Compare that against `installPath` in `~/.claude/plugins/installed_plugins.json`. A version
-directory that is not the installed one means this session predates the install. Measured
-2026-09-27: session pid `83726`, `procStart` `16:13:06Z`, was recorded in
+⚠️ **Newest, not "whichever matches" — a reload writes a new entry and never removes the old
+one, so a reloaded session's pid sits in several version directories at once.** Measured
+2026-09-27 on one session: before `/reload-plugins` its pid `83726` was in `0.61.1/` alone
+(mtime 18:13); after, it was in **both** `0.61.1/` (18:13) and `0.62.4/` (20:15), with `0.62.4`
+installed. Multi-membership is the normal case, not an edge — the same inventory shows pid
+`56704` in nine version directories. A bare `ls -d …/.in_use/"$CLAUDE_PID"` therefore prints
+two or more paths after any reload and cannot be read unambiguously; `-t` (newest first) is
+what makes it a probe rather than a list.
+
+Compare the result against `installPath` in `~/.claude/plugins/installed_plugins.json`. A
+version directory that is not the installed one means this session predates the install.
+Measured 2026-09-27: session pid `83726`, `procStart` `16:13:06Z`, was recorded in
 `0.61.1/.in_use/83726` while the install read `0.62.1` — the plugin moved four versions inside
-that one session, and nothing in the session said so.
+that one session, and nothing in the session said so. **The same session's `/reload-plugins`
+then moved that entry to `0.62.4`, so the probe reports recovery as well as staleness** — which
+is the property that lets this section's clause promise a lever at all.
 
 **The lever is `/reload-plugins`; a restart is not required.** It reloads plugins, skills
 (including every `commands/` entry), agents, hooks, plugin MCP servers and plugin LSP servers,
