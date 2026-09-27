@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.61.2
 
 - fix: **a replayed row now says so on the row itself, not only in a header printed once above it.** `scripts/who-needs-me.py` stamps every record the event-log fallback produces (`needs_source()`) and `row()` renders `⟳replay` in the scan position, so a manager reading the feed while the store is slow can tell a gate answered hours ago from a live one. Measured 2026-09-27: a store answering in 7.08 s against this reader's 3 s `STORE_TIMEOUT` rendered 18 rows where the live store held 2, and **no row said which read produced it** — the fallback announced itself in one line and then rendered identically, so every one of those rows was a candidate for action. The marker is empty when the store answers, so a responsive store's output is **byte-identical** to before (verified same-moment, patched vs unpatched: `Needs you (0)`, 11 lines, `diff` clean). Counts and classification are untouched — 17 rows before the change and 17 after on the same slow read. Four tests pin it: `test_fallback_rows_are_stamped_replayed`, `test_store_rows_are_not_stamped_replayed`, `test_a_replayed_row_says_so_on_the_row`, `test_a_live_row_carries_no_replay_marker` — all four fail against the unfixed script (verified by reverting it).
 
