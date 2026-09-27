@@ -201,7 +201,27 @@ One compact report — see `<output_format>`. You do not render the status table
 - **`claude_script` resolves empty** → print `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` as its own line, and name that as the reason the branch was skipped. Never let it read as a failed gate clause: the gate held, and the launcher is the thing that is missing.
 - **The caller reports a refused or errored spawn** → the row is **terminal for this sweep**: it goes under **`Not resumed`** (or `Escalated` when it needs the caller's hand) with the refusal quoted verbatim, and the caller writes **no `last_auto_resume`**. ⚠️ **The refusal is the caller's to report, not yours** — you never spawn, so you never see one; what you must never do is *re-hand the same row* in the same sweep as though a retry were free. A re-handed row is a resume the gate did not re-authorise. When the caller names a refusal kind, keep its wording: the **tool's own `{error}`** (the server re-probed liveness with a stronger instrument and refused) is a different fact from the **caller's outgoing call being gated under `auto`** (`[Create Unsafe Agents]` / `[Auto-Mode Bypass]`), which is not a block on the worker and which the caller fixes with Shift+Tab → `accept edits`.
 - **A tool in `tools:` did not bind** — `Task`, or `SendMessage`, each a real configuration state rather than a bug of yours — → say so explicitly and report the decisions you would have made, per task. Never let the report read as though the acts happened. ⚠️ **A missing `mcp__supervisor__*` is no longer a failure of this file** — it declares none by design (clause (6)), so its absence is the expected state and never a reason to skip a row.
-- **A ready row scores below the bar after the one permitted repair** → hold it, naming the score and the gate that failed. Never hand it over, and never repair it a second time.
+- **A ready row scores below the bar after the one permitted repair** → **post an attention-board card, then hold the row.** ⚠️ **The card is the asking, and it is not optional:** the operator can raise the task, the manager cannot, and a below-bar row held with no card is exactly the silent hold this clause exists to remove — from the operator's side it is indistinguishable from a manager with nothing to do. The operator's ruling of 2026-09-27: *"If the quality of the task is too low, it should ask the user, human, me, to help to raise this."*
+
+  **The card's five fields**, in the order `attention-ask.py post` takes them:
+
+  | Field | Carries |
+  |---|---|
+  | `--dedup-key` | the task's `task_identifier` — so a second sweep re-posts nothing, and the operator sees one card per task rather than one per tick |
+  | `--payload` | **the question** — `Raise "<task>"? It scores <score>/10 against a 9/10 bar.` |
+  | `--context` | **why it matters, and what is blocked** — the audit's **named gaps** verbatim, the link to the task file, and the fact that the row stays held until it passes |
+  | `--option` | the operator's choices — at minimum `raise it now` and `leave it held` |
+  | `--recommend` | the recommended label, marked as such |
+
+  ```
+  python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py post \
+    --dedup-key "<task_identifier>" \
+    --payload "Raise \"<task>\"? It scores <score>/10 against a 9/10 bar." \
+    --context "Gaps: <the audit's named gaps>. Task: <vault path>. Held until it passes." \
+    --option "raise it now" --option "leave it held" --recommend "raise it now"
+  ```
+
+  Report the row as `Held (below bar <score>/10 — card <item-id>)`, so the hold line names the card that carries it. ⚠️ **Never hand the row over, and never repair it a second time** — one repair is the manager's, and a second would be the manager authoring the task rather than the operator raising it.
 - **A ready row is held on an unmet prose-blocker condition, or on a collision** → these are the two holds the manager may **not** repair. ⚠️ A prose blocker holds **only while its named condition is unmet**; a condition that has shipped **releases** the row, which then proceeds through (3)–(6) like any other. Do not offer a repair, and do not re-check them within the same sweep.
 - **The fleet-wide concurrent limit is reached** → print `⏸️ CONCURRENCY LIMIT: <n> running, <limit> allowed` as its own line; the remainder is **held-on-limit** for the caller's next sweep. Never hand over past it to finish the sweep — the limit exists because a sweep that opens everything it finds is how a topic gets four sessions at once.
 - **A `To open` row the caller refuses, or that errors** → terminal for that row: `Held` (or `Escalated` when it needs the caller's hand) with the refusal quoted verbatim. ⚠️ **Never re-hand it in the same sweep, and never hand it to a second route** — a fallback is an open the gate did not authorise, and any route other than the caller bypasses `commands/open.md` § Step 0.6, so the row's `mode` is never decided.
