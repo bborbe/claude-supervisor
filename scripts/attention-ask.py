@@ -272,6 +272,14 @@ def cmd_poll(item_id, out=sys.stdout):
     # item that moved but whose mover cannot be attributed falls through to
     # NOT_OPERATOR_ANSWERED rather than being read as open — failing closed in
     # that direction is what keeps a re-ask from looking like a lost gate.
+    #
+    # ⚠️ **This branch is deliberately NOT keyed on `state`, and 2026-09-27 is
+    # why it was checked.** A `closed` item that carries an actor still classifies
+    # as an act and falls through to NOT_OPERATOR_ANSWERED — the item moved, and
+    # saying "open" would invite a manager to keep waiting on a card that is
+    # gone. Only a record with no actor at all — the reaped close — reaches OPEN
+    # here, which is what makes a reap and an acknowledgement distinguishable in
+    # the terminal rather than collapsed into one word.
     if verdict == attribution.NOTHING and described is None:
         print("OPEN", file=out)
         return 0
