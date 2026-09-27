@@ -97,9 +97,11 @@ a link, never a tab id.
 - **`/supervisor:jump` is the executor, not an emitter.** It *follows* a pane id; the
   managers' status commands emit links and never run it themselves.
 - **A session started before a plugin update keeps the command text it already loaded** — so
-  it can still hand over the old form after the plugin changed. Restart the session to pick
-  up new command text; do not count on `/reload-plugins` for this (measured 2026-09-22, see
-  the vault's *Claude Code Plugin Development Guide*).
+  it can still hand over the old form after the plugin changed. ⚠️ **A restart is not the
+  lever; `/reload-plugins` is, and a session can read which version it is serving.** The
+  probe, the lever and the two checks that do *not* discriminate have one home:
+  `docs/fleet-surface.md` § A plugin install does not reach a running session. Read it there;
+  it is not restated here.
 
 The row format each status table uses for these links is `docs/fleet-surface.md` § Sweep
 output — the fleet table.

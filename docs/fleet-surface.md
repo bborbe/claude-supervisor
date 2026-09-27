@@ -66,6 +66,61 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 ⚠️ **Probe the gate loop by the script argument's basename, never by a substring of the command line.** `pgrep -f sweep-gate` matches any process whose argv merely *mentions* the path, and a manager's spawn prompt quotes it — measured 2026-09-22, the substring probe returned **three** pids for one loop, two of them the worker sessions spawned from a prompt naming the script. **The count is transient; the mechanism is not** — re-run hours later those two workers had exited and it returned one, while a bystander process whose argv merely carried the string reproduced the spurious pid on demand. `scripts/stop-probe.py` matches the second argv token's basename against the two known script names, which also fails in the safe direction: a path containing a space mis-splits and the probe under-reports rather than inventing a loop.
 
+## A plugin install does not reach a running session — the probe and the lever
+
+**A plugin command body is read from disk when the session starts, not at each invocation**, so
+installing an updated plugin does not change what a running session executes. It keeps serving
+the body it loaded, indefinitely, with nothing announcing the change. The failure is silent in
+both directions: a session can hand the operator a stale procedure for hours while reporting
+success, and the lever everyone reaches for by default — a full restart — is heavier than the
+job needs.
+
+**The probe: a running session can read which version it loaded.** The harness writes
+`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/.in_use/<pid>` at session start — a
+JSON file `{"pid":<n>,"procStart":"<date>"}` naming the version directory that session holds.
+`CLAUDE_PID` is exported into the session's own Bash, so the version you are serving is the
+**newest** entry carrying your own pid:
+
+```bash
+ls -dt ~/.claude/plugins/cache/claude-supervisor/supervisor/*/.in_use/"$CLAUDE_PID" | head -1
+```
+
+⚠️ **Newest, not "whichever matches" — a reload writes a new entry and never removes the old
+one, so a reloaded session's pid sits in several version directories at once.** Measured
+2026-09-27 on one session: before `/reload-plugins` its pid `83726` was in `0.61.1/` alone
+(mtime 18:13); after, it was in **both** `0.61.1/` (18:13) and `0.62.4/` (20:15), with `0.62.4`
+installed. Multi-membership is the normal case, not an edge — the same inventory shows pid
+`56704` in nine version directories. A bare `ls -d …/.in_use/"$CLAUDE_PID"` therefore prints
+two or more paths after any reload and cannot be read unambiguously; `-t` (newest first) is
+what makes it a probe rather than a list.
+
+Compare the result against `installPath` in `~/.claude/plugins/installed_plugins.json`. A
+version directory that is not the installed one means this session predates the install.
+Measured 2026-09-27: session pid `83726`, `procStart` `16:13:06Z`, was recorded in
+`0.61.1/.in_use/83726` while the install read `0.62.1` — the plugin moved four versions inside
+that one session, and nothing in the session said so. **The same session's `/reload-plugins`
+then moved that entry to `0.62.4`, so the probe reports recovery as well as staleness** — which
+is the property that lets this section's clause promise a lever at all.
+
+**The lever is `/reload-plugins`; a restart is not required.** It reloads plugins, skills
+(including every `commands/` entry), agents, hooks, plugin MCP servers and plugin LSP servers,
+and it re-reads plugins from disk, so it also switches to a new version's cache path. Restart
+only if, after `/reload-plugins`, the served body still cites the old version path. The vault's
+*Claude Code Reload vs Restart Guide* owns the per-artifact-class lever table; this section
+names the lever and points at that table rather than copying it.
+
+⚠️ **Two probes that do not discriminate — both measured 2026-09-27.** The **skill listing**
+cannot tell a stale session from a current one: command frontmatter descriptions are routinely
+unchanged between releases, and all 21 of this plugin's commands were byte-identical across
+three consecutive versions (`diff -rq` over `commands/` and `docs/` → no differences). And the
+**MCP server** is a different artifact class from `commands/*.md` — this plugin's runs from a
+workspace checkout (`bun run --cwd …/claude-supervisor/server`), never from the version-pinned
+cache, so probing it says nothing about the command body. A check that is green on both copies
+is not a check.
+
+**This section is the single statement of the rule.** `docs/session-tiers.md` and the vault's
+*Claude Code Plugin Development Guide* point here; neither restates it.
+
 ## Spawn a worker
 
 **Readiness precondition — author and score the task before any spawn, or the worker's own gate parks.** A task the manager hand-writes usually ships without `# Tasks` and `# Definition of Done`, so the worker's own `plan-task` gate stops and asks the operator to supply the decomposition — inside the worker's pane, as a multi-question wizard that cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced **three 3-question wizards**, nine operator decisions, none of which needed the repo open. So, before spawning:
@@ -91,6 +146,16 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 **The asymmetry is deliberate, and it is measured.** A wrongly-interactive task costs one idle tab the operator closes; a wrongly-headless one burns a whole session on gates nobody can answer (measured 2026-09-20: two workers stranded and four gates expired across three workers in ~90 minutes). The operator's own framing, 2026-09-21: *a session that needs interaction and is headless is hard to manage.* So `interactive` is a **floor, not a tie-break** — *unclear* is not a category that resolves to headless, and neither is *probably fine*.
 
 ⚠️ **A headless worker's two standing constraints, and both are the spawner's to carry, not the worker's.** (a) **Its gates park with the session that spawned it** — no other session can answer them, so the spawner must serve them via `await_permission` / `answer_permission`. A spawner that cannot answer a parked prompt must not open a headless worker, because the prompt will outlive it. (b) **Its turn ends at READY, and a turn end is not completion** — continue it with `spawn_agent(resume="<session-id>", interactive=false, cwd="<explicit>")`; a headless worker that has exited is neither finished nor restarted. Both constraints are why the `interactive` fallback is aggressive rather than polite.
+
+⚠️ **`mode: interactive` is a resumability decision as well, and this is its only home.** The resume the auto-resume gate hands over is **path A** — `mcp__supervisor__spawn_agent(resume=…, cwd=…)` — and path A is **headless-only by construction**: its tab path launches the `cc-*` launcher without `--resume`, which is exactly what `resumeSupportError` refuses. So a task carrying `mode: interactive` is, **the moment its worker is orphaned, un-resumable by the mechanism the gate names.** The gate's clauses are all satisfiable on such a task, which makes it a gate that reports READY on an action that cannot execute. Precisely: the refusal fires whenever the **resolved** mode is interactive — always, once item 6 is honoured in both directions (the argument is passed as `interactive=true`), and equally under a `spawn.mode: interactive` config when the argument is omitted. Only a `spawn.mode: headless` config with the argument omitted escapes it, and that path violates the task's own declared mode — so it is not an escape.
+
+Three consequences, all binding:
+
+- **Never hand over a `To resume` row for a task whose `mode:` is `interactive`.** The drive leg reads `mode:` back off disk and stamps the row; a row its own mechanism cannot execute is not a decision, it is a stall, and the refusal that follows is terminal. Report it as `Not resumed` — the gate fails on this clause, and a gate failure lands there uniformly with the other clauses — naming `mode=interactive`, and give the operator the path-B recipe as the **manual** route.
+- **`mode: interactive` is not a licence to fall back to path B.** Falling back is banned outright (see *A refused path is terminal*, below) — a refused path is a **second resume the gate never authorised**. Path B is the operator's manual route for a proven-dead session under a no-headless phase; it is not an automatic retry for a mode choice.
+- **The classifier question in item 6 is unchanged by this.** `mode:` is chosen for how the worker must *run*, never for whether it can be *revived*; a task that will need resuming is not thereby `headless`. What changes is the manager's obligation: an `interactive` task's orphan is a **manual** recovery, and the escalation must say so rather than implying an automatic one exists.
+
+⚠️ **A gate clause is the cheap fix here, not a resume path.** The alternative — teaching path A to carry a resume — collides with the standing ban above and its stated reason (path B "is a tab by construction, cannot produce a headless worker, and writes **no ledger row**"), and it is the deferred work of its own task. Until that lands, the honest behaviour is for the gate to **recognise** the case and escalate, never to hand over a row that cannot run.
 
 ⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the manager-loop command all point here. It owns **three constants**: the **readiness bar (9/10)**, the **fleet-wide concurrent limit** (item 5 above), and the **mode decision** (item 6 above — the classifier, the `mode:` field, and both headless constraints). Each appears once, there, and is referenced everywhere else. ⚠️ **A restated copy of any of them is not a harmless comment — it is a second counter.** The cap was restated in `commands/manager-loop.md`, `commands/manager-verify.md` and the manager runbook's Guardrail 2 until 2026-09-24: four homes for one number, which is how a single cap becomes two caps the day one home is edited and the others are not, with no error and no diff to catch it. The mode rule carried the mirror-image defect until the same day: it lived in `commands/open.md` § Step 0.6 and was consumed only there, so every other spawn site silently fell through to the fleet config — measured 2026-09-23, **63 new-worker spawns in one day and 0 of them headless**, 57 sourced from `config` rather than from any decision.
 
