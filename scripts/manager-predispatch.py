@@ -585,6 +585,19 @@ def buckets_path(subject: str) -> str:
     return os.path.join(STATE_DIR, f"{slug(subject)}.buckets.json")
 
 
+def payload_path(subject: str) -> str:
+    """Where the render writes the table it just rendered, for `--save` to read back.
+
+    A sibling of `state_path` for the same reason `tracked_path` is one: the two hold
+    different things and can disagree. The state file holds the gate's *verdict*; this
+    holds the render's *output*, and it carries the render's own mtime — which is what
+    lets a save be dated from when the table was produced rather than from when the
+    caller got round to storing it. That gap is the whole defect: a payload held for 23
+    minutes and then saved lands as a fresh record unless the two moments are tied.
+    """
+    return os.path.join(STATE_DIR, f"{slug(subject)}.table")
+
+
 def loop_snapshot_path(vault: str, subject: str) -> str:
     """The model-free loop's own snapshot for this subject.
 
@@ -658,6 +671,7 @@ def save_stored(
     tracked: list[dict],
     busy: dict,
     bucket_sets: dict | None = None,
+    recorded_at: str | None = None,
 ) -> None:
     """Persist atomically (tmp + os.replace).
 
@@ -679,7 +693,12 @@ def save_stored(
         "table": strip_links(table),
         "members": len(tracked),
         "busy_since": busy,
-        "recorded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        # Dated from the payload's own mtime whenever the caller read the table back from
+        # `payload_path`, so a record can never postdate the render it stores — the
+        # invariant that turns a stale payload into a visible old date instead of a
+        # silent fresh one. Falls back to now for a caller still piping the table in.
+        "recorded_at": recorded_at
+        or datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     # The caller's per-bucket classification, persisted so it survives a compaction and a
     # fresh manager. This is the half the drive leg's clause (0) requires and the snapshot
@@ -770,6 +789,11 @@ def main(argv: list[str]) -> int:
         "--write-buckets",
         action="store_true",
         help="stage the caller's per-bucket classification (JSON on stdin) for --save",
+    )
+    mode.add_argument(
+        "--write-payload",
+        action="store_true",
+        help="write the rendered table (on stdin) to <slug>.table, for --save to read",
     )
     mode.add_argument(
         "--compare-tracked",
@@ -869,6 +893,41 @@ def main(argv: list[str]) -> int:
         print(path)
         return EXIT_WRITE_OK
 
+    if args.write_payload:
+        # The render's own transport, the same shape `--write-tracked` uses and for the
+        # same reason: routing the write through this script keeps the first token
+        # `python3`, which matches the `Bash(python3:*)` grant the sweep reader already
+        # holds. What it changes is *when* the write happens — at render time, to a path
+        # derived here rather than passed in — so `--save` can read the table back
+        # instead of depending on the caller to hand-pipe it, and the two moments the
+        # record's halves are stamped stop coming apart.
+        table = sys.stdin.read()
+        if not table.strip():
+            # Same discipline as `--save`'s empty-table guard and `--write-tracked`'s
+            # empty-set guard: a failed render must not clobber a good payload, because a
+            # payload with no table in it can never be replayed.
+            print(
+                "refusing to write an empty payload: nothing on stdin, so the previous "
+                "file is left unchanged.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        path = payload_path(args.subject)
+        tmp = path + ".tmp"
+        os.makedirs(STATE_DIR, exist_ok=True)
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(table)
+            # Atomic, for the reason `--write-tracked` gives: a reader sees either the old
+            # payload or the new one, never a half-written file.
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        print(path)
+        return EXIT_WRITE_OK
+
     if args.compare_tracked:
         # A dispatch whose tracked set disagrees with the gate's own membership is
         # reported, not accepted. The two memberships are produced by different code from
@@ -922,6 +981,25 @@ def main(argv: list[str]) -> int:
 
     if args.save:
         table = sys.stdin.read()
+        # Empty stdin means the caller is relying on the render's own payload — the hop
+        # this gate used to leave to the caller's memory. Read it back, and date the record
+        # from *its* mtime: a payload rendered earlier then lands carrying its earlier
+        # render time instead of reading as fresh, which is the skew failure mode 2
+        # measured by hand. An absent payload falls through to the empty-table guard
+        # below, which already refuses rather than clobbering a good snapshot.
+        rendered_at = None
+        if not table.strip():
+            try:
+                with open(payload_path(args.subject), encoding="utf-8") as fh:
+                    table = fh.read()
+            except OSError:
+                table = ""
+            else:
+                rendered_at = (
+                    datetime.fromtimestamp(os.path.getmtime(payload_path(args.subject)))
+                    .astimezone()
+                    .isoformat(timespec="seconds")
+                )
         if not payload:
             # `evaluate()` returns an empty payload on both of its fail-open paths, where
             # there is no branch, digest or tracked set to record. `--check` already
@@ -970,6 +1048,7 @@ def main(argv: list[str]) -> int:
                     payload["tracked"],
                     payload["busy"],
                     bucket_sets,
+                    rendered_at,
                 )
             except OSError as exc:
                 print(f"fail-open: could not record state ({exc})", file=sys.stderr)
