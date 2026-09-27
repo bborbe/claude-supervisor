@@ -39,7 +39,7 @@ Verify ONE subject — **a topic or a goal** — and **suggest** the fixes. Reso
 Probe with the resolved `$SUBJECT`, never the raw argument (under detection the argument is empty and every probe would match nothing). ⚠️ **This probe is the documented exception to `agent-cmd/command-thin`** — the branch must be known *before* the `Skill` dispatch, and `Skill` exists only in the REPL, so the probe cannot move into the agent. Do not re-file it as leaked logic:
 
 - `find "24 Goals" -maxdepth 1 -iname "$SUBJECT.md"` → **goal branch**. The folder is the discriminator on this side — **no `page_type: goal` confirmation**; see `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § The page test.
-- `find "23 Topics" -maxdepth 1 -iname "$SUBJECT.md"`, confirm `page_type: topic` the same way → **topic branch**.
+- `find "23 Topics" -maxdepth 1 -iname "$SUBJECT.md"`, confirm `page_type: topic` **in the frontmatter block** → **topic branch**.
 - **Both match, or neither** → print every candidate path (or `no match`) and **stop**. Never guess between a goal and a topic, and never silently prefer one.
 
 **`-iname`, not a shell glob** — a plain `ls` glob is case-sensitive under zsh, so a lowercase argument resolves nothing against Title Case filenames.

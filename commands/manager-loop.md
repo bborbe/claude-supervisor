@@ -105,7 +105,7 @@ A name resolves to **either a topic or a goal**; the branch is **detected, never
 
 0. **Detect the branch before resolving anything.** Probe with the **resolved subject**, not `$1` — under detection `$1` is empty and every probe below would match nothing.
    - `find "24 Goals" -maxdepth 1 -iname "$SUBJECT.md"` → **goal branch, step G**. The folder is the discriminator on this side — **no `page_type: goal` confirmation**, and the reason is in `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § The page test.
-   - `find "$TOPICS_DIR" -maxdepth 1 -iname "$SUBJECT.md"`, then confirm `page_type: topic` the same way → **topic branch, steps 1–4**.
+   - `find "$TOPICS_DIR" -maxdepth 1 -iname "$SUBJECT.md"`, then confirm `page_type: topic` **in the frontmatter block** → **topic branch, steps 1–4**.
    - **Exact basename, case-insensitive: `-iname "$SUBJECT.md"`** — never a substring glob (topics collide with member goals named after them), never `-name`. Under exact matching a same-folder double match is impossible, so the refusal below applies in both branches.
    - **Both match, or neither** → print every candidate path (or `no match`) and **stop**. Never guess between a goal and a topic, and never silently prefer one. A name that matches neither is not tracked — that is the intended pressure.
    - Print the branch and the page it came from in the header, e.g. `Branch: goal (24 Goals/<Goal>.md)`. A mis-resolved branch must be visible immediately.
