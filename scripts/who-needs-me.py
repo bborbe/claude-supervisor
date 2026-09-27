@@ -31,7 +31,7 @@ store's `pkg/session-liveness-checker.go`. Pane existence alone is not liveness 
 panes are renumbered and reused, and a session killed without `SessionEnd` leaves
 its item open on a pane that outlives it, which is how orphans reached this feed.
 """
-import argparse, glob, json, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, glob, importlib.util, json, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
 STATE = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser("~/.claude/state/attention")
@@ -404,6 +404,21 @@ def live_pane_ids():
     return None if p is None else set(p)
 
 
+_LIVENESS = None
+
+
+def _session_liveness():
+    """Import session-liveness.py (hyphenated filename -> importlib) — the one registry reader."""
+    global _LIVENESS
+    if _LIVENESS is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-liveness.py")
+        spec = importlib.util.spec_from_file_location("session_liveness", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _LIVENESS = mod
+    return _LIVENESS
+
+
 def read_registry(sessions_dir=None):
     """The session registry as `session id -> the name it holds now`; `None` if unreadable.
 
@@ -428,25 +443,22 @@ def read_registry(sessions_dir=None):
     d = sessions_dir if sessions_dir is not None else SESSIONS_DIR
     if d in _REGISTRY_CACHE:
         return _REGISTRY_CACHE[d]
-    # `glob` on a missing directory returns `[]` rather than raising, so an absent
-    # registry would otherwise read as "no session is live" and sweep the whole feed.
-    # Absence is not evidence of death — it is evidence the probe cannot run, which is
-    # `None`. Checked explicitly because the silent-empty shape is indistinguishable
-    # from a real empty registry downstream.
-    out = None
-    status = None
-    if os.path.isdir(d):
-        try:
-            out, status = {}, {}
-            for path in glob.glob(os.path.join(d, "*.json")):
-                with open(path, encoding="utf-8") as f:
-                    rec = json.load(f)
-                sid = rec.get("sessionId")
-                if sid:
-                    out[sid] = rec.get("name") or ""
-                    status[sid] = rec.get("status") or ""
-        except Exception:
-            out, status = None, None
+    # One reader for the whole plugin: `session-liveness.py` owns the glob, the
+    # `None`-on-unreadable rule and the pid check. Two instruments over one registry is what
+    # let an 8-char prefix read as `ABSENT` on 2026-09-26 while its session was live, and
+    # this reader was one of the copies.
+    #
+    # ⚠️ `alive` is deliberately NOT applied here. This feed's rule is **presence** — an
+    # entry is deleted when its session exits — and that rule is out of this change's scope
+    # (see the task's Out of Scope). The shared reader carries both signals so each caller
+    # takes the one it owns; `live_session_ids()` is `set(registry)` either way, so applying
+    # the pid check here would silently sweep items for a session whose entry outlived it.
+    records = _session_liveness().read_registry(d)
+    if records is None:
+        out, status = None, None
+    else:
+        out = {sid: rec.get("name") or "" for sid, rec in records.items()}
+        status = {sid: rec.get("status") or "" for sid, rec in records.items()}
     _REGISTRY_CACHE[d] = out
     _REGISTRY_STATUS_CACHE[d] = status
     return out

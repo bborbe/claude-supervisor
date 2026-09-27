@@ -122,6 +122,7 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -406,39 +407,38 @@ def heartbeat_live(sid: str, now: float | None = None) -> bool | None:
     return age < HEARTBEAT_TTL_SECONDS
 
 
+_LIVENESS = None
+
+
+def _session_liveness():
+    """Import session-liveness.py (hyphenated filename -> importlib) — the one registry reader."""
+    global _LIVENESS
+    if _LIVENESS is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-liveness.py")
+        spec = importlib.util.spec_from_file_location("session_liveness", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _LIVENESS = mod
+    return _LIVENESS
+
+
 def read_registry() -> dict[str, dict]:
     """`~/.claude/sessions/<pid>.json` -> {sessionId: {pid, status, name, alive}}.
 
     The registry is pruned on exit, so a record with a live pid is a positive signal. A
     missing record proves nothing: a headless worker has none.
+
+    ⚠️ **One reader for the whole plugin.** The glob, the pid check and the `alive` rule now
+    live in `scripts/session-liveness.py`. A second instrument over the same registry is what
+    let an 8-char prefix read as `ABSENT` on 2026-09-26 while its session was live, and this
+    reader was one of the copies.
+
+    ⚠️ **`None` is flattened to `{}` here, preserving this caller's existing contract.** An
+    unreadable registry therefore reads as "no live session" — the dangerous direction the
+    shared reader refuses. Recorded as a residual rather than changed silently inside a
+    conversion: flipping it is a rule change for this caller, not a refactor.
     """
-    out: dict[str, dict] = {}
-    for path in glob.glob(os.path.join(REGISTRY_DIR, "*.json")):
-        try:
-            with open(path, encoding="utf-8") as fh:
-                d = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            continue
-        sid = d.get("sessionId")
-        if not sid:
-            continue
-        pid = d.get("pid")
-        alive = False
-        if isinstance(pid, int):
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except PermissionError:  # exists, but not ours -> alive
-                alive = True
-            except OSError:
-                alive = False
-        out[sid] = {
-            "pid": pid,
-            "status": d.get("status", ""),
-            "name": d.get("name", ""),
-            "alive": alive,
-        }
-    return out
+    return _session_liveness().read_registry(REGISTRY_DIR) or {}
 
 
 def read_feed() -> dict[str, dict]:
