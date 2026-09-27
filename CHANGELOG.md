@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.61.1
 
 - fix: **the prose-blocker hold reads the condition the blocker names, not the blocker task's `status`.** `agents/manager-drive.md` clause (2) and a new pre-spawn check in `commands/manager-loop.md` replace the bare `grep -nE 'blocked on|depends on'` — which held **4 of 13** ready rows on ordinary English, one of them on a sentence stating the block was **cleared**, and one on the substring inside `blocked only` — with a **declared-dependency shape** (a wikilink or `blocked_by`-shaped construct; whole words; polarity read) whose condition is then checked against a named source: a **merge** (`gh pr view <n> --json mergedAt,mergeCommit`), a **release** (`git tag --list <tag>`), or a **deployed binary** (the running artifact's version). **Met → released; unmet → held.** A possible merge conflict is never a hold reason (operator ruling 2026-09-27). Measured in both directions: a false negative held a row ~11h while the merge it named had already shipped (`8a0b918`), and the false positives above held rows that had passed every hard gate. The `Held` line now renders `— prose blocker: [[X]] <condition> unmet (<source read>)`. Change set: `agents/manager-drive.md`, `commands/manager-loop.md`.
 
