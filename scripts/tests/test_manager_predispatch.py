@@ -302,5 +302,80 @@ class TestStorage(Base):
         self.assertIn("SAVED", out)
 
 
+class TestVaultRootBoundary(Base):
+    """A bad `--vault` is a usage error, never a missing subject page.
+
+    Given a vault NAME the gate joined it as a relative path, both `os.path.exists`
+    calls were False, and `resolve_subject` blamed the SUBJECT — reporting a page that
+    is present on disk as absent. Two things have to hold: the argument is named as the
+    culprit, and the subject message stays reserved for a real root.
+    """
+
+    def run_gate_raw(self, *argv, stdin=""):
+        """-> (rc, stdout+stderr) with no `--vault` appended by the caller."""
+        import sys
+
+        old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
+        sys.stdin, sys.stdout, sys.stderr = (
+            io.StringIO(stdin),
+            io.StringIO(),
+            io.StringIO(),
+        )
+        try:
+            rc = self.m.main(list(argv))
+            return rc, sys.stdout.getvalue() + sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
+
+    def test_vault_name_is_a_usage_error_not_a_missing_page(self):
+        rc, out = self.run_gate_raw("--vault", "vault", "--subject", "ATopic", "--check")
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertIn("--vault", out)
+        self.assertNotIn("no subject page", out)
+
+    def test_vault_name_is_rejected_from_the_vaults_own_parent(self):
+        """The regression: from the vault's PARENT a name resolved to a real vault and
+        gated it silently, so the same call meant different trees in different cwds."""
+        old = os.getcwd()
+        os.chdir(os.path.dirname(self.vault))
+        try:
+            rc, out = self.run_gate_raw(
+                "--vault",
+                os.path.basename(self.vault),
+                "--subject",
+                "ATopic",
+                "--check",
+            )
+        finally:
+            os.chdir(old)
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertNotIn("no subject page", out)
+
+    def test_non_vault_directory_is_a_usage_error(self):
+        plain = os.path.join(self.tmp, "plain")
+        os.makedirs(plain)
+        rc, out = self.run_gate_raw("--vault", plain, "--subject", "ATopic", "--check")
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertIn("not a vault root", out)
+        self.assertNotIn("no subject page", out)
+
+    def test_missing_absolute_path_is_a_usage_error(self):
+        rc, out = self.run_gate_raw(
+            "--vault", os.path.join(self.tmp, "nope"), "--subject", "ATopic", "--check"
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertIn("not a directory", out)
+
+    def test_absent_subject_under_a_real_root_still_fails_open(self):
+        """Negative control: the boundary guard must not swallow the fail-open path a
+        genuinely absent subject relies on, or the fix would trade one blind gate for
+        another."""
+        rc, out = self.run_gate_raw(
+            "--vault", self.vault, "--subject", "No Such Subject", "--check"
+        )
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("no subject page", out)
+
+
 if __name__ == "__main__":
     unittest.main()
