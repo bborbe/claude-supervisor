@@ -101,11 +101,11 @@ It prints the path it wrote (`~/.claude/state/manager-predispatch/<slug>.tracked
 
 6. **Dispatch the act leg.**
 
-   `Task(subagent_type: "supervisor:manager-drive", prompt: <subject + tracked-set path + classification + confirmed orphan verdicts + roster + vault + timestamp + snapshot provenance: this sweep's `recorded_at` and this sweep's own per-bucket name sets>)` — ⚠️ **the tracked set travels as the same path step 3 wrote, never inlined.** The leg reads it off disk, which is what makes clause (3a)'s corpus the set the caller actually swept rather than a list the agent has no way to check.
+   `Task(subagent_type: "supervisor:manager-drive", prompt: <subject + tracked-set path + classification + confirmed orphan verdicts + roster + vault + timestamp + snapshot provenance: this sweep's `recorded_at` and the manager-predispatch store path carrying `bucket_sets`>)` — ⚠️ **the tracked set travels as the same path step 3 wrote, never inlined.** The leg reads it off disk, which is what makes clause (3a)'s corpus the set the caller actually swept rather than a list the agent has no way to check.
 
    ⚠️ **The roster is passed here verbatim, for the same reason step 4 gives** — the act agent cannot read it either, and the 2026-09-27 attempt to move it left the agent reading `[]` while reporting success. Both dispatches take their roster from **one** `ListAgents` read, which is why `ListAgents` is back in the `allowed-tools` above. ⚠️ **The duplication is unavoidable at this tool layout, and that is the honest cost of the revert:** the manager is the only actor holding a roster tool and the agent is the only actor consuming it, so the text must appear both as the manager's `tool_result` and inside the dispatch prompt. Removing one of those two payments requires the agent to gain a tool that returns the **same** set — not one that merely binds. ⚠️ **`manager-loop` passes its roster verbatim too, and always has** — the loop owns its own read for the fleet-manager handoff — so the two paths now agree rather than diverge.
 
-   ⚠️ **The provenance fields are required, not decoration — omit them and every row comes back `Held`.** `agents/manager-drive.md` holds a row whose provenance the caller did not name, because an unlabelled list is indistinguishable from the wrong one. Measured 2026-09-26: a live pass that omitted them returned **SC2 failed** — no `recorded_at`, no per-bucket sets — and the agent named the omission itself. The two halves come from **different producers**: `recorded_at` from the snapshot the sweep wrote (`~/.claude/state/sweep-gate-loop/<vault>/<subject>.snapshot.json`) — ⚠️ **not** the manager-predispatch record, which is a different file on a different cadence — and the per-bucket name sets from **this run's own classification** — the set step 4's sweep-reader computed. ⚠️ **Never from `.snapshot.history.jsonl`** — the snapshot schema carries no bucket concept, so a per-bucket set is never obtainable from it (single home: `docs/fleet-surface.md` § Session end).
+   ⚠️ **The provenance fields are required, not decoration — omit them and every row comes back `Held`.** `agents/manager-drive.md` holds a row whose provenance the caller did not name, because an unlabelled list is indistinguishable from the wrong one. Measured 2026-09-26: a live pass that omitted them returned **SC2 failed** — no `recorded_at`, no per-bucket sets — and the agent named the omission itself. The two halves come from **different producers**: `recorded_at` from the snapshot the sweep wrote (`~/.claude/state/sweep-gate-loop/<vault>/<subject>.snapshot.json`) — ⚠️ **not** the manager-predispatch record, which is a different file on a different cadence — and the per-bucket name sets from **this run's own classification**, persisted this tick under the store's **`bucket_sets`** key (`~/.claude/state/manager-predispatch/<slug>.json`) — ⚠️ **pass that store *path* as the half, not the sets themselves.** The leg reads `bucket_sets` from the same record `recorded_at`'s snapshot sits beside, so a fresh manager can read it too; a hand-named stand-in is exactly what `<constraints>` refuses, and quoting the sets inline puts them back in prose where nothing can check them. ⚠️ **Never from `.snapshot.history.jsonl`** — the snapshot schema carries no bucket concept, so a per-bucket set is never obtainable from it (single home: `docs/fleet-surface.md` § Session end).
 
    ⚠️ **Two different things are called "vault" in this command, and the prompt's `vault` is the NAME.** The dispatch passes the vault **name** — it is the `<vault>` segment of the snapshot path above, lowercased, not a path. The `--vault` argument at steps 2 and 8 is the vault **root path**, which is why that placeholder now reads `<vault-root>`. Passing a name to the script fails open; passing a path to the snapshot path segment resolves a directory that does not exist. Neither is interchangeable with the other.
 
@@ -120,13 +120,23 @@ It prints the path it wrote (`~/.claude/state/manager-predispatch/<slug>.tracked
 
 8. **Print what came back, voice the nudges, and escalate.** Reproduce the agent's action lines verbatim, including its `Not resumed` and `Escalated` sections — a near-miss clause is the most useful line in the report. **Voice the `Nudged` lines** with `mcp__tts__say` (voice-mode gated): the agent owns the message, you own the voice, because a subagent has no TTS. Then the operator-facing tail: any gate that needs their decision goes out as **`/supervisor:jump <pane-id>`**, never as a command for them to run here (the approval belongs to the session that raised it).
 
-   **Then persist the snapshot — it is what makes the next run free.** First token `python3`, so the call matches this command's `Bash(python3:*)` grant and raises no prompt:
+   **Then persist the snapshot — it is what makes the next run free.** First token `python3`, so the call matches this command's `Bash(python3:*)` grant and raises no prompt. ⚠️ **Stage the per-bucket classification in the same step, or clause (0) has no durable source** — the sets are the ones **this run's own sweep-reader computed** (step 4), never re-derived here and never read back from the snapshot, whose schema has no bucket concept:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --save <<'TABLE'
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --write-buckets <<'BUCKETS'
+   {"<bucket>": ["<task name>", "…"], "…": ["…"]}
+   BUCKETS
+   ```
+
+   It prints the path it wrote and refuses a malformed set rather than staging one that cannot gate. **Every declared bucket must appear**, each mapping to a non-empty list of names — a single bucket, or a bucket mapped to a count, does not satisfy the half.
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --save --buckets "<the path --write-buckets printed>" <<'TABLE'
    <the rendered table>
    TABLE
    ```
+
+   The record then carries them under **`bucket_sets`** — the key the drive leg's provenance names, and the reason the half survives a compaction or a fresh manager instead of living only in this session's context.
 
    ⚠️ **`--save` exits 10 on success** — that code means "this run saw a change", which is exactly why it saved. Do not read it as a failure, and do not retry.
 

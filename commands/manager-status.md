@@ -126,13 +126,23 @@ The `Subject:` line leads so a mis-resolution is visible before the table render
 
    **Emit the link — never a raw `wezterm cli activate-tab` line, and never a tab id.** The reasons are measured, not stylistic. `activate-tab` **cannot cross WezTerm windows**: called from another window it succeeds and nothing visibly moves, so the operator gets a silent no-op instead of a jump. A tab id is **renumbered when its tab moves windows**, so a handed-over `--tab-id` goes dead within the hour — 2026-09-18, three spawned workers routed as tabs 158/159/160 in window 0 became tabs 163/164/165 in window 2, and `activate-tab --tab-id 159` failed outright with *"could not determine which pane should be active"* while `activate-pane --pane-id 239` worked immediately. And a **full WezTerm restart renumbers both namespaces at once**, collapsing them to small integers — the same day, every worker's pane id changed (238 → 33, 241 → 31, 257 → 36, 239 → 39, 255 → 44). `/supervisor:jump` resolves the coordinate at run time and prints the window id, so a cross-window no-op is legible rather than confusing. **Hand over a pane id** — the more stable of the two handles — and re-resolve it after any restart; never trust a coordinate recorded earlier in the session. ⚠️ **A bare `/supervisor:jump <N>` can refuse when tab N and pane N are both live and disagree** — the ambiguity rule. That is correct behaviour, not a failure: re-emit as `/supervisor:jump pane:<N>` and it resolves.
 7. **Names lead, numbers serve the command.** Every row and every mention leads with the task/session name; the `[ref]` and pane id are secondary, for the command only — never reference a session by bare number in prose.
-8. **Persist the snapshot — it is what makes the next run free.** First token `python3`, so the call matches this command's `Bash(python3:*)` grant and raises no prompt:
+8. **Persist the snapshot — it is what makes the next run free.** First token `python3`, so the call matches this command's `Bash(python3:*)` grant and raises no prompt. ⚠️ **Stage the per-bucket classification in the same step, or clause (0) has no durable source** — the sets are the ones **this snapshot's own sweep-reader computed**, never re-derived here and never read back from the snapshot, whose schema has no bucket concept:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --save <<'TABLE'
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --write-buckets <<'BUCKETS'
+   {"<bucket>": ["<task name>", "…"], "…": ["…"]}
+   BUCKETS
+   ```
+
+   It prints the path it wrote and refuses a malformed set rather than staging one that cannot gate. **Every declared bucket must appear**, each mapping to a non-empty list of names — a single bucket, or a bucket mapped to a count, does not satisfy the half.
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --save --buckets "<the path --write-buckets printed>" <<'TABLE'
    <the rendered table>
    TABLE
    ```
+
+   The record then carries them under **`bucket_sets`** — the key the drive leg's provenance names, and the reason the half survives a compaction or a fresh manager instead of living only in this session's context.
 
    ⚠️ **`--save` exits 10 on success** — that code means "this run saw a change", which is exactly why it saved. Do not read it as a failure, and do not retry.
 

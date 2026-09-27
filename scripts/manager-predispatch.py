@@ -569,6 +569,17 @@ def tracked_path(subject: str) -> str:
     return os.path.join(STATE_DIR, f"{slug(subject)}.tracked.txt")
 
 
+def buckets_path(subject: str) -> str:
+    """Where the caller's per-bucket classification lands before `--save` folds it in.
+
+    A staging file rather than an argument because a bucket set is a dict of every
+    tracked name the caller classified — hundreds of names, which cannot ride a
+    command line, and which must not be concatenated onto `--save`'s stdin, whose
+    whole content is the table the no-change branch replays verbatim.
+    """
+    return os.path.join(STATE_DIR, f"{slug(subject)}.buckets.json")
+
+
 def load_state(subject: str) -> dict:
     """The raw stored payload, or {} — used for the cross-run busy-since map."""
     try:
@@ -615,7 +626,13 @@ def strip_links(text: str) -> str:
 
 
 def save_stored(
-    subject: str, branch: str, digest: str, table: str, tracked: list[dict], busy: dict
+    subject: str,
+    branch: str,
+    digest: str,
+    table: str,
+    tracked: list[dict],
+    busy: dict,
+    bucket_sets: dict | None = None,
 ) -> None:
     """Persist atomically (tmp + os.replace).
 
@@ -639,6 +656,14 @@ def save_stored(
         "busy_since": busy,
         "recorded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+    # The caller's per-bucket classification, persisted so it survives a compaction and a
+    # fresh manager. This is the half the drive leg's clause (0) requires and the snapshot
+    # schema cannot supply — buckets are the *caller's* classification, so a per-bucket set
+    # is never derivable from the snapshot (single home: `docs/fleet-surface.md` § Session
+    # end). Omitted rather than defaulted when the caller passed none, so a record that
+    # lacks the half reads as "not persisted" instead of as "persisted and empty".
+    if bucket_sets is not None:
+        payload["bucket_sets"] = bucket_sets
     tmp = state_path(subject) + ".tmp"
     try:
         # 0600 at creation rather than by a chmod after it: the file is never
@@ -716,6 +741,16 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="write the caller's own tracked set (names on stdin) to <slug>.tracked.txt",
     )
+    mode.add_argument(
+        "--write-buckets",
+        action="store_true",
+        help="stage the caller's per-bucket classification (JSON on stdin) for --save",
+    )
+    ap.add_argument(
+        "--buckets",
+        default=None,
+        help="with --save: path to the staged bucket JSON (see --write-buckets)",
+    )
     args = ap.parse_args(argv)
 
     vault_error = vault_root_error(args.vault)
@@ -764,6 +799,46 @@ def main(argv: list[str]) -> int:
         print(path)
         return EXIT_WRITE_OK
 
+    if args.write_buckets:
+        # Staged, not stored: `--save` is what folds this into the record, and it runs
+        # later in the same tick. Keeping the two apart means a caller that classifies but
+        # never saves leaves no half-written record, and `--save`'s no-change branch —
+        # which writes nothing at all — cannot silently drop a bucket set it was handed.
+        try:
+            parsed = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as exc:
+            print(f"bucket sets must be JSON: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        # Shape-checked here because the consumer is an agent that gates a whole batch on
+        # this half: a dict of bucket -> non-empty list of names is the only shape that can
+        # satisfy clause (0). A count, a bare list, or a bucket mapped to nothing would all
+        # *look* like a classification and gate nothing.
+        if not isinstance(parsed, dict) or not parsed:
+            print("bucket sets must be a non-empty JSON object", file=sys.stderr)
+            return EXIT_USAGE
+        for bucket, names in parsed.items():
+            if not isinstance(names, list) or not all(
+                isinstance(n, str) and n.strip() for n in names
+            ):
+                print(
+                    f"bucket {bucket!r} must map to a non-empty list of names",
+                    file=sys.stderr,
+                )
+                return EXIT_USAGE
+        path = buckets_path(args.subject)
+        tmp = path + ".tmp"
+        os.makedirs(STATE_DIR, exist_ok=True)
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(parsed, fh, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        print(path)
+        return EXIT_WRITE_OK
+
     changed, reason, payload, stored_table = evaluate(args.vault, args.subject)
 
     if args.save:
@@ -788,6 +863,24 @@ def main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return EXIT_CHANGE
+        bucket_sets = None
+        if args.buckets:
+            try:
+                with open(args.buckets, encoding="utf-8") as fh:
+                    bucket_sets = json.load(fh)
+            except (OSError, json.JSONDecodeError) as exc:
+                # A usage error, not a verdict — and deliberately NOT a fail-open. The
+                # gate's fail-open rule exists so an unreadable *state* file re-sweeps
+                # rather than reporting a false "no change"; here the caller has handed
+                # over a path it believes holds the classification. Writing the record
+                # without the half would let it read back as persisted when it is not,
+                # and clause (0) would then hold an entire batch on a half the caller
+                # thought it had supplied. Refuse, and let the caller fix the path.
+                print(
+                    f"could not read bucket sets from {args.buckets!r}: {exc}",
+                    file=sys.stderr,
+                )
+                return EXIT_USAGE
         if changed:
             try:
                 save_stored(
@@ -797,6 +890,7 @@ def main(argv: list[str]) -> int:
                     table,
                     payload["tracked"],
                     payload["busy"],
+                    bucket_sets,
                 )
             except OSError as exc:
                 print(f"fail-open: could not record state ({exc})", file=sys.stderr)
