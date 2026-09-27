@@ -141,6 +141,22 @@ class RunTest(unittest.TestCase):
         rc, out, _ = self.run_main([], stdin='{"session_id":"S"}')
         self.assertEqual((rc, out), (0, ""))
 
+    def test_headless_worker_is_left_to_its_own_park(self):
+        # Blocking here would delay the server's canUseTool park by the whole deadline.
+        self.feed("permission")
+        with mock.patch.dict(os.environ, {"SUPERVISOR_WORKER_MODE": "headless"}):
+            t0 = time.monotonic()
+            rc, out, _ = self.run_main(["--session-id", "S", "--timeout", "30"])
+        self.assertEqual((rc, out), (0, ""))
+        self.assertLess(time.monotonic() - t0, 1.0)
+
+    def test_interactive_worker_still_polls(self):
+        self.feed("permission")
+        with mock.patch.dict(os.environ, {"SUPERVISOR_WORKER_MODE": "interactive"}):
+            rc, out, err = self.run_main(["--session-id", "S", "--timeout", "0.2", "--interval", "0.05"])
+        self.assertEqual((rc, out), (0, ""))
+        self.assertIn("deadline", err)
+
     def test_deadline_is_fail_open(self):
         self.feed("permission")
         rc, out, err = self.run_main(["--session-id", "S", "--timeout", "0.3", "--interval", "0.05"])

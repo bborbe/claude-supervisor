@@ -32,6 +32,8 @@ authorized that approval in the manager's conversation (measured 2026-09-27).
 This hook only carries a decision; it never makes one.
 
 Kill switch: SUPERVISOR_PERMISSION_POLL=off makes the hook exit at once.
+Headless supervisor workers (SUPERVISOR_WORKER_MODE=headless) are skipped: their
+server already parks and answers the prompt, and polling first would delay that park.
 
 Usage (manual / tests):
   permission-answer-poll.py --item-id <id>      [--timeout 540] [--interval 2]
@@ -168,6 +170,13 @@ def emit(decision: str) -> None:
 
 def main() -> int:
     if os.environ.get("SUPERVISOR_PERMISSION_POLL", "").lower() == "off":
+        return 0
+    # A headless supervisor worker already has an answer path: its server parks the
+    # prompt in `canUseTool` and `attention-poll.mjs` settles it. This hook fires
+    # BEFORE that park, so polling here would hold every headless gate up to the
+    # deadline before it ever parked. `workerEnvFor` (server/spawn-mode.mjs) exports
+    # the mode into the worker's environment, and hooks inherit it.
+    if os.environ.get("SUPERVISOR_WORKER_MODE", "") == "headless":
         return 0
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--item-id")
