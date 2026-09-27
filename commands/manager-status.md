@@ -44,8 +44,8 @@ It resolves its subject **exactly as `/manager-loop` does** — same branch dete
 
 **Identical to `/manager-loop` § Resolution step 0.** Probe with the **resolved subject**, not `$1` — under detection `$1` is empty and every probe below would match nothing. Detect the branch, never assume it:
 
-- `find "24 Goals" -maxdepth 1 -iname "$SUBJECT.md"`, confirm `page_type: goal` in the frontmatter block → **goal branch** below.
-- `find "$TOPICS_DIR" -maxdepth 1 -iname "$SUBJECT.md"`, confirm `page_type: topic` the same way → **topic branch, steps 1–5**.
+- `find "24 Goals" -maxdepth 1 -iname "$SUBJECT.md"` → **goal branch** below. The folder is the discriminator on this side — **no `page_type: goal` confirmation**; see `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § The page test.
+- `find "$TOPICS_DIR" -maxdepth 1 -iname "$SUBJECT.md"`, confirm `page_type: topic` **in the frontmatter block** → **topic branch, steps 1–5**.
 - **Both match, or neither** → print every candidate path (or `no match`) and **stop**. Never guess between a goal and a topic, and never silently prefer one.
 
 **Goal branch.** Read `24 Goals/<Goal>.md`.

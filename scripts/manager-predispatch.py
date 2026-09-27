@@ -342,10 +342,20 @@ def resolve_subject(vault: str, subject: str) -> tuple[str, list[str]]:
     would gate a different tree than the command sweeps. Both-match and no-match are both
     refusals — never a silent preference, which is the failure the commands' own
     resolution section exists to prevent.
+
+    The goal branch keys on the folder alone; the topic branch additionally requires
+    `page_type: topic`. The asymmetry is measured, not stylistic. `page_type` was required
+    on both sides to reject the convention guides that describe these page kinds, but
+    those guides live outside the folders and an exact `-iname "$SUBJECT.md"` match inside
+    the folder already excludes them. Measured 2026-09-27 in Personal: **88 of 258** goal
+    pages carried no `page_type: goal` and were therefore unresolvable to this gate *and*
+    to the commands that defer to it, while **11 of 11** topic pages carried
+    `page_type: topic`. Requiring a field a third of the goal pages lack bought no
+    discrimination and cost the whole goal branch.
     """
     goal_path = os.path.join(vault, "24 Goals", f"{subject}.md")
     topic_path = os.path.join(vault, "23 Topics", f"{subject}.md")
-    is_goal = os.path.exists(goal_path) and page_type_of(goal_path) == "goal"
+    is_goal = os.path.exists(goal_path)
     is_topic = os.path.exists(topic_path) and page_type_of(topic_path) == "topic"
     if is_goal and is_topic:
         raise ValueError(f"ambiguous subject: both {goal_path} and {topic_path} resolve")
@@ -699,6 +709,17 @@ def main(argv: list[str]) -> int:
 
     if args.save:
         table = sys.stdin.read()
+        if not payload:
+            # `evaluate()` returns an empty payload on both of its fail-open paths, where
+            # there is no branch, digest or tracked set to record. `--check` already
+            # reports that as a CHANGE verdict; `--save` must report the same one rather
+            # than dereferencing `payload["branch"]` and raising. The snapshot cannot be
+            # written either way, and a traceback reads to the caller as a failure rather
+            # than as a verdict to gate on — so the subject would be re-swept on every
+            # tick, which is the cost the fail-open rule exists to avoid. On stdout, to
+            # match `--check`; the two refusals below stay on stderr, where they belong.
+            print(f"CHANGE {reason}")
+            return EXIT_CHANGE
         if not table.strip():
             # Same discipline as fleet-snapshot.py's empty guard: a failed render must not
             # clobber a good snapshot, and a snapshot with no table can never be replayed.
