@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.12
 
 - fix: **the drive leg's provenance names the caller's own classification as the per-bucket source, never `.snapshot.history.jsonl`.** The snapshot schema carries no bucket concept — its single home, `docs/fleet-surface.md` § Session end, says a per-bucket name set "is never obtainable from this file" — yet `commands/manager-loop.md`, `commands/manager-drive.md` and `agents/manager-drive.md` all named it as the source, across the dispatch prompt template, clause (0), the `Held` reason, the report line and `<constraints>`. Measured **2026-09-27**: `.snapshot.history.jsonl` holds **195** records whose union of keys is `events · fail_open · recorded_at · tasks`, and **zero** carry a bucket key. A caller following the old wording read a plausible provenance from a file that is not this sweep's row source — the exact divergence a live pass reported on 2026-09-26. ⚠️ **The two halves genuinely come from different producers**, which is why the single-file framing was wrong: `recorded_at` from the snapshot record the sweep wrote, the per-bucket sets from the caller's own classification. `manager-drive.md`'s `--vault` note still refers to "the prior record the next sweep diffs against" — that is the **snapshot** history, which is real and append-only, and is untouched.
 
