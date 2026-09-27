@@ -152,6 +152,16 @@ HEARTBEAT_TTL_SECONDS = 60
 EXIT_NOCHANGE = 0
 EXIT_CHANGE = 10
 EXIT_USAGE = 2
+# `--write-tracked` is a different verb from the gate's three modes, so its success code
+# is named separately even though it is also 0. Reusing EXIT_NOCHANGE would read to a
+# caller branching on the gate's contract as "the digest is unchanged, dispatch no agent"
+# — which is the opposite of what happened: a fresh set was just written.
+EXIT_WRITE_OK = 0
+# `--compare-tracked` reports a *disagreement between two memberships*, which is neither
+# the gate's "changed" verdict nor a usage error. It shares 10 because the caller's
+# response is the same shape — stop and look rather than proceed — while staying a
+# separate name so a reader cannot mistake it for the digest verdict.
+EXIT_DIVERGENT = 10
 
 STUCK_SECONDS = 30 * 60
 
@@ -553,6 +563,48 @@ def state_path(subject: str) -> str:
     return os.path.join(STATE_DIR, f"{slug(subject)}.json")
 
 
+def tracked_path(subject: str) -> str:
+    """Where the caller's own tracked set lands, keyed by the same subject slug.
+
+    Deliberately a sibling of `state_path`, not a field inside it: the two hold
+    different things. The state file holds this gate's *verdict* — digest, table,
+    `recorded_at` — while this holds the caller's *input*, the names it resolved
+    from the page. They can disagree, and that disagreement is the point.
+    """
+    return os.path.join(STATE_DIR, f"{slug(subject)}.tracked.txt")
+
+
+def buckets_path(subject: str) -> str:
+    """Where the caller's per-bucket classification lands before `--save` folds it in.
+
+    A staging file rather than an argument because a bucket set is a dict of every
+    tracked name the caller classified — hundreds of names, which cannot ride a
+    command line, and which must not be concatenated onto `--save`'s stdin, whose
+    whole content is the table the no-change branch replays verbatim.
+    """
+    return os.path.join(STATE_DIR, f"{slug(subject)}.buckets.json")
+
+
+def loop_snapshot_path(vault: str, subject: str) -> str:
+    """The model-free loop's own snapshot for this subject.
+
+    Derived rather than passed, because the whole point of the comparison is to
+    check the caller's set against a membership the caller did NOT produce. A
+    caller that hands over the path can hand over the wrong one, and a wrong path
+    that reads clean is indistinguishable from agreement.
+
+    The convention is the loop tick's, read from `sweep-gate-notify-tick.sh`:
+    `<basename(vault) lowercased>/<slug(subject)>.snapshot.json` under
+    `$SWEEP_GATE_BASE` — the same env var that script honours, so a host running
+    the loop elsewhere is compared against the loop it actually runs.
+    """
+    base = os.path.expanduser(
+        os.environ.get("SWEEP_GATE_BASE", "~/.claude/state/sweep-gate-loop")
+    )
+    vname = os.path.basename(os.path.normpath(vault)).lower()
+    return os.path.join(base, vname, f"{slug(subject)}.snapshot.json")
+
+
 def load_state(subject: str) -> dict:
     """The raw stored payload, or {} — used for the cross-run busy-since map."""
     try:
@@ -599,7 +651,13 @@ def strip_links(text: str) -> str:
 
 
 def save_stored(
-    subject: str, branch: str, digest: str, table: str, tracked: list[dict], busy: dict
+    subject: str,
+    branch: str,
+    digest: str,
+    table: str,
+    tracked: list[dict],
+    busy: dict,
+    bucket_sets: dict | None = None,
 ) -> None:
     """Persist atomically (tmp + os.replace).
 
@@ -623,6 +681,14 @@ def save_stored(
         "busy_since": busy,
         "recorded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+    # The caller's per-bucket classification, persisted so it survives a compaction and a
+    # fresh manager. This is the half the drive leg's clause (0) requires and the snapshot
+    # schema cannot supply — buckets are the *caller's* classification, so a per-bucket set
+    # is never derivable from the snapshot (single home: `docs/fleet-surface.md` § Session
+    # end). Omitted rather than defaulted when the caller passed none, so a record that
+    # lacks the half reads as "not persisted" instead of as "persisted and empty".
+    if bucket_sets is not None:
+        payload["bucket_sets"] = bucket_sets
     tmp = state_path(subject) + ".tmp"
     try:
         # 0600 at creation rather than by a chmod after it: the file is never
@@ -695,6 +761,26 @@ def main(argv: list[str]) -> int:
     mode.add_argument(
         "--save", action="store_true", help="persist the digest + the table on stdin"
     )
+    mode.add_argument(
+        "--write-tracked",
+        action="store_true",
+        help="write the caller's own tracked set (names on stdin) to <slug>.tracked.txt",
+    )
+    mode.add_argument(
+        "--write-buckets",
+        action="store_true",
+        help="stage the caller's per-bucket classification (JSON on stdin) for --save",
+    )
+    mode.add_argument(
+        "--compare-tracked",
+        action="store_true",
+        help="compare the staged tracked set against the loop snapshot's membership",
+    )
+    ap.add_argument(
+        "--buckets",
+        default=None,
+        help="with --save: path to the staged bucket JSON (see --write-buckets)",
+    )
     args = ap.parse_args(argv)
 
     vault_error = vault_root_error(args.vault)
@@ -704,6 +790,133 @@ def main(argv: list[str]) -> int:
         # is told the argument was wrong instead of being handed a fail-open sweep.
         print(vault_error, file=sys.stderr)
         return EXIT_USAGE
+
+    if args.write_tracked:
+        # The caller's OWN scan is the only producer of this file — it is never derived
+        # here, because `evaluate()` computes a set from the same declarations and the two
+        # can disagree (measured 2026-09-27: 154 declared vs 153 derived, differing by a
+        # case-only name mismatch nothing else could see). What this mode buys is the
+        # *transport*: routing the write through this script keeps the first token
+        # `python3`, which matches the `Bash(python3:*)` grant all three manager commands
+        # already hold — so a 15-minute loop writes its set without a permission prompt,
+        # and never needs `Write` (granted by none of them) or a shell redirect.
+        names = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
+        if not names:
+            # Same discipline as `--save`'s empty-table guard: a failed read must not
+            # clobber a good set, and a set with no names can never be dispatched against.
+            print(
+                "refusing to write an empty tracked set: nothing on stdin, so the "
+                "previous file is left unchanged.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        path = tracked_path(args.subject)
+        tmp = path + ".tmp"
+        os.makedirs(STATE_DIR, exist_ok=True)
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(names) + "\n")
+            # Atomic, for the same reason the snapshot write is: a reader sees either the
+            # old set or the new one, never a half-written file — and the whole point of
+            # this artifact is that a dispatch can trust what it reads.
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        # The path on stdout is the value the dispatch carries; print it alone so the
+        # caller can capture it without parsing.
+        print(path)
+        return EXIT_WRITE_OK
+
+    if args.write_buckets:
+        # Staged, not stored: `--save` is what folds this into the record, and it runs
+        # later in the same tick. Keeping the two apart means a caller that classifies but
+        # never saves leaves no half-written record, and `--save`'s no-change branch —
+        # which writes nothing at all — cannot silently drop a bucket set it was handed.
+        try:
+            parsed = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as exc:
+            print(f"bucket sets must be JSON: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        # Shape-checked here because the consumer is an agent that gates a whole batch on
+        # this half: a dict of bucket -> non-empty list of names is the only shape that can
+        # satisfy clause (0). A count, a bare list, or a bucket mapped to nothing would all
+        # *look* like a classification and gate nothing.
+        if not isinstance(parsed, dict) or not parsed:
+            print("bucket sets must be a non-empty JSON object", file=sys.stderr)
+            return EXIT_USAGE
+        for bucket, names in parsed.items():
+            if not isinstance(names, list) or not all(
+                isinstance(n, str) and n.strip() for n in names
+            ):
+                print(
+                    f"bucket {bucket!r} must map to a non-empty list of names",
+                    file=sys.stderr,
+                )
+                return EXIT_USAGE
+        path = buckets_path(args.subject)
+        tmp = path + ".tmp"
+        os.makedirs(STATE_DIR, exist_ok=True)
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(parsed, fh, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        print(path)
+        return EXIT_WRITE_OK
+
+    if args.compare_tracked:
+        # A dispatch whose tracked set disagrees with the gate's own membership is
+        # reported, not accepted. The two memberships are produced by different code from
+        # the same declarations, so each is self-consistent while they disagree — measured
+        # 2026-09-27: 154 declared against 153 in the snapshot, differing by one name whose
+        # only fault was a capital `The` against a case-sensitive membership compare.
+        # Nothing else could see it: APFS is case-insensitive, so `os.path.exists`,
+        # `open()`, Obsidian's link resolver and `ls` all succeed on the capitalised path,
+        # and no sweep notices because neither source is internally inconsistent.
+        try:
+            with open(tracked_path(args.subject), encoding="utf-8") as fh:
+                mine = {ln.strip() for ln in fh if ln.strip()}
+        except OSError as exc:
+            print(f"no staged tracked set to compare ({exc})", file=sys.stderr)
+            return EXIT_USAGE
+        snap = loop_snapshot_path(args.vault, args.subject)
+        try:
+            with open(snap, encoding="utf-8") as fh:
+                gate = set(json.load(fh).get("tasks") or {})
+        except (OSError, json.JSONDecodeError) as exc:
+            # Fail-open in the gate's own sense: an unverifiable membership is never
+            # reported as agreement. "I could not check" and "they match" are precisely
+            # the two states this mode exists to tell apart, so collapsing them would
+            # reintroduce the defect one level down.
+            print(f"COMPARE unavailable — {snap} unreadable ({exc})")
+            print(f"  caller {len(mine)} names · gate unknown — NOT compared")
+            return EXIT_DIVERGENT
+        if not gate:
+            print(f"COMPARE unavailable — {snap} carries no `tasks` membership")
+            print(f"  caller {len(mine)} names · gate 0 — NOT compared")
+            return EXIT_DIVERGENT
+        only_mine = sorted(mine - gate)
+        only_gate = sorted(gate - mine)
+        print(f"COMPARE caller {len(mine)} names · gate {len(gate)} names")
+        if not only_mine and not only_gate:
+            print("  memberships identical")
+            return EXIT_NOCHANGE
+        print(
+            f"⚠️ DIVERGENCE: {len(only_mine)} in the caller's set only, {len(only_gate)} in "
+            "the gate's only — a dispatch on either is a dispatch on a set nothing has "
+            "reconciled, and both sources read as self-consistent"
+        )
+        for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
+            for n in names[:10]:
+                print(f"  {label}: {n}")
+            if len(names) > 10:
+                print(f"  … and {len(names) - 10} more {label}")
+        return EXIT_DIVERGENT
 
     changed, reason, payload, stored_table = evaluate(args.vault, args.subject)
 
@@ -729,6 +942,24 @@ def main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return EXIT_CHANGE
+        bucket_sets = None
+        if args.buckets:
+            try:
+                with open(args.buckets, encoding="utf-8") as fh:
+                    bucket_sets = json.load(fh)
+            except (OSError, json.JSONDecodeError) as exc:
+                # A usage error, not a verdict — and deliberately NOT a fail-open. The
+                # gate's fail-open rule exists so an unreadable *state* file re-sweeps
+                # rather than reporting a false "no change"; here the caller has handed
+                # over a path it believes holds the classification. Writing the record
+                # without the half would let it read back as persisted when it is not,
+                # and clause (0) would then hold an entire batch on a half the caller
+                # thought it had supplied. Refuse, and let the caller fix the path.
+                print(
+                    f"could not read bucket sets from {args.buckets!r}: {exc}",
+                    file=sys.stderr,
+                )
+                return EXIT_USAGE
         if changed:
             try:
                 save_stored(
@@ -738,6 +969,7 @@ def main(argv: list[str]) -> int:
                     table,
                     payload["tracked"],
                     payload["busy"],
+                    bucket_sets,
                 )
             except OSError as exc:
                 print(f"fail-open: could not record state ({exc})", file=sys.stderr)
