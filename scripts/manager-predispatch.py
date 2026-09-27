@@ -157,6 +157,11 @@ EXIT_USAGE = 2
 # caller branching on the gate's contract as "the digest is unchanged, dispatch no agent"
 # — which is the opposite of what happened: a fresh set was just written.
 EXIT_WRITE_OK = 0
+# `--compare-tracked` reports a *disagreement between two memberships*, which is neither
+# the gate's "changed" verdict nor a usage error. It shares 10 because the caller's
+# response is the same shape — stop and look rather than proceed — while staying a
+# separate name so a reader cannot mistake it for the digest verdict.
+EXIT_DIVERGENT = 10
 
 STUCK_SECONDS = 30 * 60
 
@@ -580,6 +585,26 @@ def buckets_path(subject: str) -> str:
     return os.path.join(STATE_DIR, f"{slug(subject)}.buckets.json")
 
 
+def loop_snapshot_path(vault: str, subject: str) -> str:
+    """The model-free loop's own snapshot for this subject.
+
+    Derived rather than passed, because the whole point of the comparison is to
+    check the caller's set against a membership the caller did NOT produce. A
+    caller that hands over the path can hand over the wrong one, and a wrong path
+    that reads clean is indistinguishable from agreement.
+
+    The convention is the loop tick's, read from `sweep-gate-notify-tick.sh`:
+    `<basename(vault) lowercased>/<slug(subject)>.snapshot.json` under
+    `$SWEEP_GATE_BASE` — the same env var that script honours, so a host running
+    the loop elsewhere is compared against the loop it actually runs.
+    """
+    base = os.path.expanduser(
+        os.environ.get("SWEEP_GATE_BASE", "~/.claude/state/sweep-gate-loop")
+    )
+    vname = os.path.basename(os.path.normpath(vault)).lower()
+    return os.path.join(base, vname, f"{slug(subject)}.snapshot.json")
+
+
 def load_state(subject: str) -> dict:
     """The raw stored payload, or {} — used for the cross-run busy-since map."""
     try:
@@ -746,6 +771,11 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="stage the caller's per-bucket classification (JSON on stdin) for --save",
     )
+    mode.add_argument(
+        "--compare-tracked",
+        action="store_true",
+        help="compare the staged tracked set against the loop snapshot's membership",
+    )
     ap.add_argument(
         "--buckets",
         default=None,
@@ -838,6 +868,55 @@ def main(argv: list[str]) -> int:
             raise
         print(path)
         return EXIT_WRITE_OK
+
+    if args.compare_tracked:
+        # A dispatch whose tracked set disagrees with the gate's own membership is
+        # reported, not accepted. The two memberships are produced by different code from
+        # the same declarations, so each is self-consistent while they disagree — measured
+        # 2026-09-27: 154 declared against 153 in the snapshot, differing by one name whose
+        # only fault was a capital `The` against a case-sensitive membership compare.
+        # Nothing else could see it: APFS is case-insensitive, so `os.path.exists`,
+        # `open()`, Obsidian's link resolver and `ls` all succeed on the capitalised path,
+        # and no sweep notices because neither source is internally inconsistent.
+        try:
+            with open(tracked_path(args.subject), encoding="utf-8") as fh:
+                mine = {ln.strip() for ln in fh if ln.strip()}
+        except OSError as exc:
+            print(f"no staged tracked set to compare ({exc})", file=sys.stderr)
+            return EXIT_USAGE
+        snap = loop_snapshot_path(args.vault, args.subject)
+        try:
+            with open(snap, encoding="utf-8") as fh:
+                gate = set(json.load(fh).get("tasks") or {})
+        except (OSError, json.JSONDecodeError) as exc:
+            # Fail-open in the gate's own sense: an unverifiable membership is never
+            # reported as agreement. "I could not check" and "they match" are precisely
+            # the two states this mode exists to tell apart, so collapsing them would
+            # reintroduce the defect one level down.
+            print(f"COMPARE unavailable — {snap} unreadable ({exc})")
+            print(f"  caller {len(mine)} names · gate unknown — NOT compared")
+            return EXIT_DIVERGENT
+        if not gate:
+            print(f"COMPARE unavailable — {snap} carries no `tasks` membership")
+            print(f"  caller {len(mine)} names · gate 0 — NOT compared")
+            return EXIT_DIVERGENT
+        only_mine = sorted(mine - gate)
+        only_gate = sorted(gate - mine)
+        print(f"COMPARE caller {len(mine)} names · gate {len(gate)} names")
+        if not only_mine and not only_gate:
+            print("  memberships identical")
+            return EXIT_NOCHANGE
+        print(
+            f"⚠️ DIVERGENCE: {len(only_mine)} in the caller's set only, {len(only_gate)} in "
+            "the gate's only — a dispatch on either is a dispatch on a set nothing has "
+            "reconciled, and both sources read as self-consistent"
+        )
+        for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
+            for n in names[:10]:
+                print(f"  {label}: {n}")
+            if len(names) > 10:
+                print(f"  … and {len(names) - 10} more {label}")
+        return EXIT_DIVERGENT
 
     changed, reason, payload, stored_table = evaluate(args.vault, args.subject)
 

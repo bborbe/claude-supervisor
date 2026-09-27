@@ -78,7 +78,13 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 TRACKED
 ```
 
-It prints the path it wrote (`~/.claude/state/manager-predispatch/<slug>.tracked.txt`) and refuses an empty stdin rather than clobbering a good set. ⚠️ **The first token is `python3` so the call matches this command's `Bash(python3:*)` grant and raises no prompt** — **`Write` is granted by none of the three commands**, so a bare redirect or heredoc would prompt. The printed line is for the operator; **the file is what both dispatches below carry.** It must come from **this run's own read** — never reconstructed from the roster, a checkpoint, or the gate's own snapshot, which is a different derivation and can disagree with the page (measured 2026-09-27: 154 declared vs 153 in the snapshot, differing by a case-only name mismatch nothing else could see).
+It prints the path it wrote (`~/.claude/state/manager-predispatch/<slug>.tracked.txt`) and refuses an empty stdin rather than clobbering a good set. ⚠️ **The first token is `python3` so the call matches this command's `Bash(python3:*)` grant and raises no prompt** — **`Write` is granted by none of the three commands**, so a bare redirect or heredoc would prompt. The printed line is for the operator; **the file is what both dispatches below carry.** It must come from **this run's own read** — never reconstructed from the roster, a checkpoint, or the gate's own snapshot, which is a different derivation and can disagree with the page (measured 2026-09-27: 154 declared vs 153 in the snapshot, differing by a case-only name mismatch nothing else could see). ⚠️ **Then compare that set against the gate's own membership before either dispatch leaves** — the two are derived by different code from the same declarations, so each reads as self-consistent while they disagree:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --compare-tracked
+```
+
+It prints **both counts** and, on a disagreement, the symmetric difference under `⚠️ DIVERGENCE:`. Exit **0** = identical; **10** = they diverge **or** the snapshot could not be read; **2** = usage error. ⚠️ **Never collapse the two 10s** — "I could not check" must not read as "they match", which is the defect one level down. ⚠️ **Report a divergence, never reconcile it here:** this command holds no input for which source is right. Print it; reconciling the two sources is [[The Page's Tracked Set and the Gate's Snapshot Membership Disagree and Nothing Reconciles Them]]'s.
 
 4. **Compose the sweep — do not rebuild it.** This command owns no classification. Dispatch the same agent `/manager-loop` does:
 
