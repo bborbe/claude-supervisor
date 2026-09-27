@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.60.0
 
 - feat: add a plugin `PermissionRequest` hook (`hooks/hooks.json` → `scripts/permission-answer-poll.py`) that carries an attention-store answer into a live permission prompt, so a manager can relay the operator's decision to a tab worker without the operator opening its tab. Fail-open (an unanswered prompt stays for the human), binds only to the current gate's own card (refuses stale, message-class and ambiguous cards), exits once the gate closes, stands aside for headless supervisor workers (their server already parks the prompt), kill switch `SUPERVISOR_PERMISSION_POLL=off`.
 
