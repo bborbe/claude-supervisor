@@ -630,6 +630,35 @@ class AttentionStoreSource(unittest.TestCase):
         self.assertEqual(1, len(wnm.needs_source()))
         self.assertEqual("store unreachable — reading event log", wnm.SOURCE_NOTE)
 
+    def test_fallback_rows_are_stamped_replayed(self):
+        """The note is printed once; the ROW is what a manager scans.
+
+        Without the stamp every fallback row renders through the same `row()` a
+        live read uses, so a replayed gate and a live one differ only in the age
+        column -- and age is not provenance, since a live gate can be hours old
+        and a replayed one minutes old. Measured 2026-09-27: 18 replayed rows
+        against 2 live, with nothing on any row to tell them apart.
+        """
+        def down():
+            raise wnm.StoreUnreachable("connection refused")
+
+        wnm.store_items = down
+        wnm.load_events = lambda: [{"item_id": "log-1", "session_id": "sess-a"}]
+        rows = wnm.needs_source()
+        self.assertTrue(all(r.get("replayed") for r in rows))
+
+    def test_store_rows_are_not_stamped_replayed(self):
+        """The stamp means "the fallback produced this", not "this looks old".
+
+        A live read must carry no stamp at all: a marker present on every row
+        would change every live row and fail the no-regression requirement that
+        a responsive store's output is unchanged.
+        """
+        wnm.store_items = lambda: [self.item()]
+        wnm.load_events = lambda: []
+        rows = wnm.needs_source()
+        self.assertTrue(all(not r.get("replayed") for r in rows))
+
     def test_reachable_store_prints_no_note(self):
         wnm.store_items = lambda: [self.item()]
         wnm.load_events = lambda: []
@@ -884,6 +913,31 @@ class ProvenanceRendering(unittest.TestCase):
         rec = self.rec(detail="raised from burn by Bash")
         rendered = wnm.row(rec, {"7": {}}, "question: " + rec["detail"])
         self.assertNotIn("burn:", rendered)
+
+    def test_a_replayed_row_says_so_on_the_row(self):
+        """The marker rides the row, in the scan position a manager reads first.
+
+        SC1 is a per-row claim: a section header printed once, above rows that
+        then render identically, is exactly the indistinguishability this exists
+        to break -- so asserting on the header would pass on the defect.
+        """
+        rendered = wnm.row(self.rec(replayed=True), {"7": {}}, "question: d")
+        self.assertIn("⟳replay", rendered.splitlines()[0])
+
+    def test_a_live_row_carries_no_replay_marker(self):
+        """The positive control, and the no-regression half at row level.
+
+        A responsive store's rows must render exactly as they did before the
+        marker existed, so the marker is EMPTY rather than padded when unset --
+        and a record that never carried the key renders the same as one that
+        sets it False, which is what makes an absent stamp safe.
+        """
+        rendered = wnm.row(self.rec(), {"7": {}}, "question: d")
+        self.assertNotIn("⟳replay", rendered)
+        self.assertEqual(
+            rendered,
+            wnm.row(self.rec(replayed=False), {"7": {}}, "question: d"),
+        )
 
 
 class NoShadowedDefinitions(unittest.TestCase):
