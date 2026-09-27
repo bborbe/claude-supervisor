@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.18
 
 - fix: **the drive leg stops paying for the `ListAgents` roster a second time — the manager no longer reads it at all.** `commands/manager-drive.md` step 4 stopped passing the roster to the sweep-reader on 2026-09-27, but **step 6 still passed it to the act agent**, so the roster kept entering the manager's own context once per round and the extraction was half done. Step 6 now passes no roster, `ListAgents` is gone from the command's `allowed-tools`, and `agents/manager-drive.md` declares `mcp__supervisor__list_agents` in its `tools:` and reads the roster itself — **honouring one the caller passes**, so `commands/manager-loop.md`'s verbatim roster is unaffected and the loop path lands once rather than once per command. ⚠️ **The tool is a read, not a capability**, and the file now says so explicitly: `mcp__supervisor__spawn_agent` stays out of `tools:` because binding it let this agent open a worker and skip the mode decision, while `list_agents` opens nothing and decides nothing. Change set: `commands/manager-drive.md`, `agents/manager-drive.md`.
 
