@@ -45,7 +45,7 @@ function stringSources({ env, file }) {
 // looks, and refusing every spawn over one would make the file impossible to roll
 // forward. An unknown VALUE is different — it is a typo in a key that IS load-bearing.
 const KNOWN_TOP_LEVEL = ['spawn']
-const KNOWN_SPAWN_KEYS = ['mode']
+const KNOWN_SPAWN_KEYS = ['mode', 'maxConcurrent']
 
 export function unknownKeyWarnings(file, path) {
   if (!file || typeof file !== 'object' || Array.isArray(file)) return []
@@ -101,6 +101,63 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
   // permissions. A worker missing its normal tooling is not a cheaper worker, it is one
   // that fails in unfamiliar ways and cannot be watched.
   return { mode: 'interactive', source: 'default' }
+}
+
+// How many workers the fleet may hold open at once — one value, fleet-wide.
+//
+// This replaces the per-manager spawn cap (2 per sweep, 4 per rolling 30 min) that lived in
+// `docs/fleet-surface.md` § Spawn a worker item 5 until 2026-09-27. The operator's ruling
+// that day: *"These limits are artificial and should be removed … It's more a global
+// concurrent limit we should aim than these local limits."* So there is one bound, it is
+// global, and it counts LIVE WORKERS rather than spawns-per-window — a rate cap and a
+// concurrency cap answer different questions, and only the second is what was asked for.
+//
+// ⚠️ THE VALUE SHIPS UNSET, AND UNSET MEANS UNLIMITED. That is the correct shipped state,
+// not a gap awaiting input: the ruling removed the limits, and the mechanism exists so the
+// operator can set one number when load demands it. Nothing here pre-empts that, and no
+// default is invented on the operator's behalf.
+export const MAX_CONCURRENT_ENV = 'SUPERVISOR_MAX_CONCURRENT'
+
+// The limit this spawn runs under, plus the source that decided it — or `null` for
+// unlimited, which is the shipped state.
+//
+// Validation follows `resolveSpawnMode` exactly, and for the same reason: every source is
+// checked, not only the winner. A typo in config.json must not stay invisible merely
+// because this particular spawn was capped by the environment instead — that is how a file
+// gets accepted, reported as applied, and silently ignored, the failure this repo has
+// shipped twice (policy.json in v0.3.0, permissionMode before mode.mjs).
+//
+// `0` and an absent key are the same answer — unlimited. `0` is accepted rather than
+// refused because it is the value an operator reaches for when turning a limit off, and
+// refusing it would make the off switch a syntax error.
+export function resolveMaxConcurrent({ env, file, path = 'the supervisor config' } = {}) {
+  const sources = []
+  if (env !== undefined && env !== null && env !== '') sources.push({ source: 'env', value: env })
+  const fileLimit = file?.spawn?.maxConcurrent
+  if (fileLimit !== undefined && fileLimit !== null && fileLimit !== '') {
+    sources.push({ source: 'config', value: fileLimit })
+  }
+
+  for (const { source, value } of sources) {
+    const where = source === 'env' ? MAX_CONCURRENT_ENV : `"spawn.maxConcurrent" in ${path}`
+    // Only a number or a numeric string is a candidate. `Number(true)` is 1 and
+    // `Number(null)` is 0, so coercing blindly would read a stray boolean in config.json as
+    // a limit of one worker — the kind of silent acceptance this module exists to refuse.
+    const parsed = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return {
+        error:
+          `${where} is ${JSON.stringify(value)}, which is not a concurrent-worker limit — refusing to spawn ` +
+          `rather than guessing, since a limit that silently governs nothing is discovered only by the load it ` +
+          `was meant to bound. Valid values: a non-negative integer, or omit the key for unlimited.`,
+      }
+    }
+  }
+
+  const [first] = sources
+  if (!first) return { limit: null, source: 'unset' }
+  const parsed = Number(first.value)
+  return { limit: parsed === 0 ? null : parsed, source: first.source }
 }
 
 export const WORKER_MODE_ENV = 'SUPERVISOR_WORKER_MODE'

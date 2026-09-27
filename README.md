@@ -63,7 +63,7 @@ The mode a worker opens in is a **fleet-wide decision**, so it lives in a file y
 
 ```json
 // ~/.config/claude-supervisor/config.json   (SUPERVISOR_CONFIG)
-{ "spawn": { "mode": "interactive" } }
+{ "spawn": { "mode": "interactive", "maxConcurrent": "" } }
 ```
 
 `mode` is `interactive` or `headless`. Four sources, highest first:
@@ -78,6 +78,16 @@ The mode a worker opens in is a **fleet-wide decision**, so it lives in a file y
 The file is read **once at server start**, so restart the MCP server after editing it. It is optional: no file means the built-in default, and that is silent. A file that exists but does not parse is reported, because that is a file you wrote and believe is in effect.
 
 `agent_status`, `list_agents` and each ledger record carry `mode_source` (`argument` / `env` / `config` / `default`), so a worker that opened the wrong way tells you which of the four decided it instead of leaving you to guess.
+
+### Setting the fleet-wide concurrent limit
+
+`spawn.maxConcurrent` bounds how many workers the fleet may hold open **at once** — one value, fleet-wide. It replaces the per-manager spawn cap (2 per sweep, 4 per rolling 30 min) that `docs/fleet-surface.md` § Spawn a worker carried until 2026-09-27. Source order matches `mode`: `SUPERVISOR_MAX_CONCURRENT`, then the config file.
+
+⚠️ **It ships empty, and empty means unlimited.** That is the correct shipped state, not a placeholder awaiting a value. The operator's ruling of 2026-09-27, verbatim: *"These limits are artificial and should be removed … It's more a global concurrent limit we should aim than these local limits"* and *"For now there is no global limit."* Nothing here invents a number on the operator's behalf — set one when load demands it, and `0` is accepted as the same answer because that is the value you reach for to turn a limit **off**.
+
+**The count is live workers, not live sessions.** It is read from the heartbeat store the spawner stamps for every worker it opens; the session registry would also count the operator's own sessions and the manager's, which makes a small limit unusable in practice.
+
+An unusable value — a negative number, a fraction, a stray boolean — **refuses every spawn** and names the file, on the same reasoning as the mode refusals above: `Number(true)` is `1`, so a blind coercion would read a stray `true` as "one worker at a time" and never say so. An unreadable heartbeat store also refuses, rather than opening past a limit it cannot count.
 
 ⚠️ **An unknown `mode` value refuses every spawn**, naming the file and the two valid values — same reasoning as the policy refusals below. A typo that silently fell back to a default would be discovered only by noticing a whole fleet running the wrong way, long after the edit. An unknown *key* only warns, so a config written for a newer version stays usable by this one.
 
