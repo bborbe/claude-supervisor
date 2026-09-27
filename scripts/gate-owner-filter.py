@@ -39,6 +39,39 @@ when its spawner is a live manager other than this watcher's own. Panes this
 session spawned, panes whose spawner is a worker, panes whose spawner is dead,
 and unowned panes all emit.
 
+⚠️ A PREDECESSOR MANAGER IS NOT A PEER MANAGER, and this filter cannot tell them
+apart. A PEER manager serves a DIFFERENT subject; a PREDECESSOR served the SAME
+subject and handed it over. After a handover the outgoing manager is still live
+and still owns the spawn records of every worker it started, so hop 3 reads it as
+a manager and hop 4 reads it as live -- and its workers drop as `peer-manager`
+although they belong to the subject this watcher serves. Measured 2026-09-26 on a
+Manager Layer handover: `gates: 6  emit: 1  dropped(peer-manager): 5`, four of
+them that topic's own workers (spawner `1217e759`, the outgoing manager) and one
+a genuine peer (Fleet Manager `64b4a415`).
+
+The window is BOUNDED AND SELF-CLOSING, and that is the compensating control. Hop
+4 keeps a dead manager's panes, so the blindness lasts exactly from the handover
+until the outgoing session exits. Measured 2026-09-27: those same four panes read
+`emit dead-manager` once `1217e759` had exited, with no code change. Until then,
+read `who-needs-me.py` directly on the first tick after taking a topic over --
+the watcher is the push channel, not the only channel.
+
+No predicate fix is available, and the honest answer is this documented
+limitation rather than a code change. Two candidates were considered and
+rejected:
+
+  * TOPIC-SCOPED -- would need a subject for the watcher and for each spawner.
+    The only sources are `~/.claude/state/worker-manager/<sid>.json` (absent for
+    a manager that armed no loop: the successor in the measurement above had
+    none) and the registry `name` (the subject by convention only, and
+    unnormalized -- `Unattended Execution Manager` against `Unattended
+    Execution`). Both reintroduce the session-name convention hop 3 exists to
+    avoid.
+  * INHERITANCE -- re-pointing `parent_session` falsifies provenance, and while
+    both managers are live it moves the blindness to the other session, which
+    would then read its own workers as `peer-manager`. Inert in its target
+    window.
+
 ⚠️ A filter that silently matches nothing is indistinguishable from a quiet
 fleet ([[A Broken Watcher Looks Exactly Like a Quiet One]]). So `--explain`
 prints the reason for every verdict, and every run prints a
