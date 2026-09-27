@@ -112,6 +112,13 @@ def raise_pane(pane_id, pmap):
     `user-var-changed` hook in ~/.config/wezterm/wezterm.lua, which runs
     `pane:activate()` + `window:focus()` with the real window object in hand.
     Returns True when the escape was written; the caller falls back otherwise.
+
+    `window:focus()` picks the window inside WezTerm but does not reliably make
+    WezTerm the frontmost macOS app: measured 2026-09-27, four direct calls —
+    Telegram frontmost ×2 stayed frontmost, Chrome / Firefox frontmost raised.
+    So the app is activated explicitly afterwards with `open -a WezTerm`, which
+    brings forward the window the hook just focused. Best effort: a failure here
+    must not turn a written escape into a reported failure.
     """
     tty = pmap.get(str(pane_id), {}).get("tty_name")
     if not tty:
@@ -120,9 +127,14 @@ def raise_pane(pane_id, pmap):
     try:
         with open(tty, "w") as fh:
             fh.write(f"\033]1337;SetUserVar=raise={payload}\007")
-        return True
     except OSError:
         return False
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(["open", "-a", "WezTerm"], capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return True
 
 
 def tab_focus_pane(tab_id, tabs, pmap):
