@@ -73,7 +73,15 @@ Goal: <status> · <n>/<m> SC          ← goal branch only
 Tracked (N): <task> · <task> …
 ```
 
-⚠️ **Write the set you just printed to a file, and carry its *path* from here on — never the names.** One task name per line, at `~/.claude/state/manager-predispatch/<slug>.tracked.txt` (`slug` = the subject lowercased with non-alphanumerics collapsed to `-`, the same key `manager-predispatch.py` uses for its own state file). The printed `Tracked (N):` line is for the operator; **the file is what the dispatch below carries.** It must be produced by **this run's own scan** — never reconstructed from the roster, a checkpoint, or a previous snapshot. A recalled list is indistinguishable from the right one at the point of use, and a measured one omitted **46%** of the tracked set while every probe passed.
+⚠️ **Write the set you just printed to a file — through `manager-predispatch.py --write-tracked`, never a shell redirect — and carry its *path* from here on, never the names.**
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --write-tracked <<'TRACKED'
+<the names you just resolved, one per line>
+TRACKED
+```
+
+It prints the path it wrote (`~/.claude/state/manager-predispatch/<slug>.tracked.txt`) and refuses an empty stdin rather than clobbering a good set. ⚠️ **The first token is `python3` so the call matches this command's `Bash(python3:*)` grant and raises no prompt** — **`Write` is granted by none of the three commands**, so a bare redirect or heredoc would prompt. The printed `Tracked (N):` line is for the operator; **the file is what the dispatch below carries.** It must be produced by **this run's own scan** — never reconstructed from the roster, a checkpoint, or a previous snapshot. A recalled list is indistinguishable from the right one at the point of use, and a measured one omitted **46%** of the tracked set while every probe passed.
 
 **The subject is always a clickable link.** The operator should be able to open the page the snapshot describes without hunting for it, so the link is part of the header and not an optional extra. Build it per the vault link convention — `obsidian://open?vault=<V>&file=<relpath>`, percent-encoding every character outside `[A-Za-z0-9-_.~]` (space → `%20`, `/` → `%2F`, `→` → `%E2%86%92`) and **dropping the `.md`**. `<V>` is the vault name and `<relpath>` the page path minus the vault root, both read from `vault-cli config list --output json` — never hand-written, because a hand-written path is how a link that looks right opens the wrong page.
 

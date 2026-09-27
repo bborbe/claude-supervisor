@@ -152,6 +152,11 @@ HEARTBEAT_TTL_SECONDS = 60
 EXIT_NOCHANGE = 0
 EXIT_CHANGE = 10
 EXIT_USAGE = 2
+# `--write-tracked` is a different verb from the gate's three modes, so its success code
+# is named separately even though it is also 0. Reusing EXIT_NOCHANGE would read to a
+# caller branching on the gate's contract as "the digest is unchanged, dispatch no agent"
+# — which is the opposite of what happened: a fresh set was just written.
+EXIT_WRITE_OK = 0
 
 STUCK_SECONDS = 30 * 60
 
@@ -553,6 +558,17 @@ def state_path(subject: str) -> str:
     return os.path.join(STATE_DIR, f"{slug(subject)}.json")
 
 
+def tracked_path(subject: str) -> str:
+    """Where the caller's own tracked set lands, keyed by the same subject slug.
+
+    Deliberately a sibling of `state_path`, not a field inside it: the two hold
+    different things. The state file holds this gate's *verdict* — digest, table,
+    `recorded_at` — while this holds the caller's *input*, the names it resolved
+    from the page. They can disagree, and that disagreement is the point.
+    """
+    return os.path.join(STATE_DIR, f"{slug(subject)}.tracked.txt")
+
+
 def load_state(subject: str) -> dict:
     """The raw stored payload, or {} — used for the cross-run busy-since map."""
     try:
@@ -695,6 +711,11 @@ def main(argv: list[str]) -> int:
     mode.add_argument(
         "--save", action="store_true", help="persist the digest + the table on stdin"
     )
+    mode.add_argument(
+        "--write-tracked",
+        action="store_true",
+        help="write the caller's own tracked set (names on stdin) to <slug>.tracked.txt",
+    )
     args = ap.parse_args(argv)
 
     vault_error = vault_root_error(args.vault)
@@ -704,6 +725,44 @@ def main(argv: list[str]) -> int:
         # is told the argument was wrong instead of being handed a fail-open sweep.
         print(vault_error, file=sys.stderr)
         return EXIT_USAGE
+
+    if args.write_tracked:
+        # The caller's OWN scan is the only producer of this file — it is never derived
+        # here, because `evaluate()` computes a set from the same declarations and the two
+        # can disagree (measured 2026-09-27: 154 declared vs 153 derived, differing by a
+        # case-only name mismatch nothing else could see). What this mode buys is the
+        # *transport*: routing the write through this script keeps the first token
+        # `python3`, which matches the `Bash(python3:*)` grant all three manager commands
+        # already hold — so a 15-minute loop writes its set without a permission prompt,
+        # and never needs `Write` (granted by none of them) or a shell redirect.
+        names = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
+        if not names:
+            # Same discipline as `--save`'s empty-table guard: a failed read must not
+            # clobber a good set, and a set with no names can never be dispatched against.
+            print(
+                "refusing to write an empty tracked set: nothing on stdin, so the "
+                "previous file is left unchanged.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        path = tracked_path(args.subject)
+        tmp = path + ".tmp"
+        os.makedirs(STATE_DIR, exist_ok=True)
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(names) + "\n")
+            # Atomic, for the same reason the snapshot write is: a reader sees either the
+            # old set or the new one, never a half-written file — and the whole point of
+            # this artifact is that a dispatch can trust what it reads.
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        # The path on stdout is the value the dispatch carries; print it alone so the
+        # caller can capture it without parsing.
+        print(path)
+        return EXIT_WRITE_OK
 
     changed, reason, payload, stored_table = evaluate(args.vault, args.subject)
 

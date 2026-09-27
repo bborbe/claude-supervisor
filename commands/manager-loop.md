@@ -145,7 +145,15 @@ Read and write it only through the **`supervisor:open-items` skill** — `/super
 ## Procedure
 
 1. Read the vault's `Manager Session` runbook (the canonical procedure — follow it verbatim).
-2. **Resolve the topic** by reading its topic page (see Resolution above); print the tracked set + the page it came from. No page → report and stop. ⚠️ **Then write the resolved set to a file and carry its *path* from here on — never the names.** One task name per line, at `~/.claude/state/manager-predispatch/<slug>.tracked.txt` (`slug` = the subject lowercased with non-alphanumerics collapsed to `-`, the same key `manager-predispatch.py` uses for its own state file). The file must be produced by **this run's own scan** — never reconstructed from the roster, a checkpoint, or a previous sweep. ⚠️ **A recalled list is indistinguishable from the right one at the point of use, and the cost is measured:** a 128-name list typed from memory omitted **59 of 128 genuinely-tracked tasks (46%)** and swept in **14 belonging to other topics** — and every probe passed while it did so.
+2. **Resolve the topic** by reading its topic page (see Resolution above); print the tracked set + the page it came from. No page → report and stop. ⚠️ **Then write the resolved set to a file — through `manager-predispatch.py --write-tracked`, never a shell redirect — and carry its *path* from here on, never the names.**
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --write-tracked <<'TRACKED'
+<the names you just resolved, one per line>
+TRACKED
+```
+
+It prints the path it wrote (`~/.claude/state/manager-predispatch/<slug>.tracked.txt`, `slug` = the subject lowercased with non-alphanumerics collapsed to `-`) and refuses an empty stdin rather than clobbering a good set. ⚠️ **The first token is `python3` so the call matches this command's `Bash(python3:*)` grant and raises no prompt** — the same reason the `--save` block below is written that way, and **`Write` is granted by none of the three commands**. A bare redirect or heredoc would prompt on every tick of a 15-minute loop. The file must be produced by **this run's own scan** — never reconstructed from the roster, a checkpoint, or a previous sweep. ⚠️ **A recalled list is indistinguishable from the right one at the point of use, and the cost is measured:** a 128-name list typed from memory omitted **59 of 128 genuinely-tracked tasks (46%)** and swept in **14 belonging to other topics** — and every probe passed while it did so.
 3. **Sweep 1** (then repeat while the topic is in flight, every `--interval` — default 15 min, capped at 900 s while a headless worker is owned; § Interval):
    - **Read the attention feed** before acting on `waiting-on-human`: `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/who-needs-me.py` — only its `detail` field carries the gate text; `ListAgents` shows `waiting` but not what on.
    - Roster: `ListAgents` — the topic's worker sessions (by task name), status, age.
