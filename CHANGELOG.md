@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.14
 
 - fix: **both dispatch templates now name the file `recorded_at` must come from, and name the wrong alternative explicitly.** `commands/manager-loop.md` said *"`recorded_at` from the snapshot record the sweep wrote"* with **no file named** — and the sweep does write a record (`manager-predispatch.py --save`), so that reading was defensible rather than careless. Measured **2026-09-27** on a live pass: the drive leg took `recorded_at=2026-09-27T12:09:12+02:00` from `~/.claude/state/manager-predispatch/manager-layer.json`, while the sweep-gate snapshot read `2026-09-27T12:44:18+02:00` — the same two-artifact divergence the bucket half was corrected for, one level out, and it is what a criterion requiring the snapshot's value caught. Both files now name `~/.claude/state/sweep-gate-loop/<vault>/<subject>.snapshot.json` and say **not** the manager-predispatch record, so the ambiguity is closed in the text rather than left to the reader. Change set: `commands/manager-loop.md`, `commands/manager-drive.md`.
 
