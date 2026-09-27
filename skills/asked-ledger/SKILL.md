@@ -2,7 +2,7 @@
 name: asked-ledger
 description: Claim, resolve and render the shared asked-ledger — which blocked session has already been batched to the operator, and by which layer. Use before batching blocked sessions into an AskUserQuestion in /supervisor:fleet-loop or /supervisor:manager-loop, so a session both layers hold is asked exactly once and every open claim renders as one consolidated list. Subcommands claim | resolve | list | prune.
 argument-hint: "<claim|resolve|list|prune> [flags]"
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/asked-ledger.py *)
+allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py *)
 ---
 
 The single home of the asked-ledger rules. Commands and agents point here instead of restating them or hardcoding the script path.
@@ -16,17 +16,31 @@ The ledger is the mark they were missing. Claim a subject before batching it; a 
 ## Invocation
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/asked-ledger.py $ARGUMENTS
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py $ARGUMENTS
 ```
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/asked-ledger.py claim   --session <blocked-session-id> --layer <fleet|worker> --text "<the question>"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/asked-ledger.py resolve --session <blocked-session-id>
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/asked-ledger.py list
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/asked-ledger.py prune
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py claim   --session <blocked-session-id> --layer <your-layer> --text "<the question>"
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py resolve --session <blocked-session-id>
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py list
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py prune
 ```
 
 Storage is on disk, never in context — `~/.claude/state/asked-ledger.json`, written only through the script (flock, then atomic tmp+rename). Never hand-edit the file.
+
+The `:-` fallback is load-bearing, not style: `CLAUDE_PLUGIN_ROOT` is unset in a Bash tool call (verified 2026-09-23), so the bare form expands to `/scripts/asked-ledger.py` and fails.
+
+### Which `--layer` value you pass
+
+⚠️ **`--layer` names your *layer*, and there are two layers to `docs/session-tiers.md`'s three tiers.** Read the value off this table, never off your tier's name.
+
+| Your tier | `--layer` |
+|---|---|
+| **Fleet manager** | `fleet` |
+| **Manager** (goal/topic manager) | `worker` |
+| **Worker** | — never claims: a worker does not batch, so it never calls this ledger |
+
+`--layer` is `required` and accepts exactly those two tokens (`LAYERS` in `scripts/asked-ledger.py`). **`--layer manager` is a usage error**, not a third option — argparse exits **2** with `invalid choice: 'manager'`, at the exact moment you are trying to avoid a duplicate ask. The goal/topic manager's value is `worker`: the same token `commands/manager-loop.md` passes to `scripts/notify-gate.py --layer` for that manager's own gate publishing, where `--layer worker` means *every* topic manager in the fleet rather than one manager.
 
 ## The claim contract — the one thing callers must act on
 
