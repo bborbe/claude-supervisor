@@ -194,6 +194,25 @@ class TestVerdict(Base):
             self.assertEqual(rc, self.m.EXIT_CHANGE, subject)
             self.assertNotIn("unresolvable", out)
 
+    def test_a_goal_page_without_page_type_still_resolves(self):
+        """The goal branch keys on the folder, not on `page_type: goal`.
+
+        Measured 2026-09-27 in Personal: 88 of 258 goal pages carried no `page_type: goal`
+        and were therefore unresolvable to this gate *and* to the commands that defer to
+        it, so a third of the goal branch was unreachable. The field bought no
+        discrimination — the convention guides it was meant to reject live outside the
+        folder, and an exact basename match inside it already excludes them.
+
+        Negative control: `test_goal_and_topic_both_resolve` above pins the tagged case
+        and `test_unknown_subject_fails_open` pins a genuinely absent page, so this cannot
+        be satisfied by resolving everything.
+        """
+        self.write("24 Goals/UntaggedGoal.md", GOAL.replace("page_type: goal\n", ""))
+        self.task("UntaggedTask", sid="", goals="UntaggedGoal")
+        rc, out = self.check("UntaggedGoal")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertNotIn("unresolvable", out)
+
     def test_unknown_subject_fails_open(self):
         rc, out = self.check("No Such Subject")
         self.assertEqual(rc, self.m.EXIT_CHANGE)
@@ -279,6 +298,25 @@ class TestFailOpen(Base):
         rc, _ = self.run_gate("--subject", "ATopic", "--save", stdin="   \n")
         self.assertEqual(rc, self.m.EXIT_CHANGE)
         self.assertEqual(self.read_state("ATopic"), before)
+
+    def test_save_on_an_unresolvable_subject_is_change_not_a_crash(self):
+        """`--save` owes the contract its sibling `--check` already honours: an
+        unresolvable subject is a CHANGE verdict (exit 10), never a traceback.
+
+        Nothing can be snapshotted for a subject with no page, so the save cannot
+        happen — but the caller reads a crash as a failure rather than as a verdict to
+        gate on, and a gate that cannot report "changed" re-sweeps the subject forever.
+
+        Negative control: the guard must not be satisfied by refusing every save —
+        `TestStorage.test_save_reports_change_on_success` asserts a resolvable subject
+        still saves, and `test_empty_table_is_refused_and_state_untouched` above pins
+        the other refusal that precedes this one.
+        """
+        rc, out = self.run_gate(
+            "--subject", "No Such Subject", "--save", stdin="Subject: x\n+---+\n"
+        )
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("CHANGE fail-open:", out)
 
 
 class TestStorage(Base):

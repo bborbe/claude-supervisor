@@ -12,9 +12,30 @@ The rule four commands share: `/supervisor:manager-loop`, `/supervisor:manager-s
 VAULT=$(vault-cli config list --output json | python3 -c "import json,sys,os;cwd=os.path.realpath(os.getcwd());print(next((v['name'] for v in json.load(sys.stdin) if os.path.realpath(os.path.expanduser(v['path']))==cwd),''))")
 ```
 
-Every page test below (`24 Goals/`, the vault's `topics_dir`) runs inside that vault. No match → STOP with `❌ cwd is not a configured vault — pass a goal or topic name and run from the vault root`; **never fall back to `personal`**.
+Every page test in § The page test (`24 Goals/`, the vault's `topics_dir`) runs inside that vault. No match → STOP with `❌ cwd is not a configured vault — pass a goal or topic name and run from the vault root`; **never fall back to `personal`**.
 
 ⚠️ **Who runs this paragraph, and who cannot.** `/manager-loop` and `/manager-status` derive the vault from their own `## Resolution` section and skip it. `/manager-drive` has no such section, so it carries the paragraph and runs it — it holds `Bash(python3:*)` and `Bash(vault-cli:*)`. ⚠️ **`/manager-verify` is the third case: it has no `## Resolution` section either, and its 2026-09-20 read-only re-scope trimmed `Bash(python3:*)`, `Bash(mkdir:*)` and `Bash(vault-cli:*)`** — so it can run neither this lookup nor the recording block below. It resolves the vault from cwd through its own literal `24 Goals/` / `23 Topics/` probes, which already assume the vault root, and records nothing. **That is not a regression** — it could never run either block; the extraction only made the gap visible. Its body states both divergences.
+
+## The page test
+
+**Exact basename inside the folder. The folder is the discriminator, not `page_type`.**
+
+```bash
+find "24 Goals" -maxdepth 1 -iname "$SUBJECT.md"       # goal
+find "$TOPICS_DIR" -maxdepth 1 -iname "$SUBJECT.md"    # topic
+```
+
+**`-iname`, never a case-sensitive shell glob.** A plain `ls "23 Topics/"*"$SUBJECT"*.md` is case-sensitive under zsh, so a lowercase argument silently resolves nothing against Title Case filenames (verified 2026-09-12: `*"discord"*.md` → `no matches found`, `*"Discord"*.md` → 5 files). The no-fallback rule then reports an existing page as missing.
+
+**Never a substring glob** (`*$SUBJECT*.md`). A topic's member goals are usually named after it, so a wildcard makes one argument match in both folders — `/manager-loop Sentry` collided with `24 Goals/Sentry Bug Batch 1.md` and `24 Goals/Autonomous Sentry Triage Agent for Octopus.md` (observed 2026-09-17). Under exact matching, two matches inside one folder are impossible by construction.
+
+**`page_type` is required on the topic side only — the asymmetry is measured, not stylistic.** The field was required on both sides to reject the convention guides that describe these page kinds: `Topic Writing Guide.md` carries no `page_type` and shows one inside its YAML template block, so an unscoped grep resolves the guide that *describes* topics as if it were one. Those guides live in the vault's knowledge folder, **outside** both folders, so the scoped `find` above already excludes them. Measured 2026-09-27 in Personal: **88 of 258** goal pages carried no `page_type: goal` and were therefore unresolvable to the pre-dispatch gate *and* to the commands that defer to it — a third of the goal branch unreachable, for a field that bought no discrimination — while **11 of 11** topic pages carried `page_type: topic`. So the goal branch keys on `24 Goals/<name>.md` existing, and only the topic branch additionally requires
+
+```bash
+awk '/^---$/{n++; next} n==1' "<page>" | grep -q '^page_type: topic'
+```
+
+**Both folders match, or neither → STOP.** Print every candidate path (or `no match`) and stop. Never guess between a goal and a topic, and never silently prefer one. A name that matches neither is not tracked — that is the intended pressure.
 
 ## The four sources
 
