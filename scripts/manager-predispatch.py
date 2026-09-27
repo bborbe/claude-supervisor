@@ -304,6 +304,37 @@ def page_type_of(path: str) -> str:
     return fm_scalar(fm, "page_type") if fm else ""
 
 
+# The two directories `resolve_subject` reads. A root holding neither is not a vault this
+# gate can read, and saying so beats reporting every subject as an unresolvable one.
+VAULT_MARKERS = ("24 Goals", "23 Topics")
+
+
+def vault_root_error(vault: str) -> str | None:
+    """-> a message when `vault` is not a vault root, else None.
+
+    A vault NAME is a relative path, so it resolves against the caller's cwd: from the
+    vault's own directory it names nothing and every subject reads as a missing page,
+    while from the vault's parent it silently resolves to whatever `<cwd>/<name>` is.
+    Both are caller errors, and reporting either as an unresolvable *subject* sends the
+    reader hunting for a page that is present on disk. Caught at the boundary so the
+    subject message below stays true to its own words.
+    """
+    if not os.path.isabs(vault):
+        return (
+            f"--vault must be an absolute path: {vault!r} — a relative path (a vault "
+            f"NAME included) resolves against the caller's cwd, so the same call gates a "
+            f"different tree depending on where it runs"
+        )
+    if not os.path.isdir(vault):
+        return f"--vault is not a directory: {vault!r}"
+    if not any(os.path.isdir(os.path.join(vault, m)) for m in VAULT_MARKERS):
+        return (
+            f"--vault is not a vault root: {vault!r} — it holds no "
+            + " or ".join(repr(m) for m in VAULT_MARKERS)
+        )
+    return None
+
+
 def resolve_subject(vault: str, subject: str) -> tuple[str, list[str]]:
     """-> (branch, members). Raises ValueError unless exactly one page resolves.
 
@@ -643,7 +674,9 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="manager pre-dispatch change gate")
     ap.add_argument("--subject", required=True, help="goal or topic name")
-    ap.add_argument("--vault", required=True, help="vault root")
+    ap.add_argument(
+        "--vault", required=True, help="vault root PATH (never the vault name)"
+    )
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="verdict only")
     mode.add_argument(
@@ -653,6 +686,14 @@ def main(argv: list[str]) -> int:
         "--save", action="store_true", help="persist the digest + the table on stdin"
     )
     args = ap.parse_args(argv)
+
+    vault_error = vault_root_error(args.vault)
+    if vault_error:
+        # A usage error is not a verdict. Exit 2 is the code the commands' own branch
+        # already documents as "fix the call; do not read it as changed", so the caller
+        # is told the argument was wrong instead of being handed a fail-open sweep.
+        print(vault_error, file=sys.stderr)
+        return EXIT_USAGE
 
     changed, reason, payload, stored_table = evaluate(args.vault, args.subject)
 
