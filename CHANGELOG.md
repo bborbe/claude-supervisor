@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.59.17
 
 - fix: **the `role: manager` spawn exclusion is now named in the prose that explains it, not only in the code.** `NON_SPAWNABLE_ROLES = frozenset({"human", "manager"})` has been correct since it was written, but the sites that *explain* the exclusion named `role: human` only — so a reader of any of them routed a `role: manager` row to the operator as human work rather than recognising it as a manager-tier act. `agents/manager-drive.md` clause (4) now reads *"A `role: human` or `role: manager` row is never dispatched … **neither role is a spawn target**"*, and its `Held` report shape reads `👤 YOURS (role: human|manager) — not dispatched`. `commands/manager-loop.md`'s guardrail block said *"Human-only work cannot be delegated"* one line above its own correct *"`role: manager` is likewise not a spawn target"* clause, so the block contradicted itself one indent level apart; that line now reads *"A `role: human` row cannot be delegated"*, which is true and no longer implies the exclusion is human-only. ⚠️ **`commands/manager-loop.md:173` / `:177` are deliberately untouched** — they already named both roles and are the model `agents/manager-drive.md` was brought to. Change set: `agents/manager-drive.md`, `commands/manager-loop.md`.
 
