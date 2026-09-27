@@ -66,6 +66,50 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 ⚠️ **Probe the gate loop by the script argument's basename, never by a substring of the command line.** `pgrep -f sweep-gate` matches any process whose argv merely *mentions* the path, and a manager's spawn prompt quotes it — measured 2026-09-22, the substring probe returned **three** pids for one loop, two of them the worker sessions spawned from a prompt naming the script. **The count is transient; the mechanism is not** — re-run hours later those two workers had exited and it returned one, while a bystander process whose argv merely carried the string reproduced the spurious pid on demand. `scripts/stop-probe.py` matches the second argv token's basename against the two known script names, which also fails in the safe direction: a path containing a space mis-splits and the probe under-reports rather than inventing a loop.
 
+## A plugin install does not reach a running session — the probe and the lever
+
+**A plugin command body is read from disk when the session starts, not at each invocation**, so
+installing an updated plugin does not change what a running session executes. It keeps serving
+the body it loaded, indefinitely, with nothing announcing the change. The failure is silent in
+both directions: a session can hand the operator a stale procedure for hours while reporting
+success, and the lever everyone reaches for by default — a full restart — is heavier than the
+job needs.
+
+**The probe: a running session can read which version it loaded.** The harness writes
+`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/.in_use/<pid>` at session start — a
+JSON file `{"pid":<n>,"procStart":"<date>"}` naming the version directory that session holds.
+`CLAUDE_PID` is exported into the session's own Bash, so the directory holding your own pid is
+the version you are serving:
+
+```bash
+ls -d ~/.claude/plugins/cache/claude-supervisor/supervisor/*/.in_use/"$CLAUDE_PID"
+```
+
+Compare that against `installPath` in `~/.claude/plugins/installed_plugins.json`. A version
+directory that is not the installed one means this session predates the install. Measured
+2026-09-27: session pid `83726`, `procStart` `16:13:06Z`, was recorded in
+`0.61.1/.in_use/83726` while the install read `0.62.1` — the plugin moved four versions inside
+that one session, and nothing in the session said so.
+
+**The lever is `/reload-plugins`; a restart is not required.** It reloads plugins, skills
+(including every `commands/` entry), agents, hooks, plugin MCP servers and plugin LSP servers,
+and it re-reads plugins from disk, so it also switches to a new version's cache path. Restart
+only if, after `/reload-plugins`, the served body still cites the old version path. The vault's
+*Claude Code Reload vs Restart Guide* owns the per-artifact-class lever table; this section
+names the lever and points at that table rather than copying it.
+
+⚠️ **Two probes that do not discriminate — both measured 2026-09-27.** The **skill listing**
+cannot tell a stale session from a current one: command frontmatter descriptions are routinely
+unchanged between releases, and all 21 of this plugin's commands were byte-identical across
+three consecutive versions (`diff -rq` over `commands/` and `docs/` → no differences). And the
+**MCP server** is a different artifact class from `commands/*.md` — this plugin's runs from a
+workspace checkout (`bun run --cwd …/claude-supervisor/server`), never from the version-pinned
+cache, so probing it says nothing about the command body. A check that is green on both copies
+is not a check.
+
+**This section is the single statement of the rule.** `docs/session-tiers.md` and the vault's
+*Claude Code Plugin Development Guide* point here; neither restates it.
+
 ## Spawn a worker
 
 **Readiness precondition — author and score the task before any spawn, or the worker's own gate parks.** A task the manager hand-writes usually ships without `# Tasks` and `# Definition of Done`, so the worker's own `plan-task` gate stops and asks the operator to supply the decomposition — inside the worker's pane, as a multi-question wizard that cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced **three 3-question wizards**, nine operator decisions, none of which needed the repo open. So, before spawning:
