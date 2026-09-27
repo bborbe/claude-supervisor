@@ -33,7 +33,7 @@ The default is **fleet-wide and lives in a file**, not in the caller: omit the `
 
 ## How a worker's permission prompt is answered
 
-A **tab worker** answers its own prompts in its tab, so it never appears in `pending_permissions` — steer it with `send_agent_message` or drive its tab by hand.
+A **tab worker**'s prompt never appears in `pending_permissions` (that list holds only this server's headless parks). `agent_status` shows it in `open_cards` (the session's open attention-store cards, each with the `item_id` to answer; null when the store is unreachable). It can be answered from outside its tab: the plugin's `PermissionRequest` hook (`scripts/permission-answer-poll.py`) holds the prompt open and delivers an arm answer (`scripts/attention-answer.py answer <item> --decision allow|deny`) written to its attention-store card. ⚠️ The auto-mode classifier refuses a manager's Bash/Write approval unless the operator authorized it in that conversation — the channel carries the operator's decision, it does not make one. Otherwise steer it with `send_agent_message` or drive its tab by hand.
 
 ⚠️ **`send_agent_message` is tab-only; ordinary cross-session `SendMessage` is not.** A headless worker has no pane for `send_agent_message` to type into, but it *is* reachable mid-task by plain `SendMessage`, in both directions (measured 2026-09-20). Read the limit as *"this tool cannot reach a headless worker"*, never as *"a headless worker cannot be reached"*.
 

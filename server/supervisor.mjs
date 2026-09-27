@@ -29,6 +29,7 @@ import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, readRecord, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
+import { fetchOpenCards } from './open-cards.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
@@ -1099,7 +1100,7 @@ const TOOLS = [
   },
   {
     name: 'agent_status',
-    description: 'One session: status, last assistant message, the current tool call, result, pending permission ids. `current_tool_call` is `{name, input_summary, started_at, held_seconds}` — the call the worker is inside right now and how long it has been held — or null when nothing is in flight; it is read from the worker\'s transcript and is what tells a long tool call apart from a worker parked on a gate. For a tab worker the last message is read from its transcript on disk. `session_status` and `awaiting_input` come from the session registry; `awaiting_input` is null (not false) when the session is not listed, and means "blocked on input" rather than specifically "a permission gate is open".',
+    description: 'One session: status, last assistant message, the current tool call, result, pending permission ids. `current_tool_call` is `{name, input_summary, started_at, held_seconds}` — the call the worker is inside right now and how long it has been held — or null when nothing is in flight; it is read from the worker\'s transcript and is what tells a long tool call apart from a worker parked on a gate. For a tab worker the last message is read from its transcript on disk. `session_status` and `awaiting_input` come from the session registry; `awaiting_input` is null (not false) when the session is not listed, and means "blocked on input" rather than specifically "a permission gate is open". `open_cards` lists the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`) — for a tab worker this is where a live permission prompt shows, since `pending_permissions` covers headless parks only; answer a `permission` card with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) when the store is unreachable or switched off.',
     inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } }, required: ['agent_id'] },
   },
   {
@@ -1235,7 +1236,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case 'agent_status': {
       const agent = agents.get(args.agent_id)
-      return agent ? reply(agentView(agent)) : reply({ error: `unknown agent ${args.agent_id}` })
+      if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
+      // A tab worker's permission prompt never enters the park queue, so
+      // `pending_permissions` is empty for it by construction. Its attention-store cards
+      // are the gate a manager can see — and, via the plugin's PermissionRequest hook,
+      // answer with `attention-answer.py answer <item_id>`. Null = store unreadable/off.
+      const open_cards = await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: agent.sessionId })
+      return reply({ ...agentView(agent), open_cards })
     }
 
     case 'pending_permissions':

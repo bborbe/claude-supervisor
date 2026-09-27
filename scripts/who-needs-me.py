@@ -261,7 +261,17 @@ def needs_source():
         items = store_items()
     except StoreUnreachable:
         SOURCE_NOTE = "store unreachable — reading event log"
-        return load_events()
+        # Stamp every row this fallback produced, so the ROW says where it came from.
+        # The note above is printed once, before any row, and every row then renders
+        # through the same `row()` a live read uses — so a manager could not tell a
+        # replayed gate from a live one and acted on gates answered hours ago.
+        # Measured 2026-09-27: a 7 s store read against this reader's 3 s timeout
+        # rendered 18 rows where the live store held 2, and no row said which read
+        # produced it. `row()` renders this stamp.
+        replayed = load_events()
+        for rec in replayed:
+            rec["replayed"] = True
+        return replayed
     SOURCE_NOTE = None
     events = {r.get("item_id"): r for r in load_events()}
     out = []
@@ -1128,7 +1138,13 @@ def row(rec, pmap, what, registry=None):
         answer = answer_handover(rec)
         if answer:
             jump = f"{jump}\n         {answer}"
-    return (f"  [{pane or '?':>4}] {age(rec['ts']):>6}  "
+    # A replayed row says so ON THE ROW, in the scan position a manager reads first.
+    # The marker is EMPTY when the store answered, so a live read renders
+    # byte-identically to what it always did — the no-regression requirement is that
+    # a responsive store's output is unchanged, and a marker that was always present
+    # would fail it. `replayed` is set by `needs_source()` on the fallback branch.
+    mark = "⟳replay  " if rec.get("replayed") else ""
+    return (f"  [{pane or '?':>4}] {age(rec['ts']):>6}  {mark}"
             f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
             f"         {provenance_of(rec)}\n"
             f"         {jump}")
