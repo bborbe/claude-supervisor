@@ -278,6 +278,19 @@ def needs_source():
     for item in items:
         rec = normalize_store_item(item, events)
         if rec is not None:
+            # ⚠️ Mark the row as STORE-VOUCHED. The store resolves the producer's
+            # liveness server-side and drops dead askers as a side effect of this very
+            # read (`store_items()`), so a row that came back from it has ALREADY had
+            # its liveness decided — by the component that owns that question, with a
+            # better signal than this reader has. `quiet_session_ids()` reads this flag
+            # and declines to re-decide it. The flag exists because the reader's own
+            # re-judgment was wrong for exactly the class this feed protects: a session
+            # blocked on a gate writes nothing, so its transcript ages past
+            # `LIVE_WINDOW`, so the reader called it `provably finished` and dropped
+            # the row the operator was being waited on. Measured 2026-09-28 on pane
+            # 2555: row rendered 09:46:48, gone 09:51:48, back 10:01:49 — while the
+            # store held its open item throughout.
+            rec["store_vouched"] = True
             out.append(rec)
     # The store carries only the kinds the watcher pushes — `permission` and
     # `question`. `idle` is not one of them, and it is not dead weight: the
@@ -544,13 +557,51 @@ def quiet_session_ids(records, live_ids):
 
     `live_ids=None` means the registry could not be read; that cannot prove anything
     dead, so nothing is quiet.
+
+    ⚠️ **A STORE-VOUCHED session is never quiet, and that is the whole correction.**
+    `store_items()` resolves the producer's liveness **server-side** and drops dead
+    askers as a side effect of the read, so a row that came back from a healthy store
+    read has **already had its liveness decided** — by the component that owns that
+    question. Re-deciding it here is not a second opinion; it is a **worse** one, and
+    it is wrong for precisely the class this feed exists to protect: a session blocked
+    on a gate writes nothing, so its transcript ages past `LIVE_WINDOW`, so the reader
+    called it `provably finished` and **dropped the row the operator was being waited
+    on** — the ask disappearing *because* nobody answered it. Measured 2026-09-28 on
+    pane 2555: the row rendered at 09:46:48, `+LIVE_WINDOW` put its transcript stale
+    at ~09:51, the row was gone at 09:51:48, and it returned at 10:01:49 once the
+    session wrote again — while the store held its open item throughout. That is
+    [[Liveness Checks Are Not Completion Checks]] § *A Liveness Signal the Watched
+    Thing Must Maintain Fails for the Class That Is Blocked*. A larger `LIVE_WINDOW`
+    only moves the cliff; re-judging a vouched row is the defect.
+
+    ⚠️ **The clause must NOT be widened to "a session holding an open gate is never
+    quiet".** That was tried first and the repo's own tests disprove it:
+    `test_dead_session_with_live_pane_is_not_rendered` asserts that a session which is
+    absent from the registry with a stale transcript and an open gate record must **not**
+    render — and that record *is* an open gate by the text-only rule. **Blocked-live
+    and dead are identical under registry-absence plus transcript-staleness**, so no
+    predicate built on those two signals can separate them; only the store's own
+    verdict can, which is why the flag above carries it. Do not re-propose the wider
+    clause — it fails the same two tests.
+
+    ⚠️ **The unvouched path keeps the old rule unchanged**, which is what keeps the
+    orphan protection intact: rows from the log fallback (`replayed`) and the
+    log-sourced `idle` promotions were never liveness-filtered by anything, so for
+    them registry-absence plus staleness is still the best signal available.
     """
     if live_ids is None:
         return set()
+    vouched = {
+        rec.get("session_id")
+        for rec in records
+        if rec.get("session_id") and rec.get("store_vouched")
+    }
     quiet = set()
     for rec in records:
         sid = rec.get("session_id")
         if not sid or sid in live_ids:
+            continue
+        if sid in vouched:
             continue
         if session_transcript_age(sid) > LIVE_WINDOW:
             quiet.add(sid)
