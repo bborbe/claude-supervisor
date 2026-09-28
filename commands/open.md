@@ -82,7 +82,7 @@ vault-cli config list --output json    # → claude_script, session_project_dir,
 ```
 
 - **`topics_dir`** — use the vault's value, defaulting to `23 Topics`. A vault without a topics folder (Brogrammers) simply never resolves a topic; that is correct, not a failure — say so if a topic was asked for.
-- **`claude_script`** — the vault's own launcher. `personal` → `cc-personal-deepseek`, `brogrammers` → `cc-brogrammers-deepseek`. Never carry one vault's script into another.
+- **`claude_script`** — the vault's own launcher. `personal` → `cc-private-deepseek`, `brogrammers` → `cc-seibert-deepseek`. Never carry one vault's script into another.
 - **`session_project_dir`** — the new tab's start dir. It is **absent** for `personal` and `brogrammers`, and points at `Personal` for several sibling vaults; the `cc-*` launchers `cd` into their own vault themselves, so an absent value is fine — pass no `cd`.
 
 ## Step 0.5 — Flagged batch branch (`--flagged`)

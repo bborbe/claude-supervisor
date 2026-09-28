@@ -80,7 +80,7 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
 ```json
 {
   "session_id": "b26cb46e-…", "agent_id": "agent_1", "label": "ledger-drill-tab",
-  "mode": "interactive", "launcher": "…/cc-personal-deepseek", "pane_id": "1714",
+  "mode": "interactive", "launcher": "…/cc-private-deepseek", "pane_id": "1714",
   "resumed_from": null, "policy": null, "parent_session": "0096a027-…",
   "spawned_at": "2026-09-14T06:10:31.153Z", "ended_at": null,
   "status": "running", "result": null
