@@ -440,6 +440,41 @@ class OrphanLiveness(unittest.TestCase):
         self.assertEqual(q, {self.DEAD})
         self.assertFalse(wnm.is_live(rec, {"7": {}}, q))
 
+    def test_store_vouched_session_is_never_quiet(self):
+        """The correction: a row the STORE vouched for is not re-judged here.
+
+        The store resolves producer liveness server-side and drops dead askers as a
+        side effect of the read, so a row that came back from it has ALREADY had its
+        liveness decided -- by the component that owns that question, with a better
+        signal than this reader has. Re-deciding it on transcript staleness is a
+        *worse* opinion, and it is wrong for exactly the class this feed protects: a
+        session blocked on a gate writes nothing, so its transcript ages past
+        LIVE_WINDOW, so the reader called it `provably finished` and dropped the row
+        the operator was being waited on -- the ask vanishing BECAUSE nobody answered
+        it. Measured 2026-09-28 on pane 2555: row present 09:46:48, absent 09:51:48,
+        back 10:01:49, while the store held its open item throughout.
+        """
+        rec = self.rec(self.DEAD)
+        rec["store_vouched"] = True
+        q = self.quiet([rec], [], {self.DEAD: 10 * 3600})
+        self.assertEqual(q, set())
+        self.assertTrue(wnm.is_live(rec, {"7": {}}, q))
+
+    def test_unvouched_row_keeps_the_orphan_rule(self):
+        """The protection the correction must NOT break -- same shape, no voucher.
+
+        A log-fallback row was never liveness-filtered by anything, so registry
+        absence plus staleness is still the best signal available and the orphan must
+        still be dropped. ⚠️ Widening the correction to "a session holding an open
+        gate is never quiet" fails this test and the one above it -- that was the
+        first attempt, and blocked-live and dead are indistinguishable under these
+        two signals alone. Only the store's own verdict separates them.
+        """
+        rec = self.rec(self.DEAD)
+        q = self.quiet([rec], [], {self.DEAD: 10 * 3600})
+        self.assertEqual(q, {self.DEAD})
+        self.assertFalse(wnm.is_live(rec, {"7": {}}, q))
+
     def test_live_session_with_live_pane_is_rendered(self):
         """SC2, the asymmetry: a fix that drops every unmatched open fails here."""
         rec = self.rec(self.LIVE)
