@@ -22,7 +22,7 @@ The command **resolves** and **dispatches**. It never does the work, never runs 
 
 ```
 /supervisor:open <name>
-  ├─ task   → live pane? jump · has claude_session_id? resume · else readiness gate (Step 1.5) → spawn
+  ├─ task   → live pane? jump · has claude_session_id? resume · else spawn gates (Step 1.5: approval, then readiness) → spawn
   ├─ goal   → resolve to its active task, then the task branch
   └─ topic  → live manager-loop? jump · else spawn /supervisor:manager-loop
 
@@ -230,7 +230,7 @@ FLAGGED BATCH — <vault> — <date> — <n> tasks
 Opened N · filled F fields · skipped H (human) · refused U (undecidable) · held K (blocked).
 ```
 
-**Readiness-gate every CREATE-bound row first, concurrently.** Before the loop, find the rows that would take Step 2A's CREATE branch — `role: agent`, no live pane, no `claude_session_id` — and dispatch Step 1.5's readiness sub-agent for **all of them in ONE message** (one `Agent` call per row, parallel). Resume/jump-bound rows, `role: human` (→ DIRECT) rows, and `task_type:` pipeline rows (§ Step 1.5) are not gated. Add a `readiness` column to the table: `✅ ready 9/10`, `⛔ NOT READY 7/10` with the gap bullets under the row, or `— (resume/jump/direct)`. A not-ready row is **held, never opened**, and counted in the footer: `… · not ready R (readiness)`. The per-row `/supervisor:open` below reuses this verdict — it does not re-gate a row the batch already gated in this run.
+**Readiness-gate every CREATE-bound row first, concurrently.** Before the loop, find the rows that would take Step 2A's CREATE branch — `role: agent`, no live pane, no `claude_session_id` — and dispatch Step 1.5's readiness sub-agent for **all of them in ONE message** (one `Agent` call per row, parallel). Resume/jump-bound rows, `role: human` (→ DIRECT) rows, and `task_type:` pipeline rows (§ Step 1.5) are not gated. Add a `readiness` column to the table: `✅ ready 9/10`, `⛔ NOT READY 7/10` with the gap bullets under the row, or `— (resume/jump/direct)`. A not-ready row is **held, never opened**, and counted in the footer: `… · not ready R (readiness)`. The per-row `/supervisor:open` below reuses this verdict — it does not re-gate a row the batch already gated in this run. ⚠️ **Gate 1 does not apply to this batch, and that exemption is the operator's ruling, not an omission** — `flag: true` on a `todo` row **is** the approval for `--flagged` only (ruled 2026-09-28), so a flagged `todo` row is **opened**, never refused here. The batch runs **Gate 2 only**. See § Step 1.5 Gate 1 for the ruling and its unenforced half.
 
 **Loop the eligible rows in the printed stable order** and delegate each to this command's own single-task path — the exact Step 2A resolution (live pane → JUMP, `claude_session_id` → RESUME, else CREATE + spawn). Invoke `/supervisor:open "<task>"` per row; never reimplement jump / resume / spawn here, and never pass a mode override to the fleet. The row's `role` is now on disk, so § 3.0 reads it back from frontmatter like any other task — the batch does not hand it forward in memory, which is what makes the write in Step 0.6 load-bearing rather than bookkeeping.
 
@@ -260,9 +260,33 @@ Then:
 - **more than one** → print each match with its type and STOP; tell the operator to re-run with `--task` / `--goal` / `--topic`. Goal and task titles are not namespaced in these vaults, so collisions are real — never guess, and never silently prefer one type
 - **no match** → print the closest candidates (`vault-cli task search` / `goal search`) and STOP. Never create anything from an unmatched name
 
-## Step 1.5 — Readiness gate (CREATE branch only)
+## Step 1.5 — Spawn gates (CREATE branch only)
 
-**The single home of `/supervisor:open`'s spawn precondition.** Step 2A's CREATE branch and the `--flagged` batch (Step 0.6) both reference this section; neither restates it. Added 2026-09-23 after `/supervisor:open --flagged` spawned 10 workers with no pre-spawn audit and 6 of 10 sat on a planning question within 6 minutes — the fleet manager already gated its own spawn sites at task-auditor 9/10 ([[Every Spawn Site Carries the Readiness Precondition at One Bar]]); `/supervisor:open` was the uncovered site.
+**The single home of `/supervisor:open`'s spawn preconditions.** Step 2A's CREATE branch and the `--flagged` batch (Step 0.6) both reference this section; neither restates it. Added 2026-09-23 after `/supervisor:open --flagged` spawned 10 workers with no pre-spawn audit and 6 of 10 sat on a planning question within 6 minutes — the fleet manager already gated its own spawn sites at task-auditor 9/10 ([[Every Spawn Site Carries the Readiness Precondition at One Bar]]); `/supervisor:open` was the uncovered site.
+
+Two gates run here, in this order. The first asks whether the row may be opened at all; the second asks whether its plan is good enough to hand to a worker. **A row that fails the first is never probed by the second** — auditing an unapproved row spends work on a decision the operator has not made.
+
+### Gate 1 — approval (`phase: todo` refuses)
+
+Read the resolved row's phase from the CLI, never from a frontmatter grep:
+
+```bash
+vault-cli --vault "<vault>" task get "<task>" phase
+```
+
+`phase: todo` means **the operator has not approved this row.** `vault-cli task approve` is the only thing that moves `todo → planning` and writes `approved_by` / `approved_at` in the same storage call; without that record the row is the operator's to approve, not ours to open. Print and STOP — **spawn nothing**, do not run Gate 2, do not write to the task:
+
+```
+⛔ NOT APPROVED — <task> is at phase: todo.
+   The operator approves it first:  vault-cli task approve "<task>"
+   Then re-run:                     /supervisor:open "<task>"
+```
+
+⚠️ **Never add the approval yourself, and never read a `flag: true` as one here.** This gate exists because a worker spawned on an unapproved row reaches the approval question itself and hands the operator a pane-bound `you run: vault-cli task approve …` — the pane-bound approval the attention board exists to remove. Measured twice on 2026-09-28 ([[Workers Open on Unapproved Tasks and Then Ask the Operator to Approve From Their Pane]]).
+
+⚠️ **The `--flagged` batch is exempt from Gate 1, by the operator's ruling of 2026-09-28.** `flag: true` on a `todo` row **is** the approval for `/supervisor:open --flagged` only: the batch **opens** such a row rather than refusing it. The exemption does **not** extend to the four sweeps (`manager-loop`, `manager-drive`, `fleet-loop`, `fleet-drive`), which report `todo` rows instead of acting on them. ⚠️ Nothing in the code distinguishes an operator-set flag from an agent-set one — that half of the ruling is enforced by convention, not by a field; the missing field is tracked by [[An Agent-Set Flag True Bypasses the Approval Gate and Nothing Detects It]].
+
+### Gate 2 — readiness
 
 **Scope: CREATE only.** JUMP and RESUME are never gated — a live or resumable session already exists, and gating it would strand work mid-flight. `role: human` rows opened into Direct are not gated either — the operator drives them. **Rows carrying a `task_type:` frontmatter field are exempt** — pipeline-emitted tasks (e.g. `sentry-issue-analyzer`) take their agent contract from `task_type`, not from page sections, so the auditor refuses the whole class for lacking `# Success Criteria` / `# Tasks` (measured 2026-09-23: 3/10). Show `— (pipeline contract)` in the readiness column. Decided by the operator 2026-09-23.
 
@@ -312,7 +336,7 @@ Then take exactly one branch:
 
    **Jump via `/supervisor:jump`, never a raw `wezterm cli activate-tab` line** — same rule every manager command now carries. `activate-tab` **cannot cross windows**: called from another window it succeeds and nothing visibly moves, so a silent no-op reads as a successful jump. A tab id is also **renumbered when its tab moves windows**, so a handed-over `--tab-id` goes dead within the hour (2026-09-18: three spawned workers routed as tabs 158/159/160 in window 0 became 163/164/165 in window 2, and `activate-tab --tab-id 159` failed outright with *"could not determine which pane should be active"* while `activate-pane --pane-id 239` worked immediately). `/supervisor:jump` resolves the coordinate at run time from `wezterm cli list`, prints the window id so a cross-window no-op is legible, and takes a **pane id** — the more stable of the two handles. Neither namespace survives a WezTerm restart, so re-resolve after one.
 2. **No live pane, `PRIOR_SID` present → RESUME** in a new tab (Step 3).
-3. **Neither → CREATE**, then resume in a new tab — **only after Step 1.5's readiness gate returns ready** (or the `--flagged` batch already gated this row ready in this run). Not ready → print the gaps and STOP; no spawn.
+3. **Neither → CREATE**, then resume in a new tab — **only after Step 1.5's spawn gates clear: Gate 1 (approval), then Gate 2 (readiness)** (or the `--flagged` batch already gated this row ready in this run). A `phase: todo` row stops at Gate 1 with `⛔ NOT APPROVED`; a row that clears Gate 1 but fails Gate 2 prints its gaps. Either way: STOP, no spawn.
 
    **The caller mints nothing.** Spawn via Step 3's create branch — which hands the work prompt to the worker as an *argument*, so the **worker runs its own planning turn and creates its own session**. The caller returns as soon as the spawn returns; it never runs a planning turn, never waits on one, and never reads a `session_id` out of it. A session id is not needed to start the worker: the worker is the thing that creates it.
 
