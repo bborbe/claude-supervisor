@@ -30,7 +30,7 @@ function withDir(fn) {
 const spawnRecord = (over = {}) =>
   buildRecord({
     sessionId: SESSION, agentId: 'agent_1', label: 'drill', mode: 'interactive',
-    cwd: '/tmp', launcher: 'cc-personal-deepseek', paneId: '1711', ...over,
+    cwd: '/tmp', launcher: 'cc-private-deepseek', paneId: '1711', ...over,
   })
 
 test('buildRecord carries the spawn edge and starts with no outcome', () => {
