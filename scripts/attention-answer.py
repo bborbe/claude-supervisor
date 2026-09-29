@@ -48,6 +48,7 @@ refusal is the whole guard -- it is what keeps this arm from becoming a path
 that settles an irreversible prompt without an operator-supplied decision.
 
 Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision allow|deny]
+     python3 attention-answer.py attempt ITEM_ID --outcome delivered|failed [--by ARM]
 """
 
 import argparse
@@ -231,6 +232,46 @@ def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdo
     return 0
 
 
+def post_attempt(item_id, carrier, outcome):
+    """Record what this arm observed about the delivery attempt.
+
+    ⚠️ Called AFTER the delivery step, never at answer time. An attempt is a
+    fact about the carrier: recording it where the answer is recorded would make
+    every answer read as attempted, which is the defect the delivery trail
+    exists to close. The store stamps `attempted_at` from its own clock, so an
+    arm cannot date its own attempt.
+    """
+    body = {"carrier": carrier, "outcome": outcome}
+    req = urllib.request.Request(
+        f"{STORE}/api/1.0/attention/{item_id}/attempt",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
+        return json.load(resp)
+
+
+def cmd_attempt(item_id, carrier, outcome, out=sys.stdout):
+    """Record the outcome of a delivery this arm attempted.
+
+    The outcome is refused rather than defaulted, on the same reasoning
+    `--decision` carries: neither value is safe to assume. A default of
+    `delivered` would record a success nobody observed, and a default of
+    `failed` would record a failure nobody observed — and both would be
+    indistinguishable, downstream, from a real measurement.
+    """
+    if outcome not in ("delivered", "failed"):
+        print(
+            f"REFUSED: --outcome must be delivered or failed, got {outcome!r}",
+            file=out,
+        )
+        return 1
+    post_attempt(item_id, carrier, outcome)
+    print(f"ATTEMPT: {item_id} {outcome} by {carrier}", file=out)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -242,11 +283,20 @@ def main(argv=None):
     # verdict on the caller's behalf, and the refusal belongs to this script so
     # its wording stays testable rather than becoming an argparse usage dump.
     ans.add_argument("--decision", default="")
+    att = sub.add_parser("attempt")
+    att.add_argument("item_id")
+    att.add_argument("--by", default=DEFAULT_ARM)
+    # Same rule as --decision: no `choices=` and no default, so argparse cannot
+    # record an outcome the caller never observed. The refusal belongs to this
+    # script so its wording stays testable.
+    att.add_argument("--outcome", default="")
     args = parser.parse_args(argv)
     registry = load_registry()
     try:
         if args.cmd == "next":
             return cmd_next(registry)
+        if args.cmd == "attempt":
+            return cmd_attempt(args.item_id, args.by, args.outcome)
         return cmd_answer(args.item_id, args.by, registry, decision=args.decision)
     except urllib.error.HTTPError as err:
         print(f"FAILED: store returned {err.code}")

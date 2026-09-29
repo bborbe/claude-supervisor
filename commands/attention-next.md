@@ -30,6 +30,26 @@ Print the output verbatim, then stop. Each item shows its `item_id`, its questio
    - `LOST:` → do **not** send; another arm already answered. Report it.
    - `REFUSED:` / `FAILED:` → report the line verbatim; do not send.
 
+3. **Record the attempt — this command is the arm that ATTEMPTS delivery, so this is where the trail is written.** Run exactly:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-answer.py attempt <ITEM_ID> --outcome delivered|failed
+   ```
+
+   Which outcome, per the branch taken above:
+
+   | Branch above | Outcome | Why |
+   |---|---|---|
+   | `TARGET:` and `SendMessage` returned without error | `delivered` | The answer reached the session. |
+   | `TARGET:` and `SendMessage` **errored** | `failed` | A carrier looked and could not deliver. |
+   | `UNDELIVERABLE: <reason>` | `failed` | The attempt failed at target resolution; nothing was sent. |
+   | `DELIVERY: supervisor poll` | **nothing** | The supervisor server delivers the verdict and records its own attempt. Posting here would record an attempt by an arm that delivered nothing. |
+   | `LOST:` / `REFUSED:` / `FAILED:` | **nothing** | No attempt happened — another arm won the compare-and-set, or the answer was refused before any delivery was tried. ⚠️ Recording `failed` here would claim a carrier tried and could not deliver, which is a different and false statement. |
+
+   ⚠️ **Never record at answer time.** An attempt is a fact about the carrier, so writing it where the *answer* is recorded would make every answer read as attempted — the exact defect this trail exists to close. The store stamps the attempt's time from its own clock, so this command cannot date its own attempt.
+
+   ⚠️ **Requires attention-controller ≥ `v0.30.0`**, which adds the attempt endpoint. Against an older store the `attempt` call fails with `FAILED:`; that is a missing endpoint, not a failed delivery, so report it as such and do not retry the delivery.
+
 The store is written **before** the message is sent, and only the arm that wins the store's compare-and-set sends — so two arms answering the same item deliver exactly one answer. Never retry a `LOST`, and never guess a recipient for an `UNDELIVERABLE` item: a bare name shared by two sessions reaches the wrong one.
 
 Only the operator's own words go into `ANSWER`. This command relays an operator answer; it is not a channel for a manager's own decisions. A `permission` item is answered here with an **explicit verdict** and is delivered by the **supervisor server polling the store**, never by this command — a relay is permission laundering even when the action looks small, so this command never messages a session about a permission item.
