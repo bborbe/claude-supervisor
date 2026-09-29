@@ -6,7 +6,7 @@ Audience split follows `coding/docs/readme-guide.md`: README answers *"can a new
 
 ## Session tiers
 
-Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `manager-*` for a goal/topic manager, `worker-*` for a worker; `jump`, `who-needs-me` and `read-guides` are cross-tier. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
+Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `manager-*` for a goal/topic manager, `worker-*` for a worker; `jump`, `who-needs-me`, `read-guides`, `attention-next` and `ready` are cross-tier. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
 
 ## How it works
 
@@ -120,6 +120,7 @@ commands/worker-restart.md                       restart ONE named worker — ki
 scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
 scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
 commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)
+commands/ready.md                                ready ONE named task to the bar, then open it (cross-tier)
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)

@@ -2,8 +2,9 @@
 
 Every `/supervisor:*` command belongs to the tier of the session that invokes it, and its
 prefix names that tier: `fleet-*` for the fleet manager, `manager-*` for a goal/topic manager,
-`worker-*` for a worker. Two bare verbs are cross-tier. Ask one question — *which session am I
-in?* — and the table below answers what you may run.
+`worker-*` for a worker. A few bare verbs are cross-tier — **the table below is the list**, so it
+is never restated here. Ask one question — *which session am I in?* — and the table answers what
+you may run.
 
 ⚠️ **One command breaks the prefix rule, and it is named in the table so it cannot be
 mistaken for an oversight: `/supervisor:worker-restart`.** Its prefix names its **target**,
@@ -52,6 +53,7 @@ other side.
 | `/supervisor:jump` | any | — |
 | `/supervisor:who-needs-me` | any | — |
 | `/supervisor:attention-next` | any — relays the operator's own answer | — |
+| `/supervisor:ready` | any — readies ONE named task to the spawn bar (audit → repair → re-audit in a sub-agent), then opens it or escalates | — |
 
 Keep this table in lockstep with `commands/`: a command file with no row here, or a row with
 no command file, is a defect. Check it with:
