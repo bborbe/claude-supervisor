@@ -140,7 +140,7 @@ The `Subject:` line leads so a mis-resolution is visible before the table render
    BUCKETS
    ```
 
-   It prints the path it wrote and refuses a malformed set rather than staging one that cannot gate. **Every declared bucket must appear**, each mapping to a non-empty list of names — a single bucket, or a bucket mapped to a count, does not satisfy the half.
+   It prints the path it wrote and refuses a malformed set rather than staging one that cannot gate. **Every declared bucket must appear**, each mapping to a non-empty list of names — a single bucket, a bucket mapped to a count, **or a bucket mapped to an empty list** does not satisfy the half. ⚠️ **The empty list is the case that got through:** `all(...)` over `[]` is vacuously true, so an all-empty set passed the check whose message says "non-empty", staged at exit 0 and was saved — measured 2026-09-28.
 
    ```bash
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --save --buckets "<the path --write-buckets printed>"

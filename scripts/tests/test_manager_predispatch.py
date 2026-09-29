@@ -534,6 +534,60 @@ class TestTrackedArtifacts(Base):
         rc, _ = self.buckets("ATopic", {})
         self.assertEqual(rc, self.m.EXIT_USAGE)
 
+    def test_write_buckets_refuses_a_bucket_mapped_to_an_empty_list(self):
+        """The vacuous-truth hole. `all(...)` over `[]` is True, so `{"done": []}` passed
+        the very check whose message says "must map to a non-empty list of names" — and an
+        all-empty set is precisely the shape that cannot gate, so it staged at exit 0 and
+        `--save` wrote it, holding the drive leg's whole ready batch at clause (0)."""
+        rc, _ = self.buckets("ATopic", {"done": []})
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_write_buckets_refuses_one_empty_bucket_among_full_ones(self):
+        """The mixed case: a single empty bucket is enough to poison the half, and it is
+        the shape a column-0 mis-parse produces — every declared bucket present, each one
+        empty, so the set *looks* structurally valid."""
+        rc, _ = self.buckets("ATopic", {"done": ["ATask"], "problem": []})
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_a_corrected_restage_lands_on_an_unchanged_tree(self):
+        """The no-heal, and the negative control for it. `digest_of` covers the tracked set
+        only, so a corrected set staged against an unchanged tree used to return
+        `SAVED no-change (digest equal)` at exit 0 and never reach the store — leaving the
+        bad record in place until the tree next moved. The bucket half is now a save input
+        in its own right, so the second save below writes even though the digest is equal.
+        """
+        rc, out = self.buckets("ATopic", {"done": ["ATask"]})
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out = self.run_gate(
+            "--subject", "ATopic", "--save", "--buckets", out.strip(), stdin="t\n"
+        )
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertEqual(
+            json.loads(self.read_state("ATopic"))["bucket_sets"], {"done": ["ATask"]}
+        )
+
+        # Same tree, corrected classification: the digest is equal, the half moved.
+        rc, out = self.buckets("ATopic", {"done": ["ATask"], "problem": ["AGoalTask"]})
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out = self.run_gate(
+            "--subject", "ATopic", "--save", "--buckets", out.strip(), stdin="t\n"
+        )
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertEqual(
+            json.loads(self.read_state("ATopic"))["bucket_sets"],
+            {"done": ["ATask"], "problem": ["AGoalTask"]},
+        )
+
+    def test_a_save_with_no_buckets_on_an_unchanged_tree_still_writes_nothing(self):
+        """The other side of the same decision, so the new clause cannot pass by writing
+        unconditionally: with no `--buckets` and an equal digest, the record is untouched —
+        the documented no-change contract, which is correct and must survive."""
+        self.save("ATopic")
+        before = self.read_state("ATopic")
+        rc, out = self.run_gate("--subject", "ATopic", "--save", stdin="t\n")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertEqual(self.read_state("ATopic"), before)
+
     def test_save_records_the_bucket_sets_under_the_key(self):
         rc, out = self.buckets(
             "ATopic", {"done": ["ATask"], "ready-to-start": ["AGoalTask"]}

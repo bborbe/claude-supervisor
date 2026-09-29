@@ -55,8 +55,17 @@ So: same contract, different surface. This gate owns its own store, and the two 
 disagree about a tree because they hash the same inputs.
 
 Exit codes (same three the loop gate uses)
-  0   digest equal to the stored one — nothing changed, dispatch no agent
-  10  digest differs, OR any fail-open case fired — run the full sweep
+  0   digest equal to the stored one AND no moved bucket set — nothing changed, dispatch
+      no agent
+  10  digest differs, OR a staged bucket set differs from the stored one, OR any fail-open
+      case fired — run the full sweep
+
+      The per-bucket half is a save input in its own right, not a passenger on the digest:
+      `digest_of()` covers the tracked set only, so a corrected re-stage against an
+      unchanged tree used to return 0 and be discarded — leaving a bad `bucket_sets` in
+      the store until the tree next moved. `--save` therefore also writes when the staged
+      set differs from `stored_bucket_sets`. The digest itself is unchanged by this: it
+      stays a pure function of the tracked set.
   2   usage error
 
 Fail-open, by design
@@ -762,6 +771,12 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
         "tracked": tracked,
         "busy": busy,
         "recorded_at": prev.get("recorded_at", ""),
+        # The per-bucket half as it stands in the record, so `--save` can tell a freshly
+        # staged classification from the one already stored. It is deliberately NOT folded
+        # into `digest_of`: that function's contract is "what the sweep would render", a
+        # pure function of the tracked set, and a caller-supplied argument has no business
+        # moving it. The comparison lives at the save decision instead — see `--save`.
+        "stored_bucket_sets": prev.get("bucket_sets"),
     }
     return changed, reason, payload, stored_table
 
@@ -871,8 +886,16 @@ def main(argv: list[str]) -> int:
             print("bucket sets must be a non-empty JSON object", file=sys.stderr)
             return EXIT_USAGE
         for bucket, names in parsed.items():
-            if not isinstance(names, list) or not all(
-                isinstance(n, str) and n.strip() for n in names
+            # `not names` is load-bearing, not redundant with the element check below:
+            # `all(...)` over an EMPTY list is vacuously True, so without it `{"b": []}`
+            # passes the very check whose message says "non-empty". Measured 2026-09-28:
+            # an all-empty set was staged at exit 0 and saved, holding the drive leg's
+            # whole ready batch at clause (0) until the tree next changed — and because
+            # `digest_of` omitted `bucket_sets`, a corrected re-stage could not heal it.
+            if (
+                not isinstance(names, list)
+                or not names
+                or not all(isinstance(n, str) and n.strip() for n in names)
             ):
                 print(
                     f"bucket {bucket!r} must map to a non-empty list of names",
@@ -1047,7 +1070,17 @@ def main(argv: list[str]) -> int:
                     file=sys.stderr,
                 )
                 return EXIT_USAGE
-        if changed:
+        # The bucket half is a save input in its own right, not a passenger on the digest.
+        # `digest_of` covers the tracked set only, so a tick whose tree did not move reports
+        # `digest equal` and used to write nothing at all — discarding a freshly staged,
+        # *correct* classification and leaving a corrected re-stage unable to heal a bad
+        # record. Measured 2026-09-29 on the Attention Routing loop: a correct 21/4/89 set
+        # was staged, `--save` returned `SAVED no-change (digest equal)` at exit 0, and the
+        # store kept the previous tick's sets, missing a task filed that minute.
+        buckets_moved = bucket_sets is not None and bucket_sets != payload.get(
+            "stored_bucket_sets"
+        )
+        if changed or buckets_moved:
             try:
                 save_stored(
                     args.subject,
@@ -1062,7 +1095,7 @@ def main(argv: list[str]) -> int:
             except OSError as exc:
                 print(f"fail-open: could not record state ({exc})", file=sys.stderr)
                 return EXIT_CHANGE
-            print(f"SAVED {reason}")
+            print(f"SAVED {reason if changed else 'bucket sets differ'}")
             return EXIT_CHANGE
         print(f"SAVED no-change ({reason})")
         return EXIT_NOCHANGE
