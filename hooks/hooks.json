@@ -1,0 +1,17 @@
+{
+  "description": "Carry an attention-store answer into a live permission prompt, so a manager can relay the operator's decision without the operator opening the worker's tab. Fail-open: an unanswered prompt stays for the human. Kill switch: SUPERVISOR_PERMISSION_POLL=off.",
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/permission-answer-poll.py"],
+            "timeout": 590
+          }
+        ]
+      }
+    ]
+  }
+}

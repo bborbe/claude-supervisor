@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "note": "Declarative approval policy, consumed by supervisor.mjs through the PermissionRequest hook. 'allow' and 'deny' answer the worker directly; 'escalate' defers to canUseTool, which parks the request for the manager. Set SUPERVISOR_PERMISSION_LOG=<path> to append every request as JSONL — the escalated ones are what to promote into rules here.",
+  "rules": [
+    { "tool": "Read",  "match": "*",      "action": "allow" },
+    { "tool": "Glob",  "match": "*",      "action": "allow" },
+    { "tool": "Grep",  "match": "*",      "action": "allow" },
+    { "tool": "Write", "match": "cwd",    "action": "allow" },
+    { "tool": "Edit",  "match": "cwd",    "action": "allow" },
+    { "tool": "Bash",  "match": "rm -rf", "action": "deny" },
+    { "tool": "*",     "match": "*",      "action": "escalate" }
+  ]
+}

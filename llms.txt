@@ -1,0 +1,53 @@
+# claude-supervisor
+
+An MCP server + Claude Code plugin that lets one manager session spawn worker sessions and answer their permission prompts.
+
+## What it provides
+
+- MCP server `supervisor` with tools: spawn_agent, send_agent_message, list_agents, agent_status, pending_permissions, await_permission, answer_permission
+- Slash commands: /supervisor:manager-spawn, /supervisor:fleet-workers, /supervisor:manager-answer, /supervisor:manager-drain
+- Session-finding commands: /supervisor:jump, /supervisor:who-needs-me (scripts/jump.py, scripts/who-needs-me.py; each resolves its location via ${CLAUDE_PLUGIN_ROOT} with a ~/.claude fallback)
+- Attention-stack answering arm: /supervisor:attention-next (scripts/attention-answer.py) — lists open items, answers one via POST /api/1.0/attention/{id}/answer, routes it to the asker by SendMessage
+- docs/fleet-surface.md is the canonical home for the spawn shape and the fleet table render spec
+- Jump handover: the manager commands emit each pane's jump target as `scripts/jump-link.py <pane-id>` — a clickable `http://127.0.0.1:1337/jump?pane=<N>&t=…` link when the local fleet-jump server is configured, else the literal `/supervisor:jump <N>`. Never hand-write that URL: the token is read at emit time from `~/.claude/secrets/jump-token` (0600, outside every repo).
+- Fleet commands: /supervisor:fleet-loop (stateful loop — repeats by default and dispatches the drive leg every round), /supervisor:fleet-status (read-only snapshot), /supervisor:fleet-drive (the same leg run by hand: nudge verified-unblocked parked sessions, escalate the rest); helpers scripts/{fleet-sessions,box-table,fleet-snapshot,context-usage}.py
+- Worker commands: /supervisor:manager-loop (stateful loop over ONE goal or topic), /supervisor:manager-status (read-only snapshot), /supervisor:manager-drive (the act leg, run by hand against one subject), /supervisor:manager-verify (the check leg — seven gated checks for one subject, read-only, ending in a numbered fix list), /supervisor:stop (stand that loop down — disarm the model-waking cadence, leave the model-free gate loop and the session running); helper scripts/{open-items,manager-predispatch}.py — the latter is the pre-dispatch gate both commands run first: unchanged tree → replay the stored table, dispatch no agent
+- docs/fleet-surface.md is the canonical home for the spawn shape and the fleet table render spec
+- docs/subject-resolution.md is the canonical home for the four-source subject-resolution chain the four manager commands share (vault resolution, the source order, the case-insensitive test, "no fallback, ever", and the recording contract). Each command keeps only source 3 inline — the parent conversation, which no agent can be handed.
+- Agent: supervisor:manager-wrangler (routine approval loop over headless workers, on a cheap model)
+- Agent: supervisor:manager-sweep-reader (the worker sweep's read-only half — tracked-set read, bucket classification, id-set extraction, collision count, table render; called by both worker commands, never probes liveness and never acts)
+- Agent: supervisor:manager-drive (the worker sweep's act leg — reap the finished, nudge stuck or error-marked workers, run the auto-resume gate on confirmed orphans; composed by /supervisor:manager-loop each tick and runnable by hand, reap always before drive)
+- Agent: supervisor:manager-verify (the seven-step goal/topic fork and the report shape — dispatched by /supervisor:manager-verify; mutates nothing, and never resolves the subject or detects the branch, because an agent can neither see the parent conversation nor dispatch a slash-command skill)
+- Agent: supervisor:fleet-sweep-reader (the fleet sweep's read half — four channels, open-items ledger, snapshot diff, orphan reverse index, collision/unmanaged-topic candidates, classification; returns a ≤40-line digest and persists the snapshot unless passed `persist: false`; called by /supervisor:fleet-loop and, read-only, by /supervisor:fleet-drive)
+- Agent: supervisor:fleet-drive (the fleet drive leg — splits parked into revive/blocked by live blocker probes, suppresses re-nudges via ~/.claude/state/fleet-drive/ledger.json, returns drafted nudges; never sends; called by /supervisor:fleet-drive and by /supervisor:fleet-loop on every round)
+- Agent: supervisor:gate-relay-read (the manager's gate relay, read leg — reads a blocked tab worker's pane and returns a compact per-pane summary so the manager can batch the operator's question without paying the pane-dump cost in its own context; holds no `send-text` grant, a permission boundary rather than a capability guarantee)
+- Agent: supervisor:gate-relay-send (the manager's gate relay, send leg — delivers the operator's already-given answer into a tab worker's pane, re-reading the gate immediately before typing, repeating a bare `\r` until the composer clears, reporting `not sent` with no pane mutation when the gate cleared meanwhile, and handing over a `jump-link.py` line instead of ever driving a selection modal)
+- Skill: supervising-workers (when to delegate to a worker, which spawn mode to use, and how to run the loop)
+- Skill: open-items (/supervisor:open-items — the per-session ledger of operator asks: kinds, render rule, answer-vs-note, close on evidence)
+
+## Two spawn modes
+
+`spawn_agent` opens a worker either as a real `claude` session in a wezterm tab (`interactive: true`) or headless (`interactive: false`). Tooling is identical in both; the difference is who answers the worker's permission prompts and whether you can watch it.
+
+The default is **fleet-wide and lives in a file**, not in the caller: omit the `interactive` argument and the server resolves `SUPERVISOR_SPAWN_MODE`, then `{"spawn":{"mode":…}}` in `~/.config/claude-supervisor/config.json` (`SUPERVISOR_CONFIG`), then its built-in `interactive`. Pass the argument only to force one worker against that default. An unknown mode value refuses the spawn; the file is read once at server start. `spawn_agent`, `agent_status`, `list_agents` and the ledger all report `mode_source` (`argument`/`env`/`config`/`default`).
+
+## How a worker's permission prompt is answered
+
+A **tab worker**'s prompt never appears in `pending_permissions` (that list holds only this server's headless parks). `agent_status` shows it in `open_cards` (the session's open attention-store cards, each with the `item_id` to answer; null when the store is unreachable). It can be answered from outside its tab: the plugin's `PermissionRequest` hook (`scripts/permission-answer-poll.py`) holds the prompt open and delivers an arm answer (`scripts/attention-answer.py answer <item> --decision allow|deny`) written to its attention-store card. ⚠️ The auto-mode classifier refuses a manager's Bash/Write approval unless the operator authorized it in that conversation — the channel carries the operator's decision, it does not make one. Otherwise steer it with `send_agent_message` or drive its tab by hand.
+
+⚠️ **`send_agent_message` is tab-only; ordinary cross-session `SendMessage` is not.** A headless worker has no pane for `send_agent_message` to type into, but it *is* reachable mid-task by plain `SendMessage`, in both directions (measured 2026-09-20). Read the limit as *"this tool cannot reach a headless worker"*, never as *"a headless worker cannot be reached"*.
+
+A **headless worker** is a `query()` session from @anthropic-ai/claude-agent-sdk started with `permissionMode: 'default'`. Every approval-requiring tool lands in the server's `canUseTool` callback, which parks the request; the manager resolves it through `answer_permission`.
+
+⚠️ **A headless worker DOES appear in `list_agents`** — this file claimed "it never appears in `list_agents`" until 2026-09-20, when a headless worker read its own roster row back (`personal-80 [fd6bbe] · interactive · busy`) and a manager session read the same row independently. It also holds a unix socket (`/tmp/cc-socks/<pid>.sock`). Two real limits replace the false one, and neither is invisibility: **the roster's mode column reports `interactive` for headless workers too**, so it cannot be used to tell the two apart; and **the roster is volatile** — 12 rows shrank to 8 within 17 minutes as workers exited at turn end — so any roster-derived conclusion needs a timestamp. To decide liveness, read the session registry (`~/.claude/sessions/<pid>.json`), which deletes an entry when its session exits.
+
+**`agent_status` and `list_agents` also carry `current_tool_call`** — `{name, input_summary, started_at, held_seconds}`, the call the worker is inside right now and how long it has been held, or `null`. It is read from the worker's transcript, and it is the field that tells a long tool call apart from a worker parked on a gate: `session_status` says both are not-idle, this says *which* call and *for how long*. In flight means the **LAST** `tool_use` with no matching `tool_result` — an interrupted call leaves an unmatched `tool_use` behind, so "any unmatched `tool_use`" keeps naming calls the worker abandoned.
+
+⚠️ **For an `AskUserQuestion`, answer with `deny` + a `message` — never `allow`.** An `allow` lets the tool run in a tty-less session, where it waits ~11 minutes and the worker exits with the question **unanswered**. The `message` carries the answer in the form the question expects, prefixed by the voice actually answering — `Operator answer, via supervisor:` when the operator answered in the manager session, `Manager answer, via supervisor:` when the decision is the manager's own. The operator prefix is a provenance claim; using it for a manager's own inference forges an operator answer and the worker rejects it. Neither prefix releases an irreversible or production-touching action. An `allow` is correct only for an ordinary tool-approval request, where the tool can actually run. Full spec, including the `spawn_agent(resume=…)` continuation that replaces this call once a worker has exited: `docs/fleet-surface.md` § A headless worker exits at turn end.
+
+⚠️ The manager's outgoing `answer_permission` call is gated by the **manager session's own** permission mode, not the worker's. Under `auto` the classifier can refuse it (measured 2026-09-19) — the fix is Shift+Tab → `accept edits` in the manager session, then retry, never a change to the worker's mode or `defaultMode`.
+
+## Install
+
+/plugin marketplace add <owner>/claude-supervisor
+/plugin install supervisor@claude-supervisor

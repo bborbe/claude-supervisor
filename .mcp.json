@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "supervisor": {
+      "command": "bun",
+      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}/server", "--shell=bun", "--silent", "start"]
+    }
+  }
+}

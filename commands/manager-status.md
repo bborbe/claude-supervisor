@@ -1,0 +1,155 @@
+---
+description: Read-only goal-or-topic snapshot — ONE goal's declared task set (from `24 Goals/`) or ONE topic's declared goal set (from `23 Topics/`), its sessions, a status table with bucket icons, and a blocked-by-you jump list (clickable jump links). No vault writes, no loop, no TTS. Subject via $1, or detected from the session when omitted. Per the the Manager Session runbook runbook in the active vault.
+allowed-tools:
+  - Task
+  - ListAgents
+  - Bash(grep:*)
+  - Bash(ls:*)
+  - Bash(find:*)
+  - Bash(awk:*)
+  - Bash(python3:*)
+  - Bash(mkdir:*)
+  - Bash(pgrep:*)
+  - Bash(ps:*)
+  - Bash(vault-cli:*)
+  - Bash(wezterm cli list:*)
+  - Read
+argument-hint: "[goal|topic] (detected when omitted)"
+---
+
+Manager-status slash command — the **read-only, one-shot** twin of `/fleet-status` for a single subject, **goal or topic**. The manager-loop loop is stateful and pings; this is a pure snapshot: "what is this tree doing right now?" Safe to run as often as you like, never sends messages, never arms the loop.
+
+It resolves its subject **exactly as `/manager-loop` does** — same branch detection, same fallback chain, same state files — so the two commands can never disagree about which tree is being reported.
+
+## Arguments
+
+- **`$1` (optional — resolved from the session when omitted):** the **subject** — a goal name matching a page in `24 Goals/`, or a topic name matching a topic page in `23 Topics/`. The branch is detected from whichever page resolves; this command never assumes one.
+  - `/manager-status Sentry` → topic branch, reads `23 Topics/Sentry.md`
+  - `/manager-status "<Goal Name>"` → goal branch, reads `24 Goals/<Goal>.md`
+  - `/manager-status` (bare) → resolve the subject from § Subject resolution below
+
+## Subject resolution — when `$1` is omitted
+
+**The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the vault resolution, the four-source chain, the case-insensitive vault test, the "no fallback, ever" clause, the `Subject:` line, and the recording contract (which files, on which resolution). Read it there; **it is not restated here.**
+
+**Only source 3 stays inline**, because it is the one source no agent can be handed — a subagent runs in a fresh context and cannot see the parent conversation:
+
+3. **Conversation** — the most recent `/supervisor:manager-loop`, `/supervisor:manager-status`, `/supervisor:manager-drive` or `/supervisor:manager-verify` argument in this conversation, then the most recent goal/topic page referenced **as a subject** (a wikilink or a read/edited path — not a prose mention).
+
+**Nothing resolves → STOP.** Print `❌ No subject detected. Pass a goal or topic name: /manager-status "<name>"` and do nothing else.
+
+**Print the source.** The first output line is `Subject: <name> (from <explicit|session|name|conversation|last>)`, so a wrong pick is interruptable before the report runs.
+
+## Resolution — detect the branch, then read the declared set (same as manager-loop)
+
+**Identical to `/manager-loop` § Resolution step 0.** Probe with the **resolved subject**, not `$1` — under detection `$1` is empty and every probe below would match nothing. Detect the branch, never assume it:
+
+- `find "24 Goals" -maxdepth 1 -iname "$SUBJECT.md"` → **goal branch** below. The folder is the discriminator on this side — **no `page_type: goal` confirmation**; see `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § The page test.
+- `find "$TOPICS_DIR" -maxdepth 1 -iname "$SUBJECT.md"`, confirm `page_type: topic` **in the frontmatter block** → **topic branch, steps 1–5**.
+- **Both match, or neither** → print every candidate path (or `no match`) and **stop**. Never guess between a goal and a topic, and never silently prefer one.
+
+**Goal branch.** Read `24 Goals/<Goal>.md`.
+
+- **Tracked set** = every task whose `goals:` frontmatter names this goal — exact match on the **goal name**, across **all three `goals:` shapes** (list of `[[wikilinks]]`, plain scalar `goals: X`, nested `- - X`); the census and the failure mode live in `/manager-loop` § Resolution — read them there, do not re-derive them here. A wikilink-only match is non-compliant: it renders the tracked set **smaller and complete-looking**, with no error, while every probe passes. This is the declaration; there is no second source.
+- **Cross-check against the goal's `# Tasks` list.** A task listed there whose `goals:` does not name the goal, or one whose `goals:` names it but which is absent from `# Tasks`, is a **finding to report** — never silently unioned.
+- Print a header line `Goal: <status> · <n>/<m> SC` read from the page, then the same table and the same blocked-by-you jump list the topic branch renders. The `Tracked (N):` line lists the goal's tasks.
+- **Closure is not yours.** Report SC status and hand closure to `/vault-cli:complete-goal` — never tick SC or flip the goal's status.
+- There is no `# Goals` list, no declared-optional set and no `# Status Summary` on a goal. Do not synthesise them; **skip steps 1–5** and go straight to the Procedure.
+
+**Topic branch** — steps 1–5 below.
+
+1. **Resolve the topics folder from config, then find the topic page** — the folder is declared per vault, not hardcoded: `TOPICS_DIR=$(vault-cli config list --output json 2>/dev/null | python3 -c "import json,sys,os;cwd=os.path.realpath(os.getcwd());d=json.load(sys.stdin);print(next((v.get('topics_dir') or '23 Topics' for v in d if os.path.realpath(os.path.expanduser(v['path']))==cwd),'23 Topics'))" 2>/dev/null || echo "23 Topics")`, then `find "$TOPICS_DIR" -maxdepth 1 -iname "$SUBJECT.md"`, confirm `page_type: topic` **in the frontmatter block** (`awk '/^---$/{n++; next} n==1' <page> | grep -q '^page_type: topic'` — unscoped would match the guide's YAML template). Never accept `Topic Writing Guide.md` (it lives in the vault's knowledge-base folder, outside this folder). **`-iname`, not a shell glob** — a plain `ls` glob is case-sensitive under zsh, so a lowercase argument resolves nothing against Title Case filenames (verified 2026-09-12: `*"discord"*.md` → `no matches found`, `*"Discord"*.md` → 5 files), and Resolution step 5's no-fallback rule then reports an existing page as missing.
+2. **Read its `## Goals` list** — **An entry in a topic's `## Goals` list may be a goal or a task: a goal admits every task whose `goals:` names it, and a task entry admits that task directly — membership is read from the page and never re-derived.** Tracked set = every declared goal + every task whose `goals:` frontmatter names one of them, across **all three `goals:` shapes**, + every task named directly as an entry (see `/manager-loop` § Resolution for the census and the naive-`\[\[…\]\]` failure mode). **The heading is `## Goals` (a sub-heading under `# Scope`), not `# Goals`** — a literal `^# Goals` match returns nothing, and with no fallback that reads as an empty tracked set rather than as a miss.
+3. **Resolve the declared-optional set** — the subset of tracked **task** names the page declares optional. Same rule as `/manager-loop` Resolution step 3 and the Manager Session runbook § Step 4: match **semantically** (wikilink-suffix *and* Non-goals/backticked shapes both occur — keying on the literal `optional (operator, <date>)` misses the second), **never infer from `status`** (`hold`/`backlog` are orthogonal dispositions; the resemblance on Notification System is a coincidence of one page). ⚠️ **Read it at whichever level the page declares it — a goal OR a task.** A goal declared optional contributes **all** of its tasks to the set (the Mantra lane is declared optional as a goal, so all five of its tasks are in it even though no line names three of them), and a task declared optional on its own is in it too. **The set you pass on is always task names** — the frame places tasks, and a required goal owning an optional task renders as a goal row in both boxes, which is correct rather than a defect to collapse. Nothing declared → empty set → one unlabelled box.
+4. **Read its `# Status Summary`** — hand-written prose, context only; the snapshot still reads task files directly.
+5. **No topic page** — print the missing page name and the fix (`create 23 Topics/<Topic>.md from the topic-page template`), then stop. **Never** fall back to a filename glob, `goals:` scan, theme match, or content grep — a silent fallback is what let scope be re-derived by globbing.
+
+Print the resolution header first, then the tracked set once:
+
+```text
+Subject: [<name>](obsidian://open?vault=<V>&file=<relpath>) (from <explicit|session|last|conversation>)
+Branch: <goal|topic> (<the page it came from>)
+Goal: <status> · <n>/<m> SC          ← goal branch only
+Tracked (N): <task> · <task> …
+```
+
+⚠️ **Write the set you just printed to a file — through `manager-predispatch.py --write-tracked`, never a shell redirect — and carry its *path* from here on, never the names.**
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --write-tracked <<'TRACKED'
+<the names you just resolved, one per line>
+TRACKED
+```
+
+It prints the path it wrote (`~/.claude/state/manager-predispatch/<slug>.tracked.txt`) and refuses an empty stdin rather than clobbering a good set. ⚠️ **The first token is `python3` so the call matches this command's `Bash(python3:*)` grant and raises no prompt** — **`Write` is granted by none of the three commands**, so a bare redirect or heredoc would prompt. The printed `Tracked (N):` line is for the operator; **the file is what the dispatch below carries.** It must be produced by **this run's own scan** — never reconstructed from the roster, a checkpoint, or a previous snapshot. A recalled list is indistinguishable from the right one at the point of use, and a measured one omitted **46%** of the tracked set while every probe passed. ⚠️ **Then compare that set against the gate's own membership before dispatching** — the two are derived by different code from the same declarations, so each reads as self-consistent while they disagree:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --compare-tracked
+```
+
+It prints **both counts** and, on a disagreement, the symmetric difference under `⚠️ DIVERGENCE:`. Exit **0** = identical; **10** = they diverge **or** the snapshot could not be read; **2** = usage error. ⚠️ **Never collapse the two 10s** — "I could not check" must not read as "they match". ⚠️ **Report a divergence, never reconcile it here:** the case that motivated the check was one name differing only by a capital `The` against a case-sensitive membership compare, invisible to every other probe because APFS is case-insensitive. Print it; reconciling the sources is a separate task's.
+
+**The subject is always a clickable link.** The operator should be able to open the page the snapshot describes without hunting for it, so the link is part of the header and not an optional extra. Build it per the vault link convention — `obsidian://open?vault=<V>&file=<relpath>`, percent-encoding every character outside `[A-Za-z0-9-_.~]` (space → `%20`, `/` → `%2F`, `→` → `%E2%86%92`) and **dropping the `.md`**. `<V>` is the vault name and `<relpath>` the page path minus the vault root, both read from `vault-cli config list --output json` — never hand-written, because a hand-written path is how a link that looks right opens the wrong page.
+
+The `Subject:` line leads so a mis-resolution is visible before the table renders, and `Branch:` names the page it came from so a wrong branch is legible immediately — the same reason `/manager-loop` prints its branch in the header. Neither line is a verdict; both are facts read from disk.
+
+## Procedure
+
+1. **Pre-dispatch check — decide whether this snapshot is worth a dispatch at all.** Run the gate first. Measured 2026-09-25 on a 26-task tree with 25 done, one snapshot cost **125,423 tokens** for zero new information.
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --print
+   ```
+
+   - **exit 0 — nothing changed.** The gate has already printed the stored table under its `NO-CHANGE` marker. **Reproduce that output as this snapshot's result and STOP** — dispatch no agent, run no step below. Two things the replay cannot carry, and both are said in the output rather than left to be discovered: the **blocked-by-you jump list** is step 6 and is not persisted, and the stored table carries **no jump coordinates** — pane ids are renumbered by a WezTerm restart without moving any digest input, so a replayed link can be dead while nothing reports a change. Say in one line that a fresh run re-resolves both. Never present a replayed link as live, and never let the missing jump list pass unmentioned — the frontmatter advertises it.
+   - **exit 10 — something changed, or the gate could not tell.** Continue to step 2, and persist the fresh snapshot once the table is rendered (step 8).
+   - **exit 2 — usage error.** A malformed invocation (missing `--vault`, bad flag), not a verdict. Fix the call; do not read it as "changed".
+
+   ⚠️ **The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py` — the digest inputs, why liveness is in them, why mtime is not, the fail-open cases, and the reason this store is not the loop's. Read it there; it is **not** restated here. What stays inline is only what this command does with the verdict.
+
+   ⚠️ **This block is shared with `/manager-drive` step 2.** The two copies must keep in sync in: this exit-code branch (0/10/2), the pointer above, and the no-jump-coordinates rule. They legitimately differ in the intro measurement and in the step numbers each exit-10 branch targets. Any other difference is drift — the fail-open clause below is shared and must stay byte-identical.
+
+   ⚠️ **Fail-open is the contract.** A missing state file, an unreadable one, a parse error, an unresolvable subject and a failed write all exit 10 — a gate that reports "no change" when it cannot tell makes a manager blind to its own subject. Never treat a non-zero exit as an error to route around, and never hand-roll a second classifier here: this gate is the only pre-dispatch decision.
+
+   ⚠️ **The snapshot write, declared rather than inherited.** It is the first write in **this Procedure** — the shared recording contract in `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § Recording already writes `~/.claude/state/worker-manager/` on an explicit resolution, so this is not the command's first write overall. The snapshot is a **state file under `~/.claude/state/manager-predispatch/`, never vault content**: no note, task, goal or topic page is touched, and the "no vault writes" claim stays true of everything this command reports on. Nothing below is relaxed by it — step 9's *"never fabricate state"* is about what the snapshot *says*, and the snapshot only ever holds a table this command already printed.
+
+2. `ListAgents` — the subject's worker sessions (match by task name), status, age.
+3. **Delegate the computation to `supervisor:manager-sweep-reader`** — invoke it as `Task(subagent_type: "supervisor:manager-sweep-reader", prompt: <tracked-set path + declared-optional set + the topic's member goals + this snapshot's roster verbatim + vault + mode: snapshot + today>)`. ⚠️ **The first element is the path, not the names** — the agent reads the set off disk. An inline list is the defect this placeholder removes: the agent cannot tell a recalled list from a scanned one. The agent ships here, in `agents/manager-sweep-reader.md` — not in `~/.claude/agents/`; the plugin prefix is required, since a bare name resolves to a personal copy and never to a plugin agent. Pass it the tracked-set **path**, **the declared-optional set** (from Resolution step 3 — pass it every run, even when empty; omitting it here while `/manager-loop` passes it is exactly how the two commands diverge, which is the failure this shared agent exists to prevent), **the topic's member goals** (also every run, even when the topic declares none — the agent's necessity read is gated on them, and an omitted set is indistinguishable from a topic with no goals), this snapshot's `ListAgents` roster **verbatim** (a subagent has no address of its own and cannot call `ListAgents` — the roster is an input), the vault, and `mode: snapshot`. **Pass no timestamp** — a snapshot is not a tick and carries no marker; the agent reads no clock of its own. ⚠️ **But DO pass `today` (ISO `YYYY-MM-DD`) — it is a different input, not a marker.** The `deferred` overlay compares `defer_date` against it, so a snapshot that omits it reports every deferred task as uncomputable rather than deferred — the silent direction that re-opens parked work. It owns the tracked-set read, the bucket classification, the unanchored id-set extraction, the collision count, the necessity read, and the table render, and returns one compact report: table · counts · orphan candidates · live collisions · delta · necessity.
+4. **When the delegation returns no usable table — render it yourself with `box-table.py`.** The agent is the only thing that computes the classification, but it is not the only thing that can draw the box, and the box is what the operator reads. **Trigger on the delegation returning no usable table** — it errored, came back empty, or resolved to something that did not return the report. **Never on a matched error string**: the failure has been observed as a harness message (`The following agent types are no longer available: manager-sweep-reader`), as a silent non-return, and as a bare-name dispatch that succeeded with a *correct* table — so no single message identifies it, and a trigger keyed to one would miss the other two. Same trigger, same wording, in `/manager-loop`; the two commands' fallback text is shared, like the rest of their keep-in-sync block.
+   Build the row JSON from the inputs you already hold — the tracked set, the roster, and the declared-optional set are all passed to the agent and are all in your hands — then render with `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/box-table.py`, reading its stdin contract at the Manager Session runbook § Sweep output. **The frame must still match a normal snapshot's** — same columns, same widths, same icons, same indent — because § Sweep output stays the single source for the frame and this fallback points at it rather than restating it. **Still never hand-draw the box.** The fallback is a second *renderer*, not a licence to draw one by hand; every misaligned table this runbook has carried was hand-drawn, which is the failure the rule exists for.
+   **Say so in the snapshot when it fires.** A snapshot that rendered through the fallback is one whose delegation failed — print that in the output rather than letting a correct-looking table imply the agent ran. **What this does not cover:** a delegation that resolves and returns a *wrong-but-plausible* table. That produces no signal to trigger on, so the fallback cannot catch it; it is out of scope here and would need a different guard.
+5. Print the table — from the agent, or from the fallback above. It renders per the Manager Session runbook § Sweep output — the status table, which stays the single source for the frame, the columns, the widths and the icons; this command must never restate them and never hand-draw the box. `/manager-loop` delegates to the same agent, so both commands render identically by construction rather than by two files agreeing to. Below the box, add only the non-empty action lines defined in § Sweep output — this command does not restate them. **The agent returns orphan *candidates*; print an `ORPHANED` line only after confirming it** — the confirmation probe and the reason it cannot live in the agent are in the Manager Session runbook § Step 4. ⚠️ **And never print one for a task whose `defer_date` is still in the future** — it renders `⏸️ deferred` and emits no action line; see the Manager Session runbook § Step 4 *Deferred*. Plan-gate parking is the agent's classification; its rule is in that same section — do not restate it here.
+   ⚠️ **`✅ DONE — CLOSE:` is yours the same way, and it is the one action line you may not print from the agent's classification.** § Step 4's Close-me bullet yields a **candidate**, because its predicate contains a liveness verdict the agent may not make. Confirm it against the session registry before printing any close instruction: `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py --check <id>` across the task's **whole** id set — frontmatter `claude_session_id` **and** every `metrics_sessions` id, extracted unanchored, the same set the orphan probe reads — alive if **any** id returns `LIVE` (exit 0). ⚠️ **`UNKNOWN` (exit 2) is not `ABSENT` (exit 1)** — an unreadable registry cannot prove a session dead, so it yields a candidate, never a close instruction. **Confirmed live → print the runnable line. Not confirmed → print `🔧 CLOSE-ME CANDIDATE: <task> [<sid8>] — terminal, liveness UNVERIFIED`, which carries no command.** ⚠️ **Roster presence is not liveness** — a roster row matching the task title is a *join*, not a probe, and on 2026-09-22 ten such rows resolved to ten ids absent from the registry. This is the mode-dependent half of the fix: `/manager-loop` needs the same clause on its own print step, and a fix landed in one command says nothing about the other.
+6. **Blocked-by-you jump list** (same shape as `/fleet-status`): the subject's `waiting` sessions, resolved to **pane ids** via `wezterm cli list` (TITLE == session name), one jump per row + "Next blocker to jump to" (oldest wait first):
+
+   ```text
+   ⌛ Blocked by you (N waiting — waiting ≠ confirmed blocked; verify before acting)
+     1. <name> — <age> · jump: <jump-link.py PANEID>
+     Next blocker to jump to: <name> → <jump-link.py PANEID --label>
+   ```
+
+   **Each `jump:` field is the one-line output of `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py <PANEID>` — never a hand-written URL, and never the token.** With the fleet-jump server configured that is a clickable `http://127.0.0.1:1337/jump?pane=<N>&t=…` link, followed with **SHIFT+CMD+click**; without it the script prints the `/supervisor:jump <N>` command, so the row is always usable. **Never print a bare URL you built yourself** — the token lives in a 0600 file outside every repo, so a hand-written link is either broken or leaks it into the repo. Printing a URL mutates nothing, which is what keeps this command inside its no-mutation contract.
+
+   **Emit the link — never a raw `wezterm cli activate-tab` line, and never a tab id.** The reasons are measured, not stylistic. `activate-tab` **cannot cross WezTerm windows**: called from another window it succeeds and nothing visibly moves, so the operator gets a silent no-op instead of a jump. A tab id is **renumbered when its tab moves windows**, so a handed-over `--tab-id` goes dead within the hour — 2026-09-18, three spawned workers routed as tabs 158/159/160 in window 0 became tabs 163/164/165 in window 2, and `activate-tab --tab-id 159` failed outright with *"could not determine which pane should be active"* while `activate-pane --pane-id 239` worked immediately. And a **full WezTerm restart renumbers both namespaces at once**, collapsing them to small integers — the same day, every worker's pane id changed (238 → 33, 241 → 31, 257 → 36, 239 → 39, 255 → 44). `/supervisor:jump` resolves the coordinate at run time and prints the window id, so a cross-window no-op is legible rather than confusing. **Hand over a pane id** — the more stable of the two handles — and re-resolve it after any restart; never trust a coordinate recorded earlier in the session. ⚠️ **A bare `/supervisor:jump <N>` can refuse when tab N and pane N are both live and disagree** — the ambiguity rule. That is correct behaviour, not a failure: re-emit as `/supervisor:jump pane:<N>` and it resolves.
+7. **Names lead, numbers serve the command.** Every row and every mention leads with the task/session name; the `[ref]` and pane id are secondary, for the command only — never reference a session by bare number in prose.
+8. **Persist the snapshot — it is what makes the next run free.** First token `python3`, so the call matches this command's `Bash(python3:*)` grant and raises no prompt. ⚠️ **Stage the per-bucket classification in the same step, or clause (0) has no durable source** — the sets are the ones **this snapshot's own sweep-reader computed**, never re-derived here and never read back from the snapshot, whose schema has no bucket concept:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --write-buckets <<'BUCKETS'
+   {"<bucket>": ["<task name>", "…"], "…": ["…"]}
+   BUCKETS
+   ```
+
+   It prints the path it wrote and refuses a malformed set rather than staging one that cannot gate. **Every declared bucket must appear**, each mapping to a non-empty list of names — a single bucket, or a bucket mapped to a count, does not satisfy the half.
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-predispatch.py --vault "<vault-root>" --subject "<subject>" --save --buckets "<the path --write-buckets printed>"
+   ```
+
+   The record then carries them under **`bucket_sets`** — the key the drive leg's provenance names, and the reason the half survives a compaction or a fresh manager instead of living only in this session's context.
+
+   ⚠️ **`--save` exits 10 on success** — that code means "this run saw a change", which is exactly why it saved. Do not read it as a failure, and do not retry.
+
+   ⚠️ **An empty table is refused and reports CHANGE** rather than clobbering a good snapshot — a snapshot with no table can never be replayed, so a failed render must leave the previous one standing and force the next run to re-sweep. Never write the snapshot by hand, and never save a table you did not print. The gate strips OSC 8 jump links before storing, so the persisted copy carries no jump token.
+
+9. **Never fabricate state** — report only what `ListAgents`/task files show this sweep. No recommendation, no verdict, no `👤 You:`/`⏰ Next:` panel, no TTS, no `SendMessage`. For "what should I do about this goal or topic," that is `/manager-loop`'s loop, not this snapshot.
