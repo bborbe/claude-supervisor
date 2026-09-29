@@ -18,6 +18,11 @@ Covers the two decisions that make an answer safe to route:
     omitted rather than sent blank: downstream a "" is a *set* value, so it would
     count as a manager resolution and manufacture the false positive the field
     exists to close.
+  * the attempt record -- written by the arm that ATTEMPTS delivery, after the
+    send. Its outcome is refused rather than defaulted, because neither value is
+    safe to assume: a `delivered` default would record a success nobody observed
+    and a `failed` default a failure nobody observed, and both would be
+    indistinguishable downstream from a real measurement.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -225,6 +230,78 @@ class PostAnswerBodyTest(unittest.TestCase):
         body = self._body("i1", "arm", "sess-9", "")
         self.assertEqual(body, {"answered_by": "arm", "resolved_by": "sess-9"})
         self.assertNotIn("decision", body)
+
+
+class AttemptBodyTest(unittest.TestCase):
+    """The attempt record names the carrier and what it observed."""
+
+    def _post(self, item_id, carrier, outcome):
+        captured = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def _urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["method"] = req.get_method()
+            captured["body"] = json.loads(req.data.decode())
+            return _Resp()
+
+        with mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
+            aa.post_attempt(item_id, carrier, outcome)
+        return captured
+
+    def test_body_names_the_carrier_and_the_outcome(self):
+        captured = self._post("i1", "supervisor:attention-next", "delivered")
+        self.assertEqual(
+            captured["body"],
+            {"carrier": "supervisor:attention-next", "outcome": "delivered"},
+        )
+
+    def test_posts_to_the_attempt_endpoint(self):
+        captured = self._post("i1", "arm", "failed")
+        self.assertTrue(captured["url"].endswith("/api/1.0/attention/i1/attempt"))
+        self.assertEqual(captured["method"], "POST")
+
+    def test_a_failure_is_recorded_as_failed_not_dropped(self):
+        # The trail's whole point: "a carrier looked and could not deliver" must
+        # be recorded, or it is indistinguishable from "no carrier ever looked".
+        captured = self._post("i1", "arm", "failed")
+        self.assertEqual(captured["body"]["outcome"], "failed")
+
+
+class AttemptOutcomeGateTest(unittest.TestCase):
+    """cmd_attempt refuses an unobserved outcome rather than defaulting it."""
+
+    def test_refuses_an_empty_outcome_without_posting(self):
+        with mock.patch.object(aa, "post_attempt") as posted:
+            out = io.StringIO()
+            code = aa.cmd_attempt("i1", "arm", "", out=out)
+        self.assertEqual(code, 1)
+        posted.assert_not_called()
+        self.assertIn("REFUSED", out.getvalue())
+
+    def test_refuses_an_unknown_outcome_without_posting(self):
+        with mock.patch.object(aa, "post_attempt") as posted:
+            out = io.StringIO()
+            code = aa.cmd_attempt("i1", "arm", "maybe", out=out)
+        self.assertEqual(code, 1)
+        posted.assert_not_called()
+
+    def test_records_a_delivered_outcome(self):
+        with mock.patch.object(aa, "post_attempt") as posted:
+            out = io.StringIO()
+            code = aa.cmd_attempt("i1", "arm", "delivered", out=out)
+        self.assertEqual(code, 0)
+        posted.assert_called_once_with("i1", "arm", "delivered")
+        self.assertIn("ATTEMPT: i1 delivered by arm", out.getvalue())
 
 
 if __name__ == "__main__":
