@@ -144,7 +144,7 @@ The plugin prefix is required — a bare `fleet-drive` resolves to a personal `~
 
 **Send, from this session.** Every `REAPS` line first, then every `NUDGES` line — reap before drive, so a finished session is never told to continue. For each line, re-check the target's roster status first: moved to `busy`/`shell` since Step 0 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Report any failed send — the ledger already counts it as nudged, so the next round suppresses rather than nags.
 
-**Print** the agent's report verbatim — table, escalation groups, ledger line — followed by `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons.
+**Print** the agent's report verbatim — table, escalation groups, the `Waiting on your keystroke` list, ledger line — followed by `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons.
 
 **No usable report** — errored, came back empty, or is not the report — → say so in the round's output. Nothing was reaped and nothing was sent this round; never fall back to a hand-rolled classification, because every verdict would be UNKNOWN and an empty fleet and a dead source must never render the same.
 
@@ -221,7 +221,7 @@ The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`).
 3. **`📋 Open with the operator`** — the ledger, one line per open entry: kind · what · state · age. **Never omitted**; `(none open)` when empty.
 4. **Needs-input** — the batch over the digest's BLOCKED set, per § Cadence's **Needs-input** (the `AskUserQuestion`, its `asked-ledger` claims, the relays), then the consolidated list beneath it: every open claim across every layer, in one list. **Never omitted** — `(none blocked)` when the digest's BLOCKED section is empty, and a subject one of those rules dropped prints that rule and its line.
 5. **Escalation report** — Step 5's own findings, grouped cause-first: the `stalled`/`parked`/`orphan` rows (orphans as their own group), the `finished — reap` rows as one self-closeable line, and any Step 2c collision as its own group. Omit if nothing needs attention. Mark any cause a sub-agent could not confirm as **unverified**.
-6. **Drive leg** — the agent's report verbatim (its header line, rows, `ESCALATION`, `LEDGER`) plus `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons. On no usable report, say so here instead.
+6. **Drive leg** — the agent's report verbatim (its header line, rows, `ESCALATION`, the `Waiting on your keystroke` list, `LEDGER`) plus `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons. On no usable report, say so here instead. The `Waiting on your keystroke` list is the round's operator to-do list — print it as it arrives, never re-assembled by hand; the drive agent builds it and its rules live in `agents/fleet-drive.md`.
 7. **Read-only context sent this sweep** — what and to whom.
 8. **Course-correction drafts awaiting approval** — exact text + target; ask the operator to approve or edit.
 9. **Snapshot written** — path and `swept_at`.

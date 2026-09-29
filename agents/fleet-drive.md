@@ -100,6 +100,11 @@ REAPS
   TO: <exact roster name> | <evidence message text>
 NUDGES
   TO: <exact roster name> | <message text>
+Waiting on your keystroke
+  1. **<Action verb>** <rest of the action> — <task name> · <link the digest carried>
+  2. ...
+  (nothing waiting on you)   (only when there are no rows)
+  unconfirmed: <name> [<sid8>] · <link|no pane — <reason>> — <why>   (only for unverifiable verdicts)
 LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · written <ts>
 ```
 
@@ -115,4 +120,6 @@ title match, no fallback of your own — and never render a link, which needs `p
 does not hold. The sweep resolves and renders; the caller prints what you hand it. Its own title
 fallback, where it has one, reads the session's current name from the registry at call time — that
 is the sweep's business, not yours.
+
+**`Waiting on your keystroke` — the operator's to-do list for this round.** Rendered immediately before the `LEDGER` line, and **never omitted**. One row per pane whose verdict you assigned is **`blocked`** — that single source already covers both routes in: a `CLOSERS` row that is a gate under step 4a, and a pane the digest lists under `BLOCKED`. A routine-continue `approve:` closer is **not** a gate (step 4a) and its verdict is `revive`, so it gets **no** row — never widen the routine-continue table by judgment here. A pane with two closer lines is **one** row carrying both actions, never two rows. Order quick actions first: every `approve` / `Shift+Tab` row above every `review` / `pick` row; a row carrying both classes takes the quicker one and sorts with the quick actions. Each row is the bold action verb (with the rest of the action), then the task name, then the link **the digest carried** for that pane — you render no link yourself (see above). With no rows the section prints `(nothing waiting on you)` verbatim, and that sentinel replaces the rows rather than joining them. A session whose verdict is `unverifiable` is not actionable and does not belong in the list: it goes on the separate `unconfirmed:` line beneath it, with its link (or the digest's `no pane — <reason>`, verbatim) and why the verdict is unverifiable — that line appears only when such verdicts exist. This list is the **operator's**; `ESCALATION` is the **manager's**, grouped by cause — a `blocked` pane appears in both, deliberately.
 </output_format>
