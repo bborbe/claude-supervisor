@@ -43,7 +43,9 @@ The fleet has a show (`/supervisor:fleet-status`) and an act loop (`/supervisor:
 
 4. **Send — from this session only.** Send every `REAPS` line first, then every `NUDGES` line — reap before drive, so a finished session is never told to continue. For each line, re-check the target's roster status first — moved to `busy`/`shell` since step 1 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Every send stays in this session because a sub-agent has no cross-session address — a reply to a sub-agent's message lands here after it has returned. Report any failed send; the ledger already counts it as nudged, so the next round suppresses rather than nags.
 
-5. **Print** the agent's report verbatim — table, escalation groups, ledger line — with the one addition below, then `Sent: <n>` with one line per recipient, and `Skipped: <n>` with reasons.
+5. **Print** the agent's report verbatim — table, escalation groups, the `Waiting on your keystroke` list, ledger line — with the one addition below, then `Sent: <n>` with one line per recipient, and `Skipped: <n>` with reasons.
+
+   **The report carries a `Waiting on your keystroke` list** — the round's operator to-do list, built by the drive agent from the digest's `CLOSERS` lines and its own `blocked` verdicts. Print it as it arrives; its rules live in `agents/fleet-drive.md` and are not restated here.
 
    **Every `ESCALATION` row carries its jump link — and this session renders none of them.** The drive agent hands each row its already-rendered link, produced by `fleet-sweep-reader` from the pane it resolved. Print the rows as they arrive. **Run no per-row pane read here**: no `jump-link.py`, no `who-needs-me.py --pane-for` — the sweep owns that lookup, and it already holds the session-registry join.
 
