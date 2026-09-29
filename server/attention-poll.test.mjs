@@ -130,6 +130,7 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
   const agents = agentsOf(['a1', 'sess-1'])
   const pending = pendingOf(...pendingEntries)
   const ticks = []
+  const posts = []
   const stop = startAttentionPoll({
     storeUrl: 'http://store',
     agents,
@@ -141,14 +142,21 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
       return ticks.length
     },
     clearTimeoutImpl: () => {},
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, options = {}) => {
       const path = url.replace('http://store', '')
+      // The delivery trail is written by POST. Captured rather than answered from
+      // `items`, so a spec can assert what this arm recorded and — for the negative
+      // case — that it recorded nothing at all.
+      if (options.method === 'POST') {
+        posts.push({ path, body: JSON.parse(options.body) })
+        return { ok: true, status: 200, json: async () => ({}) }
+      }
       const body = path === '/api/1.0/attention' ? open : items[path.split('/').pop()]
       if (body === undefined) return { ok: false, status: 404, json: async () => ({}) }
       return { ok: true, status: 200, json: async () => body }
     },
   })
-  return { ticks, stop, pending }
+  return { ticks, stop, pending, posts }
 }
 
 test('an answered allow settles the parked promise', async () => {
@@ -179,6 +187,48 @@ test('an open item is not settled', async () => {
   })
   await ticks[0]()
   assert.equal(pending.get('perm_7').settled.length, 0)
+})
+
+// The delivery trail. This arm is the permission class's carrier, so it — not the
+// command that answers message items — is what must record the attempt. Without
+// these writes a delivered verdict would read as `never_attempted`.
+
+test('a settled permission answer records the attempt as delivered', async () => {
+  const { ticks, posts } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+  })
+  await ticks[0]()
+  assert.deepEqual(posts, [
+    {
+      path: '/api/1.0/attention/i1/attempt',
+      body: { carrier: 'supervisor:attention-poll', outcome: 'delivered' },
+    },
+  ])
+})
+
+test('an attempt with no park to settle records the attempt as failed', async () => {
+  // The park it was aimed at belongs to another agent, so the delivery could not
+  // happen — an attempt WAS made and failed, which is not `never_attempted`.
+  const { ticks, posts } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-2' } },
+  })
+  await ticks[0]()
+  assert.equal(posts.length, 1)
+  assert.equal(posts[0].body.outcome, 'failed')
+})
+
+test('a non-arm answer records nothing, because no delivery was attempted', async () => {
+  // No `resolved_by` means no arm delivered this answer, so the gate is not released
+  // and nothing was attempted. Recording `failed` here would claim a carrier tried
+  // and could not deliver, which is a different and false statement.
+  const { ticks, posts } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+  })
+  await ticks[0]()
+  assert.equal(posts.length, 0)
 })
 
 test('an answered item with no verdict is reported, not defaulted', async () => {
