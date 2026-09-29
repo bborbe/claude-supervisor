@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.71.1
 
 - docs: **`docs/fleet-surface.md` § Spawn a worker names `/supervisor:ready` as the one-verb path for its readiness precondition.** The verb shipped in v0.71.0; the canonical spawn doc still described the manual audit → repair → re-audit → open sequence without saying it is now one command. The addition names the verb, its call surface and its single output line, and states the two properties a reader needs before trusting it: it **re-surfaces** the loop in `agents/manager-drive.md` clause (1) rather than adding a second one, and it **references** that section for the bar rather than restating the number — the same single-home rule the authoritative-home block already states for all three constants. It also records that a `phase: todo` row is refused *before* any audit runs, so the verb readies a task and never approves one.
 
