@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.68.0
 
 - feat: **A manager asks about its round's unapproved rows in one card, and acts only on the operator's words.** `commands/manager-loop.md`'s Act block gains a `waiting-approval →` line: the round's `⌛ waiting-approval` rows go to the operator as **ONE** card via `attention-ask.py post-batch` — never one card per row, which would reintroduce the per-item reporting this bucket exists to remove and would ask the same question N times — and the answer is acted on. ⚠️ **Poll before you post**, and the reason is the store's, not a convention: suppression is open-scoped, so once an item is answered the same `dedup_key` writes a **new** row, and a manager that posted first would read that fresh row as `OPEN` and lose an answer it already had. ⚠️ **The `--dedup-key` is the round's unapproved row set, not the tick** — which is what removes the need to carry an item id between ticks, since an unchanged set returns the same item to poll while a set that changed because rows were approved is a genuinely different question. ⚠️ **On `ANSWERED:` the manager runs `vault-cli task approve` per row the answer names, then compares the named set against the rows actually flipped** — an approve-on-inference build produces the same `phase: todo → planning` delta and the same timestamps, so the frontmatter delta alone cannot discriminate. Only then is each approved row opened via `/supervisor:open`. `NOT_OPERATOR_ANSWERED:` reads as `OPEN`: the gate is not released.
 
