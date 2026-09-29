@@ -51,6 +51,7 @@ with no producer can never be polled back by anyone, so it would be a question
 asked into a void.
 
 Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]...
+     python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
      python3 attention-ask.py poll ITEM_ID
 """
 
@@ -114,6 +115,35 @@ def build_options(labels, recommended):
         if recommended not in labels:
             raise ValueError(f"--recommend {recommended!r} is not one of the --option labels")
     return options
+
+
+def build_batch_payload(tasks):
+    """Return the ONE batched card's payload, or raise ValueError naming the bad input.
+
+    The batch is a single `message` item listing every unapproved ready row, not
+    one item per row. That is the whole point: a manager posting one card per
+    unapproved row has reintroduced the per-item reporting this exists to remove,
+    and it asks the operator the same question N times instead of once.
+
+    The rows are numbered because the answer names them back — the caller approves
+    exactly the rows the operator's words name, so the card has to make each row
+    nameable. Names are printed **verbatim**: a task's name is the key
+    `vault-cli task approve` takes, so abbreviating one here would produce a card
+    whose answer cannot be acted on.
+    """
+    names = [task.strip() for task in tasks]
+    if not names:
+        raise ValueError("--task must be given at least once")
+    empty = next((i for i, name in enumerate(names, 1) if not name), None)
+    if empty is not None:
+        raise ValueError(f"--task must not be empty (entry {empty})")
+    numbered = "\n".join(f"{i}. {name}" for i, name in enumerate(names, 1))
+    return (
+        f"{len(names)} task(s) are ready but unapproved — each sits at `phase: todo`, so "
+        "nothing has been opened and no worker is on them. Reply naming the ones to "
+        "approve; each is approved, then verified and planned, before any session opens."
+        f"\n\n{numbered}"
+    )
 
 
 def post_question(
@@ -214,7 +244,13 @@ def describe_answer(item):
     return describe_one(item.get("answer"))
 
 
-def cmd_post(args, out=sys.stdout):
+def _producer_or_refuse(args, out):
+    """Return `(producer_id, liveness_ref)`, or None once the refusal is printed.
+
+    Shared by both posting arms so the producer gate cannot drift between them:
+    an item's `producer_id` is the only thing that can poll it back, so an item
+    with none is a question asked into a void.
+    """
     producer_id = args.producer_id or resolved_session_id()
     if not producer_id:
         print(
@@ -222,13 +258,12 @@ def cmd_post(args, out=sys.stdout):
             "would have no producer to poll it back. Pass --producer-id explicitly.",
             file=out,
         )
-        return 2
-    liveness_ref = args.liveness_ref or f"session:{producer_id}"
-    try:
-        options = build_options(args.option, args.recommend)
-    except ValueError as err:
-        print(f"REFUSED: {err}", file=out)
-        return 2
+        return None
+    return producer_id, (args.liveness_ref or f"session:{producer_id}")
+
+
+def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
+    """POST one item and print its id and poll line. Returns the exit code."""
     try:
         item = post_question(
             producer_id=producer_id,
@@ -236,7 +271,7 @@ def cmd_post(args, out=sys.stdout):
             liveness_ref=liveness_ref,
             dedup_key=args.dedup_key,
             interrupt_class=args.interrupt_class,
-            payload=args.payload,
+            payload=payload,
             context=args.context,
             options=options,
             expires_at=args.expires_at,
@@ -248,6 +283,38 @@ def cmd_post(args, out=sys.stdout):
     print(f"ITEM_ID: {item.get('item_id')}", file=out)
     print(f"POLL: python3 attention-ask.py poll {item.get('item_id')}", file=out)
     return 0
+
+
+def cmd_post(args, out=sys.stdout):
+    producer = _producer_or_refuse(args, out)
+    if producer is None:
+        return 2
+    try:
+        options = build_options(args.option, args.recommend)
+    except ValueError as err:
+        print(f"REFUSED: {err}", file=out)
+        return 2
+    return _post_and_report(args, *producer, args.payload, options, out)
+
+
+def cmd_post_batch(args, out=sys.stdout):
+    """Post ONE card listing every unapproved ready row — never one card per row.
+
+    ⚠️ **No options are offered, deliberately.** The answer is the operator's own
+    words naming which rows to approve, and the caller matches that set against
+    the rows it flips. A fixed option list would make an all-or-nothing click the
+    only answer to a question whose real answer is a subset — and the subset is
+    the thing the criterion measures.
+    """
+    producer = _producer_or_refuse(args, out)
+    if producer is None:
+        return 2
+    try:
+        payload = build_batch_payload(args.task)
+    except ValueError as err:
+        print(f"REFUSED: {err}", file=out)
+        return 2
+    return _post_and_report(args, *producer, payload, [], out)
 
 
 def cmd_poll(item_id, out=sys.stdout):
@@ -320,6 +387,18 @@ def main(argv=None):
     post.add_argument("--interrupt-class", default="pick")
     post.add_argument("--expires-at", default="")
 
+    batch = sub.add_parser("post-batch")
+    batch.add_argument("--dedup-key", required=True)
+    # `required=True` on an append action means "at least one occurrence", which
+    # is the shape the batch needs: a batch of zero rows is not a question.
+    batch.add_argument("--task", action="append", default=[], required=True)
+    batch.add_argument("--context", default="")
+    batch.add_argument("--producer-id", default="")
+    batch.add_argument("--producer-kind", default="session")
+    batch.add_argument("--liveness-ref", default="")
+    batch.add_argument("--interrupt-class", default="pick")
+    batch.add_argument("--expires-at", default="")
+
     poll = sub.add_parser("poll")
     poll.add_argument("item_id")
 
@@ -327,6 +406,8 @@ def main(argv=None):
     try:
         if args.cmd == "post":
             return cmd_post(args)
+        if args.cmd == "post-batch":
+            return cmd_post_batch(args)
         return cmd_poll(args.item_id)
     except urllib.error.HTTPError as err:
         # Each command handles its own HTTP errors, so reaching here means the

@@ -71,6 +71,99 @@ def post_args(**overrides):
     return mock.Mock(**defaults)
 
 
+def batch_args(**overrides):
+    defaults = dict(
+        dedup_key="batch-1",
+        task=["Alpha", "Beta"],
+        context="",
+        producer_id="session-a",
+        producer_kind="session",
+        liveness_ref="",
+        interrupt_class="pick",
+        expires_at="",
+    )
+    defaults.update(overrides)
+    return mock.Mock(**defaults)
+
+
+class BuildBatchPayloadTest(unittest.TestCase):
+    def test_numbers_every_row(self):
+        payload = ask.build_batch_payload(["Alpha", "Beta Two"])
+        self.assertIn("1. Alpha", payload)
+        self.assertIn("2. Beta Two", payload)
+        self.assertIn("2 task(s)", payload)
+
+    def test_prints_names_verbatim_because_the_name_is_the_approval_key(self):
+        long_name = (
+            "Tighten the Sentry-triage Criteria at the Source That Generates Each Weekly Jira Task"
+        )
+        self.assertIn(long_name, ask.build_batch_payload([long_name]))
+
+    def test_refuses_an_empty_batch(self):
+        with self.assertRaises(ValueError):
+            ask.build_batch_payload([])
+
+    def test_refuses_a_blank_name_and_names_its_position(self):
+        with self.assertRaises(ValueError) as ctx:
+            ask.build_batch_payload(["Alpha", "   "])
+        self.assertIn("entry 2", str(ctx.exception))
+
+
+class PostBatchTest(unittest.TestCase):
+    def test_posts_exactly_one_item_for_the_whole_batch(self):
+        """The arm's whole point: N rows, ONE card."""
+        captured = {}
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": "batch1"})
+
+        out = io.StringIO()
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            rc = ask.cmd_post_batch(batch_args(task=["Alpha", "Beta", "Gamma"]), out=out)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        body = captured["body"]
+        self.assertEqual(body["answer_mechanism"], "message")
+        self.assertIn("1. Alpha", body["payload"])
+        self.assertIn("3. Gamma", body["payload"])
+        self.assertIn("ITEM_ID: batch1", out.getvalue())
+
+    def test_offers_no_options_so_the_answer_is_the_operators_own_words(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": "batch1"})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post_batch(batch_args(), out=io.StringIO())
+
+        self.assertNotIn("options", captured["body"])
+
+    def test_refuses_without_a_producer_id(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            rc = ask.cmd_post_batch(batch_args(producer_id=""), out=out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED", out.getvalue())
+
+    def test_refuses_a_blank_row_without_reaching_the_store(self):
+        out = io.StringIO()
+
+        def fake_urlopen(req, timeout=None):
+            raise AssertionError("a refused batch must not reach the store")
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            rc = ask.cmd_post_batch(batch_args(task=["Alpha", ""]), out=out)
+
+        self.assertEqual(rc, 2)
+        self.assertIn("entry 2", out.getvalue())
+
+
 class BuildOptionsTest(unittest.TestCase):
     def test_marks_the_named_option_recommended(self):
         options = ask.build_options(["the board", "the tab"], "the board")
