@@ -19,6 +19,7 @@ import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
 import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, listLive, stampRecord } from './heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
+import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
@@ -119,6 +120,23 @@ if (config.attentionStoreUrl) {
     // delivery path exists to make auditable.
     onSettled: ({ requestId, agentId, decision, park }) =>
       logPermission(storeDecisionRecord({ requestId, agentId, decision, park })),
+  })
+  // The second arm, and it is a second arm rather than a wider watch set on purpose — see
+  // message-delivery.mjs's header. A `message` card carries no verdict, so the loop above
+  // cannot settle it however its watch set is written; what it needs is a different rule
+  // (`deny` + the operator's words), which is what this starts.
+  //
+  // Without it a hook-raised `message` card is answered on the board and reaches nobody:
+  // the worker stays parked until `PERMISSION_TIMEOUT_MS` and exits with its question
+  // unanswered. The board's recorded job is *"to be able to do quickly answers to all cloud
+  // sessions"*, and this is the arm that makes an answer to one of them arrive.
+  startMessageDelivery({
+    storeUrl: config.attentionStoreUrl,
+    agents,
+    pending,
+    log,
+    onSettled: ({ requestId, agentId, park, text }) =>
+      logPermission(storeMessageRecord({ requestId, agentId, park, text })),
   })
 }
 
