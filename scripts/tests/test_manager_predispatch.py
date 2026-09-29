@@ -340,6 +340,70 @@ class TestStorage(Base):
         self.assertIn("SAVED", out)
 
 
+class TestPayloadWriter(Base):
+    """`--write-payload` is the writer every tick goes through — the sweep reader calls it
+    as its own last step — and it is the one writer that must not put the jump token on
+    disk. Graded separately from `--save` because the two are different sinks: the stored
+    record was already link-free and 0600, while this file sat 0644 carrying the link,
+    which is exactly why the defect outlived a fix to its sibling.
+    """
+
+    def payload(self, subject, table):
+        return self.run_gate("--subject", subject, "--write-payload", stdin=table)
+
+    def read_payload(self, subject):
+        with open(self.m.payload_path(subject), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_payload_is_written_link_free(self):
+        """The OSC 8 URI carries the jump token; the on-disk copy must not.
+
+        The positive control is in the same test: the table handed in provably *did* carry
+        a link, so this cannot pass on a frame that never produced one. The exposure is
+        intermittent — measured 2026-09-29, 1 link at 11:28 and 0 at 11:56 on the same
+        path — and the variable is the reader's rendering choice, not the writer's, so an
+        absence only counts against a frame with something to strip.
+        """
+        link = "\x1b]8;;http://127.0.0.1:1337/jump?pane=9&t=SECRET\x07Session\x1b]8;;\x07"
+        table = "Subject: x\n%s\n" % link
+        self.assertIn("SECRET", table)
+        rc, out = self.payload("ATopic", table)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        written = self.read_payload("ATopic")
+        self.assertNotIn("SECRET", written)
+        self.assertNotIn("\x1b]8;", written)
+        self.assertIn("Session", written)
+
+    def test_payload_file_is_0600(self):
+        """0600 at creation, not by a chmod after it: the file is never world-readable,
+        not even for the instant between the write and the os.replace."""
+        self.payload("ATopic", "Subject: x\n+---+\n")
+        mode = stat.S_IMODE(os.stat(self.m.payload_path("ATopic")).st_mode)
+        self.assertEqual(mode, 0o600, "payload file is %o, want 600" % mode)
+
+    def test_rewrite_does_not_leave_a_world_readable_file_behind(self):
+        """A file already sitting at 0644 must not survive the next write.
+
+        `os.replace` swaps the directory entry, so the mode that lands is the one set at
+        creation — but that is a property of the implementation rather than of the
+        contract, and 0644-with-a-token is the exact state the measured defect left.
+        """
+        path = self.m.payload_path("ATopic")
+        self.payload("ATopic", "Subject: x\n+---+\n")
+        os.chmod(path, 0o644)
+        self.payload("ATopic", "Subject: y\n+---+\n")
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        self.assertEqual(mode, 0o600, "payload file is %o, want 600" % mode)
+
+    def test_payload_refuses_an_empty_table_and_leaves_the_previous_file(self):
+        """Pinned alongside the new assertions so a later edit to this branch cannot
+        trade the empty-stdin guard away for the strip."""
+        self.payload("ATopic", "Subject: x\n+---+\n")
+        rc, _ = self.payload("ATopic", "   \n")
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertEqual(self.read_payload("ATopic"), "Subject: x\n+---+\n")
+
+
 class TestVaultRootBoundary(Base):
     """A bad `--vault` is a usage error, never a missing subject page.
 
