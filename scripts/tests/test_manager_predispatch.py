@@ -622,6 +622,22 @@ class TestTrackedArtifacts(Base):
         )
         self.assertEqual(rc, self.m.EXIT_USAGE, out)
 
+    def test_save_refuses_a_staged_file_that_cannot_gate(self):
+        """The second door. `--save --buckets <path>` reads a file directly, so validating
+        only `--write-buckets` left a hand-written or stale staging file able to reach
+        `save_stored` with an all-empty set — the same defect by the other route."""
+        p = os.path.join(self.tmp, "stale.buckets.json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"done": [], "problem": []}, fh)
+        rc, out = self.run_gate(
+            "--subject", "ATopic", "--save", "--buckets", p, stdin="t\n"
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertFalse(
+            os.path.exists(self.m.state_path("ATopic")),
+            "a refused save must leave no record at all",
+        )
+
     def test_compare_reports_identical_memberships_with_both_counts(self):
         self.tracked("ATopic", ["ATask", "AGoalTask"])
         self.snapshot("ATopic", ["ATask", "AGoalTask"])

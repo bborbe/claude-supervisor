@@ -781,6 +781,31 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     return changed, reason, payload, stored_table
 
 
+def bucket_shape_error(parsed) -> str | None:
+    """Why `parsed` cannot gate, or None when it is a usable classification.
+
+    A dict of bucket -> non-empty list of names is the only shape that can satisfy the
+    drive leg's clause (0). A count, a bare list, or a bucket mapped to nothing would all
+    *look* like a classification and gate nothing — and the empty list is the one that got
+    through: `all(...)` over `[]` is vacuously True, so `{"done": []}` passed the check
+    whose own message says "non-empty". Measured 2026-09-28, staged at exit 0 and saved.
+
+    Shared by BOTH doors into the record. Validating only `--write-buckets` left the
+    `--save --buckets` read path a bare `json.load`, so a hand-written or stale staging
+    file reached `save_stored` with an all-empty set — the same defect by the other door.
+    """
+    if not isinstance(parsed, dict) or not parsed:
+        return "bucket sets must be a non-empty JSON object"
+    for bucket, names in parsed.items():
+        if (
+            not isinstance(names, list)
+            or not names
+            or not all(isinstance(n, str) and n.strip() for n in names)
+        ):
+            return f"bucket {bucket!r} must map to a non-empty list of names"
+    return None
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="manager pre-dispatch change gate")
     ap.add_argument("--subject", required=True, help="goal or topic name")
@@ -878,30 +903,10 @@ def main(argv: list[str]) -> int:
         except json.JSONDecodeError as exc:
             print(f"bucket sets must be JSON: {exc}", file=sys.stderr)
             return EXIT_USAGE
-        # Shape-checked here because the consumer is an agent that gates a whole batch on
-        # this half: a dict of bucket -> non-empty list of names is the only shape that can
-        # satisfy clause (0). A count, a bare list, or a bucket mapped to nothing would all
-        # *look* like a classification and gate nothing.
-        if not isinstance(parsed, dict) or not parsed:
-            print("bucket sets must be a non-empty JSON object", file=sys.stderr)
+        shape_error = bucket_shape_error(parsed)
+        if shape_error:
+            print(shape_error, file=sys.stderr)
             return EXIT_USAGE
-        for bucket, names in parsed.items():
-            # `not names` is load-bearing, not redundant with the element check below:
-            # `all(...)` over an EMPTY list is vacuously True, so without it `{"b": []}`
-            # passes the very check whose message says "non-empty". Measured 2026-09-28:
-            # an all-empty set was staged at exit 0 and saved, holding the drive leg's
-            # whole ready batch at clause (0) until the tree next changed — and because
-            # `digest_of` omitted `bucket_sets`, a corrected re-stage could not heal it.
-            if (
-                not isinstance(names, list)
-                or not names
-                or not all(isinstance(n, str) and n.strip() for n in names)
-            ):
-                print(
-                    f"bucket {bucket!r} must map to a non-empty list of names",
-                    file=sys.stderr,
-                )
-                return EXIT_USAGE
         path = buckets_path(args.subject)
         tmp = path + ".tmp"
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -1067,6 +1072,18 @@ def main(argv: list[str]) -> int:
                 # thought it had supplied. Refuse, and let the caller fix the path.
                 print(
                     f"could not read bucket sets from {args.buckets!r}: {exc}",
+                    file=sys.stderr,
+                )
+                return EXIT_USAGE
+            # The same refusal `--write-buckets` makes, and for the same reason — this is
+            # the other door into the record, and validating only the staging path left a
+            # hand-written or stale file able to reach `save_stored` with a set that
+            # cannot gate. A record written that way reads back as persisted when it is
+            # not, which is precisely what clause (0) would then hold a batch on.
+            shape_error = bucket_shape_error(bucket_sets)
+            if shape_error:
+                print(
+                    f"bucket sets at {args.buckets!r} cannot gate: {shape_error}",
                     file=sys.stderr,
                 )
                 return EXIT_USAGE
