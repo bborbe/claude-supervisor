@@ -47,7 +47,7 @@ function pendingOf(...entries) {
 
 // One tick of the loop, driven by hand: `setTimeoutImpl` captures the callback instead of
 // scheduling it, so a test decides when time passes.
-function harness({ open = [], items = {}, agents, pending, log }) {
+function harness({ open = [], items = {}, agents, pending, log, posts }) {
   const ticks = []
   startMessageDelivery({
     storeUrl: 'http://store',
@@ -59,10 +59,24 @@ function harness({ open = [], items = {}, agents, pending, log }) {
       return ticks.length
     },
     clearTimeoutImpl: () => {},
-    fetchImpl: async (url) => ({
-      ok: true,
-      json: async () => (url.endsWith('/attention') ? open : items[url.split('/').pop()]),
-    }),
+    // The delivery trail is written by POST. Captured into a caller-supplied array, so a
+    // spec can assert what this arm recorded — and, for the negative case, that it
+    // recorded nothing at all.
+    fetchImpl: async (url, options = {}) => {
+      if (options?.method === 'POST') {
+        if (posts) {
+          posts.push({
+            path: url.replace('http://store', ''),
+            body: JSON.parse(options.body),
+          })
+        }
+        return { ok: true, json: async () => ({}) }
+      }
+      return {
+        ok: true,
+        json: async () => (url.endsWith('/attention') ? open : items[url.split('/').pop()]),
+      }
+    },
   })
   return ticks
 }
@@ -382,5 +396,88 @@ test('a terminal-but-unanswered item leaves the watch set instead of being re-re
   await ticks[0]()
   await ticks[1]()
   assert.equal(reads, 1, 'a closed item must not be re-read on the next tick')
+})
+
+// The delivery trail. This arm is the `message` class's carrier for a card answered ON
+// THE BOARD, so it — not `commands/attention-next.md`, which carries the conversational
+// path — is what must record the attempt for these. Measured live 2026-09-29: 39
+// board-answered message cards had been delivered, one of them into a running session,
+// and every one read `never_attempted`.
+
+test('a settled message card records the attempt as delivered', async () => {
+  const pending = pendingOf(['req-1', 'a1'])
+  const posts = []
+  const ticks = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'message' }],
+    items: {
+      i1: {
+        item_id: 'i1',
+        state: 'answered',
+        answer_mechanism: 'message',
+        producer_id: 'sess-1',
+        answer: { kind: 'text', value: 'done' },
+      },
+    },
+    agents: agentsOf(['a1', 'sess-1']),
+    pending,
+    log: () => {},
+    posts,
+  })
+  await ticks[0]()
+  assert.deepEqual(posts, [
+    {
+      path: '/api/1.0/attention/i1/attempt',
+      body: { carrier: 'supervisor:message-delivery', outcome: 'delivered' },
+    },
+  ])
+})
+
+test('an answer with no park to settle records the attempt as failed', async () => {
+  // An attempt WAS made and could not be delivered — the park it was aimed at is gone —
+  // so this is `failed`, not `never_attempted`.
+  const posts = []
+  const ticks = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'message' }],
+    items: {
+      i1: {
+        item_id: 'i1',
+        state: 'answered',
+        answer_mechanism: 'message',
+        producer_id: 'sess-1',
+        answer: { kind: 'text', value: 'done' },
+      },
+    },
+    agents: agentsOf(['a1', 'sess-1']),
+    pending: pendingOf(),
+    log: () => {},
+    posts,
+  })
+  await ticks[0]()
+  assert.equal(posts.length, 1)
+  assert.equal(posts[0].body.outcome, 'failed')
+})
+
+test('an answer with no content records nothing, because no delivery was attempted', async () => {
+  // Recording `failed` here would claim a carrier tried and could not deliver, which is
+  // a different and false statement: nothing was attempted, so nothing is recorded.
+  const posts = []
+  const ticks = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'message' }],
+    items: {
+      i1: {
+        item_id: 'i1',
+        state: 'answered',
+        answer_mechanism: 'message',
+        producer_id: 'sess-1',
+        answer: { kind: 'skip' },
+      },
+    },
+    agents: agentsOf(['a1', 'sess-1']),
+    pending: pendingOf(['req-1', 'a1']),
+    log: () => {},
+    posts,
+  })
+  await ticks[0]()
+  assert.equal(posts.length, 0)
 })
 
