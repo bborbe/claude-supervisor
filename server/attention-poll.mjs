@@ -167,6 +167,39 @@ export function startAttentionPoll({
     return res.json()
   }
 
+  async function postJson(path, body) {
+    const res = await fetchImpl(`${storeUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) throw new Error(`store returned ${res.status} for ${path}`)
+    return res.json()
+  }
+
+  // Record what this arm observed about the delivery, on the arm that ATTEMPTED it.
+  //
+  // ⚠️ This is the permission class's carrier. The message class is delivered by the
+  // command wrapping `attention-answer.py`, and `commands/attention-next.md` records
+  // nothing on its `DELIVERY: supervisor poll` branch precisely because this runs
+  // instead — so if this write is missing, a delivered permission verdict reads as
+  // `never_attempted`, the absence the trail exists to make readable.
+  //
+  // ⚠️ Called AFTER the settle, never before: an attempt is a fact about a delivery
+  // that happened, and writing it first would record an attempt that may not occur.
+  // A failure here is logged rather than thrown — the gate has already been released,
+  // and a missing trail entry must not be reported as a failed delivery.
+  async function recordAttempt(itemId, outcome) {
+    try {
+      await postJson(`/api/1.0/attention/${itemId}/attempt`, {
+        carrier: 'supervisor:attention-poll',
+        outcome,
+      })
+    } catch (error) {
+      log(`attention item ${itemId} delivery attempt record failed (${outcome}): ${error.message}`)
+    }
+  }
+
   async function tick() {
     try {
       const open = await getJson('/api/1.0/attention')
@@ -195,6 +228,10 @@ export function startAttentionPoll({
         const target = selectParked({ item, agents, pending })
         if (!target.ok) {
           log(`attention item ${itemId} carries ${verdict.decision} but was not delivered: ${target.reason}`)
+          // An attempt WAS made and could not be delivered — the park it was aimed at
+          // is gone — so this is `failed`, not `never_attempted`. The item already
+          // left `watching` above, so this is terminal: nothing will retry it.
+          await recordAttempt(itemId, 'failed')
           continue
         }
         // No re-check that the park is still present: selectParked read `pending` on this
@@ -209,6 +246,7 @@ export function startAttentionPoll({
         // `settle` deletes the park from `pending` but does not mutate the record, so the
         // fields the caller needs are still readable off the captured reference.
         onSettled({ requestId: target.requestId, agentId: target.agentId, decision: verdict.decision, itemId, park })
+        await recordAttempt(itemId, 'delivered')
       }
     } catch (error) {
       log(`attention poll failed (${error.message}) — parks still auto-deny at the timeout`)
