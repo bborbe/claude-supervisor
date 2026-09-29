@@ -208,6 +208,40 @@ export function startMessageDelivery({
     return res.json()
   }
 
+  async function postJson(path, body) {
+    const res = await fetchImpl(`${storeUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) throw new Error(`store returned ${res.status} for ${path}`)
+    return res.json()
+  }
+
+  // Record what this arm observed about the delivery, on the arm that ATTEMPTED it.
+  //
+  // ⚠️ This arm is the `message` class's carrier for a card answered ON THE BOARD, so it
+  // is this file — not `commands/attention-next.md`, which carries the conversational
+  // path — that must write the record for these. Measured live 2026-09-29: 39 board-
+  // answered `message` cards had been delivered, one of them into a running session, and
+  // every one of them read `never_attempted` — *"no arm ever picked its answer up"* — a
+  // confidently wrong verdict, which is worse than having no trail at all.
+  //
+  // ⚠️ Called AFTER the settle, never before: an attempt is a fact about a delivery that
+  // happened, and writing it first would record an attempt that may not occur. A failure
+  // here is logged rather than thrown — the park has already been settled, and a missing
+  // trail entry must not be reported as a failed delivery.
+  async function recordAttempt(itemId, outcome) {
+    try {
+      await postJson(`/api/1.0/attention/${itemId}/attempt`, {
+        carrier: 'supervisor:message-delivery',
+        outcome,
+      })
+    } catch (error) {
+      log(`attention item ${itemId} delivery attempt record failed (${outcome}): ${error.message}`)
+    }
+  }
+
   async function tick() {
     try {
       const open = await getJson('/api/1.0/attention')
@@ -247,6 +281,10 @@ export function startMessageDelivery({
         const target = selectMessagePark({ item, agents, pending })
         if (!target.ok) {
           log(`attention item ${itemId} carries an answer but was not delivered: ${target.reason}`)
+          // An attempt WAS made and could not be delivered — the park it was aimed at is
+          // gone — so this is `failed`, not `never_attempted`. The item already left
+          // `watching` above, so this is terminal: nothing will retry it.
+          await recordAttempt(itemId, 'failed')
           continue
         }
         log(`message ${target.requestId} answered by the attention store (item ${itemId})`)
@@ -258,6 +296,7 @@ export function startMessageDelivery({
           park: target.park,
           text: content.text,
         })
+        await recordAttempt(itemId, 'delivered')
       }
     } catch (error) {
       log(`message delivery failed (${error.message}) — parks still auto-deny at the timeout`)
