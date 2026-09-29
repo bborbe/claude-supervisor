@@ -916,8 +916,17 @@ def main(argv: list[str]) -> int:
         tmp = path + ".tmp"
         os.makedirs(STATE_DIR, exist_ok=True)
         try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(table)
+            # Both halves of the pattern `save_stored` already holds, and for its reasons.
+            # The rendered frame's OSC 8 jump link carries the jump token, and this file is
+            # a disk artifact in a shared state dir — so it is written link-free and 0600
+            # *at creation*, never world-readable even for the instant between the write and
+            # the replace. Stripping here rather than at the caller is the point: one
+            # `render_table()` frame serves both the operator's screen and this file, so a
+            # caller-side strip would take the on-screen links with it. The frame the caller
+            # prints keeps its links; only the copy on disk loses them.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(strip_links(table))
             # Atomic, for the reason `--write-tracked` gives: a reader sees either the old
             # payload or the new one, never a half-written file.
             os.replace(tmp, path)
