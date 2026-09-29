@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.67.0
 
 - feat: **A manager can batch its round's unapproved rows into ONE attention-board card.** `scripts/attention-ask.py` gains a `post-batch` arm: `--task` repeated once per unapproved ready row produces a **single** `message` item listing them, numbered, rather than one card per row. ⚠️ **The rows are printed verbatim because a task's name is the key `vault-cli task approve` takes** — a card that abbreviated one would be answerable but not actionable. ⚠️ **No options are offered, deliberately:** the answer is the operator's own words naming which rows to approve, and a fixed option list would make an all-or-nothing click the only reply to a question whose real answer is a *subset* — which is the thing the caller's set comparison measures. The producer gate and the post tail are extracted into shared helpers so `post` and `post-batch` cannot drift on the one rule that decides whether an item can ever be polled back; `post`'s behaviour and exit codes are unchanged. Tests: `scripts/tests/test_attention_ask.py` gains `BuildBatchPayloadTest` and `PostBatchTest`, the latter asserting **one** store call for a three-row batch.
 
