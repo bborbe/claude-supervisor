@@ -217,8 +217,27 @@ export function startMessageDelivery({
       for (const itemId of [...watching]) {
         // Read by id, not from the list: the list is the render path and carries open
         // items only, while this read is the post-transition one and works on any state.
-        const item = await getJson(`/api/1.0/attention/${itemId}`)
-        if (item?.state !== 'answered') continue
+        //
+        // ⚠️ The read is guarded PER ITEM, and that guard is load-bearing rather than
+        // defensive. An unguarded throw here escapes to the outer catch, so every later
+        // item in the tick is skipped — and because the id stays in `watching`, the same
+        // id throws again on every subsequent tick. One pruned item would wedge delivery
+        // permanently, silently, which is the failure class this whole arm exists to close.
+        let item
+        try {
+          item = await getJson(`/api/1.0/attention/${itemId}`)
+        } catch (error) {
+          watching.delete(itemId)
+          log(`attention item ${itemId} could not be read (${error.message}) — dropped from the watch set`)
+          continue
+        }
+        if (item?.state !== 'answered') {
+          // `open` is the only state worth holding. Anything else is terminal, and an item
+          // that went terminal without being answered can never carry an answer — keeping
+          // it would re-read it on every tick for the life of the process.
+          if (item?.state !== 'open') watching.delete(itemId)
+          continue
+        }
         watching.delete(itemId)
         const content = messageTextOf(item)
         if (!content.ok) {

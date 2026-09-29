@@ -303,3 +303,84 @@ test('a store error is logged and swallowed, never thrown', async () => {
   assert.match(logged.join('\n'), /message delivery failed/)
   assert.match(logged.join('\n'), /still auto-deny at the timeout/)
 })
+
+test('an unreadable item does not wedge the tick for the items behind it', async () => {
+  // ⚠️ Without the per-item guard the 404 escapes to the outer catch, every later item in
+  // the tick is skipped, and the same id throws again on every subsequent tick — delivery
+  // wedged permanently and silently. The item behind it settling is the proof.
+  const pending = pendingOf(['req-1', 'a1'])
+  const ticks = []
+  startMessageDelivery({
+    storeUrl: 'http://store',
+    agents: agentsOf(['a1', 'sess-1']),
+    pending,
+    log: () => {},
+    setTimeoutImpl: (fn) => {
+      ticks.push(fn)
+      return ticks.length
+    },
+    clearTimeoutImpl: () => {},
+    fetchImpl: async (url) => {
+      if (url.endsWith('/attention')) {
+        return {
+          ok: true,
+          json: async () => [
+            { item_id: 'gone', answer_mechanism: 'message' },
+            { item_id: 'i1', answer_mechanism: 'message' },
+          ],
+        }
+      }
+      if (url.endsWith('/gone')) return { ok: false, status: 404, json: async () => ({}) }
+      return {
+        ok: true,
+        json: async () => ({
+          item_id: 'i1',
+          state: 'answered',
+          answer_mechanism: 'message',
+          producer_id: 'sess-1',
+          answer: { kind: 'text', value: 'done' },
+        }),
+      }
+    },
+  })
+  await ticks[0]()
+  assert.equal(pending.get('req-1').settled.length, 1)
+  assert.equal(pending.get('req-1').settled[0].message, `${OPERATOR_PREFIX} done`)
+})
+
+test('a terminal-but-unanswered item leaves the watch set instead of being re-read forever', async () => {
+  let reads = 0
+  let lists = 0
+  const ticks = []
+  startMessageDelivery({
+    storeUrl: 'http://store',
+    agents: agentsOf(['a1', 'sess-1']),
+    pending: pendingOf(),
+    log: () => {},
+    setTimeoutImpl: (fn) => {
+      ticks.push(fn)
+      return ticks.length
+    },
+    clearTimeoutImpl: () => {},
+    fetchImpl: async (url) => {
+      if (url.endsWith('/attention')) {
+        // Served open once, then gone — the item went terminal while we watched it, so
+        // the second tick's list no longer carries it and only the watch set could.
+        lists += 1
+        return {
+          ok: true,
+          json: async () => (lists === 1 ? [{ item_id: 'gone', answer_mechanism: 'message' }] : []),
+        }
+      }
+      reads += 1
+      return {
+        ok: true,
+        json: async () => ({ item_id: 'gone', state: 'closed', answer_mechanism: 'message' }),
+      }
+    },
+  })
+  await ticks[0]()
+  await ticks[1]()
+  assert.equal(reads, 1, 'a closed item must not be re-read on the next tick')
+})
+
