@@ -82,7 +82,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
    | Signal | Reading |
    |---|---|
-   | session carries an **operator hold** | **held** — render `⏸️ HELD — <reason>`; never `stalled`, never `parked`, never a nudge |
+   | session carries an **operator hold** | **held** — render `⏸️ HELD — <reason> · <age>`; never `stalled`, never `parked`, never a nudge |
    | status changed since last sweep | progressing |
    | `busy`/`shell` **and** task mtime unchanged for ≥2 consecutive sweeps (`stall_count >= 2` after this sweep's update) | **stalled** |
    | `idle` **and** task file has open `[ ]`/`[/]` boxes | parked |
