@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.80.0
 
 - feat: **`agents/manager-drive.md` never acts on a session carrying an operator hold.** A `NEVER` clause alongside the existing ones: no nudge, no reap, no auto-resume, no escalation. ⚠️ **The row is still rendered** — only the act stops. The clause also draws the distinction that matters and is easy to miss: a hold is operator *policy* about a **session**, orthogonal to the `hold` *task status* the neighbouring clause names. A task can be `in_progress` while its session is held, and a session can be held with no task at all. The canonical rule lives in `skills/hold/SKILL.md` and is referenced, not restated, per the repo's single-home convention.
 
