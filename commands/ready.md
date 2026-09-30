@@ -1,5 +1,5 @@
 ---
-description: Ready ONE named task and open it — run the audit → repair → re-audit loop in a sub-agent until the audit returns zero hard-gate failures, then act on the Gate 2 verdict: open via `/supervisor:open`, or escalate naming the gap. Cross-tier — runnable by the fleet manager and by a goal/topic manager. It readies a task; it never approves one.
+description: "Ready ONE named task and open it — run the audit → repair → re-audit loop in a sub-agent until the audit returns zero hard-gate failures, then act on the Gate 2 verdict: open via `/supervisor:open`, or escalate naming the gap. Cross-tier — runnable by the fleet manager and by a goal/topic manager. It readies a task; it never approves one."
 allowed-tools:
   - Bash(vault-cli:*)
   - Bash(grep:*)
