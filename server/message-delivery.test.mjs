@@ -457,6 +457,53 @@ test('an answer with no park to settle records the attempt as failed', async () 
   assert.equal(posts[0].body.outcome, 'failed')
 })
 
+test('an answer for a session another server holds records nothing', async () => {
+  // Every supervisor server watches every open `message` card, so one answer is read by
+  // the whole fleet. Only the server holding the producing session attempted anything;
+  // if this one wrote `failed`, the fleet would outvote the owner's real outcome.
+  // Measured live 2026-09-30: 19 `failed` records and 0 `delivered`.
+  const posts = []
+  const ticks = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'message' }],
+    items: {
+      i1: {
+        item_id: 'i1',
+        state: 'answered',
+        answer_mechanism: 'message',
+        producer_id: 'sess-elsewhere',
+        answer: { kind: 'text', value: 'done' },
+      },
+    },
+    agents: agentsOf(['a1', 'sess-1']),
+    pending: pendingOf(['req-1', 'a1']),
+    log: () => {},
+    posts,
+  })
+  await ticks[0]()
+  assert.equal(posts.length, 0)
+})
+
+test('an answer naming no producer records nothing', async () => {
+  const posts = []
+  const ticks = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'message' }],
+    items: {
+      i1: {
+        item_id: 'i1',
+        state: 'answered',
+        answer_mechanism: 'message',
+        answer: { kind: 'text', value: 'done' },
+      },
+    },
+    agents: agentsOf(['a1', 'sess-1']),
+    pending: pendingOf(['req-1', 'a1']),
+    log: () => {},
+    posts,
+  })
+  await ticks[0]()
+  assert.equal(posts.length, 0)
+})
+
 test('an answer with no content records nothing, because no delivery was attempted', async () => {
   // Recording `failed` here would claim a carrier tried and could not deliver, which is
   // a different and false statement: nothing was attempted, so nothing is recorded.

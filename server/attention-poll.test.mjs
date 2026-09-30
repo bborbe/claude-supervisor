@@ -207,16 +207,30 @@ test('a settled permission answer records the attempt as delivered', async () =>
   ])
 })
 
-test('an attempt with no park to settle records the attempt as failed', async () => {
-  // The park it was aimed at belongs to another agent, so the delivery could not
-  // happen — an attempt WAS made and failed, which is not `never_attempted`.
+test('an owned session with no park to settle records the attempt as failed', async () => {
+  // This server holds the producing session, so it is the carrier; the park it was
+  // aimed at is gone, so an attempt WAS made and failed — not `never_attempted`.
+  const { ticks, posts } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    pendingEntries: [],
+  })
+  await ticks[0]()
+  assert.equal(posts.length, 1)
+  assert.equal(posts[0].body.outcome, 'failed')
+})
+
+test('an answer for a session another server holds records nothing', async () => {
+  // ⚠️ This spec previously asserted `failed` here, reasoning that "an attempt WAS
+  // made". It was not: every supervisor server watches every open permission item,
+  // and only the one holding the producing session attempts anything. A non-owner
+  // writing `failed` outvotes the owner's real outcome in a one-record-per-item trail.
   const { ticks, posts } = harness({
     open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
     items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', resolved_by: 'sess-abc', answer_mechanism: 'permission', producer_id: 'sess-2' } },
   })
   await ticks[0]()
-  assert.equal(posts.length, 1)
-  assert.equal(posts[0].body.outcome, 'failed')
+  assert.equal(posts.length, 0)
 })
 
 test('a non-arm answer records nothing, because no delivery was attempted', async () => {
