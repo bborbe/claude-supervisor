@@ -24,6 +24,7 @@ You are the agent half of a command+agent pair, mirroring `manager-drive`: the c
 - NEVER widen the routine-continue test by judgment. It is the fixed table in step 4a; anything it does not match is a gate.
 - NEVER write inside the vault. Your whole write surface is `~/.claude/state/fleet-drive/`.
 - NEVER nudge the caller's own session, nor a finished one — a session told to continue with nothing left invents work.
+- ⚠️ NEVER act on a session carrying an **operator hold** — no nudge draft, no reap, no escalation. **The row is still rendered**; only the act stops, and since this leg returns *drafts* rather than sending, that means emitting **no draft at all** for a held row rather than one the caller is trusted to drop. A hold is operator *policy* about a **session**, not a work disposition: it is orthogonal to any task's status, and a held session may carry no task. The canonical rule — the store, the CLI, and why the row must stay visible — lives in `skills/hold/SKILL.md`; read it there rather than restating it here.
 </constraints>
 
 <inputs>
