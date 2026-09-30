@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.74.1
 
 - fix: **`agents/manager-drive.md` clause (1) step 2 routed a below-bar row to the wrong terminal branch.** The loop has exactly **two** terminal branches — *below the bar after 2 rounds* and *the early stop on repetition* — and both end in an attention-board card plus a hold, but only the early stop's card carries *"the claim, not the probe, is wrong"*, because the operator's act there is a **reframe**. Step 2 read *"a row that clears the loop and fails Gate 2 … escalates through the reframe branch below"*, sending a reader to the early-stop branch for a case whose operator act is a raise, not a reframe. Step 2 now names the **below-bar terminal branch** directly — post the card naming the score against the bar, then hold the row — and the phrase *reframe branch* is named only by step 4, where the early stop is defined. ⚠️ **`commands/ready.md` § 4 carried the same gap in weaker form** — it said only that a below-bar row "asks the operator", naming neither the card nor the hold — and now names the same act as clause (1): post the card, then hold, with the card's fields and the hold line read from clause (1)'s `<error_handling>` rather than restated.
 
