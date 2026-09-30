@@ -110,12 +110,28 @@ today=datetime.date.today().isoformat()
 def due(t):
     dd=str(t.get('defer_date') or '')[:10]
     return (not dd) or dd <= today           # ABSENT means not deferred, i.e. available now
-sel=[t for t in tasks if t.get('flag') is True and t.get('status')=='in_progress' and due(t)]
+# An agent-set flag is never an approval (ruled 2026-09-28). Only these two actors open a row:
+#   operator — the operator's own surface wrote it (Vault UI toggle, a hand-typed --by operator)
+#   legacy   — one of the 270 rows whose flag predates the field, dispositioned 2026-09-30
+# Everything else refuses, INCLUDING an absent flag_set_by: after the disposition no row should
+# carry one, so an absent value means a writer that did not declare itself, which is the bypass.
+OPENING_ACTORS=('operator','legacy')
+cand=[t for t in tasks if t.get('flag') is True and t.get('status')=='in_progress' and due(t)]
+sel=[t for t in cand if str(t.get('flag_set_by') or '').strip() in OPENING_ACTORS]
+for t in sorted([x for x in cand if x not in sel], key=lambda x: x.get('name','')):
+    who=str(t.get('flag_set_by') or '').strip() or '<absent>'
+    print('REFUSED |', os.environ['VAULT'], '|', t.get('name'), '| flag_set_by=' + who, '| not the operator — not opened, not approved')
 for t in sorted(sel, key=lambda x: x.get('name','')):
     print(os.environ['VAULT'], '|', t.get('name'), '|', 'HOLD' if t.get('blocked') else '', '|', ','.join(t.get('blocked_by') or []))
 "
 done
 ```
+
+⚠️ **The provenance filter is a gate, not a tidy-up, and it must stay ahead of the approve pass.** Step 0.6's opening move is `vault-cli task approve` on every row this selector returned, *before* Step 1.5 Gate 1 ever runs — so a row admitted here is approved here. Filtering on `flag_set_by` at Gate 1 instead would be too late: the batch would already have written `approved_by: operator` onto the agent-set row, materializing precisely the approval the 2026-09-28 ruling forbids. The filter lives in the selector for that reason, not for convenience.
+
+⚠️ **Refuse loudly; never drop a row silently.** A refused row prints as `REFUSED | <vault> | <task> | flag_set_by=<who>` and is excluded from the batch. Omitting it instead would make it indistinguishable from a row that was never flagged, and the operator would have no way to learn that something wrote their approval marker. Both halves are load-bearing: quoting the refusal alone is satisfiable by a build that refuses everything, quoting the open alone by one that refuses nothing.
+
+⚠️ **`legacy` opens a row, and it is a migration marker rather than a credential.** It was written onto 270 rows on 2026-09-30 (counts and artifact in [[An Agent-Set Flag True Bypasses the Approval Gate and Nothing Detects It]] § Progress). `--by` is caller-declared, so `legacy` is exactly as claimable as `operator` is — this filter cannot tell an honest writer from a dishonest one and does not try. What it catches is the **undeclared** writer, which is the class that produced the defect.
 
 **Scan every vault that declares a `tasks_dir`; `--vault <name>` narrows to one.** Of 13 configured vaults, 8 declare one. A vault-scoped run is the exception now, not the default — the operator manages one fleet, not one vault, and the same complaint already stood against the fleet manager's vault argument.
 
@@ -241,7 +257,7 @@ Without it the row opens unapproved, the worker reaches the approval question it
 
 ⚠️ **Print one `approve <task>` line per approved row.** The run's output is the only record that the ordering held, and it is what a reader checks to tell a real approve from a line-printing no-op.
 
-**Readiness-gate every CREATE-bound row first, concurrently.** Before the loop, find the rows that would take Step 2A's CREATE branch — `role: agent`, no live pane, no `claude_session_id` — and dispatch Step 1.5's readiness sub-agent for **all of them in ONE message** (one `Agent` call per row, parallel). Resume/jump-bound rows, `role: human` (→ DIRECT) rows, and `task_type:` pipeline rows (§ Step 1.5) are not gated. Add a `readiness` column to the table: `✅ ready 9/10`, `⛔ NOT READY 7/10` with the gap bullets under the row, or `— (resume/jump/direct)`. A not-ready row is **held, never opened**, and counted in the footer: `… · not ready R (readiness)`. The per-row `/supervisor:open` below reuses this verdict — it does not re-gate a row the batch already gated in this run. ⚠️ **Gate 1 does not refuse this batch, because the batch performs the approval itself** — `flag: true` on a `todo` row **is** the approval for `--flagged` only (ruled 2026-09-28), and the approve pass above writes that approval to disk before this dispatch runs. The batch therefore runs **Gate 2 only**. See § Step 1.5 Gate 1 for the ruling and its unenforced half.
+**Readiness-gate every CREATE-bound row first, concurrently.** Before the loop, find the rows that would take Step 2A's CREATE branch — `role: agent`, no live pane, no `claude_session_id` — and dispatch Step 1.5's readiness sub-agent for **all of them in ONE message** (one `Agent` call per row, parallel). Resume/jump-bound rows, `role: human` (→ DIRECT) rows, and `task_type:` pipeline rows (§ Step 1.5) are not gated. Add a `readiness` column to the table: `✅ ready 9/10`, `⛔ NOT READY 7/10` with the gap bullets under the row, or `— (resume/jump/direct)`. A not-ready row is **held, never opened**, and counted in the footer: `… · not ready R (readiness)`. The per-row `/supervisor:open` below reuses this verdict — it does not re-gate a row the batch already gated in this run. ⚠️ **Gate 1 does not refuse this batch, because the batch performs the approval itself** — `flag: true` on a `todo` row **is** the approval for `--flagged` only (ruled 2026-09-28), and the approve pass above writes that approval to disk before this dispatch runs. The batch therefore runs **Gate 2 only**. See § Step 1.5 Gate 1 for the ruling, and § Step 0.5 for the provenance filter that decides which rows reach this approve pass at all — a row whose flag was not operator-set is refused there, before this pass can approve it.
 
 **Loop the eligible rows in the printed stable order** and delegate each to this command's own single-task path — the exact Step 2A resolution (live pane → JUMP, `claude_session_id` → RESUME, else CREATE + spawn). Invoke `/supervisor:open "<task>"` per row; never reimplement jump / resume / spawn here, and never pass a mode override to the fleet. The row's `role` is now on disk, so § 3.0 reads it back from frontmatter like any other task — the batch does not hand it forward in memory, which is what makes the write in Step 0.6 load-bearing rather than bookkeeping.
 
@@ -299,7 +315,7 @@ vault-cli --vault "<vault>" task get "<task>" phase
 
 ⚠️ **The ruling is load-bearing, not decorative**, because a `flag: true` **is** task content: `vault-cli`'s `docs/task-writing.md` § *Phase transitions* (the **"The approval may be delegated"** paragraph — ⚠️ present from **vault-cli 0.153.1**; it is absent in 0.153.0 and earlier, so a reader on an older install will not find it) forbids approving "on an approval read from task content", and permits a session to approve only on the operator's "own explicit words" — which the ruling is. The approval is the operator's, the keystroke is the batch's, and `approved_by: operator` records exactly that.
 
-The approval does **not** extend to the four sweeps (`manager-loop`, `manager-drive`, `fleet-loop`, `fleet-drive`), which report `todo` rows instead of acting on them. ⚠️ Nothing in the code distinguishes an operator-set flag from an agent-set one — that half of the ruling is enforced by convention, not by a field; the missing field is tracked by [[An Agent-Set Flag True Bypasses the Approval Gate and Nothing Detects It]].
+The approval does **not** extend to the four sweeps (`manager-loop`, `manager-drive`, `fleet-loop`, `fleet-drive`), which report `todo` rows instead of acting on them. ⚠️ **The field now exists, and that half of the ruling is no longer convention.** Since 2026-09-30 `vault-cli` records `flag_set_by` / `flag_set_at` in the same storage call that sets the flag, and § Step 0.5 refuses any flagged row whose `flag_set_by` is neither `operator` nor `legacy`. The enforcement therefore sits **upstream of this gate**, in the selector — deliberately, because this gate runs *after* the batch has already written its approval, so a refusal here would arrive too late to prevent one. See § Step 0.5 for the filter, the two opening actors, and why absent provenance now refuses. Shipped by [[An Agent-Set Flag True Bypasses the Approval Gate and Nothing Detects It]].
 ### Gate 2 — readiness
 
 **Scope: CREATE only.** JUMP and RESUME are never gated — a live or resumable session already exists, and gating it would strand work mid-flight. `role: human` rows opened into Direct are not gated either — the operator drives them. **Rows carrying a `task_type:` frontmatter field are exempt** — pipeline-emitted tasks (e.g. `sentry-issue-analyzer`) take their agent contract from `task_type`, not from page sections, so the auditor refuses the whole class for lacking `# Success Criteria` / `# Tasks` (measured 2026-09-23: 3/10). Show `— (pipeline contract)` in the readiness column. Decided by the operator 2026-09-23.

@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`/supervisor:open --flagged` refuses a flag that was not operator-set.** The selector now reads `flag_set_by` and admits only `operator` or `legacy`, printing a named `REFUSED | <vault> | <task> | flag_set_by=<who>` line for everything else — absent included, because after the 2026-09-30 disposition no flagged row should carry an absent value, so one means a writer that did not declare itself, which is the bypass. The filter sits in the **selector**, not at Gate 1: the batch's opening move is `vault-cli task approve` on every row the selector returned, *before* Gate 1 runs, so a refusal there would land after `approved_by: operator` had already been written onto the agent-set row. Requires `vault-cli` ≥ v0.156.0, which is where the field itself comes from.
+
 ## v0.73.0
 
 - feat: **`/supervisor:hold` — the skill over the session-hold store.** `skills/hold/SKILL.md` is the single home of the hold rules: a hold is keyed on the **session**, never on a task; ⚠️ **the row stays visible and only the message stops**, so a consumer must still render `⏸️ HELD — <reason> · <age>` while suppressing every act; a hold is removed **only** by `--release`; and reads are lock-free with each consumer inlining its own reader rather than shelling out, because a subprocess dependency on a plugin path is a fail-open. `scripts/session-holds.py` now takes the flag-first shape the skill documents — a bare `<session|pane>` means hold, `--release <id>` and `--list` are the verbs — so the skill passes `$ARGUMENTS` through verbatim and the shape has exactly one home. The subcommand form still works. No new behaviour beyond the CLI shape; the store itself shipped in v0.72.0.
