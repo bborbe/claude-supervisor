@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`agents/manager-drive.md` never acts on a session carrying an operator hold.** A `NEVER` clause alongside the existing ones: no nudge, no reap, no auto-resume, no escalation. ⚠️ **The row is still rendered** — only the act stops. The clause also draws the distinction that matters and is easy to miss: a hold is operator *policy* about a **session**, orthogonal to the `hold` *task status* the neighbouring clause names. A task can be `in_progress` while its session is held, and a session can be held with no task at all. The canonical rule lives in `skills/hold/SKILL.md` and is referenced, not restated, per the repo's single-home convention.
+
 ## v0.79.0
 
 - feat: **`restart-worker.py` refuses a held session — an EIGHTH refusal.** ⚠️ Checked **before** the status and kind gates, because a hold is the stronger statement: `busy` says the moment is wrong, a hold says the session is not yours to touch at all. Restarting is exactly the act the operator held the session to prevent. The refusal carries the stable token `held-session` and names the release path (`/supervisor:hold`), like the seven refusals the module already documents. The reader is inlined (the plugin's scripts do not import each other; a subprocess dependency on a plugin path is a fail-open) and reads are lock-free because the writer lands through `os.replace`; a missing or corrupt store reads as *nothing held*, so an unreadable file cannot refuse a restart the operator asked for. Paired test, both directions named: `test_fires_on_a_held_session` (too-tight) and `test_does_not_fire_on_a_clean_session` (too-loose — the SAME session, unheld), plus `test_a_corrupt_store_reads_as_nothing_held`. **Both inversions verified:** disabling the guard fails 1 test; making it refuse unconditionally fails 16; restoring passes 48.
