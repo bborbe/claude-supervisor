@@ -83,8 +83,16 @@ Digest inputs — verbatim from the loop gate
   member-name list, so a task added to or removed from the tracked set moves the digest
   even if every remaining task is untouched.
 
-⚠️ mtime is deliberately EXCLUDED. A touch with no content change is not a change the
-sweep reports, and including it would wake the model on every unrelated rewrite.
+⚠️ mtime is deliberately EXCLUDED as a raw digest input. A touch with no content change
+is not a change the sweep reports, and including it would wake the model on every
+unrelated rewrite.
+
+⚠️ It reaches the digest through `stuck` alone, and that is deliberate rather than a
+leak. Branch (b) of the stuck rule reads the task file's mtime — it IS the rule's
+*"task file unchanged"* measure — so for the rows that rule actually measures (idle, in
+`phase: execution`, holding an open box, not parked) a rewrite is not unrelated: it
+resets the very clock the rule reads. Every other row is untouched, because
+`apply_stuck` sets `stuck = False` for it and its mtime never enters the digest at all.
 
 ⚠️ Liveness is in the digest ON PURPOSE, and this is the criterion the whole gate is
 graded on. A worker dying changes session liveness; a digest over `status`/`phase`/mtime
@@ -253,6 +261,10 @@ def read_task(path: str) -> dict | None:
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
+            # `fstat` on the descriptor we just read, never a second `stat(path)`: the
+            # path could be replaced between the two calls, and the idle clock has to
+            # describe the file whose contents we actually hashed.
+            mtime = os.fstat(fh.fileno()).st_mtime
     except OSError:
         return None
     fm = split_frontmatter(text)
@@ -266,6 +278,7 @@ def read_task(path: str) -> dict | None:
         "goals": fm_wikilinks(fm, "goals"),
         "progress_hash": progress_hash(text),
         "met": checkbox_count(text),
+        "mtime": mtime,
     }
 
 
@@ -508,19 +521,71 @@ def enrich_liveness(tracked: list[dict], registry: dict, feed: dict) -> None:
         t["liveness"] = liveness_of(t["session"], registry, feed)
 
 
+def open_box_count(met: str) -> int:
+    """Open boxes from the `n/m` reading `checkbox_count` emits.
+
+    `checkbox_count` returns `—` for a section holding no boxes. That is zero open
+    boxes, not a parse failure, and the runbook's qualifier is `>=1 open box`, so both
+    read the same way here.
+    """
+    if "/" not in met:
+        return 0
+    done, _, total = met.partition("/")
+    try:
+        return int(total) - int(done)
+    except ValueError:
+        return 0
+
+
+def idle_stuck(t: dict, now_ts: float) -> bool:
+    """Branch (b): idle past the threshold, in `execution`, holding an open box.
+
+    Four gates, all required. The `phase: execution` and `>=1 open box` qualifiers are
+    the runbook's own. The idle duration is the task file's mtime — the rule's
+    *"task file unchanged"* measure, since a write to the file is precisely what makes
+    it changed, and the reader's shipped branch (b) derives the same duration from the
+    same signal.
+
+    ⚠️ The WAITING guard is not decoration. The runbook is explicit that a row
+    demonstrably parked on a human or a dependency is NOT stuck, and that the
+    file-unchanged proxy cannot tell the two apart. The parked carrier is already
+    computed in this file (`liveness_of` -> `LIVENESS_PARKED`), so a branch (b) that
+    ignored it would flag exactly the workers the rule exists to leave alone.
+    """
+    if t.get("liveness") == LIVENESS_PARKED:
+        return False
+    if t.get("phase") != "execution":
+        return False
+    if open_box_count(t.get("met", "—")) < 1:
+        return False
+    mtime = t.get("mtime")
+    if mtime is None:
+        return False
+    return (now_ts - float(mtime)) >= STUCK_SECONDS
+
+
 def apply_stuck(tracked: list[dict], registry: dict, prev_busy: dict, now_ts: float) -> dict:
     """Set `t['stuck']` and return the busy-since map to persist.
 
-    The registry gives a session's current status but not how long it has held it, so the
-    clock is observed across runs; a Progress write resets it, which is what keeps a
-    working worker off the stuck row.
+    ⚠️ Both branches of the runbook's rule, not just the busy one.
+
+    **(a) busy > ~30 min** — the registry gives a session's current status but not how
+    long it has held it, so the clock is observed across runs; a Progress write resets
+    it, which is what keeps a working worker off the stuck row.
+
+    **(b) idle > ~30 min in `phase: execution` with an open box** — see `idle_stuck`.
+    It carries no persisted map, because its duration is the task file's mtime and an
+    mtime is absolute: there is no clock to observe across runs.
+
+    The branches are disjoint — (b) is reached only when the session is not busy — so
+    no row can be flagged by both.
     """
     new_busy: dict[str, dict] = {}
     for t in tracked:
         rec = registry.get(t["session"]) if t["session"] else None
         busy = bool(rec and rec["alive"] and rec["status"] == "busy")
         if not busy:
-            t["stuck"] = False
+            t["stuck"] = idle_stuck(t, now_ts)
             continue
         prev = prev_busy.get(t["name"])
         if prev and prev.get("progress") == t["progress_hash"]:

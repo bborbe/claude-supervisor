@@ -759,5 +759,92 @@ class HoldDigest(Base):
         self.assertEqual(before, self.m.digest_of(tracked))
 
 
+class TestStuck(Base):
+    """`apply_stuck` — BOTH branches of the runbook's rule.
+
+    ⚠️ These call `apply_stuck` DIRECTLY with seeded inputs, and that is the point
+    rather than a style choice. The bucket-level cases elsewhere inject `stuck`,
+    which is green on a build implementing NEITHER branch, so none of them can tell
+    branch (a) from branch (b). Seeding the registry and the busy-since map is what
+    makes these fail before the fix: an idle session is not `busy`, so a busy-only
+    `apply_stuck` set `stuck = False` and the positive case could not pass.
+
+    ⚠️ `test_branch_a_still_fires` is load-bearing. The fix ADDS the missing limb;
+    an implementation that replaces (a) with (b) satisfies every (b) case here and
+    is caught only by that one.
+    """
+
+    NOW = 1_800_000_000.0
+    IDLE = {"sid": {"alive": True, "status": "idle"}}
+    BUSY = {"sid": {"alive": True, "status": "busy"}}
+
+    def row(self, **kw):
+        # `session` is not decoration: `apply_stuck` reads `registry.get(t["session"])`
+        # and an empty one resolves to None, so the positive case would fail on a
+        # CORRECT build too. `met` is the `n/m` string `checkbox_count` emits, not a
+        # count — `"0/1"` is one open box.
+        d = {
+            "name": "S",
+            "status": "in_progress",
+            "phase": "execution",
+            "session": "sid",
+            "goals": [],
+            "progress_hash": "ph",
+            "met": "0/1",
+            "mtime": self.NOW - self.m.STUCK_SECONDS - 60,
+        }
+        d.update(kw)
+        return d
+
+    def stuck(self, row, registry, prev=None):
+        self.m.apply_stuck([row], registry, prev or {}, self.NOW)
+        return row["stuck"]
+
+    def test_branch_b_flags_an_idle_row_holding_an_open_box(self):
+        self.assertTrue(self.stuck(self.row(), self.IDLE))
+
+    def test_branch_b_respects_the_threshold(self):
+        # The negative control. Without it "mark every idle execution row stuck"
+        # passes the positive case, and the ~30 min qualifier is not a rule at all.
+        self.assertFalse(
+            self.stuck(self.row(mtime=self.NOW - self.m.STUCK_SECONDS + 60), self.IDLE)
+        )
+
+    def test_branch_b_exempts_a_parked_row(self):
+        # The runbook's WAITING rule: a row held from OUTSIDE the worker is not stuck,
+        # and the file-unchanged proxy cannot tell it from a wedged one.
+        self.assertFalse(self.stuck(self.row(liveness=self.m.LIVENESS_PARKED), self.IDLE))
+
+    def test_branch_b_requires_execution_phase(self):
+        self.assertFalse(self.stuck(self.row(phase="planning"), self.IDLE))
+
+    def test_branch_b_requires_an_open_box(self):
+        self.assertFalse(self.stuck(self.row(met="1/1"), self.IDLE))
+        self.assertFalse(self.stuck(self.row(met="—"), self.IDLE))
+
+    def test_branch_b_without_an_mtime_is_not_stuck(self):
+        # A row whose file could not be stat'd must not be guessed onto the ⚠️ row.
+        self.assertFalse(self.stuck(self.row(mtime=None), self.IDLE))
+
+    def test_branch_a_still_fires(self):
+        # phase/met/mtime are deliberately outside branch (b)'s reach, so a pass here
+        # cannot be branch (b) answering instead.
+        prev = {"S": {"since": self.NOW - self.m.STUCK_SECONDS - 60, "progress": "ph"}}
+        self.assertTrue(
+            self.stuck(self.row(phase="planning", met="—", mtime=None), self.BUSY, prev)
+        )
+
+    def test_branch_a_resets_on_a_progress_write(self):
+        prev = {"S": {"since": self.NOW - self.m.STUCK_SECONDS - 60, "progress": "OTHER"}}
+        self.assertFalse(
+            self.stuck(self.row(phase="planning", met="—", mtime=None), self.BUSY, prev)
+        )
+
+    def test_read_task_carries_the_file_mtime(self):
+        # Branch (b)'s only input, and the one `apply_stuck` cannot derive itself.
+        p = os.path.join(self.vault, "25 Tasks", "ATask.md")
+        self.assertAlmostEqual(self.m.read_task(p)["mtime"], os.stat(p).st_mtime, places=3)
+
+
 if __name__ == "__main__":
     unittest.main()
