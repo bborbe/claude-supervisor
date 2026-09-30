@@ -350,34 +350,34 @@ BUCKET_ORDER = ("problem", "needs-input", "running", "idle")
 def registry_records(sessions_dir=None):
     """`session id -> {status, name, cwd}` from the registry; `None` if unreadable.
 
-    Read here rather than through `who-needs-me.read_registry()` because that
-    helper returns only the id -> name map, and this table needs `status` as well.
-    It is the same directory, so `coverage_errors()` cross-checks the live set
-    against `read_registry()`'s keys — two readers of one source must not disagree
-    about which entries exist.
+    Read through the plugin's single reader — `session-liveness.py` — rather than
+    globbing the directory here. This function used to open it directly, on the
+    reasoning that the shared reader returned only an id -> name map and this table
+    needs `status` too. That reasoning expired: the shared reader now carries
+    `status`, `cwd`, `formerNames` and `nameSource`, and a second reader over one
+    directory is precisely the defect that reader's own header records — on
+    2026-09-26 a hand-rolled copy read an 8-char prefix as `ABSENT` for two live
+    sessions and published it as a confirmed verdict.
 
     `None` is a distinct answer from `{}`: an unreadable registry cannot prove a
     fleet is empty, and reporting `{}` would render a clean table for a probe that
     simply failed.
     """
     d = sessions_dir or os.environ.get("SESSIONS_DIR") or wnm.SESSIONS_DIR
-    if not os.path.isdir(d):
+    records = _load("session_liveness", "session-liveness.py").read_registry(d)
+    if records is None:
         return None
-    try:
-        out = {}
-        for path in glob.glob(os.path.join(d, "*.json")):
-            with open(path, encoding="utf-8") as f:
-                rec = json.load(f)
-            sid = rec.get("sessionId")
-            if sid:
-                out[sid] = {
-                    "status": (rec.get("status") or "").strip(),
-                    "name": rec.get("name") or "",
-                    "cwd": rec.get("cwd") or "",
-                }
-        return out
-    except Exception:
-        return None
+    # Every entry, not only the `alive` ones: the board's row set has always been "one row per
+    # registry entry", and `coverage_errors()` cross-checks that set. Filtering on the pid check
+    # here would silently shrink the row set and turn the coverage assertion into a tautology.
+    return {
+        sid: {
+            "status": (rec.get("status") or "").strip(),
+            "name": rec.get("name") or "",
+            "cwd": rec.get("cwd") or "",
+        }
+        for sid, rec in records.items()
+    }
 
 
 def classify(status, sid, stuck_ids, gate_ids):
