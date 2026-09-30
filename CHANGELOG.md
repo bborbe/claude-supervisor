@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`agents/fleet-drive.md` never acts on a session carrying an operator hold.** A `NEVER` clause alongside the existing ones: no nudge draft, no reap, no escalation. ⚠️ **The row is still rendered** — only the act stops, and because this leg returns *drafts* rather than sending, that means emitting **no draft at all** for a held row rather than one the caller is trusted to drop. A hold is operator *policy* about a **session**, orthogonal to any task's status; a held session may carry no task. The canonical rule lives in `skills/hold/SKILL.md` and is referenced, not restated.
+
 ## v0.80.0
 
 - docs: **`docs/fleet-surface.md` § Session roles now names the three-way exclusion — the shape where no role may run an acceptance check.** Some checks need one session that **both** spawns a tab worker **and** then reads it back (`agent_status` resolves only the workers its own server spawned, `agents.set()` inside `spawn_agent`), and no role holds both halves: a worker may not spawn, a manager may not verify, so only a session the operator starts can close it. Each leg is a deliberate contract and none is individually wrong; their intersection is empty, and no source named it until 2026-09-27 (session `cd816ba7`). ⚠️ Stated as **policy, not mechanism** — nothing in the harness blocks `spawn_agent` from a worker, so a reader told a worker *cannot* spawn goes hunting for an enforcement that does not exist; the operator's authorization is the bridge. The same statement lands in the vault's `65 Runbooks/Manager Session.md` § Guardrails item 2 (the manager's side) and in the KB page `A Worker Cannot Validate a Manager Command` § Additional Insights (the case beside its two-way Corollary).
