@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.80.1
 
 - fix: **`agents/manager-sweep-reader.md` names the ownership key once, with the roster name as the fallback when a task's id set is empty.** The ready-to-start bucket and the vault runbook's auto-resume clause 6 previously read as two independent ownership tests — the first keyed on the task's session-id set, the second on the roster name — so a task whose worker never stamped an id read **unowned** to one and **owned** to the other, and the standing spawn mandate **opens** ready-to-start rows rather than merely listing them. Measured 2026-09-30 on a live manager loop: two workers spawned at 12:39 parked on their very first tool call, so neither task file ever took a `claude_session_id` or a `metrics_sessions` entry; at the 13:00 sweep both rows rendered `🚀 ready-to-start` while each held a **live** roster entry whose label exactly matched the task title — one sweep away from a second session being spawned onto work a live session already held. ⚠️ **The fallback is one-directional by construction, and that is what keeps it safe:** a roster is empty-not-absence, so a *miss* proves nothing and the row stays ready-to-start exactly as it does today. It can only ever **remove** a row from the offer, never add one — a rule that could also mark a never-started task owned would block every legitimate spawn. The lockstep edit to the runbook's ready-to-start clause lands in the operator's vault, not in this repo.
 
