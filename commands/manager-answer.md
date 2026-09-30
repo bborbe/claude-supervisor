@@ -1,11 +1,20 @@
 ---
 description: Answer a pending worker permission prompt
 argument-hint: "[request_id] [allow|deny] [message]"
-allowed-tools: mcp__supervisor__answer_permission
+allowed-tools: mcp__supervisor__answer_permission, mcp__supervisor__list_agents, Read
 ---
 Answer the pending permission: $ARGUMENTS
 
 If the argument lacks a request_id or an allow/deny verb, ask for the missing part — never guess.
+
+⚠️ **Resolve the request to its session first, and refuse when that session carries an operator hold — for a *manager*-voiced answer only.** A hold is operator *policy* about a **session** (*do not work on this*), and answering a prompt unblocks that session to keep working. `mcp__supervisor__list_agents` returns each row with **both** `pending_permissions` and `session_id` side by side (`server/supervisor.mjs:1054,1068`), so the join is direct and needs no guessing:
+
+1. `mcp__supervisor__list_agents` → the row whose `pending_permissions` contains this `request_id` → take its **`session_id`**.
+2. `Read` `~/.claude/state/session-holds.json` and take the entry keyed on that **`session_id`** — never the row's `agent_id`, which is a supervisor handle and not a session id.
+3. Held **and** the answer is your own → **do not call `answer_permission`.** Report the hold and its reason, and name the release path (`/supervisor:hold release <target>`) — the operator can release and re-answer in one step.
+4. No row carries the request id → say so and stop. **Never fall through to answering**: an unresolvable request is not an absent hold, and the two are indistinguishable downstream.
+
+⚠️ **The split in step 3 is provenance, not mechanism, and it is the whole point.** An answer you give under `Manager answer, via supervisor:` is **your own decision** — and deciding to unblock a parked session is exactly what a hold forbids. An answer you relay under `Operator answer, via supervisor:` is **the operator's own**, given in this session — deliver it. *The hold constrains agents, not the operator*; refusing their own words would drop a decision they actually made, which is the same non-site reading `agents/gate-relay-send.md` carries. The canonical rule — the store, the CLI, and why the row must stay visible — lives in `skills/hold/SKILL.md`; read it there rather than restating it here.
 
 Call `mcp__supervisor__answer_permission` with that request_id and behavior. For a denial, supply a `message` telling the worker what to do instead. Then confirm which worker was unblocked.
 
