@@ -21,7 +21,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 
 <constraints>
 - ALWAYS reap BEFORE you drive. This is the one ordering constraint and it is load-bearing, not stylistic — see `<process>` step 1.
-- ALWAYS verify reaping against **disk this run**: `status: completed`, `phase: done`, zero open boxes. Never against the session's own claim, and never against its colour.
+- ALWAYS verify reaping against **disk this run**: `status: completed`, `phase: done`, zero open boxes. Never against the session's own claim, and never against its colour. Once all three pass, the **fourth read** (`<process>` step 1) may withhold the notice, and only when the session's last closer shows it has already closed clean. That read may remove a reap. It never adds one.
 - ALWAYS treat a **deliberately-open Self-Review box as NOT complete**. The `grep -c` is what separates the two cases, and ticking a box to pass the gate is never the fix.
 - ALWAYS re-probe liveness **at the hand-off site**, immediately before emitting a `To resume` row. A probe minutes earlier is not a claim — and the caller re-probes again immediately before it spawns, because the window between your report and its spawn is not yours to close.
 - NEVER write `last_auto_resume` yourself — it is the **caller's** stamp, and it follows a spawn the caller verified (a session-registry entry exists for the resumed id). Written from here it would record an act that did not occur; a refused, errored or aborted spawn writes nothing.
@@ -64,6 +64,36 @@ grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' <task-file>        # → 0
 - **the session's own claim** that it is finished — it is not evidence;
 - **the session's colour** — no colour is machine-readable: `wezterm cli list --format json` carries 19 pane fields, **none of them a colour**;
 - **a count that a ticked box would fix.** Deliberately-open Self-Review boxes mean the task is **not** complete and the worker parking is correct. The `grep -c` is what separates "finished" from "deliberately still open", and ticking a box to pass the gate is never the fix.
+
+**Fourth read — has the close already run?** The three disk reads decide whether the task is finished. They cannot say whether the *session* still needs telling, and a session that has already run its close reads identically to one parked on the close gate: completed, done, zero boxes, live. Measured 2026-09-27: one Manager Layer tick reaped two such sessions. One had closed clean at 08:07:23Z and its notice was stale; the other was holding an open `pick — 1. /vault-cli:session-close` and its notice was correct. Nothing in the three reads separated them. So, **only for a task that has already passed all three**, read the session's last closer:
+
+```bash
+python3 - "<claude_session_id>" <<'EOF'
+import glob, json, os, sys
+paths = sorted({os.path.realpath(p) for p in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sys.argv[1]}.jsonl"))})  # a symlinked project dir lists one file twice
+if len(paths) != 1: print("closer: unreadable (transcripts found: %d)" % len(paths)); sys.exit()
+with open(paths[0], "rb") as f:
+    f.seek(max(0, os.path.getsize(paths[0]) - 262144)); tail = f.read().decode("utf-8", "replace")
+last = None
+for line in tail.splitlines():
+    try: d = json.loads(line)
+    except ValueError: continue
+    if d.get("type") != "assistant": continue          # user turns carry injected command bodies full of template closers
+    c = d.get("message", {}).get("content", [])
+    text = "".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+    you = [l for l in text.splitlines() if "👤 You:" in l]
+    if you: last = (d.get("timestamp"), you[-1].strip())
+print("closer: unreadable (no closer in window)" if last is None else "closer: %s %s" % last)
+EOF
+```
+
+- The last closer matches `👤 You:` followed by `nothing — session closed` → **closed clean**. **Do not reap.** Report the row under `Closed clean` with the closer's timestamp and the line verbatim. The three disk reads still go on that line.
+- **Any other closer** (`pick`, `approve`, `review`, `you run`, `later`, or anything unrecognised) → the gate is open. **Reap exactly as before.**
+- **Unreadable** (no single transcript for the id, or no closer inside the window) → **reap exactly as before.** This read may only *remove* a notice, and only on a positive match. It never adds a reap, and a failed read never suppresses one.
+
+⚠️ **This is not a repeat-count, and it must never become one.** A session holding an open gate gets the next notice however many it has already had. Suppression keys on *what the closer says*, never on *how often it has been told*. A count would silence exactly the open-gate neighbour this read exists to protect.
+
+⚠️ **Why reading the session's own text does not break the rule against trusting its claim.** The closer never decides whether the task is complete; disk decides that, and it has already said yes. The closer only decides whether a message is still owed. That makes the failure modes asymmetric. A false `nothing — session closed` over a completed task costs one idle tab. A misread in the other direction just sends the notice the current rule sends anyway.
 
 **You cannot close it for them.** `/vault-cli:sync-progress` and `/vault-cli:session-close` read the parent conversation, and every route into a worker's pane is refused (`[Remote Shell Writes]`, `[Auto-Mode Bypass]`, `[Self-Modification]`; measured 2026-09-19). So the act is:
 
@@ -254,7 +284,7 @@ One compact report — see `<output_format>`. You do not render the status table
 <error_handling>
 - **The caller passed no classification** → stop and say so. You do not sweep, and a bucket you computed yourself is a second classification, which is the thing this extraction exists to avoid.
 - **The caller passed rows with no snapshot provenance** — no `recorded_at`, no manager-predispatch store path resolving to a `bucket_sets` key → **Held**, with the omission named. Do not act on them and do not reconstruct the delta yourself: an unlabelled list is indistinguishable from the wrong one, and the measured defect was exactly a leg acting on a list that was not its sweep's.
-- **A task matches the reap test but has a live session** → still reap (send the evidence). The worker being alive is why the message is sent rather than nothing; it is not a reason to skip.
+- **A task matches the reap test but has a live session** → still reap (send the evidence). The worker being alive is why the message is sent rather than nothing; it is not a reason to skip. **The one exception is the fourth read.** A session whose last closer is `👤 You: nothing — session closed` has already run its close, so it goes under `Closed clean` and gets no message.
 - **The gate fails on exactly one clause** → name the clause and the value you read. A near-miss is the most useful line in the report; "not resumed" alone is not.
 - **`claude_script` resolves empty** → print `⛔ AUTO-RESUME UNAVAILABLE: <task> — no claude_script for vault <vault>` as its own line, and name that as the reason the branch was skipped. Never let it read as a failed gate clause: the gate held, and the launcher is the thing that is missing.
 - **The caller reports a refused or errored spawn** → the row is **terminal for this sweep**: it goes under **`Not resumed`** (or `Escalated` when it needs the caller's hand) with the refusal quoted verbatim, and the caller writes **no `last_auto_resume`**. ⚠️ **The refusal is the caller's to report, not yours** — you never spawn, so you never see one; what you must never do is *re-hand the same row* in the same sweep as though a retry were free. A re-handed row is a resume the gate did not re-authorise. When the caller names a refusal kind, keep its wording: the **tool's own `{error}`** (the server re-probed liveness with a stronger instrument and refused) is a different fact from the **caller's outgoing call being gated under `auto`** (`[Create Unsafe Agents]` / `[Auto-Mode Bypass]`), which is not a block on the worker and which the caller fixes with Shift+Tab → `accept edits`.
@@ -293,13 +323,16 @@ One compact report — see `<output_format>`. You do not render the status table
 Plain markdown, one line per action, in the order you performed them. Omit empty sections.
 
 ```text
-Drive: <subject> — audited <n> · reaped <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · card <n> · stale <n> · held <n> · blocked <n>
+Drive: <subject> — audited <n> · reaped <n> · closed clean <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · card <n> · stale <n> · held <n> · blocked <n>
 Provenance: recorded_at=<the snapshot's recorded_at> · own sets: <bucket>{<task>, …} · <bucket>{…}
 Batch held — no snapshot provenance (missing: <which half>) — no per-row clause ran   ← clause (0); ONE line for the whole batch, never one per row
 
 Reaped (2):
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
+
+Closed clean (1):      ← passed the three disk reads; the fourth read found the close already run — NO message sent
+  <task> — status: completed · phase: done · 0 open boxes · closer <timestamp> "👤 You: nothing — session closed" — not reaped
 
 Nudged (1):            ← the caller voices these; a subagent has no TTS
   <task> — stuck 47 min, task file unchanged — <what was sent>
@@ -360,6 +393,7 @@ Escalated (1):
 - **Every nudged task survived both pre-nudge checks, on disk, this run** — its task file had not moved since the sweep's reading, and its session was neither inside a tool call nor inside the transcript freshness window. A nudge sent on the caller's classification alone is the false nudge this pass exists to stop.
 - **Every candidate a check dropped is reported under `Freshness / in-flight drops`, naming the check and the value that dropped it** — including a `stuck` row that arrived with no mtime and so could not be checked. A silently dropped candidate reads exactly like one the sweep never classified.
 - Every reap decision is backed by the three disk reads — `status`, `phase`, open-box count — taken **this run**, never from a session's claim or its colour.
+- Every `Closed clean` row quotes the closer line and its timestamp. A row that passed the three reads and was neither reaped nor listed there is a bug; report it as one.
 - Every auto-resume names all **eleven** gate clauses, and any clause that failed is quoted with the value that failed it — including which blocker, which date, or `mode=interactive`.
 - Every `To resume` row was preceded by a re-probe at the hand-off site, and a positive re-probe aborted the row without arming the crash-loop cap.
 - No `last_auto_resume` was written by this file. The stamp is the caller's, written only through `vault-cli task set` and only **after** a spawn it verified against the session registry — this file hands over a decision and records no act.
