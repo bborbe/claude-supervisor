@@ -43,6 +43,7 @@ SITE_LIST = {
     ("jump.py", "activate_pane_by_id"), ("jump.py", "activate_tab"),
     ("jump.py", "current_window"), ("jump.py", "main"),
     ("jump.py", "pane_sessions"), ("jump.py", "wezterm_panes"),
+    ("session-holds.py", "pane_title"),
     ("stop-probe.py", "gate_processes"),
     ("who-needs-me.py", "main"), ("who-needs-me.py", "wezterm_panes"),
     # in-repo callers that hold no transport call of their own
