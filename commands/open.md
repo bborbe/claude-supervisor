@@ -545,12 +545,8 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 - **the spawned session owns its name** — check the record, do not trust the tab title alone:
 
   ```bash
-  python3 -c "
-  import json,glob
-  for f in glob.glob('$HOME/.claude/sessions/*.json'):
-      d=json.load(open(f))
-      if str(d.get('sessionId','')).startswith('<sid-prefix>'):
-          print(d.get('name'), d.get('nameSource'))"
+  python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json \
+    | python3 -c "import json,sys; [print(r['name'], r['nameSource']) for r in json.load(sys.stdin) if r['sessionId'].startswith('<sid-prefix>')]"
   ```
 
   `nameSource: user` → correct. `nameSource: peer` → the `unset` prefix was missing or ineffective; the session is named after its spawner and the title-match session-connect cannot resolve it (see below).
@@ -563,12 +559,8 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 So after spawning, read the uuid from the session record and write it yourself:
 
 ```bash
-python3 -c "
-import json,glob
-for f in glob.glob('$HOME/.claude/sessions/*.json'):
-    d=json.load(open(f))
-    if d.get('name')=='<task>' and d.get('status') in ('busy','idle'):
-        print(d['sessionId'])"
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json \
+  | python3 -c "import json,sys; [print(r['sessionId']) for r in json.load(sys.stdin) if r['name']=='<task>' and r['status'] in ('busy','idle')]"
 vault-cli task set "<task>" claude_session_id "<uuid>" --vault <vault>
 ```
 

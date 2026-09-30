@@ -276,6 +276,7 @@ class SessionLiveness(unittest.TestCase):
                     "status": "busy",
                     "formerNames": [{"name": "Topic Manager", "at": "2026-09-18"}],
                     "cwd": "/Users/bborbe/Documents/workspaces/thing",
+                    "nameSource": "user",
                 },
                 fh,
             )
@@ -284,6 +285,7 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["formerNames"], ["Topic Manager"])
         self.assertEqual(rows[0]["cwd"], "/Users/bborbe/Documents/workspaces/thing")
+        self.assertEqual(rows[0]["nameSource"], "user")
 
     def test_json_listing_omits_a_dead_pid(self):
         self.plant("deadp1d0-1111-2222-3333-444455556666", dead_pid())
@@ -294,6 +296,15 @@ class SessionLiveness(unittest.TestCase):
         self.beat("bea70001-1111-2222-3333-444455556666")
         _, rows = self.json_listing()
         self.assertEqual([r["source"] for r in rows], ["heartbeat"])
+
+    def test_a_stale_record_is_unknown_when_the_heartbeat_store_is_unreadable(self):
+        # A stale record is a NEGATIVE, so it needs both sources readable — the same rule the
+        # no-match branch applies. Returning ABSENT here would let a fresh stamp in the half we
+        # could not read be outvoted, and ABSENT is the one answer that permits a resume.
+        self.plant("57a1e57a-1111-2222-3333-444455556666", dead_pid())
+        rc, out = self.check("57a1e57a", heartbeat_dir=self.unreadable())
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("heartbeat store is unreadable", out)
 
 
 if __name__ == "__main__":

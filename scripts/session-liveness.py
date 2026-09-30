@@ -159,6 +159,10 @@ def read_registry(registry_dir=None):
                 (f.get("name") if isinstance(f, dict) else f) or "" for f in (rec.get("formerNames") or [])
             ],
             "cwd": rec.get("cwd", ""),
+            # `/supervisor:open` Step 4 checks this to prove a spawned session owns its name:
+            # `nameSource: peer` means the `unset` prefix was ineffective and the session is
+            # named after its spawner, which the title-match session-connect cannot resolve.
+            "nameSource": rec.get("nameSource", ""),
             "alive": alive,
         }
     return out
@@ -229,6 +233,15 @@ def resolve(session_id, registry, heartbeats=()):
     # record behind. The runbook's rule is "alive if ANY id holds an entry against a RUNNING
     # pid", so presence alone is not the verdict; presence against a live pid is.
     if not registry[full]["alive"]:
+        # A stale record is a NEGATIVE, so it needs both sources readable — the same rule the
+        # no-match branch applies. Returning ABSENT here while the heartbeat store is
+        # unreadable would let a fresh stamp in the half we could not read be outvoted, and
+        # ABSENT is the one answer that permits a caller to resume onto the session.
+        if heartbeats is None:
+            return UNKNOWN, (
+                "%s is registered but pid %s is gone, and the heartbeat store is unreadable "
+                "— cannot decide liveness" % (full, registry[full]["pid"])
+            )
         return ABSENT, "%s is registered but pid %s is gone — stale record" % (
             full,
             registry[full]["pid"],
