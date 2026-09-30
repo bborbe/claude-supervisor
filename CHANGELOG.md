@@ -12,6 +12,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - feat: **`orphan-candidates.py` reads the session-hold store, so a held session is never an auto-resume candidate.** The reader is inlined — the plugin's scripts do not import each other, and a subprocess dependency on a plugin path is a fail-open — and reads are lock-free because the writer lands every change through `os.replace`. ⚠️ A missing or corrupt store reads as *nothing held*, and that direction is chosen: inventing a hold would silently drop a real orphan candidate, while reading a real store as empty merely fails to honour a hold. The hold suppresses the **act** only — the row still renders, which is what keeps a hold distinguishable from a session that got fixed. Paired test: with the hold set, the held task is excluded **and** an unheld task in the same run is still a candidate; with the hold removed, both are — the control is what makes the exclusion able to fail. First of the consumer wirings.
 
+## v0.74.0
+
+- feat: **`/supervisor:open --flagged` refuses a flag that was not operator-set.** The selector now reads `flag_set_by` and admits only `operator` or `legacy`, printing a named `REFUSED | <vault> | <task> | flag_set_by=<who>` line for everything else — absent included, because after the 2026-09-30 disposition no flagged row should carry an absent value, so one means a writer that did not declare itself, which is the bypass. The filter sits in the **selector**, not at Gate 1: the batch's opening move is `vault-cli task approve` on every row the selector returned, *before* Gate 1 runs, so a refusal there would land after `approved_by: operator` had already been written onto the agent-set row. Requires `vault-cli` ≥ v0.156.0, which is where the field itself comes from.
+
 ## v0.73.0
 
 
