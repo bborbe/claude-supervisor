@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.75.0
 
 - feat: **`orphan-candidates.py` reads the session-hold store, so a held session is never an auto-resume candidate.** The reader is inlined — the plugin's scripts do not import each other, and a subprocess dependency on a plugin path is a fail-open — and reads are lock-free because the writer lands every change through `os.replace`. ⚠️ A missing or corrupt store reads as *nothing held*, and that direction is chosen: inventing a hold would silently drop a real orphan candidate, while reading a real store as empty merely fails to honour a hold. The hold suppresses the **act** only — the row still renders, which is what keeps a hold distinguishable from a session that got fixed. Paired test: with the hold set, the held task is excluded **and** an unheld task in the same run is still a candidate; with the hold removed, both are — the control is what makes the exclusion able to fail. First of the consumer wirings.
 
