@@ -24,7 +24,7 @@ into disagreeing about what "unchanged" means.
 
   manager-predispatch.py --vault <path> --subject <name> --check
   manager-predispatch.py --vault <path> --subject <name> --print
-  manager-predispatch.py --vault <path> --subject <name> --save     # table on stdin
+  manager-predispatch.py --vault <path> --subject <name> --save     # dates from the payload
 
 ⚠️ Why this store is not the loop's store — checked before building, 2026-09-26
 --------------------------------------------------------------------------------
@@ -857,7 +857,9 @@ def main(argv: list[str]) -> int:
         "--print", action="store_true", help="verdict; replay the stored table on no-change"
     )
     mode.add_argument(
-        "--save", action="store_true", help="persist the digest + the table on stdin"
+        "--save",
+        action="store_true",
+        help="persist the digest + the payload `--write-payload` wrote (a table on stdin is refused)",
     )
     mode.add_argument(
         "--write-tracked",
@@ -1057,25 +1059,43 @@ def main(argv: list[str]) -> int:
 
     if args.save:
         table = sys.stdin.read()
-        # Empty stdin means the caller is relying on the render's own payload — the hop
-        # this gate used to leave to the caller's memory. Read it back, and date the record
-        # from *its* mtime: a payload rendered earlier then lands carrying its earlier
-        # render time instead of reading as fresh, which is the skew failure mode 2
-        # measured by hand. An absent payload falls through to the empty-table guard
-        # below, which already refuses rather than clobbering a good snapshot.
+        # A table on stdin is refused, never recorded. `--save` reads the payload the
+        # render wrote and dates the record from *its* mtime — the hop this gate used to
+        # leave to the caller's memory. A caller that hands the table over itself moves the
+        # stamp to save time instead, so a stale table reads as fresh and the next tick
+        # replays it. Measured 2026-09-30 on the MDM Bugs record: `recorded_at` 11:41:29
+        # against a payload written 11:35:22, written by a `--save … < <payload>.table`
+        # redirect. The shape is in no shipped command block (the heredoc left the three at
+        # 0.63.0), so nothing legitimate depends on it — but the CLI's own help and
+        # docstring still advertised it, which is what invited the call.
+        #
+        # Reading stdin is kept deliberately rather than removed: that read is
+        # [[The Pre-Dispatch Save Blocks on an Open Stdin Pipe and Silently Stalls the
+        # Loop]], a different task's defect. Refusing on a non-empty read makes the
+        # caller-supplied table impossible without touching it.
+        if table.strip():
+            print(
+                "refusing a table on stdin: `--save` reads the payload the render wrote "
+                f"({payload_path(args.subject)}) so the record is dated from its mtime, not "
+                "from save time. Write the table with `--write-payload`, then re-run "
+                "`--save` with no stdin.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        # An absent payload falls through to the empty-table guard below, which already
+        # refuses rather than clobbering a good snapshot.
         rendered_at = None
-        if not table.strip():
-            try:
-                with open(payload_path(args.subject), encoding="utf-8") as fh:
-                    table = fh.read()
-            except OSError:
-                table = ""
-            else:
-                rendered_at = (
-                    datetime.fromtimestamp(os.path.getmtime(payload_path(args.subject)))
-                    .astimezone()
-                    .isoformat(timespec="seconds")
-                )
+        try:
+            with open(payload_path(args.subject), encoding="utf-8") as fh:
+                table = fh.read()
+        except OSError:
+            table = ""
+        else:
+            rendered_at = (
+                datetime.fromtimestamp(os.path.getmtime(payload_path(args.subject)))
+                .astimezone()
+                .isoformat(timespec="seconds")
+            )
         if not payload:
             # `evaluate()` returns an empty payload on both of its fail-open paths, where
             # there is no branch, digest or tracked set to record. `--check` already

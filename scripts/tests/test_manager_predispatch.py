@@ -137,7 +137,20 @@ class Base(unittest.TestCase):
             sys.stdin, sys.stdout = old_in, old_out
 
     def save(self, subject, table="Subject: x\n+---+\n| a |\n+---+\n"):
-        return self.run_gate("--subject", subject, "--save", stdin=table)
+        """Render the payload, then save with no stdin — the supported path.
+
+        `--save` refuses a table on stdin, so the table reaches the store only through
+        the payload the render wrote; that is what lets the record be dated from the
+        payload's mtime instead of from save time.
+        """
+        return self.save_with_table(subject, table)
+
+    def save_with_table(self, subject, table, *extra):
+        """`--write-payload` then `--save`, so the record is dated from the payload."""
+        rc, out = self.run_gate("--subject", subject, "--write-payload", stdin=table)
+        if rc != self.m.EXIT_WRITE_OK:
+            return rc, out
+        return self.run_gate("--subject", subject, "--save", *extra)
 
     def check(self, subject):
         return self.run_gate("--subject", subject, "--check")
@@ -293,11 +306,31 @@ class TestFailOpen(Base):
         self.assertIn("no stored table", out)
 
     def test_empty_table_is_refused_and_state_untouched(self):
+        """No payload to read means no table to store: the save refuses rather than
+        clobbering a good snapshot, and the record is left exactly as it was."""
         self.save("ATopic", "good table\n")
         before = self.read_state("ATopic")
-        rc, _ = self.run_gate("--subject", "ATopic", "--save", stdin="   \n")
+        os.remove(self.m.payload_path("ATopic"))
+        rc, _ = self.run_gate("--subject", "ATopic", "--save")
         self.assertEqual(rc, self.m.EXIT_CHANGE)
         self.assertEqual(self.read_state("ATopic"), before)
+
+    def test_a_table_on_stdin_is_refused_and_no_record_is_written(self):
+        """A caller-supplied table is refused, never recorded.
+
+        A caller that hands the table over itself moves `recorded_at` to save time, so a
+        stale table reads as fresh and the next tick replays it. The supported path is
+        `--write-payload`; a piped table is a usage error, and a refused save leaves no
+        record at all rather than a half-written one.
+        """
+        rc, out = self.run_gate("--subject", "ATopic", "--write-payload", stdin="old\n")
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, _ = self.run_gate("--subject", "ATopic", "--save", stdin="caller table\n")
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertFalse(
+            os.path.exists(self.m.state_path("ATopic")),
+            "a refused save must leave no record at all",
+        )
 
     def test_save_on_an_unresolvable_subject_is_change_not_a_crash(self):
         """`--save` owes the contract its sibling `--check` already honours: an
@@ -312,9 +345,7 @@ class TestFailOpen(Base):
         still saves, and `test_empty_table_is_refused_and_state_untouched` above pins
         the other refusal that precedes this one.
         """
-        rc, out = self.run_gate(
-            "--subject", "No Such Subject", "--save", stdin="Subject: x\n+---+\n"
-        )
+        rc, out = self.run_gate("--subject", "No Such Subject", "--save")
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
         self.assertIn("CHANGE fail-open:", out)
 
@@ -558,9 +589,7 @@ class TestTrackedArtifacts(Base):
         """
         rc, out = self.buckets("ATopic", {"done": ["ATask"]})
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
-        rc, out = self.run_gate(
-            "--subject", "ATopic", "--save", "--buckets", out.strip(), stdin="t\n"
-        )
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
         self.assertEqual(
             json.loads(self.read_state("ATopic"))["bucket_sets"], {"done": ["ATask"]}
@@ -569,9 +598,7 @@ class TestTrackedArtifacts(Base):
         # Same tree, corrected classification: the digest is equal, the half moved.
         rc, out = self.buckets("ATopic", {"done": ["ATask"], "problem": ["AGoalTask"]})
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
-        rc, out = self.run_gate(
-            "--subject", "ATopic", "--save", "--buckets", out.strip(), stdin="t\n"
-        )
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
         self.assertEqual(
             json.loads(self.read_state("ATopic"))["bucket_sets"],
@@ -584,7 +611,7 @@ class TestTrackedArtifacts(Base):
         the documented no-change contract, which is correct and must survive."""
         self.save("ATopic")
         before = self.read_state("ATopic")
-        rc, out = self.run_gate("--subject", "ATopic", "--save", stdin="t\n")
+        rc, out = self.run_gate("--subject", "ATopic", "--save")
         self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
         self.assertEqual(self.read_state("ATopic"), before)
 
@@ -593,9 +620,7 @@ class TestTrackedArtifacts(Base):
             "ATopic", {"done": ["ATask"], "ready-to-start": ["AGoalTask"]}
         )
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
-        rc, out = self.run_gate(
-            "--subject", "ATopic", "--save", "--buckets", out.strip(), stdin="t\n"
-        )
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
         self.assertEqual(
             json.loads(self.read_state("ATopic"))["bucket_sets"],
@@ -612,13 +637,8 @@ class TestTrackedArtifacts(Base):
         """Deliberately NOT a fail-open. The gate's fail-open rule exists so an unreadable
         *state* file re-sweeps; here the caller believes it supplied the half, and a record
         written without it would read back as persisted when it is not."""
-        rc, out = self.run_gate(
-            "--subject",
-            "ATopic",
-            "--save",
-            "--buckets",
-            os.path.join(self.tmp, "nope.json"),
-            stdin="t\n",
+        rc, out = self.save_with_table(
+            "ATopic", "t\n", "--buckets", os.path.join(self.tmp, "nope.json")
         )
         self.assertEqual(rc, self.m.EXIT_USAGE, out)
 
@@ -629,9 +649,7 @@ class TestTrackedArtifacts(Base):
         p = os.path.join(self.tmp, "stale.buckets.json")
         with open(p, "w", encoding="utf-8") as fh:
             json.dump({"done": [], "problem": []}, fh)
-        rc, out = self.run_gate(
-            "--subject", "ATopic", "--save", "--buckets", p, stdin="t\n"
-        )
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", p)
         self.assertEqual(rc, self.m.EXIT_USAGE, out)
         self.assertFalse(
             os.path.exists(self.m.state_path("ATopic")),
