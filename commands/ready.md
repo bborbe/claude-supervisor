@@ -49,10 +49,10 @@ home is `commands/open.md` § Step 1.5 Gate 2. `Task` is the only tool that addr
 Read the `READINESS:` line. **Parse the score; never trust the label.** A missing or unparseable
 line is not-ready.
 
-Then run `agents/manager-drive.md` clause (1)'s loop against this one row: repair, re-audit, stop
-on the condition that clause owns. A gap the sub-agent cannot resolve — one needing an operator
-decision — stops the loop **before** anything is opened, and the sub-agent returns
-`UNFIXABLE: <reason>` instead of a score.
+Then run `agents/manager-drive.md` clause (1)'s loop against this one row: repair, re-audit, stop on
+the conditions that clause owns — including its **step 0 `UNFIXABLE:` branch**, which is that
+token's only reader. Do not re-implement the branch here: a caller-side reader leaves the loop's
+own stop rule unenforced for every other entry into it.
 
 ### 4. Act on the verdict
 
@@ -60,8 +60,10 @@ Reuse `commands/open.md` § Step 1.5 Gate 2 for the decision. Never re-implement
 never soften the bar.
 
 - **Clears the bar** → hand to `/supervisor:open "<task>"` for this single named task.
-- **Below the bar, or `UNFIXABLE`** → escalate naming the gap. A row below the bar is not held in
-  silence: it asks the operator, per `docs/fleet-surface.md` § Spawn a worker item 2.
+- **Below the bar, or an `UNFIXABLE:` verdict** → escalate naming the gap. A row below the bar is
+  not held in silence: it asks the operator, per `docs/fleet-surface.md` § Spawn a worker item 2.
+  The `UNFIXABLE:` verdict arrives already read by the loop — this step relays it, and never
+  re-implements the branch.
 
 ### 5. Print the verdict — and only the verdict
 
