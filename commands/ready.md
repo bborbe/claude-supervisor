@@ -61,7 +61,9 @@ never soften the bar.
 
 - **Clears the bar** → hand to `/supervisor:open "<task>"` for this single named task.
 - **Below the bar, or an `UNFIXABLE:` verdict** → escalate naming the gap. A row below the bar is
-  not held in silence: it asks the operator, per `docs/fleet-surface.md` § Spawn a worker item 2.
+  not held in silence: **post the attention-board card that names the score against the bar, then
+  hold the row** — per `docs/fleet-surface.md` § Spawn a worker item 2, with the card's fields and
+  the hold line as `agents/manager-drive.md` clause (1)'s `<error_handling>` entry writes them.
   The `UNFIXABLE:` verdict arrives already read by the loop — this step relays it, and never
   re-implements the branch.
 
