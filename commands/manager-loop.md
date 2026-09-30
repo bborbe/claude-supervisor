@@ -1,4 +1,10 @@
 ---
+# No `name:` field, deliberately — and this comment exists because a review pass read
+# one in. A command takes its name from its filename; the frontmatter rule for
+# `commands/*.md` (`agent-cmd/command-frontmatter`) requires `description`,
+# `allowed-tools` and `argument-hint` and nothing else. `name:` is required for
+# `agents/*.md` (`agent-cmd/agent-frontmatter`) and `skills/<name>/SKILL.md`. All 22
+# commands in this repo omit it, so adding it to one would be the inconsistency.
 description: Run the manager loop for ONE topic OR ONE goal — watch its declared set + task files (default 15 min, `--interval`), detect problems, TTS the human (voice-mode gated), print a status table, recommend new sessions and session closes. Name via $1, or detected from the session when omitted; the branch (topic vs goal) is auto-detected, never guessed. Per the vault's Manager Session runbook.
 allowed-tools:
   - Task
