@@ -68,28 +68,14 @@ grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' <task-file>        # → 0
 **Fourth read — has the close already run?** The three disk reads decide whether the task is finished. They cannot say whether the *session* still needs telling, and a session that has already run its close reads identically to one parked on the close gate: completed, done, zero boxes, live. Measured 2026-09-27: one Manager Layer tick reaped two such sessions. One had closed clean at 08:07:23Z and its notice was stale; the other was holding an open `pick — 1. /vault-cli:session-close` and its notice was correct. Nothing in the three reads separated them. So, **only for a task that has already passed all three**, read the session's last closer:
 
 ```bash
-python3 - "<claude_session_id>" <<'EOF'
-import glob, json, os, sys
-paths = sorted({os.path.realpath(p) for p in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sys.argv[1]}.jsonl"))})  # a symlinked project dir lists one file twice
-if len(paths) != 1: print("closer: unreadable (transcripts found: %d)" % len(paths)); sys.exit()
-with open(paths[0], "rb") as f:
-    f.seek(max(0, os.path.getsize(paths[0]) - 262144)); tail = f.read().decode("utf-8", "replace")
-last = None
-for line in tail.splitlines():
-    try: d = json.loads(line)
-    except ValueError: continue
-    if d.get("type") != "assistant": continue          # user turns carry injected command bodies full of template closers
-    c = d.get("message", {}).get("content", [])
-    text = "".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
-    you = [l for l in text.splitlines() if "👤 You:" in l]
-    if you: last = (d.get("timestamp"), you[-1].strip())
-print("closer: unreadable (no closer in window)" if last is None else "closer: %s %s" % last)
-EOF
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/reap-closer.py" "<claude_session_id>"
 ```
 
-- The last closer matches `👤 You:` followed by `nothing — session closed` → **closed clean**. **Do not reap.** Report the row under `Closed clean` with the closer's timestamp and the line verbatim. The three disk reads still go on that line.
-- **Any other closer** (`pick`, `approve`, `review`, `you run`, `later`, or anything unrecognised) → the gate is open. **Reap exactly as before.**
-- **Unreadable** (no single transcript for the id, or no closer inside the window) → **reap exactly as before.** This read may only *remove* a notice, and only on a positive match. It never adds a reap, and a failed read never suppresses one.
+The script owns the read: assistant messages only, since user turns carry injected command bodies full of template closers; transcript found by session id and deduped by realpath; a bounded tail window. Read its docstring rather than restating it here.
+
+- **`closer: CLOSED …` (exit 0)** → the last closer is `👤 You: nothing — session closed`, so the session is **closed clean**. **Do not reap.** Report the row under `Closed clean` with the closer's timestamp and the line verbatim. The three disk reads still go on that line.
+- **`closer: OPEN …` (exit 1)** → any other closer (`pick`, `approve`, `review`, `you run`, `later`, or anything unrecognised). The gate is open. **Reap exactly as before.**
+- **`closer: UNREADABLE …` (exit 2)**, or any other exit → **reap exactly as before.** This read may only *remove* a notice, and only on a positive match. It never adds a reap, and a failed read never suppresses one.
 
 ⚠️ **This is not a repeat-count, and it must never become one.** A session holding an open gate gets the next notice however many it has already had. Suppression keys on *what the closer says*, never on *how often it has been told*. A count would silence exactly the open-gate neighbour this read exists to protect.
 
