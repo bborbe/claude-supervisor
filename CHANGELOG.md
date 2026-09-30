@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.71.2
 
 - fix: **`agents/manager-drive.md` clause (1) gains the `UNFIXABLE:` reader, so the loop that stops on the token is the loop that owns it.** `commands/ready.md` dispatches into clause (1)'s bounded repair-then-open loop, and a sub-agent that cannot resolve a gap — because its resolution needs an **operator decision** — returns `UNFIXABLE: <reason>` **instead of** a `READINESS:` line. That token previously had no reader in the loop: the new command mentioned it, but the clause it delegates to had no branch for it, so a sub-agent's verdict would have reached a loop that could not act on it. ⚠️ **The branch is clause (1)'s step 0, read before the audit** — a token that stops the loop must be read before anything else runs — and it spends **no round** and opens nothing, exactly as a below-bar row does: no repair the sub-agent can perform would resolve a decision that was never its to make. ⚠️ **One loop, one reader.** `commands/ready.md` now *references* the clause instead of re-implementing the branch, because a caller-side reader leaves the loop's own stop rule unenforced for every other entry into it — the failure the single-home rule exists to prevent.
 
