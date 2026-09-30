@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.84.1
 
 - fix: **`agents/fleet-sweep-reader.md` gains a `held` class, so a held session renders `⏸️ HELD — <reason>` instead of `stalled`.** The fleet's renderer classifies **sessions** and renders `[<session id 8>]` — the exact key a hold is stored against — but its class table had no held case, so a held session fell through to `stalled`, which is a **⚠️ problem row**. ⚠️ **This is a rendering fix, not an act fix, and that is the whole point.** `agents/fleet-drive.md` already refuses to nudge, reap or escalate a held session, so the loop was never going to act — but a row rendered `stalled` invites a manager to nudge **by hand**, and that is the act the drive leg's refusal cannot reach. A row that is **mislabelled** is worse than one that is missing, because it reads as work. ⚠️ **The hold row sits first because it wins over every other, and it is the fourth WAITING carrier:** the rule that a row held from outside is never `stalled` already names a parked gate, an unmet `blocked_by` and a future `defer_date` — a hold is the fourth and the strongest, because the other three say *not yet* while a hold says *not by you*. ⚠️ **Keyed on the session's FULL id, never the 8-char prefix this file renders in its digest** — the store is keyed on the whole id, and a prefix lookup misses **every** entry while looking exactly like a session nobody held. Caught in draft rather than in review.
 
