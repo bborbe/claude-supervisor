@@ -168,6 +168,38 @@ def read_registry(registry_dir=None):
     return out
 
 
+def read_registry_entries(registry_dir=None):
+    """Every registry record as `(path, rec)`, or `None` when the directory is unreadable.
+
+    The **list** shape, alongside `read_registry()`'s dict — one file, one glob, one unreadable
+    rule, two views. They exist because they answer different questions:
+
+      * the dict answers "which sessions are there", and **collapses two files that claim one
+        session id** — which is the right answer for a liveness verdict;
+      * this answers "what is on disk", and **preserves that collision**.
+
+    The collision is not hypothetical and must stay visible. `restart-worker.py` refuses when
+    two entries claim one id, because resuming onto the wrong claimant of two is exactly the
+    double-writer this plugin guards against — so a caller that needs to see the collision
+    cannot be served by the dict, however convenient it is.
+    """
+    d = registry_dir if registry_dir is not None else REGISTRY_DIR
+    if not os.path.isdir(d):
+        return None
+    try:
+        paths = sorted(glob.glob(os.path.join(d, "*.json")))
+    except OSError:
+        return None
+    out = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                out.append((path, json.load(fh)))
+        except (OSError, ValueError):
+            continue  # a half-written entry is skipped, not fatal
+    return out
+
+
 def read_heartbeats(heartbeat_dir=None, ttl=None, now=None):
     """Fresh stamps as `[{session_id, age_seconds, pid}]`, or `None` when unreadable.
 
