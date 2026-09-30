@@ -17,7 +17,7 @@ This is NOT `/supervisor:worker-drive`. `/supervisor:worker-drive` = what should
 
 Pure snapshot, no mutation, no messages sent. Safe to run as often as you like.
 
-1. `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py` — **the board**. One row per live session in the session registry (`~/.claude/sessions/<pid>.json`), each classified into `running` / `idle` / `needs-input` / `problem`. It performs the whole join itself — registry, attention store, transcript ages and the vault task lookup — and **asserts its own coverage**: it exits non-zero rather than printing a table that silently omits a session, because a table that renders correctly and drops a row is the exact failure this board exists to prevent.
+1. `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py` — **the board**. One row per live session, read through the plugin's single liveness reader (`scripts/session-liveness.py` — the registry **and** the heartbeat store, so a headless or cluster worker is a row rather than an omission), each classified into `running` / `idle` / `needs-input` / `problem`. It performs the whole join itself — registry, attention store, transcript ages and the vault task lookup — and **asserts its own coverage**: it exits non-zero rather than printing a table that silently omits a session, because a table that renders correctly and drops a row is the exact failure this board exists to prevent.
 
    ```bash
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py --json \

@@ -399,20 +399,15 @@ The goal branch **resolves and delegates**; it reimplements nothing. A worker ta
 
 ## Step 2C — Topic branch
 
-1. Resolve the topic's manager from the **session registry**, not from `ListAgents` — `~/.claude/sessions/<pid>.json` carries `sessionId`, a live `status`, the current `name`, and **`formerNames`**, the names the session has held since it started.
+1. Resolve the topic's manager from the **session registry**, not from `ListAgents` — but read it through its single reader rather than opening the directory here. `session-liveness.py --list --json` returns one record per live session carrying `sessionId`, a live `status`, the current `name`, **`formerNames`** (the names it has held since it started) and `cwd`:
 
    ```bash
-   python3 - <<'EOF'
-   import json, glob, os
-   TOPIC = "<topic>"
-   want = (TOPIC + " Manager").lower()
-   for p in glob.glob(os.path.expanduser('~/.claude/sessions/*.json')):
-       d = json.load(open(p))
-       names = [d.get('name') or ''] + [f.get('name') or '' for f in d.get('formerNames') or []]
-       if any(n.lower() == want for n in names):
-           print(d['sessionId'], '|', d.get('status'), '|', d.get('name'))
-   EOF
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json
    ```
+
+   Then match `<topic> Manager` case-insensitively against `name` and against every entry in `formerNames`.
+
+   ⚠️ **Do not re-open `~/.claude/sessions/*.json` here.** This step used to glob the registry itself, which made it a **second reader over the same directory** — exactly the defect `session-liveness.py`'s own header records, where two readers disagreed about what an id argument means and one published `ABSENT` as a confirmed verdict for two live sessions. The reader returns `formerNames` and `cwd` precisely so this call site does not need the directory, and so a cluster worker's registration (which the registry cannot hold at all) reaches this step too.
 
    **Match the topic against `name` AND `formerNames`.** Matching only the current name is the hole this closes. A topic manager is long-lived and gets renamed; on a name-only match `/supervisor:open` concludes there is none and spawns a **second** manager onto a live topic, neither aware of the other — observed 2026-09-18 (duplicate Sentry manager, killed after ~2 min), reasoning from a colour signal that had itself gone stale. The registry keeps every name the session has held, so a renamed manager stays findable under the name it was spawned with. `sessionId` is the identity — stable across `/rename`, verified 2026-09-18 on three sessions whose `formerNames` recorded superseded names while `sessionId` stayed constant through all of them — and `status` is live, so a hit cannot resume a dead conversation.
 
@@ -508,7 +503,7 @@ wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- bash -
 
 **`--window-id` is what puts the tab in the right window** — without it the new tab inherits `WEZTERM_PANE` from the calling session (see the note at the end of this step), which is exactly how a human-only task landed in the Agents window. `${WINDOW_ID:+...}` keeps the flag off entirely when the map is unavailable, so the fallback degrades to the old behaviour rather than passing an empty `--window-id`.
 
-**`--cwd` is the other half of the same trap, and it is not inherited either.** Without it the tab inherits *wezterm's* working directory — `$HOME` for a server started from a home directory — and Claude Code stops on *"Accessing workspace /Users/&lt;user&gt; — do you trust this folder?"* before registering a pid, so a resume that worked reads as a no-op. Read the value from the session registry (`~/.claude/sessions/<pid>.json`, field `cwd`) and resolve it **before** the spawn; never guess it, and refuse rather than spawn into the wrong tree when the record carries none. The requirement's single home is `docs/fleet-surface.md` § Spawn a worker — do not state a second resolution rule here.
+**`--cwd` is the other half of the same trap, and it is not inherited either.** Without it the tab inherits *wezterm's* working directory — `$HOME` for a server started from a home directory — and Claude Code stops on *"Accessing workspace /Users/&lt;user&gt; — do you trust this folder?"* before registering a pid, so a resume that worked reads as a no-op. Read the value from the shared reader (`session-liveness.py --list --json`, field `cwd`) and resolve it **before** the spawn; never guess it, and refuse rather than spawn into the wrong tree when the record carries none. The requirement's single home is `docs/fleet-surface.md` § Spawn a worker — do not state a second resolution rule here.
 
 **Order matters here: pass `/color` as the spawn prompt → send the work command after.** The colour is the *only* thing that belongs in this spawn's prompt argument: it runs in ~1s and leaves the session idle at its prompt, ready for the real command. Do NOT pass the work prompt there — a session spawned with it is busy from its first instant, and anything sent afterwards queues behind it instead of submitting.
 
@@ -550,12 +545,8 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 - **the spawned session owns its name** — check the record, do not trust the tab title alone:
 
   ```bash
-  python3 -c "
-  import json,glob
-  for f in glob.glob('$HOME/.claude/sessions/*.json'):
-      d=json.load(open(f))
-      if str(d.get('sessionId','')).startswith('<sid-prefix>'):
-          print(d.get('name'), d.get('nameSource'))"
+  python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json \
+    | python3 -c "import json,sys; [print(r['name'], r['nameSource']) for r in json.load(sys.stdin) if r['sessionId'].startswith('<sid-prefix>')]"
   ```
 
   `nameSource: user` → correct. `nameSource: peer` → the `unset` prefix was missing or ineffective; the session is named after its spawner and the title-match session-connect cannot resolve it (see below).
@@ -568,12 +559,8 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 So after spawning, read the uuid from the session record and write it yourself:
 
 ```bash
-python3 -c "
-import json,glob
-for f in glob.glob('$HOME/.claude/sessions/*.json'):
-    d=json.load(open(f))
-    if d.get('name')=='<task>' and d.get('status') in ('busy','idle'):
-        print(d['sessionId'])"
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json \
+  | python3 -c "import json,sys; [print(r['sessionId']) for r in json.load(sys.stdin) if r['name']=='<task>' and r['status'] in ('busy','idle')]"
 vault-cli task set "<task>" claude_session_id "<uuid>" --vault <vault>
 ```
 

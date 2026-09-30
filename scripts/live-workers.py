@@ -35,6 +35,18 @@ import time
 # TTL >= 2 x interval, and by `--ttl` here for an operator who changes one and not the other.
 TTL_SECONDS = 60
 
+# The mirror's reachability marker, refreshed on every poll that successfully read the cluster.
+# It lives in the store beside the stamps so it cannot drift from them, and it is named with a
+# leading underscore so it can never collide with a session id.
+#
+# ⚠️ **Why this file needs it at all.** The mirror stops refreshing a cluster worker's stamp
+# when the cluster cannot be read, so that stamp goes stale — and a stale stamp and a dead
+# worker are indistinguishable in the store. Without this marker the reader would report
+# `STALE` for a worker that is alive behind a network fault, which is the answer that permits a
+# second writer onto it. The marker is what tells the two apart, and it is the only thing that
+# can.
+REACHABILITY_FILE = "_cluster-reachability.json"
+
 
 def heartbeat_dir():
     """The store's path, resolved the same way `config.mjs` resolves it.
@@ -50,10 +62,38 @@ def heartbeat_dir():
     return os.path.join(state, "claude-supervisor", "live")
 
 
-def read_live(directory, ttl=TTL_SECONDS, now=None):
-    """Every fresh stamp as a dict, or None when the store could not be read.
+def cluster_reachable(directory, ttl=TTL_SECONDS, now=None):
+    """True when the mirror refreshed the cluster marker inside the TTL.
 
-    None and [] are different answers and must stay so: [] is "read it, no worker is live",
+    A missing marker is `False`: no mirror has ever run, so no cluster stamp in the store can
+    be trusted as fresh. That errs toward `UNKNOWN` for cluster stamps, which is the safe
+    direction — `UNKNOWN` never authorises a resume.
+    """
+    now = time.time() if now is None else now
+    try:
+        age = now - os.stat(os.path.join(directory, REACHABILITY_FILE)).st_mtime
+    except OSError:
+        return False
+    return age < ttl
+
+
+def read_live(directory, ttl=TTL_SECONDS, now=None):
+    """Every stamp the store can speak for, or None when the store could not be read.
+
+    Each entry carries `state`:
+
+      * `"live"`   — a fresh stamp. The verdict rests on the AGE, never on the file existing.
+      * `"unknown"` — a STALE stamp whose record says `source: cluster` while the mirror's
+        reachability marker is also stale. The cluster could not be read, so this stamp's
+        staleness proves nothing about the worker, and the honest answer is that we cannot
+        tell. Reporting it stale would be the dangerous direction: `STALE` permits a resume
+        onto a worker that may be alive behind a network fault.
+
+    A stale stamp that is not cluster-sourced, or a stale cluster stamp while the mirror is
+    demonstrably reachable (so the worker really did stop refreshing), is dropped — that is
+    the ordinary death case and it is what the readers already expect.
+
+    None and [] are different answers and must stay so: [] is "read it, nothing to report",
     None is "could not read it". Collapsing them is how a permissions error becomes a
     confident all-clear.
     """
@@ -65,27 +105,41 @@ def read_live(directory, ttl=TTL_SECONDS, now=None):
     except OSError:
         return None
 
+    reachable = cluster_reachable(directory, ttl=ttl, now=now)
+
     live = []
     for name in names:
-        if not name.endswith(".json"):
+        if not name.endswith(".json") or name == REACHABILITY_FILE:
             continue
         path = os.path.join(directory, name)
         try:
             age = now - os.stat(path).st_mtime
         except OSError:
             continue  # swept between the listdir and the stat — already gone
-        if age >= ttl:
-            continue
         session_id = name[: -len(".json")]
         try:
             with open(path, encoding="utf-8") as handle:
                 meta = json.load(handle)
         except (OSError, ValueError):
-            # Fresh but unreadable as JSON. The AGE is what the verdict rests on, so the
-            # worker is live; only the descriptive fields are lost. Reporting it dead because
-            # its metadata is malformed would invert the failure into the dangerous one.
+            # Unreadable as JSON. For a FRESH stamp the AGE is what the verdict rests on, so
+            # the worker is live and only the descriptive fields are lost — reporting it dead
+            # because its metadata is malformed would invert the failure into the dangerous
+            # one. A stale one has no verdict to rescue, so it falls through to the drop.
             meta = {}
-        live.append({"session_id": session_id, "age_seconds": round(age, 1), "pid": meta.get("pid")})
+        if age >= ttl:
+            if meta.get("source") == "cluster" and not reachable:
+                live.append(
+                    {
+                        "session_id": session_id,
+                        "age_seconds": round(age, 1),
+                        "pid": meta.get("pid"),
+                        "state": "unknown",
+                    }
+                )
+            continue
+        live.append(
+            {"session_id": session_id, "age_seconds": round(age, 1), "pid": meta.get("pid"), "state": "live"}
+        )
     return live
 
 
@@ -106,6 +160,12 @@ def main(argv=None):
 
     if args.check:
         match = next((w for w in workers if w["session_id"] == args.check), None)
+        if match and match["state"] == "unknown":
+            print(
+                f"UNKNOWN — {match['session_id']} is a cluster worker and the cluster store could not be read",
+                file=sys.stderr,
+            )
+            return 2
         if match:
             print(f"LIVE — {match['session_id']} stamped {match['age_seconds']}s ago (pid {match['pid']})")
             return 0
@@ -116,7 +176,8 @@ def main(argv=None):
         print(f"no live headless workers in {directory}")
         return 0
     for worker in sorted(workers, key=lambda w: w["session_id"]):
-        print(f"{worker['session_id']}  age {worker['age_seconds']}s  pid {worker['pid']}")
+        suffix = "  UNKNOWN (cluster unreachable)" if worker["state"] == "unknown" else f"  pid {worker['pid']}"
+        print(f"{worker['session_id']}  age {worker['age_seconds']}s{suffix}")
     return 0
 
 
