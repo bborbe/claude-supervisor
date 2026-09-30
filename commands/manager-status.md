@@ -150,7 +150,7 @@ The `Subject:` line leads so a mis-resolution is visible before the table render
 
    The record then carries them under **`bucket_sets`** — the key the drive leg's provenance names, and the reason the half survives a compaction or a fresh manager instead of living only in this session's context.
 
-   ⚠️ **`--save` exits 10 on success** — that code means "this run saw a change", which is exactly why it saved. Do not read it as a failure, and do not retry.
+   ⚠️ **`--save` exits 10 on success** — that code means "this run saw a change", which is exactly why it saved. Do not read it as a failure, and do not retry. ⚠️ **Never hand this call a table on stdin** — a non-empty stdin is refused with a usage error (exit 2, nothing written), because the save reads the payload the render wrote and dates the record from that file's mtime, never from save time.
 
    ⚠️ **An empty table is refused and reports CHANGE** rather than clobbering a good snapshot — a snapshot with no table can never be replayed, so a failed render must leave the previous one standing and force the next run to re-sweep. Never write the snapshot by hand, and never save a table you did not print. The gate strips OSC 8 jump links before storing, so the persisted copy carries no jump token.
 
