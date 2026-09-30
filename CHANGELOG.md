@@ -8,6 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`session-holds.py`'s pane read was missing from the transport-read enumeration, so `make test` was red on `master` and nothing reported it.** `pane_title` reads `wezterm cli list` and returns `None` on failure — compliant with `docs/pane-reads.md`, and its caller `cmd_hold` refuses non-zero — but `SITE_LIST` never recorded the site, so `transport-read-check.py` failed its own completeness assertion. The enumeration is the check's spec, so the omission is the defect, not the site.
+
+- test: **`make precommit` now depends on `test`, so the real suites gate every commit and every CI run.** It previously depended on `check` alone, which only parses: `node --test server/*.test.mjs` and `python3 -m unittest discover -s scripts/tests` never ran in CI, which is exactly how the failure above sat red on `master` unnoticed. `ci.yml` gains the dependency install the suites need (`setup-node` + `npm install` in `server/`) — `make check` never needed `node_modules` because it never resolved an import.
+
 ## v0.74.1
 
 - feat: **`orphan-candidates.py` reads the session-hold store, so a held session is never an auto-resume candidate.** The reader is inlined — the plugin's scripts do not import each other, and a subprocess dependency on a plugin path is a fail-open — and reads are lock-free because the writer lands every change through `os.replace`. ⚠️ A missing or corrupt store reads as *nothing held*, and that direction is chosen: inventing a hold would silently drop a real orphan candidate, while reading a real store as empty merely fails to honour a hold. The hold suppresses the **act** only — the row still renders, which is what keeps a hold distinguishable from a session that got fixed. Paired test: with the hold set, the held task is excluded **and** an unheld task in the same run is still a candidate; with the hold removed, both are — the control is what makes the exclusion able to fail. First of the consumer wirings.
