@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.78.0
 
 - feat: **`manager-predispatch.py` includes the session hold in its digest, so adding or releasing a hold wakes the loop.** ⚠️ **This is the one consumer where the hold is a digest INPUT and deliberately NOT a suppression.** The gate decides whether the sweep runs at all, so suppressing it for a held session would stop the sweep and the held row would never render -- the exact failure the hold design forbids, where a row that disappears from a sweep is indistinguishable from a row that got fixed. Including it as an input is what makes a hold being added or released move the digest. The reader is inlined (the plugin's scripts do not import each other; a subprocess dependency on a plugin path is a fail-open) and reads are lock-free because the writer lands through `os.replace`. Paired test, both directions named: `test_fires_on_a_held_session` (too-tight) and `test_does_not_fire_on_a_clean_session` (too-loose -- a hold on a session NOT in the tracked set leaves the digest alone), plus `test_releasing_a_hold_moves_the_digest` and `test_a_corrupt_store_reads_as_nothing_held`. Verified by neutralising the input: fails 2 tests; restoring passes 49.
 
