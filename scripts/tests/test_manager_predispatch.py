@@ -350,6 +350,73 @@ class TestFailOpen(Base):
         self.assertIn("CHANGE fail-open:", out)
 
 
+class TestBoundedStdin(Base):
+    """A stdin that never EOFs must not stall `--save`.
+
+    Every other test here drives the gate through `run_gate`, which swaps `sys.stdin` for
+    an `io.StringIO` — and a StringIO always EOFs, so the suite is structurally unable to
+    reproduce the stall. These use a real pipe instead: one with its write end held open
+    (the defect), one closed immediately (the control).
+
+    Measured 2026-09-30 against the live Manager Layer store: the open-pipe shape ran
+    45 013 ms and was killed, against 654 ms for `< /dev/null`, and left the store
+    byte-for-byte unchanged because the save never ran.
+    """
+
+    def gate_with_pipe(self, hold_open, *argv):
+        """Run the gate with fd-backed stdin. -> (rc, stdout+stderr, elapsed seconds)."""
+        import sys
+
+        r, w = os.pipe()
+        if not hold_open:
+            os.close(w)
+            w = None
+        old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
+        sys.stdin, sys.stdout, sys.stderr = os.fdopen(r), io.StringIO(), io.StringIO()
+        started = time.monotonic()
+        try:
+            rc = self.m.main(list(argv) + ["--vault", self.vault])
+            out = sys.stdout.getvalue() + sys.stderr.getvalue()
+        finally:
+            elapsed = time.monotonic() - started
+            sys.stdin.close()
+            sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
+            if w is not None:
+                os.close(w)
+        return rc, out, elapsed
+
+    def test_a_never_eof_stdin_is_abandoned_by_its_own_named_code(self):
+        """The bound holds, and the code is the run's own — not a kill's, not a verdict.
+
+        SC4's distinction, asserted directly: exit 3 is neither the gate's "changed"
+        (10) nor its "usage error" (2), and the save leaves no record behind.
+        """
+        self.m.STDIN_WAIT_SECONDS = 0.2
+        rc, out, elapsed = self.gate_with_pipe(True, "--subject", "ATopic", "--save")
+        self.assertEqual(rc, self.m.EXIT_STDIN_TIMEOUT, out)
+        self.assertNotEqual(rc, self.m.EXIT_CHANGE, "must not read as the success verdict")
+        self.assertNotEqual(rc, self.m.EXIT_USAGE)
+        self.assertIn("no EOF", out)
+        self.assertLess(elapsed, 5.0, "the bound must hold, not the pipe's lifetime")
+        self.assertFalse(
+            os.path.exists(self.m.state_path("ATopic")),
+            "a save that never ran must leave no record at all",
+        )
+
+    def test_the_control_a_closed_pipe_still_saves(self):
+        """Negative control: the guard must not be satisfied by refusing every save.
+
+        Same pipe, write end closed — a real EOF on a real fd — so the bound must not
+        fire and the save must take the supported path and write the record.
+        """
+        self.m.STDIN_WAIT_SECONDS = 0.2
+        rc, out = self.run_gate("--subject", "ATopic", "--write-payload", stdin="Subject: x\n")
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out, _ = self.gate_with_pipe(False, "--subject", "ATopic", "--save")
+        self.assertNotEqual(rc, self.m.EXIT_STDIN_TIMEOUT, out)
+        self.assertTrue(os.path.exists(self.m.state_path("ATopic")), out)
+
+
 class TestStorage(Base):
     def test_table_is_stored_link_free(self):
         """The OSC 8 URI carries the jump token; the on-disk copy must not."""
