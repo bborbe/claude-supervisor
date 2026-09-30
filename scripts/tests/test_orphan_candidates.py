@@ -153,5 +153,74 @@ class ResolveFleetSessions(unittest.TestCase):
         self.assertEqual(os.path.dirname(found), os.path.dirname(_SCRIPT))
 
 
+HELD = "aaaaaaaa-1111-2222-3333-444444444444"
+FREE = "bbbbbbbb-1111-2222-3333-444444444444"
+
+
+class HoldTest(unittest.TestCase):
+    """A held session is never an orphan candidate.
+
+    The hold suppresses the ACT only -- the row still renders in the sweep, which
+    is what keeps a hold distinguishable from a session that got fixed.
+
+    Both directions are asserted by name: the too-tight case (a held session is
+    excluded) and the too-loose case (an UNHELD session in the same run is still a
+    candidate). They fail in opposite directions and only one of them looks like a
+    bug. The third case is the control -- with the hold removed both are
+    candidates, which is what proves the fixture is able to fire at all and the
+    exclusion is real rather than an artifact of emitting nothing.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.holds = os.path.join(self.dir, "session-holds.json")
+        self._saved = oc.HOLDS_PATH
+        oc.HOLDS_PATH = self.holds
+
+    def tearDown(self):
+        oc.HOLDS_PATH = self._saved
+
+    def write_holds(self, *session_ids):
+        entries = ", ".join(
+            '"%s": {"reason": "operator: leave it"}' % sid for sid in session_ids
+        )
+        with open(self.holds, "w", encoding="utf-8") as handle:
+            handle.write('{"version": 1, "holds": {%s}}' % entries)
+
+    def names(self):
+        return [n for n, _, _ in oc.candidates(self.dir, date.today(), 30, set())]
+
+    def seed(self):
+        task_file(self.dir, "held.md", "status: in_progress\nclaude_session_id: " + HELD)
+        task_file(self.dir, "free.md", "status: in_progress\nclaude_session_id: " + FREE)
+
+    def test_fires_on_a_held_session(self):
+        """Too-tight: a held session is excluded."""
+        self.seed()
+        self.write_holds(HELD)
+        self.assertNotIn("held", self.names())
+
+    def test_does_not_fire_on_a_clean_session(self):
+        """Too-loose: an unheld session in the SAME run is still a candidate."""
+        self.seed()
+        self.write_holds(HELD)
+        got = self.names()
+        self.assertIn("free", got)
+        self.assertNotIn("held", got)
+
+    def test_the_control_fires_when_no_hold_is_set(self):
+        """The fixture can fire: with no hold, both are candidates."""
+        self.seed()
+        self.write_holds()
+        self.assertEqual(["free", "held"], sorted(self.names()))
+
+    def test_a_corrupt_store_reads_as_nothing_held(self):
+        """Fail-open: an unreadable store must not invent a hold."""
+        self.seed()
+        with open(self.holds, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self.assertEqual(["free", "held"], sorted(self.names()))
+
+
 if __name__ == "__main__":
     unittest.main()
