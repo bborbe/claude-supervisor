@@ -117,14 +117,21 @@ export function selectMessagePark({ item, agents, pending }) {
       reason: `the item is ${item?.answer_mechanism}-class, not message-class`,
     }
   }
+  // `owner` says whether THIS server holds the producing session. Only an owner can have
+  // attempted a delivery, so only an owner may record one — see the tick below.
   const producerId = item?.producer_id
   if (typeof producerId !== 'string' || producerId === '') {
-    return { ok: false, reason: 'the item names no producer, so it cannot be joined to a park' }
+    return {
+      ok: false,
+      owner: false,
+      reason: 'the item names no producer, so it cannot be joined to a park',
+    }
   }
   const agent = [...agents.values()].find((a) => a.sessionId === producerId)
   if (!agent) {
     return {
       ok: false,
+      owner: false,
       reason: `no agent of this server holds session ${producerId} — a worker spawned by another process has its park in that process`,
     }
   }
@@ -132,12 +139,14 @@ export function selectMessagePark({ item, agents, pending }) {
   if (parked.length === 0) {
     return {
       ok: false,
+      owner: true,
       reason: `agent ${agent.id} has no parked prompt to settle — a card for an idle session is not this arm's to deliver`,
     }
   }
   if (parked.length > 1) {
     return {
       ok: false,
+      owner: true,
       reason: `agent ${agent.id} has ${parked.length} parked prompts (${parked.map((p) => p.requestId).join(', ')}), so which one this answer settles cannot be told`,
     }
   }
@@ -150,6 +159,7 @@ export function selectMessagePark({ item, agents, pending }) {
     if (createdAt < requestedAt - FRESHNESS_SKEW_MS) {
       return {
         ok: false,
+        owner: true,
         reason: `the item was answered at ${item.created_at}, before the park it would settle was requested at ${park.requestedAt} — refusing to settle a gate this answer does not belong to`,
       }
     }
@@ -281,10 +291,14 @@ export function startMessageDelivery({
         const target = selectMessagePark({ item, agents, pending })
         if (!target.ok) {
           log(`attention item ${itemId} carries an answer but was not delivered: ${target.reason}`)
-          // An attempt WAS made and could not be delivered — the park it was aimed at is
-          // gone — so this is `failed`, not `never_attempted`. The item already left
-          // `watching` above, so this is terminal: nothing will retry it.
-          await recordAttempt(itemId, 'failed')
+          // Only the server holding the producing session attempted anything: for it the
+          // park it was aimed at is gone, so this is `failed`, not `never_attempted`.
+          // ⚠️ Every other server records NOTHING. Each supervisor server watches every
+          // open `message` card, so one answer is read by the whole fleet; if the
+          // non-owners wrote `failed` too, ~25 of them would claim an attempt they never
+          // made, and — the trail keeps one record per item — outvote the owner's real
+          // outcome. Measured live 2026-09-30: 19 `failed` records, 0 `delivered`.
+          if (target.owner) await recordAttempt(itemId, 'failed')
           continue
         }
         log(`message ${target.requestId} answered by the attention store (item ${itemId})`)

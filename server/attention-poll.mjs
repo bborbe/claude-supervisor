@@ -110,24 +110,32 @@ export function selectParked({ item, agents, pending }) {
   if (item?.answer_mechanism !== 'permission') {
     return { ok: false, reason: `the item is ${item?.answer_mechanism}-class, not permission-class` }
   }
+  // `owner` says whether THIS server holds the producing session. Only an owner can have
+  // attempted a delivery, so only an owner may record one — see the tick below.
   const producerId = item?.producer_id
   if (typeof producerId !== 'string' || producerId === '') {
-    return { ok: false, reason: 'the item names no producer, so it cannot be joined to a park' }
+    return {
+      ok: false,
+      owner: false,
+      reason: 'the item names no producer, so it cannot be joined to a park',
+    }
   }
   const agent = [...agents.values()].find((a) => a.sessionId === producerId)
   if (!agent) {
     return {
       ok: false,
+      owner: false,
       reason: `no agent of this server holds session ${producerId} — a worker spawned by another process has its park in that process`,
     }
   }
   const parked = [...pending.values()].filter((p) => p.agentId === agent.id)
   if (parked.length === 0) {
-    return { ok: false, reason: `agent ${agent.id} has no parked prompt to settle` }
+    return { ok: false, owner: true, reason: `agent ${agent.id} has no parked prompt to settle` }
   }
   if (parked.length > 1) {
     return {
       ok: false,
+      owner: true,
       reason: `agent ${agent.id} has ${parked.length} parked prompts (${parked.map((p) => p.requestId).join(', ')}), so which one this verdict answers cannot be told — answer it with answer_permission instead`,
     }
   }
@@ -228,10 +236,13 @@ export function startAttentionPoll({
         const target = selectParked({ item, agents, pending })
         if (!target.ok) {
           log(`attention item ${itemId} carries ${verdict.decision} but was not delivered: ${target.reason}`)
-          // An attempt WAS made and could not be delivered — the park it was aimed at
-          // is gone — so this is `failed`, not `never_attempted`. The item already
-          // left `watching` above, so this is terminal: nothing will retry it.
-          await recordAttempt(itemId, 'failed')
+          // Only the server holding the producing session attempted anything: for it the
+          // park it was aimed at is gone, so this is `failed`, not `never_attempted`.
+          // ⚠️ Every other server records NOTHING — each watches every open `permission`
+          // item, so without this gate the non-owners would outvote the owner's real
+          // outcome in a trail that keeps one record per item. Same rule as
+          // message-delivery.mjs, where it was measured live on 2026-09-30.
+          if (target.owner) await recordAttempt(itemId, 'failed')
           continue
         }
         // No re-check that the park is still present: selectParked read `pending` on this
