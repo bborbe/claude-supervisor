@@ -154,6 +154,7 @@ def main(argv=None):
     parser.add_argument("--cmd", default=None, help="override the cluster wrapper (tests pass a fake)")
     parser.add_argument("--namespace", default=None)
     parser.add_argument("--configmap", default=None)
+    parser.add_argument("--json", action="store_true", help="with --list, emit the stamps as JSON — the mirror reads this")
     args = parser.parse_args(argv)
 
     stamps = read_store(cmd=args.cmd, namespace=args.namespace, configmap=args.configmap, ttl=args.ttl)
@@ -179,6 +180,11 @@ def main(argv=None):
             )
             return STALE
         print("LIVE — %s  age %ss" % (matches[0]["session_id"], matches[0]["age_seconds"]))
+        return LIVE
+
+    if args.json:
+        json.dump(stamps, sys.stdout, indent=2)
+        sys.stdout.write("\n")
         return LIVE
 
     for stamp in sorted(stamps, key=lambda s: s["age_seconds"]):

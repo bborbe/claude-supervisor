@@ -201,10 +201,14 @@ def resolve(session_id, registry, heartbeats=()):
         return UNKNOWN, "neither the session registry nor the heartbeat store is readable — cannot decide liveness"
 
     registered = sorted(k for k in (registry or {}) if k.lower().startswith(sid))
-    beating = sorted(
-        h["session_id"] for h in (heartbeats or []) if (h.get("session_id") or "").lower().startswith(sid)
-    )
-    matches = sorted(set(registered) | set(beating))
+    # `state` is `live` for a fresh stamp and `unknown` for a cluster stamp whose store could
+    # not be read — see `live-workers.py`. An entry predating the field has no `state`, and a
+    # missing state must read as live rather than vanish: dropping it would silently empty the
+    # store for every stamp written before this change.
+    fresh = [h for h in (heartbeats or []) if (h.get("session_id") or "").lower().startswith(sid)]
+    beating = sorted(h["session_id"] for h in fresh if h.get("state", "live") == "live")
+    unresolved = sorted(h["session_id"] for h in fresh if h.get("state") == "unknown")
+    matches = sorted(set(registered) | set(beating) | set(unresolved))
 
     if not matches:
         # A negative is licensed only by two readable sources. With either unreadable, the
@@ -225,7 +229,14 @@ def resolve(session_id, registry, heartbeats=()):
         )
 
     full = matches[0]
-    if any(h.get("session_id") == full for h in (heartbeats or [])):
+    if full in unresolved:
+        # The store says this cluster worker's stamp is stale while the cluster itself could
+        # not be read. That is "cannot tell", never death — a network fault must not become
+        # permission to resume onto a worker that may be alive behind it.
+        return UNKNOWN, (
+            "%s is a cluster worker and the cluster store could not be read — cannot decide liveness" % full
+        )
+    if any(h.get("session_id") == full and h.get("state", "live") == "live" for h in (heartbeats or [])):
         # A fresh stamp is decisive on its own — this is the half that answers for a session
         # the registry structurally cannot see.
         return LIVE, full
@@ -275,7 +286,10 @@ def main(argv=None):
     if args.check:
         verdict, payload = resolve(args.check, registry, heartbeats)
         if verdict == LIVE:
-            beat = next((h for h in (heartbeats or []) if h["session_id"] == payload), None)
+            beat = next(
+                (h for h in (heartbeats or []) if h["session_id"] == payload and h.get("state", "live") == "live"),
+                None,
+            )
             if beat is not None:
                 print("LIVE — %s  heartbeat age %ss  pid %s" % (payload, beat["age_seconds"], beat["pid"]))
             else:
@@ -298,18 +312,24 @@ def main(argv=None):
         return UNKNOWN
 
     if args.json:
-        payload = [dict(rec, sessionId=sid, source="registry") for sid, rec in registry.items() if rec["alive"]]
+        payload = [
+            dict(rec, sessionId=sid, source="registry", state="live")
+            for sid, rec in registry.items()
+            if rec["alive"]
+        ]
         payload += [
             {
                 "sessionId": beat["session_id"],
                 "source": "heartbeat",
+                "state": beat.get("state", "live"),
                 "age_seconds": beat["age_seconds"],
                 "pid": beat["pid"],
                 "status": "",
                 "name": "",
                 "formerNames": [],
                 "cwd": "",
-                "alive": True,
+                "nameSource": "",
+                "alive": beat.get("state", "live") == "live",
             }
             for beat in heartbeats
         ]
@@ -322,7 +342,10 @@ def main(argv=None):
         if rec["alive"]:
             rows.append((sid, "pid %-7s %s" % (rec["pid"], rec["name"] or "(no name)")))
     for beat in heartbeats:
-        rows.append((beat["session_id"], "heartbeat age %ss  pid %s" % (beat["age_seconds"], beat["pid"])))
+        if beat.get("state") == "unknown":
+            rows.append((beat["session_id"], "heartbeat UNKNOWN (cluster unreachable)"))
+        else:
+            rows.append((beat["session_id"], "heartbeat age %ss  pid %s" % (beat["age_seconds"], beat["pid"])))
     rows.sort(key=lambda r: r[1])
     for sid, desc in rows:
         print("%s  %s" % (sid, desc))

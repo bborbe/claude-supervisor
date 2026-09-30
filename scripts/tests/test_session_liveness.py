@@ -297,6 +297,40 @@ class SessionLiveness(unittest.TestCase):
         _, rows = self.json_listing()
         self.assertEqual([r["source"] for r in rows], ["heartbeat"])
 
+    def cluster_stamp(self, session_id, age_seconds=300, reachable=False):
+        """A stale cluster stamp, and optionally a fresh mirror reachability marker."""
+        path = os.path.join(self.hb, "%s.json" % session_id)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"source": "cluster", "pid": None}, fh)
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+        if reachable:
+            with open(os.path.join(self.hb, "_cluster-reachability.json"), "w", encoding="utf-8") as fh:
+                fh.write("{}")
+
+    def test_a_stale_cluster_stamp_is_unknown_when_the_cluster_could_not_be_read(self):
+        # SC4, and the whole reason the reachability marker exists. The mirror stops
+        # refreshing a cluster worker's stamp when the cluster is unreachable, so the stamp
+        # goes stale — and a stale stamp is indistinguishable from a dead worker without the
+        # marker. Reporting STALE here would permit a resume onto a worker that may be alive
+        # behind a network fault.
+        self.cluster_stamp("c1u57e12-1111-2222-3333-444455556666", reachable=False)
+        rc, out = self.check("c1u57e12")
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("cluster store could not be read", out)
+
+    def test_a_stale_cluster_stamp_is_absent_once_the_mirror_is_reachable(self):
+        # The marker is fresh, so the cluster WAS read and this worker simply stopped
+        # refreshing — an ordinary death, which must stay ABSENT and not drift to UNKNOWN.
+        self.cluster_stamp("c1u57e12-1111-2222-3333-444455556666", reachable=True)
+        self.assertEqual(self.check("c1u57e12")[0], ABSENT)
+
+    def test_a_stale_non_cluster_stamp_is_absent_even_with_the_cluster_down(self):
+        # A headless worker's death must not be laundered into UNKNOWN by an unrelated cluster
+        # outage — the rule keys on the stamp's own source, not on the marker alone.
+        self.beat("11vea11f-1111-2222-3333-444455556666", age_seconds=300)
+        self.assertEqual(self.check("11vea11f")[0], ABSENT)
+
     def test_a_stale_record_is_unknown_when_the_heartbeat_store_is_unreadable(self):
         # A stale record is a NEGATIVE, so it needs both sources readable — the same rule the
         # no-match branch applies. Returning ABSENT here would let a fresh stamp in the half we

@@ -61,11 +61,17 @@ export function stampPath(dir, sessionId) {
 //
 // Written via a temporary file and renamed, matching `writeRecord`: a reader must never see
 // a half-written stamp and read it as a worker with no id.
-export function stampRecord(dir, { sessionId, pid, mode, at = new Date().toISOString() }, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
+export function stampRecord(dir, { sessionId, pid, mode, source, at = new Date().toISOString() }, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
   const path = stampPath(dir, sessionId)
   fs.mkdirSync(dir, { recursive: true })
   const tmp = `${path}.tmp`
-  fs.writeFileSync(tmp, `${JSON.stringify({ sessionId, pid, mode, at }, null, 2)}\n`)
+  // `source` is carried only when the writer sets it. The readers key their cluster-specific
+  // staleness rule on it — a stale cluster stamp whose store could not be read is UNKNOWN, not
+  // STALE — so it has to be on the record rather than inferred from the directory. Omitted
+  // rather than defaulted, so a headless worker's stamp keeps exactly the shape it had.
+  const record = { sessionId, pid, mode, at }
+  if (source !== undefined) record.source = source
+  fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`)
   fs.renameSync(tmp, path)
   return path
 }
