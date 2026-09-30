@@ -21,12 +21,17 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
+
+# Distinguishes "the caller said nothing, use the isolated store" from "the caller passed
+# None", which is a real argument value in this suite.
+_DEFAULT = object()
 
 
 def load():
@@ -50,6 +55,16 @@ class SessionLiveness(unittest.TestCase):
         self.m = load()
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = self.tmp.name
+        # An isolated heartbeat store, and it is not optional. Without it every case would
+        # read the REAL store, so a headless worker running on this machine while the suite
+        # runs would turn an ABSENT assertion into LIVE — a suite whose result depends on the
+        # fleet's mood rather than on the code.
+        self.hb = os.path.join(self.tmp.name, "heartbeats")
+        os.makedirs(self.hb)
+        # A path that cannot be listed (`NotADirectoryError`), for the unreadable-store cases.
+        self.blocked = os.path.join(self.tmp.name, "blocked-file")
+        with open(self.blocked, "w", encoding="utf-8") as fh:
+            fh.write("not a directory\n")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -58,16 +73,30 @@ class SessionLiveness(unittest.TestCase):
         with open(os.path.join(self.dir, "%s.json" % pid), "w", encoding="utf-8") as fh:
             json.dump({"sessionId": session_id, "pid": pid, "name": name, "status": status}, fh)
 
-    def check(self, session_id, directory=None):
+    def beat(self, session_id, age_seconds=1):
+        """Plant a heartbeat stamp aged `age_seconds`. The TTL is 60s, so the default is fresh."""
+        path = os.path.join(self.hb, "%s.json" % session_id)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"pid": None}, fh)
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+
+    def unreadable(self):
+        """A heartbeat-dir path that raises `NotADirectoryError` on listdir -> `None`."""
+        return os.path.join(self.blocked, "live")
+
+    def check(self, session_id, directory=None, heartbeat_dir=_DEFAULT):
         out, err = io.StringIO(), io.StringIO()
+        hb = self.hb if heartbeat_dir is _DEFAULT else heartbeat_dir
         with redirect_stdout(out), redirect_stderr(err):
-            rc = self.m.main(["--check", session_id, "--dir", directory or self.dir])
+            rc = self.m.main(["--check", session_id, "--dir", directory or self.dir, "--heartbeat-dir", hb])
         return rc, out.getvalue() + err.getvalue()
 
-    def listing(self, directory=None):
+    def listing(self, directory=None, heartbeat_dir=_DEFAULT):
         out, err = io.StringIO(), io.StringIO()
+        hb = self.hb if heartbeat_dir is _DEFAULT else heartbeat_dir
         with redirect_stdout(out), redirect_stderr(err):
-            rc = self.m.main(["--list", "--dir", directory or self.dir])
+            rc = self.m.main(["--list", "--dir", directory or self.dir, "--heartbeat-dir", hb])
         return rc, out.getvalue() + err.getvalue()
 
     # ---- the falsifier: prefix and full id agree -------------------------------------
@@ -167,6 +196,60 @@ class SessionLiveness(unittest.TestCase):
 
     def test_list_on_an_unreadable_registry_is_unknown(self):
         rc, out = self.listing(directory=os.path.join(self.dir, "does-not-exist"))
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+
+    # ---- the second source: heartbeats --------------------------------------------------
+    #
+    # The registry cannot answer for a session with no process of its own — a headless worker
+    # or a cluster worker. These pin the half that can, and the composition rule that keeps
+    # "could not tell" from collapsing into "not live".
+
+    def test_a_fresh_heartbeat_is_live_with_no_registry_entry(self):
+        # The cluster case, in one assertion: no pid, no registry entry, still live.
+        self.beat("c1u57e12-1111-2222-3333-444455556666")
+        rc, out = self.check("c1u57e12")
+        self.assertEqual(rc, LIVE)
+        self.assertIn("heartbeat", out)
+
+    def test_a_stale_heartbeat_is_absent_not_live(self):
+        # Age, not existence: a `kill -9`'d writer leaves the file behind. 120s is past the 60s
+        # TTL, so the stamp is not evidence of life.
+        self.beat("57a1e111-1111-2222-3333-444455556666", age_seconds=120)
+        self.assertEqual(self.check("57a1e111")[0], ABSENT)
+
+    def test_a_heartbeat_prefix_resolves_like_a_registry_prefix(self):
+        # The prefix contract is a property of the ARGUMENT, not of the source it resolves in.
+        self.beat("bea7bea7-1111-2222-3333-444455556666")
+        self.assertEqual(self.check("bea7bea7")[0], LIVE)
+        self.assertEqual(self.check("bea7bea7-1111-2222-3333-444455556666")[0], LIVE)
+
+    def test_a_fresh_heartbeat_is_decisive_when_the_registry_is_unreadable(self):
+        # A positive from one channel is an answer; "could not tell" from the other is not a
+        # refutation of it.
+        self.beat("dec151ve-1111-2222-3333-444455556666")
+        rc, _ = self.check("dec151ve", directory=os.path.join(self.dir, "does-not-exist"))
+        self.assertEqual(rc, LIVE)
+
+    def test_unreadable_heartbeat_store_makes_an_unknown_id_unknown_not_absent(self):
+        # The SC4 direction. With the second store unreadable, "no match" cannot rule out a
+        # match in the half we could not read, so the answer is UNKNOWN — never ABSENT, which
+        # is the one answer that permits a resume.
+        rc, out = self.check("3fd529af", heartbeat_dir=self.unreadable())
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("heartbeat store unreadable", out)
+
+    def test_list_includes_a_heartbeat_only_session(self):
+        self.beat("11571e57-1111-2222-3333-444455556666")
+        rc, out = self.listing()
+        self.assertEqual(rc, LIVE)
+        self.assertIn("11571e57", out)
+
+    def test_list_on_an_unreadable_heartbeat_store_is_unknown(self):
+        # A partial list presented as complete reads as "not live" for every session in the
+        # half that failed, which is the dangerous direction.
+        rc, out = self.listing(heartbeat_dir=self.unreadable())
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
 
