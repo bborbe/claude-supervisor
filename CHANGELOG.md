@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`/supervisor:open` refuses a session carrying an operator hold — before any branch, JUMP included.** The check sits at Step 2A rather than in the `--flagged` selector because that is the choke point: Step 0.6 delegates every batch row to this command's own single-task path rather than reimplementing it, so one gate covers both the batch and a hand-typed `/supervisor:open "<task>"`. A held session necessarily carries a `claude_session_id`, which already excludes it from Step 0.6's approve pass — so no `approved_by` is written onto a held row before the refusal is reached. ⚠️ **The refusal is loud and names the release path, never a silent skip** — a dropped row is indistinguishable from a task that was never opened, so the operator would have no way to learn their own hold had been read. ⚠️ **Three different things in this command are called a hold and only one is read here:** the operator's session hold, the `hold` *task status*, and the `HOLD` marker the selector prints for a `blocked` row. The canonical rule lives in `skills/hold/SKILL.md` and is referenced, not restated.
+
 ## v0.81.0
 
 - feat: **`agents/fleet-drive.md` never acts on a session carrying an operator hold.** A `NEVER` clause alongside the existing ones: no nudge draft, no reap, no escalation. ⚠️ **The row is still rendered** — only the act stops, and because this leg returns *drafts* rather than sending, that means emitting **no draft at all** for a held row rather than one the caller is trusted to drop. A hold is operator *policy* about a **session**, orthogonal to any task's status; a held session may carry no task. The canonical rule lives in `skills/hold/SKILL.md` and is referenced, not restated.
