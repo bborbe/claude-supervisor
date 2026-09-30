@@ -24,6 +24,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import contextlib
 import importlib.util
 import io
+import datetime
 import json
 import os
 import shutil
@@ -849,3 +850,84 @@ class Stamp(_Harness):
         with self.assertRaises(RuntimeError):
             self.feed_as("session-a", layer="worker")
         self.assertEqual(self.stamped, [], "no stamp for an unsent gate")
+
+
+class Hold(_Harness):
+    """A held session's gate is never published -- the row stays visible, the message stops.
+
+    Both directions are asserted by name. The too-tight case (a held gate is not
+    published) and the too-loose case (an UNHELD gate in the SAME round still is) fail
+    in opposite directions, and only one of them looks like a bug. The third case is the
+    control: with no hold set, both gates publish -- which is what proves the fixture is
+    able to publish at all, so the suppression is real rather than a round that emits
+    nothing for any reason.
+
+    `publish()` is mocked rather than the network reached: the real endpoint is the
+    operator's live notification core.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+        self.mod.publish = lambda *a, **k: self.sent.append(a)
+        self.holds = os.path.join(self.dir, "holds.json")
+        self.mod.HOLDS_PATH = self.holds
+
+    def write_holds(self, *session_ids):
+        entries = ", ".join(
+            '"%s": {"reason": "operator: leave it"}' % sid for sid in session_ids
+        )
+        with open(self.holds, "w", encoding="utf-8") as handle:
+            handle.write('{"version": 1, "holds": {%s}}' % entries)
+
+    def round(self, gates):
+        self.mod.publish_round(datetime.datetime.now(datetime.timezone.utc), gates)
+        return " | ".join(str(call) for call in self.sent)
+
+    def gate(self, session, text):
+        return {"owner": "pane-243", "text": text, "session": session}
+
+    def test_fires_on_a_held_session(self):
+        """Too-tight: a held session's gate is not published."""
+        self.write_holds(HELD)
+        out = self.round([self.gate(HELD, "approve: make apply")])
+        self.assertNotIn("make apply", out)
+
+    def test_does_not_fire_on_a_clean_session(self):
+        """Too-loose: an unheld session's gate in the SAME round still publishes."""
+        self.write_holds(HELD)
+        out = self.round(
+            [
+                self.gate(HELD, "approve: make apply"),
+                self.gate(FREE, "approve: kubectl delete"),
+            ]
+        )
+        self.assertIn("kubectl delete", out)
+        self.assertNotIn("make apply", out)
+
+    def test_the_control_fires_when_no_hold_is_set(self):
+        """The fixture can publish: with no hold, both gates go out."""
+        self.write_holds()
+        out = self.round(
+            [
+                self.gate(HELD, "approve: make apply"),
+                self.gate(FREE, "approve: kubectl delete"),
+            ]
+        )
+        self.assertIn("make apply", out)
+        self.assertIn("kubectl delete", out)
+
+    def test_a_corrupt_store_reads_as_nothing_held(self):
+        """Fail-open: an unreadable store must not silence a real escalation."""
+        with open(self.holds, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        out = self.round([self.gate(HELD, "approve: make apply")])
+        self.assertIn("make apply", out)
+
+
+HELD = "aaaaaaaa-1111-2222-3333-444444444444"
+FREE = "bbbbbbbb-1111-2222-3333-444444444444"
+
+
+if __name__ == "__main__":
+    unittest.main()
