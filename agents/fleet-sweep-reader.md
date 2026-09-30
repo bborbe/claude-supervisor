@@ -82,12 +82,15 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
    | Signal | Reading |
    |---|---|
+   | session carries an **operator hold** | **held** — render `⏸️ HELD — <reason>`; never `stalled`, never `parked`, never a nudge |
    | status changed since last sweep | progressing |
    | `busy`/`shell` **and** task mtime unchanged for ≥2 consecutive sweeps (`stall_count >= 2` after this sweep's update) | **stalled** |
    | `idle` **and** task file has open `[ ]`/`[/]` boxes | parked |
    | `idle` **and** all boxes `[x]` / task complete | **finished — reap candidate** |
    | task `in_progress` + `claude_session_id` + not parked + transcript `LAST-ACTIVE` ≥4h + absent from `ListAgents` + task mtime ≤7d | **orphan** candidate |
    | no prior snapshot, or no task file resolved | unclassified — insufficient data |
+
+   ⚠️ **The hold row sits first because it wins over every other, and it is the fourth WAITING carrier.** The rule that a row demonstrably held from outside is never `stalled` already names three — a parked gate, an unmet `blocked_by`, a future `defer_date`. **An operator hold is the fourth, and the strongest:** the other three say *not yet*, a hold says *not by you*. Read `~/.claude/state/session-holds.json` keyed on the session's **full** id — the `claude_session_id:` stamp step 2 resolved. ⚠️ **Never the 8-char prefix this file renders in its digest:** that is a display handle, the store is keyed on the whole id, and a prefix lookup misses **every** entry while looking exactly like a session nobody held. A held session may also carry **no task at all**, so an unresolved task file is no reason to skip the read. ⚠️ **This is a rendering fix, not an act fix.** `agents/fleet-drive.md` already refuses to nudge, reap or escalate a held session, so the loop was never going to act — but a held row rendered `stalled` is a **⚠️ problem row**, and a manager reading one is invited to nudge **by hand**, which is the act the drive leg's refusal cannot reach. *"A row that disappears from a sweep is indistinguishable from a row that got fixed"* — and a row that is **mislabelled** is worse than one that is missing, because it reads as work. The canonical rule lives in `skills/hold/SKILL.md`; read it there rather than restating it here.
 
    `waiting` is transient — never counts toward `stalled` or `parked`. For each reap candidate, read the three disk facts this run: `grep -m1 '^status:'` (want `completed`), `grep -m1 '^phase:'` (want `done`), `grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'` (want `0`). Two open Self-Review boxes left deliberately mean **not** complete.
 
