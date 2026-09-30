@@ -248,6 +248,42 @@ def resume_command(sid, title, chip, cwd):
     return argv + ["--", "bash", "-lc", inner]
 
 
+HOLDS_PATH = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSION_HOLDS", "~/.claude/state/session-holds.json")
+)
+
+
+def read_holds():
+    """The operator's session holds, keyed on session id. `{}` on any read failure.
+
+    Inlined rather than shelling out to session-holds.py: the plugin's scripts do not
+    import each other, and a subprocess dependency on a plugin path is a fail-open.
+    Reads are lock-free because the writer lands every change through `os.replace`.
+
+    A missing or corrupt store reads as *nothing held*. That direction is the safe one
+    here: inventing a hold would refuse a restart the operator asked for, while reading
+    a real store as empty merely fails to honour a hold -- and this module's whole design
+    is that every refusal is named rather than silent.
+    """
+    try:
+        with open(HOLDS_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    holds = data.get("holds") if isinstance(data, dict) else None
+    return holds if isinstance(holds, dict) else {}
+
+
+def held_reason(session_id):
+    """The hold's reason for this session, or None when it is not held."""
+    if not session_id:
+        return None
+    entry = read_holds().get(session_id)
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("reason") or "held"
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Restart one stale idle worker session, registry-guarded.",
@@ -281,6 +317,19 @@ def main():
         )
     if path is None:
         return refuse("unknown-session-id", f"no registry entry carries session id {sid}")
+
+    # ⚠️ A held session is never restarted -- an EIGHTH refusal, alongside the seven
+    # this module documents. Checked BEFORE the status and kind gates because a hold is
+    # the stronger statement: `busy` says the moment is wrong, a hold says the session
+    # is not yours to touch at all, and it outranks every other consideration here.
+    # Restarting is exactly the act the operator held the session to prevent.
+    held = held_reason(sid)
+    if held is not None:
+        return refuse(
+            "held-session",
+            f"session {sid} carries an operator hold ({held}); only the operator "
+            "releases it -- see the /supervisor:hold skill",
+        )
 
     pid = rec.get("pid")
     if not isinstance(pid, int):

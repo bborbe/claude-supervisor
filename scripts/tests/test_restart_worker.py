@@ -333,5 +333,65 @@ class Cli(unittest.TestCase):
         self.assertEqual(out.returncode, 0)
 
 
+SID_HELD = "aaaaaaaa-1111-2222-3333-444444444444"
+
+
+class HeldSession(Cli):
+    """A held session is refused with `held-session` -- an EIGHTH refusal.
+
+    Both directions are asserted by name. The too-tight case (a held session is refused)
+    and the too-loose case (the SAME session, unheld, is not refused for being held) fail
+    in opposite directions, and only one of them looks like a bug: a build that refuses
+    everything satisfies the first clause alone.
+
+    The refusal outranks the status and kind gates -- `busy` says the moment is wrong, a
+    hold says the session is not yours to touch at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.holds = os.path.join(self.dir, "holds.json")
+        os.environ["SUPERVISOR_SESSION_HOLDS"] = self.holds
+        self.write_holds()
+
+    def tearDown(self):
+        os.environ.pop("SUPERVISOR_SESSION_HOLDS", None)
+        super().tearDown()
+
+    def write_holds(self, *session_ids):
+        entries = ", ".join(
+            '"%s": {"reason": "operator: leave it"}' % sid for sid in session_ids
+        )
+        with open(self.holds, "w", encoding="utf-8") as handle:
+            handle.write('{"version": 1, "holds": {%s}}' % entries)
+
+    def seed(self):
+        self.write(
+            4242,
+            {"sessionId": SID_HELD, "pid": 4242, "status": "idle", "kind": "interactive"},
+        )
+
+    def test_fires_on_a_held_session(self):
+        """Too-tight: a held session is refused, with the stable token."""
+        self.seed()
+        self.write_holds(SID_HELD)
+        self.assert_refusal(SID_HELD, "held-session")
+
+    def test_does_not_fire_on_a_clean_session(self):
+        """Too-loose: the SAME session, unheld, is NOT refused for being held."""
+        self.seed()
+        self.write_holds()
+        _code, lines = self.run_cli(SID_HELD)
+        self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+    def test_a_corrupt_store_reads_as_nothing_held(self):
+        """Fail-open: an unreadable store must not refuse a restart."""
+        self.seed()
+        with open(self.holds, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        _code, lines = self.run_cli(SID_HELD)
+        self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+
 if __name__ == "__main__":
     unittest.main()
