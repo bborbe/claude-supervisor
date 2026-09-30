@@ -671,5 +671,75 @@ class TestTrackedArtifacts(Base):
         self.assertEqual(rc, self.m.EXIT_USAGE)
 
 
+HELD = "aaaaaaaa-1111-2222-3333-444444444444"
+OTHER = "bbbbbbbb-1111-2222-3333-444444444444"
+
+
+class HoldDigest(Base):
+    """A hold is a DIGEST INPUT here, never a suppression.
+
+    This gate decides whether the sweep runs at all, so suppressing it for a held session
+    would stop the sweep and the held row would never render -- the failure the hold design
+    forbids, where a row that disappears from a sweep is indistinguishable from a row that
+    got fixed. Including the hold in the digest is what makes a hold being ADDED or
+    RELEASED wake the loop so the row re-renders.
+
+    Both directions named. The too-tight case (a hold on a tracked session moves the
+    digest) and the too-loose case (a hold on a session NOT in the tracked set leaves it
+    alone) fail in opposite directions, and only one of them looks like a bug.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.holds = os.path.join(self.tmp, "holds.json")
+        self.m.HOLDS_PATH = self.holds
+        self.write_holds()
+
+    def write_holds(self, *session_ids):
+        entries = ", ".join(
+            '"%s": {"reason": "operator: leave it"}' % sid for sid in session_ids
+        )
+        with open(self.holds, "w", encoding="utf-8") as handle:
+            handle.write('{"version": 1, "holds": {%s}}' % entries)
+
+    def row(self, name, session):
+        return {
+            "name": name,
+            "status": "in_progress",
+            "phase": "execution",
+            "session": session,
+        }
+
+    def test_fires_on_a_held_session(self):
+        """Too-tight: adding a hold on a tracked session MOVES the digest."""
+        tracked = [self.row("a", HELD)]
+        before = self.m.digest_of(tracked)
+        self.write_holds(HELD)
+        self.assertNotEqual(before, self.m.digest_of(tracked))
+
+    def test_does_not_fire_on_a_clean_session(self):
+        """Too-loose: a hold on a session NOT in the tracked set leaves the digest alone."""
+        tracked = [self.row("a", OTHER)]
+        before = self.m.digest_of(tracked)
+        self.write_holds(HELD)
+        self.assertEqual(before, self.m.digest_of(tracked))
+
+    def test_releasing_a_hold_moves_the_digest(self):
+        """The pair that matters: release must wake the loop too, not only hold."""
+        tracked = [self.row("a", HELD)]
+        self.write_holds(HELD)
+        before = self.m.digest_of(tracked)
+        self.write_holds()
+        self.assertNotEqual(before, self.m.digest_of(tracked))
+
+    def test_a_corrupt_store_reads_as_nothing_held(self):
+        """Fail-open: an unreadable store must not move the digest."""
+        tracked = [self.row("a", HELD)]
+        before = self.m.digest_of(tracked)
+        with open(self.holds, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self.assertEqual(before, self.m.digest_of(tracked))
+
+
 if __name__ == "__main__":
     unittest.main()

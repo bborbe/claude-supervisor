@@ -538,11 +538,50 @@ def apply_stuck(tracked: list[dict], registry: dict, prev_busy: dict, now_ts: fl
 # --------------------------------------------------------------------------- #
 
 
+HOLDS_PATH = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSION_HOLDS", "~/.claude/state/session-holds.json")
+)
+
+
+def read_holds() -> dict:
+    """The operator's session holds, keyed on session id. `{}` on any read failure.
+
+    Inlined rather than shelling out to session-holds.py: the plugin's scripts do not
+    import each other, and a subprocess dependency on a plugin path is a fail-open.
+    Reads are lock-free because the writer lands every change through `os.replace`.
+
+    A missing or corrupt store reads as *nothing held*. Here that direction is the safe
+    one: inventing a hold would move the digest and wake the loop for a hold nobody set,
+    while reading a real store as empty merely leaves the digest unchanged.
+    """
+    try:
+        with open(HOLDS_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    holds = data.get("holds") if isinstance(data, dict) else None
+    return holds if isinstance(holds, dict) else {}
+
+
+def is_held(session_id: str) -> bool:
+    """True when this session carries a hold. Never raises."""
+    if not session_id:
+        return False
+    return isinstance(read_holds().get(session_id), dict)
+
+
 def digest_of(tracked: list[dict]) -> str:
     """What the sweep would render, plus the Progress signal it reports.
 
     `liveness` and `stuck` are set by the caller before this runs; both default to absent
     so a caller that has not enriched them (a fixture) still gets a stable digest.
+
+    ⚠️ **The hold is a digest input, and deliberately NOT a suppression here.** This gate
+    decides whether the sweep runs at all, so suppressing it for a held session would
+    stop the sweep and the held row would never render -- the exact failure the hold
+    design forbids, where a row that disappears from a sweep is indistinguishable from a
+    row that got fixed. Including it as an input is what makes a hold being ADDED or
+    RELEASED move the digest, so the loop wakes and re-renders the row.
     """
     h = hashlib.sha256()
     for t in sorted(tracked, key=lambda x: x["name"]):
@@ -550,7 +589,7 @@ def digest_of(tracked: list[dict]) -> str:
             (
                 f"{t['name']}|{t['status']}|{t['phase']}|{t['session']}"
                 f"|{t.get('progress_hash', '')}|{t.get('liveness', LIVENESS_NONE)}"
-                f"|{int(bool(t.get('stuck')))}\n"
+                f"|{int(bool(t.get('stuck')))}|{int(is_held(t['session']))}\n"
             ).encode()
         )
     h.update(b"--members--\n")
