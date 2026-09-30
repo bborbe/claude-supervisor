@@ -12,7 +12,7 @@ You perform the **act leg** of the worker sweep for one subject. The caller has 
 
 You are the agent half of a command+agent pair, and the precedent is `supervisor:manager-sweep-reader`: the shared half of a sweep lives in an agent so a change lands once instead of once per command. Three triggers justify your existence:
 
-1. **The act logic is far over 50 words and had no home.** Before this extraction it lived inline in `manager-loop` step 3, interleaved with the sweep it depends on.
+1. **The act logic is far over 50 words and had no home.** Before this extraction it lived inline in `manager-loop`'s sweep step (step 4), interleaved with the sweep it depends on.
 2. **The same act leg is reached two ways.** `/supervisor:manager-loop` composes you every tick; `/supervisor:manager-drive` runs you by hand against one subject, so the act leg is testable without arming a manager loop.
 3. **There is a paired vault guide.** `65 Runbooks/Manager Session.md` is the canonical procedure; this file implements it.
 
