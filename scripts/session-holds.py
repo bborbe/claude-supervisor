@@ -302,6 +302,18 @@ def cmd_is_held(args):
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # The skill's documented shape is flag-first -- `--release <id>` and `--list`
+    # are the verbs, and a bare `<session|pane>` means "hold". Translate that to
+    # the subcommands the parser defines so the skill passes $ARGUMENTS through
+    # verbatim and the shape has exactly one home: here.
+    if "--list" in argv:
+        argv = ["list"] + [a for a in argv if a != "--list"]
+    elif "--release" in argv:
+        argv = ["release"] + [a for a in argv if a != "--release"]
+    elif argv and argv[0] not in ("hold", "release", "list", "is-held"):
+        argv = ["hold"] + argv
+
     parser = argparse.ArgumentParser(
         description="Session holds — the operator's do-not-work mark."
     )
