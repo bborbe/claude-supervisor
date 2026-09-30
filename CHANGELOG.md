@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.85.1
 
 - fix: **the `HELD` cell renders the hold's age, not only its reason — `⏸️ HELD — <reason> · <age>`.** `session-holds.py` has stamped `held_at` since the store landed and renders the age in its own `--list`, but every consumer rendered the reason alone, so a hold set three weeks ago and one set this morning were byte-identical on every sweep — the one distinction a person reading their own holds is actually looking for. The four consumer surfaces now render the canonical cell: `agents/manager-sweep-reader.md` and `agents/fleet-sweep-reader.md` (the two sweep renderers, which must agree), `commands/manager-loop.md` (the offer exclusion), and `commands/open.md` (the refusal print, whose second slot carried the task name in the age's position — the same shape, a different meaning, so a reader who knew one would misread the other). Units are the writer's own — `12m` / `4h` / `3d` — and an entry whose `held_at` is missing or malformed renders `?`, never `0m`: reporting an old hold as one set seconds ago is the reading that would invite a manager to treat it as fresh.
 
