@@ -53,6 +53,7 @@ other side.
 | `/supervisor:jump` | any | — |
 | `/supervisor:who-needs-me` | any | — |
 | `/supervisor:attention-next` | any — relays the operator's own answer | — |
+| `/supervisor:inbox` | any — the operator's own approval queue; relays their approve / reject / later, and never picks a row itself | — |
 | `/supervisor:ready` | any — readies ONE named task to the spawn bar (audit → repair → re-audit in a sub-agent), then opens it or escalates | — |
 
 Keep this table in lockstep with `commands/`: a command file with no row here, or a row with
