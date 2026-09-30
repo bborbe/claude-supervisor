@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.82.0
 
 - feat: **`/supervisor:open` refuses a session carrying an operator hold — before any branch, JUMP included.** The check sits at Step 2A rather than in the `--flagged` selector because that is the choke point: Step 0.6 delegates every batch row to this command's own single-task path rather than reimplementing it, so one gate covers both the batch and a hand-typed `/supervisor:open "<task>"`. A held session necessarily carries a `claude_session_id`, which already excludes it from Step 0.6's approve pass — so no `approved_by` is written onto a held row before the refusal is reached. ⚠️ **The refusal is loud and names the release path, never a silent skip** — a dropped row is indistinguishable from a task that was never opened, so the operator would have no way to learn their own hold had been read. ⚠️ **Three different things in this command are called a hold and only one is read here:** the operator's session hold, the `hold` *task status*, and the `HOLD` marker the selector prints for a `blocked` row. The canonical rule lives in `skills/hold/SKILL.md` and is referenced, not restated.
 
