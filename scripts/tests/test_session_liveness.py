@@ -254,5 +254,47 @@ class SessionLiveness(unittest.TestCase):
         self.assertIn("UNKNOWN", out)
 
 
+    # ---- --list --json: the shape `/supervisor:open` reads -------------------------------
+
+    def json_listing(self):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.main(["--list", "--json", "--dir", self.dir, "--heartbeat-dir", self.hb])
+        return rc, json.loads(out.getvalue())
+
+    def test_json_listing_carries_former_names_and_cwd(self):
+        # `/supervisor:open` resolves a topic's manager by matching the topic against the
+        # current name AND every name the session has held, then spawns into `cwd`. Those two
+        # fields are the whole reason it can use this reader instead of opening the registry
+        # itself — a name-only match spawns a SECOND manager onto a live topic.
+        with open(os.path.join(self.dir, "%s.json" % os.getpid()), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "sessionId": "f0rmer00-1111-2222-3333-444455556666",
+                    "pid": os.getpid(),
+                    "name": "Renamed Topic Manager",
+                    "status": "busy",
+                    "formerNames": [{"name": "Topic Manager", "at": "2026-09-18"}],
+                    "cwd": "/Users/bborbe/Documents/workspaces/thing",
+                },
+                fh,
+            )
+        rc, rows = self.json_listing()
+        self.assertEqual(rc, LIVE)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["formerNames"], ["Topic Manager"])
+        self.assertEqual(rows[0]["cwd"], "/Users/bborbe/Documents/workspaces/thing")
+
+    def test_json_listing_omits_a_dead_pid(self):
+        self.plant("deadp1d0-1111-2222-3333-444455556666", dead_pid())
+        _, rows = self.json_listing()
+        self.assertEqual(rows, [])
+
+    def test_json_listing_marks_a_heartbeat_row_by_source(self):
+        self.beat("bea70001-1111-2222-3333-444455556666")
+        _, rows = self.json_listing()
+        self.assertEqual([r["source"] for r in rows], ["heartbeat"])
+
+
 if __name__ == "__main__":
     unittest.main()

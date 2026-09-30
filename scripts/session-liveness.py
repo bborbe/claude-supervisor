@@ -145,6 +145,20 @@ def read_registry(registry_dir=None):
             "pid": pid,
             "status": rec.get("status", ""),
             "name": rec.get("name", ""),
+            # `formerNames` and `cwd` are carried for `/supervisor:open`, which was reading
+            # this registry itself — the second reader SC1 exists to collapse. It resolves a
+            # topic's manager by matching the topic against the name the session holds NOW
+            # **and** every name it has held: a long-lived manager gets renamed, and a
+            # name-only match concludes there is none and spawns a SECOND manager onto a live
+            # topic (observed 2026-09-18). It then spawns a resume into `cwd`, because the new
+            # tab otherwise inherits wezterm's working directory and Claude Code stops on the
+            # folder-trust prompt before registering a pid — so a resume that worked reads as
+            # a no-op. Neither field is used by the liveness verdict; they are here so the one
+            # reader can serve both questions and no caller has to open the directory again.
+            "formerNames": [
+                (f.get("name") if isinstance(f, dict) else f) or "" for f in (rec.get("formerNames") or [])
+            ],
+            "cwd": rec.get("cwd", ""),
             "alive": alive,
         }
     return out
@@ -234,6 +248,12 @@ def main(argv=None):
         "worker on this machine cannot turn an ABSENT assertion into LIVE",
     )
     parser.add_argument("--ttl", type=int, default=None, help="heartbeat staleness bound in seconds")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="with --list, emit the records as JSON — the shape `/supervisor:open` reads to "
+        "resolve a topic's manager, so it stops opening the registry itself",
+    )
     args = parser.parse_args(argv)
 
     registry = read_registry(args.dir)
@@ -263,6 +283,26 @@ def main(argv=None):
         missing = (args.dir or REGISTRY_DIR) if registry is None else (args.heartbeat_dir or "the heartbeat store")
         print("UNKNOWN — cannot read %s" % missing, file=sys.stderr)
         return UNKNOWN
+
+    if args.json:
+        payload = [dict(rec, sessionId=sid, source="registry") for sid, rec in registry.items() if rec["alive"]]
+        payload += [
+            {
+                "sessionId": beat["session_id"],
+                "source": "heartbeat",
+                "age_seconds": beat["age_seconds"],
+                "pid": beat["pid"],
+                "status": "",
+                "name": "",
+                "formerNames": [],
+                "cwd": "",
+                "alive": True,
+            }
+            for beat in heartbeats
+        ]
+        json.dump(payload, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return LIVE
 
     rows = []
     for sid, rec in registry.items():
