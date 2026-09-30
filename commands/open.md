@@ -346,6 +346,15 @@ PRIOR_SID="$(vault-cli --vault "<vault>" task get "<task>" claude_session_id 2>/
 wezterm cli list
 ```
 
+**Refuse first if that session carries an operator hold — before any branch, JUMP included.** A hold is operator *policy* about a **session**, orthogonal to any task's status, and a held session may carry no task at all. It is **not** the `hold` *task status*, and not the `HOLD` marker this command's own selector prints for a `blocked` row — three different things, and only the first is read here:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-holds.py is-held "<PRIOR_SID>"
+# exit 0 → held, reason on stdout · exit 1 → not held · exit 2 → bad target
+```
+
+⚠️ **Refuse loudly and name the release path — never skip the row silently.** Print `⏸️ HELD — <reason> · <task> · refused; only the operator releases it` and STOP: no JUMP, no RESUME, no CREATE. Omitting the row instead would make it indistinguishable from a task that was never opened, and the operator would have no way to learn their own hold had been read. A held row emits **zero** acts — that is the whole contract — and the standing spawn mandate reaches a ready-to-start row through this command, so a silent skip here is precisely the defect this check exists to remove. The canonical rule — the store, the CLI, and why the row must stay visible — lives in `skills/hold/SKILL.md`; read it there rather than restating it here.
+
 **Read the full pane list — never `| tail -N` or `| head -N`.** Panes are unordered, so a truncated view drops live sessions silently and a clean result is indistinguishable from a missed one. Observed 2026-09-11: `wezterm cli list | tail -8` hid pane `1247`, already running the target task, and a duplicate tab was spawned onto the same session. Match the task title against the TAB TITLE column.
 
 ⚠️ **Identify your own pane first — `$WEZTERM_PANE` — before attributing any title to a sibling.** `wezterm cli list` marks no pane as yours, so your own tab's title reads exactly like a peer's — and the jump branch below carries the same trap: if your own tab carries the task title, you jump to yourself. Observed 2026-09-20: a session read its own pane's title off this listing and concluded a third-party session owned a goal page; the false premise drove a recommendation the operator then acted on, and only a peer's interruption caught it.
