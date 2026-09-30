@@ -10,6 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.80.2
 
+- feat: **`agents/fleet-drive.md` never acts on a session carrying an operator hold.** A `NEVER` clause alongside the existing ones: no nudge draft, no reap, no escalation. ⚠️ **The row is still rendered** — only the act stops, and because this leg returns *drafts* rather than sending, that means emitting **no draft at all** for a held row rather than one the caller is trusted to drop. A hold is operator *policy* about a **session**, orthogonal to any task's status; a held session may carry no task. The canonical rule lives in `skills/hold/SKILL.md` and is referenced, not restated.
+
 - fix: **`--save` refuses a table on stdin, so a record can no longer be stamped with save time while the payload it describes is older.** `--save` reads the payload the render wrote and dates the record from *its* mtime; a caller that hands the table over itself — a `< <payload>.table` redirect, or the `<<'TABLE'` heredoc the three commands dropped at 0.63.0 — moved that stamp to `datetime.now()`, so a stale table read as fresh and the next tick replayed it. Measured 2026-09-30 on the `MDM Bugs` record: `recorded_at` `11:41:29` against a payload written `11:35:22`, written at `09:41:25Z` by a `--save … < …/mdm-bugs.table` redirect in the Brogrammers vault. The stdin read is kept deliberately — that read is the separate hang defect — but a non-empty one is now a usage error naming `--write-payload`. The CLI's own help and docstring had advertised the piped shape; both now describe the payload path. Reproduced in a temp state dir: a piped save stamps `now()` while the payload mtime stays earlier, and a no-stdin save still dates from the payload.
 
 ## v0.80.1
