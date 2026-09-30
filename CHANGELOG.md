@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.81.0
 
 - feat: **`agents/fleet-drive.md` never acts on a session carrying an operator hold.** A `NEVER` clause alongside the existing ones: no nudge draft, no reap, no escalation. ⚠️ **The row is still rendered** — only the act stops, and because this leg returns *drafts* rather than sending, that means emitting **no draft at all** for a held row rather than one the caller is trusted to drop. A hold is operator *policy* about a **session**, orthogonal to any task's status; a held session may carry no task. The canonical rule lives in `skills/hold/SKILL.md` and is referenced, not restated.
 
