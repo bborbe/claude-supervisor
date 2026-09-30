@@ -121,6 +121,39 @@ def live_ids(script):
     return ids
 
 
+HOLDS_PATH = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSION_HOLDS", "~/.claude/state/session-holds.json")
+)
+
+
+def read_holds() -> dict:
+    """The operator's session holds, keyed on session id. `{}` on any read failure.
+
+    Inlined rather than shelling out to session-holds.py: the plugin's scripts do
+    not import each other and a subprocess dependency on a plugin path is a
+    fail-open. Reads are lock-free because the writer lands every change through
+    `os.replace`, so a reader sees the whole old file or the whole new one.
+
+    A missing or corrupt store reads as *nothing held*, and that direction is
+    chosen: inventing a hold would silently drop a real orphan candidate, while
+    reading a real store as empty merely fails to honour a hold.
+    """
+    try:
+        with open(HOLDS_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    holds = data.get("holds") if isinstance(data, dict) else None
+    return holds if isinstance(holds, dict) else {}
+
+
+def is_held(session_id: str) -> bool:
+    """True when this session carries a hold. Never raises."""
+    if not session_id:
+        return False
+    return isinstance(read_holds().get(session_id), dict)
+
+
 def candidates(tasks_dir, today, max_age_days, live):
     """Yield (name, session_id, age_hours) for each orphan candidate."""
     now = time.time()
@@ -143,6 +176,11 @@ def candidates(tasks_dir, today, max_age_days, live):
             continue
         session_id = field(block, "claude_session_id")
         if not session_id or session_id[:8] in live:
+            continue
+        # A held session is never an orphan candidate. The hold suppresses the
+        # ACT only -- the row still renders in the sweep, which is what keeps a
+        # hold distinguishable from a session that got fixed.
+        if is_held(session_id):
             continue
         yield name[: -len(".md")], session_id, age_hours
 
