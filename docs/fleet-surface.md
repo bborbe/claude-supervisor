@@ -40,6 +40,14 @@ The direction that **is** allowed runs the other way: a manager starts workers (
 
 ⚠️ **A worker session therefore has no end-to-end check of a manager command.** Exercising one belongs to a manager session's own runtime. A change whose verification is "run the manager and watch it behave" is verified by deployment (the installed copy carries the change) plus a lockstep grep across the copies — never by arming a loop from wherever the change was authored. **Handing that run to the manager is not a wait:** an idle manager drains `SendMessage` only on its next turn, and nothing gives it one. Send with `notify_when_idle: true` and close the worker's turn 🔵 READY with `you run: <command>` for the operator to type in the manager's tab — never 🟡 WAITING on the reply. (Measured 2026-09-23: a `/supervisor:reset` handoff sat unread ~4.5 h.)
 
+⚠️ **And some acceptance checks no role may run — the three-way exclusion.** The paragraph above hands the check to the manager. Some checks admit no such hand-off: they need one session that **both** spawns a tab worker **and** then reads it back, because `agent_status` resolves only the workers its own server spawned (`agents.set()` fires inside `spawn_agent`, `server/supervisor.mjs`). No role holds both halves.
+
+- **A worker may not spawn** — `worker-does-not-open-sessions` (§ Dispatch authority above).
+- **A manager may not verify** — the manager delegates; a verification is work whatever its size (`65 Runbooks/Manager Session.md` § Guardrails item 2, and the line there is work vs management, not read vs write).
+- **Only the operator's own session remains** — and only once they lift the first prohibition.
+
+The peer's framing, verbatim: *"a worker may not spawn; a manager may not verify; so only a session the operator starts can close it."* **Each leg is a deliberate contract and none is individually wrong; their intersection is empty**, which is why no source named it until 2026-09-27. ⚠️ **State it as policy, not mechanism:** nothing in the harness blocks `spawn_agent` from a worker, so a reader told a worker *cannot* spawn goes hunting for an enforcement that does not exist. The operator's authorization is the bridge, and the check becomes takeable the moment they give it. A session that meets this shape must **stop and say so**, rather than attempting the check and discovering the prohibition afterwards. (2026-09-27, session `cd816ba7`.)
+
 ## Session end — the disarm contract
 
 `/supervisor:manager-loop` arms a loop. **`/supervisor:stop` stands it down**, and this section is the contract that command points at: what it must disarm, which harness surface reaches each driver and which it cannot, and what must survive.
