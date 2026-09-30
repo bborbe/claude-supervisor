@@ -8,9 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.74.1
+## Unreleased
 
 - feat: **`orphan-candidates.py` reads the session-hold store, so a held session is never an auto-resume candidate.** The reader is inlined — the plugin's scripts do not import each other, and a subprocess dependency on a plugin path is a fail-open — and reads are lock-free because the writer lands every change through `os.replace`. ⚠️ A missing or corrupt store reads as *nothing held*, and that direction is chosen: inventing a hold would silently drop a real orphan candidate, while reading a real store as empty merely fails to honour a hold. The hold suppresses the **act** only — the row still renders, which is what keeps a hold distinguishable from a session that got fixed. Paired test: with the hold set, the held task is excluded **and** an unheld task in the same run is still a candidate; with the hold removed, both are — the control is what makes the exclusion able to fail. First of the consumer wirings.
+
+## v0.74.1
 
 - fix: **`agents/manager-drive.md` clause (1) step 2 routed a below-bar row to the wrong terminal branch.** The loop has exactly **two** terminal branches — *below the bar after 2 rounds* and *the early stop on repetition* — and both end in an attention-board card plus a hold, but only the early stop's card carries *"the claim, not the probe, is wrong"*, because the operator's act there is a **reframe**. Step 2 read *"a row that clears the loop and fails Gate 2 … escalates through the reframe branch below"*, sending a reader to the early-stop branch for a case whose operator act is a raise, not a reframe. Step 2 now names the **below-bar terminal branch** directly — post the card naming the score against the bar, then hold the row — and the phrase *reframe branch* is named only by step 4, where the early stop is defined. ⚠️ **`commands/ready.md` § 4 carried the same gap in weaker form** — it said only that a below-bar row "asks the operator", naming neither the card nor the hold — and now names the same act as clause (1): post the card, then hold, with the card's fields and the hold line read from clause (1)'s `<error_handling>` rather than restated.
 
@@ -19,7 +21,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - feat: **`/supervisor:open --flagged` refuses a flag that was not operator-set.** The selector now reads `flag_set_by` and admits only `operator` or `legacy`, printing a named `REFUSED | <vault> | <task> | flag_set_by=<who>` line for everything else — absent included, because after the 2026-09-30 disposition no flagged row should carry an absent value, so one means a writer that did not declare itself, which is the bypass. The filter sits in the **selector**, not at Gate 1: the batch's opening move is `vault-cli task approve` on every row the selector returned, *before* Gate 1 runs, so a refusal there would land after `approved_by: operator` had already been written onto the agent-set row. Requires `vault-cli` ≥ v0.156.0, which is where the field itself comes from.
 
 ## v0.73.0
-
 
 - feat: **`/supervisor:hold` — the skill over the session-hold store.** `skills/hold/SKILL.md` is the single home of the hold rules: a hold is keyed on the **session**, never on a task; ⚠️ **the row stays visible and only the message stops**, so a consumer must still render `⏸️ HELD — <reason> · <age>` while suppressing every act; a hold is removed **only** by `--release`; and reads are lock-free with each consumer inlining its own reader rather than shelling out, because a subprocess dependency on a plugin path is a fail-open. `scripts/session-holds.py` now takes the flag-first shape the skill documents — a bare `<session|pane>` means hold, `--release <id>` and `--list` are the verbs — so the skill passes `$ARGUMENTS` through verbatim and the shape has exactly one home. The subcommand form still works. No new behaviour beyond the CLI shape; the store itself shipped in v0.72.0.
 
