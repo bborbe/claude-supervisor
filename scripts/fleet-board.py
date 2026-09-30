@@ -518,8 +518,8 @@ def transcript_fresh_ids(window=None):
     return out
 
 
-def coverage_errors(row_ids, registry_ids, fresh_ids):
-    """SC3's assertion: (a) one row per registry entry, (b) no carried row dropped.
+def coverage_errors(row_ids, registry_ids, fresh_ids, heartbeat_ids=frozenset()):
+    """SC3's assertion: (a) one row per source entry, (b) no carried row dropped.
 
     (a) alone is tautological when the rows are built from the registry, so (b) is
     the real control — it fails if a row is silently dropped, which is the failure
@@ -528,6 +528,13 @@ def coverage_errors(row_ids, registry_ids, fresh_ids):
     real population (a headless worker holds no entry at all — it is an in-process
     SDK query, not a process), so it is reported, never dropped and never
     asserted equal.
+
+    ⚠️ **The row set now has TWO sources, and the `extra` assertion is written over
+    both.** It used to read `rows - registry`, which was correct while the registry
+    was the only source. Left unchanged it would fire on every heartbeat row; relaxed
+    to `rows - (registry | heartbeat)` it stays a real control — a row invented by
+    neither source is still caught. Dropping the assertion instead, because it "now
+    fails", would be the same false-clean this function exists to catch, one level up.
     """
     errors = []
     if len(row_ids) != len(set(row_ids)):
@@ -535,9 +542,12 @@ def coverage_errors(row_ids, registry_ids, fresh_ids):
     missing = registry_ids - set(row_ids)
     if missing:
         errors.append(f"registry entries with no row: {sorted(missing)}")
-    extra = set(row_ids) - registry_ids
+    beat_missing = heartbeat_ids - set(row_ids)
+    if beat_missing:
+        errors.append(f"heartbeat sessions with no row: {sorted(beat_missing)}")
+    extra = set(row_ids) - registry_ids - heartbeat_ids
     if extra:
-        errors.append(f"rows with no registry entry: {sorted(extra)}")
+        errors.append(f"rows from neither the registry nor the heartbeat store: {sorted(extra)}")
     dropped = (fresh_ids & registry_ids) - set(row_ids)
     if dropped:
         errors.append(f"transcript-fresh sessions missing from the rows: {sorted(dropped)}")
@@ -794,10 +804,34 @@ def main():
             "not gone. The table below is not evidence that the fleet is quiet.",
             file=sys.stderr,
         )
+    # The heartbeat store's half of the row set. A headless or cluster worker holds no registry
+    # entry at all — a headless one is an in-process SDK query, a cluster one runs as a pod on
+    # another machine — so a row set built from the registry alone omits both, and an omitted
+    # session is the exact failure this board exists to prevent.
+    #
+    # A live stamp is the store saying the worker is still being worked, which is precisely what
+    # the registry's `busy` means, so those rows classify as `running`.
+    #
+    # ⚠️ **A stamp in the `unknown` state is deliberately NOT a row.** That state means the
+    # cluster could not be read, so neither `running` nor `idle` is true of the worker and every
+    # bucket would assert something false about it. It is surfaced where it belongs:
+    # `session-liveness.py --check` returns `UNKNOWN` for it, and `UNKNOWN` is what SC4 tests.
+    beats = _load("live_workers", "live-workers.py").read_live(
+        _load("live_workers", "live-workers.py").heartbeat_dir()
+    )
+    beat_ids = set()
+    merged = dict(registry)
+    for beat in beats or []:
+        sid = beat.get("session_id")
+        if beat.get("state", "live") != "live" or not sid or sid in merged:
+            continue
+        beat_ids.add(sid)
+        merged[sid] = {"status": "busy", "name": "", "cwd": ""}
+
     task_titles = fs.build_work_map()
-    ages = {sid: wnm.session_transcript_age(sid) for sid in registry}
-    grouping = build_grouping(registry, vault_index(), colour_census(), loop_slugs(), task_titles)
-    rows, details = build_rows(registry, gate_ids, stuck_ids, task_titles, ages, grouping=grouping,
+    ages = {sid: wnm.session_transcript_age(sid) for sid in merged}
+    grouping = build_grouping(merged, vault_index(), colour_census(), loop_slugs(), task_titles)
+    rows, details = build_rows(merged, gate_ids, stuck_ids, task_titles, ages, grouping=grouping,
                                gate_attribution=attribution)
     tree, ordered = build_tree(rows, grouping)
 
@@ -806,7 +840,7 @@ def main():
     # a session, so it is deliberately absent from `ordered`. The tree assertion is
     # the second control: a row that exists but is never drawn is the same silent
     # drop one step later, and only this one can see it.
-    errors = coverage_errors([r["session_id"] for r in rows], set(registry), fresh)
+    errors = coverage_errors([r["session_id"] for r in rows], set(registry), fresh, beat_ids)
     errors += tree_errors(ordered, [r["session_id"] for r in rows])
     counts = {b: sum(1 for r in rows if r["bucket"] == b) for b in BUCKET_ORDER}
 
