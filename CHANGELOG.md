@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.71.4
 
 - fix: **`commands/open.md` § Step 1.5 Gate 2 gains the `UNFIXABLE:` producer, so the token its reader has been waiting for can actually be emitted.** v0.71.2 shipped clause (1) step 0 — the token's reader — but nothing told a sub-agent to produce it: every dispatch site asked only for a `READINESS:` line, and the prompt named no class of gap the token applies to. The probe prompt now instructs the auditor to check, before scoring, for the one class of gap that is not its to close — a Success Criterion depending on a page, artifact or credential that does not exist, a scope question the task file does not answer, a target system or account named nowhere — and to end with `UNFIXABLE: <reason>` as its **only** final line instead of a score, spending no repair round and opening nothing. ⚠️ **Measured, and it is why this is a producer fix rather than a wording tweak:** a probe whose prompt *did* carry the rule still emitted no token, because the audit had never raised the gap as a finding at all — so the instruction names the class to look for, not just the output token. ⚠️ **The reader is not restated here.** `agents/manager-drive.md` clause (1) step 0 owns the branch; this block documents that it is the producer and points there, and `commands/ready.md` step 3 continues to reference the clause rather than re-implement it.
 
