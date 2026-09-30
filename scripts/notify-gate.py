@@ -679,6 +679,38 @@ def escalating_session_id():
     return os.environ.get("CLAUDE_CODE_SESSION_ID", "")
 
 
+HOLDS_PATH = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSION_HOLDS", "~/.claude/state/session-holds.json")
+)
+
+
+def read_holds():
+    """The operator's session holds, keyed on session id. `{}` on any read failure.
+
+    Inlined rather than shelling out to session-holds.py: the plugin's scripts do not
+    import each other, and a subprocess dependency on a plugin path is a fail-open.
+    Reads are lock-free because the writer lands every change through `os.replace`.
+
+    A missing or corrupt store reads as *nothing held*, and that direction is chosen:
+    inventing a hold would silence a real escalation, while reading a real store as
+    empty merely fails to honour a hold.
+    """
+    try:
+        with open(HOLDS_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    holds = data.get("holds") if isinstance(data, dict) else None
+    return holds if isinstance(holds, dict) else {}
+
+
+def is_held(session_id):
+    """True when this session carries a hold. Never raises."""
+    if not session_id:
+        return False
+    return isinstance(read_holds().get(session_id), dict)
+
+
 def read_gates():
     """Parse stdin, reporting malformed input in this script's own style.
 
@@ -762,6 +794,22 @@ def publish_round(now, gates):
     # it: a stamp only suppresses when it belongs to someone else.
     me = escalating_session_id()
 
+    # A held session's gates are never published. This runs BEFORE the store read and
+    # independently of it, because a hold is local operator policy: it must apply even
+    # when the store is unreachable, unlike the cross-layer de-dup below, which needs
+    # the store and degrades without it.
+    #
+    # ⚠️ The gate leaves `current` (the publish set) but its store item is left ALONE --
+    # the same shape `suppressed` uses. Pruning the item would make a RELEASED hold
+    # re-notify as though the gate were new, which inverts the design: a hold suppresses
+    # the message, never the record.
+    held = {}
+    for key in list(current):
+        gate = current[key]
+        if is_held(gate.get("session") or ""):
+            held[key] = gate
+            del current[key]
+
     # Read the store ONCE per round rather than once per gate -- the join is a scan of
     # the item list and a sweep raises a handful of gates. `None` means the store was
     # unreachable, reported rather than read as "no stamps anywhere": the two are
@@ -808,6 +856,15 @@ def publish_round(now, gates):
             f"notify-gate: skipping '{normalise(stamp.get('text') or '')[:60]}' -- "
             f"already escalated by session {stamp['session_id']} "
             f"(item {stamp.get('item_id') or 'unknown'})"
+        )
+    # A held gate is reported for the same reason a suppressed one is: a silent skip is
+    # indistinguishable from a dropped gate, and that ambiguity is what this feature
+    # exists to remove. The row stays visible; only the message stops.
+    for gate in held.values():
+        print(
+            f"notify-gate: HELD '{normalise(gate.get('text') or '')[:60]}' -- session "
+            f"{normalise(gate.get('session') or '')[:8]} carries an operator hold; "
+            "not published"
         )
     # A gate with no resolvable item has NO cross-layer de-dup, and that is a real loss
     # rather than a clean skip: two layers can now both send it. Named per gate, because
