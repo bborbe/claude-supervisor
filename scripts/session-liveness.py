@@ -41,9 +41,32 @@ three-state rule but returns names only, with no pid, so it cannot answer the ru
 returns `{}` when the registry directory cannot be read — "nothing is live", the dangerous
 direction. One home has to hold both properties, so this reader does, and both of those
 become callers of it.
+
+⚠️ **TWO SOURCES, and the composition rule between them is asymmetric.** The registry answers
+for every session that holds a socket — every interactive one — and is structurally blind to
+a session with no process of its own: a headless worker is an in-process `query()` holding no
+pid entry, and a cluster worker runs as a pod on another machine. Those are the heartbeat
+store's half (`live-workers.py`, written by `server/heartbeat.mjs`; the store is also the
+landing point for a cluster worker's registration). This file reads both and composes them
+the way `server/liveness.mjs:checkLiveness()` does:
+
+  * **a positive from either source is an answer.** A fresh heartbeat is decisive on its own,
+    reported even when the registry could not be read — "could not tell" from one channel is
+    not a refutation by the other.
+  * **a negative needs BOTH sources readable.** With one unreadable, "no match" cannot rule
+    out a match in the half that could not be read, so it is UNKNOWN, never ABSENT.
+
+That asymmetry is the point. Only a readable-and-empty pair licenses ABSENT, which is the one
+answer that permits a caller to resume onto the session.
+
+⚠️ **One instrument per store.** The heartbeat half is delegated to `live-workers.py` rather
+than re-globbed here. Two readers over one directory is precisely the 2026-09-26 defect this
+file's opening paragraph records, and it does not become acceptable by being written twice in
+one repo instead of twice in one week.
 """
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import sys
@@ -55,6 +78,25 @@ REGISTRY_DIR = (
     or os.environ.get("SESSIONS_DIR")
     or os.path.expanduser("~/.claude/sessions")
 )
+
+_LIVE_WORKERS = None
+
+
+def _live_workers():
+    """Import `live-workers.py` (hyphenated filename -> importlib) — the heartbeat reader.
+
+    Lazy and cached: this module is itself imported by `who-needs-me.py` and
+    `manager-predispatch.py`, and a registry-only caller must not pay for a store it never
+    consults.
+    """
+    global _LIVE_WORKERS
+    if _LIVE_WORKERS is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live-workers.py")
+        spec = importlib.util.spec_from_file_location("live_workers", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _LIVE_WORKERS = mod
+    return _LIVE_WORKERS
 
 
 def read_registry(registry_dir=None):
@@ -103,27 +145,112 @@ def read_registry(registry_dir=None):
             "pid": pid,
             "status": rec.get("status", ""),
             "name": rec.get("name", ""),
+            # `formerNames` and `cwd` are carried for `/supervisor:open`, which was reading
+            # this registry itself — the second reader SC1 exists to collapse. It resolves a
+            # topic's manager by matching the topic against the name the session holds NOW
+            # **and** every name it has held: a long-lived manager gets renamed, and a
+            # name-only match concludes there is none and spawns a SECOND manager onto a live
+            # topic (observed 2026-09-18). It then spawns a resume into `cwd`, because the new
+            # tab otherwise inherits wezterm's working directory and Claude Code stops on the
+            # folder-trust prompt before registering a pid — so a resume that worked reads as
+            # a no-op. Neither field is used by the liveness verdict; they are here so the one
+            # reader can serve both questions and no caller has to open the directory again.
+            "formerNames": [
+                (f.get("name") if isinstance(f, dict) else f) or "" for f in (rec.get("formerNames") or [])
+            ],
+            "cwd": rec.get("cwd", ""),
+            # `/supervisor:open` Step 4 checks this to prove a spawned session owns its name:
+            # `nameSource: peer` means the `unset` prefix was ineffective and the session is
+            # named after its spawner, which the title-match session-connect cannot resolve.
+            "nameSource": rec.get("nameSource", ""),
             "alive": alive,
         }
     return out
 
 
-def resolve(session_id, registry):
-    """`(verdict, payload)` for one id argument against an already-read registry.
+def read_registry_entries(registry_dir=None):
+    """Every registry record as `(path, rec)`, or `None` when the directory is unreadable.
 
-    The argument is matched as a case-insensitive PREFIX, which is what makes an 8-char
-    `sid8` resolve to the same session its full UUID does. Exactly one match is a verdict;
-    zero is ABSENT; more than one is AMBIGUOUS and carries the candidates, because a caller
-    that guesses between two live sessions is the double-writer this file prevents.
+    The **list** shape, alongside `read_registry()`'s dict — one file, one glob, one unreadable
+    rule, two views. They exist because they answer different questions:
+
+      * the dict answers "which sessions are there", and **collapses two files that claim one
+        session id** — which is the right answer for a liveness verdict;
+      * this answers "what is on disk", and **preserves that collision**.
+
+    The collision is not hypothetical and must stay visible. `restart-worker.py` refuses when
+    two entries claim one id, because resuming onto the wrong claimant of two is exactly the
+    double-writer this plugin guards against — so a caller that needs to see the collision
+    cannot be served by the dict, however convenient it is.
+    """
+    d = registry_dir if registry_dir is not None else REGISTRY_DIR
+    if not os.path.isdir(d):
+        return None
+    try:
+        paths = sorted(glob.glob(os.path.join(d, "*.json")))
+    except OSError:
+        return None
+    out = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                out.append((path, json.load(fh)))
+        except (OSError, ValueError):
+            continue  # a half-written entry is skipped, not fatal
+    return out
+
+
+def read_heartbeats(heartbeat_dir=None, ttl=None, now=None):
+    """Fresh stamps as `[{session_id, age_seconds, pid}]`, or `None` when unreadable.
+
+    Delegates to `live-workers.py`. The verdict is the stamp's AGE against the TTL, never the
+    file's existence: a store whose writer was `kill -9`'d keeps its files, so reading
+    existence reports exactly the wrong answer for the case the store exists to catch.
+    """
+    lw = _live_workers()
+    d = heartbeat_dir if heartbeat_dir is not None else lw.heartbeat_dir()
+    return lw.read_live(d, ttl=lw.TTL_SECONDS if ttl is None else ttl, now=now)
+
+
+def resolve(session_id, registry, heartbeats=()):
+    """`(verdict, payload)` for one id argument against already-read sources.
+
+    The argument is matched as a case-insensitive PREFIX against the UNION of both sources,
+    which is what makes an 8-char `sid8` resolve to the same session its full UUID does —
+    and what lets a cluster session, which holds no registry entry at all, resolve from its
+    heartbeat. Exactly one match is a verdict; zero is ABSENT *only when both sources were
+    readable*; more than one is AMBIGUOUS and carries the candidates, because a caller that
+    guesses between two live sessions is the double-writer this file prevents.
+
+    `heartbeats` defaults to `()`, i.e. "the store was read and holds nothing" — the honest
+    reading for a caller that never consulted it, and the one that leaves a registry-only
+    verdict unchanged. Pass `None` to mean "could not be read".
     """
     sid = (session_id or "").strip().lower()
     if not sid:
         return UNKNOWN, "no session id given"
-    if registry is None:
-        return UNKNOWN, "session registry unreadable — cannot decide liveness"
-    matches = sorted(k for k in registry if k.lower().startswith(sid))
+    if registry is None and heartbeats is None:
+        return UNKNOWN, "neither the session registry nor the heartbeat store is readable — cannot decide liveness"
+
+    registered = sorted(k for k in (registry or {}) if k.lower().startswith(sid))
+    # `state` is `live` for a fresh stamp and `unknown` for a cluster stamp whose store could
+    # not be read — see `live-workers.py`. An entry predating the field has no `state`, and a
+    # missing state must read as live rather than vanish: dropping it would silently empty the
+    # store for every stamp written before this change.
+    fresh = [h for h in (heartbeats or []) if (h.get("session_id") or "").lower().startswith(sid)]
+    beating = sorted(h["session_id"] for h in fresh if h.get("state", "live") == "live")
+    unresolved = sorted(h["session_id"] for h in fresh if h.get("state") == "unknown")
+    matches = sorted(set(registered) | set(beating) | set(unresolved))
+
     if not matches:
+        # A negative is licensed only by two readable sources. With either unreadable, the
+        # match we did not find may be sitting in the half we could not read.
+        if registry is None:
+            return UNKNOWN, "session registry unreadable — cannot decide liveness"
+        if heartbeats is None:
+            return UNKNOWN, "heartbeat store unreadable — cannot decide liveness"
         return ABSENT, "no session id matches %s" % sid
+
     if len(matches) > 1:
         # 12 chars, not 8: the caller already passed a prefix long enough to collide, so
         # echoing 8 back hands them two identical strings and no way to tell them apart.
@@ -132,11 +259,32 @@ def resolve(session_id, registry):
             sid,
             ", ".join(m[:12] for m in matches),
         )
+
     full = matches[0]
+    if full in unresolved:
+        # The store says this cluster worker's stamp is stale while the cluster itself could
+        # not be read. That is "cannot tell", never death — a network fault must not become
+        # permission to resume onto a worker that may be alive behind it.
+        return UNKNOWN, (
+            "%s is a cluster worker and the cluster store could not be read — cannot decide liveness" % full
+        )
+    if any(h.get("session_id") == full and h.get("state", "live") == "live" for h in (heartbeats or [])):
+        # A fresh stamp is decisive on its own — this is the half that answers for a session
+        # the registry structurally cannot see.
+        return LIVE, full
     # An entry whose pid is gone is a stale file, not a live session — a `kill -9` leaves the
     # record behind. The runbook's rule is "alive if ANY id holds an entry against a RUNNING
     # pid", so presence alone is not the verdict; presence against a live pid is.
     if not registry[full]["alive"]:
+        # A stale record is a NEGATIVE, so it needs both sources readable — the same rule the
+        # no-match branch applies. Returning ABSENT here while the heartbeat store is
+        # unreadable would let a fresh stamp in the half we could not read be outvoted, and
+        # ABSENT is the one answer that permits a caller to resume onto the session.
+        if heartbeats is None:
+            return UNKNOWN, (
+                "%s is registered but pid %s is gone, and the heartbeat store is unreadable "
+                "— cannot decide liveness" % (full, registry[full]["pid"])
+            )
         return ABSENT, "%s is registered but pid %s is gone — stale record" % (
             full,
             registry[full]["pid"],
@@ -145,19 +293,40 @@ def resolve(session_id, registry):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Is this session id live? (session registry)")
+    parser = argparse.ArgumentParser(description="Is this session id live? (registry + heartbeats)")
     parser.add_argument("--check", metavar="SESSION_ID", help="full id or an 8-char prefix")
     parser.add_argument("--list", action="store_true", help="print every live session")
     parser.add_argument("--dir", default=None, help="override the registry path")
+    parser.add_argument(
+        "--heartbeat-dir",
+        default=None,
+        help="override the heartbeat store; tests pass an isolated dir so a real headless "
+        "worker on this machine cannot turn an ABSENT assertion into LIVE",
+    )
+    parser.add_argument("--ttl", type=int, default=None, help="heartbeat staleness bound in seconds")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="with --list, emit the records as JSON — the shape `/supervisor:open` reads to "
+        "resolve a topic's manager, so it stops opening the registry itself",
+    )
     args = parser.parse_args(argv)
 
     registry = read_registry(args.dir)
+    heartbeats = read_heartbeats(args.heartbeat_dir, ttl=args.ttl)
 
     if args.check:
-        verdict, payload = resolve(args.check, registry)
+        verdict, payload = resolve(args.check, registry, heartbeats)
         if verdict == LIVE:
-            rec = registry[payload]
-            print("LIVE — %s  pid %s  %s" % (payload, rec["pid"], rec["name"] or "(no name)"))
+            beat = next(
+                (h for h in (heartbeats or []) if h["session_id"] == payload and h.get("state", "live") == "live"),
+                None,
+            )
+            if beat is not None:
+                print("LIVE — %s  heartbeat age %ss  pid %s" % (payload, beat["age_seconds"], beat["pid"]))
+            else:
+                rec = registry[payload]
+                print("LIVE — %s  pid %s  %s" % (payload, rec["pid"], rec["name"] or "(no name)"))
         elif verdict == ABSENT:
             print("ABSENT — %s" % payload, file=sys.stderr)
         elif verdict == AMBIGUOUS:
@@ -166,14 +335,53 @@ def main(argv=None):
             print("UNKNOWN — %s" % payload, file=sys.stderr)
         return verdict
 
-    if registry is None:
-        print("UNKNOWN — cannot read %s" % (args.dir or REGISTRY_DIR), file=sys.stderr)
+    # A list is only a list when BOTH halves were read. One unreadable source makes the output
+    # partial, and a partial list presented as complete is the dangerous direction — it reads
+    # as "this session is not live" for every session in the half that failed.
+    if registry is None or heartbeats is None:
+        missing = (args.dir or REGISTRY_DIR) if registry is None else (args.heartbeat_dir or "the heartbeat store")
+        print("UNKNOWN — cannot read %s" % missing, file=sys.stderr)
         return UNKNOWN
 
-    live = sorted((s for s, r in registry.items() if r["alive"]), key=lambda s: (registry[s]["name"] or ""))
-    for sid in live:
-        print("%s  pid %-7s %s" % (sid, registry[sid]["pid"], registry[sid]["name"] or "(no name)"))
-    if not live:
+    if args.json:
+        payload = [
+            dict(rec, sessionId=sid, source="registry", state="live")
+            for sid, rec in registry.items()
+            if rec["alive"]
+        ]
+        payload += [
+            {
+                "sessionId": beat["session_id"],
+                "source": "heartbeat",
+                "state": beat.get("state", "live"),
+                "age_seconds": beat["age_seconds"],
+                "pid": beat["pid"],
+                "status": "",
+                "name": "",
+                "formerNames": [],
+                "cwd": "",
+                "nameSource": "",
+                "alive": beat.get("state", "live") == "live",
+            }
+            for beat in heartbeats
+        ]
+        json.dump(payload, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return LIVE
+
+    rows = []
+    for sid, rec in registry.items():
+        if rec["alive"]:
+            rows.append((sid, "pid %-7s %s" % (rec["pid"], rec["name"] or "(no name)")))
+    for beat in heartbeats:
+        if beat.get("state") == "unknown":
+            rows.append((beat["session_id"], "heartbeat UNKNOWN (cluster unreachable)"))
+        else:
+            rows.append((beat["session_id"], "heartbeat age %ss  pid %s" % (beat["age_seconds"], beat["pid"])))
+    rows.sort(key=lambda r: r[1])
+    for sid, desc in rows:
+        print("%s  %s" % (sid, desc))
+    if not rows:
         print("no live sessions in %s" % (args.dir or REGISTRY_DIR))
     return LIVE
 

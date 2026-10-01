@@ -249,6 +249,26 @@ class TestCoverageControl(unittest.TestCase):
         fresh = self.fresh | {"ccccdddd-0000-0000-0000-000000000099"}
         self.assertEqual(fb.coverage_errors(self.row_ids, self.registry_ids, fresh), [])
 
+    def test_a_row_from_neither_source_is_caught(self):
+        """The row set now has two sources. Widening it without widening this assertion
+        would make the check vacuous — it would pass for a row invented by neither source,
+        which is the false-clean it exists to catch."""
+        errors = fb.coverage_errors(self.row_ids + ["invented"], self.registry_ids, self.fresh, {"beat1"})
+        self.assertTrue(any("neither the registry nor the heartbeat store" in e for e in errors))
+
+    def test_a_heartbeat_session_with_no_row_is_caught(self):
+        errors = fb.coverage_errors(self.row_ids, self.registry_ids, self.fresh, {"beat1"})
+        self.assertTrue(any("heartbeat sessions with no row" in e for e in errors))
+
+    def test_a_covered_heartbeat_row_is_accepted(self):
+        errors = fb.coverage_errors(self.row_ids + ["beat1"], self.registry_ids, self.fresh, {"beat1"})
+        self.assertEqual(errors, [])
+
+    def test_the_heartbeat_argument_defaults_to_empty(self):
+        """Every pre-existing caller passes three arguments; the fourth must not turn
+        their call into an error about heartbeat sessions nobody told it about."""
+        self.assertEqual(fb.coverage_errors(self.row_ids, self.registry_ids, self.fresh), [])
+
 
 def _group_index():
     """A `constructed` vault: two topics, two goals, one goal owned by a topic.

@@ -18,6 +18,7 @@ import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
 import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, listLive, stampRecord } from './heartbeat.mjs'
+import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
@@ -1349,6 +1350,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 await server.connect(new StdioServerTransport())
 log('supervisor ready')
+
+// The cluster half of the heartbeat store, on the same interval the headless workers use.
+//
+// A cluster worker has no process here and no registry entry, so the only way it becomes
+// visible to the local readers is for this process to fold the cluster store into the local
+// one. One timer for the whole server, not one per worker: the poll answers for every cluster
+// session at once, and a per-worker timer would run the same query N times for one answer.
+//
+// ⚠️ **A failed poll is reported on TRANSITION, never per tick, and never as an error.**
+// The cluster being unreachable is a state the readers already handle — the reachability
+// marker goes stale, every cluster stamp reads `UNKNOWN`, and no resume is authorised — so
+// logging it every 30s would bury the signal, and logging it as a failure would invite a
+// reader to treat "could not tell" as "not live". That inversion is the one this whole store
+// exists to prevent.
+const clusterPollState = { ok: null }
+const clusterTimer = setInterval(() => {
+  const result = pollCluster()
+  if (!result.ok) {
+    if (clusterPollState.ok !== false) {
+      log(`cluster heartbeat: ${result.reason} — cluster stamps will read UNKNOWN until it clears`)
+    }
+  } else if (clusterPollState.ok === false) {
+    log(`cluster heartbeat: cluster reachable again (${result.stamped.length} stamped)`)
+  }
+  clusterPollState.ok = result.ok
+}, HEARTBEAT_INTERVAL_MS)
+clusterTimer.unref?.()
 
 // Said once at startup, so an operator learns the policy layer is unreachable without
 // having to spawn a worker and wonder why nothing happened. The per-spawn path refuses
