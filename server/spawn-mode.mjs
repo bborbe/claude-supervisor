@@ -112,14 +112,29 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
 // global, and it counts LIVE WORKERS rather than spawns-per-window — a rate cap and a
 // concurrency cap answer different questions, and only the second is what was asked for.
 //
-// ⚠️ THE VALUE SHIPS UNSET, AND UNSET MEANS UNLIMITED. That is the correct shipped state,
-// not a gap awaiting input: the ruling removed the limits, and the mechanism exists so the
-// operator can set one number when load demands it. Nothing here pre-empts that, and no
-// default is invented on the operator's behalf.
+// ⚠️ THE DEFAULT IS 20, AND THIS REVERSES THE 2026-09-27 RULING. That ruling removed the
+// limits and shipped the key unset, meaning unlimited. The operator's design of 2026-10-01
+// reinstated one — *"keep a total worker limit so the laptop isn't overwhelmed. Target e.g.
+// 20"* — so an absent key now resolves to DEFAULT_MAX_CONCURRENT rather than to unlimited,
+// and `0` remains the off switch for an operator who wants the old behaviour back. The
+// reversal is recorded here rather than left with both statements standing: a reader who
+// finds only the 2026-09-27 note concludes the fleet is unbounded, which is no longer true.
+//
+// ⚠️ ONE VALUE SERVES TWO ROLES, DELIBERATELY. The same number is the hard cap enforced in
+// `spawnAgent` and the target the manager loops read when deciding whether to propose work.
+// Two keys — a cap and a target — were considered and rejected: they can disagree, and a
+// fleet capped at 20 while its managers propose against 30 is a defect with no error on it.
 export const MAX_CONCURRENT_ENV = 'SUPERVISOR_MAX_CONCURRENT'
 
+// The fleet-wide worker target, and the value an absent key resolves to.
+//
+// Exported so the manager loops, the docs and the tests all name one number rather than
+// restating it — this repo's standing rule for a constant with several call sites, where a
+// restated copy is a second counter a grep cannot tell from the real one.
+export const DEFAULT_MAX_CONCURRENT = 20
+
 // The limit this spawn runs under, plus the source that decided it — or `null` for
-// unlimited, which is the shipped state.
+// unlimited, which only an explicit `0` now produces.
 //
 // Validation follows `resolveSpawnMode` exactly, and for the same reason: every source is
 // checked, not only the winner. A typo in config.json must not stay invisible merely
@@ -127,9 +142,11 @@ export const MAX_CONCURRENT_ENV = 'SUPERVISOR_MAX_CONCURRENT'
 // gets accepted, reported as applied, and silently ignored, the failure this repo has
 // shipped twice (policy.json in v0.3.0, permissionMode before mode.mjs).
 //
-// `0` and an absent key are the same answer — unlimited. `0` is accepted rather than
-// refused because it is the value an operator reaches for when turning a limit off, and
-// refusing it would make the off switch a syntax error.
+// An absent key and `0` are NO LONGER the same answer. An absent key resolves to
+// DEFAULT_MAX_CONCURRENT; `0` means unlimited. `0` is accepted rather than refused because
+// it is the value an operator reaches for when turning a limit off, refusing it would make
+// the off switch a syntax error, and after the 2026-10-01 reversal it is the only way back
+// to the previous behaviour.
 export function resolveMaxConcurrent({ env, file, path = 'the supervisor config' } = {}) {
   const sources = []
   if (env !== undefined && env !== null && env !== '') sources.push({ source: 'env', value: env })
@@ -149,13 +166,14 @@ export function resolveMaxConcurrent({ env, file, path = 'the supervisor config'
         error:
           `${where} is ${JSON.stringify(value)}, which is not a concurrent-worker limit — refusing to spawn ` +
           `rather than guessing, since a limit that silently governs nothing is discovered only by the load it ` +
-          `was meant to bound. Valid values: a non-negative integer, or omit the key for unlimited.`,
+          `was meant to bound. Valid values: a non-negative integer (0 for unlimited), or omit ` +
+          `the key for the default of ${DEFAULT_MAX_CONCURRENT}.`,
       }
     }
   }
 
   const [first] = sources
-  if (!first) return { limit: null, source: 'unset' }
+  if (!first) return { limit: DEFAULT_MAX_CONCURRENT, source: 'default' }
   const parsed = Number(first.value)
   return { limit: parsed === 0 ? null : parsed, source: first.source }
 }
