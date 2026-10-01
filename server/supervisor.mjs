@@ -17,7 +17,8 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, listLive, stampRecord } from './heartbeat.mjs'
+import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord } from './heartbeat.mjs'
+import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
@@ -728,9 +729,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // guards, before a worker, a tab or a ledger record exists. A limit checked after the
   // spawn has already spent the budget it exists to protect.
   //
-  // The count is live WORKERS, read from the heartbeat store the spawner stamps for every
-  // worker it opens — not every live session in the registry, which would include the
-  // operator's own sessions and the manager's and would make a small limit unusable.
+  // The count is live WORKER SESSIONS — the session registry joined to the spawn ledger.
+  // It is deliberately NOT the heartbeat store, which is stamped only for in-process
+  // (headless) workers and therefore read 0 while 11 interactive workers were live (measured
+  // 2026-10-01). A cap counting one population while the managers' target counts another is
+  // a defect with no error on either side — and the target IS this number, so they must
+  // agree by construction. Definition and its two stated limits: `worker-sessions.mjs`.
   const maxConcurrent = resolveMaxConcurrent({
     env: config.maxConcurrent,
     file: config.configFileContents,
@@ -738,17 +742,18 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   })
   if (maxConcurrent.error) return { error: maxConcurrent.error }
   if (maxConcurrent.limit !== null) {
-    const live = listLive()
-    // `null` is "the store could not be read", which is NOT "no worker is live". Refusing
+    const live = workerSessions()
+    // `null` is "a store could not be read", which is NOT "no worker is live". Refusing
     // on it is the same asymmetry the mode rule carries: a limit that cannot count must not
     // open, because opening past an uncountable limit is how the limit silently stops
     // existing — and a manager acting on the other reading spawns onto live work.
     if (live === null) {
       return {
         error:
-          `the concurrent-worker limit is set to ${maxConcurrent.limit} but the heartbeat store could not be ` +
-          `read, so the live-worker count is unknown — refusing rather than opening past a limit that cannot ` +
-          `be counted. Point SUPERVISOR_HEARTBEAT_DIR at the store if it lives elsewhere.`,
+          `the concurrent-worker limit is set to ${maxConcurrent.limit} but the live-worker count could not be ` +
+          `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. Both the ` +
+          `session registry and the spawn ledger must be readable; point SUPERVISOR_SESSIONS_DIR and ` +
+          `SUPERVISOR_LEDGER_DIR at them if they live elsewhere.`,
       }
     }
     if (live.length >= maxConcurrent.limit) {
@@ -757,7 +762,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
           `the fleet-wide concurrent-worker limit is reached: ${live.length} live, ${maxConcurrent.limit} ` +
           `allowed (source: ${maxConcurrent.source}). Open nothing further and report the remainder as ` +
           `held-on-limit; it is picked up next sweep. Raise spawn.maxConcurrent in ${config.configFile}, or ` +
-          `remove the key for unlimited.`,
+          `set it to 0 for unlimited.`,
       }
     }
   }
