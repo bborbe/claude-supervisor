@@ -138,10 +138,13 @@ is not a check.
 
    **The readiness ladder — these four branches are the rule, and this block is their single home.** Operator ruling 2026-10-01, verbatim: *"is not about 8/10 9/10 or 10/10 ... if approve is not perfect we should try to improve it ... and after we improved it we should start it even at 7/10. >= 9/10 => approve and open directly; < 9/10 => try to improve; >= 7/10 => allow to approve and open after improvement"*
 
+   ⚠️ **Every branch below is conditional on ZERO hard-gate failures — the score decides *which* branch, the hard gates decide *whether the ladder runs at all*.** An audit returning any hard-gate failure is **carded and held regardless of score**: a 9/10 carrying a failing hard gate does **not** open. ⚠️ **The two conditions are joint, never alternatives** — a row is measured on both, and satisfying one does not excuse the other. Zero hard-gate failures is also the repair loop's own acceptance (`agents/manager-drive.md` clause (1) step 2), so a row that keeps failing one takes the card branch however high its score climbs.
+
    | Post-audit score | Act |
    |---|---|
-   | **≥ 9** | open directly — no improvement pass |
-   | **< 9** | run **one improvement pass** — the audit's named gaps fixed in the task file — then re-audit |
+   | **any score, with ≥ 1 hard-gate failure** | post one card and hold — the ladder does not run |
+   | **≥ 9**, zero hard-gate failures | open directly — no improvement pass |
+   | **< 9**, zero hard-gate failures | run **one improvement pass** — the audit's named gaps fixed in the task file — then re-audit |
    | **≥ 7 after** the improvement pass | open |
    | **< 7 after** the improvement pass | post **one** board card naming the gaps, then hold |
 
