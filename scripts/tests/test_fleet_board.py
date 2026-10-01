@@ -653,6 +653,19 @@ class TestUnblocks(unittest.TestCase):
         for r in rows:
             self.assertIn(r["unblocks"], fb.UNBLOCKS_VALUES)
 
+    def test_a_gated_row_keeps_its_pane_detail(self):
+        """The two sets overlap — a session holding an open gate has also ended
+        its turn — so a `needs-input` row can be `operator-keystroke` too. The
+        gate detail carries the pane the blocked-by-you list jumps to; letting
+        the closer text overwrite it trades an actionable link for a
+        restatement of the cell."""
+        rows, details = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES,
+                                      panel_ids={_sid(3)},  # _sid(3) is GATED
+                                      gate_attribution={_sid(3): "pane 1039 — open gate"})
+        self.assertEqual([r for r in rows if r["session_id"] == _sid(3)][0]["unblocks"],
+                         fb.UNBLOCKS_OPERATOR)
+        self.assertEqual(details[_sid(3)], "pane 1039 — open gate")
+
     def test_the_pending_closer_rides_the_detail_line_not_the_cell(self):
         """`operator-keystroke` is 18 characters — the whole column — so the
         pending text cannot sit beside it. A row without the text is still

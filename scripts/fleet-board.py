@@ -815,7 +815,14 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
         # `operator-keystroke` is 18 chars — the whole column — so the pending
         # closer cannot ride in the cell. It goes on the action line below the
         # box, the same place a `needs-input` row's gate already reports itself.
-        if unblocks == UNBLOCKS_OPERATOR:
+        #
+        # ⚠️ `and sid not in details` is load-bearing, not defensive. The two
+        # sets overlap — a session holding an open gate has also ended its turn,
+        # so it can be `needs-input` and `operator-keystroke` at once — and the
+        # gate detail carries the *pane*, which is what the blocked-by-you list
+        # jumps to. Overwriting it with the closer text would trade an
+        # actionable link for a restatement of the cell.
+        if unblocks == UNBLOCKS_OPERATOR and sid not in details:
             closer = wnm.closer_from_transcript({"session_id": sid})
             details[sid] = (
                 f"waiting on your keystroke: {closer}" if closer else
