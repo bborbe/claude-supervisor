@@ -969,10 +969,11 @@ def main():
         beat_ids.add(sid)
         merged[sid] = {"status": "busy", "name": "", "cwd": ""}
 
-    task_titles = fs.build_work_map()
-    # The stamped task's own state — `status`, `phase`, its open-box count. The
-    # `Unblocks` classification needs all three and a title alone answers none.
-    task_meta = fs.build_task_meta()
+    # One walk, both outputs. `build_work_map()` gives the titles the grouping
+    # needs and `build_task_meta()` the `status`/`phase`/open-box count the
+    # `Unblocks` classification needs — but calling them separately walked every
+    # vault twice for the same data (measured 6.47s against 3.6s).
+    task_titles, task_meta = fs.build_task_index()
     ages = {sid: wnm.session_transcript_age(sid) for sid in merged}
     grouping = build_grouping(merged, vault_index(), colour_census(), loop_slugs(), task_titles)
     rows, details = build_rows(merged, gate_ids, stuck_ids, task_titles, ages, grouping=grouping,
