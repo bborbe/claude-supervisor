@@ -343,8 +343,15 @@ Agent(subagent_type='vault-cli:task-auditor', description='Readiness: <task>',
 
 ```bash
 PRIOR_SID="$(vault-cli --vault "<vault>" task get "<task>" claude_session_id 2>/dev/null)"
+PRIOR_SID_RC=$?
 wezterm cli list
 ```
+
+**Refuse if the id could not be read — before any branch, the hold check included.** ⚠️ **`2>/dev/null` on its own makes a FAILED read indistinguishable from a task that has no session, and that difference is what decides CREATE.** A non-zero `PRIOR_SID_RC` means `vault-cli` itself failed — a wrong `--vault`, a missing task — and an empty id from a *failure* is not the same answer as an empty id from a task that genuinely carries no session. The first refuses; only the second falls through to CREATE.
+
+Print `❓ SESSION UNREADABLE — <task> · vault-cli exited <rc> reading claude_session_id · refused; fix the vault/task argument and re-run.` and STOP: no JUMP, no RESUME, no CREATE.
+
+⚠️ **Measured 2026-10-01, and it cost a peer session a false reading.** `--vault` takes a **name**, not a path: a path exits `1` with `Error: get vaults: vault not found: …`, and under `2>/dev/null` that becomes `PRIOR_SID=""`. Two consequences, both silent. The liveness guard further down is bounded by `PRIOR_SID` non-empty, so an empty id **skips it entirely** and reaches CREATE — the duplicate spawn this command's cluster-worker handling exists to prevent. And `session-liveness.py --check ""` returns **exit 0 listing every session on the box**, so an unbounded empty id also reads as a confident "everything is live" wherever it reaches a probe.
 
 **Refuse first if that session carries an operator hold — before any branch, JUMP included.** A hold is operator *policy* about a **session**, orthogonal to any task's status, and a held session may carry no task at all. It is **not** the `hold` *task status*, and not the `HOLD` marker this command's own selector prints for a `blocked` row — three different things, and only the first is read here:
 
