@@ -59,13 +59,20 @@ own stop rule unenforced for every other entry into it.
 Reuse `commands/open.md` § Step 1.5 Gate 2 for the decision. Never re-implement score parsing and
 never soften the bar.
 
-- **Clears the bar** → hand to `/supervisor:open "<task>"` for this single named task.
-- **Below the bar, or an `UNFIXABLE:` verdict** → escalate naming the gap. A row below the bar is
-  not held in silence: **post the attention-board card that names the score against the bar, then
-  hold the row** — per `docs/fleet-surface.md` § Spawn a worker item 2, with the card's fields and
-  the hold line as `agents/manager-drive.md` clause (1)'s `<error_handling>` entry writes them.
-  The `UNFIXABLE:` verdict arrives already read by the loop — this step relays it, and never
-  re-implements the branch.
+- **Clears the readiness ladder** → hand to `/supervisor:open "<task>"` for this single named task.
+  The readiness ladder's four branches and their thresholds have one home,
+  `docs/fleet-surface.md` § Spawn a worker item 2 — read them there; this step never restates a
+  number.
+- **Still below the ladder's open threshold after the improvement pass** → escalate naming the gap.
+  A row below the threshold is not held in silence: **post the attention-board card that names the
+  score against the threshold, then hold the row** — per `docs/fleet-surface.md` § Spawn a worker
+  item 2, with the card's fields and the hold line as `agents/manager-drive.md` clause (1)'s
+  `<error_handling>` entry writes them.
+- **An `UNFIXABLE:` verdict is NOT an escalate-by-default.** The improvement pass rewrites the
+  criterion into a falsifiable form, or splits it into its own follow-up task, and re-audits; the
+  card is the **fallback**, and fires only when neither works or the criterion is an operator-only
+  decision. That branch is read by `agents/manager-drive.md` clause (1) **step 0** — this step
+  relays its outcome and never re-implements it.
 
 ### 5. Print the verdict — and only the verdict
 
