@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.87.6
 
 - fix: **the manager attention watcher is scoped by pane ownership — `commands/manager-loop.md` step 7 and `commands/fleet-loop.md` armed a `Monitor` over the raw feed, so every manager paid a full turn for every other manager's gate.** Measured 2026-10-01 on the `Manager Layer` topic: **7 wakes in 16 minutes, every one a pane outside the subject's tracked set**, each a full manager turn; the same topic armed scoped fired **once, and it was that topic's own gate**. The runbook § Cadence mechanics already carried the fix — `gate-owner-filter.py --feed --self "<this-session-id>"` is *"the recommended scoping for a manager's attention watcher"* — but step 7 never pointed at it, so a manager reading the instruction literally armed the feed-wide watcher. Both bullets now name the filter. ⚠️ **Not by an allowlist** — the `--only-file` doorbell id list keeps **only** the sessions named and so drops unowned panes a manager should see; the ownership filter keeps those and drops only peer-manager-owned ones.
 
