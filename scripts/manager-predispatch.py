@@ -1514,9 +1514,17 @@ def main(argv: list[str]) -> int:
             )
             return EXIT_CHANGE
         bucket_sets = None
-        if args.buckets:
+        # Default to the gate's own bucket path when the caller names none, the same way
+        # the payload half is found without being named. The *producer* writes it now
+        # (the sweep reader's own `--write-buckets` call), so the caller has no path to
+        # carry and none to get wrong — the hop this default removes. An explicitly named
+        # path keeps the strict refusal below, because a caller that names one is
+        # asserting it exists; a defaulted path that is absent means "no bucket half was
+        # produced this tick", which is the pre-existing behaviour of omitting the flag.
+        buckets_from = args.buckets or buckets_path(args.subject)
+        if args.buckets or os.path.exists(buckets_from):
             try:
-                with open(args.buckets, encoding="utf-8") as fh:
+                with open(buckets_from, encoding="utf-8") as fh:
                     bucket_sets = json.load(fh)
             except (OSError, json.JSONDecodeError) as exc:
                 # A usage error, not a verdict — and deliberately NOT a fail-open. The
@@ -1527,7 +1535,7 @@ def main(argv: list[str]) -> int:
                 # and clause (0) would then hold an entire batch on a half the caller
                 # thought it had supplied. Refuse, and let the caller fix the path.
                 print(
-                    f"could not read bucket sets from {args.buckets!r}: {exc}",
+                    f"could not read bucket sets from {buckets_from!r}: {exc}",
                     file=sys.stderr,
                 )
                 return EXIT_USAGE
@@ -1539,7 +1547,7 @@ def main(argv: list[str]) -> int:
             shape_error = bucket_shape_error(bucket_sets)
             if shape_error:
                 print(
-                    f"bucket sets at {args.buckets!r} cannot gate: {shape_error}",
+                    f"bucket sets at {buckets_from!r} cannot gate: {shape_error}",
                     file=sys.stderr,
                 )
                 return EXIT_USAGE
