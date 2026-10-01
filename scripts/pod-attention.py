@@ -100,6 +100,17 @@ STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 # the fix rather than quoting a store payload.
 DECISIONS = ("allow", "deny")
 
+# ⚠️ **Both of these are validated against a closed enum by the store, and an unknown
+# value is rejected with a 400 naming the field.** A pod is a long-lived Claude Code
+# session, so it is `session` for both — there is no `pod` member, and inventing one
+# fails every push, which is exactly what the first e2e run found.
+#   producer_kind: session | agent | cron | dark-factory
+#   liveness_ref:  <session|heartbeat>:<value>
+# Read from `attention-controller` `pkg/producer-kind.go` and `pkg/liveness-ref.go`, and
+# confirmed against the running store.
+PRODUCER_KIND = "session"
+LIVENESS_MODEL = "session"
+
 DEFAULT_GATE_TIMEOUT = 900.0
 DEFAULT_GATE_INTERVAL = 2.0
 
@@ -164,16 +175,30 @@ def build_options(labels, recommended):
     return options
 
 
-def post_item(mechanism, producer_id, dedup_key, payload, options=None, interrupt_class="pick"):
+def post_item(
+    mechanism,
+    producer_id,
+    dedup_key,
+    payload,
+    options=None,
+    interrupt_class="pick",
+    liveness_ref="",
+):
     """POST one item and return the store's response.
 
     `mechanism` is this arm's own argument rather than a constant: the pod raises both
     classes, and the class is the whole difference in how the answer comes back.
+
+    ⚠️ **`liveness_ref` decides whether the card SURVIVES, not merely how it is tagged.**
+    The store prunes an open item whose producer is not live and that *asked* rather than
+    reported (`attention-store-impl.go` `classifyForRead`: `isAsked` + `!live` →
+    `remove`). So a card posted by a producer the store cannot see live is created with a
+    201 and removed on the very first board read — it never reaches the operator.
     """
     body = {
         "producer_id": producer_id,
-        "producer_kind": "pod",
-        "liveness_ref": f"pod:{producer_id}",
+        "producer_kind": PRODUCER_KIND,
+        "liveness_ref": liveness_ref or f"{LIVENESS_MODEL}:{producer_id}",
         "dedup_key": dedup_key,
         "interrupt_class": interrupt_class,
         "payload": payload,
@@ -319,10 +344,20 @@ def cmd_ask(args, out=sys.stdout):
         return 2
     try:
         item = post_item(
-            "message", producer_id, args.dedup_key, args.payload, options, args.interrupt_class
+            "message",
+            producer_id,
+            args.dedup_key,
+            args.payload,
+            options,
+            args.interrupt_class,
+            args.liveness_ref,
         )
     except urllib.error.HTTPError as err:
-        print(f"FAILED: store returned {err.code} for the push", file=out)
+        # The store's own explanation is carried through: a bare "returned 400" names no
+        # field, and this is the message that would have pointed straight at the bad
+        # `producer_kind` instead of costing a round of probing.
+        detail = err.read().decode(errors="replace")
+        print(f"FAILED: store returned {err.code} for the push -- {detail}", file=out)
         return 1
     print(f"ITEM_ID: {item.get('item_id')}", file=out)
     return 0
@@ -343,9 +378,19 @@ def cmd_gate(args, out=sys.stdout, sleep=time.sleep, clock=time.monotonic):
     if producer_id is None:
         return 2
     try:
-        item = post_item("permission", producer_id, args.dedup_key, args.payload)
+        item = post_item(
+            "permission",
+            producer_id,
+            args.dedup_key,
+            args.payload,
+            liveness_ref=args.liveness_ref,
+        )
     except urllib.error.HTTPError as err:
-        print(f"FAILED: store returned {err.code} for the push", file=out)
+        # The store's own explanation is carried through: a bare "returned 400" names no
+        # field, and this is the message that would have pointed straight at the bad
+        # `producer_kind` instead of costing a round of probing.
+        detail = err.read().decode(errors="replace")
+        print(f"FAILED: store returned {err.code} for the push -- {detail}", file=out)
         return 1
     item_id = item.get("item_id")
     print(f"ITEM_ID: {item_id}", file=out)
@@ -386,11 +431,17 @@ def main(argv=None):
     ask.add_argument("--recommend", default="")
     ask.add_argument("--producer-id", default="")
     ask.add_argument("--interrupt-class", default="pick")
+    # How the store is to see this producer as live. Defaults to `session:<producer-id>`,
+    # which is right for anything the local session registry can resolve. A pod that
+    # cannot be resolved that way must declare its own — `heartbeat:<path>` — or its card
+    # is pruned on the first read.
+    ask.add_argument("--liveness-ref", default="")
 
     gate = sub.add_parser("gate")
     gate.add_argument("--dedup-key", required=True)
     gate.add_argument("--payload", required=True)
     gate.add_argument("--producer-id", default="")
+    gate.add_argument("--liveness-ref", default="")
     gate.add_argument("--timeout", type=float, default=DEFAULT_GATE_TIMEOUT)
     gate.add_argument("--interval", type=float, default=DEFAULT_GATE_INTERVAL)
 
