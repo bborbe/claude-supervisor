@@ -254,6 +254,14 @@ Opened N · approved A · filled F fields · skipped H (human) · refused U (und
 
 **Approve every eligible row first — before the readiness dispatch.** The batch's opening move is `vault-cli --vault "<vault>" task approve "<task>"` for each row the Step 0.5 selector returned that is **not** JUMP/RESUME-bound — no live pane and no `claude_session_id`, the same probe the readiness dispatch below already needs. `role: human` rows are approved too: they open into Direct as the operator's own session, so only the agent plan path is skipped for them (Gate 2's scope). A row that is not at `phase: todo` is left alone — already approved, or already past the gate — because `task approve` refuses it and writes nothing.
 
+⚠️ **`task approve` also moves `status` to `next`, and the pass must put it back.** The call writes `status: next` alongside the phase and the approval record — measured on a live batch run 2026-10-01, where an approved row read `status: next` while its worker was already running in a pane. Every row reaching this pass came from the § Step 0.5 selector, whose own condition is `status: in_progress`, so `next` is a status the pass itself introduced and never one it inherited. Left alone it also removes the row from every *later* run's selector. So each approved row takes one more write:
+
+```bash
+vault-cli --vault "<vault>" task set "<task>" status in_progress
+```
+
+⚠️ **This is what makes the pass's two branches agree.** The empty-`phase` branch below writes through `task set` and never touches `status`, so without this line the two branches would leave *different* statuses for the *same* outcome — observed 2026-10-01 as `next` on a `todo`-approved row beside `in_progress` on an empty-phase one, in the same batch. Operator ruling 2026-10-01: **`in_progress` is correct** — a row holding a live worker is not queued, and SC2 requires the empty-phase branch to behave "the same as approving a `todo` row".
+
 ⚠️ **One exception: a row whose `phase` is empty.** `task approve` cannot accept it — it refuses with `task is at phase "(none)", not "todo"` — so the pass writes the approval itself, in this order:
 
 ```bash
