@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.87.4
 
 - fix: **`/supervisor:open` refuses when the task's session id could not be read — a failed read was indistinguishable from a task with no session, and the difference decides CREATE.** Step 2A read `claude_session_id` with `2>/dev/null` and never looked at the exit status, so a wrong `--vault` value (it takes a **name**, not a path — a path exits 1 with `vault not found`) produced an **empty `PRIOR_SID`** that read exactly like a task that has never been worked. The liveness guard is bounded by `PRIOR_SID` non-empty, so the empty id **skipped it entirely** and reached CREATE — the duplicate spawn the cluster-worker handling exists to prevent. The read's exit status is now captured and a non-zero one refuses with `❓ SESSION UNREADABLE`, before any branch. ⚠️ **Measured 2026-10-01, reported by a peer session that hit it**: `session-liveness.py --check ""` also returns **exit 0 listing every session on the box**, so an unbounded empty id reads as a confident "everything is live" wherever it reaches a probe. ⚠️ **The failure is silent in the direction that matters** — a wrong vault argument produces a plausible wrong answer, not an error you notice.
 
