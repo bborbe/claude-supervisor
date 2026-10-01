@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.87.2
 
 - fix: **`/supervisor:open` refuses a session that is live but holds no pane on this Mac — a cluster worker's task was resumed, not refused, putting a second writer on a conversation running in a pod.** Step 2A decided JUMP / RESUME / CREATE from `wezterm cli list` and a `pgrep` on the task's `claude_session_id` alone, and a worker running as a pod in nuke holds **neither** a pane nor a local process — so both probes read "not running here" for a session that is working right now, and the `PRIOR_SID`-present branch resumed it. The branch now probes the plugin's single reader (`session-liveness.py --check`) and refuses, naming the session and the reason, unless the verdict is `ABSENT`. ⚠️ **`UNKNOWN` and `AMBIGUOUS` refuse too** — an unreadable source never authorises a second writer, the same rule `session-liveness.py`, `live-workers.py` and the manager commands already carry. ⚠️ **Not a blanket refusal**: a healthy session in a pane still jumps and a live headless pid still waits, so the guard fires only on *live, and reachable from nowhere here* — the one state where every branch below it is wrong.
 
