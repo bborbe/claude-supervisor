@@ -1601,8 +1601,12 @@ class FeedTransportTest(unittest.TestCase):
              if c["class"] == "genuine" and c["provenance"] == "live"
              and c["expect"]["in_feed"]]
 
-    def run_feed(self, panes, records):
-        """Run `main()` against a stubbed transport; return (rc, stdout, stderr)."""
+    def run_feed(self, panes, records, argv=()):
+        """Run `main()` against a stubbed transport; return (rc, stdout, stderr).
+
+        `argv` appends flags after the program name, so a caller can exercise an
+        option (e.g. `--section`) without restating the stubs.
+        """
         registry = {r["session_id"]: "Session %s" % r["pane"] for r in records}
         patches = [
             mock.patch.object(wnm, "wezterm_panes", lambda: panes),
@@ -1616,7 +1620,7 @@ class FeedTransportTest(unittest.TestCase):
                 lambda suffix: list(records) if suffix == "needs" else []),
             mock.patch.object(wnm, "reclassify_idle", lambda rec: rec),
             mock.patch.object(wnm, "task_status_from_closer", lambda _rec: None),
-            mock.patch.object(wnm.sys, "argv", ["who-needs-me.py"]),
+            mock.patch.object(wnm.sys, "argv", ["who-needs-me.py", *argv]),
         ]
         out, err = io.StringIO(), io.StringIO()
         for patch in patches:
@@ -1664,6 +1668,110 @@ class FeedTransportTest(unittest.TestCase):
         self.assertEqual("", err)
         self.assertIn("Needs you (0)", out)
         self.assertIn("Nothing needs you.", out)
+
+
+class SectionScoping(unittest.TestCase):
+    """`--section` scopes the render to the named sections.
+
+    Why it exists: the consumer, `gate-owner-filter.py`'s `panes_from_feed`,
+    matches `[<pane>]` on ANY line regardless of the section header above it -- so
+    a whole-feed arm fires the watcher on every `Rendered panels` closer, a line
+    this feed's own header labels "not a parked gate". Measured 2026-10-01 on the
+    Manager Layer arm: 8 wakes in ~55 minutes, 1 actionable, each a full turn.
+
+    Selection is by section NAME, never by position.
+    """
+
+    def test_no_flag_selects_every_section(self):
+        wanted = wnm.section_filter(None)
+        for name in wnm.SECTIONS:
+            self.assertTrue(wanted(name), name)
+
+    def test_empty_selection_selects_every_section(self):
+        wanted = wnm.section_filter([])
+        for name in wnm.SECTIONS:
+            self.assertTrue(wanted(name), name)
+
+    def test_one_section_selects_only_that_section(self):
+        wanted = wnm.section_filter(["needs-you"])
+        self.assertTrue(wanted("needs-you"))
+        for name in wnm.SECTIONS:
+            if name != "needs-you":
+                self.assertFalse(wanted(name), name)
+
+    def test_selection_is_by_name_not_position(self):
+        # `idle` is rendered LAST. A filter keyed on position -- or a "first
+        # section" shortcut -- cannot express this, and would wrongly answer True
+        # for `needs-you`.
+        wanted = wnm.section_filter(["idle"])
+        self.assertTrue(wanted("idle"))
+        self.assertFalse(wanted("needs-you"))
+
+    def test_flag_is_repeatable(self):
+        wanted = wnm.section_filter(["needs-you", "reapable"])
+        self.assertTrue(wanted("needs-you"))
+        self.assertTrue(wanted("reapable"))
+        self.assertFalse(wanted("rendered-panels"))
+
+    def test_the_watcher_arm_excludes_the_closer_section(self):
+        # The scoped arm's whole point: `rendered-panels` is the section that made
+        # the unscoped arm fire 8 times in ~55 minutes with 1 actionable.
+        wanted = wnm.section_filter(["needs-you"])
+        self.assertTrue(wanted("needs-you"))
+        self.assertFalse(wanted("rendered-panels"))
+
+
+class SectionScopingEndToEnd(unittest.TestCase):
+    """The flag through `main()`, not only through the predicate.
+
+    `run_feed` is borrowed from `FeedTransportTest` rather than inherited: a
+    subclass would re-run that class's three transport tests under this name.
+    """
+
+    run_feed = FeedTransportTest.run_feed
+
+    SECTION_HEADERS = (
+        "Needs you (",
+        "Rendered panels (",
+        "Probably stuck > ",
+        "Reapable (",
+        "Idle, turn ended: ",
+    )
+
+    def assertHeaders(self, out, present):
+        for header in self.SECTION_HEADERS:
+            if header in present:
+                self.assertIn(header, out)
+            else:
+                self.assertNotIn(header, out)
+
+    def test_unscoped_render_still_prints_all_five_headers(self):
+        # The no-regression bar: the default path is unchanged, so the existing
+        # consumer sees exactly what it saw before the flag existed.
+        rc, out, err = self.run_feed({}, [])
+        self.assertEqual(0, rc, err)
+        self.assertHeaders(out, self.SECTION_HEADERS)
+
+    def test_scoped_render_prints_only_the_named_header(self):
+        rc, out, err = self.run_feed({}, [], argv=["--section", "needs-you"])
+        self.assertEqual(0, rc, err)
+        self.assertHeaders(out, ("Needs you (",))
+        self.assertIn("Nothing needs you.", out)
+
+    def test_scoped_render_can_name_a_later_section(self):
+        # `idle` is the last header rendered; naming it proves selection is not
+        # "everything up to here".
+        rc, out, err = self.run_feed({}, [], argv=["--section", "idle"])
+        self.assertEqual(0, rc, err)
+        self.assertHeaders(out, ("Idle, turn ended: ",))
+
+    def test_unknown_section_is_rejected(self):
+        # argparse choices are bound to SECTIONS, so a typo fails loudly rather
+        # than silently rendering the whole feed -- which would re-introduce the
+        # unscoped arm under a scoped-looking command line.
+        rc, _out, err = self.run_feed({}, [], argv=["--section", "needs_you"])
+        self.assertNotEqual(0, rc)
+        self.assertIn("invalid choice", err)
 
 
 if __name__ == "__main__":
