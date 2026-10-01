@@ -134,7 +134,7 @@ kubectl<wrapper> -n <ns> get jobs 2>/dev/null | tail -5
 gh pr checks <n> --json name,bucket 2>/dev/null || true
 ```
 
-**`-f` matches the whole command line and `-l` prints it.** MCP processes on this machine carry `Authorization:` headers in their args, so widening the prescribed pattern to cover your own work (`pgrep -fl 'sentry-watcher|<service>'`) copies credentials into the transcript — observed 2026-09-13. Use PIDs only (`pgrep -f`) unless the pattern is narrow enough that nothing else can match; same caution for `ps … -o command=` in `session-close` § Phase 5. Print PIDs, then inspect one by PID if you need its identity.
+**`-f` matches the whole command line and `-l` prints it.** MCP processes on this machine carry `Authorization:` headers in their args, so widening the prescribed pattern to cover your own work (`pgrep -fl 'sentry-watcher|<service>'`) copies credentials into the transcript — observed 2026-09-13. Use PIDs only (`pgrep -f`) unless the pattern is narrow enough that nothing else can match; same caution for `ps … -o command=` in `session-close` § Phase 5. Print PIDs, then inspect one by PID if you need its identity. ⚠️ **`ps -o comm=` is not the safe spelling it looks like** — on macOS it prints the full argv, not the bare binary name, so it leaks exactly what `-o command=` leaks (observed 2026-10-01: `ps -o pid=,ppid=,comm= -p <pids>` returned `npm exec mcp-remote https://mcp.atlassian.com/v1/mcp` and a `tsx …/tts-mcp.ts` invocation). No `ps` column is safe for identity; resolve by PID through `~/.claude/sessions/<pid>.json` — see `commands/worker-restart.md` § Argument.
 
 **Axis 1 — liveness:**
 
