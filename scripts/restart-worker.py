@@ -77,11 +77,6 @@ def load_sibling(filename):
     return mod
 
 
-def read_json(path):
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
 def registry_entries(directory=None):
     """Every registry record as `(path, rec)`. `None` when the directory is unreadable.
 
@@ -90,18 +85,20 @@ def registry_entries(directory=None):
     "no such session".
     """
     d = directory or SESSIONS_DIR
-    if not os.path.isdir(d):
-        return None
-    try:
-        out = []
-        for path in sorted(glob.glob(os.path.join(d, "*.json"))):
-            try:
-                out.append((path, read_json(path)))
-            except Exception:
-                continue  # a half-written entry is skipped, not fatal
-        return out
-    except Exception:
-        return None
+    # Read through the plugin's single reader rather than globbing the directory here. This used
+    # to open it directly; a second raw read of one directory is precisely the class of defect
+    # `session-liveness.py`'s own header records.
+    #
+    # ⚠️ **The RAW record, not the reader's normalised one.** This path's consumers read
+    # `sessionId`, `startedAt`/`procStart`, `kind` and `name`, and the normalised shape carries
+    # none of those — the `kind` check is what refuses a headless worker. Taking the normalised
+    # record here would drop that check silently, in the one path whose entire job is not to
+    # resume onto a live session. The reader therefore carries the record it read, verbatim.
+    # ⚠️ The **list** accessor, not `read_registry()`. The dict is keyed by session id, so two
+    # files claiming one id collapse into a single entry — and the collision is what this path
+    # refuses on. Resuming onto the wrong claimant of two is the double-writer the guard exists
+    # to prevent, so taking the dict here would silently delete the guard.
+    return load_sibling("session-liveness.py").read_registry_entries(d)
 
 
 def refuse(reason, detail):

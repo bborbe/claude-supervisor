@@ -143,6 +143,7 @@ import importlib.util
 import json
 import os
 import re
+import select
 import sys
 import time
 from datetime import datetime
@@ -170,6 +171,12 @@ HEARTBEAT_TTL_SECONDS = 60
 EXIT_NOCHANGE = 0
 EXIT_CHANGE = 10
 EXIT_USAGE = 2
+# A stdin that never EOFs is neither a usage error nor the gate's verdict: nothing was
+# read, so nothing was decided, and a caller must be able to tell that apart from both
+# "unchanged" (0) and "changed" (10). Kept distinct from EXIT_USAGE deliberately — a
+# caller branching on 2 is looking at an argument it got wrong, and this one is about the
+# caller's stdin, which no argument describes.
+EXIT_STDIN_TIMEOUT = 3
 # `--write-tracked` is a different verb from the gate's three modes, so its success code
 # is named separately even though it is also 0. Reusing EXIT_NOCHANGE would read to a
 # caller branching on the gate's contract as "the digest is unchanged, dispatch no agent"
@@ -664,6 +671,74 @@ def digest_of(tracked: list[dict]) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# bounded stdin
+# --------------------------------------------------------------------------- #
+
+# How long `--save` will wait for stdin to reach EOF before giving up on it.
+# Deliberately small: every legitimate caller (`< /dev/null`, a regular file, a closed
+# fd 0) EOFs in microseconds, so only a stdin that is never closed reaches this. The
+# number is a ceiling on a stall, not a budget for one.
+STDIN_WAIT_SECONDS = 5
+
+
+def read_stdin_bounded(timeout: float | None = None) -> str | None:
+    """Read stdin to EOF, but never wait longer than `timeout`. `None` means it did not end.
+
+    `sys.stdin.read()` blocks until EOF, and a caller whose stdin is an open pipe that is
+    never closed blocks it forever. Measured 2026-09-30 against the Manager Layer store:
+    45 013 ms and killed, versus 654 ms for the same call with `< /dev/null` — and the
+    store was left byte-for-byte unchanged, because the save never ran. That is the whole
+    cost: the caller's tick gets a stale record, and the next drive leg holds its batch.
+
+    Reading in a `select` loop rather than one `select` followed by `read()`: a caller that
+    writes part of a table and holds the pipe open passes a single readability check and
+    then blocks *inside* `read()` — the same stall, one layer down.
+
+    The harness's own stdin wiring is not stable across calls (measured in one session,
+    minutes apart: `sock` with a read that blocked past 3 s, then the same read returning
+    0 bytes immediately), so a caller cannot be asked to redirect its way out of this.
+    The bound has to live here.
+    """
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        # No fd behind stdin: a closed fd 0, or an in-process caller that swapped
+        # `sys.stdin` for a plain object — the test suite does exactly that with
+        # `io.StringIO`, and `save_with_table` relies on it to drive the refusal below.
+        # Neither can stall, because neither is a pipe, so the plain read is correct
+        # here; only a real fd can be an open pipe that never EOFs.
+        try:
+            return sys.stdin.read()
+        except (AttributeError, OSError, ValueError):
+            return ""
+    # Resolved here rather than as a default argument so a test can lower the module
+    # constant and exercise the deadline in milliseconds instead of seconds.
+    if timeout is None:
+        timeout = STDIN_WAIT_SECONDS
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining)
+        except (OSError, ValueError):
+            return ""
+        if not ready:
+            return None
+        try:
+            # `os.read` on the fd rather than `sys.stdin.read()`: the text wrapper would
+            # re-block waiting for EOF, which is the very thing this bounds.
+            chunk = os.read(fd, 65536)
+        except OSError:
+            return ""
+        if not chunk:
+            return b"".join(chunks).decode("utf-8", errors="replace")
+        chunks.append(chunk)
+
+
+# --------------------------------------------------------------------------- #
 # stored state + fail-open
 # --------------------------------------------------------------------------- #
 
@@ -924,7 +999,11 @@ def main(argv: list[str]) -> int:
     mode.add_argument(
         "--save",
         action="store_true",
-        help="persist the digest + the payload `--write-payload` wrote (a table on stdin is refused)",
+        help=(
+            "persist the digest + the payload `--write-payload` wrote (a table on stdin is "
+            f"refused, and a stdin that does not EOF within {STDIN_WAIT_SECONDS} s exits "
+            f"{EXIT_STDIN_TIMEOUT})"
+        ),
     )
     mode.add_argument(
         "--write-tracked",
@@ -1123,7 +1202,16 @@ def main(argv: list[str]) -> int:
     changed, reason, payload, stored_table = evaluate(args.vault, args.subject)
 
     if args.save:
-        table = sys.stdin.read()
+        table = read_stdin_bounded()
+        if table is None:
+            print(
+                f"refusing to wait on stdin: no EOF within {STDIN_WAIT_SECONDS} s. `--save` "
+                f"reads the payload the render wrote ({payload_path(args.subject)}), so it "
+                "does not need a table on stdin — re-run it with `< /dev/null`, or with no "
+                "redirect at all.",
+                file=sys.stderr,
+            )
+            return EXIT_STDIN_TIMEOUT
         # A table on stdin is refused, never recorded. `--save` reads the payload the
         # render wrote and dates the record from *its* mtime — the hop this gate used to
         # leave to the caller's memory. A caller that hands the table over itself moves the
@@ -1134,10 +1222,12 @@ def main(argv: list[str]) -> int:
         # 0.63.0), so nothing legitimate depends on it — but the CLI's own help and
         # docstring still advertised it, which is what invited the call.
         #
-        # Reading stdin is kept deliberately rather than removed: that read is
-        # [[The Pre-Dispatch Save Blocks on an Open Stdin Pipe and Silently Stalls the
-        # Loop]], a different task's defect. Refusing on a non-empty read makes the
-        # caller-supplied table impossible without touching it.
+        # The read is bounded (see `read_stdin_bounded`). It used to be a bare
+        # `sys.stdin.read()`, which stalled a manager tick for 45 s on a stdin that never
+        # EOFs and left the store a full tick stale — [[The Pre-Dispatch Save Blocks on an
+        # Open Stdin Pipe and Silently Stalls the Loop]]. Refusing on a non-empty read is
+        # what makes the caller-supplied table impossible; the bound is what makes the
+        # refusal reachable at all.
         if table.strip():
             print(
                 "refusing a table on stdin: `--save` reads the payload the render wrote "
