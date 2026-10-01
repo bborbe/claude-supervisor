@@ -20,7 +20,7 @@ Collapse kill → resume → re-orient into one verb. The Fleet Manager did this
 
 ## Argument
 
-A session id, or a pid. A pid resolves through `~/.claude/sessions/<pid>.json` — the registry is authoritative because Claude Code deletes the entry on exit. **Never resolve a target from a process listing**: `pgrep -fl` and `ps` print command lines that carry MCP `Authorization:` headers, and they can confirm life but never death.
+A session id, or a pid. A pid resolves through `~/.claude/sessions/<pid>.json` — the registry is authoritative because Claude Code deletes the entry on exit. **Never resolve a target from a process listing**: `pgrep -fl` and `ps` print command lines that carry MCP `Authorization:` headers, and they can confirm life but never death. ⚠️ That includes `ps -o comm=` — it reads like the safe column and is not: on macOS it prints the full argv (observed 2026-10-01).
 
 ## Step 0 — Resolve the load path and the target
 
