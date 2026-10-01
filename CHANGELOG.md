@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- fix: **the `close-me` bucket no longer gates the `aborted` case on all success criteria, which made the bucket unreachable for exactly the class it names.** The predicate read *"the task is terminal (`completed`/`aborted`, all SCs `[x]`)"*, but `aborted` is terminal by *decision* and carries unmet criteria on purpose, so no aborted task could ever satisfy it. The two terminal statuses now qualify on different terms — `completed` keeps the all-SCs-`[x]` clause, `aborted` does not — which aligns the prose with `sweep-gate.py`, already bucketing both statuses as `done` and gating its close line on liveness alone.
+- fix: **the `close-me` bucket no longer gates the `aborted` case on all success criteria, which made the bucket unreachable for exactly the class it names.** The predicate read *"the task is terminal (`completed`/`aborted`, all SCs `[x]`)"*, but `aborted` is terminal by *decision* and carries unmet criteria on purpose, so no aborted task could ever satisfy it. The two terminal statuses now qualify on different terms — `completed` keeps the all-SCs-`[x]` clause, `aborted` does not — which aligns the prose with `sweep-gate.py`, already bucketing both statuses as `done` and gating its close line on liveness alone. The bullet also gains the **vault-relative guard its sibling buckets carry** — the clause is applied as the runbook for the vault being swept states it, with the disagreement reported rather than silently overridden — because the plugin ships to every vault and the two satellite runbooks still carry the old predicate; without the guard a satellite sweep would contradict that vault's own runbook.
 
 ## v0.92.1
 
