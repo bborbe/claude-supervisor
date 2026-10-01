@@ -334,6 +334,10 @@ class Cli(unittest.TestCase):
 
 
 SID_HELD = "aaaaaaaa-1111-2222-3333-444444444444"
+# Differs from SID_HELD in the EIGHTH character only -- the same near-miss the store's
+# own test uses (`test_session_holds.py` NEAR_MISS). A prefix match, a substring match
+# or a flag-everything build all trip on it; nothing weaker does.
+SID_NEAR_MISS = "aaaaaaab-1111-2222-3333-444444444444"
 
 
 class HeldSession(Cli):
@@ -378,9 +382,23 @@ class HeldSession(Cli):
         self.assert_refusal(SID_HELD, "held-session")
 
     def test_does_not_fire_on_a_clean_session(self):
-        """Too-loose: the SAME session, unheld, is NOT refused for being held."""
+        """Too-loose: an UNHELD session is NOT refused for being held.
+
+        Written against a POPULATED store carrying a near-miss id -- `aaaaaaab-`
+        beside the held `aaaaaaaa-` -- so a prefix match, a substring match or a
+        flag-everything build all fail here.
+
+        ⚠️ An EMPTY store would let all three pass, which is why `write_holds()`
+        with no arguments is not this case. `[[A Suppression Guard Needs
+        Both-Direction Tests]]` names empty input explicitly: *"a guard tested with
+        an empty stream and a guard tested with a realistic stream containing
+        near-misses are different tests; only the second one exercises the
+        boundary."* This test seeded an empty store until 2026-09-30, so the
+        inlined reader it guards -- a copy that does NOT inherit the store's own
+        near-miss coverage -- was asserted only against the weakest input.
+        """
         self.seed()
-        self.write_holds()
+        self.write_holds(SID_NEAR_MISS)
         _code, lines = self.run_cli(SID_HELD)
         self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
 
