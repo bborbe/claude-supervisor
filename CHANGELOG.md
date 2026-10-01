@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.89.1
 
 - fix: **the PIDs-only caution now names `ps -o comm=`, which is not the safe spelling it looks like.** The caution in `commands/worker-drive.md` § 0b enumerated `pgrep -fl` and `ps … -o command=` and stopped there, so the one `ps` spelling that *reads* safe went unmentioned — and on macOS `ps -o comm=` prints the full argv, not the bare binary name, leaking exactly what `-o command=` leaks (observed 2026-10-01: `ps -o pid=,ppid=,comm= -p <pids>` returned `npm exec mcp-remote https://mcp.atlassian.com/v1/mcp` and a `tsx …/tts-mcp.ts` invocation). `commands/worker-restart.md` § Argument gains the same clause: no `ps` column is safe for identity, and a target resolves by PID through `~/.claude/sessions/<pid>.json`.
 
