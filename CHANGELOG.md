@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.87.9
 
 - fix: **the `--flagged` batch's approve pass left two different `status` values for the same outcome — `vault-cli task approve` writes `status: next`, while the empty-`phase` branch writes through `task set` and never touches status, so a `todo`-approved row and an empty-phase row in the same batch ended up disagreeing.** Measured on a live run 2026-10-01: the sub-9 fixture read `status: next` with its worker already running in a pane, the empty-phase fixture read `status: in_progress`. The pass now writes `status: in_progress` after approving, so both branches agree. ⚠️ **`next` was the anomaly, not merely a cosmetic mismatch**: every row reaching the pass came from the § Step 0.5 selector, whose own condition is `status: in_progress` — so `next` is a status the pass itself introduced and never one it inherited — and a row left at `next` drops out of every *later* run's selector, since the selector tests that same field. A row holding a live worker is not queued. Operator ruling 2026-10-01; the divergence was found by the live verification of the empty-phase fix, not by its tests.
 
