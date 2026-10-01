@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.87.3
 
 - fix: **unfold the `pod-attention.py` bullet from `v0.87.1`, which does not contain it.** The merge of #64 landed after `v0.87.1` was cut for #63, so the bullet was folded into an already-released section and the Changelog Fold Guard caught it on the merge commit. Direction is decided by the tag, not by where the merge put the entry: `git tag --contains 461b7a2e` returned **nothing** when the repair branch was cut, and `v0.87.2` by the time it was pushed — so the bullet moved **into `## v0.87.2`**, the release whose tag actually carries the work, rather than to a fresh `## Unreleased`, which would have announced already-shipped work as pending. `## v0.87.1` is now byte-identical to `v0.87.1:CHANGELOG.md`. ⚠️ The direction was re-established between the two commits on this branch rather than assumed at the start — the first commit moved it to `## Unreleased`, correctly for the tag state it was written against and wrongly by the time it landed.
 
