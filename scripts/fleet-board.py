@@ -324,13 +324,25 @@ def manager_subject(name, index, slugs):
             return found
     return None
 
-# Session 26 · Bucket 16 · Vault task 34 · Project 11 · Last 9 -> sum 96, and
-# `box-table.py` renders `sum(widths) + 3n + 1` = 112 of the operator's 119
-# columns. The bucket column REPLACES the old Status column rather than joining
-# it: a sixth column lands at 132, and a wrapping box is worse than a truncated
-# cell. The raw busy/shell/idle counts stay in the marker line instead.
-HEADER = ["Session", "Bucket", "Vault task", "Project", "Last"]
-WIDTHS = [26, 16, 34, 11, 9]
+# Session 26 · Bucket 16 · Vault task 34 · Unblocks 18 · Inactive 9 -> sum 103,
+# and `box-table.py` renders `sum(widths) + 3n + 1` = 119 of the operator's 119
+# columns — exactly the ceiling, with nothing left over.
+#
+# `Project` was dropped to pay for `Unblocks` (2026-10-01): the Fleet Manager
+# Session runbook § Sweep output names it as the column to cut when the task
+# titles need room, and a wrapping box is worse than a truncated cell. The
+# bucket column REPLACES the old Status column rather than joining it, and the
+# raw busy/shell/idle counts stay in the marker line instead.
+#
+# ⚠️ `Inactive` is the former `Last` column, renamed: it always rendered the
+# session's transcript age, and the rename is what makes it nameable as the
+# inactive-for the operator asked for. The value did not change.
+#
+# ⚠️ Any further column, or any width bump, breaches 119. These widths ARE the
+# budget — `test_fleet_board.py` asserts the rendered sum rather than trusting
+# this comment to stay true.
+HEADER = ["Session", "Bucket", "Vault task", "Unblocks", "Inactive"]
+WIDTHS = [26, 16, 34, 18, 9]
 
 BUCKET_ICON = {
     "running": "🔄",
@@ -345,6 +357,62 @@ BUCKET_ICON = {
 RUNNING_STATUSES = ("busy", "shell")
 
 BUCKET_ORDER = ("problem", "needs-input", "running", "idle")
+
+# `Unblocks` — what would move this session forward. Display-only, in the
+# operator's vocabulary: it answers "what do I do about this row", and it
+# deliberately does NOT replace `agents/fleet-drive.md`'s
+# revive/blocked/unverifiable/finished verdicts, which drive the fleet round's
+# act leg over these same sessions. Two taxonomies over one population is a
+# drift risk; this one is a column, that one is a decision.
+UNBLOCKS_OPERATOR = "operator-keystroke"
+UNBLOCKS_NUDGE = "nudge"
+UNBLOCKS_REAP = "reap/close"
+UNBLOCKS_WORKING = "working"
+UNBLOCKS_VALUES = (UNBLOCKS_OPERATOR, UNBLOCKS_NUDGE, UNBLOCKS_REAP, UNBLOCKS_WORKING)
+
+# Value-only alignment with `manager-predispatch.py`'s `STUCK_SECONDS` (30 min).
+# ⚠️ The SIGNAL differs, and the shared number hides it: that rule measures the
+# *task file's* mtime, this one the *transcript's* age. A session can carry a
+# freshly-written task file and a stale transcript, or the reverse, so the two
+# classify different populations despite agreeing on the threshold.
+NUDGE_SECONDS = 30 * 60
+
+
+def unblocks_for(sid, age, meta, panel_ids):
+    """Which of the four `Unblocks` values this session carries.
+
+    Order is the whole rule — first match wins, and the classes are disjoint by
+    construction, so every live row lands in exactly one:
+
+    1. `operator-keystroke` — the session is in who-needs-me's Rendered-panels
+       set, i.e. it ended its turn on a closer line only the operator can clear.
+       Membership is read from that module's own `rendered_panels()` rather than
+       re-derived, which is what makes the board's set and the operator's
+       `Needs you` list the same set *by construction* instead of by agreement
+       that has to be maintained.
+    2. `reap/close` — the anchored task is `completed`; nothing is left to nudge,
+       so the session wants closing.
+    3. `nudge` — inactive past the threshold, in `execution`, holding an open
+       box: the one shape where "go on" is both allowed and useful.
+    4. `working` — everything else, including a session with no stamped task
+       (`meta` is None). ⚠️ `working` is the DEFAULT, not a finding: a session
+       with no task cannot be shown to be idle, and inventing a nudge for it
+       would be a guess wearing a classification's clothes.
+
+    `age` of `inf` (no transcript at all) counts as past the threshold rather
+    than as unknown — `session_transcript_age()`'s own reading, "nothing has been
+    written", is the maximal inactive case, and the cell renders it `—`.
+    """
+    if sid in panel_ids:
+        return UNBLOCKS_OPERATOR
+    if meta:
+        if meta.get("status") == "completed":
+            return UNBLOCKS_REAP
+        if (age is not None and age >= NUDGE_SECONDS
+                and meta.get("phase") == "execution"
+                and meta.get("open_boxes", 0) >= 1):
+            return UNBLOCKS_NUDGE
+    return UNBLOCKS_WORKING
 
 
 def registry_records(sessions_dir=None):
@@ -472,6 +540,12 @@ def collect_signals(stuck_min):
     `None`, which `is_live()` keeps every row on — the board degrades to the
     registry's own verdict rather than rendering a false empty — but it must say
     so, or a board whose pane filter never ran looks identical to one that ran.
+
+    The fifth is the Rendered-panels session-id set — the `operator-keystroke`
+    input. It is composed here rather than in `build_rows()` because it needs
+    the same `needs`/`open_panes` pair the gate predicate above was built from,
+    and re-deriving those in the row builder is exactly the second definition
+    this function exists to prevent.
     """
     registry = wnm.read_registry()
     live_ids = None if registry is None else set(registry)
@@ -497,7 +571,19 @@ def collect_signals(stuck_min):
     gate_ids = {r["session_id"] for r in gates}
     cutoff = time.time() - stuck_min * 60
     stuck_ids = {r["session_id"] for r in wnm.load("tool") if live(r) and r["ts"] < cutoff}
-    return gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap is not None
+    # The Rendered-panels set, read from who-needs-me's own composition so the
+    # board's `operator-keystroke` rows and the operator's `Needs you` section
+    # cannot drift apart. The `busy`/`resumed` sets are left at their empty
+    # defaults deliberately: both can only *remove* a row, so a blind reader
+    # lists more, never fewer — the safe direction for a column that tells the
+    # operator to go press a key.
+    panel_ids = {
+        r["session_id"]
+        for r in wnm.rendered_panels(needs, open_panes=open_panes,
+                                     task_status=wnm.task_status_from_closer)
+    }
+    return (gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap is not None,
+            panel_ids)
 
 
 def transcript_fresh_ids(window=None):
@@ -671,7 +757,7 @@ def build_grouping(registry, index, colours, slugs, task_titles):
 
 
 def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, grouping=None,
-               gate_attribution=None):
+               gate_attribution=None, task_meta=None, panel_ids=frozenset()):
     """One row per registry entry, sorted by bucket precedence then name.
 
     Pure: every input is passed in, so the bucket fixtures in
@@ -682,6 +768,7 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
     its own reason, never a sentence shared by every row.
     """
     gate_attribution = gate_attribution or {}
+    task_meta = task_meta or {}
     widths = widths or WIDTHS
     rows, details = [], {}
     for sid, rec in registry.items():
@@ -692,6 +779,8 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
         # and must render as an absent value, never as `inf`.
         age = ages.get(sid)
         last = "—" if age is None or not math.isfinite(age) else fs.human_age(age)
+        meta = task_meta.get(sid)
+        unblocks = unblocks_for(sid, age, meta, panel_ids)
         titles = task_titles.get(sid) or []
         # Glyph-stripped, matching `who-needs-me.py`'s display: the registry's
         # `name` may carry a leading `⚙` the operator did not type, and a name
@@ -705,11 +794,16 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
                 "label": label,
                 "role": grouping.role_of(sid) if grouping else ROLE_WORKER,
                 "parent": grouping.parent_of(sid) if grouping else None,
+                # Raw seconds, kept beside the rendered cell: the sibling-group
+                # ordering reads this, never the width-9 string — "20h ago" and
+                # "3h59m ago" do not sort the way their durations do.
+                "age": age,
+                "unblocks": unblocks,
                 "cells": [
                     label,
                     f"{BUCKET_ICON[bucket]} {bucket}",
                     titles[0] if titles else "—",
-                    fs.project_label("-" + (rec.get("cwd") or "").strip("/").replace("/", "-")),
+                    unblocks,
                     last,
                 ],
             }
@@ -717,6 +811,15 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
         if bucket == "needs-input":
             details[sid] = gate_attribution.get(sid) or (
                 f"no pane — gate for {sid[:8]} carries no pane id in the attention store"
+            )
+        # `operator-keystroke` is 18 chars — the whole column — so the pending
+        # closer cannot ride in the cell. It goes on the action line below the
+        # box, the same place a `needs-input` row's gate already reports itself.
+        if unblocks == UNBLOCKS_OPERATOR:
+            closer = wnm.closer_from_transcript({"session_id": sid})
+            details[sid] = (
+                f"waiting on your keystroke: {closer}" if closer else
+                f"waiting on your keystroke for {sid[:8]} — closer not readable from the transcript"
             )
     rows.sort(key=lambda r: (BUCKET_ORDER.index(r["bucket"]), r["label"].lower()))
     return rows, details
@@ -731,18 +834,45 @@ def _subject_suffix(found):
     return f" ({found[0]})" if found and found[0] in ("topic", "goal") else ""
 
 
+def _age_key(row):
+    """Sort key ordering a sibling group longest-inactive first.
+
+    Reads the row's **raw seconds**, never the rendered cell: the widths are 9
+    characters, so `20h ago` and `3h59m ago` do not sort the way their durations
+    do, and a probe that eyeballed the column would be checking the formatter.
+
+    `inf` — a session with no transcript — is the most stale reading there is,
+    so it leads its group. A **missing** age sorts last and is kept distinct
+    from `inf` rather than coerced into it: "nothing was ever written" and "we
+    could not read it" are different facts and must not tie.
+    """
+    age = row.get("age")
+    return (1, 0.0) if age is None else (0, -age)
+
+
 def build_tree(rows, grouping):
     """The drawable rows: group headers plus one row per session, in tree order.
 
-    Returns `(render_rows, ordered_ids)`. A header row is a label in the Session
-    column with every other cell blank — it names a group, not a session, so it is
-    deliberately absent from `ordered_ids`, which is what the coverage assertion
-    counts. Every session row appears exactly once.
+    Returns `(render_rows, ordered_ids, sids)`. A header row is a label in the
+    Session column with every other cell blank — it names a group, not a session,
+    so it is deliberately absent from `ordered_ids`, which is what the coverage
+    assertion counts. Every session row appears exactly once.
+
+    `sids` is parallel to `render_rows` — the session id per drawn row, `None`
+    for a group header — and exists so the renderer can link each Session cell
+    without parsing the glyphs back into ids.
 
     Glyphs follow the operator's chosen design: the root is flush left, its
     children branch from it, and a grandchild carries its parent's continuation
     bar. `Unmanaged` is a second root-level group — its members are the sessions
     no manager covers, so they draw as its children rather than under a manager.
+
+    Within each sibling group the order is **longest-inactive first**, read from
+    the raw transcript age (`_age_key`); managers still lead their group. The
+    global order stays tree order, and that is deliberate — the grouping is the
+    operator's own choice (2026-09-24) and carries the manager/worker/unmanaged
+    reading, which a globally age-sorted table would trade away for an ordering
+    the per-group rule already delivers.
 
     ⚠️ With no live root (the `Fleet Manager` session is not running) every
     top-level row draws flush, so the tree loses its single spine but stays
@@ -753,9 +883,9 @@ def build_tree(rows, grouping):
     for r in rows:
         by_parent.setdefault(r["parent"], []).append(r)
     for kids in by_parent.values():
-        kids.sort(key=lambda r: (r["role"] != ROLE_MANAGER, r["label"].lower()))
+        kids.sort(key=lambda r: (r["role"] != ROLE_MANAGER, _age_key(r), r["label"].lower()))
 
-    out, ordered = [], []
+    out, ordered, sids = [], [], []
 
     def draw(row, prefix, last, top=False):
         cells = list(row["cells"])
@@ -764,6 +894,9 @@ def build_tree(rows, grouping):
                          f"{_subject_suffix(grouping.subject_of(row['session_id']))}")
         out.append(cells)
         ordered.append(row["session_id"])
+        # Parallel to `out`, so the renderer can link the Session cell — whose
+        # text is a name and therefore carries nothing it could resolve from.
+        sids.append(row["session_id"])
         kids = by_parent.get(row["session_id"], [])
         child_prefix = "" if top else prefix + (TREE_BLANK if last else TREE_PIPE)
         for i, kid in enumerate(kids):
@@ -780,9 +913,10 @@ def build_tree(rows, grouping):
     unmanaged = by_parent.get(UNMANAGED, [])
     if unmanaged:
         out.append([UNMANAGED_LABEL, "", "", "", ""])
+        sids.append(None)  # a group header, not a session — nothing to link
         for i, r in enumerate(unmanaged):
             draw(r, "", i == len(unmanaged) - 1)
-    return out, ordered
+    return out, ordered, sids
 
 
 def main():
@@ -796,7 +930,7 @@ def main():
         print("fleet-board: session registry unreadable — refusing to render a table", file=sys.stderr)
         return 1
 
-    gate_ids, stuck_ids, attribution, panes_read = collect_signals(a.stuck_min)
+    gate_ids, stuck_ids, attribution, panes_read, panel_ids = collect_signals(a.stuck_min)
     if not panes_read:
         print(
             "fleet-board: ⚠️ `wezterm cli list` unreadable — pane data withheld. Every row is kept "
@@ -829,11 +963,15 @@ def main():
         merged[sid] = {"status": "busy", "name": "", "cwd": ""}
 
     task_titles = fs.build_work_map()
+    # The stamped task's own state — `status`, `phase`, its open-box count. The
+    # `Unblocks` classification needs all three and a title alone answers none.
+    task_meta = fs.build_task_meta()
     ages = {sid: wnm.session_transcript_age(sid) for sid in merged}
     grouping = build_grouping(merged, vault_index(), colour_census(), loop_slugs(), task_titles)
     rows, details = build_rows(merged, gate_ids, stuck_ids, task_titles, ages, grouping=grouping,
-                               gate_attribution=attribution)
-    tree, ordered = build_tree(rows, grouping)
+                               gate_attribution=attribution, task_meta=task_meta,
+                               panel_ids=panel_ids)
+    tree, ordered, sids = build_tree(rows, grouping)
 
     fresh = transcript_fresh_ids()
     # The coverage assertion counts SESSION rows; a group header names a group, not
@@ -843,12 +981,21 @@ def main():
     errors = coverage_errors([r["session_id"] for r in rows], set(registry), fresh, beat_ids)
     errors += tree_errors(ordered, [r["session_id"] for r in rows])
     counts = {b: sum(1 for r in rows if r["bucket"] == b) for b in BUCKET_ORDER}
+    # Every value in the fixed set, always present — a class with no rows reads
+    # `0`, never an absent key, so a consumer cannot mistake "none this round"
+    # for "this build does not know that class".
+    unblocks_counts = {u: sum(1 for r in rows if r["unblocks"] == u) for u in UNBLOCKS_VALUES}
 
     doc = {
         "header": HEADER,
         "rows": tree,
         "widths": WIDTHS,
+        # Parallel to `rows`: each drawn row's session id, or `None` for a group
+        # header. `box-table.py` links the Session cell from this, because that
+        # cell holds a name and a name resolves to nothing on its own.
+        "urls": sids,
         "counts": counts,
+        "unblocks_counts": unblocks_counts,
         "saturation": fleet_saturation(registry),
         "registry_count": len(registry),
         "row_count": len(rows),
@@ -862,11 +1009,25 @@ def main():
                 "role": r["role"],
                 "parent": r["parent"],
                 "bucket": r["bucket"],
+                "unblocks": r["unblocks"],
+                # The raw seconds the `Inactive` cell was rendered from, so the
+                # sibling-group ordering is checkable against the value that
+                # decided it rather than against the 9-char string it printed.
+                # `inf` (no transcript) is emitted as `null`: it is not a
+                # duration, and a literal `Infinity` is not valid JSON — `jq`
+                # and every strict parser reject it.
+                "age": (None if r["age"] is None or not math.isfinite(r["age"])
+                        else round(r["age"], 3)),
             }
             for r in rows
         ],
         "coverage_ok": not errors,
         "coverage_errors": errors,
+        # The drawn tree's session ids in emission order — a row's position in
+        # this list is its position in the box. Published because the ordering
+        # claim is otherwise only checkable by parsing the glyphs, and a probe
+        # that reads the rendered cell is testing the formatter, not the sort.
+        "order": ordered,
     }
     print(json.dumps(doc if a.json else {k: doc[k] for k in ("header", "rows", "widths")}))
 

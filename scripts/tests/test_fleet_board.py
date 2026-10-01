@@ -411,7 +411,7 @@ class TestTree(unittest.TestCase):
 
     def setUp(self):
         self.grouping, self.rows = _group_rows()
-        self.tree, self.ordered = fb.build_tree(self.rows, self.grouping)
+        self.tree, self.ordered, self.sids = fb.build_tree(self.rows, self.grouping)
 
     def cell(self, sid):
         """The Session cell drawn for one session, whatever its depth."""

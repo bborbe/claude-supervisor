@@ -132,6 +132,57 @@ def build_work_map() -> dict[str, list[str]]:
                     out.setdefault(m.group(1), []).append(f.stem)
     return out
 
+_TASK_STATUS = re.compile(r"^status:\s*[\"']?([A-Za-z_]+)", re.M)
+_TASK_PHASE = re.compile(r"^phase:\s*[\"']?([A-Za-z_]+)", re.M)
+# The vault's own open-box convention: `- [ ]` unchecked, `- [/]` in progress.
+_OPEN_BOX = re.compile(r"^\s*-\s*\[[ /]\]", re.M)
+
+
+def build_task_meta() -> dict[str, dict]:
+    """session-id -> the stamped task's own state, for the board's `Unblocks` column.
+
+    `build_work_map()` answers only *which* task a session stamped. The
+    classification also needs that task's state — `status` for the reap/close
+    test, `phase` plus its open-box count for the nudge test — so this walks the
+    same vaults, matches the same stamp, and keeps a richer record.
+
+    A sibling rather than a widening of `build_work_map()`: that one feeds the
+    roster's title column, and its callers would have to learn a new shape for
+    no gain.
+
+    First stamp wins, and the directory order is what makes that meaningful —
+    `vault_dirs_from_cli()` lists `tasks_dir` before `goals_dir`, and
+    `PROBE_DIRS` puts the task folders first, so a session that stamped both a
+    task and a goal anchors on the task.
+    """
+    out: dict[str, dict] = {}
+    pat = re.compile(r'claude_session_id:\s*["\']?(' + UUID_RE.pattern + ')')
+    known = vault_dirs_from_cli()
+    for vault in OBSIDIAN.iterdir():
+        if not vault.is_dir(): continue
+        for sub in known.get(os.path.realpath(vault)) or PROBE_DIRS:
+            d = vault / sub
+            if not d.is_dir(): continue
+            for f in d.glob("*.md"):
+                try:
+                    text = f.read_text("utf-8", "replace")
+                except Exception:
+                    continue
+                m = pat.search(text[:600])
+                if not m:
+                    continue
+                status = _TASK_STATUS.search(text)
+                phase = _TASK_PHASE.search(text)
+                out.setdefault(m.group(1), {
+                    "title": f.stem,
+                    "path": str(f),
+                    "status": status.group(1) if status else "",
+                    "phase": phase.group(1) if phase else "",
+                    "open_boxes": len(_OPEN_BOX.findall(text)),
+                })
+    return out
+
+
 def ledger_dir() -> Path:
     """The spawn ledger directory, resolved from the writer's own env override.
 
