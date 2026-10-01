@@ -23,12 +23,34 @@ import io
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "manager-predispatch.py")
+
+
+def live_proc_start(pid):
+    """`pid`'s real start time as the registry writes `procStart` — ctime, UTC.
+
+    A planted record needs this to be realistic. `session-liveness.py` now proves the pid
+    belongs to the recorded session by comparing `procStart` against the live holder's
+    `ps -o lstart=`, so a fixture that omits the field is UNKNOWN by design — the
+    missing-field path, not the live one these tests mean to exercise.
+    """
+    out = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True
+    ).stdout.strip()
+    if not out:
+        return None
+    return (
+        datetime.strptime(out, "%a %b %d %H:%M:%S %Y")
+        .astimezone(timezone.utc)
+        .strftime("%a %b %d %H:%M:%S %Y")
+    )
 
 TASK = """---
 status: in_progress
@@ -136,7 +158,15 @@ class Base(unittest.TestCase):
 
     def registry(self, sid, status="idle"):
         with open(os.path.join(self.m.REGISTRY_DIR, "1.json"), "w") as fh:
-            json.dump({"sessionId": sid, "pid": os.getpid(), "status": status}, fh)
+            json.dump(
+                {
+                    "sessionId": sid,
+                    "pid": os.getpid(),
+                    "procStart": live_proc_start(os.getpid()),
+                    "status": status,
+                },
+                fh,
+            )
 
     def heartbeat(self, sid, age):
         p = os.path.join(self.m.HEARTBEAT_DIR, "%s.json" % sid)
@@ -407,6 +437,7 @@ class TestLiveness(Base):
                 {
                     "sessionId": sid,
                     "pid": os.getpid(),
+                    "procStart": live_proc_start(os.getpid()),
                     "status": status,
                     "name": name,
                 },
