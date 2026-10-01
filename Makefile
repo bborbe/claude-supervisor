@@ -9,6 +9,9 @@ check-changelog:
 check-spawn-mode:
 	@python3 scripts/check-spawn-mode.py
 
+check-worker-target:
+	@python3 scripts/check-worker-target.py
+
 check-recording-step:
 	@python3 scripts/check-recording-step.py
 
@@ -23,6 +26,6 @@ test: check
 	python3 -m unittest discover -s scripts/tests || rc=1; \
 	exit $$rc
 
-precommit: check-versions check-changelog check-spawn-mode check-recording-step check
+precommit: check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check
 
-.PHONY: default check-versions check-changelog check-spawn-mode check-recording-step check test precommit
+.PHONY: default check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check test precommit
