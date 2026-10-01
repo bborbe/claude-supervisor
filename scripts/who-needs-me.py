@@ -1326,6 +1326,29 @@ def pane_for(session_id):
     return 1
 
 
+# The five sections this feed renders, in render order. `--section` names them;
+# a manager's attention watcher arms on `needs-you` alone.
+SECTIONS = ("needs-you", "rendered-panels", "stuck", "reapable", "idle")
+
+
+def section_filter(names):
+    """Predicate over section names; no names selects every section.
+
+    Extracted from `main()` so the scoping is testable without driving the whole
+    render (which needs a live WezTerm and session registry). `--section` exists
+    because the consumer, `gate-owner-filter.py`'s `panes_from_feed`, matches
+    `[<pane>]` on ANY line regardless of the section header above it — so a
+    whole-feed arm fires on every `Rendered panels` closer, a line this feed's own
+    header labels "not a parked gate".
+    """
+    want = set(names) if names else None
+
+    def wanted(name):
+        return want is None or name in want
+
+    return wanted
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stuck-min", type=int, default=20)
@@ -1333,6 +1356,15 @@ def main():
         "--all",
         action="store_true",
         help=f"list every open item instead of the first {CAP}",
+    )
+    ap.add_argument(
+        "--section",
+        action="append",
+        choices=SECTIONS,
+        help="render only this section (repeatable); the default renders all five. "
+        "A manager's attention watcher arms on `--section needs-you`: the other four "
+        "are not gates, and an unscoped feed makes that watcher fire on every peer's "
+        "rendered closer.",
     )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
     ap.add_argument(
@@ -1407,28 +1439,42 @@ def main():
     # Say which source answered, once, before any row. A silent fallback would
     # be indistinguishable from a healthy store — which is the whole failure
     # this note exists to prevent.
+    # `--section` scopes the render to the named sections; with no flag all five
+    # render, byte-for-byte as before. The scoping exists because the consumer,
+    # `gate-owner-filter.py`'s `panes_from_feed`, matches `[<pane>]` on ANY line
+    # regardless of the section header above it — so a whole-feed arm fires on every
+    # `Rendered panels` closer, a line this feed's own header labels "not a parked
+    # gate". Measured 2026-10-01 on the Manager Layer arm: 8 wakes in ~55 minutes,
+    # 1 actionable, each wake a full manager turn.
+    wanted = section_filter(a.section)
+
     if SOURCE_NOTE:
         print(SOURCE_NOTE)
-    print(f"Needs you ({len(blocked)})")
-    # Capped: the manager reads a summary. A reader that prints thirty
-    # undifferentiated rows has failed to triage, not failed to report — and the
-    # count of what it omitted is what keeps the cap honest rather than silent.
-    shown, withheld = capped(blocked, a.all)
-    for r in shown:
-        print(row(r, pmap, f"{r['kind']}: {r['detail']}", registry))
-    if withheld:
-        print(f"{withheld} more — pass --all")
-    print(f"\nRendered panels ({len(panels)})  — a closer line, not a parked gate")
-    for r in panels:
-        print(row(r, pmap, r["detail"], registry))
-    print(f"\nProbably stuck > {a.stuck_min}m ({len(stuck)})")
-    for r in stuck:
-        print(row(r, pmap, r["detail"], registry))
-    print(f"\nReapable ({len(reapable)})  — finished work on a close gate, yours to close")
-    for r in reapable:
-        print(row(r, pmap, r["detail"], registry))
-    print(f"\nIdle, turn ended: {len(idle)}")
-    if not blocked and not stuck:
+    if wanted("needs-you"):
+        print(f"Needs you ({len(blocked)})")
+        # Capped: the manager reads a summary. A reader that prints thirty
+        # undifferentiated rows has failed to triage, not failed to report — and the
+        # count of what it omitted is what keeps the cap honest rather than silent.
+        shown, withheld = capped(blocked, a.all)
+        for r in shown:
+            print(row(r, pmap, f"{r['kind']}: {r['detail']}", registry))
+        if withheld:
+            print(f"{withheld} more — pass --all")
+    if wanted("rendered-panels"):
+        print(f"\nRendered panels ({len(panels)})  — a closer line, not a parked gate")
+        for r in panels:
+            print(row(r, pmap, r["detail"], registry))
+    if wanted("stuck"):
+        print(f"\nProbably stuck > {a.stuck_min}m ({len(stuck)})")
+        for r in stuck:
+            print(row(r, pmap, r["detail"], registry))
+    if wanted("reapable"):
+        print(f"\nReapable ({len(reapable)})  — finished work on a close gate, yours to close")
+        for r in reapable:
+            print(row(r, pmap, r["detail"], registry))
+    if wanted("idle"):
+        print(f"\nIdle, turn ended: {len(idle)}")
+    if wanted("needs-you") and not blocked and not stuck:
         print("\nNothing needs you.")
 
 
