@@ -773,6 +773,23 @@ def buckets_path(subject: str) -> str:
     return os.path.join(STATE_DIR, f"{slug(subject)}.buckets.json")
 
 
+def verdicts_path(subject: str) -> str:
+    """Where the drive leg's `Audit` block lands, keyed by the same subject slug.
+
+    The cache clause (1) names — `<slug>.verdicts.json`, beside the `<slug>.buckets.json`
+    the caller already writes its `bucket_sets` into — and the counterpart of
+    `buckets_path`. Clause (1) assigns the write to the *caller* ("The write is the
+    caller's … let the caller persist them") and the leg holds no write tool, so the
+    caller needs a writer it can reach without `Write` or a shell redirect: that is
+    `--write-verdicts`.
+
+    Unlike `buckets_path` this is not a staging file — nothing folds it into the record.
+    The store is the gate's verdict over the *tree*; this is the leg's verdict over *rows*,
+    and clause (1) reads it back on the next tick to decide what to re-audit.
+    """
+    return os.path.join(STATE_DIR, f"{slug(subject)}.verdicts.json")
+
+
 def payload_path(subject: str) -> str:
     """Where the render writes the table it just rendered, for `--save` to read back.
 
@@ -985,6 +1002,38 @@ def bucket_shape_error(parsed) -> str | None:
     return None
 
 
+def verdicts_shape_error(parsed) -> str | None:
+    """Why `parsed` cannot serve as a verdicts cache, or None when it is usable.
+
+    A dict of task name -> `{verdict, score, content_key}` is the only shape clause (1)
+    can read. The load-bearing key is `content_key`: clause (1) re-audits a row when its
+    *file content* changes, so a stored verdict carrying no key can never be told from a
+    stale one — and it would be read back as a cache hit on every tick forever. `score` is
+    deliberately allowed to be null, because `blocked` rows carry none and the sibling
+    caches on disk show exactly that shape.
+
+    The empty-object case is refused for the reason `bucket_shape_error` gives: `{}` gates
+    nothing while looking like a cache that was written.
+    """
+    if not isinstance(parsed, dict) or not parsed:
+        return "verdicts must be a non-empty JSON object"
+    for name, entry in parsed.items():
+        if not isinstance(name, str) or not name.strip():
+            return "each key must be a non-blank task name"
+        if not isinstance(entry, dict):
+            return f"entry {name!r} must be an object"
+        verdict = entry.get("verdict")
+        if not isinstance(verdict, str) or not verdict.strip():
+            return f"entry {name!r} must carry a non-blank verdict"
+        score = entry.get("score")
+        if score is not None and (isinstance(score, bool) or not isinstance(score, int)):
+            return f"entry {name!r} score must be an integer or null"
+        key = entry.get("content_key")
+        if not isinstance(key, str) or not key.strip():
+            return f"entry {name!r} must carry a non-blank content_key"
+    return None
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="manager pre-dispatch change gate")
     ap.add_argument("--subject", required=True, help="goal or topic name")
@@ -1014,6 +1063,11 @@ def main(argv: list[str]) -> int:
         "--write-buckets",
         action="store_true",
         help="stage the caller's per-bucket classification (JSON on stdin) for --save",
+    )
+    mode.add_argument(
+        "--write-verdicts",
+        action="store_true",
+        help="persist the drive leg's Audit block (JSON on stdin) to <slug>.verdicts.json",
     )
     mode.add_argument(
         "--write-payload",
@@ -1097,6 +1151,49 @@ def main(argv: list[str]) -> int:
         os.makedirs(STATE_DIR, exist_ok=True)
         try:
             with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(parsed, fh, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        print(path)
+        return EXIT_WRITE_OK
+
+    if args.write_verdicts:
+        # The writer clause (1) delegates to the caller and the tree never provided. The
+        # leg reports each row's verdict, score and content key under its `Audit` block
+        # and holds no write tool; the caller is told to persist them, but the only tool
+        # the manager commands are granted is `Bash(python3:*)` — no `Write`, no shell
+        # redirect. So the write is routed through this script for the same transport
+        # reason `--write-tracked` is, and the first token stays `python3`.
+        #
+        # Stored as its own file rather than folded into the record: the store is the
+        # gate's verdict over the *tree*, this is the leg's verdict over *rows*, and
+        # clause (1) reads it back by content key on the next tick.
+        try:
+            parsed = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as exc:
+            print(f"verdicts must be JSON: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        shape_error = verdicts_shape_error(parsed)
+        if shape_error:
+            # A refused write must not clobber a good cache. The reason is sharper here
+            # than for the other staging files: a cache that reads back as present but
+            # unusable is indistinguishable from one that was never written, and every
+            # later tick then re-audits cold while believing it has a cache — the exact
+            # state this writer exists to end.
+            print(f"refusing to write these verdicts: {shape_error}", file=sys.stderr)
+            return EXIT_USAGE
+        path = verdicts_path(args.subject)
+        tmp = path + ".tmp"
+        os.makedirs(STATE_DIR, exist_ok=True)
+        try:
+            # 0600 at creation rather than by a chmod after it, matching `save_stored`:
+            # the file is never world-readable, not even for the instant between the
+            # write and the chmod.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(parsed, fh, indent=2, sort_keys=True)
             os.replace(tmp, path)
         except BaseException:
