@@ -553,6 +553,7 @@ class OrphanLiveness(unittest.TestCase):
         """`sessionId` is the registry's key; a renamed field must not read as dead."""
         self.assertEqual(wnm.live_session_ids(self.registry([self.LIVE])), {self.LIVE})
 
+
     def test_reader_delegates_to_the_registry_rather_than_reimplementing_it(self):
         """SC3's evidence is the CALL, not verdict agreement.
 
@@ -574,6 +575,189 @@ class OrphanLiveness(unittest.TestCase):
         self.assertIn("read_registry()", src,
                       "main() must source liveness from the registry reader")
 
+
+class PaneResolutionWithoutALogLine(unittest.TestCase):
+    """A store row whose pane the event log cannot locate must still be rendered.
+
+    ⚠️ **The defect, and why the pane is absent rather than wrong.** A store row takes
+    its pane from the hook's own event log, joined on `dedup_key`
+    (`normalize_store_item`). When no line exists under that key the row carries no
+    pane at all, and `is_live()`'s pane clause -- `str(rec.get("pane")) not in pmap` --
+    then drops the row before any classifier sees it. The operator is never told the
+    session is parked, so it waits indefinitely: the ask disappears *because* nobody
+    answered it. Measured 2026-10-01 on a parked pane 479 (session `29d4464c`), whose
+    store item was open and whose modal footer was on screen, while the feed rendered
+    the pane `absent`.
+
+    Two live producers write no line under their own `dedup_key`, so the row has no
+    pane to record: `attention-push.py` (a `session:`-marked declaration, not a hook
+    event) and, after `owned_pane()` began refusing an unprovable pane, any session
+    that **inherits** `WEZTERM_PANE` from its spawner -- a headless worker does this by
+    construction, and its item now carries an empty pane by design.
+
+    **The fix is the join the board already uses.** `attention-controller` resolved
+    this same class with a second resolution source beside the log: the item's session
+    is named from its registry entry, and that name is matched against the live panes'
+    glyph-stripped titles. The feed has the identical join already -- `is_routable()`
+    proves a *recorded* pane by exactly that test -- so this is the same predicate
+    reached from the other side, not a new one.
+
+    **Why a name-keyed join is the right instrument here.** The registry carries
+    `sessionId` and `name`; a pane carries `pane_id` and `title`. The glyph-stripped
+    title-vs-name comparison is the only session->pane join either side can observe,
+    and it makes no claim when the session cannot be named -- which is what keeps a
+    nameless row from being routed to a plausible-looking wrong pane.
+    """
+
+    SID = "dddddddd-4444-4444-8444-dddddddddddd"
+    NAME = "Parked Worker"
+
+    def setUp(self):
+        self._age = wnm.session_transcript_age
+        wnm._AGE_CACHE.clear()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        wnm.session_transcript_age = self._age
+        wnm._AGE_CACHE.clear()
+
+    def pane_map(self, title=None, pane_id=479):
+        """The live panes as `wezterm cli list --format json` reports them."""
+        return {str(pane_id): {"pane_id": pane_id, "title": title or f"◐ {self.NAME}"}}
+
+    #: Distinguishes "caller passed nothing" from "caller passed an empty string",
+    #: which the unnamed-session case needs to express.
+    _UNSET = object()
+
+    def registry(self, name=_UNSET, sid=_UNSET):
+        """A registry map in the real shape; the no-arg call is the EMPTY one.
+
+        `{}` and `None` are different answers and the tests below use both: an empty
+        registry means no session is registered, while `None` is an *unreadable* one
+        that proves nothing. Collapsing them is the `pane-reads.md` defect.
+        """
+        if name is self._UNSET and sid is self._UNSET:
+            return {}
+        return {(self.SID if sid is self._UNSET else sid):
+                (self.NAME if name is self._UNSET else name)}
+
+    def live_registry(self):
+        """The registry holding this session under its real name."""
+        return self.registry(sid=self.SID, name=self.NAME)
+
+    def store_row(self, pane=None, sid=_UNSET):
+        """A store row as `normalize_store_item` yields it when the join found no line.
+
+        `store_vouched` is set, as `needs_source()` sets it on every store row: the
+        store resolved the producer's liveness server-side, so this reader must not
+        re-judge it -- the row's absence from the feed is the pane clause's doing, not
+        the quiet set's, and the fixture must not be able to pass for the wrong reason.
+        """
+        return {"session_id": self.SID if sid is self._UNSET else sid, "pane": pane, "cwd": "/tmp",
+                "kind": "permission", "detail": "Bash: make build -n",
+                "state": "open", "ts": 0, "store_vouched": True,
+                "store_item_id": "75264206"}
+
+    # --- the defect: no pane -> dropped --------------------------------------
+
+    def test_store_row_without_a_pane_is_dropped_today(self):
+        """The control: this is the current, wrong behaviour the fix must change.
+
+        The row is live by every other signal -- the session is registered, its
+        transcript is fresh, and the pane its name resolves to is on screen. Only the
+        absent pane drops it.
+        """
+        rec = self.store_row()
+        self.assertIsNone(rec["pane"], "the fixture must carry NO pane to be the case")
+        self.assertFalse(wnm.is_live(rec, self.pane_map(), set()),
+                         "an absent pane drops the row before the fix")
+
+    def test_resolving_the_pane_by_name_makes_the_row_live(self):
+        """SC2: the resolved pane survives `is_live()`, so the row reaches the feed."""
+        rec = wnm.resolve_missing_panes([self.store_row()], self.pane_map(),
+                                        self.live_registry())[0]
+        self.assertEqual(str(rec["pane"]), "479", "the pane is resolved by name")
+        self.assertTrue(wnm.is_live(rec, self.pane_map(), set()))
+
+    def test_resolved_pane_is_routable(self):
+        """The jump line is this feed's payload -- a resolved pane must carry one.
+
+        A pane filled in for liveness but refused by `is_routable()` would render the
+        row with no way to reach it, which is the dead end `answer_handover()` exists
+        to cover and not the outcome this fix claims.
+        """
+        rec = wnm.resolve_missing_panes([self.store_row()], self.pane_map(),
+                                        self.live_registry())[0]
+        self.assertTrue(wnm.is_routable(rec, self.pane_map(), self.live_registry()))
+
+    def test_resolved_pane_renders_under_needs_you(self):
+        """SC2, end to end through the classifier the feed's `Needs you` list uses."""
+        rec = wnm.resolve_missing_panes([self.store_row()], self.pane_map(),
+                                        self.live_registry())[0]
+        self.assertTrue(wnm.is_open_gate(rec))
+
+    # --- the guards: resolution must not invent a pane -----------------------
+
+    def test_recorded_pane_is_left_untouched(self):
+        """The fallback fills a gap; it never overrides what the log recorded.
+
+        A recorded pane is the event-time fact, and re-resolving it would replace it
+        with a name-guess -- the confident-wrong-direction defect `is_routable()`
+        refuses. The controller draws the same line: the logged path wins wherever a
+        line exists.
+        """
+        rec = wnm.resolve_missing_panes([self.store_row(pane="999")], self.pane_map(),
+                                        self.live_registry())[0]
+        self.assertEqual(rec["pane"], "999", "a recorded pane is not re-resolved")
+
+    def test_unnamed_session_claims_no_pane(self):
+        """An unresolvable session yields NO pane -- an absence, never a guess.
+
+        This is the load-bearing safety property, and it is why the join is keyed on
+        the registry's name: handing an unnamed session the first pane on screen would
+        mark every pane as its own and stamp a confident route onto a row the reader
+        knows nothing about.
+        """
+        rec = wnm.resolve_missing_panes([self.store_row()], self.pane_map(),
+                                        self.registry(name="", sid=""))[0]
+        self.assertIsNone(rec["pane"])
+        self.assertFalse(wnm.is_live(rec, self.pane_map(), set()))
+
+    def test_no_matching_pane_claims_nothing(self):
+        """A named session whose pane is not on screen resolves to nothing."""
+        rec = wnm.resolve_missing_panes([self.store_row()], self.pane_map(title="◐ Other"),
+                                        self.registry())[0]
+        self.assertIsNone(rec["pane"])
+
+    def test_unreadable_pane_list_claims_nothing(self):
+        """`None` panes cannot prove a pane exists -- same rule as `is_live()`.
+
+        `{}` (readable, empty) and `None` (unreadable) are different answers, and only
+        the second is an absence of one. Neither may produce a pane here.
+        """
+        self.assertIsNone(wnm.resolve_missing_panes(
+            [self.store_row()], None, self.live_registry())[0]["pane"])
+
+    def test_unreadable_registry_claims_nothing(self):
+        """An unreadable registry names no session, so no pane can be resolved.
+
+        `None` is the unreadable answer -- distinct from `{}`, a real read that found
+        no session. Neither resolves a pane; this one because nothing can be looked
+        up, the next because the session genuinely is not there.
+        """
+        self.assertIsNone(wnm.resolve_missing_panes(
+            [self.store_row()], self.pane_map(), None)[0]["pane"])
+
+    def test_empty_registry_claims_nothing(self):
+        """A readable-but-empty registry holds no name, so no pane is claimed."""
+        self.assertIsNone(wnm.resolve_missing_panes(
+            [self.store_row()], self.pane_map(), {})[0]["pane"])
+
+    def test_row_without_a_session_is_left_alone(self):
+        """A cron job or agent item names no session; there is nothing to look up."""
+        rec = self.store_row(sid="")
+        self.assertIsNone(wnm.resolve_missing_panes([rec], self.pane_map(),
+                                                    self.live_registry())[0]["pane"])
 
 class AttentionStoreSource(unittest.TestCase):
     """The store is a THIRD producer of one record shape, not a second path.
