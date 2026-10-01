@@ -1165,6 +1165,68 @@ class TestVerdictsCache(Base):
         rc, _ = self.verdicts("ATopic", {"ATask": {"score": 9, "content_key": "c" * 64}})
         self.assertEqual(rc, self.m.EXIT_USAGE)
 
+    def test_refuses_a_needs_you_entry_with_no_reason(self):
+        """The verdicts that quote the audit to the operator require the quote. A cache
+        hit carries no dispatch, so an entry stored without its reason can never render
+        its `UNFIXABLE:` grounds — the loss the field exists to remove, with the schema
+        looking fixed."""
+        rc, _ = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "e" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_refuses_a_blank_reason_on_every_verdict_that_needs_one(self):
+        for verdict in self.m.VERDICTS_NEEDING_REASON:
+            with self.subTest(verdict=verdict):
+                rc, _ = self.verdicts(
+                    "ATopic",
+                    {
+                        "ATask": {
+                            "verdict": verdict,
+                            "score": None,
+                            "content_key": "f" * 64,
+                            "reason": "   ",
+                        }
+                    },
+                )
+                self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_accepts_a_reason_on_a_needs_you_entry(self):
+        payload = {
+            "ATask": {
+                "verdict": "needs-you",
+                "score": None,
+                "content_key": "1" * 64,
+                "reason": "no Alertmanager is named anywhere in the vault",
+            }
+        }
+        rc, out = self.verdicts("ATopic", payload)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(self.read_verdicts("ATopic"), payload)
+
+    def test_a_reason_is_optional_on_the_other_verdicts(self):
+        """The requirement is a property of the *verdict*, not of the schema: a `ready`
+        row quotes nothing to the operator, so demanding a reason of it would refuse a
+        shape the sibling caches on disk actually hold."""
+        payload = {"ATask": {"verdict": "ready", "score": 9, "content_key": "2" * 64}}
+        rc, out = self.verdicts("ATopic", payload)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+
+    def test_refuses_a_non_string_reason(self):
+        rc, _ = self.verdicts(
+            "ATopic",
+            {
+                "ATask": {
+                    "verdict": "ready",
+                    "score": 9,
+                    "content_key": "3" * 64,
+                    "reason": ["not", "a", "string"],
+                }
+            },
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
     def test_refuses_a_non_object(self):
         rc, _ = self.verdicts("ATopic", ["ATask"])
         self.assertEqual(rc, self.m.EXIT_USAGE)
