@@ -279,6 +279,36 @@ The target here **proposes**: below it a manager posts a card and waits, and the
 answers. The human queue is therefore not lengthened by the rule — the operator is the one
 who decides whether to lengthen it, which is the property the earlier reading was protecting.
 
+## The approved-not-started reading
+
+Every tick prints this line with the marker line:
+
+    approved, not started: 3 · oldest 7h35m (Build claude-interactive)
+
+Read it from `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"`. A row
+counts when its task-file frontmatter carries `approved_at` with a non-terminal `status`
+and no **live** `claude_session_id`. This is the reverse index for the one gap the sweep
+structurally cannot see: it classifies *live sessions*, so a row nobody ever opened has no
+session to sweep from and is invisible to every other channel. Rows waiting longer than
+one tick (**30 min, a script constant** — never a per-call flag, because two rounds
+disagreeing about the same row is the defect this line exists to remove) are listed
+beneath it with their owning manager.
+
+⚠️ **`unknown` is a third answer, not `0`.** If the session registry cannot be read the
+script prints `approved, not started: unknown` and exits non-zero — *"no approved rows are
+waiting"* and *"I could not ask"* must not render the same (`docs/pane-reads.md` § The
+rule). Print it as it comes back; never round `unknown` down to a number.
+
+⚠️ **The line reports; it never opens.** These rows are the drive leg's and the owning
+manager's to act on, under the standing mandate and its approval boundary — this reading
+adds visibility, not authority.
+
+Measured 2026-10-01 22:08, live run against the primary vault: `approved, not started: 16 ·
+oldest 1d14h (Check the ORB DE40 AUM 6-Month Cap Before It Passes)` — approved work no
+round had ever surfaced. The head count moves minute to minute as sessions start and stop
+(the same day read 12, 14, 15 and 16 within ten minutes); that is the metric working, not
+noise, and it is why the line is a reading rather than a stored number.
+
 ## Rules (non-negotiable)
 
 - **An operator ask lives on disk from the moment it is said** — `/supervisor:open-items add` it before replying, render every round, close only on Step 4's evidence.

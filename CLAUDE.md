@@ -127,6 +127,7 @@ docs/fleet-surface.md                            spawn shape + table render spec
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the four manager commands share
 scripts/manager-predispatch.py                   the pre-dispatch gate both manager commands run first (state: ~/.claude/state/manager-predispatch/)
+scripts/approved-not-started.py                  the approved-but-unstarted reading both loops print (tick = 30 min constant; `unknown`, never `0`, on an unreadable registry)
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/manager-wrangler.md                routine approval loop over headless workers
