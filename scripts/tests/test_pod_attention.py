@@ -57,6 +57,7 @@ def gate_args(**overrides):
         dedup_key="gate-1",
         payload="Run the production deploy?",
         producer_id="pod-a",
+        liveness_ref="",
         timeout=10.0,
         interval=1.0,
     )
@@ -72,6 +73,7 @@ def ask_args(**overrides):
         recommend="board",
         producer_id="pod-a",
         interrupt_class="pick",
+        liveness_ref="",
     )
     defaults.update(overrides)
     return mock.Mock(**defaults)
@@ -304,6 +306,70 @@ class GateTest(unittest.TestCase):
             rc = pod.cmd_gate(gate_args(), out=out)
         self.assertEqual(rc, 2)
         self.assertIn("not loopback", out.getvalue())
+
+
+class WireContractTest(unittest.TestCase):
+    """The two fields the store validates against a closed enum.
+
+    The first e2e run posted `producer_kind: "pod"` and `liveness_ref: "pod:<id>"`, and the
+    store rejected **every** push with a 400 naming the field. These tests could not have
+    seen it — they mock `urlopen`, so no real validation runs — so they assert the exact
+    wire values instead, which is the closest a mocked test gets. A regression to an
+    invented kind fails here rather than at the next e2e.
+    """
+
+    # Mirrors `attention-controller` pkg/producer-kind.go and pkg/liveness-ref.go,
+    # and confirmed against the running store.
+    STORE_PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+    STORE_LIVENESS_MODELS = ("session", "heartbeat")
+
+    def _posted(self, command="ask"):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            # The gate arm POSTs then polls; only the POST carries a body.
+            if req.get_method() == "POST":
+                captured["body"] = json.loads(req.data.decode())
+                return FakeResponse({"item_id": "i1"})
+            return FakeResponse(item(state="open"))
+
+        clock = FakeClock()
+        with mock.patch.object(pod.urllib.request, "urlopen", fake_urlopen):
+            if command == "ask":
+                pod.cmd_ask(ask_args(), out=io.StringIO())
+            else:
+                pod.cmd_gate(
+                    gate_args(timeout=0.0), out=io.StringIO(), sleep=clock.sleep, clock=clock
+                )
+        return captured["body"]
+
+    def test_producer_kind_is_a_member_of_the_stores_enum(self):
+        for command in ("ask", "gate"):
+            with self.subTest(command=command):
+                self.assertIn(self._posted(command)["producer_kind"], self.STORE_PRODUCER_KINDS)
+
+    def test_liveness_ref_uses_a_known_model_and_names_the_producer(self):
+        body = self._posted()
+        model, _, value = body["liveness_ref"].partition(":")
+        self.assertIn(model, self.STORE_LIVENESS_MODELS)
+        self.assertEqual(value, body["producer_id"])
+
+    def test_an_explicit_liveness_ref_is_used_verbatim(self):
+        """A pod the local session registry cannot resolve declares its own ref.
+
+        Without this the store sees the producer as gone, prunes the open ask on the
+        first read, and the card never reaches the operator.
+        """
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": "i1"})
+
+        with mock.patch.object(pod.urllib.request, "urlopen", fake_urlopen):
+            pod.cmd_ask(ask_args(liveness_ref="heartbeat:/tmp/pod.hb"), out=io.StringIO())
+
+        self.assertEqual(captured["body"]["liveness_ref"], "heartbeat:/tmp/pod.hb")
 
 
 if __name__ == "__main__":
