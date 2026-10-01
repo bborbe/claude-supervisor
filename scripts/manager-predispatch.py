@@ -55,10 +55,23 @@ So: same contract, different surface. This gate owns its own store, and the two 
 disagree about a tree because they hash the same inputs.
 
 Exit codes (same three the loop gate uses)
-  0   digest equal to the stored one AND no moved bucket set — nothing changed, dispatch
-      no agent
-  10  digest differs, OR a staged bucket set differs from the stored one, OR any fail-open
-      case fired — run the full sweep
+  0   digest equal to the stored one AND no moved bucket set AND no actionable row in the
+      stored classification — nothing changed, dispatch no agent
+  10  digest differs, OR a staged bucket set differs from the stored one, OR the stored
+      classification places a row in an actionable bucket, OR any fail-open case fired —
+      run the full sweep
+
+      ⚠️ The actionable-row clause is not a passenger on the digest, and it cannot be one.
+      Ready-to-start is a STEADY state: `digest_of()` hashes status, phase, the Progress
+      hash, session, liveness and stuck, and none of them moves when a row merely sits
+      approved and unstarted. Measured 2026-10-01 on `Managers Spawn Interactive Claude
+      Workers in the Cluster`: NO-CHANGE since 18:04 with 2 ready-to-start and 1
+      waiting-approval row on the board, 0 agents dispatched — so the act leg never ran and
+      the rows never moved. The caller's own `bucket_sets` is the only place a bucket
+      exists (`digest_of` covers the tracked set, and the snapshot schema has no bucket
+      concept), so the clause reads that half and suspends the saving for exactly as long
+      as actionable work is waiting. The saving returns on its own: a row the act leg
+      actually opened reclassifies as progressing on the next sweep.
 
       The per-bucket half is a save input in its own right, not a passenger on the digest:
       `digest_of()` covers the tracked set only, so a corrected re-stage against an
@@ -1025,6 +1038,29 @@ def save_stored(
 # verdict
 # --------------------------------------------------------------------------- #
 
+# Buckets whose presence means the act leg has work it can do *right now*, so a no-change
+# verdict would starve it. See the module docstring's exit-code note for the measurement.
+ACTIONABLE_BUCKETS = ("ready-to-start", "waiting-approval")
+
+
+def actionable_names(bucket_sets) -> list[str]:
+    """The rows the stored classification places in an actionable bucket, sorted.
+
+    Read from the CALLER's own per-bucket half, because that is the only place a row's
+    bucket exists: `digest_of()` covers the tracked set, and the snapshot schema has no
+    bucket concept. A missing or malformed half returns `[]` and changes no verdict — the
+    gate then behaves exactly as it did before this clause existed, which is the safe
+    direction: an absent classification costs a replay, never a wrong dispatch.
+    """
+    if not isinstance(bucket_sets, dict):
+        return []
+    names: list[str] = []
+    for bucket in ACTIONABLE_BUCKETS:
+        rows = bucket_sets.get(bucket)
+        if isinstance(rows, list):
+            names.extend(n for n in rows if isinstance(n, str) and n.strip())
+    return sorted(set(names))
+
 
 def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     """-> (changed, reason, payload, stored_table).
@@ -1047,14 +1083,31 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     stored, stored_table, fail_reason = load_stored(subject)
     prev = load_state(subject)
     prev_busy = prev.get("busy_since") or {}
+    stored_bucket_sets = prev.get("bucket_sets")
 
     now_ts = time.time()
     enrich_liveness(tracked, registry, feed)
     busy = apply_stuck(tracked, registry, prev_busy, now_ts)
     digest = digest_of(tracked)
 
-    changed = fail_reason is not None or stored != digest
-    reason = fail_reason or ("digest differs" if changed else "digest equal")
+    # Three independent reasons to sweep. The third is not derivable from the other two and
+    # is deliberately NOT folded into `digest_of`: that function's contract is "what the
+    # sweep would render", a pure function of the tracked set, and a caller-supplied
+    # classification has no business moving it. See the module docstring's exit-code note.
+    digest_moved = stored != digest
+    actionable = actionable_names(stored_bucket_sets)
+    changed = fail_reason is not None or digest_moved or bool(actionable)
+    if fail_reason:
+        reason = fail_reason
+    elif digest_moved:
+        reason = "digest differs"
+    elif actionable:
+        shown = ", ".join(actionable[:3])
+        if len(actionable) > 3:
+            shown += f" +{len(actionable) - 3} more"
+        reason = f"{len(actionable)} actionable row(s) waiting: {shown}"
+    else:
+        reason = "digest equal"
     payload = {
         "branch": branch,
         "digest": digest,
@@ -1062,11 +1115,9 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
         "busy": busy,
         "recorded_at": prev.get("recorded_at", ""),
         # The per-bucket half as it stands in the record, so `--save` can tell a freshly
-        # staged classification from the one already stored. It is deliberately NOT folded
-        # into `digest_of`: that function's contract is "what the sweep would render", a
-        # pure function of the tracked set, and a caller-supplied argument has no business
-        # moving it. The comparison lives at the save decision instead — see `--save`.
-        "stored_bucket_sets": prev.get("bucket_sets"),
+        # staged classification from the one already stored. The comparison lives at the
+        # save decision — see `--save`.
+        "stored_bucket_sets": stored_bucket_sets,
     }
     return changed, reason, payload, stored_table
 
