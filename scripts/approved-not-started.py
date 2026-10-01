@@ -268,7 +268,13 @@ def main(argv=None):
     if live is None:
         # The third state. Never `0` — an unreadable registry and an empty fleet must not
         # render the same, because only one of them is a fact about the fleet.
-        print("approved, not started: unknown", file=sys.stderr)
+        #
+        # The line goes to BOTH streams on purpose. `docs/pane-reads.md`'s third response
+        # is "already exits non-zero on failure — refuse non-zero, naming the transport",
+        # and the exit code is the signal; but a caller that captured only stdout would
+        # otherwise render nothing at all, which reads as a clean round rather than a
+        # failed one. The line is honest on either stream and is never a number.
+        print("approved, not started: unknown")
         print(
             "⚠️ session registry unreadable — cannot tell started from unstarted; "
             "this is not a count of 0",

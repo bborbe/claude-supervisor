@@ -18,6 +18,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -244,17 +245,48 @@ class UnreadableRegistry(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         task_file(self.dir, "Waiting", "approved_at: 2026-10-01T21:00:00Z\nstatus: next")
+        # A readable registry holding one live session (our own pid, so the pid check
+        # passes), plus an empty heartbeat store -- `session-liveness.py` reports a list
+        # only when BOTH halves were read. The heartbeat dir is isolated so a real headless
+        # worker on this machine cannot turn an assertion into a false positive.
+        self.registry = tempfile.mkdtemp()
+        with open(os.path.join(self.registry, "%d.json" % os.getpid()), "w", encoding="utf-8") as handle:
+            json.dump({"pid": os.getpid(), "sessionId": "live-session-1", "name": "Live"}, handle)
+        self.heartbeat = tempfile.mkdtemp()
 
     def test_read_live_returns_none_not_an_empty_list(self):
         self.assertIsNone(ans.read_live("/nonexistent-registry-dir-xyz"))
 
     def test_main_prints_unknown_and_exits_non_zero(self):
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = ans.main(["--tasks-dir", self.dir, "--registry-dir", "/nonexistent-registry-dir-xyz"])
         self.assertNotEqual(code, 0)
-        self.assertIn("unknown", stderr.getvalue())
-        self.assertNotIn("approved, not started: 0", stderr.getvalue())
+        # The line reaches stdout so a caller that captured only stdout renders a failed
+        # read rather than a clean round; the explanation lands on stderr. It is never a count.
+        self.assertEqual(stdout.getvalue().strip(), "approved, not started: unknown")
+        self.assertIn("unreadable", stderr.getvalue())
+        self.assertNotIn("approved, not started: 0", stdout.getvalue() + stderr.getvalue())
+
+    def test_a_clean_run_still_prints_the_count_on_stdout(self):
+        """The negative control — the stdout line must not be `unknown` when the read worked."""
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = ans.main(
+                [
+                    "--tasks-dir", self.dir,
+                    "--registry-dir", self.registry,
+                    "--heartbeat-dir", self.heartbeat,
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertNotIn("unknown", stdout.getvalue())
+        # Shape, not an exact age: this run reads the real clock, so pinning the duration
+        # would make the test fail the moment the fixture date passes.
+        self.assertRegex(
+            stdout.getvalue().strip(),
+            r"^approved, not started: 1 · oldest \d+[mhd]+\d*[mh]? \(Waiting\)$",
+        )
 
     def test_missing_tasks_dir_is_a_usage_error(self):
         stderr = io.StringIO()
