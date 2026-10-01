@@ -51,6 +51,26 @@ Tags: [[Task]]
 {progress}
 """
 
+TASK_WITH_METRICS = """---
+status: in_progress
+phase: execution
+goals:
+    - '[[AGoal]]'
+metrics_sessions:
+    - session_id: {ids}
+---
+Tags: [[Task]]
+
+---
+
+# Tasks
+
+- [ ] one
+
+# Progress
+
+"""
+
 TOPIC = """---
 page_type: topic
 ---
@@ -283,6 +303,79 @@ class TestLiveness(Base):
         tracked = [{"name": "T", "session": "s-wait"}]
         self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
         self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_PARKED)
+
+    # -- the id set, and the roster-name fallback ---------------------------- #
+
+    def registry_named(self, sid, name, status="idle"):
+        """A registry record carrying a session `name` — the roster the fallback reads."""
+        with open(os.path.join(self.m.REGISTRY_DIR, "1.json"), "w") as fh:
+            json.dump(
+                {
+                    "sessionId": sid,
+                    "pid": os.getpid(),
+                    "status": status,
+                    "name": name,
+                },
+                fh,
+            )
+
+    def row_for(self, rel):
+        """Read one task file through the gate's own `read_task`."""
+        return self.m.read_task(os.path.join(self.vault, rel))
+
+    def test_empty_id_set_with_a_live_roster_name_is_not_unowned(self):
+        """The roster-name fallback — the case the gate renders unowned today.
+
+        An `in_progress` row whose worker never stamped an id has an EMPTY id set, so
+        there is no id to put to the registry or to the heartbeat and a `none` verdict
+        says nothing about ownership. The row's own title is the subordinate fallback:
+        a live roster entry whose label matches it marks the row OWNED.
+
+        Measured 2026-09-30: two workers spawned at 12:39 parked on their first tool
+        call, so neither task file ever took an id; at the 13:00 sweep both rows
+        rendered ready-to-start while each held a live roster entry whose label
+        exactly matched the task title — and the standing spawn mandate opens such a
+        row rather than merely listing it.
+        """
+        self.registry_named("s-live", name="ATask")
+        tracked = [{"name": "ATask", "session": ""}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_LIVE)
+
+    def test_empty_id_set_with_a_non_matching_roster_name_stays_unowned(self):
+        """The NEGATIVE CONTROL — the fallback is one-directional.
+
+        A roster is empty-not-absence, so a MISS proves nothing and the row must stay
+        ready-to-start exactly as it does today. A build that marks any empty-id row
+        owned would block every legitimate spawn, so the positive test above is not
+        sufficient on its own.
+        """
+        self.registry_named("s-live", name="Some Other Task Entirely")
+        tracked = [{"name": "ATask", "session": ""}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_NONE)
+
+    def test_an_id_in_metrics_sessions_marks_the_row_owned(self):
+        """The id set is `claude_session_id` PLUS every `metrics_sessions` id.
+
+        A row whose `claude_session_id` was never stamped but whose `metrics_sessions`
+        holds a live id is OWNED, and the roster fallback — which applies only when the
+        set is EMPTY — must not be reached. Measured 2026-10-01 in this vault: of the
+        124 tasks carrying a `metrics_sessions` block, 64 carry no `claude_session_id`
+        at all, so a build reading that one field leaves all 64 reading `none`.
+        """
+        self.write("25 Tasks/ASetTask.md", TASK_WITH_METRICS.format(ids="s-live"))
+        self.registry("s-live")
+        row = self.row_for("25 Tasks/ASetTask.md")
+        self.m.enrich_liveness([row], self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(row["liveness"], self.m.LIVENESS_LIVE)
+
+    def test_the_empty_id_set_still_falls_back_when_metrics_sessions_is_absent(self):
+        """A row with no `metrics_sessions` key at all is the empty set, not a crash."""
+        self.registry_named("s-live", name="ATask")
+        tracked = [{"name": "ATask", "session": ""}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_LIVE)
 
 
 class TestFailOpen(Base):

@@ -146,6 +146,7 @@ import re
 import select
 import sys
 import time
+import unicodedata
 from datetime import datetime
 
 STATE_DIR = os.path.expanduser(
@@ -264,6 +265,27 @@ def checkbox_count(text: str, section: str | None = None) -> str:
     return f"{sum(1 for b in boxes if b in 'xX')}/{len(boxes)}"
 
 
+def session_id_set(fm: str) -> list[str]:
+    """The row's WHOLE id set: `claude_session_id` plus every `metrics_sessions` id.
+
+    ⚠️ **Extracted unanchored, deliberately.** `metrics_sessions` entries are indented
+    (`    - session_id: …`), so a line-anchored `^session_id:` match collects only the
+    frontmatter id and silently reproduces the very bug this exists to fix. Measured
+    2026-10-01 in the Brogrammers vault: 64 of the 124 tasks carrying a `metrics_sessions`
+    block carry no `claude_session_id` at all, so the single-field read left every one of
+    them reading `none` while a live id sat in the next key.
+    """
+    ids: list[str] = []
+    primary = fm_scalar(fm, "claude_session_id").strip("'\"")
+    if primary:
+        ids.append(primary)
+    for sid in re.findall(r"^\s*-\s*session_id:\s*(\S+)", fm, re.M):
+        sid = sid.strip("'\"")
+        if sid and sid not in ids:
+            ids.append(sid)
+    return ids
+
+
 def read_task(path: str) -> dict | None:
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -282,6 +304,7 @@ def read_task(path: str) -> dict | None:
         "status": fm_scalar(fm, "status"),
         "phase": fm_scalar(fm, "phase"),
         "session": fm_scalar(fm, "claude_session_id").strip("'\""),
+        "sessions": session_id_set(fm),
         "goals": fm_wikilinks(fm, "goals"),
         "progress_hash": progress_hash(text),
         "met": checkbox_count(text),
@@ -499,10 +522,10 @@ def is_open_gate(rec: dict | None) -> bool:
     return not detail.startswith(PARKED_VERBS)
 
 
-def liveness_of(
+def liveness_of_sid(
     sid: str, registry: dict, feed: dict, heartbeat: bool | None = _HEARTBEAT_UNREAD
 ) -> str:
-    """live / parked / none for one session id, from the registry PLUS the heartbeat.
+    """live / parked / none for ONE session id, from the registry PLUS the heartbeat.
 
     The registry answers for every session that holds a socket — every interactive one —
     and the heartbeat answers for the headless workers it structurally cannot see.
@@ -523,9 +546,80 @@ def liveness_of(
     return LIVENESS_LIVE
 
 
+def _norm_session_name(name: str) -> str:
+    """Casefolded, glyph-stripped session label, for the roster-name fallback.
+
+    A roster label carries the `⚙` marker a task title does not, so a raw equality test
+    never matches: measured 2026-09-30, both rows the fallback exists for held a live
+    roster entry whose label was the task title *with* that prefix.
+    """
+    text = unicodedata.normalize("NFKC", name or "").strip()
+    text = re.sub(r"^[^\w(]+", "", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def roster_owner(name: str, registry: dict, feed: dict) -> str:
+    """The SUBORDINATE fallback for a row whose id set is EMPTY.
+
+    A row with no id at all cannot be probed — there is no id to put to the registry or
+    to the heartbeat — so a `none` verdict there says nothing about ownership, and
+    reading it as *unowned* is what opens the duplicate spawn this gate exists to prevent.
+
+    ⚠️ **One-directional by construction, and that is what keeps it safe.** A roster is
+    empty-not-absence, so a MISS proves nothing and the row stays ready-to-start exactly
+    as it does today. This can only ever REMOVE a row from the offer, never add one; a
+    rule that could also mark a never-started task owned would block every legitimate
+    spawn.
+    """
+    wanted = _norm_session_name(name)
+    if not wanted:
+        return LIVENESS_NONE
+    for sid, rec in registry.items():
+        if not rec.get("alive"):
+            continue
+        if _norm_session_name(rec.get("name", "")) != wanted:
+            continue
+        return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
+    return LIVENESS_NONE
+
+
+def liveness_of(
+    sid: str,
+    registry: dict,
+    feed: dict,
+    heartbeat: bool | None = _HEARTBEAT_UNREAD,
+    sessions: list[str] | None = None,
+    name: str = "",
+) -> str:
+    """live / parked / none for one ROW, from its WHOLE id set PLUS the roster fallback.
+
+    The canonical key is the **session-id set** — `claude_session_id` plus every
+    `metrics_sessions` id — probed for liveness, with the roster name as a SUBORDINATE
+    fallback when that set is empty.
+
+    The set is probed id by id and the first non-`none` verdict wins: one live id owns the
+    row whatever the others say. Only a genuinely EMPTY set reaches the fallback — a row
+    whose ids are all dead is `none` by evidence, not by absence of input.
+    """
+    ids = list(sessions) if sessions else ([sid] if sid else [])
+    for one in ids:
+        verdict = liveness_of_sid(one, registry, feed, heartbeat)
+        if verdict != LIVENESS_NONE:
+            return verdict
+    if ids:
+        return LIVENESS_NONE
+    return roster_owner(name, registry, feed)
+
+
 def enrich_liveness(tracked: list[dict], registry: dict, feed: dict) -> None:
     for t in tracked:
-        t["liveness"] = liveness_of(t["session"], registry, feed)
+        t["liveness"] = liveness_of(
+            t["session"],
+            registry,
+            feed,
+            sessions=t.get("sessions"),
+            name=t.get("name", ""),
+        )
 
 
 def open_box_count(met: str) -> int:
