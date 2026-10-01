@@ -1157,7 +1157,7 @@ def bucket_shape_error(parsed) -> str | None:
 VERDICTS_NEEDING_REASON = ("needs-you", "unfixable", "below-bar", "reframe")
 
 
-def verdicts_shape_error(parsed) -> str | None:
+def verdicts_shape_error(parsed, stored=None) -> str | None:
     """Why `parsed` cannot serve as a verdicts cache, or None when it is usable.
 
     A dict of task name -> `{verdict, score, content_key, reason?}` is the only shape
@@ -1169,11 +1169,24 @@ def verdicts_shape_error(parsed) -> str | None:
     quote from. `score` is deliberately allowed to be null, because `blocked` rows carry
     none and the sibling caches on disk show exactly that shape.
 
+    ⚠️ **`stored` is the cache already on disk, and passing it is what stops this rule
+    bricking every cache written before `reason` existed.** The requirement is on a *fresh
+    audit*, not on the schema: an entry whose `content_key` is unchanged from the stored
+    one is a carry-forward, and its verdict was decided before the field existed — there
+    is nothing to re-derive it from and backfilling is out of scope, so it is
+    grandfathered rather than refused. Refusing it instead makes the whole write fail for
+    every subject still holding one, which on 2026-10-02 was **four of five caches**; the
+    cache then goes stale and the *next* tick audits cold — the exact cost the cache
+    exists to remove. An entry whose key is new or changed *is* a fresh audit and must
+    carry the reason. Omitting `stored` is the strict reading, correct only for a caller
+    that genuinely has no prior cache.
+
     The empty-object case is refused for the reason `bucket_shape_error` gives: `{}` gates
     nothing while looking like a cache that was written.
     """
     if not isinstance(parsed, dict) or not parsed:
         return "verdicts must be a non-empty JSON object"
+    stored = stored if isinstance(stored, dict) else {}
     for name, entry in parsed.items():
         if not isinstance(name, str) or not name.strip():
             return "each key must be a non-blank task name"
@@ -1190,14 +1203,47 @@ def verdicts_shape_error(parsed) -> str | None:
             return f"entry {name!r} must carry a non-blank content_key"
         reason = entry.get("reason")
         if verdict in VERDICTS_NEEDING_REASON:
-            if not isinstance(reason, str) or not reason.strip():
-                return (
-                    f"entry {name!r} is {verdict!r} and must carry a non-blank reason "
-                    "— the auditor's own words are what the operator is handed"
-                )
+            if not _carried_forward(stored, name, key):
+                if not isinstance(reason, str) or not reason.strip():
+                    return (
+                        f"entry {name!r} is {verdict!r} and must carry a non-blank reason "
+                        "— the auditor's own words are what the operator is handed"
+                    )
         elif reason is not None and not isinstance(reason, str):
             return f"entry {name!r} reason must be a string when present"
     return None
+
+
+def _carried_forward(stored: dict, name: str, key: str) -> bool:
+    """True when `name`'s stored entry is the same one, by content key.
+
+    An unchanged key means the row's file has not moved since the stored verdict was
+    written, so this entry is that verdict re-staged rather than a new audit of it.
+    """
+    prior = stored.get(name)
+    return isinstance(prior, dict) and prior.get("content_key") == key
+
+
+def verdicts_grandfathered(parsed, stored) -> list[str]:
+    """Names carried forward unchanged that the `reason` rule would otherwise refuse.
+
+    Reported rather than silently accepted: such an entry cannot render its grounds, so a
+    reader should be able to see which rows are in that state now rather than discover it
+    from an empty `UNFIXABLE:` line later. It is a migration backlog, not a failure — the
+    row re-audits and gains a reason the first time its file changes.
+    """
+    stored = stored if isinstance(stored, dict) else {}
+    out = []
+    for name, entry in (parsed or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("verdict") not in VERDICTS_NEEDING_REASON:
+            continue
+        if str(entry.get("reason") or "").strip():
+            continue
+        if _carried_forward(stored, name, entry.get("content_key")):
+            out.append(name)
+    return sorted(out)
 
 
 def main(argv: list[str]) -> int:
@@ -1342,7 +1388,18 @@ def main(argv: list[str]) -> int:
         except json.JSONDecodeError as exc:
             print(f"verdicts must be JSON: {exc}", file=sys.stderr)
             return EXIT_USAGE
-        shape_error = verdicts_shape_error(parsed)
+        # The cache already on disk, read so the `reason` rule can tell a fresh audit from a
+        # carry-forward. Without it a subject holding even one entry written before the field
+        # existed can never be written again — measured 2026-10-02, four of five caches.
+        stored = {}
+        try:
+            with open(verdicts_path(args.subject), encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                stored = loaded
+        except (OSError, json.JSONDecodeError):
+            stored = {}
+        shape_error = verdicts_shape_error(parsed, stored)
         if shape_error:
             # A refused write must not clobber a good cache. The reason is sharper here
             # than for the other staging files: a cache that reads back as present but
@@ -1351,6 +1408,15 @@ def main(argv: list[str]) -> int:
             # state this writer exists to end.
             print(f"refusing to write these verdicts: {shape_error}", file=sys.stderr)
             return EXIT_USAGE
+        for name in verdicts_grandfathered(parsed, stored):
+            # Not a failure and not silent: a row written before `reason` existed cannot
+            # render its grounds, and a reader should see which rows are in that state
+            # rather than discover it from an empty `UNFIXABLE:` line later.
+            print(
+                f"note: carrying {name!r} forward with no reason — its stored content_key is "
+                "unchanged, so there is no audit to re-derive the auditor's words from",
+                file=sys.stderr,
+            )
         path = verdicts_path(args.subject)
         tmp = path + ".tmp"
         os.makedirs(STATE_DIR, exist_ok=True)
