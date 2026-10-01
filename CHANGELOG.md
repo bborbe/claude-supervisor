@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.87.1
 
 - fix: **`test_restart_worker.py`'s too-loose case now asserts against a near-miss id, not an empty store.** It is one of five named both-direction pairs guarding the session-hold suppression, and it was the only one seeding `write_holds()` with **no arguments**. An empty store cannot fail for a prefix match, a substring match or a flag-everything build — so the inlined reader this test guards, a copy that does **not** inherit `session-holds.py`'s own near-miss coverage, was asserted only against the weakest possible input. Measured, not argued: with the reader inverted to a 7-character prefix match, the **old** empty-store test passes (48 tests OK) while the new one fails on `test_does_not_fire_on_a_clean_session`. The other four pairs (`test_session_holds.py`, `test_notify_gate.py`, `test_manager_predispatch.py`, `test_orphan_candidates.py`) already seed a populated store, and `test_session_holds.py` already used a near-miss id. The rule: a guard tested with an empty stream and a guard tested with a realistic stream containing near-misses are different tests, and only the second one exercises the boundary.
 
