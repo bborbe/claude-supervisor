@@ -219,6 +219,9 @@ The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`).
 1. **Roster** — the marker line plus the box, rendered **exactly per Fleet Manager Session runbook (per-vault) § Sweep output — the fleet table** — the single source for frame, columns, widths and icons. Build it with `python3 $P/fleet-board.py --json | python3 $P/box-table.py`; never hand-draw it. Every tick prints the marker line; the box re-prints when a bucket moved, a session appeared or vanished, or a handoff was sent, plus a ~30-min heartbeat. If `/fleet-status` just printed the same box, reference it.
 
    Print one quantitative line with the marker: the colour census `python3 $P/fleet-colours.py --json`, read for `backlog` (green/blue/cyan) with `default` and `purple` reported apart.
+
+   ⚠️ **Also print `workers: <live>/<target>` on the marker line, every round.** Read the live count with `python3 $P/worker-sessions.py --count` — live **worker sessions**: the session registry joined to the spawn ledger. ⚠️ **Not `live-workers.py`**, which reads the headless heartbeat store and answered **0 while 11 interactive workers were live** (measured 2026-10-01); and not `--list | wc -l` on either, which counts the empty-store sentence and answers **1**. A non-zero exit means the store could not be read; print `workers: unknown`, never `0`. Live **workers** from the heartbeat store, **not** the `ListAgents` roster and **not** `~/.claude/sessions/*.json`, whose registry also holds the operator's own sessions and the managers. The target is `spawn.maxConcurrent` in `~/.config/claude-supervisor/config.json`, whose single home is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 5 — **read the number there and never restate it here.** Print `workers: <live>/unlimited` when the key is `0`, and `workers: unknown` when the store cannot be read — never `0`, which is a count and would read as an idle fleet.
+   This is the same number the managers propose against, and that is the point: one fleet reading, one bound, so the fleet's own report and the managers' behaviour cannot drift apart.
 2. **Classification** — the digest's non-progressing rows: `<name> [<id>] · <status> · <classification>`. Never print the `[ref]`.
 3. **`📋 Open with the operator`** — the ledger, one line per open entry: kind · what · state · age. **Never omitted**; `(none open)` when empty.
 4. **Needs-input** — the batch over the digest's BLOCKED set, per § Cadence's **Needs-input** (the `AskUserQuestion`, its `asked-ledger` claims, the relays), then the consolidated list beneath it: every open claim across every layer, in one list. **Never omitted** — `(none blocked)` when the digest's BLOCKED section is empty, and a subject one of those rules dropped prints that rule and its line.
@@ -253,14 +256,58 @@ reading, 14 of 24 sessions were idle or waiting, and most of those were waiting 
 the operator. Spawning more agents then lengthens the human queue rather than using
 idle compute, which is what makes a fixed "target N agents" rule worse than no rule.
 
-**Open Question 1 — what ratio threshold, if any, should trigger a spawn.** n=2
-readings establishes the ratio is steadier than tok/s; it does not establish that
-any particular number means "spawn". Unresolved — never infer a threshold from this
-line.
+**Open Questions 1 and 2 — ANSWERED 2026-10-01, and neither answer is a ratio.** Both asked
+whether a *ratio threshold* should trigger a spawn. The operator's design of 2026-10-01
+replaces the ratio as the capacity signal outright: the trigger is the fleet-wide **worker
+target** (`spawn.maxConcurrent`, default 20), read as live workers against that number and
+printed as `workers: <live>/<target>` (Output shape item 1).
 
-**Open Question 2 — whether the output should be a spawn trigger at all**, versus a
-read-only saturation line. The measurement argues for read-only first. Unresolved —
-this line is read-only until the question is answered.
+- **Open Question 1 is superseded rather than answered with a threshold.** No ratio value
+  triggers a spawn, and none is to be inferred from this line. The ratio stays a
+  *diagnostic* — it is what tells you the fleet is saturated, or human-queued — while the
+  target is what decides whether a manager proposes work.
+- **Open Question 2 is answered: capacity does drive action — but through the target, not
+  through this ratio.** A manager tick below the target with no ready row proposes the next
+  most important rows to approve (`commands/manager-loop.md` step 4). **This line itself
+  stays read-only**, exactly as the measurement argued.
+
+⚠️ **This does not repeal the paragraph above it — and the reconciliation is the point.**
+The caution there is that a fixed "target N agents" rule is worse than no rule, because a
+low ratio is often a **human-queue** signal: at the 42% reading, 14 of 24 sessions were idle
+or waiting, most of them on the operator. That reasoning is about a target that **spawns**.
+The target here **proposes**: below it a manager posts a card and waits, and the operator
+answers. The human queue is therefore not lengthened by the rule — the operator is the one
+who decides whether to lengthen it, which is the property the earlier reading was protecting.
+
+## The approved-not-started reading
+
+Every tick prints this line with the marker line:
+
+    approved, not started: 3 · oldest 7h35m (Build claude-interactive)
+
+Read it from `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"`. A row
+counts when its task-file frontmatter carries `approved_at` with a non-terminal `status`
+and no **live** `claude_session_id`. This is the reverse index for the one gap the sweep
+structurally cannot see: it classifies *live sessions*, so a row nobody ever opened has no
+session to sweep from and is invisible to every other channel. Rows waiting longer than
+one tick (**30 min, a script constant** — never a per-call flag, because two rounds
+disagreeing about the same row is the defect this line exists to remove) are listed
+beneath it with their owning manager.
+
+⚠️ **`unknown` is a third answer, not `0`.** If the session registry cannot be read the
+script prints `approved, not started: unknown` and exits non-zero — *"no approved rows are
+waiting"* and *"I could not ask"* must not render the same (`docs/pane-reads.md` § The
+rule). Print it as it comes back; never round `unknown` down to a number.
+
+⚠️ **The line reports; it never opens.** These rows are the drive leg's and the owning
+manager's to act on, under the standing mandate and its approval boundary — this reading
+adds visibility, not authority.
+
+Measured 2026-10-01 22:08, live run against the primary vault: `approved, not started: 16 ·
+oldest 1d14h (Check the ORB DE40 AUM 6-Month Cap Before It Passes)` — approved work no
+round had ever surfaced. The head count moves minute to minute as sessions start and stop
+(the same day read 12, 14, 15 and 16 within ten minutes); that is the metric working, not
+noise, and it is why the line is a reading rather than a stored number.
 
 ## Rules (non-negotiable)
 
