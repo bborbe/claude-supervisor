@@ -8,6 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  DEFAULT_MAX_CONCURRENT,
   MAX_CONCURRENT_ENV,
   resolveMaxConcurrent,
   resolveSpawnMode,
@@ -173,14 +174,18 @@ test('a missing mode leaves the environment untouched rather than exporting "und
 
 // --- the fleet-wide concurrent limit --------------------------------------------------
 //
-// The limit's shipped state is UNSET, and unset means unlimited. That is not an
-// unexercised branch — it is what every spawn does today, and a resolver that reported a
-// number here would invent a limit the operator did not set.
+// ⚠️ THE DEFAULT IS 20, AND THAT REVERSES THE 2026-09-27 RULING. The key shipped unset
+// meaning unlimited; since 2026-10-01 an absent key resolves to DEFAULT_MAX_CONCURRENT, and
+// `0` is the only value that still means unlimited. The reversal is asserted rather than
+// described, because a resolver that quietly reverted to `unset → null` would restore
+// unbounded spawning with every other test in this file still green.
 
-test('resolveMaxConcurrent: unset everywhere is unlimited, and says so', () => {
-  assert.deepEqual(resolveMaxConcurrent({}), { limit: null, source: 'unset' })
-  assert.deepEqual(resolveMaxConcurrent({ env: null, file: {} }), { limit: null, source: 'unset' })
-  assert.deepEqual(resolveMaxConcurrent({ env: '', file: { spawn: {} } }), { limit: null, source: 'unset' })
+test('resolveMaxConcurrent: unset everywhere is the default 20, not unlimited', () => {
+  // `unset → null` was the old contract; after the reversal it is the defect.
+  assert.equal(DEFAULT_MAX_CONCURRENT, 20)
+  assert.deepEqual(resolveMaxConcurrent({}), { limit: DEFAULT_MAX_CONCURRENT, source: 'default' })
+  assert.deepEqual(resolveMaxConcurrent({ env: null, file: {} }), { limit: DEFAULT_MAX_CONCURRENT, source: 'default' })
+  assert.deepEqual(resolveMaxConcurrent({ env: '', file: { spawn: {} } }), { limit: DEFAULT_MAX_CONCURRENT, source: 'default' })
 })
 
 test('resolveMaxConcurrent: the file decides when the env is silent', () => {
@@ -202,6 +207,10 @@ test('resolveMaxConcurrent: the env wins over the file, and the loser is still v
 test('resolveMaxConcurrent: 0 is unlimited, not a zero-worker limit', () => {
   // 0 is the value an operator reaches for to turn a limit OFF. Refusing it would make the
   // off switch a syntax error; reading it as "zero workers" would stop the fleet dead.
+  //
+  // ⚠️ After the 2026-10-01 reversal this is the ONLY route back to unbounded spawning — an
+  // absent key no longer gets you there. That makes it load-bearing rather than a
+  // convenience: a regression that dropped it would leave the operator no off switch at all.
   assert.deepEqual(resolveMaxConcurrent({ env: '0' }), { limit: null, source: 'env' })
   assert.deepEqual(resolveMaxConcurrent({ file: { spawn: { maxConcurrent: 0 } } }), { limit: null, source: 'config' })
 })
