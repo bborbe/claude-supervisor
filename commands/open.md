@@ -22,7 +22,7 @@ The command **resolves** and **dispatches**. It never does the work, never runs 
 
 ```
 /supervisor:open <name>
-  ├─ task   → live pane? jump · has claude_session_id? resume · else spawn gates (Step 1.5: approval, then readiness) → spawn
+  ├─ task   → live pane? jump · live but no pane (cluster worker)? refuse · has claude_session_id? resume · else spawn gates (Step 1.5: approval, then readiness) → spawn
   ├─ goal   → resolve to its active task, then the task branch
   └─ topic  → live manager-loop? jump · else spawn /supervisor:manager-loop
 
@@ -259,7 +259,7 @@ Without it the row opens unapproved, the worker reaches the approval question it
 
 **Readiness-gate every CREATE-bound row first, concurrently.** Before the loop, find the rows that would take Step 2A's CREATE branch — `role: agent`, no live pane, no `claude_session_id` — and dispatch Step 1.5's readiness sub-agent for **all of them in ONE message** (one `Agent` call per row, parallel). Resume/jump-bound rows, `role: human` (→ DIRECT) rows, and `task_type:` pipeline rows (§ Step 1.5) are not gated. Add a `readiness` column to the table: `✅ ready 9/10`, `⛔ NOT READY 7/10` with the gap bullets under the row, or `— (resume/jump/direct)`. A not-ready row is **held, never opened**, and counted in the footer: `… · not ready R (readiness)`. The per-row `/supervisor:open` below reuses this verdict — it does not re-gate a row the batch already gated in this run. ⚠️ **Gate 1 does not refuse this batch, because the batch performs the approval itself** — `flag: true` on a `todo` row **is** the approval for `--flagged` only (ruled 2026-09-28), and the approve pass above writes that approval to disk before this dispatch runs. The batch therefore runs **Gate 2 only**. See § Step 1.5 Gate 1 for the ruling, and § Step 0.5 for the provenance filter that decides which rows reach this approve pass at all — a row whose flag was not operator-set is refused there, before this pass can approve it.
 
-**Loop the eligible rows in the printed stable order** and delegate each to this command's own single-task path — the exact Step 2A resolution (live pane → JUMP, `claude_session_id` → RESUME, else CREATE + spawn). Invoke `/supervisor:open "<task>"` per row; never reimplement jump / resume / spawn here, and never pass a mode override to the fleet. The row's `role` is now on disk, so § 3.0 reads it back from frontmatter like any other task — the batch does not hand it forward in memory, which is what makes the write in Step 0.6 load-bearing rather than bookkeeping.
+**Loop the eligible rows in the printed stable order** and delegate each to this command's own single-task path — the exact Step 2A resolution (live pane → JUMP, live-but-no-pane → REFUSE, `claude_session_id` → RESUME, else CREATE + spawn). Invoke `/supervisor:open "<task>"` per row; never reimplement jump / resume / spawn here, and never pass a mode override to the fleet. The row's `role` is now on disk, so § 3.0 reads it back from frontmatter like any other task — the batch does not hand it forward in memory, which is what makes the write in Step 0.6 load-bearing rather than bookkeeping.
 
 **Skip every `⛔ HOLD` row and report the skip with its blockers** — a blocked task is one whose prerequisites have not finished, so opening it is the failure the batch exists to prevent. Never open a blocked row because it appeared in the table: appearing in the selector is not the same as having its prerequisites met. Report each row's outcome, and every skip with its stated reason.
 
@@ -366,6 +366,23 @@ pgrep -fl "<PRIOR_SID>" || echo "no process holding this session"
 ```
 
 A live pid → **wait for it to exit, then resume** (Step 3). JUMP is unavailable — there is no pane to activate. Observed 2026-09-13: `wezterm cli list` matched **0** panes for the task while pids `33052`/`33055` ran `cc-personal-deepseek --print … --session-id <sid>`; the branch logic below would have spawned onto it, putting two writers on one conversation.
+
+**Then refuse if the session is live but reachable from nowhere here — this is the cluster worker.** A worker running as a pod in nuke holds **no pane** on this Mac and **no local process**, so both probes above read "not running here" for a session that is working right now — and branch 2 below would then resume it, putting a second writer on a live conversation. That is the same duplicate-writer failure the headless probe exists to prevent, one store over. Probe through the plugin's single reader; **never open the registry here**:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py --check "<PRIOR_SID>"
+# exit 0 LIVE · 1 ABSENT · 2 UNKNOWN · 3 AMBIGUOUS — an 8-char prefix is a legal argument
+```
+
+**When `PRIOR_SID` is non-empty and neither a live pane nor a live pid was found, refuse — no JUMP, no RESUME, no CREATE — unless the verdict is `ABSENT`:**
+
+- **`LIVE` (exit 0)** → `🔒 LIVE ELSEWHERE — <task> · <PRIOR_SID> · live but holds no pane and no local process; a cluster worker, or a headless turn whose id is not in its argv · refused; do not spawn.`
+- **`UNKNOWN` (exit 2)** → `❓ UNVERIFIED — <task> · <PRIOR_SID> · liveness could not be read, so a resume is not authorised · refused.` ⚠️ **`UNKNOWN` is not `ABSENT`** — an unreadable source never authorises a second writer.
+- **`AMBIGUOUS` (exit 3)** → `❓ UNVERIFIED — <task> · <PRIOR_SID> · the prefix matches more than one session, so it resumes neither · refused.`
+
+⚠️ **The guard is bounded by `PRIOR_SID`** — with no session id there is nothing to probe, so a task that has never been worked falls straight through to branch 3 (CREATE) and its spawn gates. Probing an empty id would match every session and refuse the whole CREATE path.
+
+**`ABSENT` (exit 1) falls through to the branches below unchanged** — a dead local conversation is exactly what RESUME is for. ⚠️ **A blanket refusal does not satisfy this**: a healthy session in a pane still jumps (branch 1) and a live headless pid still waits (above), so this guard fires only on *live, and reachable from nowhere here* — which is the one state where every branch below is wrong. ⚠️ **It is also stricter than the pane probe on purpose**: a session whose tab title no longer matches its task, and whose id is not in its argv, reaches this guard as `LIVE` and is refused rather than resumed, because the resume is what creates the second writer.
 
 Then take exactly one branch:
 
