@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.88.0
 
 - feat: **managers hand an answerable gate to the operator through the attention board, not through a chat jump link.** `scripts/attention-board.py` prints the board's own open-card count and its URL, read from the board's markup — not from `GET /api/1.0/attention`, which is a superset (measured 2026-10-01: 4 API items against 2 rendered cards, stable across repeated fetches, so a count taken from the API would disagree with the page the operator is looking at). `manager-loop`, `fleet-loop` and `fleet-drive` print that one line in place of the per-gate jump links for answerable (class C) gates. ⚠️ **Class D/E gates and selection modals keep their `jump-link.py` handover** — a board button cannot release a gate. ⚠️ **Store down is one branch:** `attention-board.py` exits 3 having printed `board unavailable`, and the round falls back to the chat jump links for every gate.
 
