@@ -164,10 +164,21 @@ def cell_url(value, link=True):
     return jump_url(m.group(1)) if m else None
 
 
-def line(vals, widths, link=True):
-    return "│ " + " │ ".join(
-        fmt(v, w, cell_url(v, link)) for v, w in zip(vals, widths)
-    ) + " │"
+def line(vals, widths, link=True, first_url=None):
+    """One row. `first_url` overrides the Session cell's link.
+
+    `cell_url` resolves a cell only when it is *exactly* a `[sid8]` token. The
+    fleet table's Session cell holds a **name** — the operator-facing label, and
+    the thing `/rename` changes — so it cannot be resolved from its own text and
+    the producer supplies the session id instead. Every other cell keeps the
+    existing whole-cell-token behaviour, and a `None` here falls through to it,
+    so the manager tables that share this renderer are unaffected.
+    """
+    out = []
+    for i, (v, w) in enumerate(zip(vals, widths)):
+        url = first_url if i == 0 else None
+        out.append(fmt(v, w, url if url is not None else cell_url(v, link)))
+    return "│ " + " │ ".join(out) + " │"
 
 
 def rule(left, mid, right, widths):
@@ -175,15 +186,24 @@ def rule(left, mid, right, widths):
 
 
 def render(doc, link=True):
-    """The whole box as one string. Pure apart from `jump_url`'s resolution."""
+    """The whole box as one string. Pure apart from `jump_url`'s resolution.
+
+    `doc["urls"]`, when present, is a list parallel to `rows` carrying each
+    row's session-id prefix (or `None` for a group header, which is not a
+    session). It is optional so every existing producer keeps working: without
+    it the Session cell falls back to the `[sid8]` whole-cell rule.
+    """
     hdr = doc["header"]
     rows = doc["rows"]
     widths = doc.get("widths") or [20] * len(hdr)
+    sids = doc.get("urls") or []
     out = [rule("┌", "┬", "┐", widths),
            # The header is labels, never session references — never linked.
            line(hdr, widths, False),
            rule("├", "┼", "┤", widths)]
-    out.extend(line(r, widths, link) for r in rows)
+    for i, r in enumerate(rows):
+        sid = sids[i] if i < len(sids) else None
+        out.append(line(r, widths, link, jump_url(sid) if (link and sid) else None))
     out.append(rule("└", "┴", "┘", widths))
     return "\n".join(out)
 

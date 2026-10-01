@@ -411,7 +411,7 @@ class TestTree(unittest.TestCase):
 
     def setUp(self):
         self.grouping, self.rows = _group_rows()
-        self.tree, self.ordered = fb.build_tree(self.rows, self.grouping)
+        self.tree, self.ordered, self.sids = fb.build_tree(self.rows, self.grouping)
 
     def cell(self, sid):
         """The Session cell drawn for one session, whatever its depth."""
@@ -575,6 +575,176 @@ class TestGateAttribution(unittest.TestCase):
         m = fb.wnm._PANE_REF.search(panes[_sid(3)])
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1), "1039")
+
+
+class TestUnblocks(unittest.TestCase):
+    """The `Unblocks` column: four values, first match wins, total by construction.
+
+    The failure this guards is a classifier that looks right on the common case
+    and mislabels the sparse ones. `working` is the default, so a stub returning
+    it for every row passes any "does it render" test — these fixtures pin the
+    three non-default classes, their precedence, and every qualifier that can
+    silently collapse them back into the default.
+    """
+
+    def meta(self, status="in_progress", phase="execution", open_boxes=1):
+        return {"title": "T", "path": "/x/T.md", "status": status, "phase": phase,
+                "open_boxes": open_boxes}
+
+    def test_a_rendered_panel_is_operator_keystroke(self):
+        self.assertEqual(fb.unblocks_for(_sid(1), 5.0, self.meta(), {_sid(1)}),
+                         fb.UNBLOCKS_OPERATOR)
+
+    def test_a_completed_task_is_reap_close(self):
+        self.assertEqual(fb.unblocks_for(_sid(1), 5.0, self.meta(status="completed"), set()),
+                         fb.UNBLOCKS_REAP)
+
+    def test_an_idle_execution_task_with_an_open_box_is_nudge(self):
+        self.assertEqual(fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS, self.meta(), set()),
+                         fb.UNBLOCKS_NUDGE)
+
+    def test_the_threshold_is_inclusive_at_the_boundary(self):
+        """The criterion is *at or above*, so the comparison is `>=`. An
+        off-by-one here is invisible on a live fleet where nothing sits exactly
+        on the line, which is exactly why it needs a constructed case."""
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS - 0.001, self.meta(), set()),
+            fb.UNBLOCKS_WORKING)
+
+    def test_a_recent_session_is_working(self):
+        self.assertEqual(fb.unblocks_for(_sid(1), 5.0, self.meta(), set()),
+                         fb.UNBLOCKS_WORKING)
+
+    def test_no_transcript_counts_as_past_the_threshold(self):
+        """`session_transcript_age()` returns `inf` for a session with no
+        transcript — "nothing has been written", the maximal inactive reading,
+        not an unknown. Coercing it to `working` would hide the stalest rows."""
+        self.assertEqual(fb.unblocks_for(_sid(1), float("inf"), self.meta(), set()),
+                         fb.UNBLOCKS_NUDGE)
+
+    def test_a_task_outside_execution_is_working(self):
+        for phase in ("planning", "ai_review", "human_review", "done", ""):
+            with self.subTest(phase=phase):
+                self.assertEqual(
+                    fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS, self.meta(phase=phase), set()),
+                    fb.UNBLOCKS_WORKING)
+
+    def test_no_open_box_is_working(self):
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS, self.meta(open_boxes=0), set()),
+            fb.UNBLOCKS_WORKING)
+
+    def test_no_stamped_task_is_working_not_nudge(self):
+        """Deliberate default: a session with no task cannot be shown to be idle,
+        and a guessed nudge is worse than an honest default."""
+        self.assertEqual(fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS, None, set()),
+                         fb.UNBLOCKS_WORKING)
+
+    def test_operator_keystroke_outranks_reap_close(self):
+        """A session that both finished its task and ended on a closer is the
+        operator's to clear first — closing it would discard the closer."""
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), 5.0, self.meta(status="completed"), {_sid(1)}),
+            fb.UNBLOCKS_OPERATOR)
+
+    def test_every_row_carries_a_value_from_the_fixed_set(self):
+        rows, _ = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES)
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertIn(r["unblocks"], fb.UNBLOCKS_VALUES)
+
+    def test_a_gated_row_keeps_its_pane_detail(self):
+        """The two sets overlap — a session holding an open gate has also ended
+        its turn — so a `needs-input` row can be `operator-keystroke` too. The
+        gate detail carries the pane the blocked-by-you list jumps to; letting
+        the closer text overwrite it trades an actionable link for a
+        restatement of the cell."""
+        rows, details = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES,
+                                      panel_ids={_sid(3)},  # _sid(3) is GATED
+                                      gate_attribution={_sid(3): "pane 1039 — open gate"})
+        self.assertEqual([r for r in rows if r["session_id"] == _sid(3)][0]["unblocks"],
+                         fb.UNBLOCKS_OPERATOR)
+        self.assertEqual(details[_sid(3)], "pane 1039 — open gate")
+
+    def test_the_pending_closer_rides_the_detail_line_not_the_cell(self):
+        """`operator-keystroke` is 18 characters — the whole column — so the
+        pending text cannot sit beside it. A row without the text is still
+        classified, and says why it carries none."""
+        rows, details = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES,
+                                      panel_ids={_sid(1)})
+        self.assertEqual([r for r in rows if r["session_id"] == _sid(1)][0]["unblocks"],
+                         fb.UNBLOCKS_OPERATOR)
+        self.assertIn("keystroke", details[_sid(1)])
+
+
+class TestColumnBudget(unittest.TestCase):
+    """The box is rendered against the operator's terminal width, so the widths
+    ARE the budget. A sixth column landed at 132 once already; this asserts the
+    sum rather than trusting the comment above `HEADER` to stay true."""
+
+    def test_the_box_fits_the_operator_terminal(self):
+        n = len(fb.HEADER)
+        self.assertEqual(n, len(fb.WIDTHS))
+        self.assertEqual(sum(fb.WIDTHS) + 3 * n + 1, 119)
+
+    def test_the_renamed_inactive_header_fits_its_column(self):
+        self.assertIn("Inactive", fb.HEADER)
+        self.assertLessEqual(len("Inactive"), fb.WIDTHS[fb.HEADER.index("Inactive")])
+
+    def test_every_unblocks_value_fits_its_column(self):
+        w = fb.WIDTHS[fb.HEADER.index("Unblocks")]
+        for v in fb.UNBLOCKS_VALUES:
+            self.assertLessEqual(len(v), w, f"{v} does not fit width {w}")
+
+    def test_project_is_gone_and_paid_for_the_new_column(self):
+        self.assertNotIn("Project", fb.HEADER)
+
+
+class TestSiblingOrder(unittest.TestCase):
+    """Within a sibling group: managers lead, and each role run is
+    longest-inactive first — read from raw seconds, never the rendered cell."""
+
+    def row(self, sid, role, age):
+        return {"session_id": sid, "bucket": "idle", "label": sid, "role": role,
+                "parent": None, "age": age, "unblocks": fb.UNBLOCKS_WORKING,
+                "cells": [sid, "", "", "", ""]}
+
+    def ordered(self, rows):
+        g = fb.Grouping(None,
+                        {r["session_id"]: r["role"] for r in rows},
+                        {r["session_id"]: r["parent"] for r in rows}, {})
+        _, order, _ = fb.build_tree(rows, g)
+        return order
+
+    def test_ages_descend_within_a_role_run(self):
+        rows = [self.row("a", fb.ROLE_WORKER, 10.0),
+                self.row("b", fb.ROLE_WORKER, 300.0),
+                self.row("c", fb.ROLE_WORKER, 60.0)]
+        self.assertEqual(self.ordered(rows), ["b", "c", "a"])
+
+    def test_managers_lead_their_group_regardless_of_age(self):
+        """The pre-existing hoist, kept deliberately: it is what makes the tree's
+        role read at a glance, and it is why the ordering claim is scoped to a
+        role run rather than to the whole group."""
+        rows = [self.row("w", fb.ROLE_WORKER, 3000.0),
+                self.row("m", fb.ROLE_MANAGER, 1.0)]
+        self.assertEqual(self.ordered(rows), ["m", "w"])
+
+    def test_a_missing_age_sorts_last_and_an_absent_transcript_first(self):
+        """`inf` is the stalest reading there is and leads; a missing age is
+        unknown and trails. They must not tie — "nothing was ever written" and
+        "we could not read it" are different facts."""
+        rows = [self.row("unknown", fb.ROLE_WORKER, None),
+                self.row("never", fb.ROLE_WORKER, float("inf")),
+                self.row("fresh", fb.ROLE_WORKER, 5.0)]
+        self.assertEqual(self.ordered(rows), ["never", "fresh", "unknown"])
+
+    def test_the_sort_reads_seconds_not_the_rendered_cell(self):
+        """`20h ago` and `3h59m ago` do not sort the way their durations do, so
+        a key built from the formatted string would order these two backwards."""
+        rows = [self.row("twenty-hours", fb.ROLE_WORKER, 20 * 3600),
+                self.row("three-fifty-nine", fb.ROLE_WORKER, 3 * 3600 + 59 * 60)]
+        self.assertEqual(self.ordered(rows), ["twenty-hours", "three-fifty-nine"])
 
 
 if __name__ == "__main__":
