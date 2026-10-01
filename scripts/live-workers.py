@@ -12,7 +12,16 @@ The owning server now re-stamps a small file per live worker while the turn runs
 reads it. The question it answers is the one a non-spawning process could not answer before.
 
   --list                 one line per live worker: `<session-id>  age <n>s  pid <n>`
+  --count                just the number of live workers, and nothing else on stdout
   --check <session-id>   LIVE (exit 0) / STALE (exit 1) / UNKNOWN (exit 2)
+
+⚠️ **`--count` exists because `--list | wc -l` is wrong, and wrong in the direction that looks
+right.** An empty store prints `no live headless workers in <dir>` — to *stdout*, like every
+other line this script emits — so `--list | wc -l` answers **1** for an idle fleet. A caller
+comparing that against a target reads "one worker live" on a machine with none, and the error
+is invisible precisely because 1 is a plausible count. Measured 2026-10-01 against the real
+store. A counter must therefore be its own mode: `--count` writes the integer and nothing
+else, and the unreadable case keeps its message on stderr where `$(...)` cannot capture it.
 
 ⚠️ The verdict is the stamp's AGE against the TTL, never the file's existence. A server
 killed with `kill -9` never clears its stamps, so a file that exists but has stopped being
@@ -146,6 +155,7 @@ def read_live(directory, ttl=TTL_SECONDS, now=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Read the headless-worker heartbeat store.")
     parser.add_argument("--list", action="store_true", help="print every live headless worker")
+    parser.add_argument("--count", action="store_true", help="print only the number of live workers")
     parser.add_argument("--check", metavar="SESSION_ID", help="LIVE / STALE / UNKNOWN for one session id")
     parser.add_argument("--dir", default=None, help="override the store path")
     parser.add_argument("--ttl", type=int, default=TTL_SECONDS, help=f"staleness bound in seconds (default {TTL_SECONDS})")
@@ -157,6 +167,15 @@ def main(argv=None):
     if workers is None:
         print(f"UNKNOWN — cannot read {directory}", file=sys.stderr)
         return 2
+
+    if args.count:
+        # The integer and nothing else. `$(... --count)` is written straight into a
+        # comparison, so any prose on stdout would be captured as the value; the
+        # unreadable case above already reports on stderr and exits 2, which is the only
+        # channel a counter may use. Counts what `--list` lists — including an
+        # `unknown`-state cluster stamp, which is a worker we cannot prove is gone.
+        print(len(workers))
+        return 0
 
     if args.check:
         match = next((w for w in workers if w["session_id"] == args.check), None)
