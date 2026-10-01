@@ -913,5 +913,93 @@ class TestStuck(Base):
         self.assertAlmostEqual(self.m.read_task(p)["mtime"], os.stat(p).st_mtime, places=3)
 
 
+class TestVerdictsCache(Base):
+    """The verdicts cache's writer — the half clause (1) delegated to the caller in prose.
+
+    Clause (1) (`agents/manager-drive.md`) names the cache's home and assigns the write to
+    the *caller* ("The write is the caller's … let the caller persist them"), but nothing in
+    the shipped tree wrote the file: the leg holds no write tool, and the two sibling
+    subjects' caches are one-off writes whose mtimes never move while their subject ticks
+    daily. The store's own half has a code writer (`--write-buckets`); this is its
+    counterpart.
+    """
+
+    def verdicts(self, subject, payload):
+        return self.run_gate(
+            "--subject", subject, "--write-verdicts", stdin=json.dumps(payload)
+        )
+
+    def read_verdicts(self, subject):
+        with open(self.m.verdicts_path(subject), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_write_verdicts_lands_beside_the_store_and_prints_its_path(self):
+        payload = {
+            "ATask": {
+                "verdict": "ready",
+                "score": 9,
+                "content_key": "a" * 64,
+                "audited_at": "2026-10-01T10:00:00+02:00",
+            }
+        }
+        rc, out = self.verdicts("ATopic", payload)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        # The path on stdout is the value the dispatch carries.
+        self.assertEqual(out.strip(), self.m.verdicts_path("ATopic"))
+        # A sibling of `.buckets.json`, keyed by the same slug — the home clause (1) names.
+        self.assertEqual(
+            os.path.dirname(self.m.verdicts_path("ATopic")),
+            os.path.dirname(self.m.buckets_path("ATopic")),
+        )
+        self.assertEqual(self.read_verdicts("ATopic"), payload)
+
+    def test_a_null_score_is_a_valid_entry(self):
+        """`blocked` rows carry no score — the sibling stores on disk show `"score": null`
+        — so a validator demanding an int would refuse a shape the cache actually holds."""
+        payload = {
+            "ATask": {"verdict": "blocked", "score": None, "content_key": "b" * 64}
+        }
+        rc, out = self.verdicts("ATopic", payload)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertIsNone(self.read_verdicts("ATopic")["ATask"]["score"])
+
+    def test_refuses_an_empty_cache(self):
+        rc, _ = self.verdicts("ATopic", {})
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_refuses_an_entry_with_no_content_key(self):
+        """The invalidation key is the entry's reason to exist: clause (1) re-audits when
+        the row file's content changes, so a stored verdict carrying no key can never be
+        told from a stale one — and `[]` over the entries would pass vacuously."""
+        rc, _ = self.verdicts("ATopic", {"ATask": {"verdict": "ready", "score": 9}})
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_refuses_an_entry_with_no_verdict(self):
+        rc, _ = self.verdicts("ATopic", {"ATask": {"score": 9, "content_key": "c" * 64}})
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_refuses_a_non_object(self):
+        rc, _ = self.verdicts("ATopic", ["ATask"])
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_a_refused_write_leaves_the_previous_cache_untouched(self):
+        """The negative control, and the sharper reason this guard exists here: a cache
+        that reads back as *present but unusable* is indistinguishable from one never
+        written — which is the state this writer exists to end."""
+        good = {"ATask": {"verdict": "ready", "score": 9, "content_key": "d" * 64}}
+        rc, out = self.verdicts("ATopic", good)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, _ = self.verdicts("ATopic", {"ATask": {"verdict": "ready", "score": 9}})
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertEqual(self.read_verdicts("ATopic"), good)
+
+    def test_the_cache_is_not_folded_into_the_state_record(self):
+        """`save_stored` must not absorb it: the store is the gate's verdict over the
+        *tree*, the cache is the leg's verdict over *rows* — different actors, different
+        cadences, and clause (1) reads the cache back on the next tick."""
+        self.save("ATopic")
+        self.assertNotIn("verdicts", json.loads(self.read_state("ATopic")))
+
+
 if __name__ == "__main__":
     unittest.main()
