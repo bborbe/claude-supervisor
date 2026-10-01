@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.92.1
 
 - fix: **`live-workers.py` gains `--count`, because the probe the worker target was wired to answered `1` for an idle fleet.** An empty heartbeat store prints `no live headless workers in <dir>` — to **stdout**, like every other line the script emits — so `--list | wc -l` counts that sentence and reports **one worker live** on a machine with none. Measured 2026-10-01 against the real store while preparing the worker target's live verification. ⚠️ **The error is invisible because 1 is a plausible count**, and it fails in the direction that makes the fleet look *busier* than it is — so a manager comparing it against the target would suppress a card it should have posted, which is exactly the silence the worker target exists to remove. `--count` writes the integer and nothing else; a non-zero exit still means the store could not be read, with its message on **stderr** where `$(...)` cannot capture it, so "could not check" never degrades into "zero workers". The three call sites that carried the wrong probe are corrected — `commands/manager-loop.md` (both the spawn-time cap check and the under-target trigger), `commands/fleet-loop.md`, and `docs/fleet-surface.md` § Spawn a worker item 5 — each naming `--count` and warning against `--list | wc -l` at the point of use. `scripts/tests/test_live_workers.py` adds six cases, including `test_list_line_count_is_wrong_for_an_empty_store`, which asserts the miscount **deliberately** so the reason the counting mode exists cannot be quietly forgotten.
 
