@@ -199,6 +199,24 @@ class PanesFromFeed(unittest.TestCase):
     def test_duplicate_panes_collapse(self):
         self.assertEqual(gf.panes_from_feed(["  [7] a\n", "  [7] b\n"]), ["7"])
 
+    def test_right_aligned_marker_is_read(self):
+        """The live render pads the id inside the brackets — `[ 417]`, `[   0]`.
+
+        ⚠️ The fixtures above use unpadded ids, which is exactly why the padded
+        shape went unmatched in production while every test here passed: a
+        constructed probe whose input shape the real feed never emits. Measured
+        2026-10-01 against a live render carrying 8 pane rows — `panes_from_feed`
+        returned none of them and the caller exited `pass --pane, --feed, or
+        both` against a feed that had them.
+        """
+        feed = [
+            "Needs you (3)\n",
+            "  [ 417]     0m  ⚙ PR Review - 2026W40-thu\n",
+            "  [  90]    18m  Vuln Fix Agent\n",
+            "  [   0]     0m  Fleet Manager\n",
+        ]
+        self.assertEqual(gf.panes_from_feed(feed), ["417", "90", "0"])
+
 
 class UnreadableSourcesAreUnknown(unittest.TestCase):
     """An empty read is a SUCCESSFUL read returning a decisive negative.

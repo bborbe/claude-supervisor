@@ -237,12 +237,21 @@ def panes_from_feed(stream):
     Reads the `[<pane>]` row marker rather than any `--pane-id` flag: the flag
     also appears on the activate command of a row whose pane may already be
     gone, so the marker is the row's own identity.
+
+    ⚠️ **The marker is right-aligned inside its brackets**, so the digits are
+    padded: a live render carries `[ 417]`, `[  90]`, `[   0]`, never `[417]`.
+    Matching `\\[(\\d+)\\]` therefore matched **nothing** on a real feed and the
+    caller exited `pass --pane, --feed, or both` against a feed holding eight
+    panes — a scoping filter that renders as a filter which found nothing to
+    pass. Measured 2026-10-01 against the live feed (8 pane rows, exit 2); the
+    fixtures in `tests/test_gate_owner_filter.py` used unpadded ids and so never
+    caught it. Tolerate whitespace on both sides.
     """
     import re
 
     out, seen = [], set()
     for line in stream:
-        match = re.match(r"\s*\[(\d+)\]", line)
+        match = re.match(r"\s*\[\s*(\d+)\s*\]", line)
         if not match:
             continue
         pane = match.group(1)
