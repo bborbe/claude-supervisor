@@ -249,17 +249,19 @@ grep -cE '^# (Success Criteria|Definition of Done|Tasks)' <row file>   # → 3
 
 **(7) Rank the round's decision set — once, for the whole set, never per row.** ⚠️ **This clause is batch-level like (0) and (5):** the recommendation is a property of the *round*, not of a row. ⚠️ **One card per round, never one per row** — a drive leg that surfaces a card per undecided row has reintroduced the per-item reporting the approval boundary exists to remove, and asks the operator the same question N times.
 
-Rank **only the rows that need a decision** — `✅ Ready for approval` and `🗑 Stale` — and recommend **at most 5**, in this order, first match winning:
+Rank the round's **actionable** rows — the ones this sweep handed the operator as an act or a decision: `🚀 Ready` (ready-to-start) and `✅ Ready for approval` (waiting-approval) — and recommend **at most 5**, in this order, first match winning:
 
 1. **A row serving an unserved goal criterion.** A goal with an open criterion that this row's outcome advances outranks everything else: it is the only rank with a reason outside the row itself.
 2. **A row that unblocks others** — one whose completion releases rows currently held on a prose blocker or a `blocked_by`.
 3. **The rest, by score.**
 
-**Each recommended row carries its score and its WHY** — the reason it ranks where it does, never a restatement of its title. ⚠️ **A score without a subject, or a subject without a reason, is not an ask** — the same rule the below-bar card's two mandatory fields carry, for the same measured reason.
+**Each `Next` entry carries its bucket, its score and its WHY** — the reason it ranks where it does, never a restatement of its title. The entry's shape is fixed and is graded: `<n>. <task name> — <bucket> — <score>/10 — <one-line why>`, where `<bucket>` is the sweep's own word (`ready-to-start` | `waiting-approval`) and `<why>` names the goal SC the row unblocks **or the literal `no goal SC`** when none applies. ⚠️ **A score without a subject, or a subject without a reason, is not an ask** — the same rule the below-bar card's two mandatory fields carry, for the same measured reason.
 
-**Grouped counts sit below the recommendations**, so the operator sees the size of what is *not* recommended: `N need a decision · M look obsolete — retire?`. The 🗑 Stale rows are the `M`, and they are a retirement question, not a work question — render them separately from the recommendations so a reader cannot mistake a retire-candidate for an offer.
+⚠️ **`🗑 Stale` rows are ranked too, but they are not `Next` entries** — a retire-candidate is not an offer of work. They appear only in the grouped counts line, as a retirement question, so a reader cannot mistake one for an offer.
 
-⚠️ **This file decides the ranking and reports it; the caller owns the card.** The post/poll/`--dedup-key`/`ANSWERED:` mechanics are `65 Runbooks/Manager Session.md` § Step 4's *Waiting-approval* bullet's single home — read them there and never restate them here. Report the ranked set, the scores and the reasons under the `Card` block in `<output_format>`; the caller posts it, polls it on a later tick and acts on the answer. ⚠️ **This is the same decide/act split as clause (6):** you decide, the caller acts. ⚠️ **And it is a different card from the below-bar escalation** — that one is per-task, keyed to a `task_identifier`, and asks the operator to *raise* one row; this one is per-round, keyed to the row set, and asks the operator to *approve* several.
+**Grouped counts sit below the entries**, so the operator sees the size of what is *not* recommended: `<k> more need a decision · <m> look obsolete — retire?`. The 🗑 Stale rows are the `m`.
+
+⚠️ **The `Next` block is the round's ONE ranked rendering, and it is the LAST thing the report prints.** ⚠️ **This file decides the ranking and reports it; the caller owns the card.** The card is a **posting payload derived from this block, never a second ranking**: the caller posts the `waiting-approval` entries as ONE `post-batch` card, and the report's `Card` block carries only the dedup key, the row set it covers, and — on a later tick — the item id. ⚠️ **Two renderings of one decision set is the second counter a `grep` cannot tell from a real one.** The post/poll/`--dedup-key`/`ANSWERED:` mechanics are `65 Runbooks/Manager Session.md` § Step 4's *Waiting-approval* bullet's single home — read them there and never restate them here. ⚠️ **This is the same decide/act split as clause (6):** you decide, the caller acts. ⚠️ **And it is a different card from the below-bar escalation** — that one is per-task, keyed to a `task_identifier`, and asks the operator to *raise* one row; this one is per-round, keyed to the row set, and asks the operator to *approve* several.
 
 5. **Return the action lines**
 
@@ -338,14 +340,10 @@ To open (1):           ← the caller spawns these; mode= is the field you wrote
 Audit (n):             ← the cache evidence: dispatched vs cached, per clause (1)'s content key
   task-auditor dispatches this run: <n> of <m> rows · cache hits: <n> (key: <content-hash>)
 
-Card (1):              ← the caller posts this; the ranked decision set, at most 5 recommended
-  ✅ READY FOR APPROVAL (recommended):
-    1. <task> — <score>/10 — <why it ranks here>
-    2. <task> — <score>/10 — <why it ranks here>
-  🗑 STALE — retire? (recommended):
-    1. <task> — premise already fixed at <file:line>
-  Below the line: <n> need a decision · <m> look obsolete — retire?
-  ⚠️ A `todo` row named here is **never opened and never flipped** — it waits on the operator's `todo → planning`.
+Card (1):              ← the POSTING PAYLOAD, never a second ranking — the caller posts it
+  post-batch --dedup-key "<the round's waiting-approval row set>" — covers <n> waiting-approval + <m> stale
+  ⚠️ The ranked rows are rendered ONCE, in the `Next` block below. Do not restate them here.
+  ⚠️ A `todo` row named in the `Next` block is **never opened and never flipped** — it waits on the operator's `todo → planning`.
 
 Held (<n>):            ← one line per held row, naming the clause and the value that held it
   <task> — audit 7/10 (bar 9) — <which gate failed>
@@ -367,6 +365,12 @@ Not resumed (3):
 
 Escalated (1):
   ⚠️ CRASH-LOOP: <task> — last_auto_resume 12 min ago, not re-handed
+
+Next (3):              ← the round's ONE ranked rendering, and the LAST block in this report
+  1. <task> — ready-to-start — <score>/10 — <the goal SC it unblocks, or `no goal SC`>
+  2. <task> — ready-to-start — <score>/10 — no goal SC
+  3. <task> — waiting-approval — <score>/10 — <why it ranks here>
+  <k> more need a decision · <m> look obsolete — retire?
 ```
 
 **The `Drive:` line is the ordering evidence.** A caller checking the reap-before-drive constraint reads it first: a task appearing under **both** `Reaped` and `Nudged` in one run is a bug in your own ordering, and you should report it as one rather than emitting the line.
@@ -392,7 +396,8 @@ Escalated (1):
 - **Every row in the caller's set left clause (1) with exactly one verdict**, and the verdict was decided on disk this run — never carried from a previous sweep, and never inferred from the caller's bucket. A row that produced no verdict is a row the sweep silently dropped, which is indistinguishable from one that got fixed.
 - **No `phase: todo` row was opened, and none was flipped `todo → planning`.** Every such row was audited, ranked and named on the round's card, and its `phase` was untouched. A run that opened one satisfies every other box here; the frontmatter delta is the evidence.
 - **The premise check ran per row before the score was acted on**, and a 🗑 Stale verdict quotes the row's own source — the `file:line`, the missing subject, or the re-read count — never another task's `status`. A premise that could not be resolved is `❓ Needs you`, never Stale.
-- **The round's card was reported once, ranked, at most 5 recommended**, each with a score and a WHY, with the grouped counts below the recommendations and the 🗑 Stale rows rendered as a retirement question rather than an offer. One card for the round — a card per undecided row is the per-item reporting this clause exists to remove.
+- **The report ends with the `Next` block, and it is the round's ONLY ranked rendering** — at most 5 entries, each in the graded shape `<n>. <task name> — <bucket> — <score>/10 — <one-line why>`, with `<bucket>` the sweep's own word (`ready-to-start` | `waiting-approval`) and `<why>` naming the goal SC or the literal `no goal SC`, ordered by clause (7)'s three ranks, with the grouped counts line below and the 🗑 Stale rows rendered as a retirement question rather than an offer. ⚠️ **The `Card` block carries the posting payload only — no rows.** A second rendering of the same decision set is the second counter a `grep` cannot tell from a real one.
+- **Exactly ONE approve-card per run**, posted by the caller as a single `post-batch` over the round's waiting-approval row set. ⚠️ **Zero cards and one-card-per-row both fail** — the first is the silent hold this clause exists to remove, the second is the per-item reporting it exists to prevent.
 - **A second tick on an unchanged tree dispatched zero `task-auditor` audits**, and the report quotes both counts — this run's dispatches against the first tick's for the same rows. A report that says "cache hit" without both counts does not pass. ⚠️ **The key is content, not mtime** — a run that re-audited the whole set after an mtime-only change has implemented the wrong key.
 - Every open was gated by all **six** per-row clauses (1)–(6), checked on disk **this run**, in order, and the first failure was terminal for that row. ⚠️ Clause (0) is a check on the **dispatch payload**, not an on-disk read, so "checked on disk" covers (1)–(6) and not (0) — the batch gate has its own criterion above.
 - Every ready row was intersected against the declared paths of **every other non-terminal task in the tracked set read from the passed path**, on one canonical path form, **before** the worktree probe ran. ⚠️ **A shared declared path was reported as a `Shared path` candidate and did NOT hold the row on its own** — the row was held only on a **large in-flight refactor of the same service or area**, or on **two live sessions rewriting the same section of one file at the same time**. A run that held on a shared path alone satisfies every other box here; that is the defect the 2026-09-27 ruling removes. A run that skipped (3a) entirely and probed only worktrees also satisfies every other box; that is the measured 2026-09-26 defect.

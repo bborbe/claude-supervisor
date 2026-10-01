@@ -252,6 +252,100 @@ class TestVerdict(Base):
         self.assertIn("fail-open", out)
 
 
+class TestActionablePassThrough(Base):
+    """SC1's both directions: an actionable row in the stored classification forces the
+    sweep, and a board without one keeps the saving.
+
+    The defect these pin is a STEADY state, not a moved one. A ready-to-start row hashes
+    the same on every tick — status, phase, Progress, session, liveness and stuck are all
+    unchanged while it sits approved and unstarted — so before this clause the gate
+    returned NOCHANGE forever and the act leg never ran. Measured 2026-10-01 on `Managers
+    Spawn Interactive Claude Workers in the Cluster`: NO-CHANGE since 18:04 with 2
+    ready-to-start and 1 waiting-approval row on the board, 0 agents dispatched.
+
+    The no-actionable-row case is the negative control and it is load-bearing: the
+    pass-through direction alone is satisfied by a gate hard-wired to return CHANGE, which
+    would destroy the saving this whole file exists for.
+    """
+
+    def buckets(self, subject, payload):
+        return self.run_gate(
+            "--subject", subject, "--write-buckets", stdin=json.dumps(payload)
+        )
+
+    def classified(self, subject, payload):
+        """Store a classification over an otherwise unchanged tree."""
+        self.save(subject)
+        rc, out = self.buckets(subject, payload)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out = self.save_with_table(subject, "t\n", "--buckets", out.strip())
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+
+    def test_a_ready_to_start_row_passes_through_on_an_unchanged_tree(self):
+        self.classified("ATopic", {"done": ["ATask"], "ready-to-start": ["AGoalTask"]})
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("actionable", out)
+        self.assertIn("AGoalTask", out)
+
+    def test_a_waiting_approval_row_passes_through_on_an_unchanged_tree(self):
+        self.classified("ATopic", {"done": ["ATask"], "waiting-approval": ["AGoalTask"]})
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("AGoalTask", out)
+
+    def test_a_classification_with_no_actionable_row_still_reports_nochange(self):
+        """The negative control: `changed = True` unconditionally would pass every test
+        above while disabling the gate."""
+        self.classified("ATopic", {"done": ["ATask"], "progressing": ["AGoalTask"]})
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+    def test_an_absent_classification_still_reports_nochange(self):
+        """The pre-existing contract, and why the clause reads the half defensively: a
+        record with no `bucket_sets` behaves exactly as it did before this change."""
+        self.prime("ATopic")
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+    def test_a_malformed_classification_changes_no_verdict(self):
+        """A half that is not a dict of lists reads as "no actionable rows" — never an
+        error, never a fail-open. The safe direction is a replay: the gate cannot invent a
+        row it was not told about, and a wrong dispatch is the expensive failure."""
+        self.save("ATopic")
+        path = self.m.state_path("ATopic")
+        record = json.loads(self.read_state("ATopic"))
+        for bad in ("ready-to-start", ["ready-to-start"], {"ready-to-start": "ATask"}):
+            record["bucket_sets"] = bad
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(record, fh)
+            rc, out = self.check("ATopic")
+            self.assertEqual(rc, self.m.EXIT_NOCHANGE, "%r -> %s" % (bad, out))
+
+    def test_the_saving_returns_once_the_row_leaves_the_bucket(self):
+        """Not a latch: a row the act leg actually opened reclassifies, and the next tick
+        is free again — which is what keeps this from being a permanent cost."""
+        self.classified("ATopic", {"ready-to-start": ["AGoalTask"]})
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        rc, out = self.buckets("ATopic", {"progressing": ["AGoalTask"]})
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+    def test_actionable_names_reads_only_the_two_actionable_buckets(self):
+        self.assertEqual(self.m.actionable_names(None), [])
+        self.assertEqual(self.m.actionable_names({"done": ["A"]}), [])
+        self.assertEqual(
+            self.m.actionable_names(
+                {"ready-to-start": ["B", "A"], "waiting-approval": ["C"], "done": ["D"]}
+            ),
+            ["A", "B", "C"],
+        )
+
+
 class TestLiveness(Base):
     """Property 2 and its negative control — the pair SC3 is graded on."""
 
