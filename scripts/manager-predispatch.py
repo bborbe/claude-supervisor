@@ -902,7 +902,9 @@ def verdicts_path(subject: str) -> str:
 
     Unlike `buckets_path` this is not a staging file — nothing folds it into the record.
     The store is the gate's verdict over the *tree*; this is the leg's verdict over *rows*,
-    and clause (1) reads it back on the next tick to decide what to re-audit.
+    and clause (1) reads it back on the next tick to decide what to re-audit. Each entry
+    also carries the auditor's `reason` on the verdicts that quote it to the operator
+    (`VERDICTS_NEEDING_REASON`), because a cache hit has no dispatch to quote from.
     """
     return os.path.join(STATE_DIR, f"{slug(subject)}.verdicts.json")
 
@@ -1157,15 +1159,25 @@ def bucket_shape_error(parsed) -> str | None:
     return None
 
 
+# The verdicts whose act hands the operator the auditor's *own words* — the `UNFIXABLE:`
+# grounds for the first two, the posted card's `--context` gaps for the last two. On a
+# cache hit there is no dispatch to re-derive either from, so an entry stored without its
+# reason cannot render them at all: that is the loss `reason` exists to remove, and it is
+# why the field is required here rather than merely allowed.
+VERDICTS_NEEDING_REASON = ("needs-you", "unfixable", "below-bar", "reframe")
+
+
 def verdicts_shape_error(parsed) -> str | None:
     """Why `parsed` cannot serve as a verdicts cache, or None when it is usable.
 
-    A dict of task name -> `{verdict, score, content_key}` is the only shape clause (1)
-    can read. The load-bearing key is `content_key`: clause (1) re-audits a row when its
-    *file content* changes, so a stored verdict carrying no key can never be told from a
-    stale one — and it would be read back as a cache hit on every tick forever. `score` is
-    deliberately allowed to be null, because `blocked` rows carry none and the sibling
-    caches on disk show exactly that shape.
+    A dict of task name -> `{verdict, score, content_key, reason?}` is the only shape
+    clause (1) can read. The load-bearing key is `content_key`: clause (1) re-audits a row
+    when its *file content* changes, so a stored verdict carrying no key can never be told
+    from a stale one — and it would be read back as a cache hit on every tick forever.
+    `reason` is the second required key, on `VERDICTS_NEEDING_REASON` alone: those are the
+    verdicts whose act quotes the audit to the operator, and a hit carries no dispatch to
+    quote from. `score` is deliberately allowed to be null, because `blocked` rows carry
+    none and the sibling caches on disk show exactly that shape.
 
     The empty-object case is refused for the reason `bucket_shape_error` gives: `{}` gates
     nothing while looking like a cache that was written.
@@ -1186,6 +1198,15 @@ def verdicts_shape_error(parsed) -> str | None:
         key = entry.get("content_key")
         if not isinstance(key, str) or not key.strip():
             return f"entry {name!r} must carry a non-blank content_key"
+        reason = entry.get("reason")
+        if verdict in VERDICTS_NEEDING_REASON:
+            if not isinstance(reason, str) or not reason.strip():
+                return (
+                    f"entry {name!r} is {verdict!r} and must carry a non-blank reason "
+                    "— the auditor's own words are what the operator is handed"
+                )
+        elif reason is not None and not isinstance(reason, str):
+            return f"entry {name!r} reason must be a string when present"
     return None
 
 
@@ -1317,8 +1338,8 @@ def main(argv: list[str]) -> int:
 
     if args.write_verdicts:
         # The writer clause (1) delegates to the caller and the tree never provided. The
-        # leg reports each row's verdict, score and content key under its `Audit` block
-        # and holds no write tool; the caller is told to persist them, but the only tool
+        # leg reports each row's verdict, score, content key and reason under its `Audit`
+        # block and holds no write tool; the caller is told to persist them, but the only tool
         # the manager commands are granted is `Bash(python3:*)` — no `Write`, no shell
         # redirect. So the write is routed through this script for the same transport
         # reason `--write-tracked` is, and the first token stays `python3`.
