@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.95.3
 
 - fix: **the write-back's precondition is the sections the write could contradict, not the whole page.** `commands/manager-loop.md` step 7's `noop: false` branch now names that precondition and requires the write-back to say what it read and what it grepped; the rule itself lives in the Manager Session runbook § Write-back on change, which no longer reads *"re-read the whole page"*. ⚠️ **Measured 2026-10-02** — `23 Topics/Manager Layer.md` reached 443 KB with a 225 KB `# Status Summary`, and at tick 24 a manager could not meet the old precondition, scoped its write to the `Current:` line, and wrote the deviation onto the page. A proxy a manager cannot meet is not a control; it is a licence to scope down silently, because nothing distinguishes "reconciled" from "scoped to one line" unless the manager says so.
 
