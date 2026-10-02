@@ -25,7 +25,8 @@ import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { resolveMaxConcurrent, resolveSpawnMode, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { newSessionId, startClusterSession } from './cluster-spawn.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
@@ -499,7 +500,10 @@ function writeLedger(agent, patch) {
       sessionId: agent.sessionId,
       agentId: agent.id,
       label: agent.label,
-      mode: agent.status === 'interactive' ? 'interactive' : 'headless',
+      // Three answers, not two. A cluster worker is neither a tab nor an in-process query, and
+      // folding it into `headless` would file it under a mode whose whole meaning is "a local
+      // process that parks its gates on this server" — which is exactly what it is not.
+      mode: agent.status === 'interactive' ? 'interactive' : agent.status === 'cluster' ? 'cluster' : 'headless',
       modeSource: agent.modeSource ?? null,
       cwd: agent.cwd,
       launcher: agent.launcher ?? null,
@@ -702,8 +706,209 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId, chip })
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, which is
 // what the guard below — see liveness.mjs — refuses rather than silently producing.
-async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role }) {
+// The fleet-wide concurrent-worker limit, as an error string or `null` when the spawn may open.
+//
+// Extracted so BOTH spawn paths answer to it — the tab/headless path below and the cluster
+// path, which is a different SHAPE of worker but not a different population. A limit only one
+// path consulted would be a second counter by omission, which is the defect this number's
+// single home exists to prevent.
+//
+// The count is live WORKER SESSIONS — the session registry joined to the spawn ledger. It is
+// deliberately NOT the heartbeat store, which is stamped only for in-process (headless)
+// workers and therefore read 0 while 11 interactive workers were live (measured 2026-10-01).
+// A cap counting one population while the managers' target counts another is a defect with no
+// error on either side — and the target IS this number, so they must agree by construction.
+// Definition and its two stated limits: `worker-sessions.mjs`.
+function concurrentLimitError() {
+  const maxConcurrent = resolveMaxConcurrent({
+    env: config.maxConcurrent,
+    file: config.configFileContents,
+    path: config.configFile,
+  })
+  if (maxConcurrent.error) return maxConcurrent.error
+  if (maxConcurrent.limit === null) return null
+
+  const live = workerSessions()
+  // `null` is "a store could not be read", which is NOT "no worker is live". Refusing on it is
+  // the same asymmetry the mode rule carries: a limit that cannot count must not open, because
+  // opening past an uncountable limit is how the limit silently stops existing — and a manager
+  // acting on the other reading spawns onto live work.
+  if (live === null) {
+    return (
+      `the concurrent-worker limit is set to ${maxConcurrent.limit} but the live-worker count could not be ` +
+      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. Both the ` +
+      `session registry and the spawn ledger must be readable; point SUPERVISOR_SESSIONS_DIR and ` +
+      `SUPERVISOR_LEDGER_DIR at them if they live elsewhere.`
+    )
+  }
+  if (live.length >= maxConcurrent.limit) {
+    return (
+      `the fleet-wide concurrent-worker limit is reached: ${live.length} live, ${maxConcurrent.limit} ` +
+      `allowed (source: ${maxConcurrent.source}). Open nothing further and report the remainder as ` +
+      `held-on-limit; it is picked up next sweep. Raise spawn.maxConcurrent in ${config.configFile}, or ` +
+      `set it to 0 for unlimited.`
+    )
+  }
+  return null
+}
+
+// A cluster worker: a session inside the `claude-interactive` service, not a process here.
+//
+// A different shape from both paths below, rather than a third branch of them. It has no
+// pane, so nothing here resolves a role, a window or a tab name. And it has no local
+// process, so it holds no registry entry either — which is why the session id is MINTED and
+// sent, instead of being discovered afterwards the way the tab path discovers one by polling
+// the registry for its tab name.
+//
+// ⚠️ The binding is part of the spawn, not a follow-up. The task's `claude_session_id` is
+// what makes the session reachable from the vault; a spawn that returned an id nobody wrote
+// down is a worker the fleet cannot find. It is written only AFTER the call succeeds —
+// stamping a task with an id the service refused would point it at a conversation that does
+// not exist, which is worse than an empty field.
+async function spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive }) {
+  // Arguments the cluster path cannot honour are REFUSED, never accepted and quietly ignored —
+  // the same rule the tab path already carries for `resume` and `policy`. Silently dropping
+  // them is how a caller ends up believing a worker was resumed when a fresh session was
+  // opened, or that it runs under a policy nothing consults.
+  if (resume) {
+    return {
+      error:
+        'resume is not supported with target "cluster": a cluster worker is a session inside the ' +
+        'claude-interactive service, and this path cannot continue an existing conversation. Omit `resume`, ' +
+        'or spawn locally.',
+    }
+  }
+  if (policyPath) {
+    return {
+      error:
+        'policy is not supported with target "cluster": the policy layer answers permission requests raised on ' +
+        'THIS server, and a cluster worker\'s gates never reach it. Omit `policy`, or spawn locally.',
+    }
+  }
+  if (interactive !== undefined) {
+    return {
+      error:
+        'interactive is not supported with target "cluster": it chooses between a local wezterm tab and a local ' +
+        'headless worker, and the cluster target creates neither. Omit it.',
+    }
+  }
+
+  if (!task) {
+    return {
+      error:
+        'the cluster target requires `task`: it names the vault task the worker is opened for, and the task ' +
+        'whose claude_session_id is bound to the created session. Pass the task name, plus `vault` when that ' +
+        'name is not unique across the configured vaults.',
+    }
+  }
+
+  // The limit is checked AFTER the argument refusals, so a malformed call is told what is
+  // wrong with it rather than told the fleet is full — both refuse, but only one names the
+  // thing the caller can actually fix. It is still checked BEFORE anything is created, which
+  // is what matters: a cap consulted after the spawn has already spent the budget it protects.
+  const limitError = concurrentLimitError()
+  if (limitError) return { error: limitError }
+
+  const minted = newSessionId()
+  if (minted.error) return { error: minted.error }
+
+  const started = await startClusterSession({
+    baseUrl: config.clusterUrl,
+    prompt,
+    sessionId: minted.sessionId,
+  })
+  if (started.error) return { error: started.error }
+
+  const bound = bindSessionToTask({ task, vault, sessionId: started.sessionId })
+  if (bound.error) {
+    // The session exists and is running; only the vault's record of it failed. Reported with
+    // the id, because that is the one thing a human needs to reconcile it — and reported
+    // rather than swallowed, so the caller decides whether to keep a session nothing points at.
+    return {
+      error: `session ${started.sessionId} was created but binding it to task "${task}" failed: ${bound.error}`,
+    }
+  }
+
+  // ⚠️ `transcript` and `permissions` are SEEDED, not optional, and getting this wrong is not
+  // a cosmetic drift. `agentView` dereferences both unconditionally (`a.transcript.length`,
+  // `a.permissions.filter`) and `list_agents` maps over EVERY agent — so one agent missing
+  // either makes the whole roster unreadable, not just that row. The local paths always seed
+  // them; a cluster worker has no transcript on this machine and parks no permissions here,
+  // which is exactly why they must be EMPTY rather than absent.
+  const agent = {
+    id,
+    label: label || id,
+    prompt,
+    cwd: null,
+    status: 'cluster',
+    rules: policy.rules,
+    policyPath: null,
+    sessionId: started.sessionId,
+    resumedFrom: null,
+    carriedDecision: null,
+    parentSession: parentSessionId({ dir: config.sessionsDir }),
+    modeSource: 'argument',
+    role: null,
+    windowId: null,
+    launcher: null,
+    paneId: null,
+    transcript: [],
+    permissions: [],
+    result: null,
+    error: null,
+    task,
+    createdAt: new Date().toISOString(),
+  }
+  agents.set(id, agent)
+  writeLedger(agent)
+
+  return {
+    agent_id: id,
+    label: agent.label,
+    status: 'cluster',
+    target: 'cluster',
+    session_id: started.sessionId,
+    task,
+    vault: bound.vault,
+  }
+}
+
+// Stamp the named task's `claude_session_id` with the created session's id.
+//
+// Through `vault-cli`, which owns both the vault lookup and the frontmatter write — the
+// server already shells out to it for the launcher (`vault-cli config list`), so this adds no
+// new dependency. `--vault` is passed whenever the caller supplies one, because task names
+// collide across boards and a bare name can resolve to the wrong one.
+function bindSessionToTask({ task, vault, sessionId }) {
+  const args = ['task', 'set', task, 'claude_session_id', sessionId]
+  if (vault) args.push('--vault', vault)
+  const proc = spawnSync('vault-cli', args, { encoding: 'utf8' })
+  if (proc.error) return { error: `vault-cli could not be run: ${proc.error.message}` }
+  if (proc.status !== 0) {
+    return { error: (proc.stderr || proc.stdout || `vault-cli exited ${proc.status}`).trim() }
+  }
+  return { vault: vault ?? null }
+}
+
+async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault }) {
   const id = `agent_${++seq}`
+
+  // The target is resolved before the mode, and it SHORT-CIRCUITS. A cluster worker is not
+  // opened on this machine at all, so every guard below — the role/window resolution, the
+  // tab-name join, the resume and policy support checks, the concurrent-worker limit — asks
+  // about machinery it never touches. Running them first would spend a spawn's worth of work
+  // on a worker that is never created here, and any error they raised would name the wrong
+  // thing.
+  //
+  // Refused rather than defaulted, and that is the whole reason it is a separate question
+  // from the mode: a spawn that fell back to `local` when the caller asked for the cluster
+  // would look exactly like a working call, and where the worker was created is otherwise
+  // discovered only by noticing it.
+  const spawnTarget = resolveSpawnTarget({ target })
+  if (spawnTarget.error) return { error: spawnTarget.error }
+  if (spawnTarget.target === 'cluster') {
+    return spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive })
+  }
 
   // Resolved first, because every guard below asks which way this worker opens and they
   // must all get the same answer. A bad value in the env or the file refuses here,
@@ -735,37 +940,8 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // 2026-10-01). A cap counting one population while the managers' target counts another is
   // a defect with no error on either side — and the target IS this number, so they must
   // agree by construction. Definition and its two stated limits: `worker-sessions.mjs`.
-  const maxConcurrent = resolveMaxConcurrent({
-    env: config.maxConcurrent,
-    file: config.configFileContents,
-    path: config.configFile,
-  })
-  if (maxConcurrent.error) return { error: maxConcurrent.error }
-  if (maxConcurrent.limit !== null) {
-    const live = workerSessions()
-    // `null` is "a store could not be read", which is NOT "no worker is live". Refusing
-    // on it is the same asymmetry the mode rule carries: a limit that cannot count must not
-    // open, because opening past an uncountable limit is how the limit silently stops
-    // existing — and a manager acting on the other reading spawns onto live work.
-    if (live === null) {
-      return {
-        error:
-          `the concurrent-worker limit is set to ${maxConcurrent.limit} but the live-worker count could not be ` +
-          `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. Both the ` +
-          `session registry and the spawn ledger must be readable; point SUPERVISOR_SESSIONS_DIR and ` +
-          `SUPERVISOR_LEDGER_DIR at them if they live elsewhere.`,
-      }
-    }
-    if (live.length >= maxConcurrent.limit) {
-      return {
-        error:
-          `the fleet-wide concurrent-worker limit is reached: ${live.length} live, ${maxConcurrent.limit} ` +
-          `allowed (source: ${maxConcurrent.source}). Open nothing further and report the remainder as ` +
-          `held-on-limit; it is picked up next sweep. Raise spawn.maxConcurrent in ${config.configFile}, or ` +
-          `set it to 0 for unlimited.`,
-      }
-    }
-  }
+  const limitError = concurrentLimitError()
+  if (limitError) return { error: limitError }
 
   // An explicit window id WINS — the caller may need a window the map does not describe.
   // Otherwise the role decides, in-process, and no window id crosses the tool boundary.
@@ -1117,6 +1293,22 @@ const TOOLS = [
           description:
             'Per-call override of the fleet default. OMIT IT unless you specifically need to force one mode for this one worker: with no argument the server uses SUPERVISOR_SPAWN_MODE, then spawn.mode in ~/.config/claude-supervisor/config.json, then its built-in default of interactive — so the operator changes the whole fleet in one edit instead of in every command file. true opens the worker as a real session in a wezterm tab, with the same tooling a normal session has (launcher env, plugin skills, MCP servers, settings.json permissions), watchable and drivable by hand; its approval prompts are answered IN THAT TAB, so it never appears in pending_permissions. false opens a headless worker whose prompts park for the manager instead, answered with answer_permission. Tooling is the same in both: a headless worker loads the same settingSources and the launcher\'s own MCP servers (measured 2026-09-18 — a headless worker resolved vault MCP tools and returned a real vault hit). The difference is who answers its prompts and whether you can watch it.',
         },
+        target: {
+          type: 'string',
+          enum: ['local', 'cluster'],
+          description:
+            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. `cluster` starts a session in the `claude-interactive` service in nuke dev instead, which requires `task` and a configured SUPERVISOR_CLUSTER_URL. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the cluster is a second option rather than the fleet default — a config value able to default the whole fleet into the cluster is exactly what that split forecloses. A value that is neither `local` nor `cluster` REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. ⚠️ With `target: "cluster"` the local-only arguments `interactive`, `resume` and `policy` are REFUSED rather than ignored: the cluster path can honour none of them, and a dropped `resume` would look like a resume while opening a fresh session. Omit all three on a cluster call.',
+        },
+        task: {
+          type: 'string',
+          description:
+            'The vault task this worker is opened for. REQUIRED with `target: "cluster"` and ignored otherwise: the cluster path binds the created session id to this task\'s `claude_session_id`, which is what makes the worker reachable from the vault. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+        },
+        vault: {
+          type: 'string',
+          description:
+            'The vault the `task` lives in. Optional, and meaningful only with `target: "cluster"` — task names collide across boards, so name the vault whenever the task is not uniquely named.',
+        },
         resume: {
           type: 'string',
           description:
@@ -1254,6 +1446,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // boolean here is what made the config unreachable: the server would receive
           // an explicit mode on every call and never consult anything else.
           interactive: typeof args.interactive === 'boolean' ? args.interactive : undefined,
+          // Passed through raw and validated in spawn-mode.mjs, which owns the legal values and
+          // the refusal message — the same split as the mode and the role above.
+          target: args.target,
+          task: args.task,
+          vault: args.vault,
           resume: args.resume,
           decision: args.decision,
           policy: args.policy,

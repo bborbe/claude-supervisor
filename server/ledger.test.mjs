@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildRecord, listRecords, parentSessionId, readRecord, recordPath, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
+import { MODES, buildRecord, listRecords, parentSessionId, readRecord, recordPath, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 
 const SESSION = 'ea363bb5-123a-4d03-bc89-1087a3114bbd'
 
@@ -55,6 +55,17 @@ test('buildRecord records which policy the worker ran under', () => {
 test('buildRecord refuses a record it could not file', () => {
   assert.throws(() => buildRecord({ mode: 'interactive' }), /needs a sessionId/)
   assert.throws(() => buildRecord({ sessionId: SESSION, mode: 'telepathy' }), /unknown mode/)
+})
+
+test('buildRecord accepts the third mode, cluster', () => {
+  // A cluster worker is neither a tab nor an in-process query, and the mode it is filed under
+  // is what the fleet reads to answer "who started this, and how". Omitting `cluster` from
+  // MODES failed SILENTLY rather than loudly: `buildRecord` throws, `writeLedger` catches that
+  // throw and only logs a warning, and the spawn still returns a working-looking response — so
+  // every cluster worker ran with no ledger record at all. This test is the guard, because it
+  // fails at the throw where the spawn path could not.
+  assert.ok(MODES.includes('cluster'))
+  assert.equal(buildRecord({ sessionId: SESSION, mode: 'cluster' }).mode, 'cluster')
 })
 
 test('the record is keyed by the session uuid, which is the resume handle', () => {

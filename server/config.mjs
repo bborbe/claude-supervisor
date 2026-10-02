@@ -102,6 +102,19 @@ export const config = Object.freeze({
   // Unset means unlimited, which is the shipped state — see resolveMaxConcurrent.
   maxConcurrent: ENV.SUPERVISOR_MAX_CONCURRENT || null,
 
+  // Where the cluster's `claude-interactive` service is reachable from THIS machine — the
+  // address a cluster spawn POSTs a prompt to. Raw and unvalidated, like the two above: the
+  // legal shape and the refusal message belong to cluster-spawn.mjs, which can be tested
+  // without a filesystem or an environment.
+  //
+  // ⚠️ Unset means "the cluster target is not configured here", and a cluster spawn then
+  // REFUSES rather than reaching for a default. That is not defensiveness: the pod publishes
+  // no Service of its own, the supervisor runs on a different machine from the pod, and the
+  // operator's cluster rules forbid a port-forward — so there is no address to guess, and a
+  // guessed one (a `localhost:9090` default is the obvious candidate) fails against the
+  // operator's own machine while reading like a cluster problem.
+  clusterUrl: ENV.SUPERVISOR_CLUSTER_URL || null,
+
   // Whether a reported cost figure describes the traffic that actually ran. See the
   // note above the resolution — this is a property of the deployment, not of a turn.
   anthropicBaseUrl: ANTHROPIC_BASE_URL,

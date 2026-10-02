@@ -12,9 +12,11 @@ import {
   MAX_CONCURRENT_ENV,
   resolveMaxConcurrent,
   resolveSpawnMode,
+  resolveSpawnTarget,
   unknownKeyWarnings,
   workerEnvFor,
   SPAWN_MODES,
+  SPAWN_TARGETS,
   WORKER_MODE_ENV,
   WORKER_MODE_SOURCE_ENV,
 } from './spawn-mode.mjs'
@@ -230,4 +232,41 @@ test('maxConcurrent is a known spawn key — it does not warn as unknown', () =>
   // Without this the key is accepted, reported as applied, and silently ignored — the
   // failure this repo shipped twice (policy.json v0.3.0, permissionMode before mode.mjs).
   assert.deepEqual(unknownKeyWarnings({ spawn: { mode: 'interactive', maxConcurrent: 6 } }, 'x.json'), [])
+})
+
+test('a spawn with no target is local', () => {
+  assert.deepEqual(resolveSpawnTarget({}), { target: 'local', source: 'default' })
+  assert.deepEqual(resolveSpawnTarget(), { target: 'local', source: 'default' })
+  // An empty string is "the caller passed nothing", not a target named "" — the same
+  // absent-vs-present split `stringSources` makes for the mode's env and config sources.
+  assert.deepEqual(resolveSpawnTarget({ target: '' }), { target: 'local', source: 'default' })
+})
+
+test('an explicit target is taken from the argument', () => {
+  assert.deepEqual(resolveSpawnTarget({ target: 'cluster' }), { target: 'cluster', source: 'argument' })
+  assert.deepEqual(resolveSpawnTarget({ target: 'local' }), { target: 'local', source: 'argument' })
+})
+
+test('cluster is NOT a SPAWN_MODES value', () => {
+  // The load-bearing decision, asserted rather than left to a comment. Putting `cluster` in
+  // SPAWN_MODES would make it selectable from SUPERVISOR_SPAWN_MODE and `spawn.mode` in the
+  // operator's config file, so one edit could default the whole fleet into the cluster — and
+  // the cluster is a second option, never the default. `resolveSpawnMode` refuses any value
+  // not in that list, so a config of `cluster` is refused loudly today; this test is what
+  // keeps that true after someone "helpfully" adds the third mode.
+  assert.ok(!SPAWN_MODES.includes('cluster'))
+  assert.ok(SPAWN_TARGETS.includes('cluster'))
+  assert.match(resolveSpawnMode({ env: 'cluster' }).error, /not a spawn mode/)
+  assert.match(resolveSpawnMode({ file: { spawn: { mode: 'cluster' } } }).error, /not a spawn mode/)
+})
+
+test('an unknown target refuses rather than falling back to local', () => {
+  // Falling back is the failure, not the safe answer: a worker created locally when the
+  // caller asked for the cluster looks exactly like a working call, and is otherwise
+  // discovered only by noticing where the worker actually ran.
+  for (const bad of ['Cluster', 'remote', 'nuke', ' cluster', true, 0, {}]) {
+    const { error } = resolveSpawnTarget({ target: bad })
+    assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
+    assert.match(error, /not a spawn target/)
+  }
 })
