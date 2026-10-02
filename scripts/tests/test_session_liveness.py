@@ -24,6 +24,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -50,6 +51,26 @@ def dead_pid():
     return p.pid
 
 
+def live_proc_start(pid):
+    """`pid`'s real start time, formatted the way the registry writes `procStart`: ctime, UTC.
+
+    A planted record has to carry this to be realistic. The probe compares it against the
+    live holder's `ps -o lstart=` (which prints LOCAL, hence the conversion), and a record
+    with no `procStart` is UNKNOWN by design — so a fixture that omits it exercises the
+    missing-field path, not the live one, and would read every planted session as unproven.
+    """
+    out = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True
+    ).stdout.strip()
+    if not out:
+        return None
+    return (
+        datetime.strptime(out, "%a %b %d %H:%M:%S %Y")
+        .astimezone(timezone.utc)
+        .strftime("%a %b %d %H:%M:%S %Y")
+    )
+
+
 class SessionLiveness(unittest.TestCase):
     def setUp(self):
         self.m = load()
@@ -69,9 +90,17 @@ class SessionLiveness(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def plant(self, session_id, pid, name="synth", status="running"):
+    def plant(self, session_id, pid, name="synth", status="running", proc_start=_DEFAULT):
+        """Plant a registry record. `proc_start` defaults to the pid's REAL start time.
+
+        Pass an explicit value to plant a mismatch on purpose, or `None` to omit the field.
+        """
+        rec = {"sessionId": session_id, "pid": pid, "name": name, "status": status}
+        start = live_proc_start(pid) if proc_start is _DEFAULT else proc_start
+        if start is not None:
+            rec["procStart"] = start
         with open(os.path.join(self.dir, "%s.json" % pid), "w", encoding="utf-8") as fh:
-            json.dump({"sessionId": session_id, "pid": pid, "name": name, "status": status}, fh)
+            json.dump(rec, fh)
 
     def beat(self, session_id, age_seconds=1):
         """Plant a heartbeat stamp aged `age_seconds`. The TTL is 60s, so the default is fresh."""
@@ -184,6 +213,72 @@ class SessionLiveness(unittest.TestCase):
         finally:
             self.m.os.kill = real_kill
 
+    # ---- pid IDENTITY: occupancy is not liveness -----------------------------------------
+    #
+    # `os.kill(pid, 0)` asks whether SOME process holds the pid, never whether it is THIS
+    # session's. These pin the residual `[[A Substring-Matched Liveness Probe Reports a Dead
+    # Session as Live]]` left open: a record that outlives its session (a `kill -9` leaves it
+    # behind) plus a pid the OS has since recycled. Before the identity check that pair read
+    # LIVE, which is how a close-me line gets printed for a session that is already gone.
+
+    def test_a_recycled_pid_is_absent_not_live(self):
+        # The controlled fixture, in one assertion: a record for a session id that is gone,
+        # against a pid held by an unrelated live process.
+        self.plant(
+            "rec1c1ed-1111-2222-3333-444455556666",
+            os.getpid(),
+            proc_start="Thu Jan  1 00:00:00 1970",
+        )
+        rc, out = self.check("rec1c1ed")
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("not this session", out)
+
+    def test_a_matching_proc_start_is_live(self):
+        # The other arm, and the one that keeps the fix from being "always ABSENT": the
+        # record's own start time agrees with the live holder's.
+        self.plant("ma7ch1ng-1111-2222-3333-444455556666", os.getpid())
+        self.assertEqual(self.check("ma7ch1ng")[0], LIVE)
+
+    def test_an_occupied_pid_with_no_proc_start_is_unknown(self):
+        # Occupied, but the record cannot say WHICH process — "cannot tell", never death.
+        self.plant("n0s7ar75-1111-2222-3333-444455556666", os.getpid(), proc_start=None)
+        rc, out = self.check("n0s7ar75")
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("no usable procStart", out)
+
+    def test_an_occupied_pid_with_a_malformed_proc_start_is_unknown(self):
+        self.plant("bad5tamp-1111-2222-3333-444455556666", os.getpid(), proc_start="not a date")
+        self.assertEqual(self.check("bad5tamp")[0], UNKNOWN)
+
+    def test_a_gone_pid_is_still_absent_without_a_proc_start(self):
+        # The identity check must not swallow the stale-record arm: a pid that is GONE is
+        # decisive on its own, because there is no holder to compare a start time against.
+        self.plant("g0ne0000-1111-2222-3333-444455556666", dead_pid(), proc_start=None)
+        self.assertEqual(self.check("g0ne0000")[0], ABSENT)
+
+    def test_a_mismatched_proc_start_is_unknown_when_the_heartbeat_store_is_unreadable(self):
+        # A mismatch is a NEGATIVE, so it needs both sources readable — the same rule the
+        # stale-record branch applies.
+        self.plant(
+            "m15ma7ch-1111-2222-3333-444455556666",
+            os.getpid(),
+            proc_start="Thu Jan  1 00:00:00 1970",
+        )
+        rc, out = self.check("m15ma7ch", heartbeat_dir=self.unreadable())
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("heartbeat store is unreadable", out)
+
+    def test_a_recycled_pid_is_omitted_from_the_listing(self):
+        # `--list` is "one line per live session", so an unproven identity must not appear.
+        self.plant(
+            "rec1c1ed-1111-2222-3333-444455556666",
+            os.getpid(),
+            name="Recycled",
+            proc_start="Thu Jan  1 00:00:00 1970",
+        )
+        _, out = self.listing()
+        self.assertNotIn("Recycled", out)
+
     # ---- --list -------------------------------------------------------------------------
 
     def test_list_shows_only_live_sessions(self):
@@ -272,6 +367,7 @@ class SessionLiveness(unittest.TestCase):
                 {
                     "sessionId": "f0rmer00-1111-2222-3333-444455556666",
                     "pid": os.getpid(),
+                    "procStart": live_proc_start(os.getpid()),
                     "name": "Renamed Topic Manager",
                     "status": "busy",
                     "formerNames": [{"name": "Topic Manager", "at": "2026-09-18"}],

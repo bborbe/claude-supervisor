@@ -23,12 +23,34 @@ import io
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "manager-predispatch.py")
+
+
+def live_proc_start(pid):
+    """`pid`'s real start time as the registry writes `procStart` — ctime, UTC.
+
+    A planted record needs this to be realistic. `session-liveness.py` now proves the pid
+    belongs to the recorded session by comparing `procStart` against the live holder's
+    `ps -o lstart=`, so a fixture that omits the field is UNKNOWN by design — the
+    missing-field path, not the live one these tests mean to exercise.
+    """
+    out = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True
+    ).stdout.strip()
+    if not out:
+        return None
+    return (
+        datetime.strptime(out, "%a %b %d %H:%M:%S %Y")
+        .astimezone(timezone.utc)
+        .strftime("%a %b %d %H:%M:%S %Y")
+    )
 
 TASK = """---
 status: in_progress
@@ -136,7 +158,15 @@ class Base(unittest.TestCase):
 
     def registry(self, sid, status="idle"):
         with open(os.path.join(self.m.REGISTRY_DIR, "1.json"), "w") as fh:
-            json.dump({"sessionId": sid, "pid": os.getpid(), "status": status}, fh)
+            json.dump(
+                {
+                    "sessionId": sid,
+                    "pid": os.getpid(),
+                    "procStart": live_proc_start(os.getpid()),
+                    "status": status,
+                },
+                fh,
+            )
 
     def heartbeat(self, sid, age):
         p = os.path.join(self.m.HEARTBEAT_DIR, "%s.json" % sid)
@@ -407,6 +437,7 @@ class TestLiveness(Base):
                 {
                     "sessionId": sid,
                     "pid": os.getpid(),
+                    "procStart": live_proc_start(os.getpid()),
                     "status": status,
                     "name": name,
                 },
@@ -1226,6 +1257,89 @@ class TestVerdictsCache(Base):
             },
         )
         self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def seed_verdicts(self, subject, payload):
+        """Write a cache directly, the way one written before `reason` existed sits on disk.
+
+        The writer cannot produce that shape any more — that is the point — so a legacy
+        entry has to be seeded rather than staged.
+        """
+        os.makedirs(os.path.dirname(self.m.verdicts_path(subject)), exist_ok=True)
+        with open(self.m.verdicts_path(subject), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+
+    def test_grandfathers_a_carried_forward_entry_with_no_reason(self):
+        """⚠️ The rule is on a *fresh audit*, not on the schema. A row written before the
+        field existed has no audit left to re-derive its words from, and backfilling is out
+        of scope — so an unchanged content_key means carry-forward, and refusing it instead
+        made four of five live caches unwritable (measured 2026-10-02)."""
+        self.seed_verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+        )
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(
+            self.read_verdicts("ATopic")["ATask"]["content_key"], "a" * 16
+        )
+
+    def test_refuses_the_same_entry_once_its_content_key_moves(self):
+        """The grandfather is keyed on the content key, never on the task name: a moved key
+        means the row was re-audited, so the new verdict must carry the auditor's words."""
+        self.seed_verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+        )
+        rc, _ = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "b" * 16}},
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_refuses_a_fresh_entry_on_a_subject_with_no_cache(self):
+        """The strict reading still holds where there is genuinely no prior cache: with
+        nothing on disk there is no carry-forward to grandfather, so a reason-less
+        `needs-you` entry is a fresh audit missing its words."""
+        rc, _ = self.verdicts(
+            "AFreshTopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "c" * 16}},
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_grandfathering_does_not_leak_to_the_other_verdicts(self):
+        """Only `VERDICTS_NEEDING_REASON` is exempted, and only while carried: a `ready`
+        row is unaffected either way, and a carried `ready` row still validates normally."""
+        self.seed_verdicts(
+            "ATopic", {"ATask": {"verdict": "ready", "score": 9, "content_key": "d" * 16}}
+        )
+        rc, out = self.verdicts(
+            "ATopic", {"ATask": {"verdict": "ready", "score": 9, "content_key": "d" * 16}}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+
+    def test_reports_which_rows_it_grandfathered(self):
+        """Not a failure and not silent: a reader should see which rows cannot render their
+        grounds now, rather than discover it from an empty `UNFIXABLE:` line later."""
+        self.seed_verdicts(
+            "ATopic",
+            {"Legacy": {"verdict": "unfixable", "score": None, "content_key": "e" * 16}},
+        )
+        rc, _ = self.verdicts(
+            "ATopic",
+            {"Legacy": {"verdict": "unfixable", "score": None, "content_key": "e" * 16}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK)
+        self.assertEqual(
+            self.m.verdicts_grandfathered(
+                {"Legacy": {"verdict": "unfixable", "content_key": "e" * 16}},
+                {"Legacy": {"content_key": "e" * 16}},
+            ),
+            ["Legacy"],
+        )
+        self.assertEqual(self.m.verdicts_grandfathered({}, {}), [])
 
     def test_refuses_a_non_object(self):
         rc, _ = self.verdicts("ATopic", ["ATask"])
