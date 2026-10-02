@@ -14,7 +14,14 @@ the three verbs that move one row across it.
 ⚠️ **The command never picks a row; the operator names it.** `reject` is irreversible
 and `approve` releases work to the fleet, so a command choosing its own row would be
 deciding what gets built — the inversion the boundary exists to prevent. There is no
-"approve everything", no filter, and no recommended row.
+"approve everything", no selection filter, and no recommended row.
+
+⚠️ **Scoping a view is not selecting a row.** The ban above is on the command *choosing*
+which row moves. The view does narrow and order what it shows — a manager session sees
+only its own subject's rows, every other session sees the residual no live manager
+handles, and rows render ranked and capped per `agents/manager-drive.md` clause (7) —
+but ordering and scope decide nothing: every verb still needs the operator to name the
+row, and no row is marked as the one to approve. `--all` renders every row, flat.
 
 ⚠️ **`vault-cli task approve` is the only approval.** Never substitute
 `vault-cli task set <task> phase planning` — it writes the phase and nothing else, so
@@ -31,6 +38,13 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 Print the output verbatim, then stop. It is read-only — no task file, cache or state
 file — so it is always safe to re-run.
+
+The header names the scope. A manager session (one with a
+`~/.claude/state/worker-manager/<session-id>.json` record) sees its subject's rows; any
+other session sees the **residual** — rows whose topic or goal has no live manager loop.
+Rows render ranked and capped in `agents/manager-drive.md` clause (7)'s order, with a
+count of what is not shown. When the operator asks for everything, run the same line
+with `--all` for the flat, unscoped render.
 
 Each row prints its vault in brackets — **that is the identity, not decoration**, since
 titles are not namespaced across vaults and the same title can be live twice.
