@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.95.5
 
 - fix: **the `under-target` bullet now names the producer instead of describing the output.** The state file, the `--dedup-key` derivation and the suppression line have one owner — `scripts/under-target-state.py`, shipped in v0.95.4 — and the rule points at it, carrying the *why* (`… write` on post, `… read` before posting) and the line's **required parts** (the item id, the withheld row names, the capacity line, the ranked rows) without prescribing its exact string. ⚠️ **This is what makes v0.95.4 reachable rather than decorative:** a producer nothing calls is the "no script call, no line" failure mode the script's own criteria name, and a hand-rolled line is *bypassed, not corrected*. The measured basis travels with the pointer: four subjects, four hand-rolled derivations, **two folding a timestamp into the key**, so a re-post of an unchanged set was a different key and the operator was asked twice.
 
