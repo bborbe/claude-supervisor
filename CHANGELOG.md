@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.94.0
 
 - feat: **a board answer now wakes the worker that posted the card, instead of waiting for its next drive run.** `scripts/answered-watch.py` shipped wired for the manager and fleet tiers only; `commands/worker-drive.md` now arms it too — in §0b's wait inventory, so a diagnose run treats an unarmed or expired watcher as a **dead wait** rather than a WAIT, and at §8's tail, where a worker ends its turn on a `👤 You:` panel. ⚠️ **The card is not posted by the worker explicitly** — the `Stop` hook (`~/.claude/hooks/attention-log.py`) records every `👤 You: pick / approve: / review: / you run:` line — it writes only a local event log and never talks to the store — and `~/.claude/scripts/attention-watcher.py` publishes it to the board with `producer_id` set to that session, which is what makes the arm's `producer_id` scoping meaningful for a worker at all; without it the arm would be watching a card nothing produces. On an `ANSWERED <item-id>` line the worker polls `attention-ask.py poll <item-id>` and acts immediately. ⚠️ **Not armed for `nothing` or `later (on …)` panels** — the hook records those as `idle`, so no card exists to answer. Where a manager's own feed watcher is also armed the two are distinct signals rather than a double doorbell: one fires on a gate being *raised*, this one on a card being *answered*.
 
