@@ -74,10 +74,18 @@ def refuse(msg):
 def state_path(topic):
     return os.path.join(STATE_DIR, "%s.json" % topic)
 
-def validate(topic, rows):
-    """Returns an error string, or None. Every caller runs this before touching disk."""
+def validate_topic(topic):
+    """Every path-building caller runs this first — a topic is a slug, never a path."""
     if not topic or not SLUG_RE.match(topic):
         return "topic %r is not a slug (want ^[a-z0-9][a-z0-9._-]*$)" % topic
+    return None
+
+
+def validate(topic, rows):
+    """Returns an error string, or None. Every caller runs this before touching disk."""
+    err = validate_topic(topic)
+    if err:
+        return err
     if not rows:
         return "no --row given; an empty row set has no membership to key on"
     for r in rows:
@@ -122,6 +130,9 @@ def cmd_write(args):
 
 
 def cmd_read(args):
+    err = validate_topic(args.topic)
+    if err:
+        return refuse(err)
     path = state_path(args.topic)
     if not os.path.exists(path):
         print("no state recorded for %s" % args.topic, file=sys.stderr)
@@ -138,6 +149,9 @@ def cmd_read(args):
 
 
 def cmd_clear(args):
+    err = validate_topic(args.topic)
+    if err:
+        return refuse(err)
     path = state_path(args.topic)
     if os.path.exists(path):
         os.remove(path)

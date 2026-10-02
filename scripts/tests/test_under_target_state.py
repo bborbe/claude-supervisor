@@ -119,6 +119,13 @@ class WriteRefusesRatherThanHalfLanding(unittest.TestCase):
         run("clear", "--topic", "t", state_dir=self.dir)
         self.assertFalse(os.path.exists(os.path.join(self.dir, "t.json")))
 
+    def test_read_and_clear_refuse_a_path_shaped_topic(self):
+        """Both build a path from --topic, so both must refuse a topic that is a path."""
+        for cmd in ("read", "clear"):
+            r = run(cmd, "--topic", "../../etc/passwd", state_dir=self.dir)
+            self.assertEqual(2, r.returncode, f"{cmd} accepted a path-shaped topic")
+            self.assertIn("REFUSED", r.stderr)
+
 
 class SuppressionLineKeepsTheInformation(unittest.TestCase):
     """SC3 and SC5 in one place: the line names the ask, and never withholds the rest."""
