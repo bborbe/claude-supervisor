@@ -38,10 +38,10 @@ def _say(ts, text):
         {"type": "tool_use", "name": "mcp__tts__say", "input": {"text": text}}]}}
 
 
-def _post(ts):
+def _post(ts, sub="post"):
     return {"timestamp": ts, "message": {"content": [
         {"type": "tool_use", "name": "Bash",
-         "input": {"command": "python3 scripts/attention-ask.py post --dedup-key k --payload p"}}]}}
+         "input": {"command": f"python3 scripts/attention-ask.py {sub} --dedup-key k --payload p"}}]}}
 
 
 class QuestionRule(unittest.TestCase):
@@ -79,6 +79,21 @@ class Pairing(unittest.TestCase):
     def test_post_outside_window_does_not_pair(self):
         path = self._transcript([_say("2026-10-02T10:00:00Z", QUESTIONS[2]),
                                  _post("2026-10-02T10:01:01Z")])
+        self.assertEqual(len(vap.scan(path)[1]), 1)
+
+    def test_post_batch_pairs(self):
+        path = self._transcript([_say("2026-10-02T10:00:00Z", QUESTIONS[0]),
+                                 _post("2026-10-02T10:00:10Z", sub="post-batch")])
+        self.assertEqual(len(vap.scan(path)[1]), 0)
+
+    def test_post_at_exactly_window_pairs(self):
+        path = self._transcript([_say("2026-10-02T10:00:00Z", QUESTIONS[0]),
+                                 _post("2026-10-02T10:01:00Z")])
+        self.assertEqual(len(vap.scan(path)[1]), 0)
+
+    def test_poll_alone_does_not_pair(self):
+        path = self._transcript([_say("2026-10-02T10:00:00Z", QUESTIONS[0]),
+                                 _post("2026-10-02T10:00:10Z", sub="poll")])
         self.assertEqual(len(vap.scan(path)[1]), 1)
 
     def test_statements_never_flag(self):
