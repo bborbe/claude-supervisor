@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.93.9
 
 - fix: **the readiness probe no longer emits a `ready`/`not-ready` word.** Both consumers already parsed the score and explicitly distrusted the label, so the word was never read — while it was measurably unstable: an 18-run repeat-run sweep over five unchanged task files (byte-identical inputs, hashes pinned) returned **both polarities at an identical `8/10`** on one file and flipped polarity on **three of the five**. A field nothing reads, that flips on unchanged input, is a second counter in the output contract's clothing, so it is removed rather than defined — the gate keeps deciding from the score and the hard-gate list.
 
