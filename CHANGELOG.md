@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.93.7
 
 - fix: **`commands/fleet-loop.md` still told its reader that live workers do *not* come from the session registry, three lines below telling them to run the script that reads it.** `worker-sessions.py` defines a worker session as the registry **joined to** the spawn ledger, so `~/.claude/sessions/*.json` is where half its input comes from — and the bullet named that directory as a thing not to read. Introduced by #86 (the `--count` fix) and left standing by #87 (the unit fix) when the correct instruction was added above it, which is this task's own defect class: a superseded restatement surviving inside the text that supersedes it, the second counter a `grep` cannot tell from a real one. The premise was true and is kept — the registry *alone* also holds the operator's own sessions and the managers — so the line now says the registry is read **only through the ledger join that excludes them**, rather than implying it is not read at all. Found while driving the worker-target task's SC5, whose live round printed `workers 18/20` from the joined instrument with `spawn.maxConcurrent` absent, resolving to the 20 default.
 ## v0.93.6
