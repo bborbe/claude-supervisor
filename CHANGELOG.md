@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.96.1
 
 - fix: **unfold two changelog bullets the merge resolution had spliced into already-released sections, and retire a stranded `## Unreleased` heading that had been carrying shipped work.** `Changelog Fold Guard` was red on master — `FAIL: 2 folded bullet(s) across 283 released section(s) at v0.96.0`. The `docs:` bullet for `worker-drive`'s force/trigger lever sat under `## v0.93.5` while its merge `c4fb47a` first appears in `v0.93.6`, and the `feat:` bullet for the manager wake on a board answer sat under `## v0.90.1` while its merge `2b777a5` first appears in `v0.91.0`. Both shipped, so the direction was taken from `git tag --contains` rather than from where the merge put them, and neither was moved to `## Unreleased`, which would have announced already-shipped work as pending and duplicated it in the next release cut. A third defect of the same family sat outside the guard's view: a second `## Unreleased` heading stranded between `## v0.87.5` and `## v0.87.4`, holding one bullet whose merge `4c9ea75` is already contained by `v0.95.0`; that bullet now sits in `## v0.95.0`. ⚠️ **The guard could not see it** — its released-section walk reads only `^## vX.Y.Z$` headings, and its stall check is satisfied by *any* `## Unreleased` anywhere in the file, so the stranded heading both hid the defect and suppressed the stall report the guard would otherwise emit. That blind spot is fixed in the guard's own home, `bborbe/coding`.
 
