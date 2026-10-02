@@ -52,18 +52,38 @@ Resolution reads the same live set the view renders, so a row already approved,
 rejected or deferred resolves to nothing — which is the honest answer, and it is
 what stops a second verb from re-deciding a settled row.
 
+SCOPE — WHO SEES WHICH ROWS. A session with a manager record at
+`~/.claude/state/worker-manager/<session-id>.json` sees only its subject's rows
+(a row's topic, or one of its `goals:`, equals the subject). Every other session
+sees the RESIDUAL: rows no LIVE manager handles. Live is decided by
+`manager-liveness.py`'s own `classify()` over `sweep-gate/<slug>.cadence` — never
+by the record files, which outlive their managers, and never through `--check`,
+which writes its notified-set file and would break this script's read-only rule.
+This mirrors the open-items rule: a subject's manager carries its asks, the fleet
+manager carries the residual.
+
+RANKED, NEVER THE TAIL. The view renders at most `agents/manager-drive.md`
+clause (7)'s cap, in that clause's order: a row serving a goal, then a row other
+live rows are `blocked_by`, then the rest by cached `task-auditor` score
+(`manager-predispatch/*.verdicts.json`; rows with no entry sort after, by name).
+The cap is READ from clause (7) — never restated here. Ordering picks nothing:
+no row is marked as the one to approve, and every verb still needs a named row.
+`--all` restores the flat, every-row render.
+
 Usage:
-    inbox.py [--vault <name>] [--json]
+    inbox.py [--vault <name>] [--json] [--all] [--session <id>]
     inbox.py --resolve <title>
 
 Exit codes: 0 ok, 2 vault config unreadable, 3 no such live row, 4 ambiguous.
 """
 import argparse
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
 # A cadence-marked title carries an ISO-week token; a dated one-off does not.
 # See the module docstring for why the date form is deliberately absent.
@@ -79,6 +99,15 @@ FM_RE = re.compile(r"\A---\n(.*?)\n---", re.S)
 TOPIC_LINE_RE = re.compile(r"^Topic:\s*\[\[([^\]|]+)", re.M)
 
 WHY_WIDTH = 96
+
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+MANAGER_DIR = os.path.expanduser(os.environ.get(
+    "SUPERVISOR_WORKER_MANAGER_DIR", "~/.claude/state/worker-manager"))
+VERDICTS_DIR = os.path.expanduser(os.environ.get(
+    "SUPERVISOR_PREDISPATCH_DIR", "~/.claude/state/manager-predispatch"))
+CLAUSE7 = os.path.join(SCRIPTS, os.pardir, "agents", "manager-drive.md")
+CAP_RE = re.compile(r"recommend \*\*at most (\d+)\*\*")
+WIKI_RE = re.compile(r"\[\[([^\]|]+)")
 
 
 def load_vaults():
@@ -110,12 +139,30 @@ def parse(text):
     m = FM_RE.match(text)
     if not m:
         return {}, text
-    fm = {}
+    fm, key = {}, None
     for line in m.group(1).splitlines():
         km = re.match(r"^([a-z_]+):\s*(.*)$", line)
         if km:
-            fm[km.group(1)] = km.group(2).strip().strip("'\"")
+            key = km.group(1)
+            fm[key] = km.group(2).strip().strip("'\"")
+            continue
+        # A YAML block list (`topics:` then `  - '[[X]]'`) — folded into the same
+        # comma-joined string an inline list yields, so readers see one shape.
+        li = re.match(r"^\s+-\s*(.*)$", line)
+        if key and li:
+            item = li.group(1).strip().strip("'\"")
+            fm[key] = f"{fm[key]}, {item}" if fm[key] else item
     return fm, text[m.end():]
+
+
+def names(raw):
+    """Wikilink targets (or bare items) from a raw frontmatter list value."""
+    if not raw or raw == "[]":
+        return []
+    hits = WIKI_RE.findall(raw)
+    if hits:
+        return [h.strip() for h in hits]
+    return [x.strip().strip("'\"") for x in raw.strip("[]").split(",") if x.strip()]
 
 
 def is_recurring(fm, title):
@@ -137,8 +184,9 @@ def topic_of(fm, body, vault_has_topics):
     """The row's group. A topic when the vault has one, else None (-> vault)."""
     if not vault_has_topics:
         return None
-    if fm.get("topics"):
-        return fm["topics"].strip("[]").split(",")[0].strip().strip("'\"")
+    topics = names(fm.get("topics"))
+    if topics:
+        return topics[0]
     m = TOPIC_LINE_RE.search(body)
     return m.group(1).strip() if m else None
 
@@ -175,7 +223,9 @@ def scan(vaults, only=None):
                 continue
             group = topic_of(fm, body, has_topics) or name
             rows.append((group, {"title": title, "vault": name,
-                                 "why": why_it_matters(body)}))
+                                 "why": why_it_matters(body),
+                                 "goals": names(fm.get("goals")),
+                                 "blocked_by": names(fm.get("blocked_by"))}))
     return rows, skipped
 
 
@@ -197,10 +247,120 @@ def render(rows, skipped, out=sys.stdout):
         print(f"\n⚠️ skipped {len(skipped)}: " + "; ".join(skipped), file=out)
 
 
+def slug(subject):
+    """Same slug as manager-liveness.py / sweep-gate.py."""
+    return re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")
+
+
+def subjects_of(group, row):
+    return {slug(group)} | {slug(g) for g in row.get("goals", [])}
+
+
+def session_subject(session_id):
+    """The manager record's subject for this session, or None (-> residual)."""
+    if not session_id:
+        return None
+    try:
+        with open(os.path.join(MANAGER_DIR, session_id + ".json"),
+                  encoding="utf-8") as fh:
+            return json.load(fh).get("subject") or None
+    except (OSError, ValueError):
+        return None
+
+
+def live_slugs(now=None):
+    """Slugs whose manager loop is live, per manager-liveness.py's classify().
+
+    Imported, not shelled out: `--check` writes liveness-notified.json, and this
+    script writes nothing.
+    """
+    sp = importlib.util.spec_from_file_location(
+        "manager_liveness", os.path.join(SCRIPTS, "manager-liveness.py"))
+    ml = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(ml)
+    now = time.time() if now is None else now
+    try:
+        cadences = [f[:-len(".cadence")] for f in os.listdir(ml.STATE_DIR)
+                    if f.endswith(".cadence")]
+    except FileNotFoundError:
+        return set()
+    return {s for s in cadences if ml.classify(s, now)[0] == "OK"}
+
+
+def scope(rows, subject, live):
+    """Rows for `subject`, or — subject None — the residual no live manager owns."""
+    if subject:
+        want = slug(subject)
+        return [(g, r) for g, r in rows if want in subjects_of(g, r)]
+    return [(g, r) for g, r in rows if not (subjects_of(g, r) & live)]
+
+
+def clause7_cap(path=CLAUSE7):
+    with open(path, encoding="utf-8") as fh:
+        m = CAP_RE.search(fh.read())
+    if not m:
+        raise RuntimeError(f"no cap found in {path} clause (7)")
+    return int(m.group(1))
+
+
+def cached_scores():
+    """{title: score} from every verdicts cache; read-only."""
+    scores = {}
+    try:
+        files = [f for f in os.listdir(VERDICTS_DIR) if f.endswith(".verdicts.json")]
+    except FileNotFoundError:
+        return scores
+    for f in sorted(files):
+        try:
+            with open(os.path.join(VERDICTS_DIR, f), encoding="utf-8") as fh:
+                data = json.load(fh) or {}
+        except (OSError, ValueError):
+            continue
+        for title, v in data.items():
+            if isinstance(v, dict) and isinstance(v.get("score"), (int, float)):
+                scores[title] = max(scores.get(title, v["score"]), v["score"])
+    return scores
+
+
+def rank(rows, scores):
+    """Clause (7)'s order: goal-serving, then unblockers, then score; stable by name."""
+    blockers = {b for _, r in rows for b in r.get("blocked_by", [])}
+
+    def key(item):
+        _, r = item
+        tier = 0 if r.get("goals") else 1 if r["title"] in blockers else 2
+        score = scores.get(r["title"])
+        return (tier, score is None, -(score or 0), r["title"], r["vault"])
+    return sorted(rows, key=key)
+
+
+def render_ranked(ranked, cap, label, skipped, scores, out=sys.stdout):
+    shown = ranked[:cap]
+    print(f"⌛ {label} · {len(ranked)} unapproved · showing next {len(shown)} "
+          f"(clause (7) order) · read-only, nothing written", file=out)
+    if not ranked:
+        print("✅ Nothing in this scope sits at `phase: todo`.", file=out)
+    for i, (group, r) in enumerate(shown, 1):
+        score = scores.get(r["title"])
+        print(f"{i}. {r['title']}", file=out)
+        print(f"   [{r['vault']}] {group} · "
+              f"{f'{score}/10' if score is not None else 'unscored'} · {r['why']}",
+              file=out)
+    rest = len(ranked) - len(shown)
+    if rest > 0:
+        print(f"\n{rest} more not shown — `inbox.py --all` renders every row", file=out)
+    if skipped:
+        print(f"\n⚠️ skipped {len(skipped)}: " + "; ".join(skipped), file=out)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--vault", help="narrow the scan to one vault")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--all", action="store_true",
+                    help="every live row, flat and unscoped")
+    ap.add_argument("--session", default=os.environ.get("CLAUDE_CODE_SESSION_ID"),
+                    help="session whose manager record scopes the view")
     ap.add_argument("--resolve", metavar="TITLE",
                     help="print the vault owning this live row (refuses if ambiguous)")
     args = ap.parse_args(argv)
@@ -227,13 +387,34 @@ def main(argv=None):
             return 4
         print(hits[0])
         return 0
+    if args.all:
+        if args.json:
+            json.dump({"count": len(rows), "skipped": skipped,
+                       "rows": [{"group": g, **r} for g, r in rows]},
+                      sys.stdout, indent=2)
+            print()
+        else:
+            render(rows, skipped)
+        return 0
+    try:
+        cap = clause7_cap()
+    except (OSError, RuntimeError) as e:
+        print(f"❌ {e}", file=sys.stderr)
+        return 2
+    subject = session_subject(args.session)
+    scoped = scope(rows, subject, set() if subject else live_slugs())
+    scores = cached_scores()
+    ranked = rank(scoped, scores)
+    label = f"subject: {subject}" if subject else "residual (no live manager)"
     if args.json:
-        json.dump({"count": len(rows), "skipped": skipped,
-                   "rows": [{"group": g, **r} for g, r in rows]},
+        json.dump({"scope": subject or "residual", "count": len(ranked), "cap": cap,
+                   "skipped": skipped,
+                   "rows": [{"group": g, "score": scores.get(r["title"]), **r}
+                            for g, r in ranked[:cap]]},
                   sys.stdout, indent=2)
         print()
     else:
-        render(rows, skipped)
+        render_ranked(ranked, cap, label, skipped, scores)
     return 0
 
 

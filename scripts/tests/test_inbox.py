@@ -28,6 +28,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -229,6 +230,103 @@ class ResolveTest(unittest.TestCase):
         write(da, "Already approved", phase="planning")
         rc, _, _ = self.run_resolve("Already approved")
         self.assertEqual(rc, 3)
+
+
+def row(title, goals=(), blocked_by=()):
+    return {"title": title, "vault": "v", "why": "", "goals": list(goals),
+            "blocked_by": list(blocked_by)}
+
+
+class ParseBlockListTest(unittest.TestCase):
+    """A YAML block list (`topics:` then `  - '[[X]]'`) was read as empty, so a
+    marked row fell to its vault. Both shapes must yield the same topic."""
+
+    def test_block_and_inline_topics_agree(self):
+        block, _ = inbox.parse("---\ntopics:\n    - '[[Work Approval]]'\n---\n")
+        inline, _ = inbox.parse("---\ntopics: ['[[Work Approval]]']\n---\n")
+        self.assertEqual(inbox.topic_of(block, "", True), "Work Approval")
+        self.assertEqual(inbox.topic_of(inline, "", True), "Work Approval")
+
+    def test_empty_list_is_no_topic(self):
+        fm, _ = inbox.parse("---\ntopics: []\n---\n")
+        self.assertIsNone(inbox.topic_of(fm, "", True))
+
+
+class ScopeTest(unittest.TestCase):
+    """SC1 + SC2 — the session's subject, else the residual against LIVE managers."""
+
+    ROWS = [("Work Approval", row("a")), ("Manager Layer", row("b")),
+            ("vault-x", row("c", goals=["Some Goal"])), ("vault-x", row("d"))]
+
+    def test_subject_view_is_exactly_the_subject(self):
+        got = inbox.scope(self.ROWS, "Work Approval", set())
+        self.assertEqual({g for g, _ in got}, {"Work Approval"})
+
+    def test_subject_matches_a_goal(self):
+        got = inbox.scope(self.ROWS, "Some Goal", set())
+        self.assertEqual([r["title"] for _, r in got], ["c"])
+
+    def test_residual_drops_live_keeps_stale(self):
+        got = inbox.scope(self.ROWS, None, {"work-approval"})
+        titles = [r["title"] for _, r in got]
+        self.assertNotIn("a", titles)       # live manager owns it
+        self.assertIn("b", titles)          # no live manager: residual
+
+    def test_session_record_selects_scope(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "s1.json"), "w") as fh:
+                fh.write('{"subject": "Work Approval"}')
+            with mock.patch.object(inbox, "MANAGER_DIR", d):
+                self.assertEqual(inbox.session_subject("s1"), "Work Approval")
+                self.assertIsNone(inbox.session_subject("absent"))
+                self.assertIsNone(inbox.session_subject(None))
+
+    def test_live_slugs_reads_cadence_age_not_records(self):
+        with tempfile.TemporaryDirectory() as d:
+            now = 1_000_000.0
+            for name, age in (("fresh", 10), ("stale", 10_000)):
+                p = os.path.join(d, name + ".cadence")
+                with open(p, "w") as fh:
+                    fh.write("300\n")
+                os.utime(p, (now - age, now - age))
+            with mock.patch.dict(os.environ, {"MANAGER_LIVENESS_STATE_DIR": d}):
+                live = inbox.live_slugs(now)
+            self.assertEqual(live, {"fresh"})
+            # Read-only: --check would have written liveness-notified.json.
+            self.assertFalse(os.path.exists(os.path.join(d, "liveness-notified.json")))
+
+
+class RankTest(unittest.TestCase):
+    """SC3 + SC4 — clause (7)'s order and cap, and nothing singled out."""
+
+    def test_order_goal_then_unblocker_then_score_then_unscored(self):
+        rows = [("g", row("z-unscored")), ("g", row("low")), ("g", row("high")),
+                ("g", row("unblocker")), ("g", row("waiter", blocked_by=["unblocker"])),
+                ("g", row("goal-row", goals=["G"]))]
+        scores = {"low": 5, "high": 9, "waiter": 6}
+        got = [r["title"] for _, r in inbox.rank(rows, scores)]
+        self.assertEqual(got, ["goal-row", "unblocker", "high", "waiter", "low",
+                               "z-unscored"])
+
+    def test_cap_is_read_from_clause_7(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write("and recommend **at most 3**, in this order")
+        try:
+            self.assertEqual(inbox.clause7_cap(fh.name), 3)
+        finally:
+            os.unlink(fh.name)
+
+    def test_real_clause_7_carries_a_cap(self):
+        self.assertGreater(inbox.clause7_cap(), 0)
+
+    def test_render_caps_and_marks_no_row(self):
+        rows = [("g", row(f"t{i}")) for i in range(8)]
+        buf = io.StringIO()
+        inbox.render_ranked(rows, 5, "residual", [], {}, out=buf)
+        out = buf.getvalue()
+        self.assertEqual(sum(1 for l in out.splitlines() if re.match(r"\d+\. ", l)), 5)
+        self.assertIn("3 more not shown", out)
+        self.assertNotIn("recommend", out.lower())
 
 
 if __name__ == "__main__":
