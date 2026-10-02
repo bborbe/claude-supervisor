@@ -124,7 +124,7 @@ Terminal (`completed` / `aborted`) → the session's work is over: report ⚪ DO
 
 List every wait this session believes is outstanding: `Monitor` watchers, `run_in_background` shells, subagents whose completion notification has not arrived, dark-factory daemons and exec containers, remote queues (k8s jobs, CI, PR review bots), and any "I applied X, waiting for it to take effect."
 
-**The answered-card watcher belongs on this list whenever this session has posted a card and ended its turn.** The `Stop` hook posts every `👤 You: pick / approve: / review: / you run:` line to the attention board as a card produced by *this* session, and §8 arms the watcher that catches the answer. Check it with `pgrep -f answered-watch.py`: a `Monitor` is bounded at 30 min and dies **silently**, so an unarmed or expired watcher is a **dead wait** — verdict ACT (re-arm it), never WAIT.
+**The answered-card watcher belongs on this list whenever this session has posted a card and ended its turn.** The `Stop` hook records every `👤 You: pick / approve: / review: / you run:` line, and `attention-watcher.py` publishes it to the attention board as a card produced by *this* session — §8 arms the watcher that catches the answer. Check it with `pgrep -f answered-watch.py`: a `Monitor` is bounded at 30 min and dies **silently**, so an unarmed or expired watcher is a **dead wait** — verdict ACT (re-arm it), never WAIT.
 
 **Verify mechanically — command output from this run, not recollection:**
 
@@ -464,7 +464,7 @@ ETA:        <duration + projected clock time + basis | n/a — Claude-side | unk
 
 `PROBLEM:` is not decoration. A run can be accurate in every line and still leave the operator unable to say what the task is *for* — every other field in the shape reports state, and none restates purpose. Observed 2026-09-14: after hours of correct reports on one task, the operator asked *"what problem we try to solve"* and then *"u lost me"*. Write it in plain terms — no identifiers, no paths, no acceptance-criteria vocabulary: the sentence you would say out loud to someone who had never seen the task.
 
-**Arm the answered-card watcher before you end the turn.** A `👤 You:` line on this panel is a real question, not a note: the `Stop` hook (`~/.claude/hooks/attention-log.py`) posts it to the attention board as a card whose `producer_id` is *this* session, and the operator may answer it from the board rather than from this pane. Nothing wakes this session when they do — the answer waits for the next run, which is the gap this arm closes:
+**Arm the answered-card watcher before you end the turn.** A `👤 You:` line on this panel is a real question, not a note: the `Stop` hook (`~/.claude/hooks/attention-log.py`) records it and `~/.claude/scripts/attention-watcher.py` publishes it to the board as a card whose `producer_id` is *this* session — the hook writes only a local event log and never talks to the store. The operator may answer it from the board rather than from this pane. Nothing wakes this session when they do — the answer waits for the next run, which is the gap this arm closes:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/answered-watch.py
