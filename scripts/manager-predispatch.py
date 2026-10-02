@@ -549,7 +549,12 @@ def liveness_of_sid(
     if not sid:
         return LIVENESS_NONE
     rec = registry.get(sid)
-    if not rec or not rec["alive"]:
+    # ⚠️ **Only a PROVEN negative is death.** `alive` is a three-state since 2026-10-01: `None`
+    # means "the pid is occupied but the record cannot prove the holder is this session" (see
+    # `session-liveness.py:read_registry`). Reading that as dead here would fall through to the
+    # heartbeat and then to `LIVENESS_NONE`, which is the value the auto-resume gate acts on —
+    # so an unprovable record would permit a resume onto a conversation that may still be live.
+    if rec is None or rec["alive"] is False:
         beat = heartbeat_live(sid) if heartbeat is _HEARTBEAT_UNREAD else heartbeat
         if beat is not True:
             return LIVENESS_NONE
@@ -588,7 +593,10 @@ def roster_owner(name: str, registry: dict, feed: dict) -> str:
     if not wanted:
         return LIVENESS_NONE
     for sid, rec in registry.items():
-        if not rec.get("alive"):
+        # Same rule as `liveness_of`: only a PROVEN negative is skipped. `None` is an
+        # unprovable identity, and skipping it would withhold the row from the offer's
+        # remove-list — leaving a task that may be owned looking spawnable.
+        if rec.get("alive") is False:
             continue
         if _norm_session_name(rec.get("name", "")) != wanted:
             continue
@@ -697,7 +705,9 @@ def apply_stuck(tracked: list[dict], registry: dict, prev_busy: dict, now_ts: fl
     new_busy: dict[str, dict] = {}
     for t in tracked:
         rec = registry.get(t["session"]) if t["session"] else None
-        busy = bool(rec and rec["alive"] and rec["status"] == "busy")
+        # `is not False`, not a truthiness test: `alive=None` is an unprovable identity, and a
+        # busy worker misread as idle gets flagged `stuck`, which is what feeds a resume.
+        busy = bool(rec and rec["alive"] is not False and rec["status"] == "busy")
         if not busy:
             t["stuck"] = idle_stuck(t, now_ts)
             continue

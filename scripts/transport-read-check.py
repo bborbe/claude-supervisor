@@ -44,6 +44,10 @@ SITE_LIST = {
     ("jump.py", "current_window"), ("jump.py", "main"),
     ("jump.py", "pane_sessions"), ("jump.py", "wezterm_panes"),
     ("session-holds.py", "pane_title"),
+    # added 2026-10-01 — the pid-identity probe's `ps -o lstart=` read. It is the first
+    # transport call `session-liveness.py` has ever held: before the identity fix that file
+    # only globbed the registry and called `os.kill`, neither of which shells out.
+    ("session-liveness.py", "_ps_starts"),
     ("stop-probe.py", "gate_processes"),
     ("who-needs-me.py", "main"), ("who-needs-me.py", "wezterm_panes"),
     # in-repo callers that hold no transport call of their own
