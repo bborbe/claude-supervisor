@@ -766,12 +766,6 @@ function concurrentLimitError() {
 // stamping a task with an id the service refused would point it at a conversation that does
 // not exist, which is worse than an empty field.
 async function spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive }) {
-  // The limit FIRST, matching the local path's order — a caller error is cheap to report but
-  // the cap is the guard that must not be skippable, and a cluster spawn that bypassed it
-  // would be the uncounted second population item 5 exists to prevent.
-  const limitError = concurrentLimitError()
-  if (limitError) return { error: limitError }
-
   // Arguments the cluster path cannot honour are REFUSED, never accepted and quietly ignored —
   // the same rule the tab path already carries for `resume` and `policy`. Silently dropping
   // them is how a caller ends up believing a worker was resumed when a fresh session was
@@ -807,6 +801,13 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
         'name is not unique across the configured vaults.',
     }
   }
+
+  // The limit is checked AFTER the argument refusals, so a malformed call is told what is
+  // wrong with it rather than told the fleet is full — both refuse, but only one names the
+  // thing the caller can actually fix. It is still checked BEFORE anything is created, which
+  // is what matters: a cap consulted after the spawn has already spent the budget it protects.
+  const limitError = concurrentLimitError()
+  if (limitError) return { error: limitError }
 
   const minted = newSessionId()
   if (minted.error) return { error: minted.error }
@@ -1296,7 +1297,7 @@ const TOOLS = [
           type: 'string',
           enum: ['local', 'cluster'],
           description:
-            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. `cluster` starts a session in the `claude-interactive` service in nuke dev instead, which requires `task` and a configured SUPERVISOR_CLUSTER_URL. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the cluster is a second option rather than the fleet default — a config value able to default the whole fleet into the cluster is exactly what that split forecloses. A value that is neither `local` nor `cluster` REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it.',
+            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. `cluster` starts a session in the `claude-interactive` service in nuke dev instead, which requires `task` and a configured SUPERVISOR_CLUSTER_URL. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the cluster is a second option rather than the fleet default — a config value able to default the whole fleet into the cluster is exactly what that split forecloses. A value that is neither `local` nor `cluster` REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. ⚠️ With `target: "cluster"` the local-only arguments `interactive`, `resume` and `policy` are REFUSED rather than ignored: the cluster path can honour none of them, and a dropped `resume` would look like a resume while opening a fresh session. Omit all three on a cluster call.',
         },
         task: {
           type: 'string',
