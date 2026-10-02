@@ -59,6 +59,18 @@ the way `server/liveness.mjs:checkLiveness()` does:
 That asymmetry is the point. Only a readable-and-empty pair licenses ABSENT, which is the one
 answer that permits a caller to resume onto the session.
 
+⚠️ **A pid is not an identity, and `os.kill(pid, 0)` is not a liveness test.** It asks
+whether SOME process holds the number — never whether that process is *this session's*. A
+registry record that outlives its session (a `kill -9` leaves it behind) plus a pid the OS has
+since recycled reads LIVE for a session that is gone, which is the residual
+[[A Substring-Matched Liveness Probe Reports a Dead Session as Live]] left open. The record's
+own `procStart` settles it: compared against the live holder's `ps -o lstart=`, a mismatch is
+a different process wearing the same number. ⚠️ **The two are in different zones** —
+`procStart` is UTC, `ps -o lstart=` is local — so they are compared as epochs, never as
+strings; a string compare reports every live session as a mismatch, which is this rule
+inverted. A record whose `procStart` is missing or unparseable while its pid IS occupied is
+UNKNOWN: identity cannot be established, and "cannot tell" must not become death.
+
 ⚠️ **One instrument per store.** The heartbeat half is delegated to `live-workers.py` rather
 than re-globbed here. Two readers over one directory is precisely the 2026-09-26 defect this
 file's opening paragraph records, and it does not become acceptable by being written twice in
@@ -69,9 +81,14 @@ import glob
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+from datetime import datetime, timezone
 
 LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
+
+# `ps -o lstart=` and the registry's `procStart` carry the SAME format — and different zones.
+_CTIME_FMT = "%a %b %d %H:%M:%S %Y"
 
 REGISTRY_DIR = (
     os.environ.get("SUPERVISOR_SESSIONS_DIR")
@@ -99,6 +116,95 @@ def _live_workers():
     return _LIVE_WORKERS
 
 
+def _record_start_epoch(proc_start):
+    """The record's `procStart` as epoch seconds, or `None` when absent/unparseable.
+
+    ⚠️ **`procStart` is UTC and `ps -o lstart=` is LOCAL, so the two are never
+    string-comparable.** Measured 2026-10-01 on a CEST host: every one of six sampled live
+    entries differed from its own process's `ps -o lstart=` by exactly +02:00 —
+    `"Wed Sep 30 19:18:21 2026"` against `"Wed Sep 30 21:18:21 2026"`. A raw string compare
+    therefore reports every LIVE session as a mismatch, which is this fix inverted: it turns
+    the whole registry into false deaths.
+    """
+    if not isinstance(proc_start, str) or not proc_start.strip():
+        return None
+    try:
+        # Tag it UTC rather than letting `.timestamp()` read the string in the host's zone.
+        return int(datetime.strptime(proc_start.strip(), _CTIME_FMT).replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return None
+
+
+def _ps_starts(pids):
+    """`{pid: start-epoch}` for the pids `ps` reported. Never raises, never guesses."""
+    if not pids:
+        return {}
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "pid=,lstart=", "-p", ",".join(str(p) for p in pids)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return {}
+    out = {}
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        try:
+            # `ps` prints in the host's LOCAL zone; a naive datetime's `.astimezone()` reads
+            # it as local, which is exactly what is wanted on this side of the comparison.
+            out[int(parts[0])] = int(
+                datetime.strptime(parts[1], _CTIME_FMT).astimezone(timezone.utc).timestamp()
+            )
+        except ValueError:
+            continue
+    return out
+
+
+def _live_start_epochs(pids):
+    """Start times for `pids`, batched into ONE `ps` call, with a per-pid retry for stragglers.
+
+    Batched deliberately: the registry holds one file per live session (26 measured
+    2026-10-01), and a `ps` per record would spawn a process per entry on every `--check`,
+    every `--list`, and every import by `who-needs-me.py` / `manager-predispatch.py`.
+
+    ⚠️ **The per-pid retry exists because `ps` fails ALL-OR-NOTHING.** Measured 2026-10-01:
+    `ps -o pid=,lstart= -p 1,999999` exits 1, prints `process id too large`, and emits **no
+    rows at all** — the valid pid is dropped along with the invalid one. Without the retry a
+    single unreadable record would blank every session's identity at once and turn the whole
+    registry UNKNOWN. With it, the blast radius of one bad record is one record.
+    """
+    pids = sorted(set(pids))
+    out = _ps_starts(pids)
+    for pid in [p for p in pids if p not in out]:
+        out.update(_ps_starts([pid]))
+    return out
+
+
+def _pid_identity(pid, proc_start, live_starts):
+    """`True`/`False` when the holder's identity can be decided, `None` when it cannot.
+
+    `os.kill(pid, 0)` asks only whether SOME process holds the pid — never whether it is
+    THIS session's. A record that outlives its session (a `kill -9` leaves it behind) plus a
+    pid the OS has since recycled therefore reads LIVE for a session that is gone. The
+    record's own `procStart` is the identity: compare it against the live holder's start
+    time, and a mismatch is a different process wearing the same number.
+
+    `None` is "cannot tell" and must never be read as death — ABSENT is the one answer that
+    permits a caller to resume onto the session, so it needs evidence, not an absence of it.
+    """
+    recorded = _record_start_epoch(proc_start)
+    if recorded is None:
+        return None
+    live = live_starts.get(pid)
+    if live is None:
+        return None
+    return recorded == live
+
+
 def read_registry(registry_dir=None):
     """`{sessionId: {pid, status, name, alive}}`, or `None` when the registry is unreadable.
 
@@ -111,8 +217,16 @@ def read_registry(registry_dir=None):
     a caller would resume onto a conversation it cannot see. Absence is not evidence of
     death; it is evidence the probe cannot run.
 
-    `alive` is the pid check the runbook documents. `PermissionError` means the process
-    exists but is not ours — that is life, not death.
+    ⚠️ **`alive` is a THREE-state — `True`, `False`, or `None` — not the bool it once was.**
+    `os.kill(pid, 0)` proves only that the pid is OCCUPIED, never that the process holding it
+    is this session. `True` means occupied **and** the record's `procStart` matches the live
+    holder's start time; `False` means the pid is gone, or is held by a process that is not
+    this record's; `None` means the pid IS occupied but the record carries no usable
+    `procStart`, so identity cannot be established. `None` is "cannot tell", and a caller
+    must read it as UNKNOWN — never as death.
+
+    `PermissionError` means the process exists but is not ours — that is life, not death, so
+    it still counts as occupied and the identity comparison runs on it.
     """
     d = registry_dir if registry_dir is not None else REGISTRY_DIR
     if not os.path.isdir(d):
@@ -122,6 +236,7 @@ def read_registry(registry_dir=None):
         paths = glob.glob(os.path.join(d, "*.json"))
     except OSError:
         return None
+    occupied = []  # (sid, pid, procStart) whose identity still has to be proven
     for path in paths:
         try:
             with open(path, encoding="utf-8") as fh:
@@ -132,15 +247,17 @@ def read_registry(registry_dir=None):
         if not sid:
             continue
         pid = rec.get("pid")
-        alive = False
+        held = False
         if isinstance(pid, int):
             try:
                 os.kill(pid, 0)
-                alive = True
-            except PermissionError:  # exists, but not ours -> alive
-                alive = True
+                held = True
+            except PermissionError:  # exists, but not ours -> occupied
+                held = True
             except OSError:
-                alive = False
+                held = False
+        if held:
+            occupied.append((sid, pid, rec.get("procStart")))
         out[sid] = {
             "pid": pid,
             "status": rec.get("status", ""),
@@ -163,8 +280,13 @@ def read_registry(registry_dir=None):
             # `nameSource: peer` means the `unset` prefix was ineffective and the session is
             # named after its spawner, which the title-match session-connect cannot resolve.
             "nameSource": rec.get("nameSource", ""),
-            "alive": alive,
+            "alive": held,
         }
+    # Identity pass, after every file is read so the `ps` lookups batch into one call.
+    if occupied:
+        starts = _live_start_epochs([p for _, p, _ in occupied])
+        for sid, pid, proc_start in occupied:
+            out[sid]["alive"] = _pid_identity(pid, proc_start, starts)
     return out
 
 
@@ -222,6 +344,11 @@ def resolve(session_id, registry, heartbeats=()):
     readable*; more than one is AMBIGUOUS and carries the candidates, because a caller that
     guesses between two live sessions is the double-writer this file prevents.
 
+    A matched registry entry is then read for its three-state `alive` (see `read_registry`):
+    `True` is a live session, `False` is a pid that is gone or belongs to some other process,
+    and `None` is "the pid is occupied but the record cannot prove the holder is this session"
+    — UNKNOWN, never death.
+
     `heartbeats` defaults to `()`, i.e. "the store was read and holds nothing" — the honest
     reading for a caller that never consulted it, and the one that leaves a registry-only
     verdict unchanged. Pass `None` to mean "could not be read".
@@ -272,22 +399,33 @@ def resolve(session_id, registry, heartbeats=()):
         # A fresh stamp is decisive on its own — this is the half that answers for a session
         # the registry structurally cannot see.
         return LIVE, full
-    # An entry whose pid is gone is a stale file, not a live session — a `kill -9` leaves the
-    # record behind. The runbook's rule is "alive if ANY id holds an entry against a RUNNING
-    # pid", so presence alone is not the verdict; presence against a live pid is.
-    if not registry[full]["alive"]:
+    entry = registry[full]
+    if entry["alive"] is None:
+        # The pid is occupied but the record carries no usable `procStart`, so we cannot say
+        # whether the process holding it is this session. That is "cannot tell", and it must
+        # NOT become ABSENT — ABSENT is the one answer that permits a caller to resume onto
+        # the session, and the session may well be the one holding the pid.
+        return UNKNOWN, (
+            "%s is registered against pid %s, but the record carries no usable procStart "
+            "— cannot tell whether that process is this session" % (full, entry["pid"])
+        )
+    # A pid that is gone, or that belongs to some OTHER process, is a stale file rather than a
+    # live session — a `kill -9` leaves the record behind and the OS recycles the number. The
+    # runbook's rule is "alive if ANY id holds an entry against a RUNNING pid", so presence
+    # alone is not the verdict; presence against a pid that is demonstrably THIS session's is.
+    if not entry["alive"]:
         # A stale record is a NEGATIVE, so it needs both sources readable — the same rule the
         # no-match branch applies. Returning ABSENT here while the heartbeat store is
         # unreadable would let a fresh stamp in the half we could not read be outvoted, and
         # ABSENT is the one answer that permits a caller to resume onto the session.
         if heartbeats is None:
             return UNKNOWN, (
-                "%s is registered but pid %s is gone, and the heartbeat store is unreadable "
-                "— cannot decide liveness" % (full, registry[full]["pid"])
+                "%s is registered but pid %s is not this session, and the heartbeat store is "
+                "unreadable — cannot decide liveness" % (full, entry["pid"])
             )
-        return ABSENT, "%s is registered but pid %s is gone — stale record" % (
+        return ABSENT, "%s is registered but pid %s is not this session — stale record" % (
             full,
-            registry[full]["pid"],
+            entry["pid"],
         )
     return LIVE, full
 
@@ -344,10 +482,16 @@ def main(argv=None):
         return UNKNOWN
 
     if args.json:
+        # `alive` is normalised to a bool here, and the filter keeps everything but a PROVEN
+        # negative. The dict's third state (`None` — "the pid is occupied but the record cannot
+        # prove the holder is this session") is a verdict input for `resolve()`, not something a
+        # `--list` consumer can act on; emitted raw it would read as `False` to any JSON caller
+        # doing a truthiness test, and a consumer that acts on this list declares a task unowned
+        # and spawns a duplicate onto a session that may be live.
         payload = [
-            dict(rec, sessionId=sid, source="registry", state="live")
+            dict(rec, sessionId=sid, source="registry", state="live", alive=rec["alive"] is not False)
             for sid, rec in registry.items()
-            if rec["alive"]
+            if rec["alive"] is not False
         ]
         payload += [
             {
@@ -371,7 +515,10 @@ def main(argv=None):
 
     rows = []
     for sid, rec in registry.items():
-        if rec["alive"]:
+        # Only a PROVEN negative is dropped. An unproven identity (`None`) stays listed, because
+        # the alternative is a `--list` consumer concluding the session is gone — the direction
+        # that permits a resume onto a conversation that may still be running.
+        if rec["alive"] is not False:
             rows.append((sid, "pid %-7s %s" % (rec["pid"], rec["name"] or "(no name)")))
     for beat in heartbeats:
         if beat.get("state") == "unknown":
