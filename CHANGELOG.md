@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the readiness probe no longer emits a `ready`/`not-ready` word.** Both consumers already parsed the score and explicitly distrusted the label, so the word was never read — while it was measurably unstable: an 18-run repeat-run sweep over five unchanged task files (byte-identical inputs, hashes pinned) returned **both polarities at an identical `8/10`** on one file and flipped polarity on **three of the five**. A field nothing reads, that flips on unchanged input, is a second counter in the output contract's clothing, so it is removed rather than defined — the gate keeps deciding from the score and the hard-gate list.
+
 ## v0.93.8
 
 - fix: **the under-target branch said how to post its card but never which card it was, so a manager read the waiting-approval batch's skip history as a verdict on it.** The bullet told its reader to post *"through the same mechanism and dedup-key discipline as the `waiting-approval` bullet above"* — precise about **how** and silent about **which**, which is the one thing a manager holding only the skip history needs to know. Measured 2026-10-02: four `skip` answers to the bulk batch were read as a decision against the ranked capacity card, and it went unposted until the operator said explicitly that it was wanted and that the skips had been about the bulk form. The two are different asks — the batch carries the topic's waiting set, this carries the next few within clause (7)'s cap — and the bullet now says so. ⚠️ **The one-card-per-round rule is deliberately not restated here:** it already has its home two bullets down, and a second copy is the counter a `grep` cannot tell from a real one. Found by Manager Layer, which named the silence while explaining a suppression it had applied on an earlier tick.
