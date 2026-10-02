@@ -126,6 +126,8 @@ commands/reset.md + scripts/reset.py             re-discover its state; never de
 docs/fleet-surface.md                            spawn shape + table render spec (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the four manager commands share
+docs/voice-asks.md                               a voiced question is also a board card — rule + detector (canonical)
+scripts/voice-ask-pairing.py                     flags question `say`s with no `attention-ask.py post` within 60 s
 scripts/manager-predispatch.py                   the pre-dispatch gate both manager commands run first (state: ~/.claude/state/manager-predispatch/)
 scripts/approved-not-started.py                  the approved-but-unstarted reading both loops print (tick = 30 min constant; `unknown`, never `0`, on an unreadable registry)
 commands/read-guides.md                          load every guide in docs/

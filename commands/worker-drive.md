@@ -508,6 +508,9 @@ Never speak in a session that has never spoken — that is the exact noise the s
 - DRIFTING → what drifted, and what the anchor was.
 - A `👤 You:` fork → spell it out: "option one … option two … say one or two."
 
+⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
+
+
 **How to speak** — `/tts-mcp:voice` § Speaking playbook is authoritative; the minimum reproduced here because the skill may not be loaded when this command runs:
 
 - Voice `ryan`, unless `/tts-mcp:engine` selected a non-qwen3 engine (voice and engine must match or the server 400s).
