@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.95.6
 
 - fix: **the `parked-on-unregistered-gate` cell no longer reads a frozen task file as parked while the worker is running long tool calls.** The cell's "working" test was the task file's mtime alone, so a worker mid-tool-call satisfied all three legs and false-fired — measured twice on 2026-10-02 on one row (file frozen 66 min, feed silent, live owner, while the roster read `busy` and the transcript was 28 s old). The discriminator is now **four-way**: a new **working (session)** leg reads the **drive leg's shipped in-flight check, reused verbatim** (`agents/manager-drive.md:100-108` — the session's open tool marker, then its transcript mtime against `LIVE_WINDOW`), carried to `agents/manager-sweep-reader.md` as **input 11** and wired through all three dispatch sites (`/manager-loop`, `/manager-status`, `/manager-drive`). ⚠️ **An in-flight row renders `🔄 progressing`, and dropping it from the cell alone is not the fix** — the row still satisfies `stuck` and would land in `⚠️ problem`, trading one false positive for a louder one.
 
