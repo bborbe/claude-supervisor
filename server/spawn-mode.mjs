@@ -103,6 +103,48 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
   return { mode: 'interactive', source: 'default' }
 }
 
+// WHERE a worker is created — this Mac, or the nuke cluster — and the argument that decided it.
+//
+// This is a second question from `resolveSpawnMode`, not a third answer to it, and keeping
+// them apart is the whole point. "Which way does this worker open" (a tab the operator can
+// watch, or a headless in-process query) is a property of the worker and is selectable from
+// the fleet's own configuration. "Where is it created" is a property of the CALL, and it must
+// never be reachable from a config file: the cluster is a second option rather than the
+// default, so a `spawn.mode: cluster` in `~/.config/claude-supervisor/config.json` able to
+// default the entire fleet into the cluster is exactly the shape this split forecloses.
+//
+// ⚠️ So `cluster` is deliberately NOT a `SPAWN_MODES` value. Adding it there would make it
+// env- and config-selectable for free, which is the failure above arriving silently — the
+// list has no notion of "per-call only", and every future reader of it would reasonably
+// assume otherwise.
+//
+// An unknown value REFUSES rather than falling back, for the reason `resolveSpawnMode`
+// refuses: a spawn that ignored the caller's target would create the worker somewhere the
+// caller did not ask for, and where a worker was created is otherwise discovered only by
+// noticing it. Falling back to `local` would look exactly like a working call.
+export const SPAWN_TARGETS = ['local', 'cluster']
+
+// The target this spawn runs under, plus the source that decided it — or `{error}` for a
+// value that is not a known target.
+//
+// There is no config or environment source, and that absence is deliberate rather than
+// unfinished: `source` exists so a future reader can tell "the caller asked for this" from
+// "nobody asked and it defaulted", and today those are the only two answers there are.
+export function resolveSpawnTarget({ target } = {}) {
+  if (target === undefined || target === null || target === '') {
+    return { target: 'local', source: 'default' }
+  }
+  if (typeof target !== 'string' || !SPAWN_TARGETS.includes(target)) {
+    return {
+      error:
+        `"target" is ${JSON.stringify(target)}, which is not a spawn target — refusing to spawn rather than ` +
+        `guessing, since a worker created somewhere the caller did not ask for is discovered only by noticing it. ` +
+        `Valid values: ${SPAWN_TARGETS.join(', ')} (omit the argument for the local default).`,
+    }
+  }
+  return { target, source: 'argument' }
+}
+
 // How many workers the fleet may hold open at once — one value, fleet-wide.
 //
 // This replaces the per-manager spawn cap (2 per sweep, 4 per rolling 30 min) that lived in
