@@ -250,7 +250,7 @@ This is the operator's live progress view — it renders continuously in their U
 
 **Gate the write on change.** Only append when the blocker, lever, or owner differs from the last such entry. Four runs in forty minutes is a real observed rate, and four identical Progress entries are noise that buries the one that mattered. Unchanged → write nothing and say so in the report.
 
-**Peer safety.** If the task's `claude_session_id` does not name this session, the Progress append is the *only* write permitted — never the title, Success Criteria, Tasks, DoD, or Summary. Contradictory evidence goes in the appended entry plus a `SendMessage` to the owner.
+**Peer safety.** If the task's `claude_session_id` does not name this session, the Progress append is the *only* write permitted — never the title, Success Criteria, Tasks, DoD, or Summary. Contradictory evidence goes in the appended entry plus a `SendMessage` to the owner. ⚠️ **This rule's precedence, and the row-state split that resolves it against the manager contract, is stated in `commands/manager-loop.md` § Manager contract** — read it there rather than inferring it from this file alone: on a row a **live worker owns**, a manager *proposes* through this same append-plus-`SendMessage` path and the **worker lands the edit on its own anchor**, while `status` / `phase` / dates / stamps stay the manager's own in both states. This file and that one gave opposite instructions until 2026-10-02, because neither named the other.
 
 **Guard against the table becoming the deliverable.** Build it once per run, cap it at the genuinely open items, and spend at most one turn on it. A `/supervisor:worker-drive` run that produces a beautiful inventory and zero state changes has failed exactly as hard as one that produced a status panel. Print the table only in the final report (§8), and only the rows that still matter after you drove.
 
@@ -375,7 +375,7 @@ Test each remaining criterion: **if this passed tomorrow, what would I actually 
 
 **Apply the test to your own replacement, before writing it.** The correction is a new criterion and fails the same way — ask "if my replacement passed tomorrow, what would I know?" Observed 2026-09-09: a 7-day Sentry-silence window was correctly rejected as unfalsifiable (the issue fires ~0.22/day, so 7 days expects ~1.5 events), and the 48h steady-state window written to replace it had the identical defect — it measured steady state for a defect that only fires on shutdown, against pods with 0 restarts. Both would have been ticked honestly. The second was caught an hour later, by which point it had been written into the task file and was one `/supervisor:worker-drive` run away from costing 27h of wall-clock wait.
 
-Correcting a criterion is a framing change: allowed when `claude_session_id` names this session, otherwise an appended Progress entry plus a `SendMessage` to the owner.
+Correcting a criterion is a framing change: allowed when `claude_session_id` names this session, otherwise an appended Progress entry plus a `SendMessage` to the owner. Same rule and same precedence as § Peer safety above — the manager-side statement of both lives in `commands/manager-loop.md` § Manager contract.
 
 ### The follow-up task must be well-formed
 
