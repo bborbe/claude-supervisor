@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.96.2
 
 - fix: **the manager's author-before-spawn row now names what happens after the audit score, and points at the readiness ladder's single home instead of stopping at "score it".** The row read `create-task` → `task-auditor` → spawn with a section-heading presence check as its only gate and no bar named, so a task scoring below the bar left the manager hand-sharpening Success Criteria one task at a time — or parked the worker's own `plan-task`. Measured 2026-09-22: three `task-creator`-authored tasks scored 7/10, 8/10, 8/10 before dispatch. The row now states that a sub-bar score is **not a disposition for the manager to choose** and references `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 2, restating no threshold — the same idiom the same row already uses for the cap (item 5) and the mode (item 6). ⚠️ **It deliberately does not restate `9/10`:** the flat bar was superseded by the four-branch readiness ladder (operator ruling 2026-10-01), and `docs/fleet-surface.md` § authoritative-home forbids a second copy of a ladder constant — a restated `9/10` would also contradict the ladder, which opens a row at ≥7 after one improvement pass. The vault's `70 Runbooks/Manager Session.md` § Step 5 carries the matching reference.
 
