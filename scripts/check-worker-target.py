@@ -23,10 +23,14 @@ without the doc, or the doc without the code, fails here — which is exactly th
 reader cannot see, because both surfaces look self-consistent while they disagree.
 
 **What this check does not prove.** It is a prose-shape check over markdown plus one
-constant read, because a command file *is* prose — there is no function to call. It
-cannot prove the target is *consulted* at a tick; it proves the number has one home and
-that the home and the code have not drifted apart. The behavioural half is the manager
-loop actually posting a card below the target, which no grep can fake.
+constant read, because a command file *is* prose — there is no function to call. It cannot
+prove the target is *consulted* at a tick. What (d) now proves is that the **instrument is
+cited wherever the comparison is made**: a file that reads the live count and never reads the
+target is refused, because that is a tick measuring one side of a comparison and remembering
+the other. That is still a citation check and not a behaviour check — the behavioural half is
+the manager loop actually posting a card below the target and suppressing at or above it,
+which no grep can fake. (d) closes the gap between "the number has one home" and "the number
+is read", not the gap between "the number is read" and "the branch acts on it".
 """
 import pathlib
 import re
@@ -53,6 +57,11 @@ CODE_CONSTANT = "DEFAULT_MAX_CONCURRENT"
 REFERENCING_DIRS = ("commands", "agents")
 #: The name that makes a file a referencing site at all.
 CONSTANT_NAME = "maxConcurrent"
+#: The two read commands a tick needs to compare live against target. A file that runs one
+#: and not the other is measuring one side of the comparison and remembering the other,
+#: which is check (d)'s whole subject.
+COUNT_INSTRUMENT = "worker-sessions.py --count"
+TARGET_INSTRUMENT = "worker-target.py"
 
 
 def code_default(root):
@@ -120,6 +129,19 @@ def check(root):
                 failures.append(
                     f"{rel}: names `{CONSTANT_NAME}` but carries no pointer to the "
                     f"constant's home ({HOME_ANCHOR!r}) — read it there, never restate it"
+                )
+
+            # (d) reading the count without reading the target. A pointer to the home says
+            # where the number lives; it is not a read, and a tick that has one side as an
+            # instrument and the other as a memory is not comparing against the configured
+            # target at all — measured 2026-10-02, a manager carried a hand-read value for
+            # two hours and acted on 18 against a configured 12.
+            if COUNT_INSTRUMENT in text and TARGET_INSTRUMENT not in text:
+                failures.append(
+                    f"{rel}: reads the live count (`{COUNT_INSTRUMENT}`) but never the target "
+                    f"(`{TARGET_INSTRUMENT}`) — a tick that measures one side of the "
+                    f"comparison and remembers the other is not comparing against the "
+                    f"configured target"
                 )
 
     return failures

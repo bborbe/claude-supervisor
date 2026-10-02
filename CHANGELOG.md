@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the fleet-wide worker target now has a read instrument, so a tick reads it rather than remembering it.** `scripts/worker-target.py` prints the resolved `spawn.maxConcurrent` — `--source` adds `default|config|env` — and it calls `resolveMaxConcurrent` in `server/spawn-mode.mjs` rather than restating the rule, so the number a manager reads and the cap the server enforces cannot drift apart. `commands/manager-loop.md`, `commands/fleet-loop.md` and `docs/fleet-surface.md` § Spawn a worker item 5 now cite it beside the live count's long-standing command, and `scripts/check-worker-target.py` gains check (d): a file that reads the count and never the target fails the build. ⚠️ **Measured 2026-10-02** — the count had a read command from the day it shipped and the target had only a pointer, so a manager read the key by hand **once**, on its pre-spawn cap check, and carried the value for two hours: a target changed to **12** left it posting under-target cards against a remembered **18**, while its own drive leg *derived* the config from that memory (*"So the fleet config sets maxConcurrent 18"*) rather than reading the file.
+
 ## v0.95.0
 
 - feat: **`/supervisor:inbox` is scoped and ranked instead of flat.** A manager session sees only its subject's `phase: todo` rows; every other session sees the residual no *live* manager handles (liveness from `manager-liveness.py`'s `classify()` over the `.cadence` age, never the record files and never `--check`, which writes). Rows render in `agents/manager-drive.md` clause (7)'s order and cap — goal-serving, then unblockers, then cached audit score — with the cap read from the clause. `--all` keeps the flat render. `commands/inbox.md`'s "no filter" ban now names *selection*, with the reading recorded.
