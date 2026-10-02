@@ -46,8 +46,7 @@ Dispatch the `vault-cli:task-auditor` **agent** via `Task`, using the readiness 
 home is `commands/open.md` § Step 1.5 Gate 2. `Task` is the only tool that addresses a
 `subagent_type` — `Skill("vault-cli:task-auditor")` answers `Unknown skill` and scores nothing.
 
-Read the `READINESS:` line. **Parse the score; never trust the label.** A missing or unparseable
-line is not-ready.
+Read the `READINESS:` line. **Parse the score** — the line carries no verdict word (the `ready`/`not-ready` word was removed 2026-10-02; it was never read, and it flipped polarity on unchanged input). A missing or unparseable line is not-ready.
 
 Then run `agents/manager-drive.md` clause (1)'s loop against this one row: repair, re-audit, stop on
 the conditions that clause owns — including its **step 0 `UNFIXABLE:` branch**, which is that
