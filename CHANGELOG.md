@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.95.0
 
 - feat: **`/supervisor:inbox` is scoped and ranked instead of flat.** A manager session sees only its subject's `phase: todo` rows; every other session sees the residual no *live* manager handles (liveness from `manager-liveness.py`'s `classify()` over the `.cadence` age, never the record files and never `--check`, which writes). Rows render in `agents/manager-drive.md` clause (7)'s order and cap — goal-serving, then unblockers, then cached audit score — with the cap read from the clause. `--all` keeps the flat render. `commands/inbox.md`'s "no filter" ban now names *selection*, with the reading recorded.
 - fix: `inbox.py` read a YAML block-list `topics:` as empty, so a row whose topic was declared that way fell to its vault group.
