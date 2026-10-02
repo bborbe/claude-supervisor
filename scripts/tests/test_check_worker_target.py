@@ -43,6 +43,19 @@ SITE = (
 SITE_RESTATES = (
     "Respect `spawn.maxConcurrent`, which defaults to 20.\n"
 )
+#: A site that reads ONE side of the comparison and remembers the other. It names the
+#: constant and points at its home, so (b) is satisfied and the file looks complete — but
+#: only the count is an instrument, which is the shape measured on 2026-10-02.
+SITE_READS_COUNT_ONLY = (
+    "Respect `spawn.maxConcurrent`; see `docs/fleet-surface.md` § Spawn a worker item 5.\n"
+    "Count with `python3 scripts/worker-sessions.py --count`.\n"
+)
+#: The pair. Reading both sides is what makes a tick a comparison rather than a memory.
+SITE_READS_BOTH = (
+    "Respect `spawn.maxConcurrent`; see `docs/fleet-surface.md` § Spawn a worker item 5.\n"
+    "Count with `python3 scripts/worker-sessions.py --count` and read the target with\n"
+    "`python3 scripts/worker-target.py`.\n"
+)
 
 
 class CheckWorkerTargetTest(unittest.TestCase):
@@ -77,6 +90,25 @@ class CheckWorkerTargetTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no pointer to the constant's home", result.stderr)
         self.assertIn("fleet-loop.md", result.stderr)
+
+    def test_count_read_without_the_target_fails(self):
+        """THE LOAD-BEARING CASE FOR (d). The file names the constant, points at its home,
+        and reads the live count — so every earlier assertion passes and it reads as
+        complete. But only one side of the comparison is an instrument, so the tick measures
+        the count and remembers the target. Measured 2026-10-02: a manager carried a
+        hand-read value for two hours and acted on 18 against a configured 12."""
+        self.write("commands/fleet-loop.md", SITE_READS_COUNT_ONLY)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("never the target", result.stderr)
+        self.assertIn("fleet-loop.md", result.stderr)
+
+    def test_count_read_with_the_target_passes(self):
+        """The pair satisfies (b) and (d) together: the pointer is present and both sides of
+        the comparison are read rather than remembered."""
+        self.write("commands/fleet-loop.md", SITE_READS_BOTH)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_code_moves_without_the_doc(self):
         """THE LOAD-BEARING CASE. The code default moves and the home is not updated.
