@@ -1062,6 +1062,64 @@ def pane_owner(rec, pmap, registry=None):
     return ""
 
 
+def resolve_missing_panes(records, pmap, registry=None):
+    """Fill in a pane for rows the event log could not locate one for.
+
+    ⚠️ **Why a row has no pane at all.** A store row takes its pane from the hook's
+    own log, joined on `dedup_key` (`normalize_store_item`). Two live producers write
+    no line under that key, so the row carries no pane and `is_live()`'s pane clause
+    drops it before any classifier sees it — the operator is never told the session is
+    parked, so it waits indefinitely. Measured 2026-10-01 on pane 479 (session
+    `29d4464c`): the store item open, the modal footer on screen, and the feed
+    rendering the pane `absent`.
+
+    The two producers are `attention-push.py` (a `session:`-marked declaration, not a
+    hook event, so it has no log line by construction) and any session that
+    **inherits** `WEZTERM_PANE` from its spawner — a headless worker does this by
+    construction, and since `owned_pane()` began refusing an unprovable pane such a
+    session records an empty pane by design.
+
+    **The join is the one the board already uses, and this reader already has it.**
+    `attention-controller` resolved the same class with a second source beside the log:
+    name the item's session from its registry entry, then match that name against the
+    live panes' glyph-stripped titles. `is_routable()` proves a *recorded* pane by
+    exactly that comparison, so this reaches the same predicate from the other side
+    rather than inventing one.
+
+    ⚠️ **It only fills a gap; a recorded pane always wins.** The logged pane is the
+    event-time fact, and re-resolving it would swap a fact for a name-guess — the
+    confident-wrong-direction defect `is_routable()` refuses. The controller draws the
+    same line ("the logged path is unchanged and still wins wherever a line exists").
+
+    ⚠️ **An unresolvable session yields no pane, and that is the safety property.**
+    `pmap` `None` (unreadable) and `registry` `None` (unreadable) both mean the
+    question was never answerable, so no claim is made; a session the registry cannot
+    name, or whose name matches no live pane title, likewise claims nothing. Handing
+    an unnamed session the first pane on screen would mark every pane as its own and
+    stamp a confident route onto a row this reader knows nothing about — § Silence 7's
+    failure, which is why the join is keyed on the registry's name and not on
+    proximity.
+
+    Mutates each record in place and returns the list, so callers keep the shape they
+    already iterate.
+    """
+    if not pmap or not registry:
+        return records
+    for rec in records:
+        if rec.get("pane"):
+            continue
+        sid = rec.get("session_id")
+        name = registry.get(sid) if sid else None
+        if not name:
+            continue
+        wanted = strip_status_glyph(name)
+        for pane_id, pane in pmap.items():
+            if strip_status_glyph(pane.get("title")) == wanted:
+                rec["pane"] = pane_id
+                break
+    return records
+
+
 def short_id(sid):
     """A session id as a row's identity, for a row that has no name to render."""
     return f"session {(sid or '?')[:8]}"
@@ -1405,6 +1463,12 @@ def main():
     # Read the store once: load("needs") folds every event log, so a second call for
     # the quiet pass would double that cost.
     records = load("needs")
+    # Fill a pane for rows the event log could not locate one for, BEFORE the liveness
+    # filter — `is_live()` drops a row whose pane is absent, so a store item with no log
+    # line (an `attention-push.py` declaration, or a session that inherits its spawner's
+    # `WEZTERM_PANE`) would otherwise vanish from the feed entirely. The resolution only
+    # fills a gap: a pane the log recorded always wins.
+    resolve_missing_panes(records, pmap, registry)
     quiet = quiet_session_ids(records, live_ids)
     # The registry half of supersession rides the same read as `quiet` — one glob pass,
     # no second look at the directory.
