@@ -21,7 +21,15 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 
 import { join } from 'node:path'
 import { readRegistry } from './liveness.mjs'
 
-export const MODES = ['interactive', 'headless']
+// ⚠️ Three, not two. `cluster` is a third kind of worker — a session inside the
+// `claude-interactive` service in the cluster — and it is neither a tab nor an in-process
+// query. It was omitted when the cluster target landed, and the omission was SILENT in the
+// worst way: `buildRecord` throws on an unknown mode, `writeLedger` catches that throw and
+// logs a warning, and the spawn still returned a working-looking `{agent_id, session_id}` —
+// so every cluster worker ran with no ledger record at all, which is the durable half the
+// fleet reads to answer "who started this". A rejected value that only warns is the failure
+// this file's own callers refuse elsewhere.
+export const MODES = ['interactive', 'headless', 'cluster']
 
 // The spawn edge: the session that called spawn_agent, resolved from the live registry
 // (keyed by pid) and stamped into a record that outlives it.

@@ -706,6 +706,52 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId, chip })
 // `resume` opens a NEW session continuing a CLOSED one's conversation. The session
 // must be closed: resuming a live one puts two writers on one conversation, which is
 // what the guard below — see liveness.mjs — refuses rather than silently producing.
+// The fleet-wide concurrent-worker limit, as an error string or `null` when the spawn may open.
+//
+// Extracted so BOTH spawn paths answer to it — the tab/headless path below and the cluster
+// path, which is a different SHAPE of worker but not a different population. A limit only one
+// path consulted would be a second counter by omission, which is the defect this number's
+// single home exists to prevent.
+//
+// The count is live WORKER SESSIONS — the session registry joined to the spawn ledger. It is
+// deliberately NOT the heartbeat store, which is stamped only for in-process (headless)
+// workers and therefore read 0 while 11 interactive workers were live (measured 2026-10-01).
+// A cap counting one population while the managers' target counts another is a defect with no
+// error on either side — and the target IS this number, so they must agree by construction.
+// Definition and its two stated limits: `worker-sessions.mjs`.
+function concurrentLimitError() {
+  const maxConcurrent = resolveMaxConcurrent({
+    env: config.maxConcurrent,
+    file: config.configFileContents,
+    path: config.configFile,
+  })
+  if (maxConcurrent.error) return maxConcurrent.error
+  if (maxConcurrent.limit === null) return null
+
+  const live = workerSessions()
+  // `null` is "a store could not be read", which is NOT "no worker is live". Refusing on it is
+  // the same asymmetry the mode rule carries: a limit that cannot count must not open, because
+  // opening past an uncountable limit is how the limit silently stops existing — and a manager
+  // acting on the other reading spawns onto live work.
+  if (live === null) {
+    return (
+      `the concurrent-worker limit is set to ${maxConcurrent.limit} but the live-worker count could not be ` +
+      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. Both the ` +
+      `session registry and the spawn ledger must be readable; point SUPERVISOR_SESSIONS_DIR and ` +
+      `SUPERVISOR_LEDGER_DIR at them if they live elsewhere.`
+    )
+  }
+  if (live.length >= maxConcurrent.limit) {
+    return (
+      `the fleet-wide concurrent-worker limit is reached: ${live.length} live, ${maxConcurrent.limit} ` +
+      `allowed (source: ${maxConcurrent.source}). Open nothing further and report the remainder as ` +
+      `held-on-limit; it is picked up next sweep. Raise spawn.maxConcurrent in ${config.configFile}, or ` +
+      `set it to 0 for unlimited.`
+    )
+  }
+  return null
+}
+
 // A cluster worker: a session inside the `claude-interactive` service, not a process here.
 //
 // A different shape from both paths below, rather than a third branch of them. It has no
@@ -719,7 +765,40 @@ async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId, chip })
 // down is a worker the fleet cannot find. It is written only AFTER the call succeeds —
 // stamping a task with an id the service refused would point it at a conversation that does
 // not exist, which is worse than an empty field.
-async function spawnClusterWorker({ id, prompt, label, task, vault }) {
+async function spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive }) {
+  // The limit FIRST, matching the local path's order — a caller error is cheap to report but
+  // the cap is the guard that must not be skippable, and a cluster spawn that bypassed it
+  // would be the uncounted second population item 5 exists to prevent.
+  const limitError = concurrentLimitError()
+  if (limitError) return { error: limitError }
+
+  // Arguments the cluster path cannot honour are REFUSED, never accepted and quietly ignored —
+  // the same rule the tab path already carries for `resume` and `policy`. Silently dropping
+  // them is how a caller ends up believing a worker was resumed when a fresh session was
+  // opened, or that it runs under a policy nothing consults.
+  if (resume) {
+    return {
+      error:
+        'resume is not supported with target "cluster": a cluster worker is a session inside the ' +
+        'claude-interactive service, and this path cannot continue an existing conversation. Omit `resume`, ' +
+        'or spawn locally.',
+    }
+  }
+  if (policyPath) {
+    return {
+      error:
+        'policy is not supported with target "cluster": the policy layer answers permission requests raised on ' +
+        'THIS server, and a cluster worker\'s gates never reach it. Omit `policy`, or spawn locally.',
+    }
+  }
+  if (interactive !== undefined) {
+    return {
+      error:
+        'interactive is not supported with target "cluster": it chooses between a local wezterm tab and a local ' +
+        'headless worker, and the cluster target creates neither. Omit it.',
+    }
+  }
+
   if (!task) {
     return {
       error:
@@ -749,14 +828,33 @@ async function spawnClusterWorker({ id, prompt, label, task, vault }) {
     }
   }
 
+  // ⚠️ `transcript` and `permissions` are SEEDED, not optional, and getting this wrong is not
+  // a cosmetic drift. `agentView` dereferences both unconditionally (`a.transcript.length`,
+  // `a.permissions.filter`) and `list_agents` maps over EVERY agent — so one agent missing
+  // either makes the whole roster unreadable, not just that row. The local paths always seed
+  // them; a cluster worker has no transcript on this machine and parks no permissions here,
+  // which is exactly why they must be EMPTY rather than absent.
   const agent = {
     id,
     label: label || id,
     prompt,
     cwd: null,
     status: 'cluster',
+    rules: policy.rules,
+    policyPath: null,
     sessionId: started.sessionId,
+    resumedFrom: null,
+    carriedDecision: null,
+    parentSession: parentSessionId({ dir: config.sessionsDir }),
     modeSource: 'argument',
+    role: null,
+    windowId: null,
+    launcher: null,
+    paneId: null,
+    transcript: [],
+    permissions: [],
+    result: null,
+    error: null,
     task,
     createdAt: new Date().toISOString(),
   }
@@ -808,7 +906,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const spawnTarget = resolveSpawnTarget({ target })
   if (spawnTarget.error) return { error: spawnTarget.error }
   if (spawnTarget.target === 'cluster') {
-    return spawnClusterWorker({ id, prompt, label, task, vault })
+    return spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive })
   }
 
   // Resolved first, because every guard below asks which way this worker opens and they
@@ -841,37 +939,8 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // 2026-10-01). A cap counting one population while the managers' target counts another is
   // a defect with no error on either side — and the target IS this number, so they must
   // agree by construction. Definition and its two stated limits: `worker-sessions.mjs`.
-  const maxConcurrent = resolveMaxConcurrent({
-    env: config.maxConcurrent,
-    file: config.configFileContents,
-    path: config.configFile,
-  })
-  if (maxConcurrent.error) return { error: maxConcurrent.error }
-  if (maxConcurrent.limit !== null) {
-    const live = workerSessions()
-    // `null` is "a store could not be read", which is NOT "no worker is live". Refusing
-    // on it is the same asymmetry the mode rule carries: a limit that cannot count must not
-    // open, because opening past an uncountable limit is how the limit silently stops
-    // existing — and a manager acting on the other reading spawns onto live work.
-    if (live === null) {
-      return {
-        error:
-          `the concurrent-worker limit is set to ${maxConcurrent.limit} but the live-worker count could not be ` +
-          `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. Both the ` +
-          `session registry and the spawn ledger must be readable; point SUPERVISOR_SESSIONS_DIR and ` +
-          `SUPERVISOR_LEDGER_DIR at them if they live elsewhere.`,
-      }
-    }
-    if (live.length >= maxConcurrent.limit) {
-      return {
-        error:
-          `the fleet-wide concurrent-worker limit is reached: ${live.length} live, ${maxConcurrent.limit} ` +
-          `allowed (source: ${maxConcurrent.source}). Open nothing further and report the remainder as ` +
-          `held-on-limit; it is picked up next sweep. Raise spawn.maxConcurrent in ${config.configFile}, or ` +
-          `set it to 0 for unlimited.`,
-      }
-    }
-  }
+  const limitError = concurrentLimitError()
+  if (limitError) return { error: limitError }
 
   // An explicit window id WINS — the caller may need a window the map does not describe.
   // Otherwise the role decides, in-process, and no window id crosses the tool boundary.
