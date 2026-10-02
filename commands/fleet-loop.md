@@ -32,6 +32,7 @@ allowed-tools:
   - Edit
 argument-hint: "[--interval <N>m] (interval defaults to 15m; the round repeats by default)"
 ---
+⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
 Answer one question: **does anything in the fleet need attention right now?**
 

@@ -41,6 +41,7 @@ allowed-tools:
   - mcp__supervisor__await_permission
 argument-hint: "[goal|topic] [--interval <N>m] (subject detected when omitted; interval defaults to 15m)"
 ---
+⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
 Manager-loop slash command — the **narrow / deep** layer. Per the vault's Manager Session runbook.
 

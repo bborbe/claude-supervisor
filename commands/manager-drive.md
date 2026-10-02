@@ -17,6 +17,7 @@ allowed-tools:
   - mcp__tts__say
 argument-hint: "[goal|topic] (detected when omitted)"
 ---
+⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
 Manager drive slash command — the **act leg**, run once, by hand, against one subject.
 
