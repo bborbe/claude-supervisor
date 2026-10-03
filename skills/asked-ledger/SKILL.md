@@ -1,6 +1,6 @@
 ---
 name: asked-ledger
-description: Claim, resolve and render the shared asked-ledger — which blocked session has already been batched to the operator, and by which layer. Use before batching blocked sessions into an AskUserQuestion in /supervisor:fleet-loop or /supervisor:manager-loop, so a session both layers hold is asked exactly once and every open claim renders as one consolidated list. Subcommands claim | resolve | list | prune.
+description: Claim, resolve and render the shared asked-ledger — which blocked session, or which session-less row, has already been batched to the operator, and by which layer. Use before batching blocked sessions into an AskUserQuestion in /supervisor:fleet-loop or /supervisor:manager-loop, and before the under-target card in /supervisor:manager-loop, so a subject both layers hold is asked exactly once and every open claim renders as one consolidated list. Subcommands claim | resolve | list | prune.
 argument-hint: "<claim|resolve|list|prune> [flags]"
 allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py *)
 ---
@@ -21,7 +21,9 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py claim   --session <blocked-session-id> --layer <your-layer> --text "<the question>"
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py claim   --row "<the row's key>"      --layer <your-layer> --text "<the question>"
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py resolve --session <blocked-session-id>
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py resolve --row "<the row's key>"
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py list
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py prune
 ```
@@ -55,7 +57,11 @@ The `:-` fallback is load-bearing, not style: `CLAUDE_PLUGIN_ROOT` is unset in a
 
 ## Keyed on the subject, never on the asker
 
-The blocked session is the only join both layers can agree on: both see it, and neither sees the other's batch. An asker-keyed ledger would let each layer hold its own copy and the duplicate would survive.
+The subject is the only join both layers can agree on: both see it, and neither sees the other's batch. An asker-keyed ledger would let each layer hold its own copy and the duplicate would survive.
+
+**Two subjects, one slot.** `--session` names the blocked session — the join for the blocked-set batch, which every layer can see. `--row` names the **row** — the join for `manager-loop`'s `under-target` card, whose candidates are `phase: todo` rows that carry **no blocked session at all**, so `--session` has nothing it could be given. Exactly one of the two is required; they are the same slot, and a row key is stored in the entry's `session` field.
+
+Naming the row is what makes the under-target disjointness check performable. Before this, that branch mandated a `--session` claim for rows that have no session, so a manager following it literally could not comply and silently substituted a hand-read of `list` — a substitute, not the check. With `--row`, two managers whose tracked sets overlap claim the **same row key**: the second is refused with exit 3 and drops the row from its card, so the duplicate is caught before either card is posted.
 
 ## Two marks — do not merge them
 
@@ -69,6 +75,8 @@ They answer different questions — *already asked?* versus *how often delivered
 `prune` drops a resolved entry past `--max-age-hours`, and an open entry past that age **only once its subject session is gone from `~/.claude/sessions/`**.
 
 This is the rule that keeps a shared file from re-introducing the per-layer bug it replaced. "Absent from my sweep" is a claim about that layer's **partial view** — a shared ledger pruned that way would let the fleet's sweep delete a manager's marks. A long-blocked session is exactly the one that must not be re-asked, so age alone never drops a live claim.
+
+⚠️ **A `--row` claim has no liveness to read, so it prunes by age alone.** A row key is not a session id and never appears in `~/.claude/sessions/`, so the liveness guard above cannot fire for it. That is deliberate rather than an oversight — the alternative is inventing a liveness test for a row, and an invented test is worse than the honest absence of one. A row claim's bound is therefore `--max-age-hours` (24 h by default).
 
 ## Rendering
 

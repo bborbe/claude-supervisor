@@ -4,8 +4,9 @@
 Storage: ~/.claude/state/asked-ledger.json -- ONE file, shared by every layer
 (override SUPERVISOR_ASKED_LEDGER, which is also what lets the tests exercise
 claim/resolve/prune without touching the operator's real ledger). Keyed on the
-BLOCKED session's id -- the subject -- never on the asker, and never on the
-question text.
+subject -- the BLOCKED session's id, or for a candidate that carries no blocked
+session (manager-loop's `under-target` card, whose rows are `phase: todo` rows)
+the ROW's own key -- never on the asker, and never on the question text.
 
 Why this exists (repair C, [[The Operator's Blocked Sessions Arrive as One
 Grouped Decision]]): `commands/fleet-loop.md` drops an entry whose owning manager
@@ -38,6 +39,11 @@ that way would let the fleet's sweep delete a manager's marks. `prune` drops a
 resolved entry past `--max-age-hours`, and an open entry past that age only once
 its subject session is gone from ~/.claude/sessions/.
 
+⚠️ A ROW-keyed claim has no liveness signal to read -- a row key is not a session
+id and never appears in ~/.claude/sessions/ -- so it prunes by AGE ALONE. That is
+deliberate rather than an oversight: the alternative is inventing a liveness test
+for a row, and an invented test is worse than the honest absence of one.
+
 Locking: fcntl.flock on a sidecar lock, then atomic tmp+rename -- two layers
 write this file concurrently, and a read-modify-write without the lock loses one
 of them silently.
@@ -45,7 +51,7 @@ of them silently.
 Subcommands: claim | resolve | list | prune
 
 `claim` is the gate the callers act on: exit 0 means this asker owns the ask and
-includes the session in its batch; exit 3 means another asker already holds an
+includes the subject in its batch; exit 3 means another asker already holds an
 open claim, so the caller DROPS it from the batch (it still appears in `list`).
 """
 import argparse
@@ -167,11 +173,24 @@ def normalise(text):
     return " ".join((text or "").split())
 
 
+def subject_of(args):
+    """The subject key: the blocked session's id, or the row's own key.
+
+    Exactly one of --session / --row is required (argparse's mutually exclusive
+    group enforces it), and to this ledger the two are the same thing -- a subject
+    both layers can agree on. A row key is stored in the entry's `session` field,
+    which is the subject slot; the entry SHAPE is deliberately unchanged, because
+    only the key a claim takes is in scope.
+    """
+    return args.session or args.row
+
+
 def cmd_claim(args):
     asker = asker_id(args)
+    subject = subject_of(args)
     with Locked():
         data = _read()
-        entry = data["entries"].get(args.session)
+        entry = data["entries"].get(subject)
         if entry and entry.get("state") == "open":
             if entry.get("asker") == asker:
                 # The same asker re-claiming is its own cadence, not a cross-layer
@@ -179,7 +198,7 @@ def cmd_claim(args):
                 entry["text"] = normalise(args.text) or entry.get("text", "")
                 entry["asked_at"] = now()
                 _write(data)
-                print("reclaimed %s (layer %s)" % (args.session, args.layer))
+                print("reclaimed %s (layer %s)" % (subject, args.layer))
                 return 0
             print(
                 "held by %s (layer %s) since %s"
@@ -188,8 +207,8 @@ def cmd_claim(args):
             return HELD
         # Absent, or resolved and blocked again -- either way this asker takes it.
         reopened = bool(entry)
-        data["entries"][args.session] = {
-            "session": args.session,
+        data["entries"][subject] = {
+            "session": subject,
             "asker": asker,
             "layer": args.layer,
             "text": normalise(args.text),
@@ -200,21 +219,22 @@ def cmd_claim(args):
         _write(data)
         print(
             "%s %s (layer %s)"
-            % ("reopened" if reopened else "claimed", args.session, args.layer)
+            % ("reopened" if reopened else "claimed", subject, args.layer)
         )
         return 0
 
 
 def cmd_resolve(args):
     asker = args.asker or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    subject = subject_of(args)
     with Locked():
         data = _read()
-        entry = data["entries"].get(args.session)
+        entry = data["entries"].get(subject)
         if not entry:
-            print("no entry for %s" % args.session)
+            print("no entry for %s" % subject)
             return 0
         if entry.get("state") != "open":
-            print("already resolved %s" % args.session)
+            print("already resolved %s" % subject)
             return 0
         # A resolver that is not the asker is recorded, not refused: the operator
         # may answer a session the fleet raised, and the mark is about the subject.
@@ -223,7 +243,7 @@ def cmd_resolve(args):
         if asker and asker != entry.get("asker"):
             entry["resolved_by"] = asker
         _write(data)
-        print("resolved %s" % args.session)
+        print("resolved %s" % subject)
         return 0
 
 
@@ -278,18 +298,33 @@ def cmd_prune(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Shared asked-ledger for blocked sessions.")
+    parser = argparse.ArgumentParser(
+        description="Shared asked-ledger for blocked sessions and session-less rows."
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_claim = sub.add_parser("claim", help="claim a blocked session for this asker")
-    p_claim.add_argument("--session", required=True, help="the BLOCKED session's id")
+    p_claim = sub.add_parser(
+        "claim", help="claim a blocked session, or a session-less row, for this asker"
+    )
+    claim_key = p_claim.add_mutually_exclusive_group(required=True)
+    claim_key.add_argument("--session", default=None, help="the BLOCKED session's id")
+    claim_key.add_argument(
+        "--row",
+        default=None,
+        help=(
+            "a row key, for a candidate that carries no blocked session -- "
+            "manager-loop's under-target card, whose rows are phase: todo rows"
+        ),
+    )
     p_claim.add_argument("--layer", required=True, choices=LAYERS)
     p_claim.add_argument("--asker", default=None, help="defaults to $CLAUDE_CODE_SESSION_ID")
     p_claim.add_argument("--text", default="", help="the question being put to the operator")
     p_claim.set_defaults(func=cmd_claim)
 
     p_resolve = sub.add_parser("resolve", help="mark a subject resolved")
-    p_resolve.add_argument("--session", required=True)
+    resolve_key = p_resolve.add_mutually_exclusive_group(required=True)
+    resolve_key.add_argument("--session", default=None)
+    resolve_key.add_argument("--row", default=None, help="a row key, for a session-less subject")
     p_resolve.add_argument("--asker", default=None)
     p_resolve.set_defaults(func=cmd_resolve)
 

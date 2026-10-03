@@ -41,6 +41,7 @@ _spec.loader.exec_module(al)
 ASKER = "asker-session-1"
 OTHER = "asker-session-2"
 SUBJECT = "blocked-session-a"
+ROW = "Some Task Row"
 
 
 def ts(hours_ago):
@@ -103,6 +104,15 @@ class Base(unittest.TestCase):
 
     def resolve(self, session=SUBJECT, asker=ASKER):
         return self._run(["resolve", "--session", session, "--asker", asker])
+
+    def claim_row(self, row=ROW, layer="worker", asker=ASKER, text="q"):
+        argv = ["claim", "--row", row, "--layer", layer, "--text", text]
+        if asker is not None:
+            argv += ["--asker", asker]
+        return self._run(argv)
+
+    def resolve_row(self, row=ROW, asker=ASKER):
+        return self._run(["resolve", "--row", row, "--asker", asker])
 
     def listing(self):
         return self._run(["list"])
@@ -290,6 +300,84 @@ class LedgerShape(Base):
         self.claim(asker=ASKER)
         self.assertTrue(os.path.exists(al.LOCK))
         self.assertIsInstance(self.raw(), dict)
+
+
+class RowKeyedClaims(Base):
+    """`manager-loop`'s `under-target` card claims ROWS, and its candidates are
+    `phase: todo` rows that carry no blocked session -- so a session-only key left
+    the branch's mandated disjointness check with no input it could be given.
+    Measured on the branch's first live post (tick 33, 2026-10-02): the manager
+    could not perform the claim for any of its three rows, read `list` by hand
+    instead, and posted on that weaker basis. These tests pin the second subject
+    and the one rule that differs for it."""
+
+    def test_a_row_key_is_claimable_and_keyed_on_the_row(self):
+        code, out, _ = self.claim_row()
+        self.assertEqual(code, 0)
+        self.assertIn("claimed", out)
+        entry = self.raw()["entries"][ROW]
+        self.assertEqual(entry["session"], ROW, "the row occupies the subject slot")
+        self.assertEqual(entry["layer"], "worker")
+        self.assertEqual(entry["state"], "open")
+
+    def test_a_second_layer_is_refused_the_same_row(self):
+        """The cross-layer guard the branch exists for, on a row key -- this is
+        the check the branch could not perform at all before."""
+        self.assertEqual(self.claim_row(layer="worker", asker=ASKER)[0], 0)
+        code, out, _ = self.claim_row(layer="fleet", asker=OTHER)
+        self.assertEqual(code, al.HELD, "a second layer must not take the same row")
+        self.assertIn("held by", out)
+
+    def test_a_row_claim_resolves_by_row(self):
+        """Without a row-keyed resolve the claim could never be released, and it
+        would suppress the other layer until it aged out."""
+        self.claim_row(asker=ASKER)
+        code, out, _ = self.resolve_row(asker=ASKER)
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+        self.assertEqual(self.raw()["entries"][ROW]["state"], "resolved")
+
+    def test_a_row_claim_prunes_by_age_alone(self):
+        """A row key is not a session id and never appears in the registry, so the
+        liveness guard cannot fire for it -- age alone bounds it. Deliberate: an
+        invented liveness test for a row is worse than its honest absence."""
+        self.claim_row(asker=ASKER)
+        self.backdate(ROW, hours_ago=48)
+        code, _, _ = self._run(["prune", "--max-age-hours", "24"])
+        self.assertEqual(code, 0)
+        self.assertNotIn(ROW, self.raw()["entries"])
+
+    def test_a_row_claim_on_a_live_session_is_unaffected(self):
+        """Negative control for the test above: a session claim still survives the
+        same age once its session is live. The row path must not loosen this."""
+        self.claim(asker=ASKER)
+        self.backdate(SUBJECT, hours_ago=48)
+        self.live(SUBJECT)
+        self._run(["prune", "--max-age-hours", "24"])
+        self.assertIn(SUBJECT, self.raw()["entries"])
+
+    def test_neither_key_is_a_usage_error(self):
+        """Negative control: the key is required, so an omitted one must refuse
+        rather than write an entry nothing can look up."""
+        code, _, _ = self._run(["claim", "--layer", "worker", "--asker", ASKER])
+        self.assertNotEqual(code, 0)
+
+    def test_both_keys_is_a_usage_error(self):
+        """Two subjects in one call has no meaning -- one slot, one key."""
+        code, _, _ = self._run(
+            [
+                "claim",
+                "--session",
+                SUBJECT,
+                "--row",
+                ROW,
+                "--layer",
+                "worker",
+                "--asker",
+                ASKER,
+            ]
+        )
+        self.assertNotEqual(code, 0)
 
 
 if __name__ == "__main__":
