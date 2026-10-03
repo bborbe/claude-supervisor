@@ -285,6 +285,46 @@ def fm_wikilinks(fm: str, key: str) -> list[str]:
     return [unescape_scalar(h) for h in re.findall(r"\[\[(.+?)\]\]", block.group(1))]
 
 
+def resolve_task_file(tasks_dir: str, name: str) -> str:
+    """`name`'s task file under `tasks_dir`, matched case-insensitively.
+
+    The rule this read replaces specified **case-insensitive** resolution, and the
+    reason it must be explicit rather than left to the filesystem is that APFS is
+    case-insensitive: `open()` succeeds on a case-mismatched name here, so an
+    exact-only build passes every local check and blocks permanently the moment it
+    meets a case-sensitive filesystem. This repo's own CHANGELOG records the same
+    asymmetry from the other side — a single capitalised letter passed unnoticed
+    because `open()`, Obsidian's link resolver and `ls` all agree on APFS.
+
+    Returns the directory entry's OWN spelling when one matches, never the case
+    variant that was asked for: the canonical name is what makes this testable on
+    the very filesystem that hides the defect, and a path that opens here is not
+    evidence the lookup is right. Falls back to the plain join on a miss, which is
+    the path a genuinely absent blocker must take — `open()` refuses it, and
+    "cannot verify it is done" is the unmet direction.
+    """
+    wanted = f"{name}.md".lower()
+    try:
+        for entry in os.listdir(tasks_dir):
+            if entry.lower() == wanted:
+                return os.path.join(tasks_dir, entry)
+    except OSError:
+        pass
+    return os.path.join(tasks_dir, f"{name}.md")
+
+
+def cell(text: str) -> str:
+    """A value safe to place in one tab-separated column of `--blocked-verdicts`.
+
+    A task name is frontmatter-controlled and may carry a tab, which would shift
+    every column after it for any consumer that splits on tabs — the reader's own
+    reporting rule, and the tests. Newlines cannot reach here (`fm_wikilinks`'
+    capture is `.+?` without DOTALL), but collapsing them costs nothing and keeps
+    the guarantee in one place rather than resting on a regex two functions away.
+    """
+    return text.replace("\t", " ").replace("\n", " ")
+
+
 def blocked_by_verdict(fm: str, tasks_dir: str) -> dict:
     """Resolve every `blocked_by` entry against `tasks_dir`.
 
@@ -309,7 +349,7 @@ def blocked_by_verdict(fm: str, tasks_dir: str) -> dict:
     for name in entries:
         try:
             with open(
-                os.path.join(tasks_dir, f"{name}.md"), encoding="utf-8", errors="replace"
+                resolve_task_file(tasks_dir, name), encoding="utf-8", errors="replace"
             ) as fh:
                 blocker_fm = split_frontmatter(fh.read())
         except OSError:
@@ -1984,7 +2024,7 @@ def main(argv: list[str]) -> int:
                 # reads an empty frontmatter and finds no entries — which is the vacuous
                 # promotion this whole mode exists to stop. Name it instead, and let the
                 # reader treat any word but `ready` as "not offered".
-                print(f"{name}\tunreadable\t\t")
+                print(f"{cell(name)}\tunreadable\t\t")
                 continue
             verdict = blocked_by_verdict(fm, tasks_dir)
             # The entry count is a fourth column so the reader can pick the rows it must
@@ -1994,9 +2034,9 @@ def main(argv: list[str]) -> int:
             # rule keyed on the unmet column would silently skip the rows that matter.
             print(
                 "{}\t{}\t{}\t{}".format(
-                    name,
+                    cell(name),
                     "blocked" if verdict["blocked"] else "ready",
-                    ", ".join(verdict["unmet"]),
+                    cell(", ".join(verdict["unmet"])),
                     len(verdict["entries"]),
                 )
             )

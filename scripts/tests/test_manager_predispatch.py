@@ -1837,6 +1837,17 @@ class TestBlockedByRead(Base):
             ["Add a Cluster Spawn Mode to the Supervisor's spawn_agent"],
         )
 
+    def test_escaped_apostrophe_is_unescaped_for_goals_too(self):
+        # `unescape_scalar` sits inside the shared `fm_wikilinks`, so the widening to
+        # `goals:` is a consequence of the blocked_by fix rather than a decision. It
+        # is pinned here because nothing else pins it and `goals:` is the key
+        # `resolve_tracked` compares membership on — an edit that moved the unescape
+        # out of the helper would otherwise go unnoticed. The other side of that
+        # comparison (`declared_members` via `_LIST_ITEM`) reads markdown, not YAML,
+        # so it never carries the escape and is deliberately left alone.
+        fm = "goals:\n    - '[[Bob''s goal]]'\n"
+        self.assertEqual(self.m.fm_wikilinks(fm, "goals"), ["Bob's goal"])
+
     def test_interior_unmet_entry_is_read(self):
         self.blocker("Met One", "completed")
         self.blocker("Unmet Middle", "next")
@@ -1975,7 +1986,48 @@ class TestBlockedVerdictsMode(Base):
         # A row whose own file cannot be read has an EMPTY frontmatter, which
         # `blocked_by_verdict` would call unblocked — the vacuous promotion itself.
         self.stage("Never Written")
-        self.assertEqual(self.lines()["Never Written"][1], "unreadable")
+        rc, out = self.run_gate("--subject", self.SUBJECT, "--blocked-verdicts")
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        # FOUR columns, matching the ready/blocked branch — the trailing empties are
+        # fields, not padding. The count cell is empty rather than `0`: nothing about
+        # this row's entries is known, and a consumer reading `0` would conclude the
+        # row declares no blocker, which is a different (and wrong) claim.
+        self.assertEqual(
+            out.rstrip("\n").split("\t"), ["Never Written", "unreadable", "", ""]
+        )
+
+    def test_resolve_task_file_returns_the_canonical_spelling(self):
+        # APFS is case-insensitive, so `open()` hides an exact-only regression: the
+        # assertion is on the resolved PATH, which is the only thing that differs
+        # between the two builds on this host. Asserting the verdict instead would
+        # pass either way and pin nothing.
+        self.blocker("Met Alpha", "completed")
+        tasks = os.path.join(self.vault, "25 Tasks")
+        self.assertEqual(
+            os.path.basename(self.m.resolve_task_file(tasks, "met alpha")),
+            "Met Alpha.md",
+        )
+        self.assertEqual(
+            os.path.basename(self.m.resolve_task_file(tasks, "Never Written")),
+            "Never Written.md",
+        )
+
+    def test_a_case_mismatched_blocker_does_not_block(self):
+        # End to end, the same property the resolver test pins one level down.
+        self.blocker("Met Alpha", "completed")
+        self.row("ARow", ["met alpha"])
+        self.stage("ARow")
+        self.assertEqual(self.lines()["ARow"][1], "ready")
+
+    def test_a_tab_in_a_name_cannot_shift_the_columns(self):
+        # A task name is frontmatter-controlled, and every consumer of this output
+        # splits on tabs — including this test class.
+        self.blocker("Met", "completed")
+        self.row("A\tRow", ["Met"])
+        self.stage("A\tRow")
+        rc, out = self.run_gate("--subject", self.SUBJECT, "--blocked-verdicts")
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(len(out.rstrip("\n").split("\t")), 4)
 
     def test_the_entry_count_distinguishes_no_list_from_all_met(self):
         # Both render an empty unmet column, so a report rule keyed on that column
