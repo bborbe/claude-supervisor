@@ -28,7 +28,7 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py prune
 ```
 
-⚠️ **Substitute `'<row-key>'` verbatim and keep it single-quoted.** A row key is a task name, not a uuid, so unlike `<blocked-session-id>` it can carry `"`, a backtick or `$(` — and inside double quotes those change the command instead of being passed through.
+⚠️ **Substitute `'<row-key>'` verbatim and keep it single-quoted.** A row key is a task name, not a uuid, so unlike `<blocked-session-id>` it can carry `"`, a backtick or `$(` — and inside double quotes those change the command instead of being passed through. ⚠️ **A key containing a single quote itself needs the `'\''` escape** — `'Fix the user'\''s parser'` — because otherwise the quote closes the string early and the argument word-splits before argparse ever sees it. Naming three of the four hazards would invite a reader to trust the fourth.
 
 Storage is on disk, never in context — `~/.claude/state/asked-ledger.json`, written only through the script (flock, then atomic tmp+rename). Never hand-edit the file.
 

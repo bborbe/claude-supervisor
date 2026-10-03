@@ -399,6 +399,45 @@ class RowKeyedClaims(Base):
         self.assertIn(ROW, out)
         self.assertIn("pick a row", out)
 
+    def test_a_row_claim_survives_a_prune_while_fresh(self):
+        """The surviving direction, and the one the leak scenario depends on: a
+        row claim's liveness guard can never fire, so age is the only thing
+        bounding it -- which makes the fresh side worth pinning for rows, not just
+        for sessions."""
+        self.claim_row(asker=ASKER)
+        code, out, _ = self._run(["prune", "--max-age-hours", "24"])
+        self.assertEqual(code, 0)
+        self.assertIn(ROW, self.raw()["entries"])
+
+    def test_a_row_and_a_session_coexist_in_one_ledger(self):
+        """Two subject kinds sharing `data['entries']` is exactly what this change
+        makes newly possible, and it is the case `cmd_list` iterates over."""
+        self.assertEqual(self.claim_row(row=ROW, asker=ASKER, text="a row")[0], 0)
+        self.assertEqual(self.claim(session=SUBJECT, asker=OTHER, text="a session")[0], 0)
+        code, out, _ = self.listing()
+        self.assertEqual(code, 0)
+        self.assertIn("2 open claim(s)", out)
+        self.assertIn(ROW, out)
+        self.assertIn(SUBJECT, out)
+        self.assertIn("a row", out)
+        self.assertIn("a session", out)
+
+    def test_the_two_key_forms_address_the_same_slot(self):
+        """`subject_of`'s stated contract -- to this ledger `--session` and `--row`
+        are the same thing -- so a claim taken under one form is released under
+        the other, in both directions."""
+        self.claim_row(row=ROW, asker=ASKER)
+        code, out, _ = self.resolve(session=ROW, asker=ASKER)
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+        self.assertEqual(self.raw()["entries"][ROW]["state"], "resolved")
+
+        self.claim(session=SUBJECT, asker=ASKER)
+        code, out, _ = self.resolve_row(row=SUBJECT, asker=ASKER)
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+        self.assertEqual(self.raw()["entries"][SUBJECT]["state"], "resolved")
+
     def test_neither_key_is_a_usage_error(self):
         """Negative control: the key is required, so an omitted one must refuse
         rather than write an entry nothing can look up."""
