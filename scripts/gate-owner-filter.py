@@ -39,6 +39,30 @@ when its spawner is a live manager other than this watcher's own. Panes this
 session spawned, panes whose spawner is a worker, panes whose spawner is dead,
 and unowned panes all emit.
 
+A CLAIM overrides that, and it is the one ownership input that does NOT come
+from the spawn edge. `scripts/ownership-claim.py` records which manager has
+adopted a gated session (`~/.claude/state/ownership-claims.json`, keyed on the
+GATED session id -- the id `session_for_pane` already resolves, so the claim
+joins with no new hop). A claim held by a LIVE manager other than this watcher
+drops the pane as `claimed`; a claim held by this watcher, or by a manager that
+is gone, or read against an unreadable registry, EMITS -- the same fail-open the
+spawner hops take, for the same reason.
+
+⚠️ **A claim may only ADD a drop, never remove one.** The spawner path is
+resolved FIRST, and the claim is consulted only where that path emits. Running
+the claim's fail-open outcomes ahead of the spawner path would convert a
+resolved `peer-manager` drop into an emit whenever any claim existed for the
+pane -- the fail-open rule protects an *unresolvable* input, and does not reach
+a verdict the spawner path already resolved.
+
+Without this input a pane whose session
+has no spawner is emitted to every manager forever, because nothing about the
+pane changes when a manager adopts it: measured 2026-10-02, 5+ wakes in one hour
+for gates the manager could not act on, 1 of them actionable, after the Fleet
+Manager had taken ownership of those panes by `SendMessage` -- a channel no
+record reads. The `--only-file` allowlist is NOT the answer and stays barred:
+it trades this defect for a worse one, since it drops genuinely unowned panes.
+
 ⚠️ A PREDECESSOR MANAGER IS NOT A PEER MANAGER, and this filter cannot tell them
 apart. A PEER manager serves a DIFFERENT subject; a PREDECESSOR served the SAME
 subject and handed it over. After a handover the outgoing manager is still live
@@ -89,6 +113,13 @@ import sys
 STATE = os.path.expanduser("~/.claude/state/attention")
 LEDGER = os.path.expanduser("~/.local/state/claude-supervisor/sessions")
 REGISTRY = os.path.expanduser("~/.claude/sessions")
+# Same env override the writer (`ownership-claim.py`) honours, deliberately: a
+# writer pointed at one file while every reader reads another is a SILENT
+# no-op -- the claim is recorded, `list` reports it held, and no watcher ever
+# consults it. The two resolutions must not drift.
+CLAIMS = os.environ.get("SUPERVISOR_OWNERSHIP_CLAIMS") or os.path.expanduser(
+    "~/.claude/state/ownership-claims.json"
+)
 
 EMIT = "emit"
 DROP = "drop"
@@ -110,6 +141,36 @@ def load_ledger(ledger_dir=LEDGER):
             continue
         sid = rec.get("session_id") or os.path.basename(path)[: -len(".json")]
         out[sid] = rec
+    return out
+
+
+def load_claims(path=CLAIMS):
+    """Open ownership claims, keyed by gated session id, or {} when unreadable.
+
+    An unreadable store is NOT an empty one, and here the two happen to agree:
+    both fail open. That is deliberate -- a claim store that cannot be read must
+    never silence a manager's watcher, and the cost of a missed drop is one
+    wasted wake against a fleet-wide silence.
+
+    Only entries carrying a `manager` are returned; a malformed entry is skipped
+    rather than read as a claim held by nobody. Read directly rather than by
+    shelling out to `ownership-claim.py`, so the filter keeps its single-process
+    shape and stays runnable when the script is absent.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    claims = data.get("claims")
+    if not isinstance(claims, dict):
+        return {}
+    out = {}
+    for session_id, entry in claims.items():
+        if isinstance(entry, dict) and entry.get("manager"):
+            out[str(session_id)] = str(entry["manager"])
     return out
 
 
@@ -201,19 +262,19 @@ def session_for_pane(pane, items):
     return str(hits[-1].get("session_id") or "") or None
 
 
-def verdict(session_id, spawner, ledger, live, self_id):
-    """(emit|drop, reason) for one gated session.
+def spawner_verdict(spawner, ledger, live):
+    """(emit|drop, reason) from the spawn edge alone.
 
-    The keep-set is wide on purpose: drop ONLY on a live peer manager.
+    Split out so the claim input can be consulted ONLY where this path emits.
+    A claim may ADD a drop, never remove one: running a claim's fail-open
+    outcomes ahead of this path would turn a resolved `peer-manager` drop into
+    an emit whenever any claim existed for the pane, which loses drop precision
+    and re-creates the peer-owned-wake cost the filter exists to remove. The
+    fail-open rationale -- never silence a watcher on an unresolvable input --
+    does not reach a verdict this path already resolved.
     """
-    if not session_id:
-        return EMIT, "unowned"
-    if self_id and session_id == self_id:
-        return EMIT, "self"
     if not spawner:
         return EMIT, "unowned"
-    if self_id and spawner == self_id:
-        return EMIT, "own-worker"
     if not is_manager(spawner, ledger):
         return EMIT, "worker-spawner"
     if live is None:
@@ -223,11 +284,50 @@ def verdict(session_id, spawner, ledger, live, self_id):
     return DROP, "peer-manager"
 
 
-def evaluate(pane, ledger, live, items, self_id):
+def verdict(session_id, spawner, ledger, live, self_id, claims=None):
+    """(emit|drop, reason) for one gated session.
+
+    The keep-set is wide on purpose: drop ONLY on a live peer manager -- reached
+    either by the spawn edge or by a claim a live peer manager holds.
+    """
+    if not session_id:
+        return EMIT, "unowned"
+    if self_id and session_id == self_id:
+        return EMIT, "self"
+    if self_id and spawner == self_id:
+        # Above both the spawner path and the claim branch, deliberately: a
+        # manager's own workers are the panes it EXISTS to see, so neither a
+        # peer spawner nor a peer's claim may silence them. The PREDECESSOR
+        # warning above records a measured incident of a manager silently losing
+        # its own workers; this keeps that from returning through either door.
+        return EMIT, "own-worker"
+
+    call, reason = spawner_verdict(spawner, ledger, live)
+    if call == DROP:
+        return call, reason
+
+    # The spawner path emits, so the claim can only ADD a drop. Its fail-open
+    # outcomes cost nothing here -- they land on an emit either way -- and a
+    # pane with no spawner is exactly the case this input exists for, since it
+    # is emitted permanently otherwise.
+    if claims:
+        holder = claims.get(session_id)
+        if holder:
+            if self_id and holder == self_id:
+                return EMIT, "own-claim"
+            if live is None:
+                return EMIT, "liveness-unknown"
+            if holder not in live:
+                return EMIT, "claim-dead"
+            return DROP, "claimed"
+    return call, reason
+
+
+def evaluate(pane, ledger, live, items, self_id, claims=None):
     """(verdict, reason, session_id, spawner) for one pane."""
     session_id = session_for_pane(pane, items)
     spawner = (ledger.get(session_id) or {}).get("parent_session") if session_id else None
-    call, reason = verdict(session_id, spawner, ledger, live, self_id)
+    call, reason = verdict(session_id, spawner, ledger, live, self_id, claims)
     return call, reason, session_id, spawner
 
 
@@ -271,11 +371,13 @@ def main():
     parser.add_argument("--ledger-dir", default=LEDGER)
     parser.add_argument("--registry-dir", default=REGISTRY)
     parser.add_argument("--state-dir", default=STATE)
+    parser.add_argument("--claims-file", default=CLAIMS)
     args = parser.parse_args()
 
     ledger = load_ledger(args.ledger_dir)
     live = live_ids(args.registry_dir)
     items = log_items(args.state_dir)
+    claims = load_claims(args.claims_file)
 
     panes = list(args.pane)
     if args.feed:
@@ -286,7 +388,7 @@ def main():
     rows = []
     for pane in panes:
         call, reason, session_id, spawner = evaluate(
-            pane, ledger, live, items, args.self_id
+            pane, ledger, live, items, args.self_id, claims
         )
         rows.append(
             {
@@ -322,8 +424,15 @@ def main():
 
     # Loud on the count, so an empty drop set reads as "nothing to filter"
     # rather than as a filter that never matched.
+    # Split by reason, not lumped: `dropped` now covers two rules, and a run
+    # driven entirely by claims would otherwise report panes as peer-manager
+    # drops that are not -- the exact misread this line exists to prevent.
+    dropped_peer = [r for r in dropped if r["reason"] == "peer-manager"]
+    dropped_claimed = [r for r in dropped if r["reason"] == "claimed"]
     print(
-        f"gates: {len(rows)}  emit: {len(kept)}  dropped(peer-manager): {len(dropped)}",
+        f"gates: {len(rows)}  emit: {len(kept)}  "
+        f"dropped(peer-manager): {len(dropped_peer)}  "
+        f"dropped(claimed): {len(dropped_claimed)}",
         file=sys.stderr,
     )
     return 0
