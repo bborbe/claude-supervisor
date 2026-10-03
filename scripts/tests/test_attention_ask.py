@@ -26,6 +26,8 @@ import importlib.util
 import io
 import json
 import os
+import shutil
+import tempfile
 import unittest
 import urllib.error
 from unittest import mock
@@ -66,6 +68,7 @@ def post_args(**overrides):
         liveness_ref="",
         interrupt_class="pick",
         expires_at="",
+        closer="",
     )
     defaults.update(overrides)
     return mock.Mock(**defaults)
@@ -496,6 +499,71 @@ class PollTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("abc123", text)
         self.assertIn("boom", text)
+
+
+class RecordPostedCloserTest(unittest.TestCase):
+    """The opt-in record that lets the hook and the feed decline a closer echo.
+
+    The write is best-effort and must never turn a successful post into a
+    failure, so most of these cases assert that nothing happened rather than
+    that something did.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.mkdtemp()
+        self._orig = ask.STATE_DIR
+        ask.STATE_DIR = self._dir
+
+    def tearDown(self):
+        ask.STATE_DIR = self._orig
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def _names(self):
+        return sorted(os.listdir(self._dir))
+
+    def test_an_empty_closer_writes_nothing_and_creates_no_state_dir(self):
+        shutil.rmtree(self._dir)
+        ask.record_posted_closer("session-a", "", "k")
+        self.assertFalse(os.path.exists(self._dir))
+
+    def test_a_non_string_closer_writes_nothing(self):
+        # `post_args` builds a Mock, so an unset `--closer` arrives as a TRUTHY
+        # Mock rather than as "". The type check is the only thing standing
+        # between this suite and the operator's real state dir.
+        ask.record_posted_closer("session-a", mock.Mock(), "k")
+        self.assertEqual(self._names(), [])
+
+    def test_writes_one_record_named_for_the_producer(self):
+        with mock.patch.object(ask, "resolved_session_id", return_value=""):
+            ask.record_posted_closer("session-a", "pick — 1. x · 2. y", "k")
+        self.assertEqual(self._names(), ["session-a.posted.json"])
+
+    def test_writes_a_second_record_named_for_the_session_when_it_differs(self):
+        # The hook keys the record by session_id and the feed keys it by the
+        # store item's producer_id. An explicit --producer-id makes those differ,
+        # so a single key would write the record where nothing looks.
+        with mock.patch.object(ask, "resolved_session_id", return_value="session-b"):
+            ask.record_posted_closer("session-a", "pick — 1. x · 2. y", "k")
+        self.assertEqual(
+            self._names(), ["session-a.posted.json", "session-b.posted.json"]
+        )
+
+    def test_records_the_closer_its_dedup_key_and_a_timestamp(self):
+        with mock.patch.object(ask, "resolved_session_id", return_value=""):
+            ask.record_posted_closer("session-a", "pick — 1. x · 2. y", "cap-1")
+        with open(
+            os.path.join(self._dir, "session-a.posted.json"), encoding="utf-8"
+        ) as f:
+            rec = json.load(f)
+        self.assertEqual(rec["closer"], "pick — 1. x · 2. y")
+        self.assertEqual(rec["dedup_key"], "cap-1")
+        self.assertGreater(rec["ts"], 0)
+
+    def test_a_failed_write_leaves_no_tmp_and_does_not_raise(self):
+        with mock.patch.object(ask, "resolved_session_id", return_value=""):
+            with mock.patch.object(ask.os, "replace", side_effect=OSError("boom")):
+                ask.record_posted_closer("session-a", "pick — 1. x · 2. y", "k")
+        self.assertEqual([n for n in self._names() if n.endswith(".tmp")], [])
 
 
 if __name__ == "__main__":

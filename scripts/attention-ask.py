@@ -50,7 +50,17 @@ is a real case rather than a bug, and it is refused rather than posted: an item
 with no producer can never be polled back by anyone, so it would be a question
 asked into a void.
 
-Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]...
+`--closer` is the one declaration that is OPTIONAL. It names the `👤 You:` line
+this card answers, and it exists because a session that posts a card and then
+ends its turn with the same ask on that line put ONE ask on the board twice: the
+deliberate card declares a `dedup_key` slug while the hook's echo derives
+sha256(sid:kind:detail), and those two keys can never collide. Passing it writes
+<sid>.posted.json, which the hook's `Stop` branch and the feed's `reclassify_idle`
+both read to decline the echo. Omitted, nothing is recorded and the echo is
+raised exactly as before — the mechanism is opt-in, so the board stays dirty
+until a poster passes it.
+
+Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
      python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
      python3 attention-ask.py poll ITEM_ID
 """
@@ -126,17 +136,32 @@ def record_posted_closer(producer_id, closer, dedup_key):
     cannot be written the card is still posted, and the hook falls back to today's
     behaviour rather than to a wrong suppression.
     """
-    if not closer:
+    # `closer` arrives as a Mock under the test suite's `mock.Mock(**defaults)`
+    # args, and a Mock is TRUTHY — so the type check, not just the emptiness
+    # check, is what keeps the suite from writing into the real state dir.
+    if not isinstance(closer, str) or not closer:
         return
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        path = os.path.join(STATE_DIR, f"{producer_id}.posted.json")
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"closer": closer, "dedup_key": dedup_key, "ts": time.time()}, f)
-        os.replace(tmp, path)
-    except Exception:
-        pass
+    # Written under BOTH the producer id and this session's own id when they
+    # differ. The hook keys the record by its `session_id` and the feed keys it by
+    # the store item's `producer_id`; those agree only while `--producer-id` is
+    # left to its default, so an explicit producer id would otherwise write the
+    # record where nothing looks. The miss is silent — the echo just returns —
+    # which is why both keys are written rather than one being chosen.
+    for key in {producer_id, resolved_session_id()} - {""}:
+        path = os.path.join(STATE_DIR, f"{key}.posted.json")
+        # pid-suffixed: a fixed `.tmp` per session id lets two concurrent posts
+        # interleave, and a crash between write and replace orphans it.
+        tmp = f"{path}.{os.getpid()}.tmp"
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"closer": closer, "dedup_key": dedup_key, "ts": time.time()}, f)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def build_options(labels, recommended):
