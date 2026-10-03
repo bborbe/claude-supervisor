@@ -38,6 +38,23 @@ export const PROMPT_PATH = '/prompt'
 // failing. That is the failure this constant exists to make impossible.
 export const SESSION_HEADER = 'X-Session-Id'
 
+// The header and the scheme the service authenticates with, verbatim from its own contract:
+// `bborbe/agent` `docs/interactive-service.md` § Authentication — "Every gated route requires
+// the request header `Authorization: Bearer <token>`. The scheme is matched exactly as
+// `Bearer `". Both halves are load-bearing, and each fails the same silent way: a missing
+// header is a 401, and so is a scheme that differs by case or loses its trailing space — so a
+// near-miss reads as "not authorized" rather than as a malformed request, and sends the
+// reader looking at the token instead of at the line that built the header.
+//
+// ⚠️ **This header is only confidential over TLS.** `resolveClusterBaseUrl` below accepts
+// `http:` as well as `https:`, and the deployed shape — a NodePort on the nuke dev node
+// network — is plaintext, where a bearer token is readable by anything sharing the segment and
+// grants exactly the `/prompt` access it was sent to enable. `https` is permitted, so the safe
+// configuration exists; it is the operator's choice, and this note exists so the choice is
+// visible where the header is built rather than only in a network diagram.
+export const AUTH_HEADER = 'Authorization'
+export const AUTH_SCHEME = 'Bearer '
+
 // A cluster spawn that has not answered within this long is not slow, it is broken — the
 // service holds the turn open and answers in one response, so there is no partial progress
 // to wait for. Bounded rather than unbounded so a wedged pod costs one error, not a manager
@@ -90,6 +107,50 @@ export function resolveClusterBaseUrl(raw) {
   return { baseUrl: url.origin + url.pathname.replace(/\/+$/, '') }
 }
 
+// The token a cluster spawn presents, or a refusal.
+//
+// Refused rather than omitted, following resolveClusterBaseUrl above and for the same
+// reason: the service answers a header-less request with 401 *before* the route's handler
+// runs, so an unconfigured supervisor and a wrong token produce one indistinguishable
+// observable. Refusing here is what turns that into a sentence naming the variable to set.
+export function resolveAuthToken(raw) {
+  if (raw === undefined || raw === null || raw === '') {
+    return {
+      error:
+        "the cluster target has no token: INTERACTIVE_AUTH_TOKEN is not set in this server's environment. " +
+        'The claude-interactive service requires `Authorization: Bearer <token>` on POST /prompt and refuses ' +
+        'without it, so a spawn would fail as a 401 naming nothing to fix. Set INTERACTIVE_AUTH_TOKEN on the ' +
+        'supervisor server entry, then restart the MCP server.',
+    }
+  }
+  if (typeof raw !== 'string') {
+    return { error: `INTERACTIVE_AUTH_TOKEN is ${JSON.stringify(raw)}, which is not a token string` }
+  }
+  // Whitespace is refused, NOT trimmed away, and both halves of that matter.
+  //
+  // A value that is only whitespace builds `Bearer  ` — the scheme's own trailing space plus
+  // the value's — which the counterparty matches exactly and answers with 401: precisely the
+  // indistinguishability this function exists to remove. A trailing newline is the sharper
+  // case, and the common one: a secret read whole rather than its value. That is not a legal
+  // header value at all, so the request dies in the generic `could not reach the cluster
+  // service` branch naming neither the header nor the variable.
+  //
+  // Trimming instead of refusing would be worse than either failure. It would silently repair
+  // a value the SERVICE did not repair, so a token the operator mis-pasted would start
+  // matching here and stop matching there — two ends that disagree while both look configured.
+  // Refusing keeps them honest and names the variable.
+  if (raw.trim() !== raw) {
+    return {
+      error:
+        'INTERACTIVE_AUTH_TOKEN has leading or trailing whitespace, which is not a legal header value. ' +
+        'A trailing newline — a secret file read whole rather than its value — is the usual cause. Fix the ' +
+        'value rather than trimming it here: the service compares against the token it was started with, so a ' +
+        'value this side silently repairs is one the two ends would then disagree about.',
+    }
+  }
+  return { token: raw }
+}
+
 // One turn on the addressed conversation, and nothing else.
 //
 // Returns `{sessionId, status, answer}` on a 2xx, `{error}` otherwise — including the
@@ -99,6 +160,7 @@ export async function startClusterSession({
   baseUrl,
   prompt,
   sessionId,
+  authToken,
   fetchImpl = fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
@@ -112,6 +174,10 @@ export async function startClusterSession({
       error: `session id ${JSON.stringify(sessionId)} does not match the service's pattern ${CLUSTER_SESSION_ID_PATTERN}`,
     }
   }
+  // Checked before the request for the same reason as the two above: the service's own answer
+  // to a missing credential is a bare 401 that names nothing the caller can act on.
+  const auth = resolveAuthToken(authToken)
+  if (auth.error) return { error: auth.error }
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -119,7 +185,11 @@ export async function startClusterSession({
   try {
     response = await fetchImpl(`${resolved.baseUrl}${PROMPT_PATH}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain; charset=utf-8', [SESSION_HEADER]: sessionId },
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        [SESSION_HEADER]: sessionId,
+        [AUTH_HEADER]: `${AUTH_SCHEME}${auth.token}`,
+      },
       body: prompt,
       signal: controller.signal,
     })
@@ -138,8 +208,16 @@ export async function startClusterSession({
   }
 
   if (!response.ok) {
+    // 401 gets its own sentence, and it is the half resolveAuthToken's refusal cannot reach: a
+    // token that IS set and does not match the one the service was started with. The service
+    // answers an absent, malformed and wrong credential identically, so the bare status sends
+    // the reader looking at their network for what is a credential mismatch.
+    const hint =
+      response.status === 401
+        ? ' — the service rejected the credential: check that INTERACTIVE_AUTH_TOKEN matches the token the service was started with'
+        : ''
     return {
-      error: `the cluster service refused the prompt: HTTP ${response.status}${body.trim() ? ` — ${body.trim()}` : ''}`,
+      error: `the cluster service refused the prompt: HTTP ${response.status}${body.trim() ? ` — ${body.trim()}` : ''}${hint}`,
     }
   }
 

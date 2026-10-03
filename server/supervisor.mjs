@@ -833,6 +833,7 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 
   const started = await startClusterSession({
     baseUrl: config.clusterUrl,
+    authToken: config.clusterAuthToken,
     prompt,
     sessionId: minted.sessionId,
   })
