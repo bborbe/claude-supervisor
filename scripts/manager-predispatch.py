@@ -250,6 +250,18 @@ def unescape_scalar(text: str) -> str:
     page — and "no page" is the UNMET direction, so a COMPLETED blocker would
     still render blocked-upstream. Unescaping is a no-op for every name that
     carries no `''`, which is every other name in the vault.
+
+    ⚠️ **Applied to the FRONTMATTER side of a cross-file name comparison, and
+    only that side.** `fm_wikilinks` has two callers — `blocked_by` and `goals` —
+    and the `goals` half is compared against the topic page's `## Goals` list
+    (`declared_members` via `_LIST_ITEM`). That side reads markdown, not YAML, so
+    it never carries the `''` escape and is deliberately NOT unescaped: doing it
+    there would be a no-op, while doing it on neither side leaves a frontmatter
+    `Bob''s goal` matching nothing. The asymmetry is the fix, not an oversight —
+    a name carrying no `''` is unaffected either way, which is every other name
+    in the vault. `TestBlockedByRead` pins the escape; nothing pins the `goals:`
+    widening, so an edit that moved this call out of `fm_wikilinks` would go
+    unnoticed.
     """
     return text.replace("''", "'")
 
