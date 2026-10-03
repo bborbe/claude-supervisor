@@ -216,7 +216,7 @@ Three consequences, all binding:
 
    ⚠️ **The spawn response reports `vault`, `launcher` and `model`**, so all three are verifiable from the reply rather than by opening a pane and reading a status line. The model comes from the launcher script's own `--model` argument, with a `${VAR}` resolved against that script's `export`; it is `null` when the script cannot be read, never a guess — a plausible wrong model would defeat the field's whole purpose.
 
-⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the manager-loop command all point here. It owns **five constants**: the **readiness ladder** (item 2 above — all four of its branches, its thresholds, and the `UNFIXABLE:` handling), the **fleet-wide concurrent limit** (item 5 above), the **mode decision** (item 6 above — the classifier, the `mode:` field, and both headless constraints), the **target decision** (item 7 above — `local` vs `cluster`, why `cluster` is per-call only, and why the returned id is not evidence), and the **cwd/vault/launcher decision** (item 8 above — why neither is defaulted, and what the response reports). Each appears once, there, and is referenced everywhere else. ⚠️ **A restated copy of any of them is not a harmless comment — it is a second counter.** The cap was restated in `commands/manager-loop.md`, `commands/manager-verify.md` and the manager runbook's Guardrail 2 until 2026-09-24: four homes for one number, which is how a single cap becomes two caps the day one home is edited and the others are not, with no error and no diff to catch it. The mode rule carried the mirror-image defect until the same day: it lived in `commands/open.md` § Step 0.6 and was consumed only there, so every other spawn site silently fell through to the fleet config — measured 2026-09-23, **63 new-worker spawns in one day and 0 of them headless**, 57 sourced from `config` rather than from any decision.
+⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the manager-loop command all point here. It owns **six constants**: the **readiness ladder** (item 2 above — all four of its branches, its thresholds, and the `UNFIXABLE:` handling), the **fleet-wide concurrent limit** (item 5 above), the **mode decision** (item 6 above — the classifier, the `mode:` field, and both headless constraints), the **target decision** (item 7 above — `local` vs `cluster`, why `cluster` is per-call only, and why the returned id is not evidence), the **cwd/vault/launcher decision** (item 8 above — why neither is defaulted, and what the response reports), and the **repair dispatch** (§ *The repair dispatch* below — who repairs a `🔧 Repairable` row, and the per-round cap). Each appears once, there, and is referenced everywhere else. ⚠️ **A restated copy of any of them is not a harmless comment — it is a second counter.** The cap was restated in `commands/manager-loop.md`, `commands/manager-verify.md` and the manager runbook's Guardrail 2 until 2026-09-24: four homes for one number, which is how a single cap becomes two caps the day one home is edited and the others are not, with no error and no diff to catch it. The mode rule carried the mirror-image defect until the same day: it lived in `commands/open.md` § Step 0.6 and was consumed only there, so every other spawn site silently fell through to the fleet config — measured 2026-09-23, **63 new-worker spawns in one day and 0 of them headless**, 57 sourced from `config` rather than from any decision.
 
 **A — `spawn_agent` (preferred).** The prompt is a spawn *argument*, so the task never goes
 over keystrokes:
@@ -457,6 +457,27 @@ guessing; that record is the only place the original directory survives.
 **Confirming a headless spawn took — and what to read instead of `.status` — is owned by
 § A headless worker exits at turn end.** Do not restate it here: a restated copy is what let
 four surfaces prescribe the same wrong field.
+
+### The repair dispatch — who acts on a `🔧 Repairable` row
+
+`agents/manager-drive.md` clause (1) classifies every non-terminal row in the caller's tracked set and returns exactly one verdict per row. `🔧 Repairable` is one of them: it names a row below the readiness ladder whose task file needs a **structural repair** before it can clear. ⚠️ **The leg cannot perform that repair, and this is deliberate rather than a gap** — it holds no `Edit` and no `Write`, and its `Task` tool is restricted by its own `<constraints>` to the read-only `task-auditor`. Clause (1) states the split outright (*"The write is the caller's"*), and `commands/open.md` § Step 1.5 says the same of the improvement pass.
+
+**The repair actor is the caller — the session that dispatched the leg.** Two sites carry it, and no others:
+
+| Site | Path | When |
+|---|---|---|
+| `commands/manager-loop.md` step 4's `Act:` block | the loop | once per tick |
+| `commands/manager-drive.md` step 7 | by hand | in the same step that already executes the leg's `To open` rows |
+
+Each runs `/supervisor:ready "<task>"` **once per `repairable` row**, bounded to the round's `repairable` set and **capped at `REPAIR_MAX_PER_ROUND` = 3 rows per round**.
+
+⚠️ **The repair half itself is not restated here.** `/supervisor:ready` already runs the audit → repair → re-audit loop for one named row (`commands/ready.md`), and `agents/manager-drive.md` clause (1) owns that loop's round cap, its stop condition and its early-stop-on-repetition rule. This section owns only **who dispatches it** and **how many per round** — a second copy of the loop is the second counter the block above forbids.
+
+⚠️ **The cap is a bound, not a budget.** Rows beyond it are reported as `left for the next round (cap 3)` — never silently dropped, because a silent cap is indistinguishable from a set that was fully processed, and the whole defect this closes is a verdict set that no one acts on. ⚠️ **Never dispatch a `phase: todo` row:** `/supervisor:ready` refuses one at its Gate 1, and that refusal is the operator's approval boundary rather than a defect to route around.
+
+⚠️ **Do not close this gap by giving the leg a write tool.** The split is load-bearing: the leg decides, the caller acts. A leg that could write would be a second writer on task files its own caller is editing in the same tick.
+
+⚠️ **Measured basis — 2026-10-03, tick 60 of the `Manager Layer` topic manager.** The leg returned **12** `repairable` rows, scored and cached, and repaired none; the same 12 had been scored the tick before and the tick before that. Because the verdict is cached by `content_key`, a re-scored `repairable` row costs no further audit — so nothing in the loop ever noticed that its verdict had been acted on zero times.
 
 ### The tab name is the join — and it is made unique before the process starts
 
