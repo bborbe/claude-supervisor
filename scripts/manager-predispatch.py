@@ -1134,7 +1134,105 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     return changed, reason, payload, stored_table
 
 
-def bucket_shape_error(parsed) -> str | None:
+RUNBOOK_RELATIVE_PATHS = (
+    os.path.join("65 Runbooks", "Manager Session.md"),
+    os.path.join("70 Runbooks", "Manager Session.md"),
+)
+
+# Anchored on the runbook's own prose shape, never on a line number. Measured 2026-10-03:
+# both declarations moved by one line inside a single day, so a line-anchored read would
+# have silently stopped finding them. The sibling vault's copy also sits under `70
+# Runbooks/` and declares a different count, which is why the path is a candidate list
+# and the count is never carried as a constant.
+BUCKET_DECLARATION_MARKER = "Step 4 — Classify into the full bucket set"
+DISPOSITION_MARKER = "Non-bucket dispositions"
+
+
+def runbook_path(vault: str, override: str | None) -> str | None:
+    """Where the vault's own bucket declaration lives, or None when neither candidate does."""
+    if override:
+        return override
+    for rel in RUNBOOK_RELATIVE_PATHS:
+        candidate = os.path.join(vault, rel)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def declared_bucket_names(path: str) -> tuple[set[str] | None, str | None]:
+    """(names, error) — the vocabulary the runbook declares, or why it could not be read.
+
+    TWO declarations, and both are load-bearing. The parenthesised run on the Step 4 line
+    is the bucket set; the dispositions clause names the three non-bucket keys the
+    classification also carries (`hold`, `backlog`, `👤 YOURS`). Refusing the second group
+    would reject a name the runbook declares — and the live store keys `backlog` for real,
+    so a check built from the parenthesised run alone refuses correct work.
+
+    Parsed by SHAPE, not by line number and not by collecting words on the line: the
+    clause carries prose naming superseded buckets, so a whole-line read admits exactly the
+    drift this check exists to catch. `👤 YOURS` carries an emoji, so the comparison is on
+    the runbook's own token verbatim — normalising it would re-admit the synonym spellings
+    (`yours`, `YOURS`) the store has already been measured emitting.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        return None, f"could not read the bucket declaration at {path!r}: {exc}"
+
+    buckets: set[str] = set()
+    for line in lines:
+        if BUCKET_DECLARATION_MARKER in line:
+            match = re.search(r"\(([^()]*)\)", line)
+            if match:
+                buckets.update(
+                    token.strip() for token in match.group(1).split("/") if token.strip()
+                )
+            break
+    if not buckets:
+        return None, (
+            f"could not parse the bucket set from {path!r} — expected a parenthesised, "
+            f"`/`-separated run on the {BUCKET_DECLARATION_MARKER!r} line"
+        )
+
+    dispositions: set[str] = set()
+    for line in lines:
+        if DISPOSITION_MARKER in line:
+            # The LEAD CLAUSE only. The rest of the line is commentary that backticks the
+            # cell label (`⏸️ blocked/hold`) as well as the disposition name, so a
+            # whole-line backtick sweep admits `⏸️ blocked/hold` as a legal key.
+            head = line.split(".**", 1)[0]
+            dispositions.update(re.findall(r"`([^`]+)`", head))
+            break
+    if not dispositions:
+        return None, (
+            f"could not parse the non-bucket dispositions from {path!r} — expected a "
+            f"backticked run on the {DISPOSITION_MARKER!r} line"
+        )
+
+    return buckets | dispositions, None
+
+
+def declared_bucket_names_for(
+    vault: str, override: str | None
+) -> tuple[set[str] | None, str | None]:
+    """The declared vocabulary for a vault, or why it could not be established.
+
+    Fail-closed by design. A check that skips when it cannot read the declaration is the
+    defect this refusal exists to remove — the runbook *is* the source, so failing to read
+    it is failing to have a check at all.
+    """
+    path = runbook_path(vault, override)
+    if path is None:
+        return None, (
+            f"no bucket declaration found under {vault!r} — expected one of "
+            f"{', '.join(repr(rel) for rel in RUNBOOK_RELATIVE_PATHS)}; "
+            f"pass --runbook <path>"
+        )
+    return declared_bucket_names(path)
+
+
+def bucket_shape_error(parsed, declared: set[str] | None = None) -> str | None:
     """Why `parsed` cannot gate, or None when it is a usable classification.
 
     A dict of bucket -> non-empty list of names is the only shape that can satisfy the
@@ -1146,6 +1244,15 @@ def bucket_shape_error(parsed) -> str | None:
     Shared by BOTH doors into the record. Validating only `--write-buckets` left the
     `--save --buckets` read path a bare `json.load`, so a hand-written or stale staging
     file reached `save_stored` with an all-empty set — the same defect by the other door.
+
+    `declared` adds the VOCABULARY half, and `None` skips it. Shape alone accepted any key
+    at all: measured 2026-10-03, `{"hold": ["Alpha"], "orphan": ["Beta"], "ready":
+    ["Gamma"]}` staged verbatim at exit 0, and the live store carried `backlog` / `yours`
+    against a runbook that declares neither spelling. A set keyed by a vocabulary nobody
+    declared gates the drive leg's clause (0) on names no renderer agrees with, which is
+    the drift the runbook's two-renderer rule forbids. The names come from the runbook
+    itself — never a list here — because the declared set is vault-relative and has moved
+    twice in a week.
     """
     if not isinstance(parsed, dict) or not parsed:
         return "bucket sets must be a non-empty JSON object"
@@ -1156,6 +1263,14 @@ def bucket_shape_error(parsed) -> str | None:
             or not all(isinstance(n, str) and n.strip() for n in names)
         ):
             return f"bucket {bucket!r} must map to a non-empty list of names"
+    if declared is not None:
+        undeclared = sorted(bucket for bucket in parsed if bucket not in declared)
+        if undeclared:
+            listed = ", ".join(repr(bucket) for bucket in undeclared)
+            return (
+                f"bucket set carries keys the runbook does not declare: {listed} — "
+                f"declared: {', '.join(sorted(declared))}"
+            )
     return None
 
 
@@ -1306,6 +1421,14 @@ def main(argv: list[str]) -> int:
         default=None,
         help="with --save: path to the staged bucket JSON (see --write-buckets)",
     )
+    ap.add_argument(
+        "--runbook",
+        default=None,
+        help=(
+            "path to the runbook declaring the bucket vocabulary; defaults to whichever "
+            "of <vault>/65|70 Runbooks/Manager Session.md exists"
+        ),
+    )
     args = ap.parse_args(argv)
 
     vault_error = vault_root_error(args.vault)
@@ -1364,7 +1487,13 @@ def main(argv: list[str]) -> int:
         except json.JSONDecodeError as exc:
             print(f"bucket sets must be JSON: {exc}", file=sys.stderr)
             return EXIT_USAGE
-        shape_error = bucket_shape_error(parsed)
+        # The vocabulary half, read from the runbook — fail-closed, because a check that
+        # skips when it cannot read the declaration is the defect this refusal removes.
+        declared, declaration_error = declared_bucket_names_for(args.vault, args.runbook)
+        if declaration_error:
+            print(declaration_error, file=sys.stderr)
+            return EXIT_USAGE
+        shape_error = bucket_shape_error(parsed, declared)
         if shape_error:
             print(shape_error, file=sys.stderr)
             return EXIT_USAGE
@@ -1641,7 +1770,13 @@ def main(argv: list[str]) -> int:
             # hand-written or stale file able to reach `save_stored` with a set that
             # cannot gate. A record written that way reads back as persisted when it is
             # not, which is precisely what clause (0) would then hold a batch on.
-            shape_error = bucket_shape_error(bucket_sets)
+            declared, declaration_error = declared_bucket_names_for(
+                args.vault, args.runbook
+            )
+            if declaration_error:
+                print(declaration_error, file=sys.stderr)
+                return EXIT_USAGE
+            shape_error = bucket_shape_error(bucket_sets, declared)
             if shape_error:
                 print(
                     f"bucket sets at {buckets_from!r} cannot gate: {shape_error}",
