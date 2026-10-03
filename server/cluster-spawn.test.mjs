@@ -1,10 +1,10 @@
 // Tests for the cluster spawn call.
 //
-// The two things worth pinning are the ones a working-looking implementation gets wrong:
-// that an unconfigured service URL REFUSES rather than reaching for a default, and that an
-// illegal session id is refused BEFORE the call — the service answers both with a 400 that
-// names nothing the caller can act on, so a late failure is indistinguishable from a wrong
-// prompt.
+// The things worth pinning are the ones a working-looking implementation gets wrong: that an
+// unconfigured service URL REFUSES rather than reaching for a default, that an illegal session
+// id is refused BEFORE the call, and that an unconfigured token refuses too — the service
+// answers a bad id with a 400 and a missing credential with a 401, both naming nothing the
+// caller can act on, so a late failure is indistinguishable from a wrong prompt.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -14,11 +14,28 @@ import {
   PROMPT_PATH,
   SESSION_HEADER,
   newSessionId,
+  resolveAuthToken,
   resolveClusterBaseUrl,
   startClusterSession,
 } from './cluster-spawn.mjs'
 
 const UUID = '3f2a91c4-5b6d-4e7f-8a90-1b2c3d4e5f60'
+const TOKEN = 'not-a-real-token-2f9c41'
+
+// ⚠️ Deliberately NOT imported from cluster-spawn.mjs.
+//
+// The counterparty's contract, restated from its own document — `bborbe/agent`
+// `docs/interactive-service.md` § Authentication, at merge `2379f1c6`: "Every gated route
+// requires the request header `Authorization: Bearer <token>`. The scheme is matched exactly
+// as `Bearer `".
+//
+// Importing these would make the assertion agree with the implementation by construction: a
+// typo in `AUTH_HEADER`, or a dropped trailing space in `AUTH_SCHEME`, would move both sides
+// of the comparison together and the test would still pass. That is the goal's recurring "a
+// probe that cannot fail" class, and the only fix is for the expected value to come from the
+// counterparty's head rather than the sender's.
+const CONTRACT_AUTH_HEADER = 'Authorization'
+const CONTRACT_AUTH_SCHEME = 'Bearer '
 
 const ok = (body = 'the answer', status = 200) => async () => ({
   ok: status >= 200 && status < 300,
@@ -54,6 +71,48 @@ test('a malformed or non-http service URL refuses', () => {
   assert.match(resolveClusterBaseUrl(9090).error, /not a URL/)
 })
 
+test('an unset auth token refuses rather than sending an unauthenticated request', () => {
+  // The failure this prevents: with no header the service answers 401, which is the same
+  // observable as a wrong token — so the operator goes looking at the secret instead of at
+  // the variable that was never set.
+  for (const raw of [undefined, null, '']) {
+    const { error } = resolveAuthToken(raw)
+    assert.ok(error, `expected ${JSON.stringify(raw)} to be refused`)
+    assert.match(error, /INTERACTIVE_AUTH_TOKEN/)
+    assert.match(error, /401/)
+  }
+  assert.match(resolveAuthToken(42).error, /not a token string/)
+  assert.deepEqual(resolveAuthToken('abc'), { token: 'abc' })
+})
+
+test('a missing token is refused before any request is made', async () => {
+  let called = false
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'do the thing',
+    sessionId: UUID,
+    fetchImpl: async () => {
+      called = true
+      return ok()()
+    },
+  })
+  assert.match(error, /INTERACTIVE_AUTH_TOKEN/)
+  assert.equal(called, false, 'an unauthenticated request must not be attempted')
+})
+
+test('a token with leading or trailing whitespace is refused, not trimmed', () => {
+  // A trailing newline is the case this catches, and the common one: a secret read whole
+  // rather than its value. It is not a legal header value, so the request would die in the
+  // generic `could not reach` branch naming neither the header nor the variable. Trimming
+  // instead would be worse — it repairs a value the SERVICE did not repair, so the two ends
+  // would disagree about the token while both looked configured.
+  for (const bad of [' ', '  ', '\n', `${TOKEN}\n`, ` ${TOKEN}`, `${TOKEN} `]) {
+    const { error } = resolveAuthToken(bad)
+    assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
+    assert.match(error, /INTERACTIVE_AUTH_TOKEN/)
+  }
+})
+
 test('a minted session id satisfies the service pattern', () => {
   const { sessionId } = newSessionId(() => UUID)
   assert.equal(sessionId, UUID)
@@ -76,6 +135,7 @@ test('the prompt is POSTed to /prompt with the session header', async () => {
     baseUrl: 'http://host:30090',
     prompt: 'do the thing',
     sessionId: UUID,
+    authToken: TOKEN,
     fetchImpl: async (url, init) => {
       seen = { url, init }
       return { ok: true, status: 200, text: async () => 'done' }
@@ -90,6 +150,33 @@ test('the prompt is POSTed to /prompt with the session header', async () => {
   // and nothing errors.
   assert.equal(seen.init.headers[SESSION_HEADER], UUID)
   assert.equal(seen.init.body, 'do the thing')
+})
+
+test('the request carries the bearer token the counterparty requires', async () => {
+  let seen
+  await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'do the thing',
+    sessionId: UUID,
+    authToken: TOKEN,
+    fetchImpl: async (url, init) => {
+      seen = { url, init }
+      return { ok: true, status: 200, text: async () => 'done' }
+    },
+  })
+
+  // Expected value from the CONTRACT constants above, never from cluster-spawn.mjs — see the
+  // note there. Delete the header from cluster-spawn.mjs and this fails with
+  // `undefined !== 'Bearer not-a-real-token-2f9c41'`, which is the check that it can fail.
+  const header = seen.init.headers[CONTRACT_AUTH_HEADER]
+  assert.equal(header, `${CONTRACT_AUTH_SCHEME}${TOKEN}`)
+
+  // Pinned by SHAPE, not by inequality. `notEqual(header, TOKEN)` passes for any prefixed
+  // value — `'X' + TOKEN` satisfies it — so it documents the two near-misses without checking
+  // either. Both are refused by the counterparty with 401 *before* its route handler runs,
+  // which is why the scheme's exact spelling and the value's exact bytes are what is asserted.
+  assert.ok(header.startsWith(CONTRACT_AUTH_SCHEME), 'the header must open with the contract scheme, verbatim')
+  assert.equal(header.slice(CONTRACT_AUTH_SCHEME.length), TOKEN, 'the value after the scheme must be the token, unaltered')
 })
 
 test('an illegal session id is refused before any request is made', async () => {
@@ -129,10 +216,26 @@ test("the service's own refusal is surfaced, not flattened to the status", async
     baseUrl: 'http://host:30090',
     prompt: 'x',
     sessionId: UUID,
+    authToken: TOKEN,
     fetchImpl: async () => ({ ok: false, status: 400, text: async () => 'invalid session id\n' }),
   })
   assert.match(error, /HTTP 400/)
   assert.match(error, /invalid session id/)
+})
+
+test('a 401 names the credential, so a wrong token is not read as a network fault', async () => {
+  // The half resolveAuthToken's refusal cannot reach: a token that IS set and does not match
+  // the one the service was started with. The service answers an absent, malformed and wrong
+  // credential identically, so the bare status sends the reader looking at their network.
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    fetchImpl: async () => ({ ok: false, status: 401, text: async () => 'unauthorized\n' }),
+  })
+  assert.match(error, /HTTP 401/)
+  assert.match(error, /INTERACTIVE_AUTH_TOKEN/)
 })
 
 test('an unreachable service and a timeout are reported as different failures', async () => {
@@ -140,6 +243,7 @@ test('an unreachable service and a timeout are reported as different failures', 
     baseUrl: 'http://host:30090',
     prompt: 'x',
     sessionId: UUID,
+    authToken: TOKEN,
     fetchImpl: async () => {
       throw new Error('connect ECONNREFUSED 192.168.178.30:30090')
     },
@@ -151,6 +255,7 @@ test('an unreachable service and a timeout are reported as different failures', 
     baseUrl: 'http://host:30090',
     prompt: 'x',
     sessionId: UUID,
+    authToken: TOKEN,
     timeoutMs: 5,
     fetchImpl: async () => {
       const error = new Error('aborted')
