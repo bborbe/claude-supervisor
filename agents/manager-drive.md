@@ -346,7 +346,7 @@ Audit (n):             ← the cache evidence: dispatched vs cached, per clause 
 Card (1):              ← the POSTING PAYLOAD, never a second ranking — the caller posts it
   post-batch --dedup-key "<key>" — covers <n> waiting-approval + <m> stale
   ⚠️ **`<key>` is the card producer's OUTPUT, not a field to copy.** Run
-  `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/waiting-approval-state.py" key --row "<row>" …`
+  `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/waiting-approval-state.py" key --topic <topic> --row "<row>" …`
   — one `--row` per row of this round's waiting-approval set — and substitute the returned value for `<key>`.
   ⚠️ **A placeholder is not a key, and a hand-rolled one is a second derivation**; either way no
   later tick can poll the card back, which is silent. ⚠️ **And never borrow the under-target

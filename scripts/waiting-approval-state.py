@@ -24,13 +24,22 @@ recompute check passes. A key can be internally consistent and still belong to a
 card's branch, and verification alone cannot tell the two apart. So this card gets its own
 key form and its own store, and the two never share a namespace.
 
-Why the key is bare
--------------------
+Why the key is topic-scoped but prefixless
+------------------------------------------
 The key is over the row set's **membership**, not its order — a re-ranking that names the
-same rows is not a changed ask, so the key must not move. It carries **no prefix** and does
-**not** fold in the topic: the namespace is the script, not the string, and a bare 16-hex
-digest cannot be confused with `under-target:<topic>:<digest>` at the point of use. Cross-
-topic separation is the store's own `producer_id` scoping, not the key's.
+same rows is not a changed ask, so the key must not move. It carries **no prefix**, so it
+cannot be confused with `under-target:<topic>:<digest>` at the point of use; the topic is
+folded into the digest instead.
+
+⚠️ **The topic is in the digest deliberately, and a rows-only digest would be a defect.**
+The store scopes suppression on `dedup_key` **within a live `producer_id`** — and
+`producer_id` resolves to the asking *session*, never to a topic: `attention-ask.py:319`
+sets `producer_id = args.producer_id or resolved_session_id()`, and `resolved_session_id()`
+(`attention-ask.py:110`) reads `CLAUDE_CODE_SESSION_ID`. So two topics deriving the same
+key from the same rows, through one session, would have the store suppress the second card
+against the first — the same silent loss this script exists to remove, re-entering one
+level up. The sibling folds its topic in too (`under-target-state.py:65`); this one does it
+without the prefix.
 
 Why there is a state file
 -------------------------
@@ -50,8 +59,8 @@ placeholder is the forced input that exercises the path.
 
 Usage
 -----
-    waiting-approval-state.py key    --row R [--row R …]
-    waiting-approval-state.py verify --dedup-key K --row R [--row R …]
+    waiting-approval-state.py key    --topic T --row R [--row R …]
+    waiting-approval-state.py verify --dedup-key K --topic T --row R [--row R …]
     waiting-approval-state.py write  --topic T --item-id ID --row R [--row R …] [--now ISO]
     waiting-approval-state.py read   --topic T [--json]
     waiting-approval-state.py clear  --topic T
@@ -70,19 +79,24 @@ from datetime import datetime, timezone
 STATE_DIR = os.path.expanduser("~/.claude/state/manager-waiting-approval")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
-# The template's own example, verbatim from `agents/manager-drive.md`'s `Card (1)` block.
-# Named here so the refusal can say what it was handed rather than "invalid key".
+# The literal the drive leg handed over at ticks 90 and 91 (2026-10-03, topic
+# `manager-layer`) — the value `agents/manager-drive.md`'s `Card (1)` block rendered until
+# this fix replaced it with `<key>`, so it no longer appears in any document in the repo.
+# Kept because `verify` must recognise it: a caller reproducing the old template from
+# memory is precisely the case the refusal exists for. It is a frozen historical input,
+# not a mirror of any live template — do not "re-sync" it.
 PLACEHOLDER = "<the round's waiting-approval row set>"
 
 
-def canonical_key(rows):
-    """The one derivation. Membership only — order must not move the key.
+def canonical_key(topic, rows):
+    """The one derivation. Membership and topic — order must not move the key.
 
-    Deliberately prefixless: the digest half of `under-target-state.py`'s `canonical_key`
-    with its `under-target:<topic>:` namespace dropped, so the two can never be mistaken
-    for one another by a reader or a `grep`.
+    Prefixless on purpose: `under-target-state.py` carries its topic as an
+    `under-target:<topic>:` prefix, and dropping the prefix here is what keeps the two
+    from being mistaken for one another by a reader or a `grep`. The topic still enters
+    the digest — see *Why the key is topic-scoped but prefixless* above.
     """
-    return hashlib.sha256("\n".join(sorted(rows)).encode()).hexdigest()[:16]
+    return hashlib.sha256("\n".join([topic] + sorted(rows)).encode()).hexdigest()[:16]
 
 
 def refuse(msg):
@@ -119,7 +133,7 @@ def write_state(topic, item_id, rows, now=None):
     stamp = now or datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     payload = {
         "card_item_id": item_id,
-        "key": canonical_key(rows),
+        "key": canonical_key(topic, rows),
         "row_set": rows,
         "posted_at": stamp,
     }
@@ -133,10 +147,10 @@ def write_state(topic, item_id, rows, now=None):
 
 
 def cmd_key(args):
-    err = validate_rows(args.row)
+    err = validate_topic(args.topic) or validate_rows(args.row)
     if err:
         return refuse(err)
-    print(canonical_key(args.row))
+    print(canonical_key(args.topic, args.row))
     return 0
 
 
@@ -147,25 +161,26 @@ def cmd_verify(args):
     and names what it was handed. A refusal is the correct outcome for a non-key: the
     alternative is posting a card that no later tick can poll back.
     """
-    err = validate_rows(args.row)
+    err = validate_topic(args.topic) or validate_rows(args.row)
     if err:
         return refuse(err)
     given = (args.dedup_key or "").strip()
     if not given:
         return refuse(
-            "--dedup-key is empty; derive it with `waiting-approval-state.py key --row …`")
-    expected = canonical_key(args.row)
+            "--dedup-key is empty; derive it with "
+            "`waiting-approval-state.py key --topic <topic> --row …`")
+    expected = canonical_key(args.topic, args.row)
     if given == PLACEHOLDER:
         print(
             "REFUSED: --dedup-key is the `Card (1)` template's placeholder, not a key — "
-            "derive the real one: waiting-approval-state.py key --row <row> …",
+            "derive the real one: waiting-approval-state.py key --topic <topic> --row <row> …",
             file=sys.stderr,
         )
         return 2
     if given != expected:
         print(
             "REFUSED: --dedup-key %r is not this row set's key (%s) — derive it: "
-            "waiting-approval-state.py key --row <row> …" % (given, expected),
+            "waiting-approval-state.py key --topic <topic> --row <row> …" % (given, expected),
             file=sys.stderr,
         )
         return 2
@@ -204,11 +219,27 @@ def cmd_read(args):
     if args.json:
         print(json.dumps(data, indent=2, ensure_ascii=False))
         return 0
-    rows = data.get("row_set", [])
+    rows = data.get("row_set") or []
+    # ⚠️ Validate before deriving. An empty or malformed recorded set would otherwise
+    # hash to `e3b0c44298fc1c14` — the sha256 of the empty string — and print as a
+    # perfectly plausible `key (derived):` line, which is the exact failure shape this
+    # script exists to remove: a value that looks like a key at the point of use.
+    err = validate_rows(rows)
+    if err:
+        return refuse(
+            "the recorded state for %s is unusable (%s) — nothing printed; re-post the "
+            "card to rewrite it" % (args.topic, err))
+    derived = canonical_key(args.topic, rows)
+    recorded = data.get("key", "")
     print("card_item_id: %s" % data.get("card_item_id", ""))
     print("posted_at:    %s" % data.get("posted_at", ""))
-    print("row_set:      %s" % (" | ".join(rows) if rows else ""))
-    print("key (derived): %s" % canonical_key(rows))
+    print("row_set:      %s" % " | ".join(rows))
+    print("key (derived): %s" % derived)
+    if recorded and recorded != derived:
+        # A hand-edited record, or a derivation that moved under it. Say so rather than
+        # silently preferring one of the two.
+        print("⚠️ recorded key %s disagrees with the derived %s — the record was edited, "
+              "or the derivation changed since it was written" % (recorded, derived))
     return 0
 
 
@@ -240,10 +271,10 @@ def main(argv=None):
         p.add_argument("--topic", required=True)
 
     k = sub.add_parser("key", help="print the card's canonical dedup key")
-    rows(k)
+    topic(k)
 
     v = sub.add_parser("verify", help="confirm a key is this row set's, or refuse and say so")
-    rows(v)
+    topic(v)
     v.add_argument("--dedup-key", required=True)
 
     w = sub.add_parser("write", help="record the posted card (atomic, refuses malformed)")
