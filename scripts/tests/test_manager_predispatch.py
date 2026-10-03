@@ -850,13 +850,16 @@ class TestTrackedArtifacts(Base):
             "--subject", subject, "--write-buckets", stdin=json.dumps(payload)
         )
 
-    def snapshot(self, subject, names):
+    def snapshot(self, subject, names, recorded_at=None):
         d = os.path.join(os.environ["SWEEP_GATE_BASE"], os.path.basename(self.vault).lower())
         os.makedirs(d, exist_ok=True)
+        payload = {"tasks": {n: {} for n in names}}
+        if recorded_at is not None:
+            payload["recorded_at"] = recorded_at
         with open(
             os.path.join(d, "%s.snapshot.json" % self.m.slug(subject)), "w", encoding="utf-8"
         ) as fh:
-            json.dump({"tasks": {n: {} for n in names}}, fh)
+            json.dump(payload, fh)
 
     def test_write_tracked_prints_the_path_it_wrote(self):
         rc, out = self.tracked("ATopic", ["ATask", "AGoalTask"])
@@ -1005,6 +1008,107 @@ class TestTrackedArtifacts(Base):
     def test_compare_without_a_staged_set_is_a_usage_error(self):
         rc, _ = self.run_gate("--subject", "ATopic", "--compare-tracked")
         self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    # -- the discriminator -----------------------------------------------------------
+    #
+    # The `ATopic` fixture declares `## Goals: - [[AGoal]] - [[ATask]]`, so the declared
+    # membership is exactly `{AGoal, ATask}` and a caller-only name inside it is the known
+    # healthy asymmetry rather than a defect.
+
+    def test_compare_renders_the_healthy_asymmetry_without_a_warning(self):
+        """The shape a correct tick produces: caller-only is within the declared membership
+        the snapshot does not hold, gate-only is empty. Before the discriminator this
+        printed `⚠️ DIVERGENCE`, so a healthy tick and a broken one were one line."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertNotIn("DIVERGENCE", out)
+        self.assertIn("healthy", out)
+        # The reading line prints *before* the healthy early-return, so it is on this path
+        # too — pinned here, or it could be deleted or broken without a test noticing.
+        self.assertIn("reading:", out)
+
+    def test_compare_names_the_caller_side_when_the_scan_dropped_a_name(self):
+        """Tick 41's shape: the caller's own set is exactly the healthy asymmetry, and the
+        gate carries one name it lacks — so the caller's scan is the side to check. The old
+        line named neither side, and the manager set about investigating a real membership
+        disagreement that did not exist."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask", "Dropped"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("caller-scan-suspect", out)
+        self.assertIn("gate-only: Dropped", out)
+
+    def test_compare_flags_a_disjoint_pair_as_a_caller_format_error(self):
+        """Work Approval tick #90: 11 names a side, sharing none. Two independently-derived
+        memberships cannot each hold every name the other lacks, so the shape is itself the
+        tell — a caller-side format error (here a `sed` that never fired and kept each
+        bullet's `— description` tail), not a disagreement of any size."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["Other1", "Other2"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("caller-format", out)
+        self.assertIn("format error", out)
+
+    def test_compare_names_the_caller_side_when_the_scan_overshot(self):
+        """The other direction of the same cause: gate-only is empty and the caller carries
+        a name the page never declared, so the scan is too large — or the gate's snapshot is
+        a refresh behind. Both readings are stated, because the shape cannot tell them
+        apart."""
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("caller-overshoot", out)
+        self.assertIn("refresh behind", out)
+
+    def test_the_same_signature_pair_renders_two_different_cause_labels(self):
+        """SC1's probe, and why a counts-only change cannot satisfy it. Both cases below are
+        `gate-only 1`, so a report that merely appends the counts renders them identically.
+        They differ only in whether the caller's own extra name stayed inside the page's
+        declaration — and that is what has to reach the label."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask", "Extra"])
+        rc_dropped, out_dropped = self.run_gate("--subject", "ATopic", "--compare-tracked")
+
+        self.tracked("ATopic", ["ATask", "Stray"])
+        rc_moved, out_moved = self.run_gate("--subject", "ATopic", "--compare-tracked")
+
+        for out in (out_dropped, out_moved):
+            self.assertIn("gate-only 1", out)
+        self.assertEqual(rc_dropped, self.m.EXIT_DIVERGENT, out_dropped)
+        self.assertEqual(rc_moved, self.m.EXIT_DIVERGENT, out_moved)
+        self.assertIn("caller-scan-suspect", out_dropped)
+        self.assertIn("both-sides-moved", out_moved)
+        self.assertNotEqual(out_dropped, out_moved)
+
+    def test_compare_prints_the_two_clocks_so_a_stale_snapshot_is_visible(self):
+        """Cause (2) — the gate's snapshot a refresh behind — renders the same shape as a
+        too-large scan, so the report cannot claim it. It can make it *visible*, which is
+        what this line is for: the snapshot's own `recorded_at` and the mtime of the
+        caller's scan, both printed rather than assumed."""
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask"], recorded_at="2026-10-03T13:25:00+02:00")
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("recorded_at 2026-10-03T13:25:00+02:00", out)
+        self.assertIn("caller scan written", out)
+
+    def test_compare_says_unclassified_when_the_declaration_cannot_be_read(self):
+        """"I could not check" must not read as a verdict. With the page's `## Goals`
+        section gone the shape cannot be classified at all, and the report says so rather
+        than reaching for the nearest label — the same rule the fail-open branch above
+        carries for an unreadable snapshot."""
+        self.write("23 Topics/ATopic.md", "---\npage_type: topic\n---\n\n# Scope\n")
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask", "Extra"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("unclassified", out)
+        self.assertIn("could not be read", out)
 
 
 HELD = "aaaaaaaa-1111-2222-3333-444444444444"
