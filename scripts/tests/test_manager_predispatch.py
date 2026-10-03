@@ -41,7 +41,7 @@ _SCRIPT = os.path.join(os.path.dirname(_HERE), "manager-predispatch.py")
 #
 # ⚠️ The run carries the live runbook's own MARKDOWN EMPHASIS (`**ready-to-start**` …), and
 # that is load-bearing rather than cosmetic: the live `65 Runbooks/Manager Session.md`
-# renders four of its eight bucket names bold, so a fixture that declares them plain cannot
+# renders four of its bucket names bold, so a fixture that declares them plain cannot
 # reproduce the defect at all. Measured 2026-10-03 — the parser kept the markers, its
 # declared set carried `**ready-to-start**` while `ACTIONABLE_BUCKETS` held the plain name,
 # and no key spelling satisfied both halves. A plain fixture passes against that broken
@@ -1780,9 +1780,11 @@ class TestBucketVocabulary(Base):
 
     def test_every_name_the_parser_derives_tracks_its_own_line(self):
         """SC3's probe, and the one a hardcoded set cannot pass. Every name the parser
-        derives is mutated in turn, on the line it is actually parsed from — the eight
-        bucket names on the `Step 4 — Classify into the full bucket set` run, the
-        dispositions on the `Non-bucket dispositions` line — and the answer must follow.
+        derives is mutated in turn, on the line it is actually parsed from — every bucket
+        name on the `Step 4 — Classify into the full bucket set` run, and the dispositions
+        on the `Non-bucket dispositions` line — and the answer must follow. The set is
+        mutated whole rather than sampled, and no count is restated here, so a fixture edit
+        that adds a bucket cannot shrink the probe silently.
         A fully hardcoded set ignores both lines; a partially hardcoded one ignores
         whichever half it froze, which is why the set is mutated whole rather than
         sampled."""

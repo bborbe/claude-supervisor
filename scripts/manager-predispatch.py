@@ -1274,9 +1274,12 @@ DISPOSITION_MARKER = "Non-bucket dispositions"
 def strip_emphasis(token: str) -> str:
     """`token` with the runbook's markdown emphasis removed from its ENDS only.
 
-    The runbook renders four of its eight bucket names bold — `**ready-to-start**`,
-    `**blocked-upstream**`, `**close-me**`, `**orphaned**` — so a parser that keeps the
-    markers declares a vocabulary no renderer agrees with. Measured 2026-10-03: the
+    The live `65 Runbooks/Manager Session.md` renders four of its bucket names bold —
+    `**ready-to-start**`, `**blocked-upstream**`, `**close-me**`, `**orphaned**` — so a
+    parser that keeps the markers declares a vocabulary no renderer agrees with. ⚠️ **No
+    bucket COUNT is stated here, deliberately:** the set is vault-relative and has moved
+    twice in a week, so a number in prose goes stale while reading as a measurement.
+    Measured 2026-10-03: the
     declared set carried `**ready-to-start**` while `ACTIONABLE_BUCKETS` held the plain
     name, so **no key spelling satisfied both halves** — plain keys were refused at the
     write door, and bolded keys would have made `actionable_names()` find nothing and
@@ -1286,7 +1289,11 @@ def strip_emphasis(token: str) -> str:
 
     ENDS only, never interior characters. `waiting_on_human` is a plausible bucket
     spelling, and a blanket `_`-removal would rewrite it to `waitingonhuman` — a name
-    nobody declared, admitted by the very check that exists to refuse those. `👤 YOURS`
+    nobody declared, admitted by the very check that exists to refuse those. `_` is in the
+    strip set for the ENDS half specifically, and that is not the interior rule applied
+    twice: stripping it at the ends is what de-emphasises `__bold__` / `_italic_` if the
+    runbook ever renders them that way, and no plausible bucket or disposition spelling
+    ends in `_`, so nothing real is rewritten. `👤 YOURS`
     carries an emoji and survives verbatim, which the comparison depends on: normalising it
     would re-admit the `yours` / `YOURS` synonyms the store has been measured emitting.
     """
