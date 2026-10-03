@@ -1806,5 +1806,301 @@ class TestBucketVocabulary(Base):
             self.assertNotIn(old, names, "%r survived its own mutation" % old)
 
 
+class TestBlockedByRead(Base):
+    """The deterministic `blocked_by` read the sweep reader consumes.
+
+    The defect this pins (measured 2026-10-03): the reader promoted a row to
+    `ready-to-start` once its FIRST entry had shipped, ignoring later unmet ones.
+    Two shapes must therefore be read in full — a block list of three or more
+    with the unmet entry STRICTLY INTERIOR (so neither a two-entry special case
+    nor a first-plus-last heuristic can pass), and a YAML single-quoted scalar
+    carrying an escaped apostrophe (`''`), which a raw regex returns still-escaped
+    and therefore unresolvable.
+    """
+
+    def blocker(self, name, status):
+        self.write(
+            f"25 Tasks/{name}.md",
+            f"---\npage_type: task\nstatus: {status}\n---\nTags: [[Task]]\n",
+        )
+
+    def verdict(self, fm):
+        return self.m.blocked_by_verdict(fm, os.path.join(self.vault, "25 Tasks"))
+
+    def test_escaped_apostrophe_is_unescaped(self):
+        # YAML escapes `'` as `''` inside a single-quoted scalar. A raw regex
+        # returns `Supervisor''s`, which matches no page — and "no page" reads as
+        # UNMET, so a COMPLETED blocker would still render blocked-upstream.
+        fm = "blocked_by:\n    - '[[Add a Cluster Spawn Mode to the Supervisor''s spawn_agent]]'\n"
+        self.assertEqual(
+            self.m.fm_wikilinks(fm, "blocked_by"),
+            ["Add a Cluster Spawn Mode to the Supervisor's spawn_agent"],
+        )
+
+    def test_escaped_apostrophe_is_unescaped_for_goals_too(self):
+        # `unescape_scalar` sits inside the shared `fm_wikilinks`, so the widening to
+        # `goals:` is a consequence of the blocked_by fix rather than a decision. It
+        # is pinned here because nothing else pins it and `goals:` is the key
+        # `resolve_tracked` compares membership on — an edit that moved the unescape
+        # out of the helper would otherwise go unnoticed. The other side of that
+        # comparison (`declared_members` via `_LIST_ITEM`) reads markdown, not YAML,
+        # so it never carries the escape and is deliberately left alone.
+        fm = "goals:\n    - '[[Bob''s goal]]'\n"
+        self.assertEqual(self.m.fm_wikilinks(fm, "goals"), ["Bob's goal"])
+
+    def test_interior_unmet_entry_is_read(self):
+        self.blocker("Met One", "completed")
+        self.blocker("Unmet Middle", "next")
+        self.blocker("Met Two", "completed")
+        fm = (
+            "blocked_by:\n"
+            "    - '[[Met One]]'\n"
+            "    - '[[Unmet Middle]]'\n"
+            "    - '[[Met Two]]'\n"
+        )
+        v = self.verdict(fm)
+        self.assertEqual(v["entries"], ["Met One", "Unmet Middle", "Met Two"])
+        self.assertEqual(v["unmet"], ["Unmet Middle"])
+        self.assertTrue(v["blocked"])
+
+    def test_all_met_is_the_negative_control(self):
+        # Positive without negative is a probe that cannot fail: the interior case
+        # above passes against a build that answers "blocked" too eagerly.
+        for n in ("Met One", "Met Middle", "Met Two"):
+            self.blocker(n, "completed")
+        fm = (
+            "blocked_by:\n"
+            "    - '[[Met One]]'\n"
+            "    - '[[Met Middle]]'\n"
+            "    - '[[Met Two]]'\n"
+        )
+        v = self.verdict(fm)
+        self.assertEqual(v["unmet"], [])
+        self.assertFalse(v["blocked"])
+
+    def test_missing_blocker_counts_as_unmet(self):
+        # "Cannot verify it is done" reads as blocked, never as permission to start.
+        fm = "blocked_by:\n    - '[[Never Written]]'\n"
+        v = self.verdict(fm)
+        self.assertEqual(v["unmet"], ["Never Written"])
+        self.assertTrue(v["blocked"])
+
+    def test_no_blocked_by_is_unblocked(self):
+        v = self.verdict("status: next\n")
+        self.assertEqual(v["entries"], [])
+        self.assertFalse(v["blocked"])
+
+
+class TestBlockedVerdictsMode(Base):
+    """The CLI seam the sweep reader actually calls — `--blocked-verdicts`.
+
+    `TestBlockedByRead` above pins `blocked_by_verdict` in isolation; this pins the
+    WIRING, which is the half that was missing: the function landed on 2026-10-03 with
+    no non-test caller, so the reader went on deciding `ready-to-start` from its own
+    frontmatter read and re-promoted blocked rows the same evening. A tested function
+    nothing calls ships nothing, so what is asserted here is the reader's own input —
+    one line per staged row, carrying the word the reader is told to trust.
+
+    The interior case is the discriminator, not decoration: with entries `[met, unmet,
+    met]` a first-entry-only read answers `ready`, which is exactly the promotion this
+    task exists to stop. Every case also names its control, because a build that answers
+    `blocked` too eagerly satisfies the positive case alone.
+    """
+
+    SUBJECT = "ATopic"
+
+    def stage(self, *names):
+        """Write the caller's staged tracked set — the file the mode classifies.
+
+        `--write-tracked` creates the state dir; a test that plants the file directly
+        has to do the same, or it asserts against a missing directory rather than
+        against the mode.
+        """
+        os.makedirs(self.m.STATE_DIR, exist_ok=True)
+        with open(self.m.tracked_path(self.SUBJECT), "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{n}\n" for n in names))
+
+    def row(self, name, blocked_by=None):
+        body = "---\npage_type: task\nstatus: next\n"
+        if blocked_by is not None:
+            body += "blocked_by:\n" + "".join(f"    - '[[{b}]]'\n" for b in blocked_by)
+        self.write(f"25 Tasks/{name}.md", body + "---\nTags: [[Task]]\n")
+
+    def blocker(self, name, status):
+        self.write(
+            f"25 Tasks/{name}.md",
+            f"---\npage_type: task\nstatus: {status}\n---\nTags: [[Task]]\n",
+        )
+
+    def lines(self):
+        rc, out = self.run_gate("--subject", self.SUBJECT, "--blocked-verdicts")
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        return dict(
+            (parts[0], parts) for parts in (ln.split("\t") for ln in out.strip().splitlines())
+        )
+
+    def test_interior_unmet_entry_reads_blocked(self):
+        # [met, UNMET, met] — a first-entry-only read answers `ready` here, which is
+        # the promotion measured on 2026-10-02 and again 2026-10-03 18:44.
+        self.blocker("Met One", "completed")
+        self.blocker("Unmet Middle", "next")
+        self.blocker("Met Two", "completed")
+        self.row("ARow", ["Met One", "Unmet Middle", "Met Two"])
+        self.stage("ARow")
+        line = self.lines()["ARow"]
+        self.assertEqual(line[1], "blocked")
+        self.assertEqual(line[2], "Unmet Middle")
+
+    def test_every_entry_met_reads_ready(self):
+        # The negative control: without it, a build that answers `blocked` to
+        # everything passes the interior case and blocks the whole vault.
+        for n in ("Met One", "Met Middle", "Met Two"):
+            self.blocker(n, "completed")
+        self.row("ARow", ["Met One", "Met Middle", "Met Two"])
+        self.stage("ARow")
+        self.assertEqual(self.lines()["ARow"][1], "ready")
+
+    def test_no_blocked_by_reads_ready(self):
+        # Vacuously satisfied, and it must stay that way: treating an absent list as
+        # blocked would empty the bucket for every blocker-less task in the vault.
+        self.row("ARow")
+        self.stage("ARow")
+        self.assertEqual(self.lines()["ARow"][1], "ready")
+
+    def test_missing_blocker_reads_blocked(self):
+        # "Cannot verify it is done" is not permission to start.
+        self.row("ARow", ["Never Written"])
+        self.stage("ARow")
+        self.assertEqual(self.lines()["ARow"][2], "Never Written")
+
+    def test_escaped_apostrophe_does_not_falsely_block(self):
+        # The second defect the predecessor found: a regex read returns the
+        # still-escaped `Supervisor''s`, which resolves to no page — and "no page"
+        # reads as unmet, so a COMPLETED blocker would render blocked-upstream.
+        self.blocker("Add a Cluster Spawn Mode to the Supervisor's spawn_agent", "completed")
+        self.row("ARow", ["Add a Cluster Spawn Mode to the Supervisor's spawn_agent"])
+        self.stage("ARow")
+        self.assertEqual(self.lines()["ARow"][1], "ready")
+
+    def test_an_unreadable_row_is_not_reported_ready(self):
+        # A row whose own file cannot be read has an EMPTY frontmatter, which
+        # `blocked_by_verdict` would call unblocked — the vacuous promotion itself.
+        self.stage("Never Written")
+        rc, out = self.run_gate("--subject", self.SUBJECT, "--blocked-verdicts")
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        # FOUR columns, matching the ready/blocked branch — the trailing empties are
+        # fields, not padding. The count cell is empty rather than `0`: nothing about
+        # this row's entries is known, and a consumer reading `0` would conclude the
+        # row declares no blocker, which is a different (and wrong) claim.
+        self.assertEqual(
+            out.rstrip("\n").split("\t"), ["Never Written", "unreadable", "", ""]
+        )
+
+    def test_resolve_task_file_returns_the_canonical_spelling(self):
+        # APFS is case-insensitive, so `open()` hides an exact-only regression: the
+        # assertion is on the resolved PATH, which is the only thing that differs
+        # between the two builds on this host. Asserting the verdict instead would
+        # pass either way and pin nothing.
+        self.blocker("Met Alpha", "completed")
+        tasks = os.path.join(self.vault, "25 Tasks")
+        self.assertEqual(
+            os.path.basename(self.m.resolve_task_file(tasks, "met alpha")),
+            "Met Alpha.md",
+        )
+        self.assertEqual(
+            os.path.basename(self.m.resolve_task_file(tasks, "Never Written")),
+            "Never Written.md",
+        )
+
+    def test_a_case_mismatched_blocker_does_not_block(self):
+        # End to end, the same property the resolver test pins one level down.
+        self.blocker("Met Alpha", "completed")
+        self.row("ARow", ["met alpha"])
+        self.stage("ARow")
+        self.assertEqual(self.lines()["ARow"][1], "ready")
+
+    def test_a_tab_in_a_name_cannot_shift_the_columns(self):
+        # A task name is frontmatter-controlled, and every consumer of this output
+        # splits on tabs — including this test class.
+        self.blocker("Met", "completed")
+        self.row("A\tRow", ["Met"])
+        self.stage("A\tRow")
+        rc, out = self.run_gate("--subject", self.SUBJECT, "--blocked-verdicts")
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(len(out.rstrip("\n").split("\t")), 4)
+
+    def test_the_entry_count_distinguishes_no_list_from_all_met(self):
+        # Both render an empty unmet column, so a report rule keyed on that column
+        # would skip every all-met row — and an all-met row is where a first-entry-only
+        # read and the verdict agree by accident, which is why the rows declaring a
+        # blocker are the ones the sweep report has to quote back.
+        for n in ("Met One", "Met Two"):
+            self.blocker(n, "completed")
+        self.row("AWithList", ["Met One", "Met Two"])
+        self.row("AWithoutList")
+        self.stage("AWithList", "AWithoutList")
+        lines = self.lines()
+        self.assertEqual(lines["AWithList"][3], "2")
+        self.assertEqual(lines["AWithoutList"][3], "0")
+        self.assertEqual(lines["AWithList"][2], "")
+        self.assertEqual(lines["AWithoutList"][2], "")
+
+    def test_a_bare_name_entry_is_unmet_not_absent(self):
+        # `blocked_by` entries are names OR `[[wikilinks]]`. A bare name yields no
+        # `[[...]]` match, so reading it as an EMPTY list would satisfy the
+        # `ready-to-start` clause vacuously — the one direction this mode must never
+        # fail in, and the shape the rule it replaces explicitly admits.
+        self.write(
+            "25 Tasks/ARow.md",
+            "---\npage_type: task\nstatus: next\nblocked_by:\n    - Met One\n"
+            "---\nTags: [[Task]]\n",
+        )
+        self.stage("ARow")
+        line = self.lines()["ARow"]
+        self.assertEqual(line[1], "blocked")
+        self.assertEqual(line[2], self.m.UNPARSED_BLOCKER)
+
+    def test_a_declared_but_empty_list_is_still_ready(self):
+        # The other side of the same rule, and the reason it cannot be a blanket
+        # "the key is present" test: `blocked_by: []` and a bare `blocked_by:`
+        # declare NOTHING, and a blocker-less approved row must still read ready.
+        # Over-blocking here would empty the bucket for the whole vault.
+        for body in ("blocked_by: []\n", "blocked_by:\n"):
+            self.write(
+                "25 Tasks/ARow.md",
+                "---\npage_type: task\nstatus: next\n" + body + "---\nTags: [[Task]]\n",
+            )
+            self.stage("ARow")
+            self.assertEqual(self.lines()["ARow"][1], "ready", repr(body))
+
+    def test_a_case_mismatched_row_name_still_classifies(self):
+        # Both halves of the mode go through the resolver — the row as well as its
+        # blockers. Asserted end to end here; the discriminating assertion on the
+        # resolved path lives in test_resolve_task_file_returns_the_canonical_spelling.
+        self.blocker("Met", "completed")
+        self.row("ARow", ["Met"])
+        self.stage("arow")
+        self.assertEqual(self.lines()["arow"][1], "ready")
+
+    def test_every_staged_row_is_classified_in_order(self):
+        self.blocker("Met", "completed")
+        self.row("AReady", ["Met"])
+        self.row("ABlocked", ["Never Written"])
+        self.stage("AReady", "ABlocked")
+        rc, out = self.run_gate("--subject", self.SUBJECT, "--blocked-verdicts")
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(
+            [ln.split("\t")[0] for ln in out.strip().splitlines()],
+            ["AReady", "ABlocked"],
+        )
+
+    def test_no_staged_set_is_a_usage_error_not_an_empty_pass(self):
+        # "I could not read the set" and "every row is unblocked" must never render
+        # the same way — and the second is the one that opens a spawn.
+        rc, out = self.run_gate("--subject", self.SUBJECT, "--blocked-verdicts")
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertEqual(out.strip(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
