@@ -41,6 +41,7 @@ _spec.loader.exec_module(al)
 ASKER = "asker-session-1"
 OTHER = "asker-session-2"
 SUBJECT = "blocked-session-a"
+ROW = "Some Task Row"
 
 
 def ts(hours_ago):
@@ -103,6 +104,15 @@ class Base(unittest.TestCase):
 
     def resolve(self, session=SUBJECT, asker=ASKER):
         return self._run(["resolve", "--session", session, "--asker", asker])
+
+    def claim_row(self, row=ROW, layer="worker", asker=ASKER, text="q"):
+        argv = ["claim", "--row", row, "--layer", layer, "--text", text]
+        if asker is not None:
+            argv += ["--asker", asker]
+        return self._run(argv)
+
+    def resolve_row(self, row=ROW, asker=ASKER):
+        return self._run(["resolve", "--row", row, "--asker", asker])
 
     def listing(self):
         return self._run(["list"])
@@ -290,6 +300,192 @@ class LedgerShape(Base):
         self.claim(asker=ASKER)
         self.assertTrue(os.path.exists(al.LOCK))
         self.assertIsInstance(self.raw(), dict)
+
+
+class RowKeyedClaims(Base):
+    """`manager-loop`'s `under-target` card claims ROWS, and its candidates are
+    `phase: todo` rows that carry no blocked session -- so a session-only key left
+    the branch's mandated disjointness check with no input it could be given.
+    Measured on the branch's first live post (tick 33, 2026-10-02): the manager
+    could not perform the claim for any of its three rows, read `list` by hand
+    instead, and posted on that weaker basis. These tests pin the second subject
+    and the one rule that differs for it."""
+
+    def test_a_row_key_is_claimable_and_keyed_on_the_row(self):
+        code, out, _ = self.claim_row()
+        self.assertEqual(code, 0)
+        self.assertIn("claimed", out)
+        entry = self.raw()["entries"][ROW]
+        self.assertEqual(entry["session"], ROW, "the row occupies the subject slot")
+        self.assertEqual(entry["layer"], "worker")
+        self.assertEqual(entry["state"], "open")
+
+    def test_a_second_manager_is_refused_the_same_row(self):
+        """The contention the branch actually produces: two topic managers, BOTH
+        at --layer worker (the skill maps the goal/topic manager to `worker`),
+        whose tracked sets each contain the same row. This is the check the branch
+        could not perform at all before."""
+        self.assertEqual(self.claim_row(layer="worker", asker=ASKER)[0], 0)
+        code, out, _ = self.claim_row(layer="worker", asker=OTHER)
+        self.assertEqual(code, al.HELD, "a second manager must not take the same row")
+        self.assertIn("held by", out)
+        self.assertIn(ASKER, out)
+
+    def test_a_row_claim_resolves_by_row(self):
+        """Without a row-keyed resolve the claim could never be released, and it
+        would suppress the other layer until it aged out."""
+        self.claim_row(asker=ASKER)
+        code, out, _ = self.resolve_row(asker=ASKER)
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+        self.assertEqual(self.raw()["entries"][ROW]["state"], "resolved")
+
+    def test_a_row_claim_prunes_by_age_alone(self):
+        """A row key is not a session id and never appears in the registry, so the
+        liveness guard cannot fire for it -- age alone bounds it. Deliberate: an
+        invented liveness test for a row is worse than its honest absence."""
+        self.claim_row(asker=ASKER)
+        self.backdate(ROW, hours_ago=48)
+        code, _, _ = self._run(["prune", "--max-age-hours", "24"])
+        self.assertEqual(code, 0)
+        self.assertNotIn(ROW, self.raw()["entries"])
+
+    def test_a_row_claim_on_a_live_session_is_unaffected(self):
+        """Negative control for the test above: a session claim still survives the
+        same age once its session is live. The row path must not loosen this."""
+        self.claim(asker=ASKER)
+        self.backdate(SUBJECT, hours_ago=48)
+        self.live(SUBJECT)
+        self._run(["prune", "--max-age-hours", "24"])
+        self.assertIn(SUBJECT, self.raw()["entries"])
+
+    def test_a_row_key_is_normalised_like_the_question_text(self):
+        """`--row` is free text, and an un-normalised key is interpolated raw into
+        `list`'s one-line-per-entry render -- a newline in it splits the entry and
+        misaligns every field after it. Normalising is symmetric, so it still
+        round-trips between claim and resolve."""
+        code, _, _ = self.claim_row(row="Some  Task\nRow")
+        self.assertEqual(code, 0)
+        self.assertIn("Some Task Row", self.raw()["entries"])
+
+        code, out, _ = self.resolve_row(row="Some  Task\nRow")
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+
+    def test_an_empty_subject_key_is_refused(self):
+        """An empty key can never be matched by a later claim or resolve. It is
+        also the case the bare `or` broke: `--session ""` fell through to None,
+        writing a `null` key that raises in json.dump(sort_keys=True) once the
+        ledger holds any other entry."""
+        code, _, err = self._run(
+            ["claim", "--session", "", "--layer", "worker", "--asker", ASKER]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("empty", err)
+
+        code, _, err = self._run(
+            ["claim", "--row", "", "--layer", "worker", "--asker", ASKER]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("empty", err)
+
+    def test_list_renders_a_row_keyed_entry(self):
+        """The consolidated list is what makes one ask cover every subject; a
+        row-keyed entry must render there, not vanish."""
+        self.claim_row(asker=ASKER, text="pick a row")
+        code, out, _ = self.listing()
+        self.assertEqual(code, 0)
+        self.assertIn("1 open claim(s)", out)
+        self.assertIn(ROW, out)
+        self.assertIn("pick a row", out)
+
+    def test_a_row_claim_survives_a_prune_while_fresh(self):
+        """The surviving direction, and the one the leak scenario depends on: a
+        row claim's liveness guard can never fire, so age is the only thing
+        bounding it -- which makes the fresh side worth pinning for rows, not just
+        for sessions."""
+        self.claim_row(asker=ASKER)
+        code, out, _ = self._run(["prune", "--max-age-hours", "24"])
+        self.assertEqual(code, 0)
+        self.assertIn(ROW, self.raw()["entries"])
+
+    def test_a_row_and_a_session_coexist_in_one_ledger(self):
+        """Two subject kinds sharing `data['entries']` is exactly what this change
+        makes newly possible, and it is the case `cmd_list` iterates over."""
+        self.assertEqual(self.claim_row(row=ROW, asker=ASKER, text="a row")[0], 0)
+        self.assertEqual(self.claim(session=SUBJECT, asker=OTHER, text="a session")[0], 0)
+        code, out, _ = self.listing()
+        self.assertEqual(code, 0)
+        self.assertIn("2 open claim(s)", out)
+        self.assertIn(ROW, out)
+        self.assertIn(SUBJECT, out)
+        self.assertIn("a row", out)
+        self.assertIn("a session", out)
+
+    def test_the_two_key_forms_address_the_same_slot(self):
+        """`subject_of`'s stated contract -- to this ledger `--session` and `--row`
+        are the same thing -- so a claim taken under one form is released under
+        the other, in both directions."""
+        self.claim_row(row=ROW, asker=ASKER)
+        code, out, _ = self.resolve(session=ROW, asker=ASKER)
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+        self.assertEqual(self.raw()["entries"][ROW]["state"], "resolved")
+
+        self.claim(session=SUBJECT, asker=ASKER)
+        code, out, _ = self.resolve_row(row=SUBJECT, asker=ASKER)
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+        self.assertEqual(self.raw()["entries"][SUBJECT]["state"], "resolved")
+
+    def test_a_row_claim_is_not_rescued_by_an_unrelated_live_session(self):
+        """The design argument the row path rests on, pinned in the row direction:
+        the guard matches the subject string against session ids, not "some session
+        is live", so a live registry does not save a row claim.
+
+        ⚠️ The bound is honest rather than structural: a registry entry whose
+        `sessionId` IS the row key would rescue it. That is unreachable in
+        practice -- one is a uuid, the other a task name -- and asserting the
+        stronger claim here would pin a falsehood, so the real guard is pinned and
+        the caveat stated."""
+        self.claim_row(asker=ASKER)
+        self.backdate(ROW, hours_ago=48)
+        self.live("11111111-2222-3333-4444-555555555555")
+        code, _, _ = self._run(["prune", "--max-age-hours", "24"])
+        self.assertEqual(code, 0)
+        self.assertNotIn(ROW, self.raw()["entries"])
+
+    def test_resolve_row_falls_back_to_the_environment_asker(self):
+        """`--asker` stays optional on the row path, exactly as on the session
+        path: both reach the same cmd_resolve, which reads the env var."""
+        self.claim_row(asker=ASKER)
+        code, out, _ = self._run(["resolve", "--row", ROW])
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+        self.assertEqual(self.raw()["entries"][ROW]["state"], "resolved")
+
+    def test_neither_key_is_a_usage_error(self):
+        """Negative control: the key is required, so an omitted one must refuse
+        rather than write an entry nothing can look up."""
+        code, _, _ = self._run(["claim", "--layer", "worker", "--asker", ASKER])
+        self.assertNotEqual(code, 0)
+
+    def test_both_keys_is_a_usage_error(self):
+        """Two subjects in one call has no meaning -- one slot, one key."""
+        code, _, _ = self._run(
+            [
+                "claim",
+                "--session",
+                SUBJECT,
+                "--row",
+                ROW,
+                "--layer",
+                "worker",
+                "--asker",
+                ASKER,
+            ]
+        )
+        self.assertNotEqual(code, 0)
 
 
 if __name__ == "__main__":
