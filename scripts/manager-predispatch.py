@@ -952,6 +952,20 @@ def loop_snapshot_path(vault: str, subject: str) -> str:
     return os.path.join(base, vname, f"{slug(subject)}.snapshot.json")
 
 
+def print_provenance(subject: str, vault: str) -> None:
+    """Name the two provenance files `--save` sits between, labelled.
+
+    The drive leg's dispatch requires `recorded_at` from the *snapshot*, while the store
+    is the file `--save` reads and writes. The two paths sit one directory apart and read
+    alike, so the wrong half is plausible-looking — measured 2026-09-30, the store's value
+    was passed where the snapshot's was required. Printing both here, with the
+    `recorded_at` source named, makes that half unambiguous at the point the caller reads
+    it, rather than leaving the command's prose to disambiguate a value already in hand.
+    """
+    print(f"  store:    {state_path(subject)}  (bucket_sets)")
+    print(f"  snapshot: {loop_snapshot_path(vault, subject)}  (recorded_at source)")
+
+
 # The shapes a caller/gate disagreement can take — and the two that are not disagreements
 # at all. Named separately because the whole defect this discriminates is that ONE line
 # rendered for all of them: a scan that is too small looks exactly like a gate that gained
@@ -1950,8 +1964,10 @@ def main(argv: list[str]) -> int:
                 print(f"fail-open: could not record state ({exc})", file=sys.stderr)
                 return EXIT_CHANGE
             print(f"SAVED {reason if changed else 'bucket sets differ'}")
+            print_provenance(args.subject, args.vault)
             return EXIT_CHANGE
         print(f"SAVED no-change ({reason})")
+        print_provenance(args.subject, args.vault)
         return EXIT_NOCHANGE
 
     if args.check:

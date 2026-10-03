@@ -17,13 +17,15 @@ Stand the manager loop **this session** is running down. This is the operator's 
 <process>
 1. **Read the contract, then disarm every model-waking driver it names** — in the order it gives, printing each driver's line as you go and *before* the call that removes it, since a deletion the operator cannot see is indistinguishable from a job that was never armed. Those lines **are** the report's `Disarmed` block — collect them, and do not print the set a second time.
 
-   **Three forms, because the drivers do not share a read surface.** `✓` and `·` are claims a read surface confirmed; `~` is the honest form for a driver nothing can confirm — whether a stop was sent or none could be. Never print `✓` for a driver you could not read.
+   **Three forms, because not every driver has a read surface.** `✓` and `·` are claims a read surface confirmed; `~` is the honest form for a driver nothing can confirm — whether a stop was sent or none could be. Never print `✓` for a driver you could not read.
 
    | Form | Means | Available for |
    |---|---|---|
    | `✓ <driver> — <what it was>` | disarmed, confirmed | the enumerable driver — a cron job, which `CronList` reads |
    | `· <driver> — not armed` | read surface says it was never armed | the same one |
-   | `~ <driver> — <what was done, or why nothing could be>` | **unconfirmed** — nothing can confirm it | every driver without a read surface — § Session end names them and why |
+   | `~ <driver> — <what was done, or why nothing could be>` | **unconfirmed** — nothing can confirm it | the one driver with no read surface — § Session end names it and why |
+
+   **Disarm by `CronList` → `CronDelete`, and that sweep is what reaches a `ScheduleWakeup`-armed loop** — it is a cron job, so it appears in `CronList` like any other and takes the `✓`/`·` rows above. ⚠️ **Never `ScheduleWakeup {stop:true}` for it:** measured 2026-09-30, that returned *"there was no pending wakeup to cancel"* while the job kept firing, so a stand-down that used it left the loop armed. § Session end owns why the two are one driver; this is the procedure that follows from it.
 
    ⚠️ **`~` carries a reason, and the reason must be true.** Two cases reach it and they are not the same sentence: a stop *was* sent (the driver was reachable but unreadable), or nothing *could* be sent (no id exists in this conversation to name it — the `Monitor` case, which § Session end bounds at ≤30 min for exactly this reason). Writing *"stop sent"* where no stop was sent is the same over-claim as a `✓` you could not read, one form down.
 
