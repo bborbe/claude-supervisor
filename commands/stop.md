@@ -34,7 +34,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/stop-probe.py
    ```
 
-   It prints the session id; the subject with its branch and vault; **one line per gate loop found**, each with its pid, uptime and command; the tick file's path, mtime and age; the gate ledger's path, last line and age; and the session ledger's open count. The report below has a slot for every one of those — if a line has no slot, that is this template's defect, not a value to drop.
+   It prints the session id; the subject with its branch and vault; **one line per gate loop found**, each with its pid, uptime and command; the tick file's path, mtime and age; the gate ledger's path, last line and age; and the session ledger's open count. The report below has a slot for every one of those — if a line has no slot, that is this template's defect, not a value to drop. ⚠️ **One line is a directive rather than a fact to report** — the `⚠️ no registration for this session …` hint the probe prints when it resolves no subject. It is step 2b's trigger, not a slot: act on it there, and do not carry it into the report as a value.
 
 2b. **Mark the stand-down as deliberate** — when the probe resolved a subject:
 
@@ -78,5 +78,5 @@ Stand the manager loop **this session** is running down. This is the operator's 
 - **No gate loop found**: print `⚠️ no gate loop found` in place of the gate-loop line, and say plainly that it may never have been armed. A fact to report, not to repair.
 - **Tick file or gate ledger absent**: print `· tick file — absent` / `· gate ledger — absent` in place of that line, and say which of the two reasons it is — no subject recorded, so no path resolves, or the loop has not written one yet. Neither is a fault in this command.
 - **No session id resolves**: the header prints `session (unknown)` verbatim, and the ledger line names the path it looked for. Say the id could not be resolved rather than leaving the slot empty — an empty slot reads as a value that was not printed, not as one that does not exist.
-- **No subject recorded**: print the session id and carry on — the loop may have been armed before the subject was written. The branch and vault render as `—` with it, since all three come from the same record.
+- **No subject recorded**: print the session id, then **apply step 2b's fallback** — the subject this session manages — and run the marker with it. ⚠️ **Never read this clause as licence to skip `<slug>.stopped`**: the loop may have been armed before the registration was written, which is exactly the case the fallback exists for, and skipping the marker leaves the arms to go stale and be reported as a lapsed manager. The branch and vault render as `—` with it, since all three come from the same record.
 </error_handling>

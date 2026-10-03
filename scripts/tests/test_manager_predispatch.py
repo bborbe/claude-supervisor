@@ -694,18 +694,36 @@ class TestStorage(Base):
         `--save` writes the store while the gate writes the snapshot, and the two paths
         sit one directory apart and read alike — so the caller once took the wrong half
         (measured 2026-09-30: the store's `recorded_at` passed where the snapshot's was
-        required). Each label names the half *its* file carries, which is the whole
-        deliverable, so it is pinned here rather than left to the tolerant
-        `assertIn("SAVED", out)` — that assertion passes with both lines deleted.
+        required). Each label names where its half lands, which is the whole deliverable,
+        so it is pinned here rather than left to the tolerant `assertIn("SAVED", out)` —
+        that assertion passes with both lines deleted.
         """
         rc, out = self.save("ATopic")
         self.assertEqual(rc, self.m.EXIT_CHANGE)
         self.assertIn("store:    %s" % self.m.state_path("ATopic"), out)
-        self.assertIn("(bucket_sets)", out)
         self.assertIn(
             "snapshot: %s" % self.m.loop_snapshot_path(self.vault, "ATopic"), out
         )
         self.assertIn("(recorded_at source)", out)
+        # No `--buckets` staged here, so the store half is absent by design and the
+        # label says so rather than asserting a half the file does not carry.
+        self.assertIn("no bucket sets staged this tick", out)
+
+    def test_save_names_both_paths_on_the_no_change_branch_too(self):
+        """The no-change branch carries the same two lines.
+
+        Without this, deleting that branch's `print_provenance` call passes green — the
+        same hole the sibling test's docstring names for `assertIn("SAVED", out)`, one
+        branch over. The no-change tick is the common one, so it is the branch a reader
+        is most likely to meet.
+        """
+        self.save("ATopic")
+        rc, out = self.save("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE)
+        self.assertIn("store:    %s" % self.m.state_path("ATopic"), out)
+        self.assertIn(
+            "snapshot: %s" % self.m.loop_snapshot_path(self.vault, "ATopic"), out
+        )
 
 
 class TestPayloadWriter(Base):

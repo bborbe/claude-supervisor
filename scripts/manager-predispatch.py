@@ -952,7 +952,7 @@ def loop_snapshot_path(vault: str, subject: str) -> str:
     return os.path.join(base, vname, f"{slug(subject)}.snapshot.json")
 
 
-def print_provenance(subject: str, vault: str) -> None:
+def print_provenance(subject: str, vault: str, buckets_staged: bool) -> None:
     """Name the two provenance files `--save` sits between, labelled.
 
     The drive leg's dispatch requires `recorded_at` from the *snapshot*, while the store
@@ -961,8 +961,16 @@ def print_provenance(subject: str, vault: str) -> None:
     was passed where the snapshot's was required. Printing both here, with the
     `recorded_at` source named, makes that half unambiguous at the point the caller reads
     it, rather than leaving the command's prose to disambiguate a value already in hand.
+
+    ⚠️ **The store label is conditional, because the half it names is.** `save_stored`
+    omits `bucket_sets` entirely when the caller staged none — *"Omitted rather than
+    defaulted … so a record that lacks the half reads as 'not persisted' instead of as
+    'persisted and empty'"* — so an unconditional `(bucket_sets)` would assert a half the
+    file does not carry, on the one branch where it is absent. Each label names where its
+    half *lands*; neither is a promise that the file exists or is complete.
     """
-    print(f"  store:    {state_path(subject)}  (bucket_sets)")
+    carries = "bucket_sets" if buckets_staged else "no bucket sets staged this tick"
+    print(f"  store:    {state_path(subject)}  ({carries})")
     print(f"  snapshot: {loop_snapshot_path(vault, subject)}  (recorded_at source)")
 
 
@@ -1964,10 +1972,10 @@ def main(argv: list[str]) -> int:
                 print(f"fail-open: could not record state ({exc})", file=sys.stderr)
                 return EXIT_CHANGE
             print(f"SAVED {reason if changed else 'bucket sets differ'}")
-            print_provenance(args.subject, args.vault)
+            print_provenance(args.subject, args.vault, bucket_sets is not None)
             return EXIT_CHANGE
         print(f"SAVED no-change ({reason})")
-        print_provenance(args.subject, args.vault)
+        print_provenance(args.subject, args.vault, bucket_sets is not None)
         return EXIT_NOCHANGE
 
     if args.check:
