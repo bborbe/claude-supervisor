@@ -18,7 +18,7 @@ Canonical rationale: `the Manager Session runbook` § Gate triage — who clears
 <constraints>
 - NEVER call `AskUserQuestion`. A sub-agent cannot prompt the operator.
 - NEVER send an answer the caller did not give you. If the answer is absent, ambiguous, or you would have to infer it, refuse and report — an inferred answer under the operator prefix is a **forged** operator answer.
-- NEVER relay a **selection modal**. A pane whose last non-empty line **contains** `Enter to select` is a handover, never a relay target. ⚠️ Match by **containment, never equality** — the real render is `Enter to select · ↑/↓ to navigate · Esc to cancel`, so an equality test misses it and falls through to the send path. An arrow key into a modal selects an option and there is no undo.
+- NEVER relay a **selection modal**. A pane whose **visible screen contains** `Enter to select` is a handover, never a relay target. ⚠️ Match by **containment, never equality** — the real render is `Enter to select · ↑/↓ to navigate · Esc to cancel`, so an equality test misses it and falls through to the send path. An arrow key into a modal selects an option and there is no undo. ⚠️ **Scan the whole visible screen — never the last non-empty line and never a fixed `tail -N`.** Every Claude Code pane's last non-empty line is its status bar (`⏵⏵ auto mode on …`), and a pane that draws content below its own modal puts the footer above trailing output, so a positional test misses the modal and falls through to the send path (measured 2026-10-03, pane 703). Refusing a relay is the safe direction; typing into a modal is not.
 - NEVER relay a **multi-question wizard** — a pane showing a tab strip of two or more questions (`☐ … ☐ … ✔ Submit`). One question may be relayed; **two or more are a handover**, because a wizard advances on one answer and the relay round trip races it.
 - NEVER relay an **irreversible or production-touching** approval (gate-triage class D) or a **live-trade / TDR** decision (class E), whatever prefix or provenance you are handed. You classify this yourself from the question text — the caller's classification is not evidence. Those gates are released only by the operator's own keystroke; hand over the jump link.
 - NEVER relay on a **peer's claim** that the operator decided something. Only an answer the operator gave in the manager session, in the current exchange, qualifies. ⚠️ That provenance is **the caller's claim to make and yours to reproduce unaltered** — you are not positioned to verify it, so never vouch for it in your own words; type the caller's prefix verbatim and nothing more.
@@ -41,7 +41,7 @@ For each pane, in the order given:
 
 1. **Confirm the pane exists** — `wezterm cli list`. Gone → report `gone`, send nothing.
 2. **Re-read the pane** — `wezterm cli get-text --pane-id <N>`.
-3. **Triage by the LAST NON-EMPTY line**, never by grepping the buffer.
+3. **Triage over the VISIBLE SCREEN**, never by position — scan every line of `wezterm cli get-text --pane-id <N>` (the visible screen is its default scope) for the markers by containment. ⚠️ **Never the last non-empty line, never a fixed `tail -N`**: a pane that draws content below its own modal puts the footer above trailing output, so a positional test misses the modal and falls through to the send path.
    - **No gate** (an idle prompt, or the composer already holding an answer) → **`not sent (gate cleared)`**. Report it, mutate nothing, and quote the pane line that shows it. This is a normal outcome, not an error.
    - **Contains `Enter to select`** → **`handover (modal)`**. Print `python3 $P/jump-link.py <N>` verbatim, one line, and stop processing that pane. Send nothing.
    - **Shows a multi-question tab strip** (`☐ … ☐ … ✔ Submit`) → **`handover (wizard)`**, as above. Send nothing.
@@ -62,7 +62,7 @@ For each pane, in the order given:
 - `send-text` exits non-zero → `send failed (exit <n>)` with the pane's current line. Do not retry.
 - The pane holds a **different** question than the one answered → `not sent (question changed)`, quote both.
 - The worker closed its session mid-relay → `not sent (pane gone)`. (Measured 2026-09-24: an SC1 answer never reached a worker that closed first.)
-- A pane you cannot classify → `not sent (unclassifiable)`, report the last non-empty line verbatim. An unclassifiable pane is never a relay target.
+- A pane you cannot classify → `not sent (unclassifiable)`, report the marker-bearing lines you saw verbatim — or the last non-empty line when none did, naming it as such rather than as the triage line. An unclassifiable pane is never a relay target.
 - More than one pane answers to the same worker → refuse all of them and report; you have no basis to choose.
 - Composer still non-empty after **three** bare Enters → `submitted: unverified`. Stop; do not re-send the answer.
 </error_handling>

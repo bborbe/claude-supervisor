@@ -8,6 +8,7 @@ allowed-tools:
   - Task
   - Bash(python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/*)
   - Bash(wezterm cli list *)
+  - Bash(wezterm cli get-text *)
   - Bash(git status *)
   - Bash(grep:*)
   - Bash(awk:*)
@@ -105,7 +106,7 @@ render the same.
    is no stamp — a `\s*` parse crossed its newline and read `goals:` as a stamp shared by three files.
 
 4. **CLASSIFICATION vs PANE READ (read).** For **every** session in the board's `needs-input`
-   bucket — not a sample — compare the board's bucket against that pane's last non-empty line.
+   bucket — not a sample — compare the board's bucket against that pane's **visible screen**, matched by containment (`wezterm cli get-text --pane-id <N>` returns the visible screen by default). ⚠️ **Never the last non-empty line and never a fixed `tail -N`**: every Claude Code pane's last non-empty line is its status bar (`⏵⏵ auto mode on …`), and a pane that draws content below its own modal puts the footer above trailing output — measured 2026-10-03, pane 703's live permission prompt sat 8 non-empty lines from the end.
    Report each disagreement with **both readings**. A bucket of `needs-input` whose pane shows no
    open gate is the board over-counting; the reverse is the board under-reporting a blocker.
    ⚠️ The board's rows are **lists of cell strings, not dicts**, so session identity comes from the
