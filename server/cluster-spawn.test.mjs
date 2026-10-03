@@ -100,6 +100,19 @@ test('a missing token is refused before any request is made', async () => {
   assert.equal(called, false, 'an unauthenticated request must not be attempted')
 })
 
+test('a token with leading or trailing whitespace is refused, not trimmed', () => {
+  // A trailing newline is the case this catches, and the common one: a secret read whole
+  // rather than its value. It is not a legal header value, so the request would die in the
+  // generic `could not reach` branch naming neither the header nor the variable. Trimming
+  // instead would be worse — it repairs a value the SERVICE did not repair, so the two ends
+  // would disagree about the token while both looked configured.
+  for (const bad of [' ', '  ', '\n', `${TOKEN}\n`, ` ${TOKEN}`, `${TOKEN} `]) {
+    const { error } = resolveAuthToken(bad)
+    assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
+    assert.match(error, /INTERACTIVE_AUTH_TOKEN/)
+  }
+})
+
 test('a minted session id satisfies the service pattern', () => {
   const { sessionId } = newSessionId(() => UUID)
   assert.equal(sessionId, UUID)
@@ -158,11 +171,12 @@ test('the request carries the bearer token the counterparty requires', async () 
   const header = seen.init.headers[CONTRACT_AUTH_HEADER]
   assert.equal(header, `${CONTRACT_AUTH_SCHEME}${TOKEN}`)
 
-  // The scheme is matched exactly, so both near-misses are refused by the service with 401
-  // *before* the route's handler runs. Pinned because each is a plausible edit: sending the
-  // bare token, or lower-casing the scheme, both look right and both fail closed.
-  assert.notEqual(header, TOKEN, 'a bare token is not a bearer credential')
-  assert.notEqual(header, `bearer ${TOKEN}`, 'the scheme is matched case-sensitively')
+  // Pinned by SHAPE, not by inequality. `notEqual(header, TOKEN)` passes for any prefixed
+  // value — `'X' + TOKEN` satisfies it — so it documents the two near-misses without checking
+  // either. Both are refused by the counterparty with 401 *before* its route handler runs,
+  // which is why the scheme's exact spelling and the value's exact bytes are what is asserted.
+  assert.ok(header.startsWith(CONTRACT_AUTH_SCHEME), 'the header must open with the contract scheme, verbatim')
+  assert.equal(header.slice(CONTRACT_AUTH_SCHEME.length), TOKEN, 'the value after the scheme must be the token, unaltered')
 })
 
 test('an illegal session id is refused before any request is made', async () => {
@@ -207,6 +221,21 @@ test("the service's own refusal is surfaced, not flattened to the status", async
   })
   assert.match(error, /HTTP 400/)
   assert.match(error, /invalid session id/)
+})
+
+test('a 401 names the credential, so a wrong token is not read as a network fault', async () => {
+  // The half resolveAuthToken's refusal cannot reach: a token that IS set and does not match
+  // the one the service was started with. The service answers an absent, malformed and wrong
+  // credential identically, so the bare status sends the reader looking at their network.
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    fetchImpl: async () => ({ ok: false, status: 401, text: async () => 'unauthorized\n' }),
+  })
+  assert.match(error, /HTTP 401/)
+  assert.match(error, /INTERACTIVE_AUTH_TOKEN/)
 })
 
 test('an unreachable service and a timeout are reported as different failures', async () => {

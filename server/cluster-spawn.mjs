@@ -45,6 +45,13 @@ export const SESSION_HEADER = 'X-Session-Id'
 // header is a 401, and so is a scheme that differs by case or loses its trailing space — so a
 // near-miss reads as "not authorized" rather than as a malformed request, and sends the
 // reader looking at the token instead of at the line that built the header.
+//
+// ⚠️ **This header is only confidential over TLS.** `resolveClusterBaseUrl` below accepts
+// `http:` as well as `https:`, and the deployed shape — a NodePort on the nuke dev node
+// network — is plaintext, where a bearer token is readable by anything sharing the segment and
+// grants exactly the `/prompt` access it was sent to enable. `https` is permitted, so the safe
+// configuration exists; it is the operator's choice, and this note exists so the choice is
+// visible where the header is built rather than only in a network diagram.
 export const AUTH_HEADER = 'Authorization'
 export const AUTH_SCHEME = 'Bearer '
 
@@ -119,6 +126,28 @@ export function resolveAuthToken(raw) {
   if (typeof raw !== 'string') {
     return { error: `INTERACTIVE_AUTH_TOKEN is ${JSON.stringify(raw)}, which is not a token string` }
   }
+  // Whitespace is refused, NOT trimmed away, and both halves of that matter.
+  //
+  // A value that is only whitespace builds `Bearer  ` — the scheme's own trailing space plus
+  // the value's — which the counterparty matches exactly and answers with 401: precisely the
+  // indistinguishability this function exists to remove. A trailing newline is the sharper
+  // case, and the common one: a secret read whole rather than its value. That is not a legal
+  // header value at all, so the request dies in the generic `could not reach the cluster
+  // service` branch naming neither the header nor the variable.
+  //
+  // Trimming instead of refusing would be worse than either failure. It would silently repair
+  // a value the SERVICE did not repair, so a token the operator mis-pasted would start
+  // matching here and stop matching there — two ends that disagree while both look configured.
+  // Refusing keeps them honest and names the variable.
+  if (raw.trim() !== raw) {
+    return {
+      error:
+        'INTERACTIVE_AUTH_TOKEN has leading or trailing whitespace, which is not a legal header value. ' +
+        'A trailing newline — a secret file read whole rather than its value — is the usual cause. Fix the ' +
+        'value rather than trimming it here: the service compares against the token it was started with, so a ' +
+        'value this side silently repairs is one the two ends would then disagree about.',
+    }
+  }
   return { token: raw }
 }
 
@@ -179,8 +208,16 @@ export async function startClusterSession({
   }
 
   if (!response.ok) {
+    // 401 gets its own sentence, and it is the half resolveAuthToken's refusal cannot reach: a
+    // token that IS set and does not match the one the service was started with. The service
+    // answers an absent, malformed and wrong credential identically, so the bare status sends
+    // the reader looking at their network for what is a credential mismatch.
+    const hint =
+      response.status === 401
+        ? ' — the service rejected the credential: check that INTERACTIVE_AUTH_TOKEN matches the token the service was started with'
+        : ''
     return {
-      error: `the cluster service refused the prompt: HTTP ${response.status}${body.trim() ? ` — ${body.trim()}` : ''}`,
+      error: `the cluster service refused the prompt: HTTP ${response.status}${body.trim() ? ` — ${body.trim()}` : ''}${hint}`,
     }
   }
 
