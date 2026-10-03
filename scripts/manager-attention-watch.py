@@ -70,6 +70,8 @@ than cleared: no `CLEARED` is emitted, because nothing was answered.
   condition is visible on evidence rather than inferred.
 """
 import argparse
+import glob
+import hashlib
 import json
 import os
 import re
@@ -79,6 +81,7 @@ import time
 POLL_SECONDS = 60
 SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
 DEFAULT_STATE = os.path.expanduser("~/.claude/state/manager-attention-watch")
+DEFAULT_PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
 
 
 def tracked_ids(tracked_path, tasks_dir):
@@ -232,7 +235,8 @@ def is_gated(status, body):
     return False, "registry:" + str(status)
 
 
-def probe(tracked_path, tasks_dir, projects_dir, sessions_dir=SESSIONS_DIR):
+def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
+          warned=None):
     """{sid8: (task name, detail, reason, verdict)} for every tracked worker
     that has a transcript.
 
@@ -240,17 +244,33 @@ def probe(tracked_path, tasks_dir, projects_dir, sessions_dir=SESSIONS_DIR):
     `True` gated, `False` not gated, `None` UNREGISTERED. Collapsing `None` into
     `False` is how a dead worker gets a `CLEARED` it did not earn — the same
     silent direction as the defect this file exists to fix.
+
+    `projects_root` is the ROOT (`~/.claude/projects`), never one munged cwd
+    directory. A tracked worker may run in any cwd, and every sibling resolves
+    transcripts across the root for exactly that reason (`who-needs-me.py`,
+    `reap-closer.py`, `voice-ask-pairing.py`). A per-cwd path silently bounds
+    coverage to one cwd's workers *and* fails quietly when the cwd is munged
+    wrongly — so the root is the default and there is no escaping rule to get
+    wrong.
     """
+    if warned is None:
+        warned = set()
     state = {}
     for sid8, label in tracked_ids(tracked_path, tasks_dir).items():
-        try:
-            cands = [p for p in os.listdir(projects_dir)
-                     if p.startswith(sid8) and p.endswith(".jsonl")]
-        except OSError:
-            continue
+        cands = sorted(glob.glob(os.path.join(projects_root, "*",
+                                              sid8 + "*.jsonl")))
         if not cands:
+            # Never silent. A tracked id with no transcript is a scope gap, and
+            # an empty result here must not read as a quiet sweep. Warned once
+            # per id per process, because a poll would otherwise repeat it every
+            # 60 s for a task that is simply not running.
+            if sid8 not in warned:
+                warned.add(sid8)
+                print(f"WATCH WARN: no transcript for tracked session {sid8} "
+                      f"({label}) under {projects_root} — NOT watched; this is "
+                      f"not a quiet sweep", file=sys.stderr, flush=True)
             continue
-        text = last_assistant_text(os.path.join(projects_dir, cands[0]))
+        text = last_assistant_text(cands[0])
         body = closer_body(text)
         verdict, reason = is_gated(registry_status(sid8, sessions_dir), body)
         state[sid8] = (label, (body or reason)[:150], reason, verdict)
@@ -260,6 +280,24 @@ def probe(tracked_path, tasks_dir, projects_dir, sessions_dir=SESSIONS_DIR):
 def gated_keys(state):
     """The session ids the watcher should hold, from a `probe()` result."""
     return sorted(sid8 for sid8, (_, _, _, v) in state.items() if v is True)
+
+
+def state_path_for(state_dir, tracked_path):
+    """The state file for one manager's scope — keyed by its tracked set.
+
+    ⚠️ **Not a bare `state.json`, and this is a correctness requirement rather
+    than tidiness.** Two managers sharing the default state directory is the
+    *ordinary* case — every manager on the machine resolves `DEFAULT_STATE` —
+    and with one shared file each poll reads the OTHER manager's gated set as its
+    own `prev` and then overwrites it. Every one of that manager's sessions then
+    lands in `prevset - set(key)`, misses the `HELD` guard (they are not in this
+    manager's `state`), and prints a **bare `CLEARED`** — the same silent
+    direction this whole file exists to close, reintroduced by a filename. Two
+    managers on the same tracked set still share, which is correct: that is one
+    scope, and `manager-loop` already enforces one manager per subject.
+    """
+    scope = hashlib.sha1(os.path.abspath(tracked_path).encode()).hexdigest()[:8]
+    return os.path.join(state_dir, f"state-{scope}.json")
 
 
 def log_event(log_path, kind, sid8, label, detail):
@@ -290,18 +328,24 @@ def main(argv=None):
     ap.add_argument("--tracked", required=True,
                     help="tracked-set file written by manager-predispatch.py")
     ap.add_argument("--tasks-dir", required=True, help="the vault's tasks directory")
-    ap.add_argument("--projects-dir", required=True,
-                    help="~/.claude/projects/<munged-cwd> for the watched vault")
+    ap.add_argument("--projects-root", default=DEFAULT_PROJECTS_ROOT,
+                    help="root holding one directory per cwd; transcripts are "
+                         "resolved across all of them (default: %(default)s)")
     ap.add_argument("--sessions-dir", default=SESSIONS_DIR,
                     help="the session registry (default: %(default)s)")
     ap.add_argument("--state", default=DEFAULT_STATE,
-                    help="state + event-log directory (default: %(default)s)")
+                    help="state + event-log directory (default: %(default)s). "
+                         "⚠️ The state FILE is keyed by --tracked, so two "
+                         "managers with different tracked sets cannot collide "
+                         "even when they share this directory — but pass a "
+                         "per-manager directory anyway, so the event logs are "
+                         "separable.")
     ap.add_argument("--interval", type=int, default=POLL_SECONDS)
     ap.add_argument("--once", action="store_true",
                     help="one poll, print the verdict, exit (diagnostic only)")
     args = ap.parse_args(argv)
 
-    state_path = os.path.join(args.state, "state.json")
+    state_path = state_path_for(args.state, args.tracked)
     log_path = os.path.join(args.state, "events.jsonl")
 
     try:
@@ -315,10 +359,11 @@ def main(argv=None):
     # opening and closing. A genuine gate holds for minutes; churn does not. So
     # require the new state to survive one poll before announcing it.
     pending = None
+    warned = set()
     while True:
         try:
-            state = probe(args.tracked, args.tasks_dir, args.projects_dir,
-                          args.sessions_dir)
+            state = probe(args.tracked, args.tasks_dir, args.projects_root,
+                          args.sessions_dir, warned)
             key = gated_keys(state)
             if args.once:
                 for sid8 in key:

@@ -78,17 +78,22 @@ class Fixture:
 
     def __init__(self, records, status, task_body=None):
         self.dir = tempfile.mkdtemp(prefix="maw-test-")
+        # `projects` is the ROOT — the script globs one level down, matching the
+        # real `~/.claude/projects/<munged-cwd>/<sid>.jsonl` layout, because a
+        # tracked worker may run in any cwd.
         self.projects = os.path.join(self.dir, "projects")
+        self.projdir = os.path.join(self.projects, "-Users-someone-my-vault")
         self.tasks = os.path.join(self.dir, "tasks")
         self.sessions = os.path.join(self.dir, "sessions")
-        for d in (self.projects, self.tasks, self.sessions):
+        for d in (self.projdir, self.tasks, self.sessions):
             os.makedirs(d)
+        self.transcript = os.path.join(self.projdir, SID + ".jsonl")
         self.tracked = os.path.join(self.dir, "tracked.txt")
         with open(self.tracked, "w") as fh:
             fh.write(TASK + "\n")
         with open(os.path.join(self.tasks, TASK + ".md"), "w", encoding="utf-8") as fh:
             fh.write("---\nclaude_session_id: %s\n---\n%s\n" % (SID, task_body or "x"))
-        with open(os.path.join(self.projects, SID + ".jsonl"), "w") as fh:
+        with open(self.transcript, "w") as fh:
             for r in records:
                 fh.write(json.dumps(r) + "\n")
         if status is not None:
@@ -175,7 +180,7 @@ class DefectTest(unittest.TestCase):
         # ...and the transcript really has lost the closer, so an implementation
         # keying on it alone would have dropped the session and emitted CLEARED.
         text = watch.last_assistant_text(
-            os.path.join(self.fx.projects, SID + ".jsonl"))
+            self.fx.transcript)
         self.assertIsNone(watch.closer_body(text))
 
     def test_a_prompt_alone_does_not_displace_the_closer(self):
@@ -190,7 +195,7 @@ class DefectTest(unittest.TestCase):
              assistant(tool="AskUserQuestion")],
             "waiting")
         text = watch.last_assistant_text(
-            os.path.join(self.fx.projects, SID + ".jsonl"))
+            self.fx.transcript)
         self.assertEqual(watch.closer_body(text), CLOSER)
         self.assertIn(SID8, watch.gated_keys(self.fx.probe()))
 
@@ -202,7 +207,7 @@ class DefectTest(unittest.TestCase):
             [assistant(text=CLOSER_LINE), assistant(text=PROSE, tool="AskUserQuestion")],
             "busy")
         text = watch.last_assistant_text(
-            os.path.join(self.fx.projects, SID + ".jsonl"))
+            self.fx.transcript)
         self.assertIsNone(watch.closer_body(text))
         self.assertNotIn(SID8, watch.gated_keys(self.fx.probe()))
 
@@ -301,6 +306,62 @@ class EventLogTest(unittest.TestCase):
         self.assertIn("could not write event log", err.getvalue())
 
 
+class StateScopeTest(unittest.TestCase):
+    """Two managers sharing a state dir must not clobber each other's `prev`.
+
+    This is the defect the pr-reviewer bot found on PR #130: with one shared
+    `state.json`, each poll reads the other manager's gated set as its own `prev`,
+    every one of those sessions lands in `prevset - set(key)`, misses the HELD
+    guard, and prints a bare `CLEARED` — the silent direction this file exists to
+    close, reintroduced by a filename.
+    """
+
+    def test_state_file_is_keyed_by_tracked_set(self):
+        a = watch.state_path_for("/s", "/vault/alpha.tracked.txt")
+        b = watch.state_path_for("/s", "/vault/beta.tracked.txt")
+        self.assertNotEqual(a, b, "two scopes must not share one state file")
+        self.assertEqual(a, watch.state_path_for("/s", "/vault/alpha.tracked.txt"),
+                         "same scope must be stable across polls")
+        self.assertTrue(os.path.basename(a).startswith("state-"))
+
+    def test_no_bare_state_json_is_ever_used(self):
+        for name in ("/vault/alpha.tracked.txt", "/vault/beta.tracked.txt"):
+            self.assertNotEqual(
+                os.path.basename(watch.state_path_for("/s", name)), "state.json")
+
+
+class MissingTranscriptTest(unittest.TestCase):
+    def test_tracked_id_without_a_transcript_warns(self):
+        # The projects ROOT holds one dir per cwd; a tracked id with no
+        # transcript anywhere under it is a scope gap, and must not read as quiet.
+        fx = Fixture([assistant(text=CLOSER_LINE)], "idle")
+        try:
+            os.remove(fx.transcript)
+            err = io.StringIO()
+            with redirect_stderr(err):
+                state = watch.probe(fx.tracked, fx.tasks, fx.projects, fx.sessions)
+            self.assertEqual(state, {})
+            self.assertIn("no transcript for tracked session", err.getvalue())
+            self.assertIn("not a quiet sweep", err.getvalue())
+        finally:
+            fx.cleanup()
+
+    def test_the_warning_fires_once_per_id(self):
+        fx = Fixture([assistant(text=CLOSER_LINE)], "idle")
+        try:
+            os.remove(fx.transcript)
+            warned = set()
+            err = io.StringIO()
+            with redirect_stderr(err):
+                for _ in range(3):
+                    watch.probe(fx.tracked, fx.tasks, fx.projects, fx.sessions,
+                                warned)
+            self.assertEqual(err.getvalue().count("no transcript"), 1,
+                             "a 60s poll must not repeat the warning forever")
+        finally:
+            fx.cleanup()
+
+
 class OnceModeTest(unittest.TestCase):
     def test_once_prints_the_verdict_and_exits(self):
         fx = Fixture([assistant(text=CLOSER_LINE)], "idle")
@@ -308,7 +369,7 @@ class OnceModeTest(unittest.TestCase):
             out = io.StringIO()
             with redirect_stdout(out):
                 rc = watch.main(["--tracked", fx.tracked, "--tasks-dir", fx.tasks,
-                                 "--projects-dir", fx.projects,
+                                 "--projects-root", fx.projects,
                                  "--sessions-dir", fx.sessions, "--state",
                                  os.path.join(fx.dir, "state"), "--once"])
             self.assertEqual(rc, 0)
