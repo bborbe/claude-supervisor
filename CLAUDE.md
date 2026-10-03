@@ -24,6 +24,16 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 
 **Escalation chain:** worker → policy → `manager-wrangler` → manager → human. Routine approvals should never reach the manager, and genuine forks should never reach the human.
 
+## Where a worker runs
+
+`spawn_agent` requires `vault` or `cwd` and **refuses when neither is given**. `server/spawn-cwd.mjs` owns that resolution, and it is a pure function — no filesystem, no environment, no clock — so it is unit-testable without a server.
+
+Both halves used to be silent, and the failure is worth keeping in view when editing it. An absent `cwd` became this server's own working directory; an unresolvable launcher became the vault named `personal` and then the bare `claude` binary. Measured 2026-10-03: **27 workers** spawned that way in one batch, every one in the supervisor repo and on Opus instead of the vault's `cc-private-deepseek` — and the response named neither the launcher, nor the vault, nor the model, so a wrong spawn was indistinguishable from a correct one.
+
+⚠️ **Do not add a fallback here.** Every branch of `resolveWorkerTarget` refuses rather than defaulting, for the same reason `spawn-mode.mjs` refuses an unknown mode or target: a worker started in the wrong place under the wrong launcher is discovered only by noticing it. The same rule governs `parseLauncherModel`, which returns `null` rather than a guess when the launcher script cannot be read.
+
+The spawn response carries `vault`, `launcher` and `model`. The model is read from the launcher script's own `--model` argument — vault-cli config does not hold it — with a `${VAR}` resolved against that script's `export`.
+
 ## Reaching a running tab worker
 
 `send_agent_message(agent_id, message)` types a follow-up into a running tab worker and submits it. This is the `send_to_agent` the server never had: a worker that has gone wrong can be corrected, and one that has stalled can be nudged, without a human at the tab.

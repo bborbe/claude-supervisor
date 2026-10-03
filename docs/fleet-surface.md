@@ -208,13 +208,21 @@ Three consequences, all binding:
 
    ⚠️ **The returned session id is MINTED by the caller and is not proof the session exists.** The service's `POST /prompt` returns the session's *answer* as `text/plain` and echoes no id, because the caller supplies one (`X-Session-Id`). So a successful call shows the request was well-formed and a turn ran; it does not show which conversation ran it. The proof is the **serving pod's own log** — the `turn start id=<id>` / `turn end id=<id>` pair — and a caller that treats the response as the evidence has an unfalsifiable check.
 
-⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the manager-loop command all point here. It owns **four constants**: the **readiness ladder** (item 2 above — all four of its branches, its thresholds, and the `UNFIXABLE:` handling), the **fleet-wide concurrent limit** (item 5 above), the **mode decision** (item 6 above — the classifier, the `mode:` field, and both headless constraints), and the **target decision** (item 7 above — `local` vs `cluster`, why `cluster` is per-call only, and why the returned id is not evidence). Each appears once, there, and is referenced everywhere else. ⚠️ **A restated copy of any of them is not a harmless comment — it is a second counter.** The cap was restated in `commands/manager-loop.md`, `commands/manager-verify.md` and the manager runbook's Guardrail 2 until 2026-09-24: four homes for one number, which is how a single cap becomes two caps the day one home is edited and the others are not, with no error and no diff to catch it. The mode rule carried the mirror-image defect until the same day: it lived in `commands/open.md` § Step 0.6 and was consumed only there, so every other spawn site silently fell through to the fleet config — measured 2026-09-23, **63 new-worker spawns in one day and 0 of them headless**, 57 sourced from `config` rather than from any decision.
+8. **Decide the `cwd` and the vault before you spawn — neither is defaulted any more.** `spawn_agent` requires one of **`vault`** (the vault name — it resolves the worker's directory **and** that vault's `claude_script` from one value, so the two cannot disagree; this is the form to prefer) or **`cwd`** (which must resolve to a configured vault by containment, longest matching path first, so a nested vault is not shadowed by the one containing it). Passing both is allowed only when they agree.
+
+   ⚠️ **Omitting both used to default to this server's own working directory, and that is precisely what the 2026-10-03 incident was.** A manager session called `spawn_agent` **27 times** with no `cwd`: every worker started in `~/Documents/workspaces/claude-supervisor/server` and every one ran **Opus** instead of the vault's `cc-private-deepseek`. The launcher lookup fell back to a vault named `personal` — renamed `private-personal`, so the entry matched nothing — and then to the bare `claude` binary; and the response named neither the launcher, nor the vault, nor the model, so the caller had no way to see any of it. A wrong-cwd, wrong-model worker returned exactly what a correct one returned.
+
+   ⚠️ **All four failures are refusals now, not fallbacks** — the same rule and the same reason as items 6 and 7: no `cwd` and no `vault`; an unknown vault; a vault with no `claude_script` (or a `cwd` whose vault has none); and a `cwd` outside every configured vault. A `cwd` and a `vault` that disagree are refused rather than one silently winning. `SUPERVISOR_CLAUDE_CMD` stays the top launcher override, because it is an explicit operator setting rather than a fallback.
+
+   ⚠️ **The spawn response reports `vault`, `launcher` and `model`**, so all three are verifiable from the reply rather than by opening a pane and reading a status line. The model comes from the launcher script's own `--model` argument, with a `${VAR}` resolved against that script's `export`; it is `null` when the script cannot be read, never a guess — a plausible wrong model would defeat the field's whole purpose.
+
+⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the manager-loop command all point here. It owns **five constants**: the **readiness ladder** (item 2 above — all four of its branches, its thresholds, and the `UNFIXABLE:` handling), the **fleet-wide concurrent limit** (item 5 above), the **mode decision** (item 6 above — the classifier, the `mode:` field, and both headless constraints), the **target decision** (item 7 above — `local` vs `cluster`, why `cluster` is per-call only, and why the returned id is not evidence), and the **cwd/vault/launcher decision** (item 8 above — why neither is defaulted, and what the response reports). Each appears once, there, and is referenced everywhere else. ⚠️ **A restated copy of any of them is not a harmless comment — it is a second counter.** The cap was restated in `commands/manager-loop.md`, `commands/manager-verify.md` and the manager runbook's Guardrail 2 until 2026-09-24: four homes for one number, which is how a single cap becomes two caps the day one home is edited and the others are not, with no error and no diff to catch it. The mode rule carried the mirror-image defect until the same day: it lived in `commands/open.md` § Step 0.6 and was consumed only there, so every other spawn site silently fell through to the fleet config — measured 2026-09-23, **63 new-worker spawns in one day and 0 of them headless**, 57 sourced from `config` rather than from any decision.
 
 **A — `spawn_agent` (preferred).** The prompt is a spawn *argument*, so the task never goes
 over keystrokes:
 
 ```
-mcp__supervisor__spawn_agent(prompt="...", cwd="/path", label="alpha", role="agent")
+mcp__supervisor__spawn_agent(prompt="...", vault="private-personal", label="alpha", role="agent")
 ```
 
 ⚠️ **`interactive` is resolved from the fleet's config — omit it.** With no argument the
@@ -282,7 +290,7 @@ colour is a role signal, so a hardcoded one is the defect it replaced.
 `prompt` argument and **no pre-minted `session_id`**:
 
 ```
-mcp__supervisor__spawn_agent(prompt='/vault-cli:work-on-task "<task>"', cwd="<dir>", label="<task>")
+mcp__supervisor__spawn_agent(prompt='/vault-cli:work-on-task "<task>"', vault="<vault>", label="<task>")
 ```
 
 The worker runs its own planning turn, in its own pane. **Never mint the session first:**
@@ -299,9 +307,14 @@ to name, and the worker mints its own. That asymmetry is why the two paths diver
 
 `policy` is headless-only, which is why a tab-producing call site never carries it.
 
-The launcher is resolved from `vault-cli config` (`claude_script`), falling back to the
-`personal` entry. Never invoke the bare `claude` binary — that routes around the router, the
-MCP config and the model selection. Override with `SUPERVISOR_CLAUDE_CMD`.
+The launcher is resolved from `vault-cli config` (`claude_script`) for the vault the worker
+belongs to — named by `vault`, or found by containment from `cwd` (item 8 above). There is
+**no fallback**: an unknown vault, a vault with no `claude_script`, and a `cwd` outside every
+vault are each refused. The fallback this sentence used to describe — the `personal` entry —
+was a vault that no longer exists (renamed `private-personal`), so it matched nothing and the
+launcher silently became the bare `claude` binary, which routes around the router, the MCP
+config and the model selection. Never invoke that binary. Override with
+`SUPERVISOR_CLAUDE_CMD`.
 
 **Precondition, and it fails silently:** `supervisor` must be in the launcher's MCP config
 allowlist. Launchers that pass `--strict-mcp-config` exclude plugin-provided MCP servers —
@@ -389,11 +402,11 @@ The row's preference for A is a preference, not a requirement, and it is the onl
 
 ⚠️ **A refused path is terminal — never fall back to the other one.** If the chosen path's spawn
 is refused, the resume did not happen: report the refusal and stop. Falling back from B to A (or
-A to B) is not a retry — it is a **second resume the gate never authorised**, and it lands a
-worker in the caller's directory with no pane, its prompt parked on the manager, under a stamp
-that now records a resume that never took. The refusal is the safe direction and it is the
-design: path A already refuses `resume` + `interactive:true` rather than silently downgrading it,
-and a refused resume costs one sweep where a wrong-path spawn corrupts a conversation.
+A to B) is not a retry — it is a **second resume the gate never authorised**, and it opens a
+worker on a path the gate rejected, under a stamp that now records a resume that never took.
+The refusal is the safe direction and it is the design: path A already refuses `resume` +
+`interactive:true` rather than silently downgrading it, and a refused resume costs one sweep
+where a wrong-path spawn corrupts a conversation.
 
 **2 — Drive, by cause of death:**
 
@@ -430,15 +443,16 @@ with the orchestration in `commands/worker-restart.md`. Do not restate the class
 elsewhere — two copies of a transcript-tail read drift silently, because both keep returning a
 string.
 
-**3 — `cwd` is not inherited on a resume — pass it explicitly.**
+**3 — `cwd` (or `vault`) is not inherited on a resume — pass it explicitly.**
 
-`spawn_agent(resume="<id>", interactive=false, cwd="<dir>")`. The resumed session starts in the
-`cwd` you pass, **not** the directory the original session ran in: the session id names a
-conversation, not a working directory, and nothing carries the old one across. A resume that
-omits `cwd` lands in the caller's directory, so a worker resumed to finish repo work silently
-starts somewhere else and its first file operation goes to the wrong tree. Pass the original
-task's directory; if you cannot determine it, read `cwd` from the session registry
-(`~/.claude/sessions/<pid>.json`) rather than guessing.
+`spawn_agent(resume="<id>", interactive=false, vault="<vault>")`. The resumed session starts in
+the directory you name, **not** the directory the original session ran in: the session id names
+a conversation, not a working directory, and nothing carries the old one across. A resume that
+names **neither** `cwd` nor `vault` is **refused** (item 8), not defaulted — so a worker
+resumed to finish repo work can no longer silently start somewhere else and send its first file
+operation to the wrong tree, but a caller who never had the directory still has to go and find
+it. Read `cwd` from the session registry (`~/.claude/sessions/<pid>.json`) rather than
+guessing; that record is the only place the original directory survives.
 
 **Confirming a headless spawn took — and what to read instead of `.status` — is owned by
 § A headless worker exits at turn end.** Do not restate it here: a restated copy is what let

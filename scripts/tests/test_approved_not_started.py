@@ -281,12 +281,22 @@ class UnreadableRegistry(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertNotIn("unknown", stdout.getvalue())
+        # The headline is the FIRST line, not the whole stream: `render` appends the per-row
+        # delta section beneath it, so anchoring on the full output fails on a render that is
+        # working exactly as intended. Measured 2026-10-01 → 2026-10-03: this assertion was
+        # red on master for two days, because `0e8b9ec` added that section and only this test
+        # still expected one line.
+        #
         # Shape, not an exact age: this run reads the real clock, so pinning the duration
         # would make the test fail the moment the fixture date passes.
+        headline = stdout.getvalue().strip().splitlines()[0]
         self.assertRegex(
-            stdout.getvalue().strip(),
+            headline,
             r"^approved, not started: 1 · oldest \d+[mhd]+\d*[mh]? \(Waiting\)$",
         )
+        # And the section beneath it actually renders the row, so this stays a positive
+        # control: a headline-only assertion passes on a render that dropped every row.
+        self.assertIn("manager unmanaged", stdout.getvalue())
 
     def test_missing_tasks_dir_is_a_usage_error(self):
         stderr = io.StringIO()
