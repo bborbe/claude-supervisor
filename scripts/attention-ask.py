@@ -50,7 +50,17 @@ is a real case rather than a bug, and it is refused rather than posted: an item
 with no producer can never be polled back by anyone, so it would be a question
 asked into a void.
 
-Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]...
+`--closer` is the one declaration that is OPTIONAL. It names the `👤 You:` line
+this card answers, and it exists because a session that posts a card and then
+ends its turn with the same ask on that line put ONE ask on the board twice: the
+deliberate card declares a `dedup_key` slug while the hook's echo derives
+sha256(sid:kind:detail), and those two keys can never collide. Passing it writes
+<sid>.posted.json, which the hook's `Stop` branch and the feed's `reclassify_idle`
+both read to decline the echo. Omitted, nothing is recorded and the echo is
+raised exactly as before — the mechanism is opt-in, so the board stays dirty
+until a poster passes it.
+
+Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
      python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
      python3 attention-ask.py poll ITEM_ID
 """
@@ -60,6 +70,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -97,6 +108,60 @@ def resolved_session_id(environ=None):
     caller rather than papered over.
     """
     return (os.environ if environ is None else environ).get("CLAUDE_CODE_SESSION_ID", "")
+
+
+# Resolved exactly as `attention-log.py` resolves it, so the record lands where the
+# hook's `Stop` branch looks for it. A mismatch here would be silent: the hook would
+# simply never find the record and the echo would return, with nothing to see.
+STATE_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention")
+
+
+def record_posted_closer(producer_id, closer, dedup_key):
+    """Name the closer line this card corresponds to, for the hook's `Stop` branch.
+
+    A session that posts a card and then ends its turn with the same ask on its
+    `👤 You:` line used to produce TWO store items: this card, whose `dedup_key` is
+    the declared slug, and the hook's echo, whose key is a derived sha256 of
+    `sid:kind:detail`. Those keys can never collide, so the store's key-based
+    suppression had nothing to match on and the board carried one ask twice —
+    measured 2026-10-02, cards `d393d3e9…` and `3d9263ae…`, one session, two cards,
+    one question.
+
+    Writing the closer here is what supplies the identity the hook cannot derive:
+    `attention-log.py`'s `Stop` branch reads `<sid>.posted.json` and declines to
+    mint the echo when its closer matches.
+
+    Best-effort by design. This is a local hint, not part of the question: if it
+    cannot be written the card is still posted, and the hook falls back to today's
+    behaviour rather than to a wrong suppression.
+    """
+    # `closer` arrives as a Mock under the test suite's `mock.Mock(**defaults)`
+    # args, and a Mock is TRUTHY — so the type check, not just the emptiness
+    # check, is what keeps the suite from writing into the real state dir.
+    if not isinstance(closer, str) or not closer:
+        return
+    # Written under BOTH the producer id and this session's own id when they
+    # differ. The hook keys the record by its `session_id` and the feed keys it by
+    # the store item's `producer_id`; those agree only while `--producer-id` is
+    # left to its default, so an explicit producer id would otherwise write the
+    # record where nothing looks. The miss is silent — the echo just returns —
+    # which is why both keys are written rather than one being chosen.
+    for key in {producer_id, resolved_session_id()} - {""}:
+        path = os.path.join(STATE_DIR, f"{key}.posted.json")
+        # pid-suffixed: a fixed `.tmp` per session id lets two concurrent posts
+        # interleave, and a crash between write and replace orphans it.
+        tmp = f"{path}.{os.getpid()}.tmp"
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"closer": closer, "dedup_key": dedup_key, "ts": time.time()}, f)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def build_options(labels, recommended):
@@ -280,6 +345,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
         detail = err.read().decode(errors="replace")
         print(f"FAILED: store returned {err.code} for the push -- {detail}", file=out)
         return 1
+    record_posted_closer(producer_id, getattr(args, "closer", ""), args.dedup_key)
     print(f"ITEM_ID: {item.get('item_id')}", file=out)
     print(f"POLL: python3 attention-ask.py poll {item.get('item_id')}", file=out)
     return 0
@@ -386,6 +452,9 @@ def main(argv=None):
     post.add_argument("--liveness-ref", default="")
     post.add_argument("--interrupt-class", default="pick")
     post.add_argument("--expires-at", default="")
+    # The `👤 You:` line this card answers, when the poster knows it. Optional:
+    # omitted, nothing is recorded and the hook behaves exactly as it did before.
+    post.add_argument("--closer", default="")
 
     batch = sub.add_parser("post-batch")
     batch.add_argument("--dedup-key", required=True)

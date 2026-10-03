@@ -40,6 +40,7 @@ import re
 import shutil
 import tempfile
 import time
+import time
 import unittest
 from unittest import mock
 
@@ -1772,6 +1773,63 @@ class SectionScopingEndToEnd(unittest.TestCase):
         rc, _out, err = self.run_feed({}, [], argv=["--section", "needs_you"])
         self.assertNotEqual(0, rc)
         self.assertIn("invalid choice", err)
+
+
+class PostedCloserTest(unittest.TestCase):
+    """The record that stops a suppressed echo being re-promoted by the reader.
+
+    `reclassify_idle` promotes an `idle` row back to `question` from the
+    transcript, so without this the hook's suppression is undone one layer down.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.mkdtemp()
+        self._orig_state = wnm.STATE
+        self._orig_ttl = wnm.POSTED_CLOSER_TTL
+        wnm.STATE = self._dir
+
+    def tearDown(self):
+        wnm.STATE = self._orig_state
+        wnm.POSTED_CLOSER_TTL = self._orig_ttl
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def _write(self, rec, sid="session-a"):
+        with open(
+            os.path.join(self._dir, f"{sid}.posted.json"), "w", encoding="utf-8"
+        ) as f:
+            f.write(rec if isinstance(rec, str) else json.dumps(rec))
+
+    def test_no_record_returns_empty(self):
+        self.assertEqual(wnm.posted_closer("session-a"), "")
+
+    def test_an_empty_session_id_returns_empty(self):
+        self._write({"closer": "pick — 1. x", "ts": time.time()})
+        self.assertEqual(wnm.posted_closer(""), "")
+
+    def test_malformed_json_returns_empty(self):
+        self._write("{not json")
+        self.assertEqual(wnm.posted_closer("session-a"), "")
+
+    def test_a_non_string_closer_returns_empty(self):
+        self._write({"closer": 42, "ts": time.time()})
+        self.assertEqual(wnm.posted_closer("session-a"), "")
+
+    def test_a_fresh_record_returns_its_normalized_closer(self):
+        self._write({"closer": "pick  —  1. x · 2. y", "ts": time.time()})
+        self.assertEqual(wnm.posted_closer("session-a"), "pick — 1. x · 2. y")
+
+    def test_an_expired_record_is_ignored(self):
+        # Unbounded, the record lives as long as the session id, so an identical
+        # closer re-raised on a genuinely later turn is suppressed forever. The
+        # window bounds the identity to the turn that produced it.
+        self._write({"closer": "pick — 1. x", "ts": time.time() - 7 * 3600})
+        self.assertEqual(wnm.posted_closer("session-a"), "")
+
+    def test_a_record_with_no_usable_ts_is_ignored(self):
+        # Failing open here means the echo returns, which is the safe direction:
+        # the alternative suppresses a closer on an unreadable clock.
+        self._write({"closer": "pick — 1. x"})
+        self.assertEqual(wnm.posted_closer("session-a"), "")
 
 
 if __name__ == "__main__":

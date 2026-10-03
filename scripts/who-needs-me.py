@@ -45,6 +45,15 @@ PROJECTS_DIR = os.environ.get("PROJECTS_DIR") or os.path.expanduser("~/.claude/p
 # written inside this window counts as fresh.
 LIVE_WINDOW = 5 * 60
 
+# How long a posted-closer record stays authoritative. The echo it suppresses
+# always lands at the END of the same turn as its post, so the window only has to
+# outlast a turn. Unbounded, the record lives as long as the session id, so an
+# IDENTICAL closer text re-raised on a genuinely later turn would be suppressed
+# forever — "identity, not recency" is the right call for a *different* ask, but
+# unbounded text equality is a weaker identity than it looks. Past the window the
+# record is ignored and the closer is judged on its own merits.
+POSTED_CLOSER_TTL = float(os.environ.get("ATTENTION_POSTED_CLOSER_TTL", str(6 * 3600)))
+
 # The attention store. Tried first; the event log is the fallback, so a stopped
 # store degrades the feed rather than emptying it.
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
@@ -803,6 +812,51 @@ def current_closer(rec):
     return closer_from_transcript(rec) or (rec.get("detail") or "")
 
 
+def posted_closer(session_id):
+    """The closer this session already posted a card for, or "".
+
+    A session that posts a card and then ends its turn with the same ask on its
+    `👤 You:` line puts ONE ask on the board twice. The hook's `Stop` branch now
+    declines to mint the echo and writes an `idle` row instead — but this reader
+    promotes an `idle` row back to `question` from the transcript, so without
+    this check it re-derives the very echo the hook suppressed and the row
+    returns. Measured 2026-10-03: the store carried one item while the feed still
+    rendered the echo.
+
+    Written by `attention-ask.py`'s `record_posted_closer`. Absent or unreadable,
+    this returns "" and the reader behaves exactly as it did before — the fix
+    degrades to a no-op, never to a wrong suppression.
+
+    Bounded by `POSTED_CLOSER_TTL` against the record's own `ts`, so the identity
+    expires with the turn that produced it rather than lasting as long as the
+    session id. A record past the window is ignored, not deleted.
+    """
+    if not session_id:
+        return ""
+    try:
+        with open(
+            os.path.join(STATE, f"{session_id}.posted.json"), encoding="utf-8"
+        ) as f:
+            rec = json.load(f)
+    except Exception:
+        return ""
+    # A record with no usable `ts` is treated as expired rather than as
+    # unbounded: failing open here means the echo returns, which is the safe
+    # direction — the alternative suppresses a closer on an unreadable clock.
+    try:
+        if time.time() - float(rec.get("ts") or 0) > POSTED_CLOSER_TTL:
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    # A record is a local hint written by another process, so its shape is not
+    # guaranteed: `normalize_closer` calls `.sub()` on the value and raises on a
+    # non-string, which would take the whole feed down for one bad file.
+    closer = rec.get("closer")
+    if not isinstance(closer, str):
+        return ""
+    return normalize_closer(closer)
+
+
 def reclassify_idle(rec):
     """Stop hook may predate the closer-panel rule; re-derive from the transcript.
 
@@ -814,6 +868,11 @@ def reclassify_idle(rec):
         return rec
     ask = closer_from_transcript(rec)
     if not ask or ask.startswith("nothing") or is_parked_verb(ask):
+        return rec
+    # Identity, not recency: a closer carrying a DIFFERENT ask than the one this
+    # session posted must still reach the board, so the comparison is on the text
+    # the poster recorded rather than on "this session has a card".
+    if ask == posted_closer(rec.get("session_id")):
         return rec
     return dict(rec, kind="question", detail=ask)
 

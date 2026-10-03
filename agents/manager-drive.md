@@ -285,14 +285,18 @@ One compact report — see `<output_format>`. You do not render the status table
   | `--payload` | **the question** — `Raise "<task>"? It scores <score>/10 after its improvement pass, against a 7/10 open threshold.` |
   | `--context` | **why it matters, and what is blocked** — the audit's **named gaps** verbatim, the link to the task file, and the fact that the row stays held until it passes. ⚠️ **On a cache hit the gaps come from the stored `reason`, not from a fresh dispatch** — that is what the field is stored for, and a below-bar row re-audited only to re-read gaps already on disk is the cost the cache exists to remove |  | `--option` | the operator's choices — at minimum `raise it now` and `leave it held` |
   | `--recommend` | the recommended label, marked as such |
+  | `--closer` | **the `👤 You:` line this card answers** — pass it whenever your turn's closer will carry the same ask, so the board shows one card rather than two |
 
   ```
   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py post \
     --dedup-key "<task_identifier>" \
     --payload "Raise \"<task>\"? It scores <score>/10 after its improvement pass, against a 7/10 open threshold." \
     --context "Gaps: <the audit's named gaps>. Task: <vault path>. Held until it passes." \
-    --option "raise it now" --option "leave it held" --recommend "raise it now"
+    --option "raise it now" --option "leave it held" --recommend "raise it now" \
+    --closer "pick — 1. raise it now · 2. leave it held"
   ```
+
+  ⚠️ **Pass `--closer` whenever your turn will close on the same ask, and omit it otherwise.** The card declares a `dedup_key` slug; the hook's echo of your closer derives `sha256(sid:kind:detail)`, and those two keys can never collide — so without the record the board carries one question twice and the operator spends an action dismissing the echo (measured 2026-10-02, cards `d393d3e9…` and `3d9263ae…`). The flag names the `👤 You:` line you intend to end on, and the hook and the feed both read it to decline the echo. It is **opt-in**: omit it and nothing is recorded, the echo is raised exactly as before, and no caller is harmed — so a card whose closer asks something *else* should omit it, and a closer asking a *different* question than the card always reaches the board.
 
   ⚠️ **Two fields are mandatory, and the card is worthless without them — this is measured, not stylistic.** On 2026-09-27 a live sweep posted **21** cards whose payload read `held below bar 3/10` with **no task name in `--payload` and no task link in `--context`**; the only identifier on the card was the opaque `dedup_key` UUID. An operator reading that board cannot tell **which** task to raise, so the card replaces an invisible hold with an **unactionable** one — a strictly worse outcome, because it looks like the asking happened. **The task name goes in `--payload` and the task link in `--context`, both verbatim.** A score without a subject is not an ask. Verify by reading the card back (`attention-ask.py poll <item-id>` for state, or the store's `/api/1.0/attention/<item-id>`) before reporting the row held — a card that was posted is not a card that can be acted on.
 
