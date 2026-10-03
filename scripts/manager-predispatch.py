@@ -952,6 +952,94 @@ def loop_snapshot_path(vault: str, subject: str) -> str:
     return os.path.join(base, vname, f"{slug(subject)}.snapshot.json")
 
 
+# The shapes a caller/gate disagreement can take — and the two that are not disagreements
+# at all. Named separately because the whole defect this discriminates is that ONE line
+# rendered for all of them: a scan that is too small looks exactly like a gate that gained
+# a row, and a scan that is too large looks exactly like a gate that is missing one, so the
+# direction that matters is the silent one.
+# Each value **is** the label it renders under — one name per concept, because a constant
+# reading `caller-dropped` while the report prints `caller-scan-suspect` is the same
+# one-line-two-readings split this discriminator exists to remove, one level down. One
+# glyph, distinct words: the convention the Manager Session runbook already uses for
+# causally different states (`⏸️ blocked/hold` vs `⏸️ blocked/upstream`), because two causes
+# sharing a word is how they become one cause to the reader again. `DIVERGENCE_HEALTHY` is
+# never rendered under the `⚠️` glyph at all — it is not a divergence.
+DIVERGENCE_HEALTHY = "healthy"
+DIVERGENCE_CALLER_FORMAT = "caller-format"
+DIVERGENCE_CALLER_SCAN_SUSPECT = "caller-scan-suspect"
+DIVERGENCE_CALLER_OVERSHOOT = "caller-overshoot"
+DIVERGENCE_BOTH_MOVED = "both-sides-moved"
+DIVERGENCE_UNCLASSIFIED = "unclassified"
+
+
+def classify_divergence(mine, gate, members) -> tuple[str, str]:
+    """-> (kind, sentence) for a caller set that disagrees with the gate's membership.
+
+    `members` is the page's *declared* membership — the same list `resolve_subject` hands
+    the gate — or None when that declaration could not be read. First match wins, and the
+    order is the argument rather than an accident:
+
+    - **healthy** is tested first, because it and `caller-scan-suspect` can both hold
+      `only_mine <= members`; the healthy one is the one with an *empty* gate-only, and it
+      must not fall through to a divergence label;
+    - **disjoint** next, because it is a caller-side format error wearing the largest
+      possible disagreement's clothes — two independently-derived memberships cannot each
+      hold every name the other lacks. Measured 2026-10-02 (Work Approval, tick #90): a
+      normalizer whose BSD `sed` never fired wrote all 11 names with their `— description`
+      tails, and the report rendered `11 caller-only · 11 gate-only`, a shape that reads as
+      total disagreement and is total garbage. ⚠️ Healthy and disjoint are **mutually
+      exclusive** — disjointness forces `only_gate` non-empty, which already disqualifies
+      healthy — so their relative order is behaviourally inert; only
+      healthy-before-`caller-scan-suspect` carries weight.
+
+    `members is None` returns UNCLASSIFIED rather than a guess. "I could not check" and
+    "they agree" are the two states this mode exists to tell apart, and collapsing them one
+    level down is the same defect the fail-open branch below refuses.
+
+    ⚠️ **A heuristic, not a proof, and every reader of a label must hold it that way.** It
+    names which side is *more likely* wrong from the shape alone; it never establishes which
+    side *is* wrong, and it holds no input that could — the caller's scan and the gate's
+    membership are the only two sets it ever sees. `caller-overshoot` in particular renders
+    two causes it cannot separate and says so. Read a label as *the side to check first*,
+    never as *the side already convicted*.
+    """
+    only_mine = set(mine) - set(gate)
+    only_gate = set(gate) - set(mine)
+    if members is None:
+        return DIVERGENCE_UNCLASSIFIED, (
+            "the page's declared membership could not be read, so the shape is "
+            "unclassified and neither side is exonerated"
+        )
+    member_set = set(members)
+    if not only_gate and only_mine <= member_set:
+        return DIVERGENCE_HEALTHY, (
+            f"caller-only is within the {len(member_set)} declared member(s) and gate-only "
+            "is empty — the known healthy asymmetry, not a divergence"
+        )
+    if mine and gate and not (set(mine) & set(gate)):
+        return DIVERGENCE_CALLER_FORMAT, (
+            "the two sets share no name at all — two independently-derived memberships "
+            "cannot each hold every name the other lacks, so this is a caller-side format "
+            "error (suffixes, casing, or an extractor that kept a description tail), not a "
+            "membership disagreement"
+        )
+    if only_gate and only_mine <= member_set:
+        return DIVERGENCE_CALLER_SCAN_SUSPECT, (
+            "the caller carries nothing beyond the declared membership while the gate "
+            "carries names it lacks — the caller's scan is the side more likely wrong: it "
+            "dropped something"
+        )
+    if not only_gate:
+        return DIVERGENCE_CALLER_OVERSHOOT, (
+            "the caller carries names the gate does not, beyond the declared membership — "
+            "the caller's scan is too large, or the gate's snapshot is a refresh behind"
+        )
+    return DIVERGENCE_BOTH_MOVED, (
+        "the caller carries names beyond the declared membership and the gate carries "
+        "names the caller lacks — neither side is exonerated"
+    )
+
+
 def load_state(subject: str) -> dict:
     """The raw stored payload, or {} — used for the cross-run busy-since map."""
     try:
@@ -1147,7 +1235,105 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     return changed, reason, payload, stored_table
 
 
-def bucket_shape_error(parsed) -> str | None:
+RUNBOOK_RELATIVE_PATHS = (
+    os.path.join("65 Runbooks", "Manager Session.md"),
+    os.path.join("70 Runbooks", "Manager Session.md"),
+)
+
+# Anchored on the runbook's own prose shape, never on a line number. Measured 2026-10-03:
+# both declarations moved by one line inside a single day, so a line-anchored read would
+# have silently stopped finding them. The sibling vault's copy also sits under `70
+# Runbooks/` and declares a different count, which is why the path is a candidate list
+# and the count is never carried as a constant.
+BUCKET_DECLARATION_MARKER = "Step 4 — Classify into the full bucket set"
+DISPOSITION_MARKER = "Non-bucket dispositions"
+
+
+def runbook_path(vault: str, override: str | None) -> str | None:
+    """Where the vault's own bucket declaration lives, or None when neither candidate does."""
+    if override:
+        return override
+    for rel in RUNBOOK_RELATIVE_PATHS:
+        candidate = os.path.join(vault, rel)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def declared_bucket_names(path: str) -> tuple[set[str] | None, str | None]:
+    """(names, error) — the vocabulary the runbook declares, or why it could not be read.
+
+    TWO declarations, and both are load-bearing. The parenthesised run on the Step 4 line
+    is the bucket set; the dispositions clause names the three non-bucket keys the
+    classification also carries (`hold`, `backlog`, `👤 YOURS`). Refusing the second group
+    would reject a name the runbook declares — and the live store keys `backlog` for real,
+    so a check built from the parenthesised run alone refuses correct work.
+
+    Parsed by SHAPE, not by line number and not by collecting words on the line: the
+    clause carries prose naming superseded buckets, so a whole-line read admits exactly the
+    drift this check exists to catch. `👤 YOURS` carries an emoji, so the comparison is on
+    the runbook's own token verbatim — normalising it would re-admit the synonym spellings
+    (`yours`, `YOURS`) the store has already been measured emitting.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        return None, f"could not read the bucket declaration at {path!r}: {exc}"
+
+    buckets: set[str] = set()
+    for line in lines:
+        if BUCKET_DECLARATION_MARKER in line:
+            match = re.search(r"\(([^()]*)\)", line)
+            if match:
+                buckets.update(
+                    token.strip() for token in match.group(1).split("/") if token.strip()
+                )
+            break
+    if not buckets:
+        return None, (
+            f"could not parse the bucket set from {path!r} — expected a parenthesised, "
+            f"`/`-separated run on the {BUCKET_DECLARATION_MARKER!r} line"
+        )
+
+    dispositions: set[str] = set()
+    for line in lines:
+        if DISPOSITION_MARKER in line:
+            # The LEAD CLAUSE only. The rest of the line is commentary that backticks the
+            # cell label (`⏸️ blocked/hold`) as well as the disposition name, so a
+            # whole-line backtick sweep admits `⏸️ blocked/hold` as a legal key.
+            head = line.split(".**", 1)[0]
+            dispositions.update(re.findall(r"`([^`]+)`", head))
+            break
+    if not dispositions:
+        return None, (
+            f"could not parse the non-bucket dispositions from {path!r} — expected a "
+            f"backticked run on the {DISPOSITION_MARKER!r} line"
+        )
+
+    return buckets | dispositions, None
+
+
+def declared_bucket_names_for(
+    vault: str, override: str | None
+) -> tuple[set[str] | None, str | None]:
+    """The declared vocabulary for a vault, or why it could not be established.
+
+    Fail-closed by design. A check that skips when it cannot read the declaration is the
+    defect this refusal exists to remove — the runbook *is* the source, so failing to read
+    it is failing to have a check at all.
+    """
+    path = runbook_path(vault, override)
+    if path is None:
+        return None, (
+            f"no bucket declaration found under {vault!r} — expected one of "
+            f"{', '.join(repr(rel) for rel in RUNBOOK_RELATIVE_PATHS)}; "
+            f"pass --runbook <path>"
+        )
+    return declared_bucket_names(path)
+
+
+def bucket_shape_error(parsed, declared: set[str] | None = None) -> str | None:
     """Why `parsed` cannot gate, or None when it is a usable classification.
 
     A dict of bucket -> non-empty list of names is the only shape that can satisfy the
@@ -1159,6 +1345,15 @@ def bucket_shape_error(parsed) -> str | None:
     Shared by BOTH doors into the record. Validating only `--write-buckets` left the
     `--save --buckets` read path a bare `json.load`, so a hand-written or stale staging
     file reached `save_stored` with an all-empty set — the same defect by the other door.
+
+    `declared` adds the VOCABULARY half, and `None` skips it. Shape alone accepted any key
+    at all: measured 2026-10-03, `{"hold": ["Alpha"], "orphan": ["Beta"], "ready":
+    ["Gamma"]}` staged verbatim at exit 0, and the live store carried `backlog` / `yours`
+    against a runbook that declares neither spelling. A set keyed by a vocabulary nobody
+    declared gates the drive leg's clause (0) on names no renderer agrees with, which is
+    the drift the runbook's two-renderer rule forbids. The names come from the runbook
+    itself — never a list here — because the declared set is vault-relative and has moved
+    twice in a week.
     """
     if not isinstance(parsed, dict) or not parsed:
         return "bucket sets must be a non-empty JSON object"
@@ -1169,6 +1364,14 @@ def bucket_shape_error(parsed) -> str | None:
             or not all(isinstance(n, str) and n.strip() for n in names)
         ):
             return f"bucket {bucket!r} must map to a non-empty list of names"
+    if declared is not None:
+        undeclared = sorted(bucket for bucket in parsed if bucket not in declared)
+        if undeclared:
+            listed = ", ".join(repr(bucket) for bucket in undeclared)
+            return (
+                f"bucket set carries keys the runbook does not declare: {listed} — "
+                f"declared: {', '.join(sorted(declared))}"
+            )
     return None
 
 
@@ -1319,6 +1522,14 @@ def main(argv: list[str]) -> int:
         default=None,
         help="with --save: path to the staged bucket JSON (see --write-buckets)",
     )
+    ap.add_argument(
+        "--runbook",
+        default=None,
+        help=(
+            "path to the runbook declaring the bucket vocabulary; defaults to whichever "
+            "of <vault>/65|70 Runbooks/Manager Session.md exists"
+        ),
+    )
     args = ap.parse_args(argv)
 
     vault_error = vault_root_error(args.vault)
@@ -1377,7 +1588,13 @@ def main(argv: list[str]) -> int:
         except json.JSONDecodeError as exc:
             print(f"bucket sets must be JSON: {exc}", file=sys.stderr)
             return EXIT_USAGE
-        shape_error = bucket_shape_error(parsed)
+        # The vocabulary half, read from the runbook — fail-closed, because a check that
+        # skips when it cannot read the declaration is the defect this refusal removes.
+        declared, declaration_error = declared_bucket_names_for(args.vault, args.runbook)
+        if declaration_error:
+            print(declaration_error, file=sys.stderr)
+            return EXIT_USAGE
+        shape_error = bucket_shape_error(parsed, declared)
         if shape_error:
             print(shape_error, file=sys.stderr)
             return EXIT_USAGE
@@ -1511,6 +1728,13 @@ def main(argv: list[str]) -> int:
         # Nothing else could see it: APFS is case-insensitive, so `os.path.exists`,
         # `open()`, Obsidian's link resolver and `ls` all succeed on the capitalised path,
         # and no sweep notices because neither source is internally inconsistent.
+        # ⚠️ What that framing got wrong is that the *caller's* half is not a derivation at
+        # all — it is a scan the manager writes fresh every tick, specified nowhere and
+        # shipped nowhere. So one `⚠️ DIVERGENCE` line rendered for three causally
+        # different situations: a wrong caller scan, a stale gate snapshot, and a genuine
+        # membership disagreement. `classify_divergence` tells them apart, and the healthy
+        # shape (caller-only within the declared membership, gate-only empty) stops being a
+        # warning at all.
         try:
             with open(tracked_path(args.subject), encoding="utf-8") as fh:
                 mine = {ln.strip() for ln in fh if ln.strip()}
@@ -1520,7 +1744,8 @@ def main(argv: list[str]) -> int:
         snap = loop_snapshot_path(args.vault, args.subject)
         try:
             with open(snap, encoding="utf-8") as fh:
-                gate = set(json.load(fh).get("tasks") or {})
+                snap_payload = json.load(fh)
+            gate = set(snap_payload.get("tasks") or {})
         except (OSError, json.JSONDecodeError) as exc:
             # Fail-open in the gate's own sense: an unverifiable membership is never
             # reported as agreement. "I could not check" and "they match" are precisely
@@ -1539,11 +1764,43 @@ def main(argv: list[str]) -> int:
         if not only_mine and not only_gate:
             print("  memberships identical")
             return EXIT_NOCHANGE
+
+        # Which of the three causes this is. The declaration is read through the same
+        # resolver the gate itself uses, so "healthy" is a comparison against the page's
+        # own declaration rather than against a remembered shape — and an unreadable page
+        # yields UNCLASSIFIED rather than a guess.
+        try:
+            _branch, members = resolve_subject(args.vault, args.subject)
+        except (ValueError, OSError) as exc:
+            print(f"  declared membership unreadable ({exc})", file=sys.stderr)
+            members = None
+        kind, sentence = classify_divergence(mine, gate, members)
+
+        # Every reading this verdict rests on, printed rather than assumed: the two counts
+        # and the two clocks. A gate snapshot that predates the caller's own scan is cause
+        # (2) made visible — stated, not claimed, because a stale snapshot and a too-large
+        # scan render the same shape.
+        try:
+            # `.astimezone()` so both clocks on the `reading:` line carry an offset — the
+            # line exists to be compared, and a naive local mtime beside a tz-aware
+            # `recorded_at` cannot be compared across a boundary.
+            scanned_at = (
+                datetime.fromtimestamp(os.path.getmtime(tracked_path(args.subject)))
+                .astimezone()
+                .isoformat(timespec="seconds")
+            )
+        except OSError:
+            scanned_at = "unstated"
         print(
-            f"⚠️ DIVERGENCE: {len(only_mine)} in the caller's set only, {len(only_gate)} in "
-            "the gate's only — a dispatch on either is a dispatch on a set nothing has "
-            "reconciled, and both sources read as self-consistent"
+            f"  reading: caller-only {len(only_mine)} · gate-only {len(only_gate)} · "
+            f"gate snapshot recorded_at {snap_payload.get('recorded_at') or 'unstated'} · "
+            f"caller scan written {scanned_at}"
         )
+
+        if kind == DIVERGENCE_HEALTHY:
+            print(f"✅ COMPARE healthy — {sentence}")
+            return EXIT_NOCHANGE
+        print(f"⚠️ DIVERGENCE ({kind}): {sentence}")
         for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
             for n in names[:10]:
                 print(f"  {label}: {n}")
@@ -1654,7 +1911,13 @@ def main(argv: list[str]) -> int:
             # hand-written or stale file able to reach `save_stored` with a set that
             # cannot gate. A record written that way reads back as persisted when it is
             # not, which is precisely what clause (0) would then hold a batch on.
-            shape_error = bucket_shape_error(bucket_sets)
+            declared, declaration_error = declared_bucket_names_for(
+                args.vault, args.runbook
+            )
+            if declaration_error:
+                print(declaration_error, file=sys.stderr)
+                return EXIT_USAGE
+            shape_error = bucket_shape_error(bucket_sets, declared)
             if shape_error:
                 print(
                     f"bucket sets at {buckets_from!r} cannot gate: {shape_error}",

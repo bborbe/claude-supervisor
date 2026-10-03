@@ -32,6 +32,25 @@ from datetime import datetime, timezone
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "manager-predispatch.py")
 
+# The fixture vault's bucket declaration, shaped like the real runbook's § Step 4: a
+# parenthesised `/`-separated run on the marker line, then a dispositions clause. The
+# prose note deliberately names two SUPERSEDED spellings (`problem`, `orphan`) that appear
+# nowhere in the parenthesised run — a parser that collects words off the line admits them,
+# and a clean fixture with no removal note passes against that broken parser. That is the
+# regression case, not the happy path.
+RUNBOOK = """---
+page_type: runbook
+---
+
+# Manager Session
+
+**Step 4 — Classify into the full bucket set** — **this is the canonical set; there is no second one.** (progressing / stuck / waiting-on-human / waiting-approval / parked-on-unregistered-gate / done / ready-to-start / blocked-upstream / close-me / orphaned):
+
+⚠️ The `problem` cell was renamed `stuck` on 2026-09-20, and `orphan` was renamed `orphaned`; both old spellings survive in this file's history and must not be read back as members.
+
+- **Non-bucket dispositions — `hold`, `backlog` and `👤 YOURS`.** These are **not** among the ten and are **not** escape hatches into one of them. A `hold` task renders `⏸️ blocked/hold`.
+"""
+
 
 def live_proc_start(pid):
     """`pid`'s real start time as the registry writes `procStart` — ctime, UTC.
@@ -131,8 +150,11 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.vault = os.path.join(self.tmp, "vault")
-        for d in ("25 Tasks", "23 Topics", "24 Goals"):
+        for d in ("25 Tasks", "23 Topics", "24 Goals", "65 Runbooks"):
             os.makedirs(os.path.join(self.vault, d))
+        # The bucket vocabulary is read from the runbook, so every bucket-door test needs
+        # one. Fail-closed means its absence is itself a usage error.
+        self.write("65 Runbooks/Manager Session.md", RUNBOOK)
         self.m = load(os.path.join(self.tmp, "state"))
         self.m.REGISTRY_DIR = os.path.join(self.tmp, "sessions")
         self.m.FEED_DIR = os.path.join(self.tmp, "attention")
@@ -828,13 +850,16 @@ class TestTrackedArtifacts(Base):
             "--subject", subject, "--write-buckets", stdin=json.dumps(payload)
         )
 
-    def snapshot(self, subject, names):
+    def snapshot(self, subject, names, recorded_at=None):
         d = os.path.join(os.environ["SWEEP_GATE_BASE"], os.path.basename(self.vault).lower())
         os.makedirs(d, exist_ok=True)
+        payload = {"tasks": {n: {} for n in names}}
+        if recorded_at is not None:
+            payload["recorded_at"] = recorded_at
         with open(
             os.path.join(d, "%s.snapshot.json" % self.m.slug(subject)), "w", encoding="utf-8"
         ) as fh:
-            json.dump({"tasks": {n: {} for n in names}}, fh)
+            json.dump(payload, fh)
 
     def test_write_tracked_prints_the_path_it_wrote(self):
         rc, out = self.tracked("ATopic", ["ATask", "AGoalTask"])
@@ -873,7 +898,7 @@ class TestTrackedArtifacts(Base):
         """The mixed case: a single empty bucket is enough to poison the half, and it is
         the shape a column-0 mis-parse produces — every declared bucket present, each one
         empty, so the set *looks* structurally valid."""
-        rc, _ = self.buckets("ATopic", {"done": ["ATask"], "problem": []})
+        rc, _ = self.buckets("ATopic", {"done": ["ATask"], "stuck": []})
         self.assertEqual(rc, self.m.EXIT_USAGE)
 
     def test_a_corrected_restage_lands_on_an_unchanged_tree(self):
@@ -892,13 +917,13 @@ class TestTrackedArtifacts(Base):
         )
 
         # Same tree, corrected classification: the digest is equal, the half moved.
-        rc, out = self.buckets("ATopic", {"done": ["ATask"], "problem": ["AGoalTask"]})
+        rc, out = self.buckets("ATopic", {"done": ["ATask"], "stuck": ["AGoalTask"]})
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
         rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
         self.assertEqual(
             json.loads(self.read_state("ATopic"))["bucket_sets"],
-            {"done": ["ATask"], "problem": ["AGoalTask"]},
+            {"done": ["ATask"], "stuck": ["AGoalTask"]},
         )
 
     def test_a_save_with_no_buckets_on_an_unchanged_tree_still_writes_nothing(self):
@@ -944,7 +969,7 @@ class TestTrackedArtifacts(Base):
         `save_stored` with an all-empty set — the same defect by the other route."""
         p = os.path.join(self.tmp, "stale.buckets.json")
         with open(p, "w", encoding="utf-8") as fh:
-            json.dump({"done": [], "problem": []}, fh)
+            json.dump({"done": [], "stuck": []}, fh)
         rc, out = self.save_with_table("ATopic", "t\n", "--buckets", p)
         self.assertEqual(rc, self.m.EXIT_USAGE, out)
         self.assertFalse(
@@ -983,6 +1008,107 @@ class TestTrackedArtifacts(Base):
     def test_compare_without_a_staged_set_is_a_usage_error(self):
         rc, _ = self.run_gate("--subject", "ATopic", "--compare-tracked")
         self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    # -- the discriminator -----------------------------------------------------------
+    #
+    # The `ATopic` fixture declares `## Goals: - [[AGoal]] - [[ATask]]`, so the declared
+    # membership is exactly `{AGoal, ATask}` and a caller-only name inside it is the known
+    # healthy asymmetry rather than a defect.
+
+    def test_compare_renders_the_healthy_asymmetry_without_a_warning(self):
+        """The shape a correct tick produces: caller-only is within the declared membership
+        the snapshot does not hold, gate-only is empty. Before the discriminator this
+        printed `⚠️ DIVERGENCE`, so a healthy tick and a broken one were one line."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertNotIn("DIVERGENCE", out)
+        self.assertIn("healthy", out)
+        # The reading line prints *before* the healthy early-return, so it is on this path
+        # too — pinned here, or it could be deleted or broken without a test noticing.
+        self.assertIn("reading:", out)
+
+    def test_compare_names_the_caller_side_when_the_scan_dropped_a_name(self):
+        """Tick 41's shape: the caller's own set is exactly the healthy asymmetry, and the
+        gate carries one name it lacks — so the caller's scan is the side to check. The old
+        line named neither side, and the manager set about investigating a real membership
+        disagreement that did not exist."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask", "Dropped"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("caller-scan-suspect", out)
+        self.assertIn("gate-only: Dropped", out)
+
+    def test_compare_flags_a_disjoint_pair_as_a_caller_format_error(self):
+        """Work Approval tick #90: 11 names a side, sharing none. Two independently-derived
+        memberships cannot each hold every name the other lacks, so the shape is itself the
+        tell — a caller-side format error (here a `sed` that never fired and kept each
+        bullet's `— description` tail), not a disagreement of any size."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["Other1", "Other2"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("caller-format", out)
+        self.assertIn("format error", out)
+
+    def test_compare_names_the_caller_side_when_the_scan_overshot(self):
+        """The other direction of the same cause: gate-only is empty and the caller carries
+        a name the page never declared, so the scan is too large — or the gate's snapshot is
+        a refresh behind. Both readings are stated, because the shape cannot tell them
+        apart."""
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("caller-overshoot", out)
+        self.assertIn("refresh behind", out)
+
+    def test_the_same_signature_pair_renders_two_different_cause_labels(self):
+        """SC1's probe, and why a counts-only change cannot satisfy it. Both cases below are
+        `gate-only 1`, so a report that merely appends the counts renders them identically.
+        They differ only in whether the caller's own extra name stayed inside the page's
+        declaration — and that is what has to reach the label."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask", "Extra"])
+        rc_dropped, out_dropped = self.run_gate("--subject", "ATopic", "--compare-tracked")
+
+        self.tracked("ATopic", ["ATask", "Stray"])
+        rc_moved, out_moved = self.run_gate("--subject", "ATopic", "--compare-tracked")
+
+        for out in (out_dropped, out_moved):
+            self.assertIn("gate-only 1", out)
+        self.assertEqual(rc_dropped, self.m.EXIT_DIVERGENT, out_dropped)
+        self.assertEqual(rc_moved, self.m.EXIT_DIVERGENT, out_moved)
+        self.assertIn("caller-scan-suspect", out_dropped)
+        self.assertIn("both-sides-moved", out_moved)
+        self.assertNotEqual(out_dropped, out_moved)
+
+    def test_compare_prints_the_two_clocks_so_a_stale_snapshot_is_visible(self):
+        """Cause (2) — the gate's snapshot a refresh behind — renders the same shape as a
+        too-large scan, so the report cannot claim it. It can make it *visible*, which is
+        what this line is for: the snapshot's own `recorded_at` and the mtime of the
+        caller's scan, both printed rather than assumed."""
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask"], recorded_at="2026-10-03T13:25:00+02:00")
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("recorded_at 2026-10-03T13:25:00+02:00", out)
+        self.assertIn("caller scan written", out)
+
+    def test_compare_says_unclassified_when_the_declaration_cannot_be_read(self):
+        """"I could not check" must not read as a verdict. With the page's `## Goals`
+        section gone the shape cannot be classified at all, and the report says so rather
+        than reaching for the nearest label — the same rule the fail-open branch above
+        carries for an unreadable snapshot."""
+        self.write("23 Topics/ATopic.md", "---\npage_type: topic\n---\n\n# Scope\n")
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask", "Extra"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("unclassified", out)
+        self.assertIn("could not be read", out)
 
 
 HELD = "aaaaaaaa-1111-2222-3333-444444444444"
@@ -1373,6 +1499,210 @@ class TestVerdictsCache(Base):
         cadences, and clause (1) reads the cache back on the next tick."""
         self.save("ATopic")
         self.assertNotIn("verdicts", json.loads(self.read_state("ATopic")))
+
+
+class TestBucketVocabulary(Base):
+    """The vocabulary half of the bucket door — SC1, SC2 and SC4.
+
+    Shape alone accepted any key at all: measured 2026-10-03, `{"hold": ["Alpha"],
+    "orphan": ["Beta"], "ready": ["Gamma"]}` staged verbatim at exit 0, and the live store
+    carried `backlog` / `yours` against a runbook declaring neither spelling. A set keyed
+    by a vocabulary nobody declared gates the drive leg's clause (0) on names no renderer
+    agrees with — the drift the runbook's own two-renderer rule forbids.
+    """
+
+    DECLARED = {
+        "progressing",
+        "stuck",
+        "waiting-on-human",
+        "waiting-approval",
+        "parked-on-unregistered-gate",
+        "done",
+        "ready-to-start",
+        "blocked-upstream",
+        "close-me",
+        "orphaned",
+        "hold",
+        "backlog",
+        "👤 YOURS",
+    }
+
+    def buckets(self, subject, payload):
+        return self.run_gate(
+            "--subject", subject, "--write-buckets", stdin=json.dumps(payload)
+        )
+
+    def run_both(self, *argv, stdin=""):
+        """-> (rc, stdout + stderr). `Base.run_gate` swaps only stdout, and every
+        validation message this script emits goes to stderr — so a test asserting the
+        refusal NAMES the offending key needs the stream it is actually written to."""
+        import sys
+
+        old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
+        sys.stdin, sys.stdout, sys.stderr = (
+            io.StringIO(stdin),
+            io.StringIO(),
+            io.StringIO(),
+        )
+        try:
+            rc = self.m.main(list(argv) + ["--vault", self.vault])
+            return rc, sys.stdout.getvalue() + sys.stderr.getvalue()
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
+
+    def temp_runbook(self, text):
+        """A stand-in declaration, so a probe never edits the live runbook."""
+        p = os.path.join(self.tmp, "temp-runbook.md")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    # -- SC1: the refusal, at BOTH doors ------------------------------------ #
+
+    def test_write_buckets_refuses_an_off_vocabulary_set(self):
+        """The measured payload, and the union pinned in both directions. This exact set
+        staged verbatim at exit 0 before the check existed; of its three keys, `orphan` and
+        `ready` are declared nowhere and are refused, while `hold` IS a declared non-bucket
+        disposition and must survive — a refusal that also rejects it is the failure SC4
+        calls worse than no check."""
+        rc, out = self.run_both(
+            "--subject",
+            "ATopic",
+            "--write-buckets",
+            stdin=json.dumps({"hold": ["Alpha"], "orphan": ["Beta"], "ready": ["Gamma"]}),
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        for key in ("orphan", "ready"):
+            self.assertIn(repr(key), out)
+        self.assertNotIn("'hold'", out)
+        self.assertFalse(
+            os.path.exists(self.m.buckets_path("ATopic")),
+            "a refused stage must leave no staging file at all",
+        )
+
+    def test_save_refuses_an_off_vocabulary_staged_file(self):
+        """The SECOND door. `--save --buckets <path>` reads a file directly, so a check on
+        the staging path alone leaves a hand-written or stale file able to reach
+        `save_stored` — the same defect the empty-list hole already had, one door over."""
+        p = os.path.join(self.tmp, "off-vocab.buckets.json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"yours": ["ATask"]}, fh)
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", p)
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertFalse(
+            os.path.exists(self.m.state_path("ATopic")),
+            "a refused save must leave no record at all",
+        )
+
+    def test_a_synonym_is_refused_rather_than_normalised(self):
+        """The store has been measured emitting `yours` / `YOURS` / `approval` across
+        consecutive ticks. Only the runbook's own token is a member; case-folding or
+        emoji-stripping the rest re-admits exactly the drift this check exists to catch."""
+        for synonym in ("yours", "YOURS", "approval"):
+            rc, out = self.buckets("ATopic", {synonym: ["ATask"]})
+            self.assertEqual(rc, self.m.EXIT_USAGE, "%s -> %s" % (synonym, out))
+
+    def test_a_superseded_name_in_the_runbooks_prose_is_not_a_member(self):
+        """The regression case the fixture is built for. `problem` and `orphan` are named
+        in the runbook's own prose — as renames — and appear nowhere in its declaration. A
+        parser that collects words off the line admits them, and a clean fixture with no
+        removal note passes against that broken parser."""
+        for superseded in ("problem", "orphan"):
+            rc, out = self.buckets("ATopic", {superseded: ["ATask"]})
+            self.assertEqual(rc, self.m.EXIT_USAGE, "%s -> %s" % (superseded, out))
+
+    # -- SC4: the correct sets still pass ----------------------------------- #
+
+    def test_a_set_of_declared_names_round_trips_with_an_identical_key_set(self):
+        """SC1's other half, and why it is a KEY-SET assertion rather than a count: a
+        count passes on every drift variant the store has produced, and the runbook's own
+        declared set is the only thing the stored keys may equal."""
+        payload = {name: ["ATask"] for name in sorted(self.DECLARED)}
+        rc, out = self.buckets("ATopic", payload)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        stored = json.loads(self.read_state("ATopic"))["bucket_sets"]
+        self.assertEqual(set(stored), self.DECLARED)
+
+    def test_a_disposition_keyed_set_saves(self):
+        """`backlog` is a declared NON-BUCKET DISPOSITION, and the live store keys it for
+        real (4 tasks on 2026-10-03). A check built from the runbook's parenthesised bucket
+        run alone refuses it — and a refusal that also rejects the correct set is worse
+        than none."""
+        rc, out = self.buckets("ATopic", {"backlog": ["ATask"]})
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertEqual(
+            json.loads(self.read_state("ATopic"))["bucket_sets"], {"backlog": ["ATask"]}
+        )
+
+    # -- SC2: the vocabulary comes from the runbook, and only from it ------- #
+
+    def test_editing_the_declared_list_changes_what_is_refused(self):
+        """SC2's observable, and the one probe a hard-coded list cannot pass. The
+        declaration is read at runtime, so widening it accepts a key refused a moment ago
+        and narrowing it refuses one that was accepted."""
+        widened = self.temp_runbook(
+            RUNBOOK.replace("/ close-me", "/ close-me / newbucket")
+        )
+        rc, out = self.run_gate(
+            "--subject",
+            "ATopic",
+            "--runbook",
+            widened,
+            "--write-buckets",
+            stdin=json.dumps({"newbucket": ["ATask"]}),
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+
+        narrowed = self.temp_runbook(RUNBOOK.replace(" / orphaned", ""))
+        rc, out = self.run_both(
+            "--subject",
+            "ATopic",
+            "--runbook",
+            narrowed,
+            "--write-buckets",
+            stdin=json.dumps({"orphaned": ["ATask"]}),
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertIn("orphaned", out)
+
+    def test_the_probe_reads_the_override_not_the_live_declaration(self):
+        """The negative control for the test above: with no override the same key is
+        refused, so the override is what moved the answer — not a check that had stopped
+        reading the declaration at all."""
+        rc, out = self.buckets("ATopic", {"newbucket": ["ATask"]})
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+
+    def test_a_vault_with_no_runbook_is_a_usage_error_not_a_silent_pass(self):
+        """Fail-closed. A check that skips when it cannot read the declaration is the
+        defect this refusal exists to remove, so the absence is itself the error."""
+        os.remove(os.path.join(self.vault, "65 Runbooks", "Manager Session.md"))
+        rc, out = self.run_both(
+            "--subject",
+            "ATopic",
+            "--write-buckets",
+            stdin=json.dumps({"done": ["ATask"]}),
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertIn("no bucket declaration found", out)
+
+    def test_an_unparseable_declaration_is_a_usage_error(self):
+        """A runbook that exists but declares nothing is refused, never read as an empty
+        vocabulary — an empty set would refuse every key, including the correct ones."""
+        runbook = self.temp_runbook("# A runbook carrying no Step 4 declaration at all\n")
+        rc, out = self.run_both(
+            "--subject",
+            "ATopic",
+            "--runbook",
+            runbook,
+            "--write-buckets",
+            stdin=json.dumps({"done": ["ATask"]}),
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertIn("could not parse the bucket set", out)
 
 
 if __name__ == "__main__":
