@@ -39,6 +39,21 @@ when its spawner is a live manager other than this watcher's own. Panes this
 session spawned, panes whose spawner is a worker, panes whose spawner is dead,
 and unowned panes all emit.
 
+A CLAIM overrides that, and it is the one ownership input that does NOT come
+from the spawn edge. `scripts/ownership-claim.py` records which manager has
+adopted a gated session (`~/.claude/state/ownership-claims.json`, keyed on the
+GATED session id -- the id `session_for_pane` already resolves, so the claim
+joins with no new hop). A claim held by a LIVE manager other than this watcher
+drops the pane as `claimed`; a claim held by this watcher, or by a manager that
+is gone, or read against an unreadable registry, EMITS -- the same fail-open the
+spawner hops take, for the same reason. Without this input a pane whose session
+has no spawner is emitted to every manager forever, because nothing about the
+pane changes when a manager adopts it: measured 2026-10-02, 5+ wakes in one hour
+for gates the manager could not act on, 1 of them actionable, after the Fleet
+Manager had taken ownership of those panes by `SendMessage` -- a channel no
+record reads. The `--only-file` allowlist is NOT the answer and stays barred:
+it trades this defect for a worse one, since it drops genuinely unowned panes.
+
 ⚠️ A PREDECESSOR MANAGER IS NOT A PEER MANAGER, and this filter cannot tell them
 apart. A PEER manager serves a DIFFERENT subject; a PREDECESSOR served the SAME
 subject and handed it over. After a handover the outgoing manager is still live
@@ -89,6 +104,7 @@ import sys
 STATE = os.path.expanduser("~/.claude/state/attention")
 LEDGER = os.path.expanduser("~/.local/state/claude-supervisor/sessions")
 REGISTRY = os.path.expanduser("~/.claude/sessions")
+CLAIMS = os.path.expanduser("~/.claude/state/ownership-claims.json")
 
 EMIT = "emit"
 DROP = "drop"
@@ -110,6 +126,36 @@ def load_ledger(ledger_dir=LEDGER):
             continue
         sid = rec.get("session_id") or os.path.basename(path)[: -len(".json")]
         out[sid] = rec
+    return out
+
+
+def load_claims(path=CLAIMS):
+    """Open ownership claims, keyed by gated session id, or {} when unreadable.
+
+    An unreadable store is NOT an empty one, and here the two happen to agree:
+    both fail open. That is deliberate -- a claim store that cannot be read must
+    never silence a manager's watcher, and the cost of a missed drop is one
+    wasted wake against a fleet-wide silence.
+
+    Only entries carrying a `manager` are returned; a malformed entry is skipped
+    rather than read as a claim held by nobody. Read directly rather than by
+    shelling out to `ownership-claim.py`, so the filter keeps its single-process
+    shape and stays runnable when the script is absent.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    claims = data.get("claims")
+    if not isinstance(claims, dict):
+        return {}
+    out = {}
+    for session_id, entry in claims.items():
+        if isinstance(entry, dict) and entry.get("manager"):
+            out[str(session_id)] = str(entry["manager"])
     return out
 
 
@@ -201,15 +247,29 @@ def session_for_pane(pane, items):
     return str(hits[-1].get("session_id") or "") or None
 
 
-def verdict(session_id, spawner, ledger, live, self_id):
+def verdict(session_id, spawner, ledger, live, self_id, claims=None):
     """(emit|drop, reason) for one gated session.
 
-    The keep-set is wide on purpose: drop ONLY on a live peer manager.
+    The keep-set is wide on purpose: drop ONLY on a live peer manager -- reached
+    either by the spawn edge or by a claim a live peer manager holds.
     """
     if not session_id:
         return EMIT, "unowned"
     if self_id and session_id == self_id:
         return EMIT, "self"
+    if claims:
+        # The claim is checked BEFORE the `not spawner` early return, because a
+        # pane with no spawner is exactly the case this input exists for: it is
+        # emitted permanently otherwise.
+        holder = claims.get(session_id)
+        if holder:
+            if self_id and holder == self_id:
+                return EMIT, "own-claim"
+            if live is None:
+                return EMIT, "liveness-unknown"
+            if holder not in live:
+                return EMIT, "claim-dead"
+            return DROP, "claimed"
     if not spawner:
         return EMIT, "unowned"
     if self_id and spawner == self_id:
@@ -223,11 +283,11 @@ def verdict(session_id, spawner, ledger, live, self_id):
     return DROP, "peer-manager"
 
 
-def evaluate(pane, ledger, live, items, self_id):
+def evaluate(pane, ledger, live, items, self_id, claims=None):
     """(verdict, reason, session_id, spawner) for one pane."""
     session_id = session_for_pane(pane, items)
     spawner = (ledger.get(session_id) or {}).get("parent_session") if session_id else None
-    call, reason = verdict(session_id, spawner, ledger, live, self_id)
+    call, reason = verdict(session_id, spawner, ledger, live, self_id, claims)
     return call, reason, session_id, spawner
 
 
@@ -271,11 +331,13 @@ def main():
     parser.add_argument("--ledger-dir", default=LEDGER)
     parser.add_argument("--registry-dir", default=REGISTRY)
     parser.add_argument("--state-dir", default=STATE)
+    parser.add_argument("--claims-file", default=CLAIMS)
     args = parser.parse_args()
 
     ledger = load_ledger(args.ledger_dir)
     live = live_ids(args.registry_dir)
     items = log_items(args.state_dir)
+    claims = load_claims(args.claims_file)
 
     panes = list(args.pane)
     if args.feed:
@@ -286,7 +348,7 @@ def main():
     rows = []
     for pane in panes:
         call, reason, session_id, spawner = evaluate(
-            pane, ledger, live, items, args.self_id
+            pane, ledger, live, items, args.self_id, claims
         )
         rows.append(
             {

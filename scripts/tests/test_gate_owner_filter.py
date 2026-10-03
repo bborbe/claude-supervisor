@@ -13,6 +13,9 @@ defect the filter has actually shipped or would ship:
   * the pane->session source is the event log, not the retired `*.needs.json`
     store, which carries nothing for the live feed (measured 2026-09-25: 0 of 9
     feed panes had a record).
+  * a CLAIM is the one ownership input that is not the spawn edge, and it drops
+    ONLY for a live peer manager -- so both halves are pinned: a claimed pane
+    drops, and the same unclaimed pane still emits.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -264,6 +267,122 @@ class Evaluate(unittest.TestCase):
     def test_pane_with_no_event_record_is_unowned(self):
         call, reason, session_id, _ = gf.evaluate("1", {}, set(), [], ME)
         self.assertEqual((call, reason, session_id), (gf.EMIT, "unowned", None))
+
+
+class Claims(unittest.TestCase):
+    """A claim is the one ownership input that is not the spawn edge.
+
+    Drop on a claim a LIVE PEER manager holds; emit on one this watcher holds,
+    on one whose holder is gone, and against an unreadable registry. Both halves
+    of the load-bearing probe live here: a fix that drops every `spawner=None`
+    pane fails `test_unclaimed_pane_is_still_emitted`, and a fix that drops none
+    fails `test_claimed_pane_is_dropped`.
+    """
+
+    LEDGER = {"worker-1": {"session_id": "worker-1", "parent_session": "manager-x"}}
+    LIVE = {"worker-1", "manager-x", "manager-y", ME, PEER}
+
+    def call(self, session_id, spawner, claims, live=_UNSET, me=ME):
+        return gf.verdict(
+            session_id,
+            spawner,
+            self.LEDGER,
+            self.LIVE if live is _UNSET else live,
+            me,
+            claims,
+        )
+
+    def test_claimed_pane_is_dropped(self):
+        """Half one: a claim held by a live peer drops the pane."""
+        self.assertEqual(self.call("w", None, {"w": PEER}), (gf.DROP, "claimed"))
+
+    def test_unclaimed_pane_is_still_emitted(self):
+        """Half two: the same pane with no claim still emits.
+
+        This is the half that fails a fix dropping every `spawner=None` pane --
+        the reason the criterion names both halves rather than one.
+        """
+        self.assertEqual(self.call("w", None, {}), (gf.EMIT, "unowned"))
+
+    def test_claim_overrides_a_peer_manager_spawner_too(self):
+        """The claim is checked before the spawner, so it wins on either path."""
+        self.assertEqual(self.call("w", PEER, {"w": "manager-y"}), (gf.DROP, "claimed"))
+
+    def test_own_claim_is_kept(self):
+        """A pane this watcher adopted is one it EXISTS to see."""
+        self.assertEqual(self.call("w", None, {"w": ME}), (gf.EMIT, "own-claim"))
+
+    def test_dead_holder_claim_is_kept(self):
+        """A gone manager's claim is nobody's -- the rule for a dead spawner."""
+        self.assertEqual(
+            self.call("w", None, {"w": "manager-gone"}), (gf.EMIT, "claim-dead")
+        )
+
+    def test_claim_against_unreadable_registry_fails_open(self):
+        """An unreadable registry is UNKNOWN, so the claim cannot silence a pane."""
+        self.assertEqual(
+            self.call("w", None, {"w": PEER}, live=None),
+            (gf.EMIT, "liveness-unknown"),
+        )
+
+    def test_claim_on_another_session_does_not_leak(self):
+        """Keyed on the gated session id -- a claim elsewhere must not drop here."""
+        self.assertEqual(self.call("w", None, {"other": PEER}), (gf.EMIT, "unowned"))
+
+    def test_self_session_beats_a_claim(self):
+        self.assertEqual(self.call(ME, None, {ME: PEER}), (gf.EMIT, "self"))
+
+    def test_absent_claims_mapping_is_the_pre_claim_behaviour(self):
+        self.assertEqual(self.call("w", None, None), (gf.EMIT, "unowned"))
+
+
+class LoadClaims(unittest.TestCase):
+    def write(self, payload):
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        tmp.write(payload)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return tmp.name
+
+    def test_keys_by_gated_session(self):
+        path = self.write(json.dumps({
+            "version": 1,
+            "claims": {"s1": {"session": "s1", "manager": "m1"}},
+        }))
+        self.assertEqual(gf.load_claims(path), {"s1": "m1"})
+
+    def test_missing_file_is_empty(self):
+        self.assertEqual(gf.load_claims("/nonexistent/claims.json"), {})
+
+    def test_malformed_json_is_empty(self):
+        self.assertEqual(gf.load_claims(self.write("{not json")), {})
+
+    def test_entry_without_manager_is_skipped(self):
+        """A malformed entry is not a claim held by nobody."""
+        path = self.write(json.dumps({"claims": {"s1": {"session": "s1"}}}))
+        self.assertEqual(gf.load_claims(path), {})
+
+    def test_wrong_shape_is_empty(self):
+        self.assertEqual(gf.load_claims(self.write(json.dumps({"claims": []}))), {})
+
+
+class EvaluateWithClaims(unittest.TestCase):
+    def test_full_chain_pane_to_claim(self):
+        """The probe's shape: a `spawner=None` pane, claimed by a live peer."""
+        items = [{"pane": "372", "session_id": "884016da", "ts": 1}]
+        call, reason, session_id, spawner = gf.evaluate(
+            "372", {}, {PEER}, items, ME, {"884016da": PEER}
+        )
+        self.assertEqual((call, reason), (gf.DROP, "claimed"))
+        self.assertEqual(session_id, "884016da")
+        self.assertIsNone(spawner)
+
+    def test_same_pane_unclaimed_still_emits(self):
+        items = [{"pane": "372", "session_id": "884016da", "ts": 1}]
+        call, reason, _, _ = gf.evaluate("372", {}, {PEER}, items, ME, {})
+        self.assertEqual((call, reason), (gf.EMIT, "unowned"))
 
 
 if __name__ == "__main__":
