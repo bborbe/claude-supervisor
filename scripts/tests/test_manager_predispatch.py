@@ -283,7 +283,7 @@ class TestVerdict(Base):
 
 
 class TestActionablePassThrough(Base):
-    """SC1's both directions: an actionable row in the stored classification forces the
+    """SC1's both directions: a READY-TO-START row in the stored classification forces the
     sweep, and a board without one keeps the saving.
 
     The defect these pin is a STEADY state, not a moved one. A ready-to-start row hashes
@@ -292,6 +292,14 @@ class TestActionablePassThrough(Base):
     returned NOCHANGE forever and the act leg never ran. Measured 2026-10-01 on `Managers
     Spawn Interactive Claude Workers in the Cluster`: NO-CHANGE since 18:04 with 2
     ready-to-start and 1 waiting-approval row on the board, 0 agents dispatched.
+
+    ⚠️ `waiting-approval` is deliberately NOT actionable, and the 2026-10-01 measurement
+    above is why the distinction is easy to miss: it was counted then. It is a steady state
+    the act leg cannot end — the row sits at `phase: todo`, and only the operator's
+    `vault-cli task approve` moves it. Counting it made the no-change verdict unreachable
+    for every topic carrying an approval queue, which is a managed topic's normal state.
+    Measured 2026-10-03 on `Manager Layer`: 23 rows, `--check` answering CHANGE with the
+    `actionable` reason on a tree whose digest had not moved.
 
     The no-actionable-row case is the negative control and it is load-bearing: the
     pass-through direction alone is satisfied by a gate hard-wired to return CHANGE, which
@@ -318,11 +326,14 @@ class TestActionablePassThrough(Base):
         self.assertIn("actionable", out)
         self.assertIn("AGoalTask", out)
 
-    def test_a_waiting_approval_row_passes_through_on_an_unchanged_tree(self):
+    def test_a_waiting_approval_row_keeps_the_saving_on_an_unchanged_tree(self):
+        """The row waits on the OPERATOR, not on the loop: it leaves `waiting-approval` only
+        through `vault-cli task approve`, which the act leg may not run. Sweeping cannot move
+        it, so it must not suspend the saving."""
         self.classified("ATopic", {"done": ["ATask"], "waiting-approval": ["AGoalTask"]})
         rc, out = self.check("ATopic")
-        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
-        self.assertIn("AGoalTask", out)
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertNotIn("actionable", out)
 
     def test_a_classification_with_no_actionable_row_still_reports_nochange(self):
         """The negative control: `changed = True` unconditionally would pass every test
@@ -365,14 +376,14 @@ class TestActionablePassThrough(Base):
         rc, out = self.check("ATopic")
         self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
 
-    def test_actionable_names_reads_only_the_two_actionable_buckets(self):
+    def test_actionable_names_reads_only_the_ready_to_start_bucket(self):
         self.assertEqual(self.m.actionable_names(None), [])
         self.assertEqual(self.m.actionable_names({"done": ["A"]}), [])
         self.assertEqual(
             self.m.actionable_names(
                 {"ready-to-start": ["B", "A"], "waiting-approval": ["C"], "done": ["D"]}
             ),
-            ["A", "B", "C"],
+            ["A", "B"],
         )
 
 
