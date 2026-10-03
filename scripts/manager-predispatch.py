@@ -1587,6 +1587,15 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="compare the staged tracked set against the loop snapshot's membership",
     )
+    mode.add_argument(
+        "--blocked-verdicts",
+        action="store_true",
+        help=(
+            "one `<name>\\t<blocked|ready|unreadable>\\t<unmet…>\\t<entry count>` line per "
+            "staged tracked row, for the sweep reader's ready-to-start / blocked-upstream "
+            "decision"
+        ),
+    )
     ap.add_argument(
         "--buckets",
         default=None,
@@ -1877,6 +1886,72 @@ def main(argv: list[str]) -> int:
             if len(names) > 10:
                 print(f"  … and {len(names) - 10} more {label}")
         return EXIT_DIVERGENT
+
+    if args.blocked_verdicts:
+        # The reader's own read, handed to it as a verdict rather than left to its prose.
+        #
+        # `blocked_by_verdict` was landed with no caller, and a tested function nothing
+        # calls ships nothing: the sweep reader went on deciding `ready-to-start` from its
+        # own frontmatter read, which is nondeterministic — measured 2026-10-02, four
+        # misreads across eleven relevant ticks, and reproduced again 2026-10-03 18:44 on
+        # two rows whose first entry had shipped and whose later entries had not. The
+        # warning against exactly that read has sat in `agents/manager-sweep-reader.md`
+        # since v0.96.4 and did not prevent it, so the decision moves to code and the
+        # agent renders the bucket from the answer.
+        #
+        # Reads the caller's STAGED set — `--write-tracked`'s file, the same membership
+        # the caller passed the reader — so the verdicts and the table cover one set by
+        # construction. That is also its one hazard, and the reader is told to check it:
+        # a staged file left over from an earlier tick would classify the wrong rows, so
+        # the reader compares the names printed here against the names it was handed and
+        # refuses the read on a mismatch rather than classifying a set it cannot vouch for.
+        try:
+            with open(tracked_path(args.subject), encoding="utf-8") as fh:
+                names = [ln.strip() for ln in fh if ln.strip()]
+        except OSError as exc:
+            # Fail-closed, like `--compare-tracked`: "I could not read the set" and "every
+            # row is unblocked" must never render the same way, and the second is the one
+            # that opens a spawn.
+            print(f"no staged tracked set to classify ({exc})", file=sys.stderr)
+            return EXIT_USAGE
+        # Hardcoded here exactly as `resolve_tracked` hardcodes it (`:412`), and for the
+        # same reason: this script gates one vault layout, and a caller-supplied directory
+        # would let a typo classify every row against an empty tree — which reads as
+        # "no blockers found" rather than as an error.
+        tasks_dir = os.path.join(args.vault, "25 Tasks")
+        for name in names:
+            try:
+                with open(
+                    os.path.join(tasks_dir, f"{name}.md"),
+                    encoding="utf-8",
+                    errors="replace",
+                ) as fh:
+                    fm = split_frontmatter(fh.read())
+            except OSError:
+                fm = None
+            if fm is None:
+                # An unreadable ROW is not an unreadable BLOCKER, and the two must not
+                # share a word. `blocked_by_verdict` would call this row unblocked — it
+                # reads an empty frontmatter and finds no entries — which is the vacuous
+                # promotion this whole mode exists to stop. Name it instead, and let the
+                # reader treat any word but `ready` as "not offered".
+                print(f"{name}\tunreadable\t\t")
+                continue
+            verdict = blocked_by_verdict(fm, tasks_dir)
+            # The entry count is a fourth column so the reader can pick the rows it must
+            # quote back without parsing `blocked_by` itself — which is the read this mode
+            # exists to replace. `0` and "every entry met" both render an empty unmet list,
+            # so without this the two are indistinguishable downstream and a reporting
+            # rule keyed on the unmet column would silently skip the rows that matter.
+            print(
+                "{}\t{}\t{}\t{}".format(
+                    name,
+                    "blocked" if verdict["blocked"] else "ready",
+                    ", ".join(verdict["unmet"]),
+                    len(verdict["entries"]),
+                )
+            )
+        return EXIT_WRITE_OK
 
     changed, reason, payload, stored_table = evaluate(args.vault, args.subject)
 
