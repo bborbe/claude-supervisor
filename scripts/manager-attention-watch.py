@@ -97,8 +97,20 @@ def tracked_ids(tracked_path, tasks_dir):
     try:
         with open(tracked_path) as fh:
             names = [l.strip() for l in fh if l.strip()]
-    except OSError:
+    except OSError as exc:
+        # NEVER return an empty result for a failed read. The tracked set is what
+        # scopes this watcher, so an unreadable one means it is watching nothing
+        # while looking exactly like a quiet sweep — the failure this repo names
+        # as *a broken watcher looks exactly like a quiet one*. `docs/pane-reads.md`
+        # states the same rule for transport reads: a failed read must never be
+        # representable as an empty result.
+        print(f"WATCH WARN: tracked set unreadable ({exc}) — NOTHING is being "
+              f"watched; this is not a quiet sweep", file=sys.stderr, flush=True)
         return out
+    if not names:
+        print(f"WATCH WARN: tracked set is empty ({tracked_path}) — NOTHING is "
+              f"being watched; this is not a quiet sweep",
+              file=sys.stderr, flush=True)
     for name in names:
         path = os.path.join(tasks_dir, name + ".md")
         try:

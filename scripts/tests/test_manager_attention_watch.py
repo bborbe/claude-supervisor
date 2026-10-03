@@ -27,7 +27,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SID = "d91bf7c1-0000-0000-0000-000000000000"
@@ -236,6 +236,29 @@ class TrackedIdsTest(unittest.TestCase):
             self.assertNotIn("deadbeef", ids)
         finally:
             fx.cleanup()
+
+    def test_unreadable_tracked_set_is_not_a_quiet_sweep(self):
+        # A watcher watching nothing must never look like a quiet one. Returning
+        # an empty set for a failed read is exactly that failure, and this repo
+        # names it: *a broken watcher looks exactly like a quiet one*.
+        err = io.StringIO()
+        with redirect_stderr(err):
+            ids = watch.tracked_ids("/nonexistent/tracked.txt", "/nonexistent/tasks")
+        self.assertEqual(ids, {})
+        self.assertIn("NOTHING is being watched", err.getvalue())
+
+    def test_empty_tracked_set_warns(self):
+        d = tempfile.mkdtemp(prefix="maw-empty-")
+        try:
+            path = os.path.join(d, "tracked.txt")
+            with open(path, "w"):
+                pass
+            err = io.StringIO()
+            with redirect_stderr(err):
+                watch.tracked_ids(path, d)
+            self.assertIn("tracked set is empty", err.getvalue())
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_metrics_sessions_entry_is_watched(self):
         body = ("# Progress\n\n- x\n\nmetrics_sessions:\n"
