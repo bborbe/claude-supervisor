@@ -1831,6 +1831,57 @@ class PostedCloserTest(unittest.TestCase):
         self._write({"closer": "pick — 1. x"})
         self.assertEqual(wnm.posted_closer("session-a"), "")
 
+    def test_a_future_dated_record_is_ignored(self):
+        # A `ts` ahead of now makes the delta negative, so it would never exceed
+        # the TTL and the record would stay authoritative indefinitely -- the
+        # unbounded case the window exists to prevent, reached by a clock-skewed
+        # or buggy poster rather than by a typo.
+        self._write({"closer": "pick — 1. x", "ts": time.time() + 86400})
+        self.assertEqual(wnm.posted_closer("session-a"), "")
+
+
+class PostedCloserTtlFromEnv(unittest.TestCase):
+    """`_ttl_from_env` must cost the window, never the import.
+
+    An unguarded `float()` at module scope raises ValueError at import, which
+    kills the reader outright rather than falling back to the default -- and
+    `inf`/`nan` parse as floats while making every comparison false, so the
+    record would never expire. Both are the unbounded case arriving by a
+    different route, which is why only a finite positive window is accepted.
+    """
+
+    def _ttl(self, value):
+        original = os.environ.get("ATTENTION_POSTED_CLOSER_TTL")
+        try:
+            os.environ.pop("ATTENTION_POSTED_CLOSER_TTL", None)
+            if value is not None:
+                os.environ["ATTENTION_POSTED_CLOSER_TTL"] = value
+            return wnm._ttl_from_env()
+        finally:
+            if original is None:
+                os.environ.pop("ATTENTION_POSTED_CLOSER_TTL", None)
+            else:
+                os.environ["ATTENTION_POSTED_CLOSER_TTL"] = original
+
+    def test_unset_uses_the_default(self):
+        self.assertEqual(self._ttl(None), 6 * 3600)
+
+    def test_a_non_numeric_override_falls_back(self):
+        self.assertEqual(self._ttl("abc"), 6 * 3600)
+
+    def test_infinity_does_not_disable_expiry(self):
+        self.assertEqual(self._ttl("inf"), 6 * 3600)
+
+    def test_nan_does_not_disable_expiry(self):
+        self.assertEqual(self._ttl("nan"), 6 * 3600)
+
+    def test_zero_and_negative_fall_back(self):
+        self.assertEqual(self._ttl("0"), 6 * 3600)
+        self.assertEqual(self._ttl("-5"), 6 * 3600)
+
+    def test_a_valid_override_is_honoured(self):
+        self.assertEqual(self._ttl("7200"), 7200.0)
+
 
 if __name__ == "__main__":
     unittest.main()
