@@ -688,6 +688,25 @@ class TestStorage(Base):
         self.assertEqual(rc, self.m.EXIT_CHANGE)
         self.assertIn("SAVED", out)
 
+    def test_save_names_both_provenance_paths_labelled(self):
+        """The two halves the drive leg's dispatch takes from *different* producers.
+
+        `--save` writes the store while the gate writes the snapshot, and the two paths
+        sit one directory apart and read alike — so the caller once took the wrong half
+        (measured 2026-09-30: the store's `recorded_at` passed where the snapshot's was
+        required). Each label names the half *its* file carries, which is the whole
+        deliverable, so it is pinned here rather than left to the tolerant
+        `assertIn("SAVED", out)` — that assertion passes with both lines deleted.
+        """
+        rc, out = self.save("ATopic")
+        self.assertEqual(rc, self.m.EXIT_CHANGE)
+        self.assertIn("store:    %s" % self.m.state_path("ATopic"), out)
+        self.assertIn("(bucket_sets)", out)
+        self.assertIn(
+            "snapshot: %s" % self.m.loop_snapshot_path(self.vault, "ATopic"), out
+        )
+        self.assertIn("(recorded_at source)", out)
+
 
 class TestPayloadWriter(Base):
     """`--write-payload` is the writer every tick goes through — the sweep reader calls it

@@ -4,7 +4,6 @@ allowed-tools:
   - Read
   - CronList
   - CronDelete
-  - ScheduleWakeup
   - TaskStop
   - Bash(python3:*)
 argument-hint: "(no argument)"
