@@ -86,7 +86,7 @@ wezterm cli get-text --pane-id <NEW-PANE-ID>
 
 **Veto — type nothing, and report `vetoed` with the pane's `jump-link.py` line — when either holds:**
 
-- the pane shows a selection modal (`Enter to select`), or
+- the pane carries `Enter to select` at the start of a line (a selection modal), or
 - the composer is not empty.
 
 A pane that came up holding a modal is precisely the state the 2026-09-20 run misread as a live gate. Typing into it turns any keystroke into a menu selection, and handing the operator the pane is the honest alternative to answering for them.
