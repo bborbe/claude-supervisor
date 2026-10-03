@@ -367,9 +367,7 @@ Plain markdown, in this order, omitting empty sections:
   └────────────────────────────────────────────┴────────────┴─────────────────────┴───────────┴───────────────────┘
 
 Blocker verdicts:
-  ```
   <task>	<blocked|ready|unreadable>	<unmet…>	<entries>
-  ```
 Candidates: <task> — ids <a,b,c> — <reason>
 Collisions: <id> — <n> non-terminal carriers — <task A>, <task B>
 Delta: <what moved, or "no change">
@@ -390,9 +388,7 @@ Tracked (4): <task> · <task> · <task> · <task>
   └────────────────────────────────────────────┴────────────┴─────────────────────┴───────────┴───────────────────┘
 
 Blocker verdicts:
-  ```
   <task>	<blocked|ready|unreadable>	<unmet…>	<entries>
-  ```
 Candidates: <task> — ids <a,b,c> — <reason>
 Collisions: <id> — <n> non-terminal carriers — <task A>, <task B>
 Delta: <what moved, or "no change">
