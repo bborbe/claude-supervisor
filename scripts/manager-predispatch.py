@@ -952,6 +952,89 @@ def loop_snapshot_path(vault: str, subject: str) -> str:
     return os.path.join(base, vname, f"{slug(subject)}.snapshot.json")
 
 
+# The shapes a caller/gate disagreement can take — and the two that are not disagreements
+# at all. Named separately because the whole defect this discriminates is that ONE line
+# rendered for all of them: a scan that is too small looks exactly like a gate that gained
+# a row, and a scan that is too large looks exactly like a gate that is missing one, so the
+# direction that matters is the silent one.
+DIVERGENCE_HEALTHY = "healthy"
+DIVERGENCE_CALLER_FORMAT = "caller-format"
+DIVERGENCE_CALLER_DROPPED = "caller-dropped"
+DIVERGENCE_CALLER_OVERSHOOT = "caller-overshoot"
+DIVERGENCE_BOTH_MOVED = "both-moved"
+DIVERGENCE_UNCLASSIFIED = "unclassified"
+
+# The label each divergent shape renders under. One glyph, distinct words — the convention
+# the Manager Session runbook already uses for causally different states (`⏸️ blocked/hold`
+# vs `⏸️ blocked/upstream`), because two causes sharing a word is how they become one cause
+# to the reader again. `DIVERGENCE_HEALTHY` is absent on purpose: it is not a divergence,
+# so it never renders under the `⚠️` glyph at all.
+DIVERGENCE_LABEL = {
+    DIVERGENCE_CALLER_FORMAT: "caller-format",
+    DIVERGENCE_CALLER_DROPPED: "caller-scan-suspect",
+    DIVERGENCE_CALLER_OVERSHOOT: "caller-overshoot",
+    DIVERGENCE_BOTH_MOVED: "both-sides-moved",
+    DIVERGENCE_UNCLASSIFIED: "unclassified",
+}
+
+
+def classify_divergence(mine, gate, members) -> tuple[str, str]:
+    """-> (kind, sentence) for a caller set that disagrees with the gate's membership.
+
+    `members` is the page's *declared* membership — the same list `resolve_subject` hands
+    the gate — or None when that declaration could not be read. First match wins, and the
+    order is the argument rather than an accident:
+
+    - the **healthy** shape is tested before `caller-dropped`, because both can hold
+      `only_mine <= members`; the healthy one is the one with an *empty* gate-only;
+    - the **disjoint** shape is tested before either, because it is a caller-side format
+      error wearing the largest possible disagreement's clothes — two independently-derived
+      memberships cannot each hold every name the other lacks. Measured 2026-10-02 (Work
+      Approval, tick #90): a normalizer whose BSD `sed` never fired wrote all 11 names with
+      their `— description` tails, and the report rendered `11 caller-only · 11 gate-only`,
+      a shape that reads as total disagreement and is total garbage.
+
+    `members is None` returns UNCLASSIFIED rather than a guess. "I could not check" and
+    "they agree" are the two states this mode exists to tell apart, and collapsing them one
+    level down is the same defect the fail-open branch below refuses.
+    """
+    only_mine = set(mine) - set(gate)
+    only_gate = set(gate) - set(mine)
+    if members is None:
+        return DIVERGENCE_UNCLASSIFIED, (
+            "the page's declared membership could not be read, so the shape is "
+            "unclassified and neither side is exonerated"
+        )
+    member_set = set(members)
+    if not only_gate and only_mine <= member_set:
+        return DIVERGENCE_HEALTHY, (
+            f"caller-only is within the {len(member_set)} declared member(s) and gate-only "
+            "is empty — the known healthy asymmetry, not a divergence"
+        )
+    if mine and gate and not (set(mine) & set(gate)):
+        return DIVERGENCE_CALLER_FORMAT, (
+            "the two sets share no name at all — two independently-derived memberships "
+            "cannot each hold every name the other lacks, so this is a caller-side format "
+            "error (suffixes, casing, or an extractor that kept a description tail), not a "
+            "membership disagreement"
+        )
+    if only_gate and only_mine <= member_set:
+        return DIVERGENCE_CALLER_DROPPED, (
+            "the caller carries nothing beyond the declared membership while the gate "
+            "carries names it lacks — the caller's scan is the side more likely wrong: it "
+            "dropped something"
+        )
+    if not only_gate:
+        return DIVERGENCE_CALLER_OVERSHOOT, (
+            "the caller carries names the gate does not, beyond the declared membership — "
+            "the caller's scan is too large, or the gate's snapshot is a refresh behind"
+        )
+    return DIVERGENCE_BOTH_MOVED, (
+        "the caller carries names beyond the declared membership and the gate carries "
+        "names the caller lacks — neither side is exonerated"
+    )
+
+
 def load_state(subject: str) -> dict:
     """The raw stored payload, or {} — used for the cross-run busy-since map."""
     try:
@@ -1511,6 +1594,13 @@ def main(argv: list[str]) -> int:
         # Nothing else could see it: APFS is case-insensitive, so `os.path.exists`,
         # `open()`, Obsidian's link resolver and `ls` all succeed on the capitalised path,
         # and no sweep notices because neither source is internally inconsistent.
+        # ⚠️ What that framing got wrong is that the *caller's* half is not a derivation at
+        # all — it is a scan the manager writes fresh every tick, specified nowhere and
+        # shipped nowhere. So one `⚠️ DIVERGENCE` line rendered for three causally
+        # different situations: a wrong caller scan, a stale gate snapshot, and a genuine
+        # membership disagreement. `classify_divergence` tells them apart, and the healthy
+        # shape (caller-only within the declared membership, gate-only empty) stops being a
+        # warning at all.
         try:
             with open(tracked_path(args.subject), encoding="utf-8") as fh:
                 mine = {ln.strip() for ln in fh if ln.strip()}
@@ -1520,7 +1610,8 @@ def main(argv: list[str]) -> int:
         snap = loop_snapshot_path(args.vault, args.subject)
         try:
             with open(snap, encoding="utf-8") as fh:
-                gate = set(json.load(fh).get("tasks") or {})
+                snap_payload = json.load(fh)
+            gate = set(snap_payload.get("tasks") or {})
         except (OSError, json.JSONDecodeError) as exc:
             # Fail-open in the gate's own sense: an unverifiable membership is never
             # reported as agreement. "I could not check" and "they match" are precisely
@@ -1539,11 +1630,38 @@ def main(argv: list[str]) -> int:
         if not only_mine and not only_gate:
             print("  memberships identical")
             return EXIT_NOCHANGE
+
+        # Which of the three causes this is. The declaration is read through the same
+        # resolver the gate itself uses, so "healthy" is a comparison against the page's
+        # own declaration rather than against a remembered shape — and an unreadable page
+        # yields UNCLASSIFIED rather than a guess.
+        try:
+            _branch, members = resolve_subject(args.vault, args.subject)
+        except (ValueError, OSError) as exc:
+            print(f"  declared membership unreadable ({exc})", file=sys.stderr)
+            members = None
+        kind, sentence = classify_divergence(mine, gate, members)
+
+        # Every reading this verdict rests on, printed rather than assumed: the two counts
+        # and the two clocks. A gate snapshot that predates the caller's own scan is cause
+        # (2) made visible — stated, not claimed, because a stale snapshot and a too-large
+        # scan render the same shape.
+        try:
+            scanned_at = datetime.fromtimestamp(
+                os.path.getmtime(tracked_path(args.subject))
+            ).isoformat(timespec="seconds")
+        except OSError:
+            scanned_at = "unstated"
         print(
-            f"⚠️ DIVERGENCE: {len(only_mine)} in the caller's set only, {len(only_gate)} in "
-            "the gate's only — a dispatch on either is a dispatch on a set nothing has "
-            "reconciled, and both sources read as self-consistent"
+            f"  reading: caller-only {len(only_mine)} · gate-only {len(only_gate)} · "
+            f"gate snapshot recorded_at {snap_payload.get('recorded_at') or 'unstated'} · "
+            f"caller scan written {scanned_at}"
         )
+
+        if kind == DIVERGENCE_HEALTHY:
+            print(f"✅ COMPARE healthy — {sentence}")
+            return EXIT_NOCHANGE
+        print(f"⚠️ DIVERGENCE ({DIVERGENCE_LABEL[kind]}): {sentence}")
         for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
             for n in names[:10]:
                 print(f"  {label}: {n}")
