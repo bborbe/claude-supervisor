@@ -23,6 +23,8 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -35,6 +37,7 @@ _spec.loader.exec_module(gf)
 
 ME = "92de43c3-bd91-409d-a33e-824a61e5706a"
 PEER = "64b4a415-906d-457f-81f9-48a842007b88"
+GATED = "33333333-3333-4333-8333-333333333333"
 
 # Distinct from None, which is a MEANINGFUL value here (unknown liveness).
 _UNSET = object()
@@ -332,6 +335,17 @@ class Claims(unittest.TestCase):
     def test_self_session_beats_a_claim(self):
         self.assertEqual(self.call(ME, None, {ME: PEER}), (gf.EMIT, "self"))
 
+    def test_own_worker_beats_a_peer_claim(self):
+        """The keep-set invariant, which the claim branch sits BELOW on purpose.
+
+        A manager's own workers are the panes it EXISTS to see, so a peer's
+        claim must never silence one. The PREDECESSOR warning in the module
+        docstring records a measured incident of a manager silently losing four
+        of its own workers; hoisting `own-worker` above the claim keeps that
+        from coming back through the claim door.
+        """
+        self.assertEqual(self.call("w", ME, {"w": PEER}), (gf.EMIT, "own-worker"))
+
     def test_absent_claims_mapping_is_the_pre_claim_behaviour(self):
         self.assertEqual(self.call("w", None, None), (gf.EMIT, "unowned"))
 
@@ -383,6 +397,61 @@ class EvaluateWithClaims(unittest.TestCase):
         items = [{"pane": "372", "session_id": "884016da", "ts": 1}]
         call, reason, _, _ = gf.evaluate("372", {}, {PEER}, items, ME, {})
         self.assertEqual((call, reason), (gf.EMIT, "unowned"))
+
+
+class ClaimsFilePath(unittest.TestCase):
+    """The CLI path to the new input, end to end.
+
+    The writer (`ownership-claim.py`) resolves its store from
+    `SUPERVISOR_OWNERSHIP_CLAIMS`. A reader that honours only its own default
+    writes a claim nothing ever consults -- recorded, listed by `list`, and
+    silently ignored by every watcher. These run the script as a subprocess so
+    the wiring from argv and from the environment is what is exercised.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        os.makedirs(self.state)
+        os.makedirs(self.registry)
+        with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "open", "item_id": "1", "pane": "372", "session_id": GATED,
+            }) + "\n")
+        with open(os.path.join(self.registry, "p.json"), "w", encoding="utf-8") as handle:
+            json.dump({"sessionId": PEER}, handle)
+        self.claims = os.path.join(self.dir, "claims.json")
+
+    def write_claims(self):
+        with open(self.claims, "w", encoding="utf-8") as handle:
+            json.dump({"claims": {GATED: {"session": GATED, "manager": PEER}}}, handle)
+
+    def run_filter(self, *extra, env=None):
+        return subprocess.run(
+            [sys.executable, _SCRIPT, "--pane", "372", "--self", ME, "--explain",
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", os.path.join(self.dir, "ledger"), *extra],
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_claims_file_flag_drops_a_claimed_pane(self):
+        self.write_claims()
+        result = self.run_filter("--claims-file", self.claims)
+        self.assertIn("drop claimed", result.stdout, result.stderr)
+
+    def test_env_override_is_honoured_without_the_flag(self):
+        """The writer's env var must reach the reader, or the store is a no-op."""
+        self.write_claims()
+        env = dict(os.environ, SUPERVISOR_OWNERSHIP_CLAIMS=self.claims)
+        result = self.run_filter(env=env)
+        self.assertIn("drop claimed", result.stdout, result.stderr)
+
+    def test_absent_claim_file_still_emits(self):
+        result = self.run_filter("--claims-file", os.path.join(self.dir, "absent.json"))
+        self.assertIn("emit unowned", result.stdout, result.stderr)
 
 
 if __name__ == "__main__":

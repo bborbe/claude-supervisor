@@ -151,6 +151,12 @@ def cmd_claim(args):
     with Locked():
         data = _read()
         entry = data["claims"].get(args.session)
+        if not isinstance(entry, dict):
+            # A non-dict entry is malformed, and the reader already skips this
+            # shape (gate-owner-filter.py `load_claims`). Treating it as absent
+            # here keeps a hand-edited file from killing the claim with a
+            # traceback while every watcher reads straight past it.
+            entry = None
         if entry:
             holder = entry.get("manager")
             if holder == manager:
@@ -191,7 +197,8 @@ def cmd_release(args):
             print("no claim for %s" % args.session)
             return 0
         _write(data)
-        print("released %s (was held by %s)" % (args.session, entry.get("manager", "?")))
+        holder = entry.get("manager", "?") if isinstance(entry, dict) else "?"
+        print("released %s (was held by %s)" % (args.session, holder))
         return 0
 
 

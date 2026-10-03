@@ -104,7 +104,13 @@ import sys
 STATE = os.path.expanduser("~/.claude/state/attention")
 LEDGER = os.path.expanduser("~/.local/state/claude-supervisor/sessions")
 REGISTRY = os.path.expanduser("~/.claude/sessions")
-CLAIMS = os.path.expanduser("~/.claude/state/ownership-claims.json")
+# Same env override the writer (`ownership-claim.py`) honours, deliberately: a
+# writer pointed at one file while every reader reads another is a SILENT
+# no-op -- the claim is recorded, `list` reports it held, and no watcher ever
+# consults it. The two resolutions must not drift.
+CLAIMS = os.environ.get("SUPERVISOR_OWNERSHIP_CLAIMS") or os.path.expanduser(
+    "~/.claude/state/ownership-claims.json"
+)
 
 EMIT = "emit"
 DROP = "drop"
@@ -257,6 +263,15 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None):
         return EMIT, "unowned"
     if self_id and session_id == self_id:
         return EMIT, "self"
+    if self_id and spawner == self_id:
+        # Hoisted ABOVE the claim branch, deliberately: a manager's own workers
+        # are the panes it EXISTS to see, so a peer's claim must never silence
+        # them. The PREDECESSOR warning above records a measured incident of a
+        # manager silently losing its own workers; this keeps that from coming
+        # back through the claim door. Hoisting changes nothing on the spawner
+        # path -- with `spawner` falsy this test is False and the `not spawner`
+        # return below still answers `unowned`.
+        return EMIT, "own-worker"
     if claims:
         # The claim is checked BEFORE the `not spawner` early return, because a
         # pane with no spawner is exactly the case this input exists for: it is
@@ -272,8 +287,6 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None):
             return DROP, "claimed"
     if not spawner:
         return EMIT, "unowned"
-    if self_id and spawner == self_id:
-        return EMIT, "own-worker"
     if not is_manager(spawner, ledger):
         return EMIT, "worker-spawner"
     if live is None:
