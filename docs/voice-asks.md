@@ -7,7 +7,7 @@ Voice reaches the operator only while they are near audio; the board is the dura
 ## The rule
 
 - **A question** is a `say` whose text contains `?` anywhere — mid-text counts ("Want a worker on it? It has been idle since noon.").
-- Before or within 60 s of voicing it, post the same question with `scripts/attention-ask.py post` (dedup key, payload, options, your recommendation), then `poll` for the answer.
+- Before or within 60 s of voicing it, post the same question with `scripts/attention-ask.py post` (dedup key, payload, options, your recommendation, **and `--closer`**), then `poll` for the answer. ⚠️ **Pass `--closer` with the `👤 You:` line you will end the turn on whenever that line carries the same ask** — a voiced question is usually the closer's own ask, which is precisely the shape that mints a duplicate card: the Stop hook mirrors the closer as a second item for one question, and the operator spends an action dismissing the echo. Omitting it is safe but leaves the duplicate live.
 - The card carries the substance; the voice only points at it. One question, two channels, **one** answer path: the board.
 - A `say` with no question (verdicts, progress) needs no card.
 
