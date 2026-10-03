@@ -1003,6 +1003,9 @@ class TestTrackedArtifacts(Base):
         self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
         self.assertNotIn("DIVERGENCE", out)
         self.assertIn("healthy", out)
+        # The reading line prints *before* the healthy early-return, so it is on this path
+        # too — pinned here, or it could be deleted or broken without a test noticing.
+        self.assertIn("reading:", out)
 
     def test_compare_names_the_caller_side_when_the_scan_dropped_a_name(self):
         """Tick 41's shape: the caller's own set is exactly the healthy asymmetry, and the

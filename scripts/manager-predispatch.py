@@ -957,25 +957,19 @@ def loop_snapshot_path(vault: str, subject: str) -> str:
 # rendered for all of them: a scan that is too small looks exactly like a gate that gained
 # a row, and a scan that is too large looks exactly like a gate that is missing one, so the
 # direction that matters is the silent one.
+# Each value **is** the label it renders under — one name per concept, because a constant
+# reading `caller-dropped` while the report prints `caller-scan-suspect` is the same
+# one-line-two-readings split this discriminator exists to remove, one level down. One
+# glyph, distinct words: the convention the Manager Session runbook already uses for
+# causally different states (`⏸️ blocked/hold` vs `⏸️ blocked/upstream`), because two causes
+# sharing a word is how they become one cause to the reader again. `DIVERGENCE_HEALTHY` is
+# never rendered under the `⚠️` glyph at all — it is not a divergence.
 DIVERGENCE_HEALTHY = "healthy"
 DIVERGENCE_CALLER_FORMAT = "caller-format"
-DIVERGENCE_CALLER_DROPPED = "caller-dropped"
+DIVERGENCE_CALLER_SCAN_SUSPECT = "caller-scan-suspect"
 DIVERGENCE_CALLER_OVERSHOOT = "caller-overshoot"
-DIVERGENCE_BOTH_MOVED = "both-moved"
+DIVERGENCE_BOTH_MOVED = "both-sides-moved"
 DIVERGENCE_UNCLASSIFIED = "unclassified"
-
-# The label each divergent shape renders under. One glyph, distinct words — the convention
-# the Manager Session runbook already uses for causally different states (`⏸️ blocked/hold`
-# vs `⏸️ blocked/upstream`), because two causes sharing a word is how they become one cause
-# to the reader again. `DIVERGENCE_HEALTHY` is absent on purpose: it is not a divergence,
-# so it never renders under the `⚠️` glyph at all.
-DIVERGENCE_LABEL = {
-    DIVERGENCE_CALLER_FORMAT: "caller-format",
-    DIVERGENCE_CALLER_DROPPED: "caller-scan-suspect",
-    DIVERGENCE_CALLER_OVERSHOOT: "caller-overshoot",
-    DIVERGENCE_BOTH_MOVED: "both-sides-moved",
-    DIVERGENCE_UNCLASSIFIED: "unclassified",
-}
 
 
 def classify_divergence(mine, gate, members) -> tuple[str, str]:
@@ -985,14 +979,18 @@ def classify_divergence(mine, gate, members) -> tuple[str, str]:
     the gate — or None when that declaration could not be read. First match wins, and the
     order is the argument rather than an accident:
 
-    - the **healthy** shape is tested before `caller-dropped`, because both can hold
-      `only_mine <= members`; the healthy one is the one with an *empty* gate-only;
-    - the **disjoint** shape is tested before either, because it is a caller-side format
-      error wearing the largest possible disagreement's clothes — two independently-derived
-      memberships cannot each hold every name the other lacks. Measured 2026-10-02 (Work
-      Approval, tick #90): a normalizer whose BSD `sed` never fired wrote all 11 names with
-      their `— description` tails, and the report rendered `11 caller-only · 11 gate-only`,
-      a shape that reads as total disagreement and is total garbage.
+    - **healthy** is tested first, because it and `caller-scan-suspect` can both hold
+      `only_mine <= members`; the healthy one is the one with an *empty* gate-only, and it
+      must not fall through to a divergence label;
+    - **disjoint** next, because it is a caller-side format error wearing the largest
+      possible disagreement's clothes — two independently-derived memberships cannot each
+      hold every name the other lacks. Measured 2026-10-02 (Work Approval, tick #90): a
+      normalizer whose BSD `sed` never fired wrote all 11 names with their `— description`
+      tails, and the report rendered `11 caller-only · 11 gate-only`, a shape that reads as
+      total disagreement and is total garbage. ⚠️ Healthy and disjoint are **mutually
+      exclusive** — disjointness forces `only_gate` non-empty, which already disqualifies
+      healthy — so their relative order is behaviourally inert; only
+      healthy-before-`caller-scan-suspect` carries weight.
 
     `members is None` returns UNCLASSIFIED rather than a guess. "I could not check" and
     "they agree" are the two states this mode exists to tell apart, and collapsing them one
@@ -1026,7 +1024,7 @@ def classify_divergence(mine, gate, members) -> tuple[str, str]:
             "membership disagreement"
         )
     if only_gate and only_mine <= member_set:
-        return DIVERGENCE_CALLER_DROPPED, (
+        return DIVERGENCE_CALLER_SCAN_SUSPECT, (
             "the caller carries nothing beyond the declared membership while the gate "
             "carries names it lacks — the caller's scan is the side more likely wrong: it "
             "dropped something"
@@ -1654,9 +1652,14 @@ def main(argv: list[str]) -> int:
         # (2) made visible — stated, not claimed, because a stale snapshot and a too-large
         # scan render the same shape.
         try:
-            scanned_at = datetime.fromtimestamp(
-                os.path.getmtime(tracked_path(args.subject))
-            ).isoformat(timespec="seconds")
+            # `.astimezone()` so both clocks on the `reading:` line carry an offset — the
+            # line exists to be compared, and a naive local mtime beside a tz-aware
+            # `recorded_at` cannot be compared across a boundary.
+            scanned_at = (
+                datetime.fromtimestamp(os.path.getmtime(tracked_path(args.subject)))
+                .astimezone()
+                .isoformat(timespec="seconds")
+            )
         except OSError:
             scanned_at = "unstated"
         print(
@@ -1668,7 +1671,7 @@ def main(argv: list[str]) -> int:
         if kind == DIVERGENCE_HEALTHY:
             print(f"✅ COMPARE healthy — {sentence}")
             return EXIT_NOCHANGE
-        print(f"⚠️ DIVERGENCE ({DIVERGENCE_LABEL[kind]}): {sentence}")
+        print(f"⚠️ DIVERGENCE ({kind}): {sentence}")
         for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
             for n in names[:10]:
                 print(f"  {label}: {n}")
