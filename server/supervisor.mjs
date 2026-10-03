@@ -26,6 +26,7 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { newSessionId, startClusterSession } from './cluster-spawn.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
@@ -565,23 +566,37 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 // so it is not supervised the way the headless path is. That also means no filter
 // is needed in pending_permissions / await_permission — an interactive worker never
 // calls canUseTool, so no permission record is ever created for it.
-// Resolve the LAUNCHER SCRIPT, not the bare `claude` binary. The cc-* scripts carry
-// the router env (ANTHROPIC_BASE_URL), the MCP config and the model selection, and
-// invoking `claude` directly routes around all three — the same reason /open reads
-// claude_script from vault-cli config instead of calling the binary.
-function resolveClaudeCmd(cwd) {
-  if (config.claudeCmd) return config.claudeCmd
+// The vaults this machine is configured for — the one source that knows each vault's
+// directory and its `claude_script` together, and the same source /open reads.
+//
+// An unreadable list returns `[]`, which `resolveWorkerTarget` REFUSES on rather than
+// resolving against nothing. Returning a fallback here instead is what produced the
+// defect this replaced: `vaults.find(v => v.name === 'personal')` matched nothing once
+// that vault was renamed, and the launcher then silently became the bare `claude` binary.
+function loadVaults() {
   try {
     const out = spawnSync('vault-cli', ['config', 'list', '--output', 'json'], { encoding: 'utf8' })
-    if (out.status === 0) {
-      const vaults = JSON.parse(out.stdout)
-      const match =
-        vaults.find((v) => v.path && cwd.startsWith(v.path)) ||
-        vaults.find((v) => v.name === 'personal')
-      if (match?.claude_script) return match.claude_script
-    }
-  } catch {}
-  return 'claude'
+    if (out.status !== 0) return []
+    const parsed = JSON.parse(out.stdout)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+// The model a launcher script starts its session with, or `null` when it cannot be read.
+//
+// Reported in the spawn response so a caller can tell "my worker came up on deepseek" from
+// "it came up on Opus" without opening a pane. That verification is exactly what the
+// 2026-10-03 batch could not perform: 27 workers ran on Opus under a launcher the response
+// never named, and nothing in the reply distinguished them from a correct spawn.
+function launcherModelFor(scriptPath) {
+  if (!scriptPath) return null
+  try {
+    return parseLauncherModel(readFileSync(scriptPath, 'utf8'))
+  } catch {
+    return null
+  }
 }
 
 // Read the servers the launcher passes via `--mcp-config <file>`. These arrive as a
@@ -610,8 +625,12 @@ function resolveMcpServers(claudeCmd) {
   }
 }
 
-async function spawnInteractiveAgent({ id, prompt, cwd, label, windowId, chip }) {
-  const claudeCmd = resolveClaudeCmd(cwd)
+async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowId, chip }) {
+  // Handed in rather than resolved here. The target is resolved once, in spawnAgent, so a
+  // bad path costs no tab — and so the tab path and the headless path cannot disagree about
+  // which launcher this spawn uses, which is how a worker's `launcher` field came to mean
+  // something different depending on which way it opened.
+  const claudeCmd = launcher
   // Prefix the tab TITLE so a supervised worker is identifiable at a glance in the
   // tab bar and the fleet roster — the two places a normal session is otherwise
   // indistinguishable. The agent's own `label` stays unprefixed, so list_agents
@@ -960,7 +979,20 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
 
   // Resolved before anything is spawned, so a bad path costs no worker, no ledger
   // record, and no half-started session running under rules nobody chose.
-  const workerCwd = cwd || process.cwd()
+  //
+  // REFUSED, not defaulted, and that is the whole fix. Both halves used to be silent: an
+  // absent `cwd` became this server's own working directory, and an unresolvable launcher
+  // became the vault named `personal` — since renamed, so it matched nothing — and then the
+  // bare `claude` binary. Measured 2026-10-03: 27 workers spawned that way in one batch,
+  // every one in the supervisor repo and on Opus instead of the vault's
+  // `cc-private-deepseek`, with nothing in the reply to say so.
+  const workerTarget = resolveWorkerTarget({ cwd, vault, vaults: loadVaults(), serverCwd: process.cwd() })
+  if (workerTarget.error) return { error: workerTarget.error }
+  const workerCwd = workerTarget.cwd
+  // `SUPERVISOR_CLAUDE_CMD` stays the top override: an explicit operator setting rather
+  // than a fallback, and the documented way to force a launcher for a one-off spawn.
+  const workerLauncher = config.claudeCmd || workerTarget.launcher
+  const workerModel = launcherModelFor(workerLauncher)
   let workerRules = null
   let resolvedPolicyPath = null
   if (policyPath) {
@@ -1095,7 +1127,15 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // from wherever the tab happened to land.
     role: roleResolution.role,
     windowId: targetWindowId ?? null,
-    launcher: null,
+    // Which vault this worker belongs to, the launcher it inherits, and the model that
+    // launcher starts — carried on the agent so the reply, agent_status and the ledger all
+    // answer "where did this spawn go, and under what" from one value rather than
+    // re-deriving it from a config that may have changed since. The model rides along
+    // because it is the half a caller cannot otherwise check: a wrong launcher and a wrong
+    // model are the same defect seen from two sides, and the 2026-10-03 batch had neither.
+    vault: workerTarget.vault,
+    launcher: workerLauncher,
+    model: workerModel,
     permissions: [],
     transcript: [],
     error: null,
@@ -1105,7 +1145,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -1120,6 +1160,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       label: agent.label,
       cwd: agent.cwd,
       status: agent.status,
+      // The three fields the 2026-10-03 incident had no way to read. A caller could see
+      // only the `cwd` it passed and nothing about where the worker went or what it ran on,
+      // so a batch of 27 wrong workers returned exactly what a correct one returns.
+      vault: agent.vault,
+      launcher: agent.launcher,
+      model: agent.model,
       interactive: true,
       mode_source: agent.modeSource,
       role: agent.role,
@@ -1140,9 +1186,10 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     }
   }
 
-  // Resolved once and kept, so the ledger records which launcher the worker inherited
-  // rather than re-deriving it later from a config that may have changed.
-  agent.launcher = resolveClaudeCmd(agent.cwd)
+  // `agent.launcher` is already set — resolved once, above, alongside the cwd it belongs
+  // to. It used to be re-derived here from `agent.cwd` alone, which meant the tab path and
+  // the headless path each resolved the launcher separately and could disagree about the
+  // same spawn.
 
   const q = query({
     prompt,
@@ -1187,6 +1234,11 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     label: agent.label,
     cwd: agent.cwd,
     status: agent.status,
+    // Same three fields as the tab path, and for the same reason: the launcher and the
+    // model a worker runs under are not observable from the arguments that produced it.
+    vault: agent.vault,
+    launcher: agent.launcher,
+    model: agent.model,
     interactive: false,
     mode_source: agent.modeSource,
     // Reported here for the SAME reason as on the tab path, and it is not redundant: the
@@ -1275,7 +1327,11 @@ const TOOLS = [
       type: 'object',
       properties: {
         prompt: { type: 'string', description: 'The task for the new session.' },
-        cwd: { type: 'string', description: 'Working directory (default: supervisor cwd).' },
+        cwd: {
+          type: 'string',
+          description:
+            'Working directory for the worker. It must resolve to a configured vault — the vault supplies the LAUNCHER, so a cwd outside every vault is refused rather than run under a guessed one. Prefer `vault` when the worker belongs to a vault rather than to a specific directory. Omitting BOTH `cwd` and `vault` is REFUSED: it used to default to this server\'s own working directory, which is how 27 workers came up in the supervisor repo on the wrong model in one batch (2026-10-03).',
+        },
         label: { type: 'string', description: 'Short label so you can tell agents apart.' },
         role: {
           type: 'string',
@@ -1307,7 +1363,7 @@ const TOOLS = [
         vault: {
           type: 'string',
           description:
-            'The vault the `task` lives in. Optional, and meaningful only with `target: "cluster"` — task names collide across boards, so name the vault whenever the task is not uniquely named.',
+            'The vault this worker belongs to. Resolves BOTH the working directory and the launcher (that vault\'s `claude_script`) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
         },
         resume: {
           type: 'string',
