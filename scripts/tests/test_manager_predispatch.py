@@ -2045,6 +2045,43 @@ class TestBlockedVerdictsMode(Base):
         self.assertEqual(lines["AWithList"][2], "")
         self.assertEqual(lines["AWithoutList"][2], "")
 
+    def test_a_bare_name_entry_is_unmet_not_absent(self):
+        # `blocked_by` entries are names OR `[[wikilinks]]`. A bare name yields no
+        # `[[...]]` match, so reading it as an EMPTY list would satisfy the
+        # `ready-to-start` clause vacuously — the one direction this mode must never
+        # fail in, and the shape the rule it replaces explicitly admits.
+        self.write(
+            "25 Tasks/ARow.md",
+            "---\npage_type: task\nstatus: next\nblocked_by:\n    - Met One\n"
+            "---\nTags: [[Task]]\n",
+        )
+        self.stage("ARow")
+        line = self.lines()["ARow"]
+        self.assertEqual(line[1], "blocked")
+        self.assertEqual(line[2], self.m.UNPARSED_BLOCKER)
+
+    def test_a_declared_but_empty_list_is_still_ready(self):
+        # The other side of the same rule, and the reason it cannot be a blanket
+        # "the key is present" test: `blocked_by: []` and a bare `blocked_by:`
+        # declare NOTHING, and a blocker-less approved row must still read ready.
+        # Over-blocking here would empty the bucket for the whole vault.
+        for body in ("blocked_by: []\n", "blocked_by:\n"):
+            self.write(
+                "25 Tasks/ARow.md",
+                "---\npage_type: task\nstatus: next\n" + body + "---\nTags: [[Task]]\n",
+            )
+            self.stage("ARow")
+            self.assertEqual(self.lines()["ARow"][1], "ready", repr(body))
+
+    def test_a_case_mismatched_row_name_still_classifies(self):
+        # Both halves of the mode go through the resolver — the row as well as its
+        # blockers. Asserted end to end here; the discriminating assertion on the
+        # resolved path lives in test_resolve_task_file_returns_the_canonical_spelling.
+        self.blocker("Met", "completed")
+        self.row("ARow", ["Met"])
+        self.stage("arow")
+        self.assertEqual(self.lines()["arow"][1], "ready")
+
     def test_every_staged_row_is_classified_in_order(self):
         self.blocker("Met", "completed")
         self.row("AReady", ["Met"])

@@ -259,11 +259,45 @@ def unescape_scalar(text: str) -> str:
     there would be a no-op, while doing it on neither side leaves a frontmatter
     `Bob''s goal` matching nothing. The asymmetry is the fix, not an oversight —
     a name carrying no `''` is unaffected either way, which is every other name
-    in the vault. `TestBlockedByRead` pins the escape; nothing pins the `goals:`
-    widening, so an edit that moved this call out of `fm_wikilinks` would go
-    unnoticed.
+    in the vault. `TestBlockedByRead` pins the escape on `blocked_by`, and
+    `test_escaped_apostrophe_is_unescaped_for_goals_too` pins the widening to
+    `goals:` — so moving this call out of `fm_wikilinks` fails a test rather than
+    going unnoticed.
     """
     return text.replace("''", "'")
+
+
+# The unmet entry reported when `blocked_by` declares items and none parses as a
+# name. Not a page name, deliberately — it names the CONDITION, so the reader's
+# `⏸️ BLOCKED UPSTREAM:` line says what is wrong instead of naming a blocker that
+# does not exist.
+UNPARSED_BLOCKER = "<unparsed blocked_by entry>"
+
+
+def fm_list_body(fm: str, key: str) -> str | None:
+    """The text `key:` declares its items in — inline or block — else None.
+
+    The ONE place the two list shapes are recognised. `fm_wikilinks` extracts names
+    from what this returns; `blocked_by_verdict` ALSO asks whether it is non-empty,
+    so it can tell "declares no blocker" from "declares a blocker that did not parse
+    as a name". Those two answers must never come from separate shape logic: a shape
+    this extractor misses would otherwise read as *declares nothing*, and an empty
+    list satisfies the `ready-to-start` clause vacuously — the unsafe direction.
+
+    `None` means the key is absent, or present with no items at all (`key:` alone,
+    or `key: []`). A non-empty return that yields no `[[...]]` names is a different
+    thing entirely, and the caller is the one that has to tell them apart.
+    """
+    m = re.search(rf"^{re.escape(key)}:(.*)$", fm, re.M)
+    if not m:
+        return None
+    rest = m.group(1)
+    if rest.strip() and rest.strip() != "[]":
+        return rest
+    block = re.search(rf"^{re.escape(key)}:\s*\n((?:[ \t]+-.*\n?)*)", fm, re.M)
+    if not block:
+        return None
+    return block.group(1) or None
 
 
 def fm_wikilinks(fm: str, key: str) -> list[str]:
@@ -273,19 +307,29 @@ def fm_wikilinks(fm: str, key: str) -> list[str]:
     empty/absent. Block form is `key:` then indented `- '[[X]]'` lines. YAML
     escaping is undone before the names are returned — see `unescape_scalar`.
     """
-    m = re.search(rf"^{re.escape(key)}:(.*)$", fm, re.M)
-    if not m:
+    body = fm_list_body(fm, key)
+    if body is None:
         return []
-    rest = m.group(1)
-    if rest.strip() and rest.strip() != "[]":
-        return [unescape_scalar(h) for h in re.findall(r"\[\[(.+?)\]\]", rest)]
-    block = re.search(rf"^{re.escape(key)}:\s*\n((?:[ \t]+-.*\n?)*)", fm, re.M)
-    if not block:
-        return []
-    return [unescape_scalar(h) for h in re.findall(r"\[\[(.+?)\]\]", block.group(1))]
+    return [unescape_scalar(h) for h in re.findall(r"\[\[(.+?)\]\]", body)]
 
 
-def resolve_task_file(tasks_dir: str, name: str) -> str:
+def task_index(tasks_dir: str) -> dict[str, str]:
+    """`{lowercased filename: actual filename}` for `tasks_dir`, built once per run.
+
+    Built once because `resolve_task_file` is called per row AND per blocker entry;
+    a `listdir` inside that loop is O(rows x entries) full scans of a directory that
+    runs to thousands of files. Hoisting it leaves the per-row `open` as the only
+    per-row I/O, and the lookup is identical.
+    """
+    try:
+        return {entry.lower(): entry for entry in os.listdir(tasks_dir)}
+    except OSError:
+        return {}
+
+
+def resolve_task_file(
+    tasks_dir: str, name: str, index: dict[str, str] | None = None
+) -> str:
     """`name`'s task file under `tasks_dir`, matched case-insensitively.
 
     The rule this read replaces specified **case-insensitive** resolution, and the
@@ -302,15 +346,18 @@ def resolve_task_file(tasks_dir: str, name: str) -> str:
     evidence the lookup is right. Falls back to the plain join on a miss, which is
     the path a genuinely absent blocker must take — `open()` refuses it, and
     "cannot verify it is done" is the unmet direction.
+
+    ⚠️ **Both halves of this mode go through here** — the row being classified and
+    every blocker it names. Resolving only the blockers would leave the row on a
+    plain join and so leave the very asymmetry this helper exists to remove: a
+    case-mismatched tracked name would read `unreadable` on a case-sensitive
+    filesystem. That fails toward a missed dispatch rather than a wrong spawn, so it
+    is safe — but the two halves disagreeing is how a reader comes to trust one and
+    not the other.
     """
-    wanted = f"{name}.md".lower()
-    try:
-        for entry in os.listdir(tasks_dir):
-            if entry.lower() == wanted:
-                return os.path.join(tasks_dir, entry)
-    except OSError:
-        pass
-    return os.path.join(tasks_dir, f"{name}.md")
+    idx = task_index(tasks_dir) if index is None else index
+    entry = idx.get(f"{name}.md".lower())
+    return os.path.join(tasks_dir, entry if entry else f"{name}.md")
 
 
 def cell(text: str) -> str:
@@ -325,7 +372,9 @@ def cell(text: str) -> str:
     return text.replace("\t", " ").replace("\n", " ")
 
 
-def blocked_by_verdict(fm: str, tasks_dir: str) -> dict:
+def blocked_by_verdict(
+    fm: str, tasks_dir: str, index: dict[str, str] | None = None
+) -> dict:
     """Resolve every `blocked_by` entry against `tasks_dir`.
 
     The deterministic half of the sweep reader's `ready-to-start` /
@@ -345,11 +394,26 @@ def blocked_by_verdict(fm: str, tasks_dir: str) -> dict:
     neutral: it satisfies the `ready-to-start` clause vacuously.
     """
     entries = fm_wikilinks(fm, "blocked_by")
+    if not entries and fm_list_body(fm, "blocked_by"):
+        # The key declares something and NOT ONE item parsed as a name. That is not
+        # "declares no blocker": `blocked_by` entries are names OR `[[wikilinks]]`,
+        # so a bare name is a legal entry this extractor does not resolve — and an
+        # entry we cannot read is one we cannot verify. Reporting it as an empty list
+        # would satisfy the `ready-to-start` clause VACUOUSLY, which is the exact
+        # promotion this mode exists to stop, and the only place it could still fail
+        # in the unsafe direction.
+        return {
+            "entries": [],
+            "unmet": [UNPARSED_BLOCKER],
+            "blocked": True,
+        }
     unmet: list[str] = []
     for name in entries:
         try:
             with open(
-                resolve_task_file(tasks_dir, name), encoding="utf-8", errors="replace"
+                resolve_task_file(tasks_dir, name, index),
+                encoding="utf-8",
+                errors="replace",
             ) as fh:
                 blocker_fm = split_frontmatter(fh.read())
         except OSError:
@@ -2008,10 +2072,11 @@ def main(argv: list[str]) -> int:
         # would let a typo classify every row against an empty tree — which reads as
         # "no blockers found" rather than as an error.
         tasks_dir = os.path.join(args.vault, "25 Tasks")
+        index = task_index(tasks_dir)
         for name in names:
             try:
                 with open(
-                    os.path.join(tasks_dir, f"{name}.md"),
+                    resolve_task_file(tasks_dir, name, index),
                     encoding="utf-8",
                     errors="replace",
                 ) as fh:
@@ -2026,7 +2091,7 @@ def main(argv: list[str]) -> int:
                 # reader treat any word but `ready` as "not offered".
                 print(f"{cell(name)}\tunreadable\t\t")
                 continue
-            verdict = blocked_by_verdict(fm, tasks_dir)
+            verdict = blocked_by_verdict(fm, tasks_dir, index)
             # The entry count is a fourth column so the reader can pick the rows it must
             # quote back without parsing `blocked_by` itself — which is the read this mode
             # exists to replace. `0` and "every entry met" both render an empty unmet list,
