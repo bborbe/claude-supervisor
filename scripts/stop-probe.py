@@ -220,6 +220,12 @@ def main() -> int:
         f"subject  {subject or '(none recorded)'}"
         f" ({st.get('branch') or '—'}, {vault or '—'})"
     )
+    if not subject:
+        print(
+            "         ⚠️ no registration for this session — the caller passes the subject "
+            "this session manages to `manager-liveness.py --stop --topic` and never skips "
+            "the marker (commands/stop.md step 2b)"
+        )
 
     rows = gate_processes()
     if rows is None:
