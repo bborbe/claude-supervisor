@@ -997,6 +997,13 @@ def classify_divergence(mine, gate, members) -> tuple[str, str]:
     `members is None` returns UNCLASSIFIED rather than a guess. "I could not check" and
     "they agree" are the two states this mode exists to tell apart, and collapsing them one
     level down is the same defect the fail-open branch below refuses.
+
+    ⚠️ **A heuristic, not a proof, and every reader of a label must hold it that way.** It
+    names which side is *more likely* wrong from the shape alone; it never establishes which
+    side *is* wrong, and it holds no input that could — the caller's scan and the gate's
+    membership are the only two sets it ever sees. `caller-overshoot` in particular renders
+    two causes it cannot separate and says so. Read a label as *the side to check first*,
+    never as *the side already convicted*.
     """
     only_mine = set(mine) - set(gate)
     only_gate = set(gate) - set(mine)
