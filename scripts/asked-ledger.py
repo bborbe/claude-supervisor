@@ -181,8 +181,29 @@ def subject_of(args):
     both layers can agree on. A row key is stored in the entry's `session` field,
     which is the subject slot; the entry SHAPE is deliberately unchanged, because
     only the key a claim takes is in scope.
+
+    The key is NORMALISED the way `--text` is, and a key that normalises to empty
+    is refused. Both matter because `--row` is free text where `--session` was a
+    uuid:
+
+      * An un-normalised key is interpolated raw into `list`'s one-line-per-entry
+        render, so a key carrying a newline splits the entry and misaligns every
+        field after it. Normalising is symmetric across claim and resolve, so the
+        key still round-trips.
+      * `--session ""` used to store the valid key ""; the bare `or` would instead
+        fall through to `None`, writing a `null` key no later call can match --
+        and raising TypeError in json.dump(sort_keys=True) once the ledger holds
+        any other entry. Refusing is the honest answer: an empty key can never be
+        claimed or resolved by a later call.
     """
-    return args.session or args.row
+    subject = normalise(args.session or args.row)
+    if not subject:
+        sys.exit(
+            "error: the subject key is empty. --session and --row each take a\n"
+            "      non-empty value; an empty key is written into the shared ledger\n"
+            "      and can never be matched by a later claim or resolve."
+        )
+    return subject
 
 
 def cmd_claim(args):

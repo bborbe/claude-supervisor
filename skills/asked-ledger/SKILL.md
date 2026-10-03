@@ -21,12 +21,14 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py claim   --session <blocked-session-id> --layer <your-layer> --text "<the question>"
-python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py claim   --row "<the row's key>"      --layer <your-layer> --text "<the question>"
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py claim   --row '<row-key>'           --layer <your-layer> --text "<the question>"
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py resolve --session <blocked-session-id>
-python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py resolve --row "<the row's key>"
+python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py resolve --row '<row-key>'
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py list
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py prune
 ```
+
+⚠️ **Substitute `'<row-key>'` verbatim and keep it single-quoted.** A row key is a task name, not a uuid, so unlike `<blocked-session-id>` it can carry `"`, a backtick or `$(` — and inside double quotes those change the command instead of being passed through.
 
 Storage is on disk, never in context — `~/.claude/state/asked-ledger.json`, written only through the script (flock, then atomic tmp+rename). Never hand-edit the file.
 
@@ -62,6 +64,8 @@ The subject is the only join both layers can agree on: both see it, and neither 
 **Two subjects, one slot.** `--session` names the blocked session — the join for the blocked-set batch, which every layer can see. `--row` names the **row** — the join for `manager-loop`'s `under-target` card, whose candidates are `phase: todo` rows that carry **no blocked session at all**, so `--session` has nothing it could be given. Exactly one of the two is required; they are the same slot, and a row key is stored in the entry's `session` field.
 
 Naming the row is what makes the under-target disjointness check performable. Before this, that branch mandated a `--session` claim for rows that have no session, so a manager following it literally could not comply and silently substituted a hand-read of `list` — a substitute, not the check. With `--row`, two managers whose tracked sets overlap claim the **same row key**: the second is refused with exit 3 and drops the row from its card, so the duplicate is caught before either card is posted.
+
+The key is **normalised** the way `--text` is — whitespace collapsed — and a key that normalises to **empty is refused**. Both matter because a row key is free text where a session id was a uuid: an un-normalised key is interpolated raw into `list`'s one-line-per-entry render, so one carrying a newline splits the entry and misaligns every field after it; and an empty key can never be matched by a later `claim` or `resolve`. Normalising is symmetric, so the key still round-trips.
 
 ## Two marks — do not merge them
 

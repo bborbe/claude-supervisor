@@ -320,13 +320,16 @@ class RowKeyedClaims(Base):
         self.assertEqual(entry["layer"], "worker")
         self.assertEqual(entry["state"], "open")
 
-    def test_a_second_layer_is_refused_the_same_row(self):
-        """The cross-layer guard the branch exists for, on a row key -- this is
-        the check the branch could not perform at all before."""
+    def test_a_second_manager_is_refused_the_same_row(self):
+        """The contention the branch actually produces: two topic managers, BOTH
+        at --layer worker (the skill maps the goal/topic manager to `worker`),
+        whose tracked sets each contain the same row. This is the check the branch
+        could not perform at all before."""
         self.assertEqual(self.claim_row(layer="worker", asker=ASKER)[0], 0)
-        code, out, _ = self.claim_row(layer="fleet", asker=OTHER)
-        self.assertEqual(code, al.HELD, "a second layer must not take the same row")
+        code, out, _ = self.claim_row(layer="worker", asker=OTHER)
+        self.assertEqual(code, al.HELD, "a second manager must not take the same row")
         self.assertIn("held by", out)
+        self.assertIn(ASKER, out)
 
     def test_a_row_claim_resolves_by_row(self):
         """Without a row-keyed resolve the claim could never be released, and it
@@ -355,6 +358,46 @@ class RowKeyedClaims(Base):
         self.live(SUBJECT)
         self._run(["prune", "--max-age-hours", "24"])
         self.assertIn(SUBJECT, self.raw()["entries"])
+
+    def test_a_row_key_is_normalised_like_the_question_text(self):
+        """`--row` is free text, and an un-normalised key is interpolated raw into
+        `list`'s one-line-per-entry render -- a newline in it splits the entry and
+        misaligns every field after it. Normalising is symmetric, so it still
+        round-trips between claim and resolve."""
+        code, _, _ = self.claim_row(row="Some  Task\nRow")
+        self.assertEqual(code, 0)
+        self.assertIn("Some Task Row", self.raw()["entries"])
+
+        code, out, _ = self.resolve_row(row="Some  Task\nRow")
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+
+    def test_an_empty_subject_key_is_refused(self):
+        """An empty key can never be matched by a later claim or resolve. It is
+        also the case the bare `or` broke: `--session ""` fell through to None,
+        writing a `null` key that raises in json.dump(sort_keys=True) once the
+        ledger holds any other entry."""
+        code, _, err = self._run(
+            ["claim", "--session", "", "--layer", "worker", "--asker", ASKER]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("empty", err)
+
+        code, _, err = self._run(
+            ["claim", "--row", "", "--layer", "worker", "--asker", ASKER]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("empty", err)
+
+    def test_list_renders_a_row_keyed_entry(self):
+        """The consolidated list is what makes one ask cover every subject; a
+        row-keyed entry must render there, not vanish."""
+        self.claim_row(asker=ASKER, text="pick a row")
+        code, out, _ = self.listing()
+        self.assertEqual(code, 0)
+        self.assertIn("1 open claim(s)", out)
+        self.assertIn(ROW, out)
+        self.assertIn("pick a row", out)
 
     def test_neither_key_is_a_usage_error(self):
         """Negative control: the key is required, so an omitted one must refuse
