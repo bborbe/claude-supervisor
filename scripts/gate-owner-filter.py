@@ -46,7 +46,16 @@ GATED session id -- the id `session_for_pane` already resolves, so the claim
 joins with no new hop). A claim held by a LIVE manager other than this watcher
 drops the pane as `claimed`; a claim held by this watcher, or by a manager that
 is gone, or read against an unreadable registry, EMITS -- the same fail-open the
-spawner hops take, for the same reason. Without this input a pane whose session
+spawner hops take, for the same reason.
+
+⚠️ **A claim may only ADD a drop, never remove one.** The spawner path is
+resolved FIRST, and the claim is consulted only where that path emits. Running
+the claim's fail-open outcomes ahead of the spawner path would convert a
+resolved `peer-manager` drop into an emit whenever any claim existed for the
+pane -- the fail-open rule protects an *unresolvable* input, and does not reach
+a verdict the spawner path already resolved.
+
+Without this input a pane whose session
 has no spawner is emitted to every manager forever, because nothing about the
 pane changes when a manager adopts it: measured 2026-10-02, 5+ wakes in one hour
 for gates the manager could not act on, 1 of them actionable, after the Fleet
@@ -253,6 +262,28 @@ def session_for_pane(pane, items):
     return str(hits[-1].get("session_id") or "") or None
 
 
+def spawner_verdict(spawner, ledger, live):
+    """(emit|drop, reason) from the spawn edge alone.
+
+    Split out so the claim input can be consulted ONLY where this path emits.
+    A claim may ADD a drop, never remove one: running a claim's fail-open
+    outcomes ahead of this path would turn a resolved `peer-manager` drop into
+    an emit whenever any claim existed for the pane, which loses drop precision
+    and re-creates the peer-owned-wake cost the filter exists to remove. The
+    fail-open rationale -- never silence a watcher on an unresolvable input --
+    does not reach a verdict this path already resolved.
+    """
+    if not spawner:
+        return EMIT, "unowned"
+    if not is_manager(spawner, ledger):
+        return EMIT, "worker-spawner"
+    if live is None:
+        return EMIT, "liveness-unknown"
+    if spawner not in live:
+        return EMIT, "dead-manager"
+    return DROP, "peer-manager"
+
+
 def verdict(session_id, spawner, ledger, live, self_id, claims=None):
     """(emit|drop, reason) for one gated session.
 
@@ -264,18 +295,22 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None):
     if self_id and session_id == self_id:
         return EMIT, "self"
     if self_id and spawner == self_id:
-        # Hoisted ABOVE the claim branch, deliberately: a manager's own workers
-        # are the panes it EXISTS to see, so a peer's claim must never silence
-        # them. The PREDECESSOR warning above records a measured incident of a
-        # manager silently losing its own workers; this keeps that from coming
-        # back through the claim door. Hoisting changes nothing on the spawner
-        # path -- with `spawner` falsy this test is False and the `not spawner`
-        # return below still answers `unowned`.
+        # Above both the spawner path and the claim branch, deliberately: a
+        # manager's own workers are the panes it EXISTS to see, so neither a
+        # peer spawner nor a peer's claim may silence them. The PREDECESSOR
+        # warning above records a measured incident of a manager silently losing
+        # its own workers; this keeps that from returning through either door.
         return EMIT, "own-worker"
+
+    call, reason = spawner_verdict(spawner, ledger, live)
+    if call == DROP:
+        return call, reason
+
+    # The spawner path emits, so the claim can only ADD a drop. Its fail-open
+    # outcomes cost nothing here -- they land on an emit either way -- and a
+    # pane with no spawner is exactly the case this input exists for, since it
+    # is emitted permanently otherwise.
     if claims:
-        # The claim is checked BEFORE the `not spawner` early return, because a
-        # pane with no spawner is exactly the case this input exists for: it is
-        # emitted permanently otherwise.
         holder = claims.get(session_id)
         if holder:
             if self_id and holder == self_id:
@@ -285,15 +320,7 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None):
             if holder not in live:
                 return EMIT, "claim-dead"
             return DROP, "claimed"
-    if not spawner:
-        return EMIT, "unowned"
-    if not is_manager(spawner, ledger):
-        return EMIT, "worker-spawner"
-    if live is None:
-        return EMIT, "liveness-unknown"
-    if spawner not in live:
-        return EMIT, "dead-manager"
-    return DROP, "peer-manager"
+    return call, reason
 
 
 def evaluate(pane, ledger, live, items, self_id, claims=None):
@@ -397,8 +424,15 @@ def main():
 
     # Loud on the count, so an empty drop set reads as "nothing to filter"
     # rather than as a filter that never matched.
+    # Split by reason, not lumped: `dropped` now covers two rules, and a run
+    # driven entirely by claims would otherwise report panes as peer-manager
+    # drops that are not -- the exact misread this line exists to prevent.
+    dropped_peer = [r for r in dropped if r["reason"] == "peer-manager"]
+    dropped_claimed = [r for r in dropped if r["reason"] == "claimed"]
     print(
-        f"gates: {len(rows)}  emit: {len(kept)}  dropped(peer-manager): {len(dropped)}",
+        f"gates: {len(rows)}  emit: {len(kept)}  "
+        f"dropped(peer-manager): {len(dropped_peer)}  "
+        f"dropped(claimed): {len(dropped_claimed)}",
         file=sys.stderr,
     )
     return 0

@@ -82,14 +82,23 @@ def manager_id(args):
 
 
 def live_sessions():
-    """Session ids the registry currently holds.
+    """Session ids the registry currently holds, or None when it is unreadable.
 
-    Used only to decide whether an existing claim is still backed by a live
-    manager. An unreadable registry returns an empty set, which makes a held
-    claim look dead and lets this manager take it -- the same fail-open the
-    filter takes on an unreadable registry, and the safe direction here: a
-    wrongly-taken claim is visible in `list`, a wrongly-refused one is silent.
+    None is NOT "nothing is live" -- it is unknown, and the two must not be
+    conflated here. A missing registry directory would otherwise make every
+    holder read dead, so any manager could steal a claim from a live one, and a
+    wrongly-taken claim silently silences a pane for the manager that actually
+    holds it. `cmd_claim` therefore refuses a takeover on an unknown registry:
+    the safe direction is the one that keeps the existing holder, since a
+    wrongly-refused claim is visible and retryable while a stolen one is not.
+
+    This is deliberately the OPPOSITE of the filter's fail-open on the same
+    unreadable registry. The filter must never silence a watcher; the writer
+    must never move a claim it cannot prove is free. Different safe directions,
+    same unknown.
     """
+    if not os.path.isdir(REGISTRY):
+        return None
     ids = set()
     for path in glob.glob(os.path.join(REGISTRY, "*.json")):
         try:
@@ -167,7 +176,14 @@ def cmd_claim(args):
                 _write(data)
                 print("reclaimed %s" % args.session)
                 return 0
-            if holder in live_sessions():
+            live = live_sessions()
+            if live is None:
+                print(
+                    "held by %s since %s (registry unreadable -- liveness unknown, "
+                    "not taking over)" % (holder or "?", entry.get("claimed_at", "?"))
+                )
+                return HELD
+            if holder in live:
                 print(
                     "held by %s since %s"
                     % (holder or "?", entry.get("claimed_at", "?"))
@@ -212,8 +228,13 @@ def cmd_list(args):
     print("ownership-claims: %d claim(s)" % len(claims))
     for sid in sorted(claims):
         entry = claims[sid]
+        if not isinstance(entry, dict):
+            # The same malformed shape `cmd_claim` normalises; `list` is the
+            # operator's only read of the store, so it must not traceback on it.
+            print("  %-36s  (malformed entry)" % sid)
+            continue
         holder = entry.get("manager") or "?"
-        state = "live" if holder in live else "GONE"
+        state = "unknown" if live is None else ("live" if holder in live else "GONE")
         note = entry.get("note") or ""
         print(
             "  %-36s  holder=%s (%s)  since=%s  %s"

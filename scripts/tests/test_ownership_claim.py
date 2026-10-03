@@ -14,6 +14,8 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -115,6 +117,18 @@ class Claim(Base):
         """The other half of the takeover rule, or it would always take over."""
         self.live(PEER)
         self.claim(GATED, PEER)
+        self.assertEqual(self.claim(GATED, ME), oc.HELD)
+        self.assertEqual(self.store()[GATED]["manager"], PEER)
+
+    def test_unknown_registry_refuses_a_takeover(self):
+        """A missing registry must not make a live holder read dead.
+
+        Returning an empty set for an unreadable registry would let any manager
+        steal a live one's claim, and a stolen claim silently silences a pane
+        for the manager that actually holds it.
+        """
+        self.claim(GATED, PEER)
+        os.rmdir(self.registry)  # gone entirely => liveness unknown, not empty
         self.assertEqual(self.claim(GATED, ME), oc.HELD)
         self.assertEqual(self.store()[GATED]["manager"], PEER)
 
@@ -236,6 +250,45 @@ class List(Base):
         crash on the shape takeover exists to handle."""
         self.claim(GATED, PEER)
         self.assertEqual(oc.cmd_list(argparse.Namespace()), 0)
+
+    def test_list_survives_a_malformed_entry(self):
+        """The same shape `cmd_claim` normalises -- acknowledged in one
+        subcommand and not the other was the defect."""
+        with open(self.claims, "w", encoding="utf-8") as handle:
+            json.dump({"claims": {GATED: "oops"}}, handle)
+        self.assertEqual(oc.cmd_list(argparse.Namespace()), 0)
+
+    def test_list_renders_an_unknown_registry(self):
+        os.rmdir(self.registry)
+        self.claim(GATED, PEER)
+        self.assertEqual(oc.cmd_list(argparse.Namespace()), 0)
+
+
+class EnvStorePath(unittest.TestCase):
+    """The writer's env override, exercised the way the CLI resolves it.
+
+    `Base` patches the module globals directly, which is convenient but skips
+    the resolution an operator actually relies on: `SUPERVISOR_OWNERSHIP_CLAIMS`
+    is read at import, and the READER honours the same var. A writer resolving
+    its store differently from every reader is a silent no-op -- the claim is
+    recorded, `list` reports it held, and no watcher ever consults it.
+    """
+
+    def test_env_var_moves_the_store(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = os.path.join(d, "claims.json")
+            env = dict(os.environ, SUPERVISOR_OWNERSHIP_CLAIMS=store)
+            env.pop("CLAUDE_CODE_SESSION_ID", None)
+            env.pop("CLAUDE_SESSION_ID", None)
+            result = subprocess.run(
+                [sys.executable, _SCRIPT, "claim",
+                 "--session", GATED, "--manager", ME],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(os.path.exists(store), result.stderr)
+            with open(store, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["claims"][GATED]["manager"], ME)
 
 
 if __name__ == "__main__":

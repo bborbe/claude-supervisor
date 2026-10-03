@@ -307,9 +307,31 @@ class Claims(unittest.TestCase):
         """
         self.assertEqual(self.call("w", None, {}), (gf.EMIT, "unowned"))
 
-    def test_claim_overrides_a_peer_manager_spawner_too(self):
-        """The claim is checked before the spawner, so it wins on either path."""
-        self.assertEqual(self.call("w", PEER, {"w": "manager-y"}), (gf.DROP, "claimed"))
+    def test_a_claim_cannot_weaken_a_resolved_spawner_drop(self):
+        """A claim may only ADD a drop, never remove one.
+
+        A live peer spawner is already a resolved DROP. A claim on the same pane
+        must not change the outcome, whatever its own state.
+        """
+        self.assertEqual(
+            self.call("w", PEER, {"w": "manager-y"}), (gf.DROP, "peer-manager")
+        )
+
+    def test_a_stale_claim_does_not_undo_a_peer_manager_drop(self):
+        """The blocking case: a live peer spawner plus a claim whose holder is gone.
+
+        Resolving the claim first made this read `EMIT/claim-dead`, converting a
+        resolved peer-manager drop into an emit and re-creating the peer-owned
+        wake the filter exists to remove. The spawner path is resolved first now,
+        so the drop stands.
+        """
+        self.assertEqual(
+            self.call("w", PEER, {"w": "manager-gone"}), (gf.DROP, "peer-manager")
+        )
+
+    def test_a_live_peer_claim_still_drops_a_spawnerless_pane(self):
+        """The claim's own job is untouched: it adds the drop where none existed."""
+        self.assertEqual(self.call("w", None, {"w": "manager-y"}), (gf.DROP, "claimed"))
 
     def test_own_claim_is_kept(self):
         """A pane this watcher adopted is one it EXISTS to see."""
