@@ -438,6 +438,32 @@ class RowKeyedClaims(Base):
         self.assertIn("resolved", out)
         self.assertEqual(self.raw()["entries"][SUBJECT]["state"], "resolved")
 
+    def test_a_row_claim_is_not_rescued_by_an_unrelated_live_session(self):
+        """The design argument the row path rests on, pinned in the row direction:
+        the guard matches the subject string against session ids, not "some session
+        is live", so a live registry does not save a row claim.
+
+        ⚠️ The bound is honest rather than structural: a registry entry whose
+        `sessionId` IS the row key would rescue it. That is unreachable in
+        practice -- one is a uuid, the other a task name -- and asserting the
+        stronger claim here would pin a falsehood, so the real guard is pinned and
+        the caveat stated."""
+        self.claim_row(asker=ASKER)
+        self.backdate(ROW, hours_ago=48)
+        self.live("11111111-2222-3333-4444-555555555555")
+        code, _, _ = self._run(["prune", "--max-age-hours", "24"])
+        self.assertEqual(code, 0)
+        self.assertNotIn(ROW, self.raw()["entries"])
+
+    def test_resolve_row_falls_back_to_the_environment_asker(self):
+        """`--asker` stays optional on the row path, exactly as on the session
+        path: both reach the same cmd_resolve, which reads the env var."""
+        self.claim_row(asker=ASKER)
+        code, out, _ = self._run(["resolve", "--row", ROW])
+        self.assertEqual(code, 0)
+        self.assertIn("resolved", out)
+        self.assertEqual(self.raw()["entries"][ROW]["state"], "resolved")
+
     def test_neither_key_is_a_usage_error(self):
         """Negative control: the key is required, so an omitted one must refuse
         rather than write an entry nothing can look up."""

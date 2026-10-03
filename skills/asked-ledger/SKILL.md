@@ -67,6 +67,8 @@ Naming the row is what makes the under-target disjointness check performable. Be
 
 The key is **normalised** the way `--text` is — whitespace collapsed — and a key that normalises to **empty is refused**. Both matter because a row key is free text where a session id was a uuid: an un-normalised key is interpolated raw into `list`'s one-line-per-entry render, so one carrying a newline splits the entry and misaligns every field after it; and an empty key can never be matched by a later `claim` or `resolve`. Normalising is symmetric, so the key still round-trips.
 
+⚠️ **The normalised name IS the identity.** Two rows whose names differ only in whitespace — `Fix  the parser` and `Fix the parser` — collapse to one key and shadow each other: the second claim is refused as a duplicate of the first. That is the intended reading (they are the same task to every other call site), but it means a row must be claimed under the name the task actually carries, not a retyped variant.
+
 ## Two marks — do not merge them
 
 - **This ledger marks the ASK** (has this blocked session been batched yet, and by whom). It is **shared**, because "asked exactly once" is a cross-layer property a per-layer mark cannot express.
