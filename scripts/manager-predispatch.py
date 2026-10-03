@@ -241,22 +241,186 @@ def fm_scalar(fm: str, key: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def unescape_scalar(text: str) -> str:
+    """Undo YAML's `''` escape for an apostrophe inside a single-quoted scalar.
+
+    The vault writes these lists as `- '[[Name]]'`, and a name carrying an
+    apostrophe is stored as `- '[[Supervisor''s spawn_agent]]'`. A raw regex
+    returns the still-escaped `Supervisor''s spawn_agent`, which resolves to no
+    page — and "no page" is the UNMET direction, so a COMPLETED blocker would
+    still render blocked-upstream. Unescaping is a no-op for every name that
+    carries no `''`, which is every other name in the vault.
+
+    ⚠️ **Applied to the FRONTMATTER side of a cross-file name comparison, and
+    only that side.** `fm_wikilinks` has two callers — `blocked_by` and `goals` —
+    and the `goals` half is compared against the topic page's `## Goals` list
+    (`declared_members` via `_LIST_ITEM`). That side reads markdown, not YAML, so
+    it never carries the `''` escape and is deliberately NOT unescaped: doing it
+    there would be a no-op, while doing it on neither side leaves a frontmatter
+    `Bob''s goal` matching nothing. The asymmetry is the fix, not an oversight —
+    a name carrying no `''` is unaffected either way, which is every other name
+    in the vault. `TestBlockedByRead` pins the escape on `blocked_by`, and
+    `test_escaped_apostrophe_is_unescaped_for_goals_too` pins the widening to
+    `goals:` — so moving this call out of `fm_wikilinks` fails a test rather than
+    going unnoticed.
+    """
+    return text.replace("''", "'")
+
+
+# The unmet entry reported when `blocked_by` declares items and none parses as a
+# name. Not a page name, deliberately — it names the CONDITION, so the reader's
+# `⏸️ BLOCKED UPSTREAM:` line says what is wrong instead of naming a blocker that
+# does not exist.
+UNPARSED_BLOCKER = "<unparsed blocked_by entry>"
+
+
+def fm_list_body(fm: str, key: str) -> str | None:
+    """The text `key:` declares its items in — inline or block — else None.
+
+    The ONE place the two list shapes are recognised. `fm_wikilinks` extracts names
+    from what this returns; `blocked_by_verdict` ALSO asks whether it is non-empty,
+    so it can tell "declares no blocker" from "declares a blocker that did not parse
+    as a name". Those two answers must never come from separate shape logic: a shape
+    this extractor misses would otherwise read as *declares nothing*, and an empty
+    list satisfies the `ready-to-start` clause vacuously — the unsafe direction.
+
+    `None` means the key is absent, or present with no items at all (`key:` alone,
+    or `key: []`). A non-empty return that yields no `[[...]]` names is a different
+    thing entirely, and the caller is the one that has to tell them apart.
+    """
+    m = re.search(rf"^{re.escape(key)}:(.*)$", fm, re.M)
+    if not m:
+        return None
+    rest = m.group(1)
+    if rest.strip() and rest.strip() != "[]":
+        return rest
+    block = re.search(rf"^{re.escape(key)}:\s*\n((?:[ \t]+-.*\n?)*)", fm, re.M)
+    if not block:
+        return None
+    return block.group(1) or None
+
+
 def fm_wikilinks(fm: str, key: str) -> list[str]:
     """All [[...]] under `key:`, whether inline (`key: ['[[X]]']`) or block.
 
     All three shapes the vault writes must resolve: inline list, block list, and
-    empty/absent. Block form is `key:` then indented `- '[[X]]'` lines.
+    empty/absent. Block form is `key:` then indented `- '[[X]]'` lines. YAML
+    escaping is undone before the names are returned — see `unescape_scalar`.
     """
-    m = re.search(rf"^{re.escape(key)}:(.*)$", fm, re.M)
-    if not m:
+    body = fm_list_body(fm, key)
+    if body is None:
         return []
-    rest = m.group(1)
-    if rest.strip() and rest.strip() != "[]":
-        return re.findall(r"\[\[(.+?)\]\]", rest)
-    block = re.search(rf"^{re.escape(key)}:\s*\n((?:[ \t]+-.*\n?)*)", fm, re.M)
-    if not block:
-        return []
-    return re.findall(r"\[\[(.+?)\]\]", block.group(1))
+    return [unescape_scalar(h) for h in re.findall(r"\[\[(.+?)\]\]", body)]
+
+
+def task_index(tasks_dir: str) -> dict[str, str]:
+    """`{lowercased filename: actual filename}` for `tasks_dir`, built once per run.
+
+    Built once because `resolve_task_file` is called per row AND per blocker entry;
+    a `listdir` inside that loop is O(rows x entries) full scans of a directory that
+    runs to thousands of files. Hoisting it leaves the per-row `open` as the only
+    per-row I/O, and the lookup is identical.
+    """
+    try:
+        return {entry.lower(): entry for entry in os.listdir(tasks_dir)}
+    except OSError:
+        return {}
+
+
+def resolve_task_file(
+    tasks_dir: str, name: str, index: dict[str, str] | None = None
+) -> str:
+    """`name`'s task file under `tasks_dir`, matched case-insensitively.
+
+    The rule this read replaces specified **case-insensitive** resolution, and the
+    reason it must be explicit rather than left to the filesystem is that APFS is
+    case-insensitive: `open()` succeeds on a case-mismatched name here, so an
+    exact-only build passes every local check and blocks permanently the moment it
+    meets a case-sensitive filesystem. This repo's own CHANGELOG records the same
+    asymmetry from the other side — a single capitalised letter passed unnoticed
+    because `open()`, Obsidian's link resolver and `ls` all agree on APFS.
+
+    Returns the directory entry's OWN spelling when one matches, never the case
+    variant that was asked for: the canonical name is what makes this testable on
+    the very filesystem that hides the defect, and a path that opens here is not
+    evidence the lookup is right. Falls back to the plain join on a miss, which is
+    the path a genuinely absent blocker must take — `open()` refuses it, and
+    "cannot verify it is done" is the unmet direction.
+
+    ⚠️ **Both halves of this mode go through here** — the row being classified and
+    every blocker it names. Resolving only the blockers would leave the row on a
+    plain join and so leave the very asymmetry this helper exists to remove: a
+    case-mismatched tracked name would read `unreadable` on a case-sensitive
+    filesystem. That fails toward a missed dispatch rather than a wrong spawn, so it
+    is safe — but the two halves disagreeing is how a reader comes to trust one and
+    not the other.
+    """
+    idx = task_index(tasks_dir) if index is None else index
+    entry = idx.get(f"{name}.md".lower())
+    return os.path.join(tasks_dir, entry if entry else f"{name}.md")
+
+
+def cell(text: str) -> str:
+    """A value safe to place in one tab-separated column of `--blocked-verdicts`.
+
+    A task name is frontmatter-controlled and may carry a tab, which would shift
+    every column after it for any consumer that splits on tabs — the reader's own
+    reporting rule, and the tests. Newlines cannot reach here (`fm_wikilinks`'
+    capture is `.+?` without DOTALL), but collapsing them costs nothing and keeps
+    the guarantee in one place rather than resting on a regex two functions away.
+    """
+    return text.replace("\t", " ").replace("\n", " ")
+
+
+def blocked_by_verdict(
+    fm: str, tasks_dir: str, index: dict[str, str] | None = None
+) -> dict:
+    """Resolve every `blocked_by` entry against `tasks_dir`.
+
+    The deterministic half of the sweep reader's `ready-to-start` /
+    `blocked-upstream` decision, and the reason it is code rather than a clause:
+    a first-entry-only read lands a genuinely blocked row in `ready-to-start`,
+    which is the spawn offer, and a prose warning has twice failed to pin that
+    read (v0.96.4 shipped the warning; the defect reproduced 2026-10-03 18:44).
+
+    EVERY entry is evaluated, never just the first. A blocker whose file is
+    missing, unreadable, or carries no parseable status counts as NOT completed —
+    "cannot verify it is done" reads as blocked, never as permission to start.
+    One status read per entry, and a blocker's own `blocked_by` is never
+    followed, so a dependency cycle terminates.
+
+    Returns `{"entries": [...], "unmet": [...], "blocked": bool}`. An empty
+    `blocked_by` is unblocked — and that is exactly why an EMPTY read is not
+    neutral: it satisfies the `ready-to-start` clause vacuously.
+    """
+    entries = fm_wikilinks(fm, "blocked_by")
+    if not entries and fm_list_body(fm, "blocked_by"):
+        # The key declares something and NOT ONE item parsed as a name. That is not
+        # "declares no blocker": `blocked_by` entries are names OR `[[wikilinks]]`,
+        # so a bare name is a legal entry this extractor does not resolve — and an
+        # entry we cannot read is one we cannot verify. Reporting it as an empty list
+        # would satisfy the `ready-to-start` clause VACUOUSLY, which is the exact
+        # promotion this mode exists to stop, and the only place it could still fail
+        # in the unsafe direction.
+        return {
+            "entries": [],
+            "unmet": [UNPARSED_BLOCKER],
+            "blocked": True,
+        }
+    unmet: list[str] = []
+    for name in entries:
+        try:
+            with open(
+                resolve_task_file(tasks_dir, name, index),
+                encoding="utf-8",
+                errors="replace",
+            ) as fh:
+                blocker_fm = split_frontmatter(fh.read())
+        except OSError:
+            blocker_fm = None
+        if fm_scalar(blocker_fm or "", "status") != "completed":
+            unmet.append(name)
+    return {"entries": entries, "unmet": unmet, "blocked": bool(unmet)}
 
 
 def progress_hash(text: str) -> str:
@@ -1576,6 +1740,15 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="compare the staged tracked set against the loop snapshot's membership",
     )
+    mode.add_argument(
+        "--blocked-verdicts",
+        action="store_true",
+        help=(
+            "one `<name>\\t<blocked|ready|unreadable>\\t<unmet…>\\t<entry count>` line per "
+            "staged tracked row, for the sweep reader's ready-to-start / blocked-upstream "
+            "decision"
+        ),
+    )
     ap.add_argument(
         "--buckets",
         default=None,
@@ -1866,6 +2039,73 @@ def main(argv: list[str]) -> int:
             if len(names) > 10:
                 print(f"  … and {len(names) - 10} more {label}")
         return EXIT_DIVERGENT
+
+    if args.blocked_verdicts:
+        # The reader's own read, handed to it as a verdict rather than left to its prose.
+        #
+        # `blocked_by_verdict` was landed with no caller, and a tested function nothing
+        # calls ships nothing: the sweep reader went on deciding `ready-to-start` from its
+        # own frontmatter read, which is nondeterministic — measured 2026-10-02, four
+        # misreads across eleven relevant ticks, and reproduced again 2026-10-03 18:44 on
+        # two rows whose first entry had shipped and whose later entries had not. The
+        # warning against exactly that read has sat in `agents/manager-sweep-reader.md`
+        # since v0.96.4 and did not prevent it, so the decision moves to code and the
+        # agent renders the bucket from the answer.
+        #
+        # Reads the caller's STAGED set — `--write-tracked`'s file, the same membership
+        # the caller passed the reader — so the verdicts and the table cover one set by
+        # construction. That is also its one hazard, and the reader is told to check it:
+        # a staged file left over from an earlier tick would classify the wrong rows, so
+        # the reader compares the names printed here against the names it was handed and
+        # refuses the read on a mismatch rather than classifying a set it cannot vouch for.
+        try:
+            with open(tracked_path(args.subject), encoding="utf-8") as fh:
+                names = [ln.strip() for ln in fh if ln.strip()]
+        except OSError as exc:
+            # Fail-closed, like `--compare-tracked`: "I could not read the set" and "every
+            # row is unblocked" must never render the same way, and the second is the one
+            # that opens a spawn.
+            print(f"no staged tracked set to classify ({exc})", file=sys.stderr)
+            return EXIT_USAGE
+        # Hardcoded here exactly as `resolve_tracked` hardcodes it (`:412`), and for the
+        # same reason: this script gates one vault layout, and a caller-supplied directory
+        # would let a typo classify every row against an empty tree — which reads as
+        # "no blockers found" rather than as an error.
+        tasks_dir = os.path.join(args.vault, "25 Tasks")
+        index = task_index(tasks_dir)
+        for name in names:
+            try:
+                with open(
+                    resolve_task_file(tasks_dir, name, index),
+                    encoding="utf-8",
+                    errors="replace",
+                ) as fh:
+                    fm = split_frontmatter(fh.read())
+            except OSError:
+                fm = None
+            if fm is None:
+                # An unreadable ROW is not an unreadable BLOCKER, and the two must not
+                # share a word. `blocked_by_verdict` would call this row unblocked — it
+                # reads an empty frontmatter and finds no entries — which is the vacuous
+                # promotion this whole mode exists to stop. Name it instead, and let the
+                # reader treat any word but `ready` as "not offered".
+                print(f"{cell(name)}\tunreadable\t\t")
+                continue
+            verdict = blocked_by_verdict(fm, tasks_dir, index)
+            # The entry count is a fourth column so the reader can pick the rows it must
+            # quote back without parsing `blocked_by` itself — which is the read this mode
+            # exists to replace. `0` and "every entry met" both render an empty unmet list,
+            # so without this the two are indistinguishable downstream and a reporting
+            # rule keyed on the unmet column would silently skip the rows that matter.
+            print(
+                "{}\t{}\t{}\t{}".format(
+                    cell(name),
+                    "blocked" if verdict["blocked"] else "ready",
+                    cell(", ".join(verdict["unmet"])),
+                    len(verdict["entries"]),
+                )
+            )
+        return EXIT_WRITE_OK
 
     changed, reason, payload, stored_table = evaluate(args.vault, args.subject)
 
