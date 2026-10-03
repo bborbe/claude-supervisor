@@ -329,6 +329,34 @@ class StateScopeTest(unittest.TestCase):
             self.assertNotEqual(
                 os.path.basename(watch.state_path_for("/s", name)), "state.json")
 
+    def test_shared_state_manufactures_a_bare_cleared(self):
+        # THE DEFECT ITSELF, reproduced rather than avoided — path inequality
+        # alone would pin the fix by construction and never show the failure.
+        # Manager B's poll reads manager A's gated set as its `prev`; A's session
+        # is absent from B's `state`, so it misses the HELD guard and takes the
+        # bare CLEARED branch.
+        b_state = {"bbbb2222": ("B", "y", "idle+closer", True)}
+        got = watch.transitions(["aaaa1111"], ["bbbb2222"], b_state)
+        self.assertIn(("CLEARED", "aaaa1111", "", "left the gated set"), got,
+                      "this is the failure the per-scope state file prevents")
+
+    def test_unregistered_is_held_never_cleared(self):
+        state = {"aaaa1111": ("A", "x", "unregistered", None)}
+        self.assertEqual([k for k, *_ in watch.transitions(["aaaa1111"], [], state)],
+                         ["HELD"])
+
+    def test_genuine_answer_still_clears(self):
+        state = {"aaaa1111": ("A", "x", "registry:busy", False)}
+        self.assertEqual([k for k, *_ in watch.transitions(["aaaa1111"], [], state)],
+                         ["CLEARED"])
+
+    def test_new_gate_only_for_newly_gated(self):
+        state = {"aaaa1111": ("A", "x", "idle+closer", True),
+                 "bbbb2222": ("B", "y", "idle+closer", True)}
+        got = watch.transitions(["aaaa1111"], ["aaaa1111", "bbbb2222"], state)
+        self.assertEqual([(k, s) for k, s, *_ in got], [("NEW GATE", "bbbb2222")],
+                         "an unchanged gate must not be re-announced")
+
 
 class MissingTranscriptTest(unittest.TestCase):
     def test_tracked_id_without_a_transcript_warns(self):

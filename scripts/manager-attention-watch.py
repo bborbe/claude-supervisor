@@ -282,6 +282,36 @@ def gated_keys(state):
     return sorted(sid8 for sid8, (_, _, _, v) in state.items() if v is True)
 
 
+def transitions(prev, key, state):
+    """The transitions one poll emits — `(kind, sid8, label, detail)` records.
+
+    Returned rather than printed so the diff, which is the part that decides
+    whether a `CLEARED` is honest, can be tested directly instead of only by
+    constructing inputs that avoid it.
+
+    The `HELD` branch is the reason this is three-valued. A session that left the
+    gated set because it became UNREGISTERED was not answered, so it must not be
+    announced as a clear — and the guard has to test membership in `state` first,
+    because an id that is not in `state` at all is the shared-state case: with a
+    state file belonging to another manager, every one of that manager's sessions
+    lands in `prevset - set(key)` with no entry here, and takes the bare
+    `CLEARED` branch. See `state_path_for`.
+    """
+    out = []
+    prevset = set(prev or [])
+    for sid8 in key:
+        if sid8 not in prevset:
+            label, detail, reason, _ = state[sid8]
+            out.append(("NEW GATE", sid8, label, f"{reason} :: {detail}"))
+    for sid8 in sorted(prevset - set(key)):
+        if sid8 in state and state[sid8][3] is None:
+            out.append(("HELD", sid8, state[sid8][0],
+                        "unregistered; no CLEARED emitted"))
+            continue
+        out.append(("CLEARED", sid8, "", "left the gated set"))
+    return out
+
+
 def state_path_for(state_dir, tracked_path):
     """The state file for one manager's scope — keyed by its tracked set.
 
@@ -377,34 +407,31 @@ def main(argv=None):
                 # the new set re-fires an unchanged gate whenever any OTHER
                 # session leaves it — measured 2026-10-01, one session dropped
                 # out and another, untouched, was re-printed as NEW GATE.
-                prevset = set(prev or [])
-                for sid8 in key:
-                    if sid8 not in prevset:
-                        label, detail, reason, _ = state[sid8]
-                        print(f"NEW GATE  {sid8}  {label[:46]}  ::  {detail}",
-                              flush=True)
-                        log_event(log_path, "NEW GATE", sid8, label,
-                                  f"{reason} :: {detail}")
-                for sid8 in sorted(prevset - set(key)):
-                    # Three-valued: a session that left the gated set because it
-                    # became UNREGISTERED was not answered, so it must not be
-                    # announced as a clear. It is recorded instead — a dead
+                for kind, sid8, label, detail in transitions(prev, key, state):
+                    # A HELD transition is recorded, never announced: a dead
                     # worker is neither progress nor a gate, and reporting it as
                     # either is the silent direction this file exists to close.
-                    if sid8 in state and state[sid8][3] is None:
-                        log_event(log_path, "HELD", sid8, state[sid8][0],
-                                  "unregistered; no CLEARED emitted")
+                    if kind == "HELD":
+                        log_event(log_path, kind, sid8, label, detail)
                         continue
-                    print(f"CLEARED  {sid8}", flush=True)
-                    log_event(log_path, "CLEARED", sid8, "",
-                              "left the gated set")
+                    if kind == "NEW GATE":
+                        print(f"NEW GATE  {sid8}  {label[:46]}  ::  {detail}",
+                              flush=True)
+                    else:
+                        print(f"CLEARED  {sid8}", flush=True)
+                    log_event(log_path, kind, sid8, label, detail)
                 prev = key
                 os.makedirs(os.path.dirname(state_path), exist_ok=True)
                 with open(state_path, "w") as fh:
                     json.dump(prev, fh)
             pending = key
         except Exception as exc:  # never let one bad poll kill the watch
-            print(f"WATCH ERROR: {type(exc).__name__}: {exc}", flush=True)
+            # stderr, never stdout: stdout is the event stream the `Monitor`
+            # reads, and a diagnostic sharing that stream is a line a consumer
+            # has to learn to ignore — the same reasoning that puts the WATCH
+            # WARN lines on stderr.
+            print(f"WATCH ERROR: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
         time.sleep(args.interval)
 
 
