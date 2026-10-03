@@ -38,18 +38,33 @@ _SCRIPT = os.path.join(os.path.dirname(_HERE), "manager-predispatch.py")
 # nowhere in the parenthesised run — a parser that collects words off the line admits them,
 # and a clean fixture with no removal note passes against that broken parser. That is the
 # regression case, not the happy path.
+#
+# ⚠️ The run carries the live runbook's own MARKDOWN EMPHASIS (`**ready-to-start**` …), and
+# that is load-bearing rather than cosmetic: the live `65 Runbooks/Manager Session.md`
+# renders four of its eight bucket names bold, so a fixture that declares them plain cannot
+# reproduce the defect at all. Measured 2026-10-03 — the parser kept the markers, its
+# declared set carried `**ready-to-start**` while `ACTIONABLE_BUCKETS` held the plain name,
+# and no key spelling satisfied both halves. A plain fixture passes against that broken
+# parser, which is exactly how the regression shipped.
 RUNBOOK = """---
 page_type: runbook
 ---
 
 # Manager Session
 
-**Step 4 — Classify into the full bucket set** — **this is the canonical set; there is no second one.** (progressing / stuck / waiting-on-human / waiting-approval / parked-on-unregistered-gate / done / ready-to-start / blocked-upstream / close-me / orphaned):
+**Step 4 — Classify into the full bucket set** — **this is the canonical set; there is no second one.** (progressing / stuck / waiting-on-human / waiting-approval / parked-on-unregistered-gate / done / **ready-to-start** / **blocked-upstream** / **close-me** / **orphaned**):
 
 ⚠️ The `problem` cell was renamed `stuck` on 2026-09-20, and `orphan` was renamed `orphaned`; both old spellings survive in this file's history and must not be read back as members.
 
 - **Non-bucket dispositions — `hold`, `backlog` and `👤 YOURS`.** These are **not** among the ten and are **not** escape hatches into one of them. A `hold` task renders `⏸️ blocked/hold`.
 """
+
+# The two declaration lines' markers, matched exactly as `manager-predispatch.py` matches
+# them. Restated here rather than imported from the script, so a test can pin WHICH line a
+# mutation landed on — a mutation that drifted into prose would otherwise pass a
+# line-agnostic assertion while proving nothing about the declaration the parser reads.
+BUCKET_MARKER = "Step 4 — Classify into the full bucket set"
+DISPOSITION_MARKER = "Non-bucket dispositions"
 
 
 def live_proc_start(pid):
@@ -1682,7 +1697,7 @@ class TestBucketVocabulary(Base):
         declaration is read at runtime, so widening it accepts a key refused a moment ago
         and narrowing it refuses one that was accepted."""
         widened = self.temp_runbook(
-            RUNBOOK.replace("/ close-me", "/ close-me / newbucket")
+            RUNBOOK.replace("/ **close-me**", "/ **close-me** / newbucket")
         )
         rc, out = self.run_gate(
             "--subject",
@@ -1694,7 +1709,7 @@ class TestBucketVocabulary(Base):
         )
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
 
-        narrowed = self.temp_runbook(RUNBOOK.replace(" / orphaned", ""))
+        narrowed = self.temp_runbook(RUNBOOK.replace(" / **orphaned**", ""))
         rc, out = self.run_both(
             "--subject",
             "ATopic",
@@ -1740,6 +1755,53 @@ class TestBucketVocabulary(Base):
         )
         self.assertEqual(rc, self.m.EXIT_USAGE, out)
         self.assertIn("could not parse the bucket set", out)
+
+    # -- SC1(ii): the parser strips the runbook's emphasis ------------------- #
+
+    def test_a_bolded_declaration_yields_the_plain_vocabulary(self):
+        """The clause that makes SC1 discriminate. A criterion satisfied by de-bolding the
+        *runbook* leaves the parser exactly as brittle as it was and still passes green —
+        the store's keys become canonical because the source document was edited, not
+        because the gate was fixed. Requiring plain output from a declaration line that
+        CARRIES `**` is what forces the fix into the parser, and what stops a future
+        re-bold from silently regressing the store the same way."""
+        path = os.path.join(self.vault, "65 Runbooks", "Manager Session.md")
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn(
+                "**ready-to-start**", fh.read(), "the fixture lost its emphasis"
+            )
+        names, err = self.m.declared_bucket_names(path)
+        self.assertIsNone(err)
+        self.assertEqual(names, self.DECLARED)
+        for name in sorted(names):
+            self.assertNotIn("*", name, "emphasis survived into %r" % name)
+
+    # -- SC3: the set is derived from the runbook, never hardcoded ----------- #
+
+    def test_every_name_the_parser_derives_tracks_its_own_line(self):
+        """SC3's probe, and the one a hardcoded set cannot pass. Every name the parser
+        derives is mutated in turn, on the line it is actually parsed from — the eight
+        bucket names on the `Step 4 — Classify into the full bucket set` run, the
+        dispositions on the `Non-bucket dispositions` line — and the answer must follow.
+        A fully hardcoded set ignores both lines; a partially hardcoded one ignores
+        whichever half it froze, which is why the set is mutated whole rather than
+        sampled."""
+        for old in sorted(self.DECLARED):
+            renamed = old + "-renamed"
+            mutated = RUNBOOK.replace(old, renamed, 1)
+            self.assertNotEqual(mutated, RUNBOOK, "the fixture does not carry %r" % old)
+            # Pin WHICH line moved: a mutation that landed in prose would prove nothing
+            # about the declaration the parser reads.
+            step4 = mutated.split(BUCKET_MARKER, 1)[1].split("\n", 1)[0]
+            dispo = mutated.split(DISPOSITION_MARKER, 1)[1].split("\n", 1)[0]
+            self.assertTrue(
+                renamed in step4 or renamed in dispo,
+                "%r was mutated outside the two declaration lines" % old,
+            )
+            names, err = self.m.declared_bucket_names(self.temp_runbook(mutated))
+            self.assertIsNone(err, "%s -> %s" % (old, err))
+            self.assertIn(renamed, names, "%r did not track to %r" % (old, renamed))
+            self.assertNotIn(old, names, "%r survived its own mutation" % old)
 
 
 if __name__ == "__main__":
