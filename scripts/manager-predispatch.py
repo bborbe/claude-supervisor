@@ -1271,6 +1271,35 @@ BUCKET_DECLARATION_MARKER = "Step 4 — Classify into the full bucket set"
 DISPOSITION_MARKER = "Non-bucket dispositions"
 
 
+def strip_emphasis(token: str) -> str:
+    """`token` with the runbook's markdown emphasis removed from its ENDS only.
+
+    The live `65 Runbooks/Manager Session.md` renders four of its bucket names bold —
+    `**ready-to-start**`, `**blocked-upstream**`, `**close-me**`, `**orphaned**` — so a
+    parser that keeps the markers declares a vocabulary no renderer agrees with. ⚠️ **No
+    bucket COUNT is stated here, deliberately:** the set is vault-relative and has moved
+    twice in a week, so a number in prose goes stale while reading as a measurement.
+    Measured 2026-10-03: the
+    declared set carried `**ready-to-start**` while `ACTIONABLE_BUCKETS` held the plain
+    name, so **no key spelling satisfied both halves** — plain keys were refused at the
+    write door, and bolded keys would have made `actionable_names()` find nothing and
+    silently disable the drive leg's clause (0). Every sweep's classification went stale
+    behind the refusal, and the refusal was the *correct* behaviour: the reader declined to
+    write a second vocabulary. The fix belongs here, on the declaring side.
+
+    ENDS only, never interior characters. `waiting_on_human` is a plausible bucket
+    spelling, and a blanket `_`-removal would rewrite it to `waitingonhuman` — a name
+    nobody declared, admitted by the very check that exists to refuse those. `_` is in the
+    strip set for the ENDS half specifically, and that is not the interior rule applied
+    twice: stripping it at the ends is what de-emphasises `__bold__` / `_italic_` if the
+    runbook ever renders them that way, and no plausible bucket or disposition spelling
+    ends in `_`, so nothing real is rewritten. `👤 YOURS`
+    carries an emoji and survives verbatim, which the comparison depends on: normalising it
+    would re-admit the `yours` / `YOURS` synonyms the store has been measured emitting.
+    """
+    return token.strip().strip("*_`").strip()
+
+
 def runbook_path(vault: str, override: str | None) -> str | None:
     """Where the vault's own bucket declaration lives, or None when neither candidate does."""
     if override:
@@ -1296,6 +1325,10 @@ def declared_bucket_names(path: str) -> tuple[set[str] | None, str | None]:
     drift this check exists to catch. `👤 YOURS` carries an emoji, so the comparison is on
     the runbook's own token verbatim — normalising it would re-admit the synonym spellings
     (`yours`, `YOURS`) the store has already been measured emitting.
+
+    Both declarations are read through `strip_emphasis`, because the runbook RENDERS four
+    of its bucket names bold and the markers are not part of the vocabulary. See that
+    function for the measured cost of keeping them.
     """
     try:
         with open(path, encoding="utf-8") as fh:
@@ -1308,9 +1341,10 @@ def declared_bucket_names(path: str) -> tuple[set[str] | None, str | None]:
         if BUCKET_DECLARATION_MARKER in line:
             match = re.search(r"\(([^()]*)\)", line)
             if match:
-                buckets.update(
-                    token.strip() for token in match.group(1).split("/") if token.strip()
-                )
+                for token in match.group(1).split("/"):
+                    name = strip_emphasis(token)
+                    if name:
+                        buckets.add(name)
             break
     if not buckets:
         return None, (
@@ -1325,7 +1359,10 @@ def declared_bucket_names(path: str) -> tuple[set[str] | None, str | None]:
             # cell label (`⏸️ blocked/hold`) as well as the disposition name, so a
             # whole-line backtick sweep admits `⏸️ blocked/hold` as a legal key.
             head = line.split(".**", 1)[0]
-            dispositions.update(re.findall(r"`([^`]+)`", head))
+            for token in re.findall(r"`([^`]+)`", head):
+                name = strip_emphasis(token)
+                if name:
+                    dispositions.add(name)
             break
     if not dispositions:
         return None, (
