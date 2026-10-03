@@ -225,19 +225,21 @@ def cmd_read(args):
         return refuse(
             "the recorded state for %s is unreadable (%s: %s) — nothing printed; re-post "
             "the card to rewrite it" % (args.topic, type(e).__name__, e))
-    if args.json:
-        print(json.dumps(data, indent=2, ensure_ascii=False))
-        return 0
     rows = data.get("row_set") or []
-    # ⚠️ Validate before deriving. An empty or malformed recorded set would otherwise
-    # hash to `e3b0c44298fc1c14` — the sha256 of the empty string — and print as a
-    # perfectly plausible `key (derived):` line, which is the exact failure shape this
-    # script exists to remove: a value that looks like a key at the point of use.
+    # ⚠️ Validate before EITHER render — `--json` included. The raw dump returns the
+    # record verbatim, so a check placed after it leaves the empty-set failure reachable
+    # through a flag: the same defect, one branch over. An empty or malformed set would
+    # otherwise carry `e3b0c44298fc1c14` — the sha256 of the empty string — as a
+    # perfectly plausible key, which is the failure shape this script exists to remove:
+    # a value that looks like a key at the point of use.
     err = validate_rows(rows)
     if err:
         return refuse(
             "the recorded state for %s is unusable (%s) — nothing printed; re-post the "
             "card to rewrite it" % (args.topic, err))
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
     derived = canonical_key(args.topic, rows)
     recorded = data.get("key", "")
     print("card_item_id: %s" % data.get("card_item_id", ""))

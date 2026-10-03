@@ -222,6 +222,24 @@ class WriteAndRead(TempDirCase):
         self.assertIn("REFUSED", r.stderr)
         self.assertNotIn("e3b0c44298fc1c14", r.stdout)
 
+    def test_read_json_refuses_an_empty_recorded_row_set_too(self):
+        """The `--json` branch returns before the human render — it must not also return
+        before the validation, or the empty-set failure is reachable through a flag."""
+        with open(os.path.join(self.dir, "%s.json" % TOPIC), "w", encoding="utf-8") as fh:
+            json.dump({"card_item_id": "abc123", "key": "e3b0c44298fc1c14",
+                       "row_set": [], "posted_at": "2026-10-04T00:00:00+02:00"}, fh)
+        r = run("read", "--topic", TOPIC, "--json", state_dir=self.dir)
+        self.assertEqual(2, r.returncode)
+        self.assertIn("REFUSED", r.stderr)
+        self.assertNotIn("e3b0c44298fc1c14", r.stdout)
+
+    def test_read_json_still_dumps_a_valid_record(self):
+        run("write", "--topic", TOPIC, "--item-id", "abc123",
+            *rows_args(ROWS), state_dir=self.dir)
+        r = run("read", "--topic", TOPIC, "--json", state_dir=self.dir)
+        self.assertEqual(0, r.returncode)
+        self.assertEqual("abc123", json.loads(r.stdout)["card_item_id"])
+
     def test_read_refuses_an_unparseable_record(self):
         """A truncated file must refuse, not raise — the reader cannot tell a broken tool
         from a damaged store, and only the second is actionable."""
