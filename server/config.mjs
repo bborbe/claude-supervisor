@@ -115,6 +115,24 @@ export const config = Object.freeze({
   // operator's own machine while reading like a cluster problem.
   clusterUrl: ENV.SUPERVISOR_CLUSTER_URL || null,
 
+  // The bearer token a cluster spawn presents to that same service. Read here for the same
+  // reason as every other value: this module owns the environment surface (see the header),
+  // which is what keeps cluster-spawn.mjs a pure function taking the token as an argument.
+  //
+  // ⚠️ The NAME is the counterparty's, not ours. `INTERACTIVE_AUTH_TOKEN` is what the service
+  // itself reads at startup (`bborbe/agent` `docs/interactive-service.md` § Authentication),
+  // so one variable configures both halves. A `SUPERVISOR_`-prefixed alias would be a second
+  // name for one secret, which is how the two ends drift apart while both look configured.
+  //
+  // ⚠️ Unset means "no token configured here", and a cluster spawn then REFUSES — see
+  // resolveAuthToken in cluster-spawn.mjs. Omitting the header is not a neutral fallback: the
+  // service answers 401 before the route's handler runs, so an unconfigured supervisor would
+  // fail as an authorization error naming nothing the operator can act on.
+  //
+  // Raw and deliberately unvalidated, like clusterUrl above: the legal shape and the refusal
+  // message belong to cluster-spawn.mjs, which can be tested without an environment.
+  clusterAuthToken: ENV.INTERACTIVE_AUTH_TOKEN || null,
+
   // Whether a reported cost figure describes the traffic that actually ran. See the
   // note above the resolution — this is a property of the deployment, not of a turn.
   anthropicBaseUrl: ANTHROPIC_BASE_URL,

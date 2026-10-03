@@ -38,6 +38,16 @@ export const PROMPT_PATH = '/prompt'
 // failing. That is the failure this constant exists to make impossible.
 export const SESSION_HEADER = 'X-Session-Id'
 
+// The header and the scheme the service authenticates with, verbatim from its own contract:
+// `bborbe/agent` `docs/interactive-service.md` § Authentication — "Every gated route requires
+// the request header `Authorization: Bearer <token>`. The scheme is matched exactly as
+// `Bearer `". Both halves are load-bearing, and each fails the same silent way: a missing
+// header is a 401, and so is a scheme that differs by case or loses its trailing space — so a
+// near-miss reads as "not authorized" rather than as a malformed request, and sends the
+// reader looking at the token instead of at the line that built the header.
+export const AUTH_HEADER = 'Authorization'
+export const AUTH_SCHEME = 'Bearer '
+
 // A cluster spawn that has not answered within this long is not slow, it is broken — the
 // service holds the turn open and answers in one response, so there is no partial progress
 // to wait for. Bounded rather than unbounded so a wedged pod costs one error, not a manager
@@ -90,6 +100,28 @@ export function resolveClusterBaseUrl(raw) {
   return { baseUrl: url.origin + url.pathname.replace(/\/+$/, '') }
 }
 
+// The token a cluster spawn presents, or a refusal.
+//
+// Refused rather than omitted, following resolveClusterBaseUrl above and for the same
+// reason: the service answers a header-less request with 401 *before* the route's handler
+// runs, so an unconfigured supervisor and a wrong token produce one indistinguishable
+// observable. Refusing here is what turns that into a sentence naming the variable to set.
+export function resolveAuthToken(raw) {
+  if (raw === undefined || raw === null || raw === '') {
+    return {
+      error:
+        "the cluster target has no token: INTERACTIVE_AUTH_TOKEN is not set in this server's environment. " +
+        'The claude-interactive service requires `Authorization: Bearer <token>` on POST /prompt and refuses ' +
+        'without it, so a spawn would fail as a 401 naming nothing to fix. Set INTERACTIVE_AUTH_TOKEN on the ' +
+        'supervisor server entry, then restart the MCP server.',
+    }
+  }
+  if (typeof raw !== 'string') {
+    return { error: `INTERACTIVE_AUTH_TOKEN is ${JSON.stringify(raw)}, which is not a token string` }
+  }
+  return { token: raw }
+}
+
 // One turn on the addressed conversation, and nothing else.
 //
 // Returns `{sessionId, status, answer}` on a 2xx, `{error}` otherwise — including the
@@ -99,6 +131,7 @@ export async function startClusterSession({
   baseUrl,
   prompt,
   sessionId,
+  authToken,
   fetchImpl = fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
@@ -112,6 +145,10 @@ export async function startClusterSession({
       error: `session id ${JSON.stringify(sessionId)} does not match the service's pattern ${CLUSTER_SESSION_ID_PATTERN}`,
     }
   }
+  // Checked before the request for the same reason as the two above: the service's own answer
+  // to a missing credential is a bare 401 that names nothing the caller can act on.
+  const auth = resolveAuthToken(authToken)
+  if (auth.error) return { error: auth.error }
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -119,7 +156,11 @@ export async function startClusterSession({
   try {
     response = await fetchImpl(`${resolved.baseUrl}${PROMPT_PATH}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain; charset=utf-8', [SESSION_HEADER]: sessionId },
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        [SESSION_HEADER]: sessionId,
+        [AUTH_HEADER]: `${AUTH_SCHEME}${auth.token}`,
+      },
       body: prompt,
       signal: controller.signal,
     })
