@@ -1831,6 +1831,16 @@ class PostedCloserTest(unittest.TestCase):
         self._write({"closer": "pick — 1. x"})
         self.assertEqual(wnm.posted_closer("session-a"), "")
 
+    def test_a_non_object_record_is_ignored(self):
+        # Valid JSON is not necessarily an object: `[]`, `"x"`, `42` and `null`
+        # all parse cleanly, then raise AttributeError on `.get` -- which is not
+        # a TypeError, so the `ts` guard alone would not catch it and one bad
+        # file would take the whole feed down.
+        for bad in ("[]", '"a string"', "42", "null"):
+            with self.subTest(record=bad):
+                self._write(bad)
+                self.assertEqual(wnm.posted_closer("session-a"), "")
+
     def test_a_future_dated_record_is_ignored(self):
         # A `ts` ahead of now makes the delta negative, so it would never exceed
         # the TTL and the record would stay authoritative indefinitely -- the

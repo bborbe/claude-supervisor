@@ -863,6 +863,13 @@ def posted_closer(session_id):
             rec = json.load(f)
     except Exception:
         return ""
+    # Valid JSON is not necessarily an OBJECT. A list, string, number or null
+    # parses cleanly and then raises `AttributeError` on `.get` — which is not a
+    # TypeError, so the guard below would not catch it and a single bad file
+    # would take the whole feed down. Same fail-open direction as the rest: an
+    # unreadable record means the echo returns, never a wrong suppression.
+    if not isinstance(rec, dict):
+        return ""
     # A record with no usable `ts` is treated as expired rather than as
     # unbounded: failing open here means the echo returns, which is the safe
     # direction — the alternative suppresses a closer on an unreadable clock.
