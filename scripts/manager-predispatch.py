@@ -73,6 +73,16 @@ Exit codes (same three the loop gate uses)
       as actionable work is waiting. The saving returns on its own: a row the act leg
       actually opened reclassifies as progressing on the next sweep.
 
+      ⚠️ ONE bucket, not two, and the second is the trap. `waiting-approval` looks
+      actionable and is not: the row sits at `phase: todo`, and the only thing that moves
+      it is the operator's `vault-cli task approve` — which the act leg is forbidden to
+      run. Sweeping cannot clear it, so counting it does not stop the gate sleeping while
+      work waits; it makes the no-change verdict UNREACHABLE for any topic carrying an
+      approval queue, which is a managed topic's normal state. Measured 2026-10-03 on
+      `Manager Layer`: 23 `waiting-approval` rows, `--check` answering CHANGE with this
+      clause's reason on a tree whose digest had not moved — the clause permanently true,
+      not intermittently. `ACTIONABLE_BUCKETS` therefore holds `ready-to-start` alone.
+
       The per-bucket half is a save input in its own right, not a passenger on the digest:
       `digest_of()` covers the tracked set only, so a corrected re-stage against an
       unchanged tree used to return 0 and be discarded — leaving a bad `bucket_sets` in
@@ -1051,8 +1061,11 @@ def save_stored(
 # --------------------------------------------------------------------------- #
 
 # Buckets whose presence means the act leg has work it can do *right now*, so a no-change
-# verdict would starve it. See the module docstring's exit-code note for the measurement.
-ACTIONABLE_BUCKETS = ("ready-to-start", "waiting-approval")
+# verdict would starve it. `waiting-approval` is deliberately NOT here: that row waits on
+# the operator's `vault-cli task approve`, which the act leg may not run, so sweeping
+# cannot move it and counting it makes the no-change verdict unreachable for any topic
+# carrying an approval queue. See the module docstring's exit-code note.
+ACTIONABLE_BUCKETS = ("ready-to-start",)
 
 
 def actionable_names(bucket_sets) -> list[str]:
