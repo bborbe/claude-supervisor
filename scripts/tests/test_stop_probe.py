@@ -204,6 +204,23 @@ class MainEndToEndTest(unittest.TestCase):
         self.assertIn("/sweep-gate-loop/myvault/scratch-subject.heartbeat", text)
         self.assertNotIn("/sweep-gate-loop/MyVault/", text)
 
+    def test_missing_registration_prints_the_marker_fallback_hint(self):
+        """The branch the third CHANGELOG entry exists for: no registration, so no subject.
+
+        The probe resolves a subject only from the session's own registration, and a
+        reader that follows the old *"skip and say so; there is no slug to mark"* line
+        leaves the arms to go stale — which the liveness watcher reports as a lapsed
+        manager. The hint is what points the caller at the fallback instead, so it is
+        the deliverable and not a decoration: without it the `(none recorded)` line is
+        a dead end, and a later edit that dropped the `if not subject:` guard would
+        otherwise pass green.
+        """
+        os.unlink(os.path.join(self.tmp, "worker-manager", "scratch.json"))
+        text = self.run_probe()
+        self.assertIn("(none recorded)", text)
+        self.assertIn("never skips the marker", text)
+        self.assertIn("commands/stop.md step 2b", text)
+
 
 if __name__ == "__main__":
     unittest.main()
