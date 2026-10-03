@@ -9,9 +9,15 @@ three consecutive ticks, and two rounds held the card. One tick later it handed 
 another card's branch that **round-trips cleanly**, so a recompute check passes it.
 
 So the assertions are shaped as refusals and as separations: a key that moves when the
-order moves, a key over an empty set, a key that collides across two topics, a write that
-half-lands, and a placeholder a caller must be told to derive past. Each is a thing a
-hand-rolled implementation could do and this one must not.
+order moves, a key over an empty set, a key that collides across two topics, a record that
+is unusable or unparseable, and a placeholder a caller must be told to derive past. Each is
+a thing a hand-rolled implementation could do and this one must not.
+
+⚠️ **Not covered: the atomicity of `write_state`.** `test_a_malformed_write_leaves_the_
+previous_state_intact` passes a repeated row, which `validate_rows` rejects *before*
+`write_state` is entered — so no temp file is ever created and the test proves the
+validation, not the atomicity. The `os.replace` claim is inherited verbatim from
+`under-target-state.py` and is untested here.
 """
 import json
 import os
@@ -71,14 +77,17 @@ class KeyIsOverMembershipAndTopic(TempDirCase):
         self.assertEqual(a, b)
 
     def test_a_changed_row_changes_the_key(self):
-        self.assertNotEqual(key_for(ROWS, self.dir), key_for(ROWS + ["Delta Row"], self.dir))
+        a, b = key_for(ROWS, self.dir), key_for(ROWS + ["Delta Row"], self.dir)
+        self.assertTrue(a and b)  # guard: "" != "" would pass vacuously
+        self.assertNotEqual(a, b)
 
     def test_a_changed_topic_changes_the_key(self):
         """The store scopes suppression on `producer_id`, which is a *session*, not a
         topic (`attention-ask.py:110,:319`) — so the topic has to be in the key or two
         topics with the same rows suppress against each other."""
-        self.assertNotEqual(key_for(ROWS, self.dir, TOPIC),
-                            key_for(ROWS, self.dir, OTHER_TOPIC))
+        a, b = key_for(ROWS, self.dir, TOPIC), key_for(ROWS, self.dir, OTHER_TOPIC)
+        self.assertTrue(a and b)  # guard: "" != "" would pass vacuously
+        self.assertNotEqual(a, b)
 
     def test_the_key_is_bare_hex_with_no_branch_prefix(self):
         """The tick-92 discriminator: a borrowed key carries `under-target:`."""
@@ -212,6 +221,16 @@ class WriteAndRead(TempDirCase):
         self.assertEqual(2, r.returncode)
         self.assertIn("REFUSED", r.stderr)
         self.assertNotIn("e3b0c44298fc1c14", r.stdout)
+
+    def test_read_refuses_an_unparseable_record(self):
+        """A truncated file must refuse, not raise — the reader cannot tell a broken tool
+        from a damaged store, and only the second is actionable."""
+        with open(os.path.join(self.dir, "%s.json" % TOPIC), "w", encoding="utf-8") as fh:
+            fh.write('{"card_item_id": "abc123", "row_set": ["Alpha Row"')
+        r = run("read", "--topic", TOPIC, state_dir=self.dir)
+        self.assertEqual(2, r.returncode)
+        self.assertIn("REFUSED", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
     def test_read_flags_a_recorded_key_that_disagrees_with_the_derivation(self):
         run("write", "--topic", TOPIC, "--item-id", "abc123",

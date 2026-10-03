@@ -214,8 +214,17 @@ def cmd_read(args):
     if not os.path.exists(path):
         print("no state recorded for %s" % args.topic, file=sys.stderr)
         return 3
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        # ⚠️ An unparseable record is a **refusal**, not a traceback. This script's whole
+        # contract is that it never emits a value it cannot stand behind, and a crash
+        # here reads as a broken tool rather than as a damaged store — the reader cannot
+        # tell the two apart, and the second is the actionable one.
+        return refuse(
+            "the recorded state for %s is unreadable (%s: %s) — nothing printed; re-post "
+            "the card to rewrite it" % (args.topic, type(e).__name__, e))
     if args.json:
         print(json.dumps(data, indent=2, ensure_ascii=False))
         return 0
