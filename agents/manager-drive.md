@@ -344,7 +344,17 @@ Audit (n):             ← the cache evidence: dispatched vs cached, per clause 
     ← one line per row the caller persists. `reason:` is REQUIRED on a needs-you / unfixable / below-bar / reframe row and omitted on every other verdict; on a cache hit it repeats the STORED reason verbatim, never a re-derivation.
 
 Card (1):              ← the POSTING PAYLOAD, never a second ranking — the caller posts it
-  post-batch --dedup-key "<the round's waiting-approval row set>" — covers <n> waiting-approval + <m> stale
+  post-batch --dedup-key "<key>" — covers <n> waiting-approval + <m> stale
+  ⚠️ **`<key>` is the card producer's OUTPUT, not a field to copy.** Run
+  `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/waiting-approval-state.py" key --row "<row>" …`
+  — one `--row` per row of this round's waiting-approval set — and substitute the returned value for `<key>`.
+  ⚠️ **A placeholder is not a key, and a hand-rolled one is a second derivation**; either way no
+  later tick can poll the card back, which is silent. ⚠️ **And never borrow the under-target
+  producer's key for this card** — its `under-target:<topic>:<digest>` form recomputes cleanly
+  from these very rows and is still the wrong card's branch (measured 2026-10-03, tick 92,
+  which round-tripped and posted). The derivation's single home is
+  `scripts/waiting-approval-state.py`; the posting mechanics' single home is
+  `65 Runbooks/Manager Session.md` § Step 4's *Waiting-approval* bullet.
   ⚠️ The ranked rows are rendered ONCE, in the `Next` block below. Do not restate them here.
   ⚠️ A `todo` row named in the `Next` block is **never opened and never flipped** — it waits on the operator's `todo → planning`.
 
