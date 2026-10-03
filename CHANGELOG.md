@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.96.6
 
 - fix: **`scripts/manager-predispatch.py`'s actionable-row clause now reads `ready-to-start` alone, so the pre-dispatch gate can return its no-change verdict while a topic carries an approval queue.** `ACTIONABLE_BUCKETS` held `("ready-to-start", "waiting-approval")`, and only the first of those can leave on its own — a `waiting-approval` row sits at `phase: todo`, and the only thing that moves it is the operator's `vault-cli task approve`, which the act leg is forbidden to run. Counting it did not stop the gate sleeping while work waited; it made the no-change verdict **unreachable** for any topic carrying an approval queue, which is a managed topic's normal state. Measured 2026-10-03 on `Manager Layer`: 23 `waiting-approval` rows and `--check` answering `CHANGE 23 actionable row(s) waiting` at exit 10 on a tree whose digest had not moved — the clause permanently true, not intermittently. `test_manager_predispatch.py` flips with it (`test_a_waiting_approval_row_keeps_the_saving_on_an_unchanged_tree`; `actionable_names` now reads one bucket), and the module docstring's exit-code note names the single bucket and why the second is a trap.
 
