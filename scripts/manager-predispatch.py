@@ -241,22 +241,70 @@ def fm_scalar(fm: str, key: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def unescape_scalar(text: str) -> str:
+    """Undo YAML's `''` escape for an apostrophe inside a single-quoted scalar.
+
+    The vault writes these lists as `- '[[Name]]'`, and a name carrying an
+    apostrophe is stored as `- '[[Supervisor''s spawn_agent]]'`. A raw regex
+    returns the still-escaped `Supervisor''s spawn_agent`, which resolves to no
+    page — and "no page" is the UNMET direction, so a COMPLETED blocker would
+    still render blocked-upstream. Unescaping is a no-op for every name that
+    carries no `''`, which is every other name in the vault.
+    """
+    return text.replace("''", "'")
+
+
 def fm_wikilinks(fm: str, key: str) -> list[str]:
     """All [[...]] under `key:`, whether inline (`key: ['[[X]]']`) or block.
 
     All three shapes the vault writes must resolve: inline list, block list, and
-    empty/absent. Block form is `key:` then indented `- '[[X]]'` lines.
+    empty/absent. Block form is `key:` then indented `- '[[X]]'` lines. YAML
+    escaping is undone before the names are returned — see `unescape_scalar`.
     """
     m = re.search(rf"^{re.escape(key)}:(.*)$", fm, re.M)
     if not m:
         return []
     rest = m.group(1)
     if rest.strip() and rest.strip() != "[]":
-        return re.findall(r"\[\[(.+?)\]\]", rest)
+        return [unescape_scalar(h) for h in re.findall(r"\[\[(.+?)\]\]", rest)]
     block = re.search(rf"^{re.escape(key)}:\s*\n((?:[ \t]+-.*\n?)*)", fm, re.M)
     if not block:
         return []
-    return re.findall(r"\[\[(.+?)\]\]", block.group(1))
+    return [unescape_scalar(h) for h in re.findall(r"\[\[(.+?)\]\]", block.group(1))]
+
+
+def blocked_by_verdict(fm: str, tasks_dir: str) -> dict:
+    """Resolve every `blocked_by` entry against `tasks_dir`.
+
+    The deterministic half of the sweep reader's `ready-to-start` /
+    `blocked-upstream` decision, and the reason it is code rather than a clause:
+    a first-entry-only read lands a genuinely blocked row in `ready-to-start`,
+    which is the spawn offer, and a prose warning has twice failed to pin that
+    read (v0.96.4 shipped the warning; the defect reproduced 2026-10-03 18:44).
+
+    EVERY entry is evaluated, never just the first. A blocker whose file is
+    missing, unreadable, or carries no parseable status counts as NOT completed —
+    "cannot verify it is done" reads as blocked, never as permission to start.
+    One status read per entry, and a blocker's own `blocked_by` is never
+    followed, so a dependency cycle terminates.
+
+    Returns `{"entries": [...], "unmet": [...], "blocked": bool}`. An empty
+    `blocked_by` is unblocked — and that is exactly why an EMPTY read is not
+    neutral: it satisfies the `ready-to-start` clause vacuously.
+    """
+    entries = fm_wikilinks(fm, "blocked_by")
+    unmet: list[str] = []
+    for name in entries:
+        try:
+            with open(
+                os.path.join(tasks_dir, f"{name}.md"), encoding="utf-8", errors="replace"
+            ) as fh:
+                blocker_fm = split_frontmatter(fh.read())
+        except OSError:
+            blocker_fm = None
+        if fm_scalar(blocker_fm or "", "status") != "completed":
+            unmet.append(name)
+    return {"entries": entries, "unmet": unmet, "blocked": bool(unmet)}
 
 
 def progress_hash(text: str) -> str:

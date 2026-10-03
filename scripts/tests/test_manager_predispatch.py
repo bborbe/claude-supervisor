@@ -1742,5 +1742,79 @@ class TestBucketVocabulary(Base):
         self.assertIn("could not parse the bucket set", out)
 
 
+class TestBlockedByRead(Base):
+    """The deterministic `blocked_by` read the sweep reader consumes.
+
+    The defect this pins (measured 2026-10-03): the reader promoted a row to
+    `ready-to-start` once its FIRST entry had shipped, ignoring later unmet ones.
+    Two shapes must therefore be read in full — a block list of three or more
+    with the unmet entry STRICTLY INTERIOR (so neither a two-entry special case
+    nor a first-plus-last heuristic can pass), and a YAML single-quoted scalar
+    carrying an escaped apostrophe (`''`), which a raw regex returns still-escaped
+    and therefore unresolvable.
+    """
+
+    def blocker(self, name, status):
+        self.write(
+            f"25 Tasks/{name}.md",
+            f"---\npage_type: task\nstatus: {status}\n---\nTags: [[Task]]\n",
+        )
+
+    def verdict(self, fm):
+        return self.m.blocked_by_verdict(fm, os.path.join(self.vault, "25 Tasks"))
+
+    def test_escaped_apostrophe_is_unescaped(self):
+        # YAML escapes `'` as `''` inside a single-quoted scalar. A raw regex
+        # returns `Supervisor''s`, which matches no page — and "no page" reads as
+        # UNMET, so a COMPLETED blocker would still render blocked-upstream.
+        fm = "blocked_by:\n    - '[[Add a Cluster Spawn Mode to the Supervisor''s spawn_agent]]'\n"
+        self.assertEqual(
+            self.m.fm_wikilinks(fm, "blocked_by"),
+            ["Add a Cluster Spawn Mode to the Supervisor's spawn_agent"],
+        )
+
+    def test_interior_unmet_entry_is_read(self):
+        self.blocker("Met One", "completed")
+        self.blocker("Unmet Middle", "next")
+        self.blocker("Met Two", "completed")
+        fm = (
+            "blocked_by:\n"
+            "    - '[[Met One]]'\n"
+            "    - '[[Unmet Middle]]'\n"
+            "    - '[[Met Two]]'\n"
+        )
+        v = self.verdict(fm)
+        self.assertEqual(v["entries"], ["Met One", "Unmet Middle", "Met Two"])
+        self.assertEqual(v["unmet"], ["Unmet Middle"])
+        self.assertTrue(v["blocked"])
+
+    def test_all_met_is_the_negative_control(self):
+        # Positive without negative is a probe that cannot fail: the interior case
+        # above passes against a build that answers "blocked" too eagerly.
+        for n in ("Met One", "Met Middle", "Met Two"):
+            self.blocker(n, "completed")
+        fm = (
+            "blocked_by:\n"
+            "    - '[[Met One]]'\n"
+            "    - '[[Met Middle]]'\n"
+            "    - '[[Met Two]]'\n"
+        )
+        v = self.verdict(fm)
+        self.assertEqual(v["unmet"], [])
+        self.assertFalse(v["blocked"])
+
+    def test_missing_blocker_counts_as_unmet(self):
+        # "Cannot verify it is done" reads as blocked, never as permission to start.
+        fm = "blocked_by:\n    - '[[Never Written]]'\n"
+        v = self.verdict(fm)
+        self.assertEqual(v["unmet"], ["Never Written"])
+        self.assertTrue(v["blocked"])
+
+    def test_no_blocked_by_is_unblocked(self):
+        v = self.verdict("status: next\n")
+        self.assertEqual(v["entries"], [])
+        self.assertFalse(v["blocked"])
+
+
 if __name__ == "__main__":
     unittest.main()
