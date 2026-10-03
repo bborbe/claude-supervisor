@@ -60,6 +60,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -97,6 +98,45 @@ def resolved_session_id(environ=None):
     caller rather than papered over.
     """
     return (os.environ if environ is None else environ).get("CLAUDE_CODE_SESSION_ID", "")
+
+
+# Resolved exactly as `attention-log.py` resolves it, so the record lands where the
+# hook's `Stop` branch looks for it. A mismatch here would be silent: the hook would
+# simply never find the record and the echo would return, with nothing to see.
+STATE_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention")
+
+
+def record_posted_closer(producer_id, closer, dedup_key):
+    """Name the closer line this card corresponds to, for the hook's `Stop` branch.
+
+    A session that posts a card and then ends its turn with the same ask on its
+    `👤 You:` line used to produce TWO store items: this card, whose `dedup_key` is
+    the declared slug, and the hook's echo, whose key is a derived sha256 of
+    `sid:kind:detail`. Those keys can never collide, so the store's key-based
+    suppression had nothing to match on and the board carried one ask twice —
+    measured 2026-10-02, cards `d393d3e9…` and `3d9263ae…`, one session, two cards,
+    one question.
+
+    Writing the closer here is what supplies the identity the hook cannot derive:
+    `attention-log.py`'s `Stop` branch reads `<sid>.posted.json` and declines to
+    mint the echo when its closer matches.
+
+    Best-effort by design. This is a local hint, not part of the question: if it
+    cannot be written the card is still posted, and the hook falls back to today's
+    behaviour rather than to a wrong suppression.
+    """
+    if not closer:
+        return
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        path = os.path.join(STATE_DIR, f"{producer_id}.posted.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"closer": closer, "dedup_key": dedup_key, "ts": time.time()}, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
 
 
 def build_options(labels, recommended):
@@ -280,6 +320,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
         detail = err.read().decode(errors="replace")
         print(f"FAILED: store returned {err.code} for the push -- {detail}", file=out)
         return 1
+    record_posted_closer(producer_id, getattr(args, "closer", ""), args.dedup_key)
     print(f"ITEM_ID: {item.get('item_id')}", file=out)
     print(f"POLL: python3 attention-ask.py poll {item.get('item_id')}", file=out)
     return 0
@@ -386,6 +427,9 @@ def main(argv=None):
     post.add_argument("--liveness-ref", default="")
     post.add_argument("--interrupt-class", default="pick")
     post.add_argument("--expires-at", default="")
+    # The `👤 You:` line this card answers, when the poster knows it. Optional:
+    # omitted, nothing is recorded and the hook behaves exactly as it did before.
+    post.add_argument("--closer", default="")
 
     batch = sub.add_parser("post-batch")
     batch.add_argument("--dedup-key", required=True)

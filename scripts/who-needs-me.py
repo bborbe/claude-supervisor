@@ -803,6 +803,32 @@ def current_closer(rec):
     return closer_from_transcript(rec) or (rec.get("detail") or "")
 
 
+def posted_closer(session_id):
+    """The closer this session already posted a card for, or "".
+
+    A session that posts a card and then ends its turn with the same ask on its
+    `👤 You:` line puts ONE ask on the board twice. The hook's `Stop` branch now
+    declines to mint the echo and writes an `idle` row instead — but this reader
+    promotes an `idle` row back to `question` from the transcript, so without
+    this check it re-derives the very echo the hook suppressed and the row
+    returns. Measured 2026-10-03: the store carried one item while the feed still
+    rendered the echo.
+
+    Written by `attention-ask.py`'s `record_posted_closer`. Absent or unreadable,
+    this returns "" and the reader behaves exactly as it did before — the fix
+    degrades to a no-op, never to a wrong suppression.
+    """
+    if not session_id:
+        return ""
+    try:
+        with open(
+            os.path.join(STATE, f"{session_id}.posted.json"), encoding="utf-8"
+        ) as f:
+            return normalize_closer(json.load(f).get("closer") or "")
+    except Exception:
+        return ""
+
+
 def reclassify_idle(rec):
     """Stop hook may predate the closer-panel rule; re-derive from the transcript.
 
@@ -814,6 +840,11 @@ def reclassify_idle(rec):
         return rec
     ask = closer_from_transcript(rec)
     if not ask or ask.startswith("nothing") or is_parked_verb(ask):
+        return rec
+    # Identity, not recency: a closer carrying a DIFFERENT ask than the one this
+    # session posted must still reach the board, so the comparison is on the text
+    # the poster recorded rather than on "this session has a card".
+    if ask == posted_closer(rec.get("session_id")):
         return rec
     return dict(rec, kind="question", detail=ask)
 
