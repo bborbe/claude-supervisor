@@ -280,10 +280,31 @@ export function resolveMaxConcurrent({ env, envHard, file, path = 'the superviso
   })
   if (hard.error) return hard
 
+  // ⚠️ `0` IS NOT AN OFF SWITCH ON THE HARD KEY, unlike on the soft one, and it is refused
+  // rather than accepted. On the soft key `0` is the documented off switch; here it would
+  // silently delete the ceiling while leaving the soft cap in force — a fleet that looks
+  // capped and is not, which is the "a limit that silently governs nothing" failure this
+  // module exists to refuse. It would also skip the pair check below. The fallback is never
+  // 0, so a null here can only have come from an explicit `0`.
+  if (hard.limit === null) {
+    // Name the source that actually carried the 0 — the env var when it came from there, the
+    // file otherwise. The same rule `resolveThreshold` follows above, and for the same reason:
+    // a refusal that names the wrong place sends the operator to edit a file that is not the
+    // one governing the spawn.
+    const where = hard.source === 'env' ? MAX_CONCURRENT_HARD_ENV : `"spawn.maxConcurrentHard" in ${path}`
+    return {
+      error:
+        `${where} is 0, which is not a hard concurrent-worker limit — refusing to spawn rather than ` +
+        `removing the ceiling while the soft cap stays in force, because a fleet that looks capped and is ` +
+        `not is discovered only by the load it was meant to bound. Set a non-negative integer above the ` +
+        `soft cap, or use the off switch: "spawn.maxConcurrent": 0 disables BOTH thresholds.`,
+    }
+  }
+
   // A ceiling beneath its own floor is not a limit: every spawn would be refused at the
   // soft count and the operator-named band would be empty. Refused rather than silently
   // reordered, because which of the two numbers the operator meant is not ours to guess.
-  if (hard.limit !== null && hard.limit < soft.limit) {
+  if (hard.limit < soft.limit) {
     return {
       error:
         `the hard concurrent-worker limit is below the soft one: "spawn.maxConcurrent" resolves to ` +
@@ -295,6 +316,60 @@ export function resolveMaxConcurrent({ env, envHard, file, path = 'the superviso
   }
 
   return { limit: soft.limit, hardLimit: hard.limit, source: soft.source, hardSource: hard.source }
+}
+
+// Whether a spawn may proceed — a refusal string, or `null` to allow it.
+//
+// ⚠️ PURE, AND SPLIT OUT OF `supervisor.mjs` FOR THAT REASON. The enforcement lived inline in
+// the server module, which starts an MCP server on import and so cannot be unit-tested — the
+// same reason this file exists at all. The decision is four branches and two of them are the
+// two-threshold change, so it is exactly the logic that must not ship uncovered.
+//
+// ⚠️ `operatorNamed` is the CALLER's assertion, resolved from the task's own operator-set
+// flag and passed in — never inferred here. This module cannot read the vault, and a default
+// of `true` would make the soft cap unenforceable, so an absent argument means an ordinary
+// spawn. The marker and its provenance rule have one home in `commands/open.md` § Step 1.5.
+//
+// ⚠️ THE HARD CAP IS ASKED FIRST because it refuses everyone, so it is the answer whatever
+// named the task — and answering the soft cap first would tell an operator-named caller it
+// was exempt at a count where nothing opens.
+export function concurrentLimitRefusal({ limits, liveCount, operatorNamed = false, configFile }) {
+  if (limits.error) return limits.error
+  // `null` is unlimited — the soft key's off switch, which disables the pair.
+  if (limits.limit === null) return null
+
+  // `null` is "a store could not be read", which is NOT "no worker is live". Refusing on it is
+  // the same asymmetry the mode rule carries: a limit that cannot count must not open, because
+  // opening past an uncountable limit is how the limit silently stops existing — and a caller
+  // acting on the other reading spawns onto live work.
+  if (liveCount === null) {
+    return (
+      `the concurrent-worker limit is set to ${limits.limit} but the live-worker count could not be ` +
+      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. Both the ` +
+      `session registry and the spawn ledger must be readable; point SUPERVISOR_SESSIONS_DIR and ` +
+      `SUPERVISOR_LEDGER_DIR at them if they live elsewhere.`
+    )
+  }
+
+  if (limits.hardLimit !== null && liveCount >= limits.hardLimit) {
+    return (
+      `the fleet is FULL: ${liveCount} live workers against a hard cap of ${limits.hardLimit} ` +
+      `(source: ${limits.hardSource}), so nothing opens — not even an operator-named task. The soft ` +
+      `cap is ${limits.limit} (source: ${limits.source}). Raise spawn.maxConcurrentHard in ` +
+      `${configFile} to open past ${limits.hardLimit}, or set spawn.maxConcurrent to 0 for unlimited.`
+    )
+  }
+
+  if (liveCount >= limits.limit && !operatorNamed) {
+    return (
+      `the fleet-wide concurrent-worker limit is reached: ${liveCount} live, ${limits.limit} ` +
+      `allowed (source: ${limits.source}). Open nothing further and report the remainder as ` +
+      `held-on-limit; it is picked up next sweep. An OPERATOR-NAMED task may still open here — this one was ` +
+      `not named, so it is refused. Raise spawn.maxConcurrent in ${configFile}, or ` +
+      `set it to 0 for unlimited.`
+    )
+  }
+  return null
 }
 
 export const WORKER_MODE_ENV = 'SUPERVISOR_WORKER_MODE'

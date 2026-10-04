@@ -45,7 +45,11 @@ class WorkerTargetTest(unittest.TestCase):
     def run_script(self, config, *args, env=None):
         """`(exit code, stdout, stderr)` with `SUPERVISOR_CONFIG` pointed at `config`."""
         environment = dict(os.environ, SUPERVISOR_CONFIG=config)
+        # BOTH cap variables, not just the soft one: either left in the ambient environment
+        # would override the fixture's config and make these assertions test the operator's
+        # machine instead of the file under test.
         environment.pop("SUPERVISOR_MAX_CONCURRENT", None)
+        environment.pop("SUPERVISOR_MAX_CONCURRENT_HARD", None)
         environment.update(env or {})
         out = subprocess.run(
             [sys.executable, str(SCRIPT), *args],
@@ -148,6 +152,44 @@ class WorkerTargetTest(unittest.TestCase):
         self.assertIn("resolveMaxConcurrent", source)
         self.assertIn("spawn-mode.mjs", source)
         self.assertNotIn("DEFAULT_MAX_CONCURRENT = 20", source)
+
+
+    # --- the hard cap (`--hard`, added 2026-10-04) -------------------------------
+
+    def test_hard_flag_reads_the_hard_cap_from_the_same_resolver(self):
+        """`--hard` prints the hard ceiling, and it comes from the SAME resolver call as the
+        soft target, so the band a manager reports and the band the server enforces cannot
+        drift. A regression where `--hard` echoed the soft value would leave this whole suite
+        green while every reader was handed the wrong ceiling."""
+        config = self.write("config.json", json.dumps({"spawn": {"maxConcurrent": 30, "maxConcurrentHard": 50}}))
+        self.assertEqual(self.run_script(config)[1].strip(), "30")
+        self.assertEqual(self.run_script(config, "--hard")[1].strip(), "50")
+        self.assertEqual(self.run_script(config, "--hard", "--source")[1].strip(), "50 config")
+
+    def test_hard_flag_defaults_to_50_when_the_key_is_absent(self):
+        """The hard default is a real default, reachable with no config edit: a machine that has
+        never set either key still ships the 20/50 pair."""
+        config = self.write("config.json", json.dumps({"spawn": {}}))
+        self.assertEqual(self.run_script(config)[1].strip(), "20")
+        self.assertEqual(self.run_script(config, "--hard")[1].strip(), "50")
+
+    def test_hard_flag_reports_unlimited_when_the_soft_off_switch_is_thrown(self):
+        """`0` on the soft key disables the PAIR, so `--hard` reads `unlimited` too — not a bare
+        `50`, which would render as a live ceiling a reader could act on."""
+        config = self.write("config.json", json.dumps({"spawn": {"maxConcurrent": 0}}))
+        self.assertEqual(self.run_script(config)[1].strip(), "unlimited")
+        self.assertEqual(self.run_script(config, "--hard")[1].strip(), "unlimited")
+
+    def test_zero_on_the_hard_key_is_unknown_not_a_silent_ceiling_removal(self):
+        """The resolver refuses `0` on the hard key, so this instrument reports UNKNOWN with the
+        reason — never `unlimited` (which a reader would act on) and never `50` (which would
+        hide that the operator's line was rejected)."""
+        config = self.write("config.json", json.dumps({"spawn": {"maxConcurrentHard": 0}}))
+        code, out, err = self.run_script(config, "--hard")
+        self.assertEqual(code, 2)
+        self.assertEqual(out.strip(), "")
+        self.assertIn("UNKNOWN", err)
+        self.assertIn("maxConcurrentHard", err)
 
 
 if __name__ == "__main__":

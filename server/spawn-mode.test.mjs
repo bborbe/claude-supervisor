@@ -12,6 +12,7 @@ import {
   DEFAULT_MAX_CONCURRENT_HARD,
   MAX_CONCURRENT_ENV,
   MAX_CONCURRENT_HARD_ENV,
+  concurrentLimitRefusal,
   resolveMaxConcurrent,
   resolveSpawnMode,
   resolveSpawnTarget,
@@ -287,6 +288,80 @@ test('both cap keys are known spawn keys — neither warns as unknown', () => {
     unknownKeyWarnings({ spawn: { mode: 'interactive', maxConcurrent: 6, maxConcurrentHard: 60 } }, 'x.json'),
     [],
   )
+})
+
+test('resolveMaxConcurrent: 0 on the HARD key is refused, unlike on the soft one', () => {
+  // On the soft key `0` is the documented off switch. On the hard key it would silently delete
+  // the ceiling while the soft cap stayed in force — a fleet that looks capped and is not,
+  // which is the "a limit that silently governs nothing" failure this module refuses. The
+  // fallback is never 0, so a null here can only have come from an explicit 0.
+  const { error } = resolveMaxConcurrent({ file: { spawn: { maxConcurrentHard: 0 } } })
+  assert.match(error, /spawn\.maxConcurrentHard/)
+  assert.match(error, /is 0/)
+  assert.match(error, /disables/)
+  assert.match(resolveMaxConcurrent({ envHard: '0' }).error, new RegExp(MAX_CONCURRENT_HARD_ENV))
+  // ⚠️ But the soft key's off switch still wins, and it is checked FIRST — so `0` on both keys
+  // is the documented "no limit" state, not an error. A hard value that would be refused on
+  // its own must not refuse a spawn the operator has deliberately uncapped.
+  assert.deepEqual(
+    resolveMaxConcurrent({ file: { spawn: { maxConcurrent: 0, maxConcurrentHard: 0 } } }),
+    { limit: null, hardLimit: null, source: 'config', hardSource: 'config' },
+  )
+})
+
+// --- the enforcement decision ---------------------------------------------------------
+//
+// ⚠️ Split out of `supervisor.mjs` so it CAN be tested: that module starts an MCP server on
+// import, which is why this file exists at all. The four branches below are the enforcement
+// half of the two-threshold change, and two of them are new.
+
+const PAIR = { limit: 30, hardLimit: 50, source: 'config', hardSource: 'config' }
+
+test('concurrentLimitRefusal: below the soft cap everything opens', () => {
+  assert.equal(concurrentLimitRefusal({ limits: PAIR, liveCount: 29 }), null)
+  assert.equal(concurrentLimitRefusal({ limits: PAIR, liveCount: 0, operatorNamed: false }), null)
+})
+
+test('concurrentLimitRefusal: the band refuses an ordinary spawn and admits an operator-named one', () => {
+  // The whole point of the change. Both halves are asserted together, because either alone is
+  // satisfied by a build that got the other wrong — raising the single cap for everyone passes
+  // the exemption half, and refusing everyone passes the ordinary half.
+  assert.match(concurrentLimitRefusal({ limits: PAIR, liveCount: 30 }), /OPERATOR-NAMED/)
+  assert.equal(concurrentLimitRefusal({ limits: PAIR, liveCount: 30, operatorNamed: true }), null)
+  assert.equal(concurrentLimitRefusal({ limits: PAIR, liveCount: 49, operatorNamed: true }), null)
+})
+
+test('concurrentLimitRefusal: the hard cap refuses everyone, operator-named included', () => {
+  // The hard branch is asked FIRST, and that ordering is what makes this true: answering the
+  // soft cap first would tell an operator-named caller it was exempt at a count where nothing
+  // opens.
+  const full = concurrentLimitRefusal({ limits: PAIR, liveCount: 50, operatorNamed: true })
+  assert.match(full, /fleet is FULL/)
+  assert.match(full, /not even an operator-named task/)
+  assert.match(concurrentLimitRefusal({ limits: PAIR, liveCount: 51, operatorNamed: true }), /51 live workers/)
+  assert.match(concurrentLimitRefusal({ limits: PAIR, liveCount: 50, operatorNamed: false }), /fleet is FULL/)
+})
+
+test('concurrentLimitRefusal: an equal pair leaves no band, so the exemption never applies', () => {
+  // Degenerate but coherent, and the hard-first ordering is what keeps it coherent — at the
+  // shared count the hard branch fires, so nothing slips through the exemption.
+  const equal = { limit: 30, hardLimit: 30, source: 'config', hardSource: 'config' }
+  assert.equal(concurrentLimitRefusal({ limits: equal, liveCount: 29, operatorNamed: true }), null)
+  assert.match(concurrentLimitRefusal({ limits: equal, liveCount: 30, operatorNamed: true }), /fleet is FULL/)
+})
+
+test('concurrentLimitRefusal: an uncountable store refuses rather than reading as zero', () => {
+  // `null` is "a store could not be read", NOT "no worker is live". A limit that cannot count
+  // must not open — and the reading that would let it open is the one that looks healthy.
+  const refusal = concurrentLimitRefusal({ limits: PAIR, liveCount: null })
+  assert.match(refusal, /could not be/)
+  assert.match(refusal, /unknown/)
+})
+
+test('concurrentLimitRefusal: the off switch and a resolver error pass straight through', () => {
+  const off = { limit: null, hardLimit: null, source: 'config', hardSource: 'config' }
+  assert.equal(concurrentLimitRefusal({ limits: off, liveCount: 999 }), null)
+  assert.equal(concurrentLimitRefusal({ limits: { error: 'boom' }, liveCount: 0 }), 'boom')
 })
 
 test('a spawn with no target is local', () => {

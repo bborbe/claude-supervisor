@@ -25,7 +25,7 @@ import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { newSessionId, startClusterSession } from './cluster-spawn.mjs'
 import { windowIdArgument } from './window-id.mjs'
@@ -751,51 +751,26 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
 // ordinary spawn. The marker and its provenance rule have one home in `commands/open.md`
 // § Step 1.5; this is the enforcement, not a second definition.
 function concurrentLimitError({ operatorNamed = false } = {}) {
-  const maxConcurrent = resolveMaxConcurrent({
+  // Resolve and count HERE; decide THERE. The decision is `concurrentLimitRefusal` in
+  // `spawn-mode.mjs` — pure, and therefore unit-testable, which this module is not, because
+  // importing it starts an MCP server. Only the two side-effectful reads stay in this file.
+  const limits = resolveMaxConcurrent({
     env: config.maxConcurrent,
     envHard: config.maxConcurrentHard,
     file: config.configFileContents,
     path: config.configFile,
   })
-  if (maxConcurrent.error) return maxConcurrent.error
-  if (maxConcurrent.limit === null) return null
-
-  const live = workerSessions()
-  // `null` is "a store could not be read", which is NOT "no worker is live". Refusing on it is
-  // the same asymmetry the mode rule carries: a limit that cannot count must not open, because
-  // opening past an uncountable limit is how the limit silently stops existing — and a manager
-  // acting on the other reading spawns onto live work.
-  if (live === null) {
-    return (
-      `the concurrent-worker limit is set to ${maxConcurrent.limit} but the live-worker count could not be ` +
-      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. Both the ` +
-      `session registry and the spawn ledger must be readable; point SUPERVISOR_SESSIONS_DIR and ` +
-      `SUPERVISOR_LEDGER_DIR at them if they live elsewhere.`
-    )
-  }
-  // The HARD cap is asked FIRST because it refuses everyone, so it is the answer whatever
-  // named the task — and answering the soft cap first would tell an operator-named caller it
-  // was exempt at a count where nothing is.
-  if (maxConcurrent.hardLimit !== null && live.length >= maxConcurrent.hardLimit) {
-    return (
-      `the fleet is FULL: ${live.length} live workers against a hard cap of ${maxConcurrent.hardLimit} ` +
-      `(source: ${maxConcurrent.hardSource}), so nothing opens — not even an operator-named task. The soft ` +
-      `cap is ${maxConcurrent.limit} (source: ${maxConcurrent.source}). Raise spawn.maxConcurrentHard in ` +
-      `${config.configFile} to open past ${maxConcurrent.hardLimit}, or set spawn.maxConcurrent to 0 for ` +
-      `unlimited.`
-    )
-  }
-
-  if (live.length >= maxConcurrent.limit && !operatorNamed) {
-    return (
-      `the fleet-wide concurrent-worker limit is reached: ${live.length} live, ${maxConcurrent.limit} ` +
-      `allowed (source: ${maxConcurrent.source}). Open nothing further and report the remainder as ` +
-      `held-on-limit; it is picked up next sweep. An OPERATOR-NAMED task may still open here — this one was ` +
-      `not named, so it is refused. Raise spawn.maxConcurrent in ${config.configFile}, or ` +
-      `set it to 0 for unlimited.`
-    )
-  }
-  return null
+  // Skipped when the pair is off or unresolvable: `concurrentLimitRefusal` answers both of
+  // those before it ever looks at the count, and the store read is the expensive half.
+  const live = limits.error || limits.limit === null ? null : workerSessions()
+  return concurrentLimitRefusal({
+    limits,
+    // `null` is "a store could not be read", which is NOT "no worker is live" — the refusal
+    // turns that distinction into an error rather than a zero.
+    liveCount: live === null ? null : live.length,
+    operatorNamed,
+    configFile: config.configFile,
+  })
 }
 
 // A cluster worker: a session inside the `claude-interactive` service, not a process here.
@@ -1417,7 +1392,13 @@ const TOOLS = [
         operator_named: {
           type: 'boolean',
           description:
-            'Whether the OPERATOR named THIS task by hand — the exemption that lets one task open while the fleet sits between its soft and hard caps (default soft 30 / hard 50). The caller resolves it from the task\'s own operator-set flag and passes it; the server never infers it and never reads the vault, because a default of true would make the soft cap unenforceable. Omit for an ordinary spawn, which is refused at the soft cap. An operator-named spawn is still refused at the hard cap, where the fleet is full for everyone.',
+            // ⚠️ The two numbers are INTERPOLATED from the constants, never written. They were
+            // written once, as "30 / hard 50", and were wrong within the hour: 30 is the value
+            // the operator set in his config, not the code default, which is 20. A restated
+            // default is a second counter a reader cannot tell from the real one, and this
+            // surface is outside `check-worker-target.py`'s reach — so the fix is to make the
+            // drift impossible rather than to correct it once.
+            `Whether the OPERATOR named THIS task by hand — the exemption that lets one task open while the fleet sits between its soft and hard caps (default soft ${DEFAULT_MAX_CONCURRENT} / hard ${DEFAULT_MAX_CONCURRENT_HARD}). The caller resolves it from the task's own operator-set flag and passes it; the server never infers it and never reads the vault, because a default of true would make the soft cap unenforceable. Omit for an ordinary spawn, which is refused at the soft cap. An operator-named spawn is still refused at the hard cap, where the fleet is full for everyone.`,
         },
       },
       required: ['prompt'],
