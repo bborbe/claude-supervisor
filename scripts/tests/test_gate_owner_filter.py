@@ -434,6 +434,30 @@ class Claims(unittest.TestCase):
     def test_absent_claims_mapping_is_the_pre_claim_behaviour(self):
         self.assertEqual(self.call("w", None, None), (gf.EMIT, "unowned"))
 
+    # --- the claim x hop-3b intersection -----------------------------------
+    #
+    # Hop 3b sits ABOVE the claim block, so without an explicit guard it would
+    # drop an adopted pane before the claim was ever read -- silencing the gate
+    # for the one manager that undertook to route it, while the peer's own
+    # watcher exits at the `self` check and nobody is left to report it. The
+    # fixture that hid this: `LIVE` above does not contain `"w"`, so hop 3b's
+    # liveness guard kept every other case in this class inert.
+
+    def test_adopted_live_managers_own_gate_is_still_kept(self):
+        """`own-claim` outranks hop 3b: an adopted pane is one we EXIST to see."""
+        self.assertEqual(
+            self.call("manager-z", None, {"manager-z": ME}, live={"manager-z"}),
+            (gf.EMIT, "own-claim"),
+        )
+
+    def test_a_peers_claim_on_a_live_managers_own_gate_still_drops(self):
+        """The guard is scoped to OUR adoption only -- a peer's claim does not
+        rescue the pane, and the reason names the rule that actually fired."""
+        self.assertEqual(
+            self.call("manager-z", None, {"manager-z": PEER}, live={"manager-z"}),
+            (gf.DROP, "peer-manager-own"),
+        )
+
 
 class LoadClaims(unittest.TestCase):
     def write(self, payload):
@@ -537,6 +561,55 @@ class ClaimsFilePath(unittest.TestCase):
     def test_absent_claim_file_still_emits(self):
         result = self.run_filter("--claims-file", os.path.join(self.dir, "absent.json"))
         self.assertIn("emit unowned", result.stdout, result.stderr)
+
+
+class SummaryLine(unittest.TestCase):
+    """The stderr counters, which nothing asserted on before this change.
+
+    The line exists so a broken watcher stops looking like a quiet fleet, and
+    this change adds a third bucket to it. A typo in the f-string, or a bucket
+    name drifting from the reason `verdict` actually returns, would render as
+    `dropped(peer-manager-own): 0` on every run -- the exact misread the
+    split-by-reason line was built to prevent. Pinning both counts in ONE run
+    keeps each bucket tied to its reason string.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.ledger = os.path.join(self.dir, "ledger")
+        for path in (self.state, self.registry, self.ledger):
+            os.makedirs(path)
+        # Two panes off one live manager: its OWN gate (no ledger record at all,
+        # so hop 3b's branch) and its worker's (a ledger record, so hop 3's).
+        with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(
+                {"type": "open", "item_id": "1", "pane": "10", "session_id": "own-mgr"}
+            ) + "\n")
+            handle.write(json.dumps(
+                {"type": "open", "item_id": "2", "pane": "11", "session_id": "w1"}
+            ) + "\n")
+        with open(os.path.join(self.registry, "p.json"), "w", encoding="utf-8") as handle:
+            json.dump({"sessionId": "own-mgr"}, handle)
+        with open(os.path.join(self.ledger, "w1.json"), "w", encoding="utf-8") as handle:
+            json.dump({"session_id": "w1", "parent_session": "own-mgr"}, handle)
+
+    def test_each_drop_bucket_is_counted_under_its_own_reason(self):
+        result = subprocess.run(
+            [sys.executable, _SCRIPT, "--pane", "10", "--pane", "11", "--self", ME,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", self.ledger,
+             "--claims-file", os.path.join(self.dir, "no-claims.json")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gates: 2", result.stderr, result.stderr)
+        self.assertIn("emit: 0", result.stderr, result.stderr)
+        self.assertIn("dropped(peer-manager): 1", result.stderr, result.stderr)
+        self.assertIn("dropped(peer-manager-own): 1", result.stderr, result.stderr)
 
 
 if __name__ == "__main__":

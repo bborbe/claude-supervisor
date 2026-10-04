@@ -61,6 +61,22 @@ carries `parent_session: null` too (see `CLAUDE.md` § The spawn ledger), but it
 has a ledger record of its OWN, so it is not a manager and must keep emitting.
 Keying 3b on the empty spawner would drop every such worker.
 
+⚠️ **HOP 3b CANNOT SEPARATE AN OPERATOR-STARTED MANAGER FROM A RECORD-LESS
+WORKER, and that is the one case it over-filters.** The same `CLAUDE.md`
+paragraph continues: *"A worker whose session id never resolved gets no record
+rather than one filed under a key nothing would look up, and the server logs that
+rather than staying quiet."* Such a worker is absent from the ledger **and**
+resolves no spawner, so it satisfies both halves of this branch — and if the
+registry lists it, it drops. Before this change it emitted. It is the same
+"nobody's to route" shape hop 4 protects with `dead-manager`. **No predicate fix
+is available:** a record-less live session is indistinguishable from an
+operator-started manager by the evidence this hop has, and the alternative —
+dropping the branch — restores the peer-manager wake the branch exists to remove.
+The compensating control is that the condition is *discoverable* rather than
+invisible: the server logs the unresolved id at spawn, per the same paragraph.
+Named here rather than left to be rediscovered, for the reason the PREDECESSOR
+section above states its own limitation.
+
 ⚠️ HOP 3b REQUIRES LIVENESS, so a DEAD peer manager's own gate is KEPT -- hop 4's
 rule read one hop differently. A dead manager cannot act on its own gate, so the
 duplication that justifies the drop is absent and dropping would leave the gate
@@ -345,7 +361,17 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None):
     # a resolved `peer-manager` drop back into an emit. Same predicate as hop 3,
     # applied one hop differently; the module header carries the measured cases
     # and why this keys on ledger membership rather than on an empty spawner.
-    if not spawner and is_manager(session_id, ledger):
+    # A pane this watcher ADOPTED is one it EXISTS to see, and the claim block
+    # below promises exactly that with its `own-claim` arm. The adoption is
+    # checked here as well because hop 3b sits ABOVE that block: without this
+    # guard it would drop an adopted pane before the claim was ever read,
+    # silencing the gate for the one manager that undertook to route it -- and
+    # the peer's own watcher exits at the `self` check, so nobody is left to
+    # report it. Measured contract, not a hypothetical: `ownership-claim.py`
+    # records the adoption precisely so the adopting manager keeps seeing a
+    # spawnerless pane.
+    adopted_by_self = bool(claims and self_id and claims.get(session_id) == self_id)
+    if not spawner and is_manager(session_id, ledger) and not adopted_by_self:
         # Liveness stays a requirement, so a DEAD peer manager's own gate falls
         # through and emits: it cannot act on its own gate, so nothing
         # duplicates this wake, and dropping it would leave the gate owned by
