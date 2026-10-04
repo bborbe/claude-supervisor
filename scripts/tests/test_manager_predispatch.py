@@ -18,6 +18,7 @@ The load-bearing properties, in the order the criteria grade them:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -1842,6 +1843,50 @@ class TestVerdictsCache(Base):
         )
         self.assertEqual(rc, self.m.EXIT_USAGE)
         self.assertEqual(self.read_verdicts("ATopic"), good)
+
+    def test_an_unresolvable_name_with_a_suffix_is_still_reduced_to_its_stem(self):
+        """The `.md` strip runs before the lookup, so it applies on the unresolvable path
+        too: an absent `Foo.md` is stored as `Foo`, canonicalising it exactly as a
+        resolvable one is. This is the single sub-case the "left as sent" rule does not
+        cover literally, so it is pinned rather than left to the prose."""
+        rc, out = self.verdicts(
+            "ATopic",
+            {"Foo.md": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["Foo"])
+
+    def test_an_unreadable_tasks_dir_says_so_rather_than_degrading_silently(self):
+        """`task_index` collapses "unreadable" and "empty" into `{}`, which is right for its
+        other callers and wrong here: an empty index stores every name exactly as the caller
+        spelled it — the defect this writer's name derivation exists to remove — and without
+        the note the write succeeds looking normal. The note is the whole difference between
+        a documented fallback and a silent one."""
+        tasks_dir = os.path.join(self.vault, "25 Tasks")
+        for entry in os.listdir(tasks_dir):
+            os.unlink(os.path.join(tasks_dir, entry))
+        os.rmdir(tasks_dir)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.verdicts(
+                "ATopic",
+                {"atask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+            )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertIn("cannot read", err.getvalue())
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["atask"])
+
+    def test_a_refusal_names_the_spelling_the_caller_sent(self):
+        """Every shape refusal names the DERIVED title, because that is what the shape check
+        reads. A caller who sent `atask` would otherwise read a message about a title it
+        never typed, and have no way to tell which of its keys was refused."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, _ = self.verdicts(
+                "ATopic", {"atask": {"verdict": "ready", "score": "high"}}
+            )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertIn("'ATask' ← 'atask'", err.getvalue())
 
     def test_a_renamed_row_lands_under_its_current_title(self):
         """The defect the task names: a rename must not strand the entry. The caller reads
