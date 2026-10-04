@@ -35,9 +35,39 @@ Ownership is resolvable without guessing, through four hops:
      they are kept rather than dropped.
 
 The keep-set is the complement and is deliberately wide: a gate is dropped ONLY
-when its spawner is a live manager other than this watcher's own. Panes this
-session spawned, panes whose spawner is a worker, panes whose spawner is dead,
-and unowned panes all emit.
+when a live manager other than this watcher's own owns it -- reached at hop 3
+(its SPAWNER is such a manager) or at hop 3b (the gated session IS such a
+manager itself). Panes this session spawned, panes whose spawner is a worker,
+panes whose spawner is dead, and unowned panes all emit.
+
+⚠️ HOP 3b EXISTS BECAUSE HOP 3 CANNOT REACH A MANAGER'S OWN GATE. A manager that
+raises a gate on itself was operator-started, so it has no ledger record, hop 2
+resolves no spawner, and `spawner_verdict` reads the empty spawner `unowned` and
+keeps it -- while that same manager's WORKERS drop correctly one hop out.
+Measured 2026-09-27 on goal-manager session `cd816ba7`: one `--explain` run
+dropped `ca3ea901`'s two workers (panes 2326, 2327) and emitted `ca3ea901`'s own
+pane 2076 as `unowned` in the same pass -- succeeding one hop out and failing
+exactly the hop this adds. Re-measured 2026-10-01 with the actors named: session
+`9ecc3e19` was simultaneously the SPAWNER of a dropped gate and the SUBJECT of an
+emitted one. Cost on one topic manager: 5-13 foreign wakes per 30-minute arm,
+zero true positives. It is consulted only where the spawner path emits -- like
+the claim below, hop 3b can only ADD a drop, never turn a resolved
+`peer-manager` drop back into an emit.
+
+⚠️ HOP 3b KEYS ON `is_manager(session_id, ledger)`, NOT ON `spawner is None`.
+The two are not the same test, and the difference is a live case rather than a
+pedantic one: a WORKER whose spawn chain never resolved to a registered session
+carries `parent_session: null` too (see `CLAUDE.md` § The spawn ledger), but it
+has a ledger record of its OWN, so it is not a manager and must keep emitting.
+Keying 3b on the empty spawner would drop every such worker.
+
+⚠️ HOP 3b REQUIRES LIVENESS, so a DEAD peer manager's own gate is KEPT -- hop 4's
+rule read one hop differently. A dead manager cannot act on its own gate, so the
+duplication that justifies the drop is absent and dropping would leave the gate
+with no owner. Absence from the registry is not proof of death either (measured
+2026-10-04: a live session read `UNREGISTERED` because its registry record keys
+the id differently), and the asymmetry is the one `load_claims` states -- one
+wasted wake against a fleet-wide silence.
 
 A CLAIM overrides that, and it is the one ownership input that does NOT come
 from the spawn edge. `scripts/ownership-claim.py` records which manager has
@@ -99,9 +129,9 @@ rejected:
 ⚠️ A filter that silently matches nothing is indistinguishable from a quiet
 fleet (a broken watcher is indistinguishable from a quiet one). So `--explain`
 prints the reason for every verdict, and every run prints a
-`gates: N  emit: N  dropped(peer-manager): N` line on stderr — which is what
-makes an empty result legible as "nothing to filter" rather than "the filter is
-broken".
+`gates: N  emit: N  dropped(peer-manager): N  dropped(peer-manager-own): N
+dropped(claimed): N` line on stderr — which is what makes an empty result legible
+as "nothing to filter" rather than "the filter is broken".
 """
 
 import argparse
@@ -288,7 +318,8 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None):
     """(emit|drop, reason) for one gated session.
 
     The keep-set is wide on purpose: drop ONLY on a live peer manager -- reached
-    either by the spawn edge or by a claim a live peer manager holds.
+    by the spawn edge (its spawner), by the gated session being one itself, or by
+    a claim a live peer manager holds.
     """
     if not session_id:
         return EMIT, "unowned"
@@ -305,6 +336,23 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None):
     call, reason = spawner_verdict(spawner, ledger, live)
     if call == DROP:
         return call, reason
+
+    # HOP 3b -- the GATED SESSION is itself the manager. Hop 3 reads the spawn
+    # edge, and a manager's own gate has none: an operator-started manager was
+    # never spawned, so hop 2 resolves no spawner and the spawner path just
+    # emitted `unowned`. Consulted only where that path emits, exactly as the
+    # claim below is, because like a claim it can only ADD a drop -- never turn
+    # a resolved `peer-manager` drop back into an emit. Same predicate as hop 3,
+    # applied one hop differently; the module header carries the measured cases
+    # and why this keys on ledger membership rather than on an empty spawner.
+    if not spawner and is_manager(session_id, ledger):
+        # Liveness stays a requirement, so a DEAD peer manager's own gate falls
+        # through and emits: it cannot act on its own gate, so nothing
+        # duplicates this wake, and dropping it would leave the gate owned by
+        # nobody. An unreadable registry (`live is None`) falls through for the
+        # same fail-open reason every other hop takes it.
+        if live is not None and session_id in live:
+            return DROP, "peer-manager-own"
 
     # The spawner path emits, so the claim can only ADD a drop. Its fail-open
     # outcomes cost nothing here -- they land on an emit either way -- and a
@@ -424,14 +472,17 @@ def main():
 
     # Loud on the count, so an empty drop set reads as "nothing to filter"
     # rather than as a filter that never matched.
-    # Split by reason, not lumped: `dropped` now covers two rules, and a run
-    # driven entirely by claims would otherwise report panes as peer-manager
-    # drops that are not -- the exact misread this line exists to prevent.
+    # Split by reason, not lumped: `dropped` now covers three rules, and a run
+    # driven entirely by claims -- or by hop 3b -- would otherwise report panes
+    # as peer-manager drops that are not: the exact misread this line exists to
+    # prevent.
     dropped_peer = [r for r in dropped if r["reason"] == "peer-manager"]
+    dropped_own = [r for r in dropped if r["reason"] == "peer-manager-own"]
     dropped_claimed = [r for r in dropped if r["reason"] == "claimed"]
     print(
         f"gates: {len(rows)}  emit: {len(kept)}  "
         f"dropped(peer-manager): {len(dropped_peer)}  "
+        f"dropped(peer-manager-own): {len(dropped_own)}  "
         f"dropped(claimed): {len(dropped_claimed)}",
         file=sys.stderr,
     )

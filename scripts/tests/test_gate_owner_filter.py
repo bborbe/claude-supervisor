@@ -16,6 +16,11 @@ defect the filter has actually shipped or would ship:
   * a CLAIM is the one ownership input that is not the spawn edge, and it drops
     ONLY for a live peer manager -- so both halves are pinned: a claimed pane
     drops, and the same unclaimed pane still emits.
+  * a manager's OWN gate (hop 3b) drops on the GATED SESSION being a live peer
+    manager, not only on its spawner being one. The branch keys on ledger
+    membership rather than on an empty spawner, so a WORKER whose
+    `parent_session` never resolved is not mistaken for a manager -- and a dead
+    peer manager's own gate stays kept (SC3).
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -104,6 +109,48 @@ class Verdict(unittest.TestCase):
         naive_drops_own_worker = ME in live_managers
         self.assertTrue(naive_drops_own_worker, "fixture no longer exercises the bug")
         self.assertEqual(self.call("w", ME)[0], gf.EMIT)
+
+    # --- HOP 3b: the gated session is ITSELF a manager ---------------------
+    #
+    # Hop 3 reads the spawn edge. A manager that raises a gate on itself has
+    # none -- an operator-started manager was never spawned -- so hop 2 resolves
+    # no spawner and the pane read `unowned`, waking every other manager's
+    # watcher. These pin the new branch and, just as importantly, its edges.
+
+    def test_live_peer_managers_own_gate_is_dropped(self):
+        """The defect this rule removes: a manager's OWN pane, not its workers'."""
+        self.assertEqual(
+            self.call("manager-z", None, live={"manager-z"}),
+            (gf.DROP, "peer-manager-own"),
+        )
+
+    def test_own_session_is_not_dropped_by_hop_3b(self):
+        """Self-exclusion outranks the new rule, or the watcher silences itself."""
+        self.assertEqual(self.call(ME, None, live={ME}), (gf.EMIT, "self"))
+
+    def test_dead_peer_managers_own_gate_is_kept(self):
+        """SC3: a dead manager cannot act on its own gate, so nothing duplicates
+        this wake and dropping it would leave the gate owned by nobody."""
+        self.assertEqual(self.call("manager-z", None, live=set()), (gf.EMIT, "unowned"))
+
+    def test_unknown_liveness_keeps_a_managers_own_gate(self):
+        """An unreadable registry is UNKNOWN -- fail open, as every hop does."""
+        self.assertEqual(self.call("manager-z", None, live=None), (gf.EMIT, "unowned"))
+
+    def test_worker_with_unresolved_parent_is_not_dropped(self):
+        """Hop 3b keys on LEDGER MEMBERSHIP, not on an empty spawner.
+
+        A worker whose spawn chain never resolved to a registered session carries
+        `parent_session: null` too (CLAUDE.md § The spawn ledger) -- but it has a
+        ledger record of its OWN, so it is not a manager and must keep emitting.
+        Keying the new branch on the empty spawner would drop every such worker,
+        which is a live shape rather than a hypothetical one.
+        """
+        ledger = {"w-null": {"session_id": "w-null", "parent_session": None}}
+        self.assertEqual(
+            self.call("w-null", None, ledger=ledger, live={"w-null"}),
+            (gf.EMIT, "unowned"),
+        )
 
 
 class IsManager(unittest.TestCase):
@@ -270,6 +317,22 @@ class Evaluate(unittest.TestCase):
     def test_pane_with_no_event_record_is_unowned(self):
         call, reason, session_id, _ = gf.evaluate("1", {}, set(), [], ME)
         self.assertEqual((call, reason, session_id), (gf.EMIT, "unowned", None))
+
+    def test_full_chain_pane_to_a_peer_managers_own_gate(self):
+        """The measured shape: an operator-started manager's OWN pane.
+
+        Session `6f8ed1f6` (Work Approval Manager) raised a gate on its own pane
+        162, and the filter emitted it as `unowned` -- the exact class it exists
+        to drop. It has no ledger record of its own, which is what makes it a
+        manager, and it is live, which is what makes it a peer.
+        """
+        items = [{"pane": "162", "session_id": "6f8ed1f6", "ts": 1}]
+        call, reason, session_id, spawner = gf.evaluate(
+            "162", {}, {"6f8ed1f6"}, items, ME
+        )
+        self.assertEqual((call, reason), (gf.DROP, "peer-manager-own"))
+        self.assertEqual(session_id, "6f8ed1f6")
+        self.assertIsNone(spawner)
 
 
 class Claims(unittest.TestCase):
