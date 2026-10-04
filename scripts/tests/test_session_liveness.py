@@ -19,6 +19,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -470,6 +471,32 @@ class SessionLiveness(unittest.TestCase):
         parent = os.path.dirname(os.environ["SUPERVISOR_START_CACHE"])
         leftovers = [f for f in os.listdir(parent) if ".tmp." in f]
         self.assertEqual(leftovers, [], "a failed write must not strand its temp file")
+
+    def test_a_malformed_tunable_does_not_break_import(self):
+        # ⚠️ This module is imported by seven other scripts, so a ValueError raised at import
+        # here disables the whole plugin, not just the probe — a typo'd
+        # `SUPERVISOR_PS_TIMEOUT=5s` would take down who-needs-me, fleet-board, worker-sessions
+        # and four more. The parse is tolerant for the same reason `_start_cache_path()` is.
+        os.environ["SUPERVISOR_PS_TIMEOUT"] = "5s"
+        try:
+            fresh = load()  # the real assertion: this must not raise
+        finally:
+            os.environ.pop("SUPERVISOR_PS_TIMEOUT", None)
+        self.assertEqual(fresh._PS_TIMEOUT, 5, "a malformed tunable falls back to its default")
+        self.assertEqual(self.m._env_float("SUPERVISOR_PS_TIMEOUT", 5), 5)
+        os.environ["SUPERVISOR_PS_TIMEOUT"] = "2.5"
+        try:
+            self.assertEqual(self.m._env_float("SUPERVISOR_PS_TIMEOUT", 5), 2.5)
+        finally:
+            os.environ.pop("SUPERVISOR_PS_TIMEOUT", None)
+
+    def test_the_cache_file_is_written_owner_only(self):
+        # The repo's other `~/.claude/state/` writers create at 0o600 rather than letting the
+        # umask decide. This file is read as an identity assertion, so a store another user
+        # could write is a poisoning surface for the TTL window.
+        self.m._save_start_cache({os.getpid(): [123, 456.0]})
+        mode = stat.S_IMODE(os.stat(os.environ["SUPERVISOR_START_CACHE"]).st_mode)
+        self.assertEqual(mode, 0o600, "the cache must never be world-readable")
 
     # ---- --list -------------------------------------------------------------------------
 

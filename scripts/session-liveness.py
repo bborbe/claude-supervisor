@@ -168,18 +168,35 @@ def _record_start_epoch(proc_start):
 # `transport-read-check.py` fails when the walk derives a site outside its `SITE_LIST`, which
 # names `("session-liveness.py", "_ps_starts")`. A `ps` call moved into a helper would be a
 # new site that enumeration does not carry.
+def _env_float(name, default):
+    """A tunable read from the environment, parsed tolerantly.
+
+    ⚠️ **Tolerant because this module is imported by seven other scripts** —
+    `approved-not-started.py`, `who-needs-me.py`, `manager-predispatch.py`, `fleet-board.py`,
+    `cluster-heartbeat.py`, `worker-sessions.py` and `restart-worker.py` — so a `ValueError`
+    raised here at import does not disable the probe, it disables every one of them. A bare
+    `float(os.environ.get(...) or default)` turns a typo'd `SUPERVISOR_PS_TIMEOUT=5s` into a
+    whole-plugin outage, which is the same tolerant-parse rule `_start_cache_path()` below
+    already follows for its own variable.
+    """
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
 _START_CACHE_DEFAULT = os.path.expanduser("~/.claude/state/session-liveness-starts.json")
 # Seconds a cached start time is trusted. Bounded by the pid-reuse window — see above.
-_START_CACHE_TTL = float(os.environ.get("SUPERVISOR_START_CACHE_TTL") or 60)
+_START_CACHE_TTL = _env_float("SUPERVISOR_START_CACHE_TTL", 60)
 # Seconds any single `ps` may run before it is killed. A single-pid `ps` measured 0.026 s, so
 # this is a backstop against a wedged process, never a routine path.
-_PS_TIMEOUT = float(os.environ.get("SUPERVISOR_PS_TIMEOUT") or 5)
+_PS_TIMEOUT = _env_float("SUPERVISOR_PS_TIMEOUT", 5)
 # Seconds the WHOLE probe may run. ⚠️ **A per-call bound is not a bound on the call.** The loop
 # is strictly serial, so `_PS_TIMEOUT` alone leaves a worst case of `n x 5 s` for `n` uncached
 # pids — worse than the single batched call this change replaced, in exactly the pathological
 # case it exists to fix (a wedged `ps`). This caps the probe itself; the steady state is 0-3
 # uncached pids at 0.026 s each, so it is never reached on the hot path.
-_PS_BUDGET = float(os.environ.get("SUPERVISOR_PS_BUDGET") or 20)
+_PS_BUDGET = _env_float("SUPERVISOR_PS_BUDGET", 20)
 
 # `{pid: [start_epoch, read_epoch]}`, loaded once per process. `None` until first use.
 _START_CACHE = None
@@ -241,7 +258,14 @@ def _save_start_cache(cache):
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as fh:
+        # ⚠️ **`os.open` with an explicit `0o600`, not a bare `open()`.** The repo's other
+        # `~/.claude/state/` writers do the same (`manager-predispatch.py`), for the reason its
+        # comment gives: the file is never world-readable, *not even for the instant between
+        # the write and a later chmod*. A bare `open()` lands at the umask — typically 0644 —
+        # and this file is read as an identity assertion, so a writable-by-others store is a
+        # poisoning surface for the TTL window however low the odds.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({str(k): v for k, v in cache.items()}, fh, sort_keys=True)
         os.replace(tmp, path)
     except (OSError, TypeError, ValueError):
@@ -325,11 +349,13 @@ def _ps_starts(pids):
             learned = True
             break
     if learned:
-        # ⚠️ **Pruned on write, because nothing else would ever remove an expired entry.** An
-        # entry past the TTL is re-read on its next use regardless, so keeping it buys nothing
-        # — and it is only ever OVERWRITTEN when that re-read succeeds, which a pid that has
-        # since exited never does. Left alone the file grows monotonically, one dead pid per
-        # session the host has ever run.
+        # ⚠️ **Pruned on the next write, which any newly-learned pid forces within a TTL
+        # window.** An entry past the TTL is re-read on its next use regardless, so keeping it
+        # buys nothing — and it is only ever OVERWRITTEN when that re-read succeeds, which a
+        # pid that has since exited never does. Left alone the file grows monotonically, one
+        # dead pid per session the host has ever run. ⚠️ **The prune sits inside `learned`
+        # deliberately:** in a fully-warm steady state no write happens, so no prune does
+        # either — moving it out would buy a write on the hot path for no correctness gain.
         for dead in [k for k, v in cache.items() if now - v[1] >= _START_CACHE_TTL]:
             cache.pop(dead, None)
         _save_start_cache(cache)
