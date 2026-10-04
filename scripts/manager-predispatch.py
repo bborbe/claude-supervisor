@@ -359,8 +359,10 @@ def tasks_index_for_write(tasks_dir: str) -> dict[str, str]:
     try:
         entries = os.listdir(tasks_dir)
     except OSError as exc:
+        # `exc.strerror or exc`, matching `load_stored` below: an OSError raised without a
+        # message would otherwise render a literal `None` in the note.
         print(
-            f"note: cannot read {tasks_dir} ({exc.strerror}) — every verdict name is "
+            f"note: cannot read {tasks_dir} ({exc.strerror or exc}) — every verdict name is "
             "stored as sent, unnormalised",
             file=sys.stderr,
         )
