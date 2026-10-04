@@ -982,11 +982,18 @@ class TestTrackedArtifacts(Base):
         rc, _ = self.buckets("ATopic", {})
         self.assertEqual(rc, self.m.EXIT_USAGE)
 
-    def test_write_buckets_refuses_a_bucket_mapped_to_an_empty_list(self):
-        """The vacuous-truth hole. `all(...)` over `[]` is True, so `{"done": []}` passed
-        the very check whose message says "must map to a non-empty list of names" — and an
-        all-empty set is precisely the shape that cannot gate, so it staged at exit 0 and
-        `--save` wrote it, holding the drive leg's whole ready batch at clause (0)."""
+    def test_write_buckets_refuses_a_single_key_mapped_to_an_empty_list(self):
+        """The vacuous-truth hole, in its one-key form — and the case is now refused by a
+        DIFFERENT branch than the one it was written for. `all(...)` over `[]` is True, so
+        `{"done": []}` once passed the very check whose message said "must map to a
+        non-empty list of names", staged at exit 0 and was saved, leaving the drive leg
+        holding its whole ready batch at clause (0).
+
+        Under direction (2) an empty list is *accepted* per bucket — that is the whole
+        reversal — so this payload clears the per-bucket check and is refused by the
+        **all-empty** branch instead: a set whose every value is `[]` cannot come from a
+        non-empty tracked set. The thirteen-key form of the same case is
+        `TestBucketVocabulary.test_an_all_empty_set_is_still_refused`."""
         rc, _ = self.buckets("ATopic", {"done": []})
         self.assertEqual(rc, self.m.EXIT_USAGE)
 
@@ -1071,6 +1078,31 @@ class TestTrackedArtifacts(Base):
         p = os.path.join(self.tmp, "stale.buckets.json")
         with open(p, "w", encoding="utf-8") as fh:
             json.dump({"done": [], "stuck": []}, fh)
+        rc, out = self.save_with_table("ATopic", "t\n", "--buckets", p)
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+        self.assertFalse(
+            os.path.exists(self.m.state_path("ATopic")),
+            "a refused save must leave no record at all",
+        )
+
+    def test_save_refuses_a_staged_file_that_omits_a_declared_bucket(self):
+        """The second door's COMPLETENESS half — the case the test above does not reach.
+
+        `test_save_refuses_a_staged_file_that_cannot_gate` stages `{"done": [], "stuck": []}`,
+        which the **all-empty** branch refuses, so the omission check never runs there. Both
+        doors resolve `declared` and share `bucket_shape_error`, so the behaviour matches
+        `--write-buckets` — but this is the path a stale or hand-written staging file reaches,
+        and nothing pinned it.
+
+        The payload is otherwise valid on purpose: every one of its twelve keys is declared,
+        and one carries a row, so **omission is its only defect** and the exit code
+        discriminates. A sparse set is exactly what the live producer wrote before
+        2026-10-04 (6 of 13 declared names present)."""
+        payload = full_set(done=["ATask"])
+        del payload["stuck"]
+        p = os.path.join(self.tmp, "sparse.buckets.json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
         rc, out = self.save_with_table("ATopic", "t\n", "--buckets", p)
         self.assertEqual(rc, self.m.EXIT_USAGE, out)
         self.assertFalse(

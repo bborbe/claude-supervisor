@@ -55,10 +55,13 @@ def main() -> int:
     found: dict[str, str] = {}
     for rel in COMMANDS:
         line, err = clause(REPO / rel)
-        if err:
-            print(f"bucket-clause FAILED: {err}", file=sys.stderr)
+        if err or line is None:
+            # `clause()` returns either (None, err) or (line, None), so the second half is
+            # unreachable — but an explicit branch keeps the narrowing honest under `-O`,
+            # where an `assert` used for control flow is stripped. Sibling guards
+            # (`check-recording-step.py`, `check-spawn-mode.py`) use the same shape.
+            print(f"bucket-clause FAILED: {err or 'clause() returned no line'}", file=sys.stderr)
             return 1
-        assert line is not None
         found[rel] = line
 
     (ref_name, ref_line), *rest = found.items()
