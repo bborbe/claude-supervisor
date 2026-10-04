@@ -1726,9 +1726,9 @@ def verdicts_shape_error(parsed, stored=None) -> str | None:
     that genuinely has no prior cache.
 
     A key carrying `…` is refused outright, and it is the only name rule here that reads
-    the *name* rather than the entry: a name rendered short is not a name, and guessing its
-    remainder is what stored six stale titles on 2026-10-02. `ABBREVIATION_MARKER` above
-    carries the reasoning for why that marker and not the ASCII `...`.
+    the *name* rather than the entry: a name rendered short is not a name. `ABBREVIATION_MARKER`
+    above carries both the reasoning for why that marker and not the ASCII `...`, and the
+    measurement behind the refusal — stated once, there, so a correction has one home.
 
     The empty-object case is refused for the reason `bucket_shape_error` gives: `{}` gates
     nothing while looking like a cache that was written.
@@ -1743,7 +1743,7 @@ def verdicts_shape_error(parsed, stored=None) -> str | None:
             return (
                 f"entry {name!r} carries the abbreviation marker "
                 f"{ABBREVIATION_MARKER!r} — a name rendered short is not a name, and "
-                "guessing its remainder is what stored six stale titles on 2026-10-02; "
+                "guessing its remainder is what stored stale titles; "
                 "read the row's own title and re-send it"
             )
         if not isinstance(entry, dict):
@@ -1845,10 +1845,13 @@ def derive_verdict_names(parsed, index: dict[str, str], *, strict: bool = True):
     claimed away.** First spelling wins, so a cache holding two spellings of one row with
     *different* `content_key`s still misses the carry-forward when the matching entry lost
     the race, and the write is refused for a missing reason. That fails **safe** — a
-    refusal leaves the previous cache untouched — and it is **unreachable from either
-    writer**: every write replaces the whole file and a dict holds one entry per title, so
-    no sequence of writes can accumulate two spellings of one row. Only a hand-edited cache
-    reaches it, which is why the note exists rather than a merge policy.
+    refusal leaves the previous cache untouched. ⚠️ **The writer introduced here cannot
+    produce such a cache** — every write replaces the whole file and a dict holds one entry
+    per title, so no sequence of writes by *this* writer accumulates two spellings — but a
+    cache written by the **pre-fix** writer could already hold them, if a caller ever sent
+    both spellings on one tick. That is the cache the note exists to name, and saying
+    "unreachable" without that qualifier would be the overstatement this docstring is
+    otherwise careful to avoid.
 
     Returns `(rekeyed, None, renamed)`, or `(parsed, reason, {})` when two keys resolve to
     one row. `renamed` maps each changed title back to the spelling the caller sent, so a
@@ -1859,6 +1862,15 @@ def derive_verdict_names(parsed, index: dict[str, str], *, strict: bool = True):
     source: dict[str, str] = {}
     renamed: dict[str, str] = {}
     for name, entry in parsed.items():
+        # ⚠️ A marker-bearing key is NEVER re-keyed, and this is the one path where the
+        # refusal could otherwise leak. `verdicts_shape_error` tests the DERIVED key, so a
+        # caller's `Foo…Bar` that resolved against a literal `Foo…Bar.md` in the tasks dir
+        # would come back as `Foo…Bar` — identical, but only because that file exists. The
+        # refusal must rest on the caller's own name, not on the measurement that no
+        # `…`-bearing file lives in a tasks dir today.
+        if isinstance(name, str) and ABBREVIATION_MARKER in name:
+            out[name] = entry
+            continue
         stem = (
             name[:-3]
             if isinstance(name, str) and name.lower().endswith(".md")

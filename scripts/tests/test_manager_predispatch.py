@@ -1650,8 +1650,8 @@ class TestVerdictsCache(Base):
     def test_refuses_a_name_carrying_the_abbreviation_marker(self):
         """`…` is a rendering artifact, not a title. A caller holding
         `A Manager's Own Closer Line Is Mirrored…` has not read the row's name, so the
-        writer must not accept its guess at the remainder — the six stale entries of
-        2026-10-02 are exactly six such guesses, each stored under a name no file carries.
+        writer must not accept its guess at the remainder — each such guess is stored under
+        a name no file carries, which is the whole of the harm.
         """
         rc, _ = self.verdicts(
             "ATopic",
