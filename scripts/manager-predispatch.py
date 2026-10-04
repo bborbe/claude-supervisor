@@ -313,6 +313,15 @@ def fm_wikilinks(fm: str, key: str) -> list[str]:
     return [unescape_scalar(h) for h in re.findall(r"\[\[(.+?)\]\]", body)]
 
 
+# The one vault layout this script gates, hardcoded rather than caller-supplied: a typo'd
+# directory would let it classify every row against an empty tree, which reads as "no
+# blockers found" rather than as an error. Named once because it now has three call sites
+# and the failure it produces differs by site — on the classify path an empty tree hides
+# blockers, on the write path (`--write-verdicts`) it stores every verdict name exactly as
+# the caller spelled it, which is the defect that path's name derivation exists to remove.
+TASKS_DIRNAME = "25 Tasks"
+
+
 def task_index(tasks_dir: str) -> dict[str, str]:
     """`{lowercased filename: actual filename}` for `tasks_dir`, built once per run.
 
@@ -325,6 +334,46 @@ def task_index(tasks_dir: str) -> dict[str, str]:
         return {entry.lower(): entry for entry in os.listdir(tasks_dir)}
     except OSError:
         return {}
+
+
+def tasks_index_for_write(tasks_dir: str) -> dict[str, str]:
+    """`task_index`, but it SAYS SO when nothing resolved.
+
+    `task_index` collapses "unreadable" and "empty" into the same `{}`, which is right for
+    its other callers — an unreadable directory and an empty one both mean *nothing
+    resolves*, and neither path can act on the difference. On the **write** path they are
+    not the same fact, and both are the fact that matters: an empty index stores every
+    verdict name exactly as the caller spelled it, which is precisely the defect this
+    writer's name derivation exists to remove. Degrading silently back to the pre-fix
+    behaviour is the one outcome that must be visible, so this reports it **whichever way
+    the index came back empty** — a listing that raised, and a listing that succeeded and
+    found nothing. The file already names its other degradations on stderr (the
+    grandfathered-row note below).
+
+    ⚠️ **Warning on the empty case is not pedantry.** An empty-but-readable `25 Tasks` is a
+    real state — a mistyped `--vault`, a vault whose layout differs — and it produces
+    exactly the same silent unnormalised write as an unreadable one. Guarding only the
+    `OSError` branch would make the note a property of *how* the directory failed rather
+    than of the outcome, which is the distinction that matters here.
+    """
+    try:
+        entries = os.listdir(tasks_dir)
+    except OSError as exc:
+        # `exc.strerror or exc`, matching `load_stored` below: an OSError raised without a
+        # message would otherwise render a literal `None` in the note.
+        print(
+            f"note: cannot read {tasks_dir} ({exc.strerror or exc}) — every verdict name is "
+            "stored as sent, unnormalised",
+            file=sys.stderr,
+        )
+        return {}
+    if not entries:
+        print(
+            f"note: {tasks_dir} is empty — every verdict name is stored as sent, "
+            "unnormalised",
+            file=sys.stderr,
+        )
+    return {entry.lower(): entry for entry in entries}
 
 
 def resolve_task_file(
@@ -525,7 +574,7 @@ def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
     Vault-only and pure: it never touches the registry, so a fixture can run it against a
     throwaway vault and get the same values the live run gets.
     """
-    tasks_dir = os.path.join(vault, "25 Tasks")
+    tasks_dir = os.path.join(vault, TASKS_DIRNAME)
     member_set = set(members)
     tracked: list[dict] = []
     for entry in sorted(os.listdir(tasks_dir)):
@@ -1643,6 +1692,15 @@ def bucket_shape_error(parsed, declared: set[str] | None = None) -> str | None:
 VERDICTS_NEEDING_REASON = ("needs-you", "unfixable", "below-bar", "reframe")
 
 
+# The marker the drive leg's `Audit` block leaves when it renders a name short for width.
+# A key carrying it is a name the caller never read in full — so it is neither stored as
+# it stands nor expanded into a guess, because a guess is what put **six stale titles** in
+# the live caches on 2026-10-02: the caller reconstructed the full titles from the
+# abbreviated render and got six of them wrong. `…` (U+2026) is the marker the leg emits;
+# the ASCII `...` is deliberately not included, because a real title may contain it.
+ABBREVIATION_MARKER = "…"
+
+
 def verdicts_shape_error(parsed, stored=None) -> str | None:
     """Why `parsed` cannot serve as a verdicts cache, or None when it is usable.
 
@@ -1667,6 +1725,11 @@ def verdicts_shape_error(parsed, stored=None) -> str | None:
     carry the reason. Omitting `stored` is the strict reading, correct only for a caller
     that genuinely has no prior cache.
 
+    A key carrying `…` is refused outright, and it is the only name rule here that reads
+    the *name* rather than the entry: a name rendered short is not a name. `ABBREVIATION_MARKER`
+    above carries both the reasoning for why that marker and not the ASCII `...`, and the
+    measurement behind the refusal — stated once, there, so a correction has one home.
+
     The empty-object case is refused for the reason `bucket_shape_error` gives: `{}` gates
     nothing while looking like a cache that was written.
     """
@@ -1676,6 +1739,13 @@ def verdicts_shape_error(parsed, stored=None) -> str | None:
     for name, entry in parsed.items():
         if not isinstance(name, str) or not name.strip():
             return "each key must be a non-blank task name"
+        if ABBREVIATION_MARKER in name:
+            return (
+                f"entry {name!r} carries the abbreviation marker "
+                f"{ABBREVIATION_MARKER!r} — a name rendered short is not a name, and "
+                "guessing its remainder is what stored stale titles; "
+                "read the row's own title and re-send it"
+            )
         if not isinstance(entry, dict):
             return f"entry {name!r} must be an object"
         verdict = entry.get("verdict")
@@ -1730,6 +1800,106 @@ def verdicts_grandfathered(parsed, stored) -> list[str]:
         if _carried_forward(stored, name, entry.get("content_key")):
             out.append(name)
     return sorted(out)
+
+
+def derive_verdict_names(parsed, index: dict[str, str], *, strict: bool = True):
+    """`parsed` re-keyed onto the task files' own titles, or the collision that stops it.
+
+    The name half of the cache key. The cache is keyed by task *name*, so the key is the
+    one thing a later tick matches a row by — and until this ran, it was whatever spelling
+    the caller sent. Where a name resolves against the tasks dir, the file's own basename is
+    used instead, so **case** drift cannot key an entry. ⚠️ **Whitespace is deliberately
+    *not* normalised, and the claim is scoped to case for that reason:** a title may
+    legitimately contain a space — including a trailing one — so a `strip()` would make
+    `Foo ` miss the very file it names. The index lookup is case-insensitive because the
+    filesystem is, not because names are normalised. A caller sending the
+    filename rather than the stem (`ATask.md`) is stripped to `ATask` before the lookup, so
+    both spellings reach the same row.
+
+    Resolution is a lookup in the tasks index — the `{lowercased name: name}` dict that
+    `task_index` and `tasks_index_for_write` both build from `os.listdir` of the tasks dir
+    — rather than a stat of a path assembled from the name. That keeps the contract below
+    exactly true: a name carrying a separator is not reduced to its basename, and nothing
+    outside the tasks dir is ever stat-ed.
+
+    A name that does *not* resolve is left as the caller sent it rather than refused —
+    except that a `.md` suffix is still stripped, so an unresolvable `Foo.md` is stored as
+    `Foo`, canonicalising it the same way the resolvable path does. A refusal is not the
+    alternative: `--vault` names one vault, and a subject's rows may live in another
+    (`bro-21389-mdm-via-rest`'s 13 rows are all in `seibert-brogrammers/25 Tasks`), so
+    refusing the unresolvable would brick every write for those subjects — and a row whose
+    file was deleted would do the same to this one. The detectable sub-case is the
+    abbreviation, and `verdicts_shape_error` refuses that one.
+
+    ⚠️ **`strict` is the destination/lookup split, and it is not cosmetic.** The payload is
+    a **destination** — two keys resolving to one row would drop one — so a collision is
+    refused. `stored` is a **lookup source** only: it is never written, and every write
+    replaces the whole file, so the entry already present answers a lookup by that title
+    and the second is dropped rather than refused. Refusing it would be worse than useless,
+    because the caller discards that reason: the cache is left un-rekeyed,
+    `_carried_forward` then misses, and a legacy `needs-you` entry is refused for a missing
+    reason — **the write-bricking cost the grandfather rule exists to remove, reached by
+    the repair itself.**
+
+    ⚠️ **The stored-side drop is named on stderr, and its residual is stated rather than
+    claimed away.** First spelling wins, so a cache holding two spellings of one row with
+    *different* `content_key`s still misses the carry-forward when the matching entry lost
+    the race, and the write is refused for a missing reason. That fails **safe** — a
+    refusal leaves the previous cache untouched. ⚠️ **The writer introduced here cannot
+    produce such a cache** — every write replaces the whole file and a dict holds one entry
+    per title, so no sequence of writes by *this* writer accumulates two spellings — but a
+    cache written by the **pre-fix** writer could already hold them, if a caller ever sent
+    both spellings on one tick. That is the cache the note exists to name, and saying
+    "unreachable" without that qualifier would be the overstatement this docstring is
+    otherwise careful to avoid.
+
+    Returns `(rekeyed, None, renamed)`, or `(parsed, reason, {})` when two keys resolve to
+    one row. `renamed` maps each changed title back to the spelling the caller sent, so a
+    refusal downstream can name both — a caller who sent `atask` and is refused otherwise
+    reads a message about a title it never typed.
+    """
+    out: dict = {}
+    source: dict[str, str] = {}
+    renamed: dict[str, str] = {}
+    for name, entry in parsed.items():
+        # ⚠️ A marker-bearing key is NEVER re-keyed, and this is the one path where the
+        # refusal could otherwise leak. `verdicts_shape_error` tests the DERIVED key, so a
+        # caller's `Foo…Bar` that resolved against a literal `Foo…Bar.md` in the tasks dir
+        # would come back as `Foo…Bar` — identical, but only because that file exists. The
+        # refusal must rest on the caller's own name, not on the measurement that no
+        # `…`-bearing file lives in a tasks dir today.
+        if isinstance(name, str) and ABBREVIATION_MARKER in name:
+            out[name] = entry
+            continue
+        stem = (
+            name[:-3]
+            if isinstance(name, str) and name.lower().endswith(".md")
+            else name
+        )
+        found = index.get(f"{stem}.md".lower())
+        title = os.path.splitext(found)[0] if found else stem
+        if title in out:
+            if not strict:
+                # A lookup source: the entry already under this title answers the lookup, so
+                # this one is dropped rather than refused. Named rather than silent — it is
+                # the only place a stored entry can be lost, and naming it is what lets a
+                # reader tell a hand-edited two-spelling cache from a clean one.
+                print(
+                    f"note: stored cache holds {source[title]!r} and {name!r}, both naming "
+                    f"{title!r} — keeping {source[title]!r}; if that is not the entry this "
+                    "payload matches, the write is refused for a missing reason",
+                    file=sys.stderr,
+                )
+                continue
+            return parsed, (
+                f"{name!r} and {source[title]!r} both name {title!r} — one row cannot "
+                "carry two verdicts"
+            ), {}
+        out[title] = entry
+        source[title] = name
+        if title != name:
+            renamed[title] = name
+    return out, None, renamed
 
 
 def main(argv: list[str]) -> int:
@@ -1908,6 +2078,23 @@ def main(argv: list[str]) -> int:
                 stored = loaded
         except (OSError, json.JSONDecodeError):
             stored = {}
+        # The name half of the key, and the reason a rename no longer strands an entry —
+        # see `derive_verdict_names`. It runs *before* the shape check because the `reason`
+        # carry-forward compares payload keys against stored ones, so both sides have to be
+        # re-keyed onto the files' own titles for that comparison to mean anything. A
+        # non-dict payload is left alone: `verdicts_shape_error` owns that refusal, and it
+        # is the only place the message lives.
+        renamed: dict[str, str] = {}
+        if isinstance(parsed, dict):
+            index = tasks_index_for_write(os.path.join(args.vault, TASKS_DIRNAME))
+            parsed, collision, renamed = derive_verdict_names(parsed, index)
+            if collision:
+                print(f"refusing to write these verdicts: {collision}", file=sys.stderr)
+                return EXIT_USAGE
+            # `strict=False`: the stored cache is a lookup source, never a destination, so
+            # a collision there is tolerated rather than refused — the reason is provably
+            # None on this path, which is why it is discarded rather than reported.
+            stored, _, _ = derive_verdict_names(stored, index, strict=False)
         shape_error = verdicts_shape_error(parsed, stored)
         if shape_error:
             # A refused write must not clobber a good cache. The reason is sharper here
@@ -1916,6 +2103,18 @@ def main(argv: list[str]) -> int:
             # later tick then re-audits cold while believing it has a cache — the exact
             # state this writer exists to end.
             print(f"refusing to write these verdicts: {shape_error}", file=sys.stderr)
+            if renamed:
+                # Every refusal above names the DERIVED title, because that is what the
+                # shape check reads. A caller who sent `atask` would otherwise read a
+                # message about a title it never typed, so the mapping is printed with it.
+                print(
+                    "  (keys re-keyed onto the task files' own titles: "
+                    + ", ".join(
+                        f"{new!r} ← {old!r}" for new, old in sorted(renamed.items())
+                    )
+                    + ")",
+                    file=sys.stderr,
+                )
             return EXIT_USAGE
         for name in verdicts_grandfathered(parsed, stored):
             # Not a failure and not silent: a row written before `reason` existed cannot
@@ -2104,11 +2303,9 @@ def main(argv: list[str]) -> int:
             # that opens a spawn.
             print(f"no staged tracked set to classify ({exc})", file=sys.stderr)
             return EXIT_USAGE
-        # Hardcoded here exactly as `resolve_tracked` hardcodes it (`:412`), and for the
-        # same reason: this script gates one vault layout, and a caller-supplied directory
-        # would let a typo classify every row against an empty tree — which reads as
-        # "no blockers found" rather than as an error.
-        tasks_dir = os.path.join(args.vault, "25 Tasks")
+        # Hardcoded, and the reason now lives once — with `TASKS_DIRNAME`, which both this
+        # path and the write path use.
+        tasks_dir = os.path.join(args.vault, TASKS_DIRNAME)
         index = task_index(tasks_dir)
         for name in names:
             try:

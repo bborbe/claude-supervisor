@@ -18,6 +18,7 @@ The load-bearing properties, in the order the criteria grade them:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -1636,6 +1637,319 @@ class TestVerdictsCache(Base):
         cadences, and clause (1) reads the cache back on the next tick."""
         self.save("ATopic")
         self.assertNotIn("verdicts", json.loads(self.read_state("ATopic")))
+
+    # --- the name half of the key (Finding 2) ----------------------------------------
+    #
+    # The cache is keyed by task *name*, so the writer is the last place that can stop a
+    # name the caller never read in full from becoming a key. Measured 2026-10-02: six of
+    # 24 live keys were stale titles, every one of them *invented* by the caller from an
+    # `Audit` block that renders names abbreviated with `…` (U+2026) for width. The
+    # `content_key` half kept the cache working; the name half drifted on every rename,
+    # and the caller is the writer.
+
+    def test_refuses_a_name_carrying_the_abbreviation_marker(self):
+        """`…` is a rendering artifact, not a title. A caller holding
+        `A Manager's Own Closer Line Is Mirrored…` has not read the row's name, so the
+        writer must not accept its guess at the remainder — each such guess is stored under
+        a name no file carries, which is the whole of the harm.
+        """
+        rc, _ = self.verdicts(
+            "ATopic",
+            {
+                "A Manager's Own Closer Line Is Mirrored…": {
+                    "verdict": "ready",
+                    "score": 9,
+                    "content_key": "a" * 64,
+                }
+            },
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_the_abbreviation_marker_never_reaches_the_stored_keys(self):
+        """The refusal is total, not a sanitisation: an entry keyed by the abbreviation
+        itself is as unusable as one keyed by the guessed expansion, because neither is
+        the file's title — and a refused write must not clobber a good cache."""
+        good = {"ATask": {"verdict": "ready", "score": 9, "content_key": "d" * 64}}
+        rc, out = self.verdicts("ATopic", good)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, _ = self.verdicts(
+            "ATopic",
+            {
+                "ATask": {"verdict": "ready", "score": 9, "content_key": "d" * 64},
+                "A Manager's Own Closer Line Is Mirrored…": {
+                    "verdict": "ready",
+                    "score": 9,
+                    "content_key": "a" * 64,
+                },
+            },
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        stored = self.read_verdicts("ATopic")
+        self.assertEqual(stored, good)
+        self.assertEqual([k for k in stored if "…" in k], [])
+
+    def test_a_resolvable_name_is_stored_under_the_files_own_basename(self):
+        """The other half of the repair: where the name *can* be resolved against the
+        tasks dir, the file's own title is the key rather than the caller's spelling of
+        it — so case and spacing drift cannot key an entry either."""
+        rc, out = self.verdicts(
+            "ATopic",
+            {"atask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask"])
+
+    def test_refuses_two_keys_that_resolve_to_one_row(self):
+        """`ATask` and `atask` are distinct JSON keys and both name `ATask.md`, so the
+        payload does not say which verdict is the row's — and keeping the later one would
+        drop the other silently, the same loss this writer refuses everywhere else."""
+        rc, _ = self.verdicts(
+            "ATopic",
+            {
+                "ATask": {"verdict": "ready", "score": 9, "content_key": "a" * 64},
+                "atask": {"verdict": "blocked", "score": None, "content_key": "b" * 64},
+            },
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
+    def test_a_stored_key_that_drifted_in_spelling_still_grandfathers(self):
+        """The carry-forward lookup runs against the *stored* cache, so the stored keys are
+        normalised through the same rule as the payload. Without that, a legacy entry keyed
+        `atask` would read as a fresh audit of `ATask` and be refused for a missing reason —
+        the cost the grandfather rule exists to remove, reintroduced by the name fix."""
+        self.seed_verdicts(
+            "ATopic",
+            {"atask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+        )
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask"])
+
+    def test_a_name_that_does_not_resolve_is_stored_exactly_as_sent(self):
+        """The fallback the CHANGELOG argues for at length, and the contract most likely to
+        regress silently: `--vault` names one vault while a subject's rows may live in
+        another (measured: `bro-21389-mdm-via-rest`'s 13 rows are all in
+        `seibert-brogrammers/25 Tasks`), so a name the index does not carry is stored
+        unchanged rather than refused — refusing would brick every write for those
+        subjects, and for this one the moment a row file is deleted."""
+        name = "BRO-22002 Split MDM Parties and Contacts via REST"
+        rc, out = self.verdicts(
+            "ATopic", {name: {"verdict": "ready", "score": 9, "content_key": "a" * 64}}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), [name])
+
+    def test_a_name_carrying_a_separator_is_left_as_sent(self):
+        """Resolution is an index lookup — `task_index` *is* `os.listdir` of the tasks dir —
+        never a stat of a path assembled from the name, so `sub/ATask` is not reduced to
+        `ATask`. ⚠️ **The nested file is what makes this load-bearing rather than
+        decorative:** with `25 Tasks/sub/ATask.md` absent, a stat-based implementation would
+        also store the name verbatim and the test would pass for either mechanism. It is
+        present, so only a directory-entry lookup can still answer `sub/ATask`."""
+        os.makedirs(os.path.join(self.vault, "25 Tasks", "sub"))
+        self.write("25 Tasks/sub/ATask.md", "---\nstatus: next\n---\n")
+        rc, out = self.verdicts(
+            "ATopic",
+            {"sub/ATask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["sub/ATask"])
+
+    def test_a_filename_sent_with_its_suffix_resolves_to_the_same_row(self):
+        """A caller may send the filename rather than the stem. Without the suffix strip the
+        lookup asks for `atask.md.md`, misses, and keys the entry `ATask.md` — a name no
+        reader will ever match, which matters because the key is the one thing a later tick
+        matches a row by."""
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask.md": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask"])
+
+    def test_a_two_spelling_stored_cache_still_grandfathers(self):
+        """⚠️ This failure was introduced by the repair itself, and it is silent. A legacy
+        cache holding two drifted spellings of one row collides; a *strict* re-key of the
+        stored side would refuse, the caller discards that reason, the cache is left
+        un-rekeyed, `_carried_forward` then misses the canonical title, and a `needs-you`
+        entry with no reason is refused — **the write-bricking cost the grandfather rule
+        exists to remove, reached by the repair.** `stored` is a lookup source and never a
+        destination, so a collision there must be tolerated rather than refused."""
+        self.seed_verdicts(
+            "ATopic",
+            {
+                "atask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16},
+                "Atask": {"verdict": "ready", "score": 9, "content_key": "b" * 16},
+            },
+        )
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(
+            self.read_verdicts("ATopic")["ATask"]["content_key"], "a" * 16
+        )
+
+    def test_a_title_containing_ascii_ellipsis_is_not_refused(self):
+        """The positive control for the deliberate exclusion: `ABBREVIATION_MARKER` is
+        U+2026 alone, because a real title may carry `...`. Widening it would refuse
+        exactly the titles the source comment calls common, and nothing else here would
+        catch that."""
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask... draft": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask... draft"])
+
+    def test_a_marker_bearing_key_in_the_stored_cache_is_benign(self):
+        """`stored` is a lookup source only — the write replaces the whole file with the
+        payload — so a `…` key already sitting in a cache neither refuses the write nor
+        survives it."""
+        self.seed_verdicts(
+            "ATopic",
+            {
+                "A Manager's Own Closer Line Is Mirrored…": {
+                    "verdict": "ready",
+                    "score": 9,
+                    "content_key": "a" * 64,
+                }
+            },
+        )
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask"])
+
+    def test_the_collision_refusal_leaves_the_previous_cache_untouched(self):
+        """The collision path returns before any `open()`, so it cannot clobber today — but
+        a reordering that moved it after the shape check or after the write would, and only
+        this assertion would catch that."""
+        good = {"ATask": {"verdict": "ready", "score": 9, "content_key": "d" * 64}}
+        rc, out = self.verdicts("ATopic", good)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, _ = self.verdicts(
+            "ATopic",
+            {
+                "ATask": {"verdict": "ready", "score": 9, "content_key": "a" * 64},
+                "atask": {"verdict": "blocked", "score": None, "content_key": "b" * 64},
+            },
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertEqual(self.read_verdicts("ATopic"), good)
+
+    def test_an_unresolvable_name_with_a_suffix_is_still_reduced_to_its_stem(self):
+        """The `.md` strip runs before the lookup, so it applies on the unresolvable path
+        too: an absent `Foo.md` is stored as `Foo`, canonicalising it exactly as a
+        resolvable one is. This is the single sub-case the "left as sent" rule does not
+        cover literally, so it is pinned rather than left to the prose."""
+        rc, out = self.verdicts(
+            "ATopic",
+            {"Foo.md": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["Foo"])
+
+    def test_an_unreadable_tasks_dir_says_so_rather_than_degrading_silently(self):
+        """`task_index` collapses "unreadable" and "empty" into `{}`, which is right for its
+        other callers and wrong here: an empty index stores every name exactly as the caller
+        spelled it — the defect this writer's name derivation exists to remove — and without
+        the note the write succeeds looking normal. The note is the whole difference between
+        a documented fallback and a silent one."""
+        tasks_dir = os.path.join(self.vault, "25 Tasks")
+        for entry in os.listdir(tasks_dir):
+            os.unlink(os.path.join(tasks_dir, entry))
+        os.rmdir(tasks_dir)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.verdicts(
+                "ATopic",
+                {"atask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+            )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertIn("cannot read", err.getvalue())
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["atask"])
+
+    def test_a_refusal_names_the_spelling_the_caller_sent(self):
+        """Every shape refusal names the DERIVED title, because that is what the shape check
+        reads. A caller who sent `atask` would otherwise read a message about a title it
+        never typed, and have no way to tell which of its keys was refused."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, _ = self.verdicts(
+                "ATopic", {"atask": {"verdict": "ready", "score": "high"}}
+            )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertIn("'ATask' ← 'atask'", err.getvalue())
+
+    def test_an_empty_tasks_dir_says_so_too(self):
+        """⚠️ The case the `OSError` branch does not cover, and it degrades identically: an
+        empty-but-readable `25 Tasks` stores every name as the caller spelled it. Guarding
+        only the failure mode would make the note a property of *how* the directory failed
+        rather than of the outcome — and an empty tasks dir is a real state (a mistyped
+        `--vault`, a vault whose layout differs), not a hypothetical."""
+        tasks_dir = os.path.join(self.vault, "25 Tasks")
+        for entry in os.listdir(tasks_dir):
+            os.unlink(os.path.join(tasks_dir, entry))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.verdicts(
+                "ATopic",
+                {"atask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+            )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertIn("is empty", err.getvalue())
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["atask"])
+
+    def test_the_reversed_two_spelling_cache_is_refused_rather_than_silently_wrong(self):
+        """The residual is pinned rather than hidden. First spelling wins, so when the
+        matching entry *loses* the race the carry-forward misses and the write is
+        **refused** — never silently written wrong, and the seeded cache survives intact.
+        Unreachable from either writer (every write replaces the whole file, so no cache
+        can accumulate two spellings of one row); only a hand-edited cache reaches it, and
+        the note on stderr is what makes it visible."""
+        self.seed_verdicts(
+            "ATopic",
+            {
+                "Atask": {"verdict": "ready", "score": 9, "content_key": "b" * 16},
+                "atask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16},
+            },
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, _ = self.verdicts(
+                "ATopic",
+                {"ATask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+            )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertIn("both naming", err.getvalue())
+        self.assertEqual(sorted(self.read_verdicts("ATopic")), ["Atask", "atask"])
+
+    def test_a_renamed_row_lands_under_its_current_title(self):
+        """The defect the task names: a rename must not strand the entry. The caller reads
+        the row's current title off disk, the writer resolves it, and the entry lands under
+        that title — the pre-rename key is gone, because the write replaces the cache."""
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        os.rename(
+            os.path.join(self.vault, "25 Tasks", "ATask.md"),
+            os.path.join(self.vault, "25 Tasks", "ATaskRenamed.md"),
+        )
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATaskRenamed": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATaskRenamed"])
 
 
 class TestBucketVocabulary(Base):
