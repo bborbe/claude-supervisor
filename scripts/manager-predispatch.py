@@ -1559,34 +1559,64 @@ def declared_bucket_names_for(
 def bucket_shape_error(parsed, declared: set[str] | None = None) -> str | None:
     """Why `parsed` cannot gate, or None when it is a usable classification.
 
-    A dict of bucket -> non-empty list of names is the only shape that can satisfy the
-    drive leg's clause (0). A count, a bare list, or a bucket mapped to nothing would all
-    *look* like a classification and gate nothing — and the empty list is the one that got
-    through: `all(...)` over `[]` is vacuously True, so `{"done": []}` passed the check
-    whose own message says "non-empty". Measured 2026-09-28, staged at exit 0 and saved.
+    A dict of bucket -> list of names is the only shape that can satisfy the drive leg's
+    clause (0). A count, a bare list, or a bucket mapped to a non-list would all *look* like
+    a classification and gate nothing.
+
+    ⚠️ **A bucket mapped to `[]` is ACCEPTED, and that is the direction-(2) reversal of what
+    this function used to refuse.** `[]` is a declaration of absence — "evaluated, nothing
+    in it" — and it is the only way the record can distinguish that from "not evaluated".
+    Before the reversal the rule text's *"every declared bucket must appear"* and this
+    check's *"non-empty list"* could not both hold whenever any bucket was empty, which on
+    the live store is most of them (measured 2026-10-04: 6 of 13 declared names present,
+    `recorded_at 2026-10-04T12:39:32+02:00`). A producer facing an unsatisfiable pair wrote
+    a sparse map, and nothing in the record said which buckets it had skipped.
+
+    ⚠️ **An ALL-EMPTY set is still refused, so the 2026-09-28 hole stays closed.** That
+    defect was `all(...)` over `[]` being vacuously True, so `{"done": []}` passed the very
+    check whose message said "non-empty", staged at exit 0 and was saved. The refusal
+    survives the reversal because it rests on a fact rather than on a shape preference: a
+    non-empty tracked set always populates at least one bucket, so every-value-`[]` is the
+    mis-parse signature and never a quiet tick.
+
+    ⚠️ **The guard the reversal gives up is real, and it is recorded rather than glossed.**
+    The old refusal also caught a PARTIAL mis-parse that emitted a key with an empty list.
+    The completeness half below catches a mis-parse that *omits* a key; it cannot catch one
+    that emits the key empty. *Declared means evaluated* is the whole point of the trade.
 
     Shared by BOTH doors into the record. Validating only `--write-buckets` left the
     `--save --buckets` read path a bare `json.load`, so a hand-written or stale staging
-    file reached `save_stored` with an all-empty set — the same defect by the other door.
+    file reached `save_stored` with a set that cannot gate — the same defect by the other
+    door.
 
-    `declared` adds the VOCABULARY half, and `None` skips it. Shape alone accepted any key
-    at all: measured 2026-10-03, `{"hold": ["Alpha"], "orphan": ["Beta"], "ready":
-    ["Gamma"]}` staged verbatim at exit 0, and the live store carried `backlog` / `yours`
-    against a runbook that declares neither spelling. A set keyed by a vocabulary nobody
-    declared gates the drive leg's clause (0) on names no renderer agrees with, which is
-    the drift the runbook's two-renderer rule forbids. The names come from the runbook
-    itself — never a list here — because the declared set is vault-relative and has moved
-    twice in a week.
+    `declared` adds the VOCABULARY and COMPLETENESS halves, and `None` skips both. Shape
+    alone accepted any key at all: measured 2026-10-03, `{"hold": ["Alpha"], "orphan":
+    ["Beta"], "ready": ["Gamma"]}` staged verbatim at exit 0, and the live store carried
+    `backlog` / `yours` against a runbook that declares neither spelling. A set keyed by a
+    vocabulary nobody declared gates the drive leg's clause (0) on names no renderer agrees
+    with, which is the drift the runbook's two-renderer rule forbids. Completeness is the
+    other half of the same clause: the prose always said every declared bucket must appear
+    and nothing enforced it, which is exactly the gap the reversal above exposed. The names
+    come from the runbook itself — never a list here — because the declared set is
+    vault-relative and has moved twice in a week.
     """
     if not isinstance(parsed, dict) or not parsed:
         return "bucket sets must be a non-empty JSON object"
     for bucket, names in parsed.items():
-        if (
-            not isinstance(names, list)
-            or not names
-            or not all(isinstance(n, str) and n.strip() for n in names)
+        if not isinstance(names, list) or not all(
+            isinstance(n, str) and n.strip() for n in names
         ):
-            return f"bucket {bucket!r} must map to a non-empty list of names"
+            return f"bucket {bucket!r} must map to a list of names"
+    # An all-empty set is the mis-parse signature, not a quiet tick: a non-empty tracked
+    # set always populates at least one bucket, so `{"done": []}` and every sibling shape
+    # reach here only from a broken parse. This is the 2026-09-28 vacuous-`all()` hole and
+    # it stays closed under direction (2).
+    if all(not names for names in parsed.values()):
+        return (
+            "bucket set maps every bucket to an empty list — a non-empty tracked set "
+            "always populates at least one bucket, so this is the shape a broken parse "
+            "produces rather than a quiet tick"
+        )
     if declared is not None:
         undeclared = sorted(bucket for bucket in parsed if bucket not in declared)
         if undeclared:
@@ -1594,6 +1624,13 @@ def bucket_shape_error(parsed, declared: set[str] | None = None) -> str | None:
             return (
                 f"bucket set carries keys the runbook does not declare: {listed} — "
                 f"declared: {', '.join(sorted(declared))}"
+            )
+        missing = sorted(name for name in declared if name not in parsed)
+        if missing:
+            listed = ", ".join(repr(name) for name in missing)
+            return (
+                f"bucket set omits buckets the runbook declares: {listed} — every "
+                f"declared bucket must appear, mapped to its names or to an empty list"
             )
     return None
 
