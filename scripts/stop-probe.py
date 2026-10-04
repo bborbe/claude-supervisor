@@ -15,7 +15,7 @@ Four reads and nothing else. No writes, no signals, no state mutation:
   ledger     ~/.claude/state/open-items/<session-id>.json       what must survive
 
 **Every gate path is per-vault, and the vault comes from the session record** —
-lowercased, because the vault-cli config name is lowercase (`personal`) while records
+lowercased, because the vault-cli config name is lowercase (`private-personal`) while records
 written before 2026-09-23 carry display case (`MyVault`), and a strict join resolves
 a directory that does not exist. The subject is the record's own, slugged by the
 gate's `slug()`.
