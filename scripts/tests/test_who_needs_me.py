@@ -1862,6 +1862,24 @@ class PostedCloserTest(unittest.TestCase):
                 self._write('{"closer": "pick — 1. x", "ts": %s}' % bad)
                 self.assertEqual(wnm.posted_closer("session-a"), "")
 
+    def test_an_out_of_range_integer_ts_is_ignored(self):
+        # A bare integer literal of unbounded size decodes to a Python `int`, and
+        # `float()` of one beyond the float range raises OverflowError -- neither
+        # a TypeError nor a ValueError, so without it in the except tuple the
+        # raise escapes posted_closer and takes the render down with it, the
+        # class of failure this guard exists to prevent. `math.isfinite` cannot
+        # catch it: the raise happens before `ts` exists.
+        self._write('{"closer": "pick — 1. x", "ts": %s}' % ("9" * 400))
+        self.assertEqual(wnm.posted_closer("session-a"), "")
+
+    def test_a_ts_inside_the_skew_allowance_is_honoured(self):
+        # The 60 s allowance is the value the whole future-`ts` guard rests on,
+        # and only the far-future case was covered: a guard that rejected EVERY
+        # future `ts`, or an off-by-one at the boundary, passed the suite
+        # unchanged. This pins the allow-side.
+        self._write({"closer": "pick — 1. x", "ts": time.time() + 30})
+        self.assertEqual(wnm.posted_closer("session-a"), "pick — 1. x")
+
 
 class PostedCloserTtlFromEnv(unittest.TestCase):
     """`_ttl_from_env` must cost the window, never the import.
@@ -1904,6 +1922,29 @@ class PostedCloserTtlFromEnv(unittest.TestCase):
 
     def test_a_valid_override_is_honoured(self):
         self.assertEqual(self._ttl("7200"), 7200.0)
+
+    def test_the_module_constant_is_the_guarded_value(self):
+        # Every case above calls `_ttl_from_env()` directly, so they pin the
+        # helper and NOT the module-scope wiring: reverting the constant to the
+        # old unguarded `float(os.environ.get(...))` would leave all six green
+        # while the import-time ValueError this fix exists to remove came back
+        # uncaught. Importing the script fresh under a bad override is what
+        # actually pins it -- the import must survive, and the constant must be
+        # the default rather than a traceback.
+        original = os.environ.get("ATTENTION_POSTED_CLOSER_TTL")
+        try:
+            os.environ["ATTENTION_POSTED_CLOSER_TTL"] = "abc"
+            spec = importlib.util.spec_from_file_location(
+                "who_needs_me_reimport", _SCRIPT
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            self.assertEqual(mod.POSTED_CLOSER_TTL, 6 * 3600)
+        finally:
+            if original is None:
+                os.environ.pop("ATTENTION_POSTED_CLOSER_TTL", None)
+            else:
+                os.environ["ATTENTION_POSTED_CLOSER_TTL"] = original
 
 
 if __name__ == "__main__":

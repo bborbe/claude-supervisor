@@ -873,15 +873,26 @@ def posted_closer(session_id):
     # A record with no usable `ts` is treated as expired rather than as
     # unbounded: failing open here means the echo returns, which is the safe
     # direction — the alternative suppresses a closer on an unreadable clock.
+    # `OverflowError` is in the tuple because a bare integer literal of unbounded
+    # size decodes to a Python `int`, and `float()` of one beyond the float range
+    # raises it — neither a `TypeError` nor a `ValueError`, so it would escape
+    # this function entirely and take the render down with it, the exact class of
+    # failure this guard exists to prevent. `math.isfinite` below cannot help:
+    # the raise happens before `ts` exists. The tuple is now total for JSON —
+    # `float()` on a decoded str/int/float/bool/list/dict/None raises only these
+    # three.
     try:
         ts = float(rec.get("ts") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return ""
     # A future-dated `ts` makes the delta negative, so it would never exceed the
     # TTL and the record would stay authoritative indefinitely — the unbounded
     # case the docstring above says it prevents. A clock-skewed or buggy poster
     # is enough to trigger it, so anything meaningfully ahead of now expires too.
-    # Mirrors the hook's guard; the two halves must agree on the window.
+    # Mirrors the hook's guard; the two halves must agree on the window. The
+    # counterpart is NOT in this repository — it is `hooks/attention-log.py` in
+    # `bborbe/claude` (its `Stop` branch), so a reader here has no local file to
+    # follow and the agreement cannot be verified from this worktree.
     #
     # `NaN` reaches the same unbounded case by another route, so it is rejected
     # here rather than left to the comparisons: `json.load` accepts a bare `NaN`
