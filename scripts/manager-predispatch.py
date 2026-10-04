@@ -1643,6 +1643,15 @@ def bucket_shape_error(parsed, declared: set[str] | None = None) -> str | None:
 VERDICTS_NEEDING_REASON = ("needs-you", "unfixable", "below-bar", "reframe")
 
 
+# The marker the drive leg's `Audit` block leaves when it renders a name short for width.
+# A key carrying it is a name the caller never read in full — so it is neither stored as
+# it stands nor expanded into a guess, because a guess is what put **six stale titles** in
+# the live caches on 2026-10-02: the caller reconstructed the full titles from the
+# abbreviated render and got six of them wrong. `…` (U+2026) is the marker the leg emits;
+# the ASCII `...` is deliberately not included, because a real title may contain it.
+ABBREVIATION_MARKER = "…"
+
+
 def verdicts_shape_error(parsed, stored=None) -> str | None:
     """Why `parsed` cannot serve as a verdicts cache, or None when it is usable.
 
@@ -1676,6 +1685,13 @@ def verdicts_shape_error(parsed, stored=None) -> str | None:
     for name, entry in parsed.items():
         if not isinstance(name, str) or not name.strip():
             return "each key must be a non-blank task name"
+        if ABBREVIATION_MARKER in name:
+            return (
+                f"entry {name!r} carries the abbreviation marker "
+                f"{ABBREVIATION_MARKER!r} — a name rendered short is not a name, and "
+                "guessing its remainder is what stored six stale titles on 2026-10-02; "
+                "read the row's own title and re-send it"
+            )
         if not isinstance(entry, dict):
             return f"entry {name!r} must be an object"
         verdict = entry.get("verdict")
@@ -1917,6 +1933,42 @@ def main(argv: list[str]) -> int:
             # state this writer exists to end.
             print(f"refusing to write these verdicts: {shape_error}", file=sys.stderr)
             return EXIT_USAGE
+        # The name half of the key, and the reason a rename no longer strands an entry.
+        # The cache is keyed by task *name*, so the key is the one thing a later tick
+        # matches a row by — and until now it was whatever spelling the caller sent. Where
+        # that name resolves against the tasks dir, the file's own basename is stored
+        # instead, so case and spacing drift cannot key an entry either. A name that does
+        # *not* resolve is left exactly as sent rather than refused: `--vault` names one
+        # vault, and a subject's rows may live in another (`bro-21389-mdm-via-rest`'s 13
+        # rows are all in `seibert-brogrammers/25 Tasks`), so refusing the unresolvable
+        # would brick every write for those subjects — and a row whose file was deleted
+        # would do the same to this one. The unresolvable case is what the abbreviation
+        # refusal above already covers where it is detectable.
+        tasks_dir = os.path.join(args.vault, "25 Tasks")
+        index = task_index(tasks_dir)
+        resolved: dict = {}
+        source: dict[str, str] = {}
+        for name, entry in parsed.items():
+            path = resolve_task_file(tasks_dir, name, index)
+            title = (
+                os.path.splitext(os.path.basename(path))[0]
+                if os.path.exists(path)
+                else name
+            )
+            if title in resolved:
+                # Two keys naming one row — `ATask` and `atask` are distinct JSON keys and
+                # both resolve to `ATask.md`. The payload does not say which verdict is the
+                # row's, and keeping the later one silently would drop the other, which is
+                # the same class of silent loss this writer exists to end.
+                print(
+                    f"refusing to write these verdicts: {name!r} and {source[title]!r} both "
+                    f"name {title!r} — one row cannot carry two verdicts",
+                    file=sys.stderr,
+                )
+                return EXIT_USAGE
+            resolved[title] = entry
+            source[title] = name
+        parsed = resolved
         for name in verdicts_grandfathered(parsed, stored):
             # Not a failure and not silent: a row written before `reason` existed cannot
             # render its grounds, and a reader should see which rows are in that state
