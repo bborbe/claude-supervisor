@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Which manager has taken a gated session off the fleet.
 
-`gate-owner-filter.py` resolves ownership from the spawn edge alone -- the gated
-session's `parent_session` in the spawn ledger. That answers "whose worker is
-this" and cannot answer "who has taken this on". A pane whose session has no
-spawner (`spawner=None`) reads `unowned` and is emitted to EVERY manager's
+`gate-owner-filter.py` resolves ownership from the spawn edge -- the gated
+session's `parent_session` in the spawn ledger -- and, since 2026-10-04, from the
+gated session being a live manager itself (its "hop 3b"). Neither answers "who
+has taken this on". A pane whose session has no spawner (`spawner=None`) **and is
+not itself a live manager** reads `unowned` and is emitted to EVERY manager's
 watcher on every poll, permanently: nothing about the pane changes when a
 manager adopts it, so the adoption is invisible and the wakes never stop.
 
