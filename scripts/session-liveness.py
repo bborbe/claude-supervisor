@@ -80,6 +80,7 @@ import argparse
 import glob
 import importlib.util
 import json
+import math
 import os
 import subprocess
 import sys
@@ -168,7 +169,7 @@ def _record_start_epoch(proc_start):
 # `transport-read-check.py` fails when the walk derives a site outside its `SITE_LIST`, which
 # names `("session-liveness.py", "_ps_starts")`. A `ps` call moved into a helper would be a
 # new site that enumeration does not carry.
-def _env_float(name, default):
+def _env_float(name, default, minimum=0.0):
     """A tunable read from the environment, parsed tolerantly.
 
     ⚠️ **Tolerant because this module is imported by seven other scripts** —
@@ -178,11 +179,23 @@ def _env_float(name, default):
     `float(os.environ.get(...) or default)` turns a typo'd `SUPERVISOR_PS_TIMEOUT=5s` into a
     whole-plugin outage, which is the same tolerant-parse rule `_start_cache_path()` below
     already follows for its own variable.
+
+    ⚠️ **And `float()` accepts `nan` and `inf`, which for the timeout is not a bound at all.**
+    `min(nan, remaining)` is `nan`, `subprocess`'s deadline becomes `monotonic() + nan`, and
+    its `_remaining_time(...) <= 0` test is then False forever — so the child is never killed
+    and the very orphan this change removes comes back, reachable through a single typo. A
+    value that is not finite, or not above `minimum`, falls back to the default rather than
+    being trusted. Only the timeout is unsafe in this way; a non-finite budget or TTL degrades
+    in the safe direction, but the guard is uniform because a bound that can be silently
+    switched off is not a bound.
     """
     try:
-        return float(os.environ[name])
+        value = float(os.environ[name])
     except (KeyError, ValueError):
         return default
+    if not math.isfinite(value) or value <= minimum:
+        return default
+    return value
 
 
 _START_CACHE_DEFAULT = os.path.expanduser("~/.claude/state/session-liveness-starts.json")
@@ -251,6 +264,14 @@ def _save_start_cache(cache):
     concurrent writer can do is drop an entry another process just learned. That costs one
     re-read; it cannot produce a wrong start time, which is the only outcome worth locking
     against.
+
+    ⚠️ **The writer's own view is a SNAPSHOT, frozen at first use.** `_START_CACHE` is loaded
+    once per process and never re-read, so a caller that outlives a few seconds writes back the
+    world as it looked when it started, clobbering whatever another process learned meanwhile.
+    That is acceptable only because every importer of this module is a single-shot script
+    (`approved-not-started.py`, `who-needs-me.py`, `manager-predispatch.py`, `fleet-board.py`,
+    `cluster-heartbeat.py`, `worker-sessions.py`, `restart-worker.py`) — checked, not assumed.
+    A long-lived importer would need the memo re-read before the merge.
     """
     path = _start_cache_path()
     tmp = "%s.tmp.%d" % (path, os.getpid())
@@ -264,7 +285,17 @@ def _save_start_cache(cache):
         # the write and a later chmod*. A bare `open()` lands at the umask — typically 0644 —
         # and this file is read as an identity assertion, so a writable-by-others store is a
         # poisoning surface for the TTL window however low the odds.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # ⚠️ **`O_EXCL`, because the temp name is derived from our own pid and is therefore
+        # predictable.** Without it a pre-created path — or a symlink — in a writable parent is
+        # followed and truncated rather than rejected, which matters precisely because this file
+        # is read as an identity assertion. The `EEXIST` branch is not optional: the name is
+        # predictable, so a crashed predecessor's leftovers would otherwise wedge every later
+        # write permanently, and nothing else ever clears them.
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            os.unlink(tmp)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({str(k): v for k, v in cache.items()}, fh, sort_keys=True)
         os.replace(tmp, path)
@@ -282,12 +313,21 @@ def _save_start_cache(cache):
         return
 
 
-def _ps_starts(pids):
+def _ps_starts(pids, refresh=False):
     """`{pid: start-epoch}` for the pids `ps` reported. Never raises, never guesses.
 
     Cache-first: a pid whose start time is known and younger than `_START_CACHE_TTL` is
     returned from the cache and never re-read. A pid absent from the cache is read with **one
     `ps` call of its own** — see the module note above on why that is per-pid, not batched.
+
+    ⚠️ **`refresh=True` bypasses the cache for every pid given, and the one caller that needs
+    it is `read_registry`'s identity pass.** A cached value is whatever process *last held*
+    that pid; inside the TTL a recycled pid therefore hands back the dead holder's start time,
+    which does not match the live holder's record — and a mismatch is a NEGATIVE, so it would
+    be published as `ABSENT` for a session that is alive. That is a regression the cache
+    introduces and the pre-cache code did not have, since `ps` then always answered for the
+    current holder. See `read_registry`: a mismatch is re-proved uncached before it is
+    believed.
 
     ⚠️ **The per-pid retry this function's caller used to hold is gone with the batching, and
     nothing was lost.** That retry existed because `ps` fails ALL-OR-NOTHING — measured
@@ -308,7 +348,7 @@ def _ps_starts(pids):
     deadline = now + _PS_BUDGET
     for pid in sorted(set(pids)):
         entry = cache.get(pid)
-        if entry is not None and 0 <= now - entry[1] < _START_CACHE_TTL:
+        if not refresh and entry is not None and 0 <= now - entry[1] < _START_CACHE_TTL:
             out[pid] = entry[0]
             continue
         remaining = deadline - time.time()
@@ -464,6 +504,21 @@ def read_registry(registry_dir=None):
     # once and can answer each pid from the shared cache.
     if occupied:
         starts = _ps_starts([p for _, p, _ in occupied])
+        # ⚠️ **A mismatch is re-proved UNCACHED before it is allowed to become a negative.**
+        # Inside the TTL a cached entry is the start time of whatever process *last held* that
+        # pid, so a pid the OS recycled within the window hands back the dead holder's start,
+        # disagrees with the live holder's record, and would publish ABSENT for a session that
+        # is alive — the one answer that permits a resume onto a live conversation, and a
+        # regression this cache introduced rather than one the pre-cache code carried (there,
+        # `ps` always answered for the current holder). Only the mismatch arm pays for the
+        # re-read. ⚠️ **The entry is DROPPED first**, so a re-read that itself fails leaves the
+        # pid unanswered — UNKNOWN — rather than silently reinstating the value we just
+        # declined to trust.
+        doubtful = [p for _, p, ps in occupied if _pid_identity(p, ps, starts) is False]
+        if doubtful:
+            for pid in doubtful:
+                starts.pop(pid, None)
+            starts.update(_ps_starts(doubtful, refresh=True))
         for sid, pid, proc_start in occupied:
             out[sid]["alive"] = _pid_identity(pid, proc_start, starts)
     return out

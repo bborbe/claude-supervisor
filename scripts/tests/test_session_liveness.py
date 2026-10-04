@@ -435,6 +435,24 @@ class SessionLiveness(unittest.TestCase):
             restore()
         self.assertEqual(len(spawns), 2, "a stale entry must be read again, not served")
 
+    def test_a_cached_mismatch_is_reproved_uncached_before_it_reads_absent(self):
+        """A stale CACHE entry must not manufacture ABSENT — this module's one forbidden answer.
+
+        Within the TTL a cached start time belongs to whatever process *last held* that pid, so
+        a pid the OS recycled inside the window hands back the dead holder's start and disagrees
+        with the live holder's record. `_pid_identity` reads a mismatch as `False`, `resolve()`
+        turns that into ABSENT, and a genuinely LIVE session becomes resumable. The pre-cache
+        code could not do this — `ps` then always answered for the current holder — so this pins
+        the regression the cache introduced, and the uncached re-read that closes it.
+        """
+        pid = os.getpid()
+        self.plant("ca5heca5-1111-2222-3333-444455556666", pid)  # real procStart -> LIVE
+        # A FRESH cache entry disagreeing with the record, exactly as a recycled pid produces.
+        with open(os.environ["SUPERVISOR_START_CACHE"], "w", encoding="utf-8") as fh:
+            json.dump({str(pid): [1, time.time()]}, fh)
+        rc, out = self.check("ca5heca5")
+        self.assertEqual(rc, LIVE, "a cache-served mismatch must be re-proved, not believed: %s" % out)
+
     def test_a_corrupt_cache_file_is_ignored_not_fatal(self):
         # The cache only shortens the path to the answer; an unreadable one costs latency and
         # never correctness. It must not raise, and it must not answer from garbage.
@@ -490,6 +508,27 @@ class SessionLiveness(unittest.TestCase):
             os.environ.pop("SUPERVISOR_PS_TIMEOUT", None)
         self.assertEqual(fresh._PS_TIMEOUT, 5, "a malformed tunable falls back to its default")
         self.assertEqual(self.m._env_float("SUPERVISOR_PS_TIMEOUT", 5), 5)
+        os.environ["SUPERVISOR_PS_TIMEOUT"] = "2.5"
+        try:
+            self.assertEqual(self.m._env_float("SUPERVISOR_PS_TIMEOUT", 5), 2.5)
+        finally:
+            os.environ.pop("SUPERVISOR_PS_TIMEOUT", None)
+
+    def test_a_non_finite_or_non_positive_tunable_falls_back_to_its_default(self):
+        # ⚠️ `float()` accepts `nan` and `inf`, and a `nan` timeout is not a bound at all:
+        # `min(nan, remaining)` is `nan`, so `subprocess`'s deadline test never fires and the
+        # child is never killed — the original orphan, reachable through a single typo. A value
+        # that cannot bound anything must not be allowed to *unbound* something.
+        for bad in ("nan", "inf", "-inf", "0", "-1", "5s"):
+            os.environ["SUPERVISOR_PS_TIMEOUT"] = bad
+            try:
+                self.assertEqual(
+                    self.m._env_float("SUPERVISOR_PS_TIMEOUT", 5),
+                    5,
+                    "%r must fall back to the default rather than becoming the timeout" % bad,
+                )
+            finally:
+                os.environ.pop("SUPERVISOR_PS_TIMEOUT", None)
         os.environ["SUPERVISOR_PS_TIMEOUT"] = "2.5"
         try:
             self.assertEqual(self.m._env_float("SUPERVISOR_PS_TIMEOUT", 5), 2.5)
