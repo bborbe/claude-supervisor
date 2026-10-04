@@ -376,8 +376,11 @@ Measured 2026-09-23 on the first real run: both probes ended `READINESS: ready 8
 **Resolve the marker before you spawn.** Read the row's own flag provenance — the same two fields § Step 0.5 already filters on:
 
 ```bash
-vault-cli --vault "<vault>" task get "<task>" flag flag_set_by
+vault-cli --vault "<vault>" task get "<task>" flag
+vault-cli --vault "<vault>" task get "<task>" flag_set_by
 ```
+
+⚠️ **Two calls, never one — `task get` takes exactly ONE key** (`vault-cli task get <task-name> <key> [flags]`). A `task get "<task>" flag flag_set_by` reads as the obvious shorthand and is wrong: the second field is not a second key, so the gate would silently degrade to reading `flag` alone — which is precisely what the next sentence forbids, and the degradation is invisible because a `flag: true` row still returns `true`.
 
 A row is **operator-named** when `flag` is true **and** `flag_set_by` is an opening actor (`operator`, or the `legacy` rows § Step 0.5 admits). Pass `operator_named: true` on the `spawn_agent` call for such a row, and omit it for every other row. ⚠️ **Never infer it and never write it into the row's prose** — the server does not read the vault, so this assertion is entirely this step's, and a default of true would make the soft cap unenforceable. ⚠️ **An agent-set flag is not an operator-named row.** § Step 0.5 refuses those upstream; this gate must not re-admit one by reading the flag alone, which is why the test is on the *pair* and never on `flag` by itself.
 

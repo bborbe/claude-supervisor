@@ -23,11 +23,14 @@ without the doc, or the doc without the code, fails here — which is exactly th
 reader cannot see, because both surfaces look self-consistent while they disagree.
 
 ⚠️ **(c) covers BOTH thresholds since 2026-10-04.** The cap is a pair — a soft cap
-(`DEFAULT_MAX_CONCURRENT`, 20) and a hard cap (`DEFAULT_MAX_CONCURRENT_HARD`, 50) — so a
-home that states only the soft number is a doc that describes half the enforcement, and a
-code change moving the hard constant without the prose would leave the reader believing a
-band that no longer exists. Each half is asserted against its own code constant, so the two
-cannot be cross-satisfied.
+(`DEFAULT_MAX_CONCURRENT`) and a hard cap (`DEFAULT_MAX_CONCURRENT_HARD`) — so a home that
+states only the soft number is a doc that describes half the enforcement, and a code change
+moving the hard constant without the prose would leave the reader believing a band that no
+longer exists. Each half is asserted against its own code constant, so the two cannot be
+cross-satisfied.
+⚠️ **The constants are named here, never their values** — this file exists to refuse doc/code
+drift, so a docstring restating the numbers would be the one copy nothing checks, going stale
+behind its own green run. The values are read from the code at run time; the prose is not.
 
 **What this check does not prove.** It is a prose-shape check over markdown plus one
 constant read, because a command file *is* prose — there is no function to call. It cannot
