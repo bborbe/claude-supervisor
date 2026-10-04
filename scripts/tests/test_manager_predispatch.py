@@ -1888,6 +1888,49 @@ class TestVerdictsCache(Base):
         self.assertEqual(rc, self.m.EXIT_USAGE)
         self.assertIn("'ATask' ← 'atask'", err.getvalue())
 
+    def test_an_empty_tasks_dir_says_so_too(self):
+        """⚠️ The case the `OSError` branch does not cover, and it degrades identically: an
+        empty-but-readable `25 Tasks` stores every name as the caller spelled it. Guarding
+        only the failure mode would make the note a property of *how* the directory failed
+        rather than of the outcome — and an empty tasks dir is a real state (a mistyped
+        `--vault`, a vault whose layout differs), not a hypothetical."""
+        tasks_dir = os.path.join(self.vault, "25 Tasks")
+        for entry in os.listdir(tasks_dir):
+            os.unlink(os.path.join(tasks_dir, entry))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.verdicts(
+                "ATopic",
+                {"atask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+            )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertIn("is empty", err.getvalue())
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["atask"])
+
+    def test_the_reversed_two_spelling_cache_is_refused_rather_than_silently_wrong(self):
+        """The residual is pinned rather than hidden. First spelling wins, so when the
+        matching entry *loses* the race the carry-forward misses and the write is
+        **refused** — never silently written wrong, and the seeded cache survives intact.
+        Unreachable from either writer (every write replaces the whole file, so no cache
+        can accumulate two spellings of one row); only a hand-edited cache reaches it, and
+        the note on stderr is what makes it visible."""
+        self.seed_verdicts(
+            "ATopic",
+            {
+                "Atask": {"verdict": "ready", "score": 9, "content_key": "b" * 16},
+                "atask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16},
+            },
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, _ = self.verdicts(
+                "ATopic",
+                {"ATask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+            )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertIn("both naming", err.getvalue())
+        self.assertEqual(sorted(self.read_verdicts("ATopic")), ["Atask", "atask"])
+
     def test_a_renamed_row_lands_under_its_current_title(self):
         """The defect the task names: a rename must not strand the entry. The caller reads
         the row's current title off disk, the writer resolves it, and the entry lands under

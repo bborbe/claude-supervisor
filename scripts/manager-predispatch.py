@@ -337,19 +337,27 @@ def task_index(tasks_dir: str) -> dict[str, str]:
 
 
 def tasks_index_for_write(tasks_dir: str) -> dict[str, str]:
-    """`task_index`, but it SAYS SO when the directory could not be read at all.
+    """`task_index`, but it SAYS SO when nothing resolved.
 
     `task_index` collapses "unreadable" and "empty" into the same `{}`, which is right for
     its other callers — an unreadable directory and an empty one both mean *nothing
     resolves*, and neither path can act on the difference. On the **write** path they are
-    not the same fact: an empty index stores every verdict name exactly as the caller
-    spelled it, which is precisely the defect this writer's name derivation exists to
-    remove. Degrading silently back to the pre-fix behaviour is the one outcome that must
-    be visible, so this reports it while the sibling keeps its own contract. The file
-    already names its other degradations on stderr (the grandfathered-row note below).
+    not the same fact, and both are the fact that matters: an empty index stores every
+    verdict name exactly as the caller spelled it, which is precisely the defect this
+    writer's name derivation exists to remove. Degrading silently back to the pre-fix
+    behaviour is the one outcome that must be visible, so this reports it **whichever way
+    the index came back empty** — a listing that raised, and a listing that succeeded and
+    found nothing. The file already names its other degradations on stderr (the
+    grandfathered-row note below).
+
+    ⚠️ **Warning on the empty case is not pedantry.** An empty-but-readable `25 Tasks` is a
+    real state — a mistyped `--vault`, a vault whose layout differs — and it produces
+    exactly the same silent unnormalised write as an unreadable one. Guarding only the
+    `OSError` branch would make the note a property of *how* the directory failed rather
+    than of the outcome, which is the distinction that matters here.
     """
     try:
-        return {entry.lower(): entry for entry in os.listdir(tasks_dir)}
+        entries = os.listdir(tasks_dir)
     except OSError as exc:
         print(
             f"note: cannot read {tasks_dir} ({exc.strerror}) — every verdict name is "
@@ -357,6 +365,13 @@ def tasks_index_for_write(tasks_dir: str) -> dict[str, str]:
             file=sys.stderr,
         )
         return {}
+    if not entries:
+        print(
+            f"note: {tasks_dir} is empty — every verdict name is stored as sent, "
+            "unnormalised",
+            file=sys.stderr,
+        )
+    return {entry.lower(): entry for entry in entries}
 
 
 def resolve_task_file(
@@ -1812,12 +1827,21 @@ def derive_verdict_names(parsed, index: dict[str, str], *, strict: bool = True):
     ⚠️ **`strict` is the destination/lookup split, and it is not cosmetic.** The payload is
     a **destination** — two keys resolving to one row would drop one — so a collision is
     refused. `stored` is a **lookup source** only: it is never written, and every write
-    replaces the whole file, so a collision there costs nothing a reader can observe (the
-    entry already present answers a lookup by that title). Refusing it is worse than
-    useless, because the caller discards that reason: the cache is left un-rekeyed,
+    replaces the whole file, so the entry already present answers a lookup by that title
+    and the second is dropped rather than refused. Refusing it would be worse than useless,
+    because the caller discards that reason: the cache is left un-rekeyed,
     `_carried_forward` then misses, and a legacy `needs-you` entry is refused for a missing
     reason — **the write-bricking cost the grandfather rule exists to remove, reached by
-    the repair itself, and silently.**
+    the repair itself.**
+
+    ⚠️ **The stored-side drop is named on stderr, and its residual is stated rather than
+    claimed away.** First spelling wins, so a cache holding two spellings of one row with
+    *different* `content_key`s still misses the carry-forward when the matching entry lost
+    the race, and the write is refused for a missing reason. That fails **safe** — a
+    refusal leaves the previous cache untouched — and it is **unreachable from either
+    writer**: every write replaces the whole file and a dict holds one entry per title, so
+    no sequence of writes can accumulate two spellings of one row. Only a hand-edited cache
+    reaches it, which is why the note exists rather than a merge policy.
 
     Returns `(rekeyed, None, renamed)`, or `(parsed, reason, {})` when two keys resolve to
     one row. `renamed` maps each changed title back to the spelling the caller sent, so a
@@ -1837,6 +1861,16 @@ def derive_verdict_names(parsed, index: dict[str, str], *, strict: bool = True):
         title = os.path.splitext(found)[0] if found else stem
         if title in out:
             if not strict:
+                # A lookup source: the entry already under this title answers the lookup, so
+                # this one is dropped rather than refused. Named rather than silent — it is
+                # the only place a stored entry can be lost, and naming it is what lets a
+                # reader tell a hand-edited two-spelling cache from a clean one.
+                print(
+                    f"note: stored cache holds {source[title]!r} and {name!r}, both naming "
+                    f"{title!r} — keeping {source[title]!r}; if that is not the entry this "
+                    "payload matches, the write is refused for a missing reason",
+                    file=sys.stderr,
+                )
                 continue
             return parsed, (
                 f"{name!r} and {source[title]!r} both name {title!r} — one row cannot "
