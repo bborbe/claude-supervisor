@@ -1806,7 +1806,11 @@ def derive_verdict_names(parsed, index: dict[str, str], *, strict: bool = True):
     The name half of the cache key. The cache is keyed by task *name*, so the key is the
     one thing a later tick matches a row by — and until this ran, it was whatever spelling
     the caller sent. Where a name resolves against the tasks dir, the file's own basename is
-    used instead, so case and spacing drift cannot key an entry. A caller sending the
+    used instead, so **case** drift cannot key an entry. ⚠️ **Whitespace is deliberately
+    *not* normalised, and the claim is scoped to case for that reason:** a title may
+    legitimately contain a space — including a trailing one — so a `strip()` would make
+    `Foo ` miss the very file it names. The index lookup is case-insensitive because the
+    filesystem is, not because names are normalised. A caller sending the
     filename rather than the stem (`ATask.md`) is stripped to `ATask` before the lookup, so
     both spellings reach the same row.
 
