@@ -373,46 +373,52 @@ class SessionLiveness(unittest.TestCase):
     def test_a_timed_out_ps_is_killed_not_orphaned(self):
         """SC2's second clause — the child is reaped, not left running.
 
-        ⚠️ **The marker file is what makes the absence assertion mean anything.** A test that
-        only checked "no such process survives" passes for a command that never started, which
-        is the failure mode where a probe proves nothing while reading as rigorous. So the
-        child records that it ran, and only then is its absence evidence.
+        ⚠️ **The proof that the child really ran is the `TimeoutExpired` itself, not a marker
+        file.** `subprocess.run` raises it only while the child is still alive at the deadline,
+        so a command that never started would return normally and this assertion would never be
+        reached — which is what makes the absence check below evidence, rather than a probe that
+        passes because it spawned nothing. An earlier draft had the child write a file first,
+        and that made the test hostage to interpreter startup on a loaded host: miss the window
+        and the child dies before the write lands. This has no such dependency, because the
+        process exists from the moment `Popen` returns, whether or not it has finished exec'ing.
 
         ⚠️ **Only the COMMAND is swapped.** Every kwarg — `timeout` above all — comes from the
         code under test, so the kill under assertion is the real one and not a mock of it.
         """
         marker = "session-liveness-timeout-probe-%d" % os.getpid()
-        ran = os.path.join(self.tmp.name, "ran")
         real_run = self.m.subprocess.run
-        # A single process that carries the marker in its own argv and outlives the timeout.
-        probe_argv = [
-            sys.executable,
-            "-c",
-            "open(%r, 'w').write('ran'); import time; time.sleep(300)" % ran,
-            marker,
-        ]
         real_subprocess = self.m.subprocess
+        # A single process carrying the marker in its own argv, outliving the timeout — and one
+        # that self-terminates in 30 s, so a regression in the kill leaves a stray sleeper for
+        # half a minute rather than the five a `sleep 300` would have.
+        probe_argv = [sys.executable, "-c", "import time; time.sleep(30)", marker]
+        observed = {}
 
         class Stub:
             def __getattr__(self, name):
                 return getattr(real_subprocess, name)
 
             def run(self, _argv, **kwargs):
-                return real_run(probe_argv, **kwargs)
+                try:
+                    return real_run(probe_argv, **kwargs)
+                except real_subprocess.TimeoutExpired:
+                    observed["timed_out"] = True
+                    raise
 
         self.m.subprocess = Stub()
         original_timeout = self.m._PS_TIMEOUT
-        self.m._PS_TIMEOUT = 1.5
+        self.m._PS_TIMEOUT = 2
         try:
             out = self.m._ps_starts([os.getpid()])
         finally:
             self.m.subprocess = real_subprocess
             self.m._PS_TIMEOUT = original_timeout
 
-        self.assertEqual(out, {}, "a timed-out read answers nothing")
         self.assertTrue(
-            os.path.exists(ran), "the child never started — its absence would prove nothing"
+            observed.get("timed_out"),
+            "the child never outlived the timeout — its absence would prove nothing",
         )
+        self.assertEqual(out, {}, "a timed-out read answers nothing")
         survivors = real_run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout
         self.assertNotIn(marker, survivors, "the timed-out child survived — orphaned, not killed")
 

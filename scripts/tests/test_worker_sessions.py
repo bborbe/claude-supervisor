@@ -22,10 +22,11 @@ import unittest
 
 # The start-time cache is keyed by PID, so the suite must not read the machine's real one —
 # the rule the heartbeat store already carries, and not a convenience: an entry cached for a
-# pid the OS has since recycled would answer for the wrong process. One store per test run.
-os.environ.setdefault(
-    "SUPERVISOR_START_CACHE",
-    os.path.join(tempfile.gettempdir(), "claude-supervisor-test-starts-%d.json" % os.getpid()),
+# pid the OS has since recycled would answer for the wrong process. One store per test run,
+# and ASSIGNED rather than `setdefault`: an exported SUPERVISOR_START_CACHE is precisely the
+# environment where isolation matters, and `setdefault` would silently defer to it.
+os.environ["SUPERVISOR_START_CACHE"] = os.path.join(
+    tempfile.gettempdir(), "claude-supervisor-test-starts-%d.json" % os.getpid()
 )
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent.parent
