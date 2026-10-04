@@ -26,6 +26,9 @@ failure `scripts/check-worker-target.py` exists to refuse.
   --source   `<target> <source>`, where source is `default` | `config` | `env`: which source
              decided the number. That is the diagnostic whose absence cost the run above —
              a bare `18` cannot be told from a bare `12`.
+  --hard     the HARD cap instead of the soft target: the count at which even an
+             operator-named task is refused. Both thresholds come from one resolver call, so
+             the band a manager reports and the band the server enforces cannot disagree.
 
 ⚠️ **An unreadable or invalid config is UNKNOWN, never the default.** A manager that cannot
 read the target must not silently compare against 20, because that is a number nobody chose
@@ -69,20 +72,26 @@ RESOLVE = (
     "else {"
     "  const r = resolveMaxConcurrent({"
     "    env: process.env.SUPERVISOR_MAX_CONCURRENT,"
+    "    envHard: process.env.SUPERVISOR_MAX_CONCURRENT_HARD,"
     "    file,"
     "    path,"
     "  });"
-    "  console.log(JSON.stringify("
-    "    r.error ? { resolveError: r.error } : { limit: r.limit, source: r.source }));"
+    "  console.log(JSON.stringify(r.error ? { resolveError: r.error }"
+    "    : { limit: r.limit, source: r.source, hardLimit: r.hardLimit, hardSource: r.hardSource }));"
     "}"
 )
 
 
 def resolve():
-    """`(limit, source)` — or None when the config could not be read or the value is invalid.
+    """`(limit, source, hard_limit, hard_source)` — or None when the config could not be read
+    or a value is invalid.
 
     `limit` is None for unlimited, which is the shape `resolveMaxConcurrent` returns for an
-    explicit `0` and the only way left to reach it.
+    explicit `0` and the only way left to reach it. Since 2026-10-04 the resolver returns
+    BOTH thresholds from one call, so this reads both: the soft cap is the target a manager
+    compares against, the hard cap is the count at which even an operator-named task is
+    refused, and a reader that had only the soft number could not tell a manager how much
+    headroom the band actually leaves.
     """
     env = dict(os.environ, WORKER_TARGET_CONFIG=CONFIG)
     try:
@@ -109,7 +118,7 @@ def resolve():
     if facts.get("resolveError"):
         print(f"UNKNOWN — {facts['resolveError']}", file=sys.stderr)
         return None
-    return facts["limit"], facts["source"]
+    return facts["limit"], facts["source"], facts["hardLimit"], facts["hardSource"]
 
 
 def main(argv):
@@ -119,18 +128,28 @@ def main(argv):
         action="store_true",
         help="print `<target> <source>` instead of the target alone",
     )
+    parser.add_argument(
+        "--hard",
+        action="store_true",
+        help="print the HARD cap — the count at which even an operator-named task is refused — instead of the soft target",
+    )
     args = parser.parse_args(argv)
 
     resolved = resolve()
     if resolved is None:
         return 2
-    limit, source = resolved
+    limit, source, hard_limit, hard_source = resolved
 
     # `unlimited` is the token `commands/fleet-loop.md` already prints on its marker line for
     # a `0` key. The two surfaces say the same word for the same state rather than one
     # printing `0` and the other `unlimited`.
-    target = "unlimited" if limit is None else str(limit)
-    print(f"{target} {source}" if args.source else target)
+    #
+    # ⚠️ The DEFAULT output stays the SOFT target. It is what a manager compares its live
+    # count against, and every existing caller reads it that way — silently switching this to
+    # the hard number would make every tick believe it had the whole band in headroom.
+    value, origin = (hard_limit, hard_source) if args.hard else (limit, source)
+    target = "unlimited" if value is None else str(value)
+    print(f"{target} {origin}" if args.source else target)
     return 0
 
 
