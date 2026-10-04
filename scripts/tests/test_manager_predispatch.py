@@ -1744,14 +1744,54 @@ class TestVerdictsCache(Base):
     def test_a_name_carrying_a_separator_is_left_as_sent(self):
         """Resolution is an index lookup — `task_index` *is* `os.listdir` of the tasks dir —
         never a stat of a path assembled from the name, so `sub/ATask` is not reduced to
-        `ATask`. That is the contract the docstring states, and the reason nothing outside
-        the tasks dir is ever stat-ed."""
+        `ATask`. ⚠️ **The nested file is what makes this load-bearing rather than
+        decorative:** with `25 Tasks/sub/ATask.md` absent, a stat-based implementation would
+        also store the name verbatim and the test would pass for either mechanism. It is
+        present, so only a directory-entry lookup can still answer `sub/ATask`."""
+        os.makedirs(os.path.join(self.vault, "25 Tasks", "sub"))
+        self.write("25 Tasks/sub/ATask.md", "---\nstatus: next\n---\n")
         rc, out = self.verdicts(
             "ATopic",
             {"sub/ATask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
         )
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
         self.assertEqual(list(self.read_verdicts("ATopic")), ["sub/ATask"])
+
+    def test_a_filename_sent_with_its_suffix_resolves_to_the_same_row(self):
+        """A caller may send the filename rather than the stem. Without the suffix strip the
+        lookup asks for `atask.md.md`, misses, and keys the entry `ATask.md` — a name no
+        reader will ever match, which matters because the key is the one thing a later tick
+        matches a row by."""
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask.md": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask"])
+
+    def test_a_two_spelling_stored_cache_still_grandfathers(self):
+        """⚠️ This failure was introduced by the repair itself, and it is silent. A legacy
+        cache holding two drifted spellings of one row collides; a *strict* re-key of the
+        stored side would refuse, the caller discards that reason, the cache is left
+        un-rekeyed, `_carried_forward` then misses the canonical title, and a `needs-you`
+        entry with no reason is refused — **the write-bricking cost the grandfather rule
+        exists to remove, reached by the repair.** `stored` is a lookup source and never a
+        destination, so a collision there must be tolerated rather than refused."""
+        self.seed_verdicts(
+            "ATopic",
+            {
+                "atask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16},
+                "Atask": {"verdict": "ready", "score": 9, "content_key": "b" * 16},
+            },
+        )
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(
+            self.read_verdicts("ATopic")["ATask"]["content_key"], "a" * 16
+        )
 
     def test_a_title_containing_ascii_ellipsis_is_not_refused(self):
         """The positive control for the deliberate exclusion: `ABBREVIATION_MARKER` is

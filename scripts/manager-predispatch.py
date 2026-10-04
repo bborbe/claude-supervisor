@@ -1748,13 +1748,15 @@ def verdicts_grandfathered(parsed, stored) -> list[str]:
     return sorted(out)
 
 
-def derive_verdict_names(parsed, index: dict[str, str]):
+def derive_verdict_names(parsed, index: dict[str, str], *, strict: bool = True):
     """`parsed` re-keyed onto the task files' own titles, or the collision that stops it.
 
     The name half of the cache key. The cache is keyed by task *name*, so the key is the
     one thing a later tick matches a row by — and until this ran, it was whatever spelling
     the caller sent. Where a name resolves against the tasks dir, the file's own basename is
-    used instead, so case and spacing drift cannot key an entry.
+    used instead, so case and spacing drift cannot key an entry. A caller sending the
+    filename rather than the stem (`ATask.md`) is stripped to `ATask` before the lookup, so
+    both spellings reach the same row.
 
     Resolution is a lookup in `task_index` — which *is* `os.listdir` of the tasks dir —
     rather than a stat of a path assembled from the name. That keeps the contract below
@@ -1768,16 +1770,31 @@ def derive_verdict_names(parsed, index: dict[str, str]):
     same to this one. The detectable sub-case is the abbreviation, and
     `verdicts_shape_error` refuses that one.
 
-    Returns `(rekeyed, None)`, or `(parsed, reason)` when two keys resolve to one row: the
-    payload then does not say which verdict is that row's, and keeping the later one would
-    drop the other silently — the same loss this writer refuses everywhere else.
+    ⚠️ **`strict` is the destination/lookup split, and it is not cosmetic.** The payload is
+    a **destination** — two keys resolving to one row would drop one — so a collision is
+    refused. `stored` is a **lookup source** only: it is never written, and every write
+    replaces the whole file, so a collision there costs nothing a reader can observe (the
+    entry already present answers a lookup by that title). Refusing it is worse than
+    useless, because the caller discards that reason: the cache is left un-rekeyed,
+    `_carried_forward` then misses, and a legacy `needs-you` entry is refused for a missing
+    reason — **the write-bricking cost the grandfather rule exists to remove, reached by
+    the repair itself, and silently.**
+
+    Returns `(rekeyed, None)`, or `(parsed, reason)` when two keys resolve to one row.
     """
     out: dict = {}
     source: dict[str, str] = {}
     for name, entry in parsed.items():
-        found = index.get(f"{name}.md".lower())
-        title = os.path.splitext(found)[0] if found else name
+        stem = (
+            name[:-3]
+            if isinstance(name, str) and name.lower().endswith(".md")
+            else name
+        )
+        found = index.get(f"{stem}.md".lower())
+        title = os.path.splitext(found)[0] if found else stem
         if title in out:
+            if not strict:
+                continue
             return parsed, (
                 f"{name!r} and {source[title]!r} both name {title!r} — one row cannot "
                 "carry two verdicts"
@@ -1975,7 +1992,10 @@ def main(argv: list[str]) -> int:
             if collision:
                 print(f"refusing to write these verdicts: {collision}", file=sys.stderr)
                 return EXIT_USAGE
-            stored, _ = derive_verdict_names(stored, index)
+            # `strict=False`: the stored cache is a lookup source, never a destination, so
+            # a collision there is tolerated rather than refused — the reason is provably
+            # None on this path, which is why it is discarded rather than reported.
+            stored, _ = derive_verdict_names(stored, index, strict=False)
         shape_error = verdicts_shape_error(parsed, stored)
         if shape_error:
             # A refused write must not clobber a good cache. The reason is sharper here

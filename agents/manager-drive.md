@@ -342,6 +342,7 @@ Audit (n):             ← the cache evidence: dispatched vs cached, per clause 
   task-auditor dispatches this run: <n> of <m> rows · cache hits: <n> (key: <content-hash>)
   <task> — <verdict> · score <n>/10|null · key <content-hash> · reason: <the auditor's own wording>
     ← one line per row the caller persists. `reason:` is REQUIRED on a needs-you / unfixable / below-bar / reframe row and omitted on every other verdict; on a cache hit it repeats the STORED reason verbatim, never a re-derivation.
+  ⚠️ **`<task>` is the row's OWN title, in full — never a width-abbreviated form.** These lines are what the caller persists, and the name on the line becomes the cache's key, so a title elided to `…` for column width is not something the caller can key off: `--write-verdicts` refuses any key carrying `…` outright, and a name whose elided remainder was guessed is stored under a title no later tick will ever match — measured 2026-10-02, **six of 24 live keys were exactly such guesses**. Emit the title whole even when it overruns the column. A caller that reads the row's own file keys correctly either way; an abbreviated render only costs it the row.
 
 Card (1):              ← the POSTING PAYLOAD, never a second ranking — the caller posts it
   post-batch --dedup-key "<key>" — covers <n> waiting-approval + <m> stale
