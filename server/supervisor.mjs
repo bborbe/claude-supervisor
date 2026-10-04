@@ -25,7 +25,7 @@ import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { newSessionId, startClusterSession } from './cluster-spawn.mjs'
 import { windowIdArgument } from './window-id.mjs'
@@ -738,37 +738,39 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
 // A cap counting one population while the managers' target counts another is a defect with no
 // error on either side — and the target IS this number, so they must agree by construction.
 // Definition and its two stated limits: `worker-sessions.mjs`.
-function concurrentLimitError() {
-  const maxConcurrent = resolveMaxConcurrent({
+// ⚠️ TWO THRESHOLDS SINCE 2026-10-04, ON THE OPERATOR'S RULING — *"lets start with 30 = soft
+// cap and 50 = hard cap"*. The SOFT cap refuses ORDINARY spawns; the HARD cap refuses EVERY
+// spawn. `operatorNamed` is the exemption that lives between them: a task the operator has
+// named by hand may still open while the fleet sits at or above the soft cap, up to but not
+// including the hard one. The band exists so the fleet never refuses the operator's own
+// named work for a reason the operator did not choose.
+//
+// ⚠️ `operatorNamed` is the CALLER's assertion, resolved from the task's own operator-set
+// flag and passed in — never inferred here. This function cannot read the vault, and a
+// default of `true` would make the soft cap unenforceable, so an absent argument means an
+// ordinary spawn. The marker and its provenance rule have one home in `commands/open.md`
+// § Step 1.5; this is the enforcement, not a second definition.
+function concurrentLimitError({ operatorNamed = false } = {}) {
+  // Resolve and count HERE; decide THERE. The decision is `concurrentLimitRefusal` in
+  // `spawn-mode.mjs` — pure, and therefore unit-testable, which this module is not, because
+  // importing it starts an MCP server. Only the two side-effectful reads stay in this file.
+  const limits = resolveMaxConcurrent({
     env: config.maxConcurrent,
+    envHard: config.maxConcurrentHard,
     file: config.configFileContents,
     path: config.configFile,
   })
-  if (maxConcurrent.error) return maxConcurrent.error
-  if (maxConcurrent.limit === null) return null
-
-  const live = workerSessions()
-  // `null` is "a store could not be read", which is NOT "no worker is live". Refusing on it is
-  // the same asymmetry the mode rule carries: a limit that cannot count must not open, because
-  // opening past an uncountable limit is how the limit silently stops existing — and a manager
-  // acting on the other reading spawns onto live work.
-  if (live === null) {
-    return (
-      `the concurrent-worker limit is set to ${maxConcurrent.limit} but the live-worker count could not be ` +
-      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. Both the ` +
-      `session registry and the spawn ledger must be readable; point SUPERVISOR_SESSIONS_DIR and ` +
-      `SUPERVISOR_LEDGER_DIR at them if they live elsewhere.`
-    )
-  }
-  if (live.length >= maxConcurrent.limit) {
-    return (
-      `the fleet-wide concurrent-worker limit is reached: ${live.length} live, ${maxConcurrent.limit} ` +
-      `allowed (source: ${maxConcurrent.source}). Open nothing further and report the remainder as ` +
-      `held-on-limit; it is picked up next sweep. Raise spawn.maxConcurrent in ${config.configFile}, or ` +
-      `set it to 0 for unlimited.`
-    )
-  }
-  return null
+  // Skipped when the pair is off or unresolvable: `concurrentLimitRefusal` answers both of
+  // those before it ever looks at the count, and the store read is the expensive half.
+  const live = limits.error || limits.limit === null ? null : workerSessions()
+  return concurrentLimitRefusal({
+    limits,
+    // `null` is "a store could not be read", which is NOT "no worker is live" — the refusal
+    // turns that distinction into an error rather than a zero.
+    liveCount: live === null ? null : live.length,
+    operatorNamed,
+    configFile: config.configFile,
+  })
 }
 
 // A cluster worker: a session inside the `claude-interactive` service, not a process here.
@@ -784,7 +786,7 @@ function concurrentLimitError() {
 // down is a worker the fleet cannot find. It is written only AFTER the call succeeds —
 // stamping a task with an id the service refused would point it at a conversation that does
 // not exist, which is worse than an empty field.
-async function spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive }) {
+async function spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed }) {
   // Arguments the cluster path cannot honour are REFUSED, never accepted and quietly ignored —
   // the same rule the tab path already carries for `resume` and `policy`. Silently dropping
   // them is how a caller ends up believing a worker was resumed when a fresh session was
@@ -825,7 +827,7 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
   // wrong with it rather than told the fleet is full — both refuse, but only one names the
   // thing the caller can actually fix. It is still checked BEFORE anything is created, which
   // is what matters: a cap consulted after the spawn has already spent the budget it protects.
-  const limitError = concurrentLimitError()
+  const limitError = concurrentLimitError({ operatorNamed })
   if (limitError) return { error: limitError }
 
   const minted = newSessionId()
@@ -910,7 +912,7 @@ function bindSessionToTask({ task, vault, sessionId }) {
   return { vault: vault ?? null }
 }
 
-async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed }) {
   const id = `agent_${++seq}`
 
   // The target is resolved before the mode, and it SHORT-CIRCUITS. A cluster worker is not
@@ -927,7 +929,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const spawnTarget = resolveSpawnTarget({ target })
   if (spawnTarget.error) return { error: spawnTarget.error }
   if (spawnTarget.target === 'cluster') {
-    return spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive })
+    return spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed })
   }
 
   // Resolved first, because every guard below asks which way this worker opens and they
@@ -960,7 +962,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // 2026-10-01). A cap counting one population while the managers' target counts another is
   // a defect with no error on either side — and the target IS this number, so they must
   // agree by construction. Definition and its two stated limits: `worker-sessions.mjs`.
-  const limitError = concurrentLimitError()
+  const limitError = concurrentLimitError({ operatorNamed })
   if (limitError) return { error: limitError }
 
   // An explicit window id WINS — the caller may need a window the map does not describe.
@@ -1387,6 +1389,17 @@ const TOOLS = [
           description:
             'Path to a JSON file of approval rules for THIS worker, evaluated ahead of the user and bundled rules — first match wins, so a rule here beats both, while the bundled set still covers whatever it does not name. Full replacement is reachable by ending the file with a {"tool":"*","match":"*","action":"escalate"} catch-all. An absolute path is used as-is; a relative one resolves against the worker\'s cwd. The file must exist and parse — a named policy that cannot be read refuses the spawn rather than silently falling back to the server default. Headless only: a tab worker answers its own prompts in its tab, so combining this with interactive:true is refused. Omit to use the server policy.',
         },
+        operator_named: {
+          type: 'boolean',
+          description:
+            // ⚠️ The two numbers are INTERPOLATED from the constants, never written. They were
+            // written once, as "30 / hard 50", and were wrong within the hour: 30 is the value
+            // the operator set in his config, not the code default, which is 20. A restated
+            // default is a second counter a reader cannot tell from the real one, and this
+            // surface is outside `check-worker-target.py`'s reach — so the fix is to make the
+            // drift impossible rather than to correct it once.
+            `Whether the OPERATOR named THIS task by hand — the exemption that lets one task open while the fleet sits between its soft and hard caps (default soft ${DEFAULT_MAX_CONCURRENT} / hard ${DEFAULT_MAX_CONCURRENT_HARD}). The caller resolves it from the task's own operator-set flag and passes it; the server never infers it and never reads the vault, because a default of true would make the soft cap unenforceable. Omit for an ordinary spawn, which is refused at the soft cap. An operator-named spawn is still refused at the hard cap, where the fleet is full for everyone.`,
+        },
       },
       required: ['prompt'],
     },
@@ -1510,6 +1523,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           vault: args.vault,
           resume: args.resume,
           decision: args.decision,
+          // Passed through raw, like `target`: the caller asserts it from the task's own
+          // operator-set flag, and `concurrentLimitError` reads only truthiness. Coercing an
+          // omitted argument to a boolean here is what made the mode config unreachable.
+          operatorNamed: args.operator_named,
           policy: args.policy,
           // Passed through raw and validated in role-map.mjs, which owns the legal values
           // and the refusal message — the same split as the spawn mode below.

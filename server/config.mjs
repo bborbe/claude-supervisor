@@ -101,6 +101,10 @@ export const config = Object.freeze({
   spawnMode: ENV.SUPERVISOR_SPAWN_MODE || null,
   // Unset means unlimited, which is the shipped state — see resolveMaxConcurrent.
   maxConcurrent: ENV.SUPERVISOR_MAX_CONCURRENT || null,
+  // The HARD ceiling above the soft cap above. Unlike `maxConcurrent`, unset here resolves
+  // to DEFAULT_MAX_CONCURRENT_HARD rather than to unlimited — the ceiling is always in
+  // force unless the soft key's `0` switches the pair off. See resolveMaxConcurrent.
+  maxConcurrentHard: ENV.SUPERVISOR_MAX_CONCURRENT_HARD || null,
 
   // Where the cluster's `claude-interactive` service is reachable from THIS machine — the
   // address a cluster spawn POSTs a prompt to. Raw and unvalidated, like the two above: the
