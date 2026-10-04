@@ -53,7 +53,7 @@ If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a
 
 ⚠️ **This step is for the single-name path only. `--flagged` does NOT use it** — the batch scans every vault with a `tasks_dir` (Step 0.5), so resolving one vault from cwd would be exactly the narrowing that hid 8 `brogrammers` candidates and 2 `octopusagent` ones on 2026-09-21.
 
-**Never hardcode a vault.** Precedence: `--vault` flag → the vault whose `path` contains the cwd → `default_vault` from the config. **None of the three → STOP.** Command substitution discards the resolver's exit status, so the block below ends with an explicit `[ -n "$VAULT" ]` guard that exits non-zero rather than letting Step 0 continue against an empty vault — the same fail-closed shape `docs/subject-resolution.md:15` uses.
+**Never hardcode a vault.** Precedence: `--vault` flag → the vault whose `path` contains the cwd → `default_vault` from the config. **None of the three → STOP.** Command substitution discards the resolver's exit status, so the block below ends with an explicit `[ -n "$VAULT" ]` guard that exits non-zero rather than letting Step 0 continue against an empty vault.
 
 ```bash
 VAULT="${VAULT_FLAG:-$(python3 -c "
