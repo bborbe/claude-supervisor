@@ -59,6 +59,43 @@ page_type: runbook
 - **Non-bucket dispositions — `hold`, `backlog` and `👤 YOURS`.** These are **not** among the ten and are **not** escape hatches into one of them. A `hold` task renders `⏸️ blocked/hold`.
 """
 
+# The 13 names the RUNBOOK above declares. Under direction (2) this tuple carries BOTH
+# halves: it is the vocabulary a key must belong to, and — because the rule text's
+# "every declared bucket must appear" is now enforced rather than merely stated — the set
+# of keys a writable classification must carry in full.
+DECLARED_NAMES = (
+    "progressing",
+    "stuck",
+    "waiting-on-human",
+    "waiting-approval",
+    "parked-on-unregistered-gate",
+    "done",
+    "ready-to-start",
+    "blocked-upstream",
+    "close-me",
+    "orphaned",
+    "hold",
+    "backlog",
+    "👤 YOURS",
+)
+
+
+def full_set(**overrides):
+    """Every declared name present, each mapped to `[]` unless overridden.
+
+    The shape direction (2) makes the only writable one: a bucket mapped to `[]` is a
+    declaration of absence ("evaluated, nothing in it"), and a bucket *missing* is an
+    under-declaration the writer now refuses.
+
+    ⚠️ The default is the quiet board, so a caller MUST populate at least one bucket —
+    `full_set()` alone is all-empty, which the writer still refuses as the mis-parse
+    signature (a non-empty tracked set always populates at least one bucket).
+    """
+    payload = {name: [] for name in DECLARED_NAMES}
+    payload.update(overrides)
+    return payload
+
+
 # The two declaration lines' markers, matched exactly as `manager-predispatch.py` matches
 # them. Restated here rather than imported from the script, so a test can pin WHICH line a
 # mutation landed on — a mutation that drifted into prose would otherwise pass a
@@ -349,7 +386,12 @@ class TestActionablePassThrough(Base):
         )
 
     def classified(self, subject, payload):
-        """Store a classification over an otherwise unchanged tree."""
+        """Store a classification over an otherwise unchanged tree.
+
+        `payload` is merged OVER `full_set()`, so a test names only the buckets it is about
+        and every other declared name is carried empty. Under direction (2) a bucket
+        *missing* is refused, so a sparse literal is no longer a writable set."""
+        payload = {**full_set(), **payload}
         self.save(subject)
         rc, out = self.buckets(subject, payload)
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
@@ -406,7 +448,9 @@ class TestActionablePassThrough(Base):
         self.classified("ATopic", {"ready-to-start": ["AGoalTask"]})
         rc, out = self.check("ATopic")
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
-        rc, out = self.buckets("ATopic", {"progressing": ["AGoalTask"]})
+        rc, out = self.buckets(
+            "ATopic", {**full_set(), "progressing": ["AGoalTask"]}
+        )
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
         rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
@@ -946,12 +990,21 @@ class TestTrackedArtifacts(Base):
         rc, _ = self.buckets("ATopic", {"done": []})
         self.assertEqual(rc, self.m.EXIT_USAGE)
 
-    def test_write_buckets_refuses_one_empty_bucket_among_full_ones(self):
-        """The mixed case: a single empty bucket is enough to poison the half, and it is
-        the shape a column-0 mis-parse produces — every declared bucket present, each one
-        empty, so the set *looks* structurally valid."""
-        rc, _ = self.buckets("ATopic", {"done": ["ATask"], "stuck": []})
-        self.assertEqual(rc, self.m.EXIT_USAGE)
+    def test_write_buckets_accepts_one_empty_bucket_among_full_ones(self):
+        """The mixed case — and the direction-(2) REVERSAL of the contract this test used to
+        pin. A bucket mapped to `[]` is now a declaration of absence, "evaluated, nothing in
+        it", which is the reading the store could not previously express: a sparse map left
+        "bucket empty" and "bucket not evaluated" indistinguishable, and nothing in the
+        record said which.
+
+        ⚠️ The guard this replaces is a real loss, recorded rather than glossed. The old
+        refusal caught a partial mis-parse that emitted a key with an empty list. The new
+        completeness half catches a mis-parse that OMITS a key; it cannot catch one that
+        emits the key empty. The trade is deliberate — declared means evaluated — and the
+        all-empty refusal still stands, because a non-empty tracked set always populates at
+        least one bucket."""
+        rc, out = self.buckets("ATopic", full_set(done=["ATask"], stuck=[]))
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
 
     def test_a_corrected_restage_lands_on_an_unchanged_tree(self):
         """The no-heal, and the negative control for it. `digest_of` covers the tracked set
@@ -960,23 +1013,20 @@ class TestTrackedArtifacts(Base):
         bad record in place until the tree next moved. The bucket half is now a save input
         in its own right, so the second save below writes even though the digest is equal.
         """
-        rc, out = self.buckets("ATopic", {"done": ["ATask"]})
+        first = full_set(done=["ATask"])
+        rc, out = self.buckets("ATopic", first)
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
         rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
-        self.assertEqual(
-            json.loads(self.read_state("ATopic"))["bucket_sets"], {"done": ["ATask"]}
-        )
+        self.assertEqual(json.loads(self.read_state("ATopic"))["bucket_sets"], first)
 
         # Same tree, corrected classification: the digest is equal, the half moved.
-        rc, out = self.buckets("ATopic", {"done": ["ATask"], "stuck": ["AGoalTask"]})
+        second = full_set(done=["ATask"], stuck=["AGoalTask"])
+        rc, out = self.buckets("ATopic", second)
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
         rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
-        self.assertEqual(
-            json.loads(self.read_state("ATopic"))["bucket_sets"],
-            {"done": ["ATask"], "stuck": ["AGoalTask"]},
-        )
+        self.assertEqual(json.loads(self.read_state("ATopic"))["bucket_sets"], second)
 
     def test_a_save_with_no_buckets_on_an_unchanged_tree_still_writes_nothing(self):
         """The other side of the same decision, so the new clause cannot pass by writing
@@ -989,15 +1039,14 @@ class TestTrackedArtifacts(Base):
         self.assertEqual(self.read_state("ATopic"), before)
 
     def test_save_records_the_bucket_sets_under_the_key(self):
-        rc, out = self.buckets(
-            "ATopic", {"done": ["ATask"], "ready-to-start": ["AGoalTask"]}
-        )
+        payload = {**full_set(), "done": ["ATask"], "ready-to-start": ["AGoalTask"]}
+        rc, out = self.buckets("ATopic", payload)
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
         rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
         self.assertEqual(
             json.loads(self.read_state("ATopic"))["bucket_sets"],
-            {"done": ["ATask"], "ready-to-start": ["AGoalTask"]},
+            payload,
         )
 
     def test_save_without_buckets_leaves_the_key_absent(self):
@@ -1584,6 +1633,38 @@ class TestBucketVocabulary(Base):
             "--subject", subject, "--write-buckets", stdin=json.dumps(payload)
         )
 
+    # -- direction (2): `[]` is a declaration, and completeness is enforced --- #
+
+    def test_a_declared_bucket_mapped_to_an_empty_list_is_accepted(self):
+        """SC1(a). The rule text always demanded "every declared bucket must appear" while
+        the writer refused any bucket mapped to an empty list — so the two halves could not
+        both hold whenever any bucket was empty, which on the live store is most of them
+        (6 of 13 keys present, `recorded_at 2026-10-04T12:39:32+02:00`). Direction (2) makes
+        `[]` mean "evaluated, nothing in it"."""
+        rc, out = self.buckets("ATopic", full_set(done=["ATask"], stuck=[]))
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+
+    def test_a_set_omitting_a_declared_bucket_is_refused(self):
+        """SC1(b) — the completeness half. The prose promised it and the code never applied
+        it, so a sparse map silently under-declared which buckets were evaluated and
+        nothing in the record said which."""
+        payload = full_set(done=["ATask"])
+        del payload["stuck"]
+        rc, out = self.run_both(
+            "--subject", "ATopic", "--write-buckets", stdin=json.dumps(payload)
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertIn("stuck", out)
+
+    def test_an_all_empty_set_is_still_refused(self):
+        """SC1(c) — the 2026-09-28 vacuous-`all()` hole stays closed. Under direction (2)
+        an all-empty set reads as "every bucket evaluated, every one empty", which a
+        non-empty tracked set cannot produce: every tracked row lands in some bucket, so at
+        least one bucket is non-empty. All-empty therefore remains the mis-parse
+        signature rather than a quiet tick."""
+        rc, _ = self.buckets("ATopic", {name: [] for name in DECLARED_NAMES})
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+
     def run_both(self, *argv, stdin=""):
         """-> (rc, stdout + stderr). `Base.run_gate` swaps only stdout, and every
         validation message this script emits goes to stderr — so a test asserting the
@@ -1682,13 +1763,12 @@ class TestBucketVocabulary(Base):
         real (4 tasks on 2026-10-03). A check built from the runbook's parenthesised bucket
         run alone refuses it — and a refusal that also rejects the correct set is worse
         than none."""
-        rc, out = self.buckets("ATopic", {"backlog": ["ATask"]})
+        payload = full_set(done=["ATask"], backlog=["ATask"])
+        rc, out = self.buckets("ATopic", payload)
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
         rc, out = self.save_with_table("ATopic", "t\n", "--buckets", out.strip())
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
-        self.assertEqual(
-            json.loads(self.read_state("ATopic"))["bucket_sets"], {"backlog": ["ATask"]}
-        )
+        self.assertEqual(json.loads(self.read_state("ATopic"))["bucket_sets"], payload)
 
     # -- SC2: the vocabulary comes from the runbook, and only from it ------- #
 
@@ -1705,7 +1785,7 @@ class TestBucketVocabulary(Base):
             "--runbook",
             widened,
             "--write-buckets",
-            stdin=json.dumps({"newbucket": ["ATask"]}),
+            stdin=json.dumps({**full_set(done=["ATask"]), "newbucket": ["ATask"]}),
         )
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
 
@@ -1716,7 +1796,7 @@ class TestBucketVocabulary(Base):
             "--runbook",
             narrowed,
             "--write-buckets",
-            stdin=json.dumps({"orphaned": ["ATask"]}),
+            stdin=json.dumps(full_set(done=["ATask"])),
         )
         self.assertEqual(rc, self.m.EXIT_USAGE, out)
         self.assertIn("orphaned", out)
