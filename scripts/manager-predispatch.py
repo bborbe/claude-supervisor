@@ -1748,20 +1748,25 @@ def verdicts_grandfathered(parsed, stored) -> list[str]:
     return sorted(out)
 
 
-def derive_verdict_names(parsed, tasks_dir: str, index: dict[str, str]):
+def derive_verdict_names(parsed, index: dict[str, str]):
     """`parsed` re-keyed onto the task files' own titles, or the collision that stops it.
 
     The name half of the cache key. The cache is keyed by task *name*, so the key is the
     one thing a later tick matches a row by — and until this ran, it was whatever spelling
-    the caller sent. Where a name resolves against `tasks_dir`, the file's own basename is
+    the caller sent. Where a name resolves against the tasks dir, the file's own basename is
     used instead, so case and spacing drift cannot key an entry.
+
+    Resolution is a lookup in `task_index` — which *is* `os.listdir` of the tasks dir —
+    rather than a stat of a path assembled from the name. That keeps the contract below
+    exactly true: a name carrying a separator is not reduced to its basename, and nothing
+    outside the tasks dir is ever stat-ed.
 
     A name that does *not* resolve is left exactly as sent rather than refused: `--vault`
     names one vault, and a subject's rows may live in another (`bro-21389-mdm-via-rest`'s
     13 rows are all in `seibert-brogrammers/25 Tasks`), so refusing the unresolvable would
     brick every write for those subjects — and a row whose file was deleted would do the
     same to this one. The detectable sub-case is the abbreviation, and
-    `verdicts_shape_error` refuses that one before this is reached.
+    `verdicts_shape_error` refuses that one.
 
     Returns `(rekeyed, None)`, or `(parsed, reason)` when two keys resolve to one row: the
     payload then does not say which verdict is that row's, and keeping the later one would
@@ -1770,10 +1775,8 @@ def derive_verdict_names(parsed, tasks_dir: str, index: dict[str, str]):
     out: dict = {}
     source: dict[str, str] = {}
     for name, entry in parsed.items():
-        path = resolve_task_file(tasks_dir, name, index)
-        title = (
-            os.path.splitext(os.path.basename(path))[0] if os.path.exists(path) else name
-        )
+        found = index.get(f"{name}.md".lower())
+        title = os.path.splitext(found)[0] if found else name
         if title in out:
             return parsed, (
                 f"{name!r} and {source[title]!r} both name {title!r} — one row cannot "
@@ -1967,13 +1970,12 @@ def main(argv: list[str]) -> int:
         # non-dict payload is left alone: `verdicts_shape_error` owns that refusal, and it
         # is the only place the message lives.
         if isinstance(parsed, dict):
-            tasks_dir = os.path.join(args.vault, "25 Tasks")
-            index = task_index(tasks_dir)
-            parsed, collision = derive_verdict_names(parsed, tasks_dir, index)
+            index = task_index(os.path.join(args.vault, "25 Tasks"))
+            parsed, collision = derive_verdict_names(parsed, index)
             if collision:
                 print(f"refusing to write these verdicts: {collision}", file=sys.stderr)
                 return EXIT_USAGE
-            stored, _ = derive_verdict_names(stored, tasks_dir, index)
+            stored, _ = derive_verdict_names(stored, index)
         shape_error = verdicts_shape_error(parsed, stored)
         if shape_error:
             # A refused write must not clobber a good cache. The reason is sharper here

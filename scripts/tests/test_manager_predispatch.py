@@ -1727,6 +1727,82 @@ class TestVerdictsCache(Base):
         self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
         self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask"])
 
+    def test_a_name_that_does_not_resolve_is_stored_exactly_as_sent(self):
+        """The fallback the CHANGELOG argues for at length, and the contract most likely to
+        regress silently: `--vault` names one vault while a subject's rows may live in
+        another (measured: `bro-21389-mdm-via-rest`'s 13 rows are all in
+        `seibert-brogrammers/25 Tasks`), so a name the index does not carry is stored
+        unchanged rather than refused — refusing would brick every write for those
+        subjects, and for this one the moment a row file is deleted."""
+        name = "BRO-22002 Split MDM Parties and Contacts via REST"
+        rc, out = self.verdicts(
+            "ATopic", {name: {"verdict": "ready", "score": 9, "content_key": "a" * 64}}
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), [name])
+
+    def test_a_name_carrying_a_separator_is_left_as_sent(self):
+        """Resolution is an index lookup — `task_index` *is* `os.listdir` of the tasks dir —
+        never a stat of a path assembled from the name, so `sub/ATask` is not reduced to
+        `ATask`. That is the contract the docstring states, and the reason nothing outside
+        the tasks dir is ever stat-ed."""
+        rc, out = self.verdicts(
+            "ATopic",
+            {"sub/ATask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["sub/ATask"])
+
+    def test_a_title_containing_ascii_ellipsis_is_not_refused(self):
+        """The positive control for the deliberate exclusion: `ABBREVIATION_MARKER` is
+        U+2026 alone, because a real title may carry `...`. Widening it would refuse
+        exactly the titles the source comment calls common, and nothing else here would
+        catch that."""
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask... draft": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask... draft"])
+
+    def test_a_marker_bearing_key_in_the_stored_cache_is_benign(self):
+        """`stored` is a lookup source only — the write replaces the whole file with the
+        payload — so a `…` key already sitting in a cache neither refuses the write nor
+        survives it."""
+        self.seed_verdicts(
+            "ATopic",
+            {
+                "A Manager's Own Closer Line Is Mirrored…": {
+                    "verdict": "ready",
+                    "score": 9,
+                    "content_key": "a" * 64,
+                }
+            },
+        )
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "ready", "score": 9, "content_key": "a" * 64}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask"])
+
+    def test_the_collision_refusal_leaves_the_previous_cache_untouched(self):
+        """The collision path returns before any `open()`, so it cannot clobber today — but
+        a reordering that moved it after the shape check or after the write would, and only
+        this assertion would catch that."""
+        good = {"ATask": {"verdict": "ready", "score": 9, "content_key": "d" * 64}}
+        rc, out = self.verdicts("ATopic", good)
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        rc, _ = self.verdicts(
+            "ATopic",
+            {
+                "ATask": {"verdict": "ready", "score": 9, "content_key": "a" * 64},
+                "atask": {"verdict": "blocked", "score": None, "content_key": "b" * 64},
+            },
+        )
+        self.assertEqual(rc, self.m.EXIT_USAGE)
+        self.assertEqual(self.read_verdicts("ATopic"), good)
+
     def test_a_renamed_row_lands_under_its_current_title(self):
         """The defect the task names: a rename must not strand the entry. The caller reads
         the row's current title off disk, the writer resolves it, and the entry lands under
