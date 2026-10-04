@@ -422,6 +422,24 @@ class SessionLiveness(unittest.TestCase):
         survivors = real_run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout
         self.assertNotIn(marker, survivors, "the timed-out child survived — orphaned, not killed")
 
+    def test_an_out_of_range_cache_value_cannot_make_a_live_session_absent(self):
+        """⚠️ The half `test_a_corrupt_cache_file_is_ignored_not_fatal` leaves open.
+
+        That test feeds `{not json at all`, which `json.load` rejects as a `ValueError`. Valid
+        JSON holding an out-of-range value is a different path: `json.load` accepts a bare
+        `Infinity`, and `int(inf)` then raises `OverflowError` — a subclass of `ArithmeticError`,
+        not of `TypeError` or `ValueError`. Uncaught it escapes `_ps_starts` (documented "Never
+        raises") and out of `main()`, and an uncaught exception exits **1** — this module's
+        documented ABSENT code. A corrupt cache would therefore report a LIVE session as ABSENT,
+        the one answer that permits a resume onto a live conversation. End-to-end form: a
+        planted live record plus a poisoned cache, asserted on the verdict rather than the raise.
+        """
+        self.plant("0u70frange-1111-2222-3333-444455556666", os.getpid())
+        with open(os.environ["SUPERVISOR_START_CACHE"], "w", encoding="utf-8") as fh:
+            fh.write('{"%d": [Infinity, 1.0]}' % os.getpid())
+        rc, out = self.check("0u70frange")
+        self.assertEqual(rc, LIVE, "an out-of-range cache value must not become ABSENT: %s" % out)
+
     def test_a_stale_cache_entry_is_read_again(self):
         # A pid's start time is immutable, but its MEANING is not: pids are recycled. The TTL
         # is what bounds that, so an expired entry must not be served.

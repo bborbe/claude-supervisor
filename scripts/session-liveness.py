@@ -251,7 +251,19 @@ def _load_start_cache():
                     continue
                 try:
                     _START_CACHE[int(key)] = [int(val[0]), float(val[1])]
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
+                    # ⚠️ **`OverflowError` is in this tuple because omitting it is not a missed
+                    # entry — it is the wrong ANSWER.** `json.load` accepts a bare `Infinity`,
+                    # so `{"123": [Infinity, 1.0]}` parses cleanly and `int(inf)` then raises
+                    # `OverflowError` — a subclass of `ArithmeticError`, not of either of the
+                    # other two. Uncaught, it escapes `_load_start_cache` → `_ps_starts` (which
+                    # documents "Never raises") → `read_registry` → `main()`, and an uncaught
+                    # exception exits **1**, which is this module's documented **ABSENT** code
+                    # (`LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3`). A corrupt cache file
+                    # would therefore report a live session as ABSENT — the one answer that
+                    # permits a resume onto a live conversation, and precisely the failure this
+                    # file exists to prevent. `who-needs-me.py` carries the same tuple for the
+                    # same reason; this loader had re-opened the gap it closed.
                     continue
     return _START_CACHE
 
