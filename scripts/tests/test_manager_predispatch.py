@@ -1644,21 +1644,11 @@ class TestBucketVocabulary(Base):
     agrees with — the drift the runbook's own two-renderer rule forbids.
     """
 
-    DECLARED = {
-        "progressing",
-        "stuck",
-        "waiting-on-human",
-        "waiting-approval",
-        "parked-on-unregistered-gate",
-        "done",
-        "ready-to-start",
-        "blocked-upstream",
-        "close-me",
-        "orphaned",
-        "hold",
-        "backlog",
-        "👤 YOURS",
-    }
+    # Folded onto the module-level tuple rather than restated: two hardcoded thirteen-name
+    # lists in one file meant a future bucket addition was two edits, and nothing tied them
+    # together. A `set` here because this class asserts membership; `full_set()` needs the
+    # tuple's order for nothing.
+    DECLARED = set(DECLARED_NAMES)
 
     def buckets(self, subject, payload):
         return self.run_gate(
