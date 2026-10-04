@@ -44,14 +44,9 @@ import time
 import unittest
 from unittest import mock
 
-# The start-time cache is keyed by PID, so the suite must not read the machine's real one —
-# the rule the heartbeat store already carries, and not a convenience: an entry cached for a
-# pid the OS has since recycled would answer for the wrong process. A per-run directory rather
-# than a pid-derived name in the shared temp dir, and ASSIGNED rather than `setdefault`: an
-# exported SUPERVISOR_START_CACHE is precisely the environment where isolation matters, and
-# `setdefault` would silently defer to it. `TemporaryDirectory` registers its own cleanup.
-_START_CACHE_DIR = tempfile.TemporaryDirectory(prefix="claude-supervisor-test-starts-")
-os.environ["SUPERVISOR_START_CACHE"] = os.path.join(_START_CACHE_DIR.name, "starts.json")
+# Side effect only: points the start-time cache at an isolated per-run store, in one shared
+# home so five suites cannot each assign the same key and leave only the last standing.
+import start_cache_isolation  # noqa: E402,F401
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "who-needs-me.py")

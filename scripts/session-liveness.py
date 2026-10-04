@@ -345,17 +345,32 @@ def _ps_starts(pids, refresh=False):
     now = time.time()
     cache = _load_start_cache()
     out, learned = {}, False
-    deadline = now + _PS_BUDGET
+    # ⚠️ **`time.monotonic()`, not `time.time()`, for the deadline.** `subprocess` enforces its
+    # own `timeout=` against the monotonic clock, so a wall-clock deadline would leave the two
+    # halves of one bound measuring against different clocks: a backwards step inflates
+    # `remaining` past the budget, a forwards one trips the break early. `now` stays wall-clock
+    # because the cache epoch genuinely is a wall-clock fact.
+    deadline = time.monotonic() + _PS_BUDGET
     for pid in sorted(set(pids)):
         entry = cache.get(pid)
         if not refresh and entry is not None and 0 <= now - entry[1] < _START_CACHE_TTL:
             out[pid] = entry[0]
             continue
-        remaining = deadline - time.time()
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             # The probe's OWN bound, not the per-call one — see `_PS_BUDGET`. Stopping here
             # leaves the remaining pids unanswered, which `_pid_identity` reads as `None`, i.e.
             # UNKNOWN: the safe direction, and the same one a per-pid timeout already takes.
+            # ⚠️ **Said out loud, because a silent degraded read is this file's own
+            # prohibition** — `main()` warns on stderr for every other one, and the difference
+            # between "probed and not held" and "gave up halfway" is not visible to a caller
+            # from the return value alone. A fleet board that renders most sessions UNKNOWN
+            # with no signal is indistinguishable from a healthy fleet.
+            print(
+                "UNKNOWN — probe budget (%.0fs) exhausted; %d pid(s) unanswered"
+                % (_PS_BUDGET, sum(1 for p in set(pids) if p not in out)),
+                file=sys.stderr,
+            )
             break
         try:
             proc = subprocess.run(

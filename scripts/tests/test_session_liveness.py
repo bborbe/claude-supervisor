@@ -477,13 +477,21 @@ class SessionLiveness(unittest.TestCase):
         restore = self._stub_probe(spawns, lambda argv: "%s %s\n" % (argv[-1], self._PS_LINE))
         original = self.m._PS_BUDGET
         self.m._PS_BUDGET = 0  # exhausted before the first pid is even attempted
+        err = io.StringIO()
         try:
-            out = self.m._ps_starts([os.getpid(), os.getppid()])
+            with redirect_stderr(err):
+                out = self.m._ps_starts([os.getpid(), os.getppid()])
         finally:
             self.m._PS_BUDGET = original
             restore()
         self.assertEqual(spawns, [], "an exhausted budget must spawn no `ps` at all")
         self.assertEqual(out, {}, "unread pids stay unanswered — UNKNOWN, never death")
+        # ⚠️ **A degraded read must not be quiet.** `main()` warns on stderr for every other
+        # one, and "probed and not held" is indistinguishable from "gave up halfway" in the
+        # return value alone — so a fleet board could render most sessions UNKNOWN with no
+        # signal, which reads exactly like a healthy fleet.
+        self.assertIn("UNKNOWN", err.getvalue(), "a budget break must say so on stderr")
+        self.assertIn("2 pid(s) unanswered", err.getvalue(), "and name how many were left")
 
     def test_a_failed_cache_write_neither_raises_nor_strands_its_temp_file(self):
         # ⚠️ `_ps_starts` documents "Never raises" and calls this on its way out, so the guard
