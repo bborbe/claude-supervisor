@@ -443,6 +443,34 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(sorted(out), [os.getpid()], "the read answer must survive the garbage")
         self.assertIsInstance(out[os.getpid()], int)
 
+    def test_the_whole_probe_is_bounded_by_its_own_budget(self):
+        # ⚠️ A per-call timeout is not a bound on the CALL. The loop is strictly serial, so
+        # `_PS_TIMEOUT` alone leaves a worst case of n x 5 s for n uncached pids — worse than
+        # the single batched call this change replaced, in exactly the pathological case it
+        # exists to fix. `_PS_BUDGET` caps the probe itself.
+        spawns = []
+        restore = self._stub_probe(spawns, lambda argv: "%s %s\n" % (argv[-1], self._PS_LINE))
+        original = self.m._PS_BUDGET
+        self.m._PS_BUDGET = 0  # exhausted before the first pid is even attempted
+        try:
+            out = self.m._ps_starts([os.getpid(), os.getppid()])
+        finally:
+            self.m._PS_BUDGET = original
+            restore()
+        self.assertEqual(spawns, [], "an exhausted budget must spawn no `ps` at all")
+        self.assertEqual(out, {}, "unread pids stay unanswered — UNKNOWN, never death")
+
+    def test_a_failed_cache_write_neither_raises_nor_strands_its_temp_file(self):
+        # ⚠️ `_ps_starts` documents "Never raises" and calls this on its way out, so the guard
+        # is widened past `OSError` — an unserialisable value raises `TypeError` from
+        # `json.dump` — and the per-process temp file is unlinked. Nothing else ever cleans it:
+        # the name is derived from the pid and is never reused, so one failed write would be
+        # permanent litter in the state directory.
+        self.m._save_start_cache({os.getpid(): [object(), 456.0]})  # must not raise
+        parent = os.path.dirname(os.environ["SUPERVISOR_START_CACHE"])
+        leftovers = [f for f in os.listdir(parent) if ".tmp." in f]
+        self.assertEqual(leftovers, [], "a failed write must not strand its temp file")
+
     # ---- --list -------------------------------------------------------------------------
 
     def test_list_shows_only_live_sessions(self):

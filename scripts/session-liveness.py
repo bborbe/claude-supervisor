@@ -174,6 +174,12 @@ _START_CACHE_TTL = float(os.environ.get("SUPERVISOR_START_CACHE_TTL") or 60)
 # Seconds any single `ps` may run before it is killed. A single-pid `ps` measured 0.026 s, so
 # this is a backstop against a wedged process, never a routine path.
 _PS_TIMEOUT = float(os.environ.get("SUPERVISOR_PS_TIMEOUT") or 5)
+# Seconds the WHOLE probe may run. ⚠️ **A per-call bound is not a bound on the call.** The loop
+# is strictly serial, so `_PS_TIMEOUT` alone leaves a worst case of `n x 5 s` for `n` uncached
+# pids — worse than the single batched call this change replaced, in exactly the pathological
+# case it exists to fix (a wedged `ps`). This caps the probe itself; the steady state is 0-3
+# uncached pids at 0.026 s each, so it is never reached on the hot path.
+_PS_BUDGET = float(os.environ.get("SUPERVISOR_PS_BUDGET") or 20)
 
 # `{pid: [start_epoch, read_epoch]}`, loaded once per process. `None` until first use.
 _START_CACHE = None
@@ -230,15 +236,25 @@ def _save_start_cache(cache):
     against.
     """
     path = _start_cache_path()
+    tmp = "%s.tmp.%d" % (path, os.getpid())
     try:
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        tmp = "%s.tmp.%d" % (path, os.getpid())
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({str(k): v for k, v in cache.items()}, fh, sort_keys=True)
         os.replace(tmp, path)
-    except OSError:
+    except (OSError, TypeError, ValueError):
+        # ⚠️ **Widened past `OSError`, and the temp file is unlinked rather than abandoned.**
+        # `_ps_starts` documents "Never raises" and calls this on its way out, so a `TypeError`
+        # out of `json.dump` — an unserialisable value — escaping here would break that
+        # contract from the one function whose entire job is to be skippable. And `tmp` is
+        # named per process and never reused, so no other path will ever clean it: without the
+        # unlink a single failed write is permanent litter in the state directory.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         return
 
 
@@ -265,18 +281,26 @@ def _ps_starts(pids):
     now = time.time()
     cache = _load_start_cache()
     out, learned = {}, False
+    deadline = now + _PS_BUDGET
     for pid in sorted(set(pids)):
         entry = cache.get(pid)
         if entry is not None and 0 <= now - entry[1] < _START_CACHE_TTL:
             out[pid] = entry[0]
             continue
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            # The probe's OWN bound, not the per-call one — see `_PS_BUDGET`. Stopping here
+            # leaves the remaining pids unanswered, which `_pid_identity` reads as `None`, i.e.
+            # UNKNOWN: the safe direction, and the same one a per-pid timeout already takes.
+            break
         try:
             proc = subprocess.run(
                 ["ps", "-o", "pid=,lstart=", "-p", str(pid)],
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=_PS_TIMEOUT,
+                # Whichever runs out first — this call's own bound, or the probe's.
+                timeout=min(_PS_TIMEOUT, remaining),
             )
         except (OSError, subprocess.TimeoutExpired):
             # ⚠️ `subprocess.run`'s timeout kills the child AND waits for it, so the `ps` is
@@ -301,6 +325,13 @@ def _ps_starts(pids):
             learned = True
             break
     if learned:
+        # ⚠️ **Pruned on write, because nothing else would ever remove an expired entry.** An
+        # entry past the TTL is re-read on its next use regardless, so keeping it buys nothing
+        # — and it is only ever OVERWRITTEN when that re-read succeeds, which a pid that has
+        # since exited never does. Left alone the file grows monotonically, one dead pid per
+        # session the host has ever run.
+        for dead in [k for k, v in cache.items() if now - v[1] >= _START_CACHE_TTL]:
+            cache.pop(dead, None)
         _save_start_cache(cache)
     return out
 
