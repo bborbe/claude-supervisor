@@ -83,6 +83,25 @@ SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
 DEFAULT_STATE = os.path.expanduser("~/.claude/state/manager-attention-watch")
 DEFAULT_PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
 
+# `&nbsp;` is six literal characters, not whitespace, so `strip()` does not remove
+# it. Copied verbatim from `who-needs-me.py:127` (`normalize_closer`) rather than
+# imported: `manager-predispatch.py` carries the same pair for the same reason, and
+# this script ships as a plugin artifact that must run with no sibling on the path.
+# ⚠️ The two must stay ONE rule — if that file's entity set grows, grow it here too,
+# or the two readers of the same closer line will disagree about what it says.
+_ENTITY = re.compile(r"&(?:nbsp|#160|#xa0);", re.I)
+
+# Closer verbs describing a parked wait rather than an open gate
+# (`who-needs-me.py:107`). `later (on <trigger>):` names the event that resumes the
+# work; until it fires there is nothing for the operator to answer. Measured
+# 2026-09-19: two such closers sat at the top of `Needs you` for over five hours,
+# reported as neglect. Not an ask here either, so it raises no gate.
+PARKED_VERBS = ("later (on ",)
+
+# A closer whose text could not be read at all — distinct from "read it, and it
+# carries no closer". Collapsing those two is a false-`CLEARED` route; see `probe`.
+_CLOSER_UNKNOWN = object()
+
 
 def tracked_ids(tracked_path, tasks_dir):
     """{sid8: task name} for every tracked task carrying an id, read fresh each poll.
@@ -139,29 +158,50 @@ def tracked_ids(tracked_path, tasks_dir):
     return out
 
 
-def registry_status(sid8, sessions_dir=SESSIONS_DIR):
+def registry_status(sid8, sessions_dir=SESSIONS_DIR, warned=None):
     """Registry status for a session id or its 8-char prefix, or None if unlisted.
 
     Joined on `sessionId`, never on cwd: the `cwd` a spawn response reports is
-    unreliable for a launcher-`cd` worker, while this join is not. An 8-char
-    prefix is a legal lookup — it is the form the task files carry — and an
-    ambiguous prefix is resolved to the first match, which is acceptable here
-    because the caller only needs "is this session parked".
+    unreliable for a launcher-`cd` worker, while this join is not. An 8-char prefix
+    is a legal lookup — it is the form the task files carry — and an ambiguous
+    prefix resolves to the first match after sorting, so the choice is
+    deterministic rather than filesystem-order. A collision at 8 hex characters is
+    not practically reachable, and this status now decides `CLEARED` as well as "is
+    it parked", so the sort is worth having.
 
     None is a three-way answer — UNREGISTERED — and callers must never read it as
     "no gate"; see the module docstring.
+
+    ⚠️ A registry file that fails to PARSE is not the same as one that did not
+    match, though both read as None here: a file caught mid-rewrite holds a live
+    session as UNREGISTERED and re-fires its `NEW GATE` when the write lands. That
+    is reported on stderr rather than left silent; `warned` dedupes it so a
+    long-running poll loop does not repeat it every 60 s.
     """
+    if warned is None:
+        warned = set()
     try:
         names = os.listdir(sessions_dir)
-    except OSError:
+    except OSError as exc:
+        if "registry-unreadable" not in warned:
+            warned.add("registry-unreadable")
+            print(f"WATCH WARN: registry unreadable ({exc}) — every tracked "
+                  f"session reads UNREGISTERED and is HELD; this is not a quiet "
+                  f"sweep", file=sys.stderr, flush=True)
         return None
-    for f in names:
+    for f in sorted(names):
         if not f.endswith(".json"):
             continue
         try:
             with open(os.path.join(sessions_dir, f)) as fh:
                 d = json.load(fh)
-        except Exception:
+        except Exception as exc:
+            key = f"registry-parse:{f}"
+            if key not in warned:
+                warned.add(key)
+                print(f"WATCH WARN: registry entry {f} unreadable ({exc}) — a "
+                      f"session it lists reads UNREGISTERED this poll",
+                      file=sys.stderr, flush=True)
             continue
         sid = str(d.get("sessionId") or "")
         if sid.startswith(sid8):
@@ -170,7 +210,14 @@ def registry_status(sid8, sessions_dir=SESSIONS_DIR):
 
 
 def last_assistant_text(path):
-    """Last assistant text block in the transcript, or ''.
+    """Last assistant text block in the transcript, or None when there is none.
+
+    ⚠️ `None` means "the tail window held no assistant text at all", which is NOT
+    the same as "the last text block carries no closer". Collapsing the two is a
+    false-`CLEARED` route: the window is a fixed 400 KB, so a transcript that
+    appended more than that in `tool_result` records after the closer pushes the
+    closer out of reach, and an `idle` worker still parked on a live ask would read
+    as "no closer" and be cleared. The caller holds instead; see `_CLOSER_UNKNOWN`.
 
     Reads the tail only. A transcript is unbounded and this runs every poll for
     every tracked worker; the last message is at the end by definition.
@@ -181,7 +228,7 @@ def last_assistant_text(path):
             fh.seek(max(0, size - 400_000))
             tail = fh.read().decode("utf-8", "replace")
     except OSError:
-        return ""
+        return None
     text = ""
     for line in tail.splitlines():
         line = line.strip()
@@ -199,7 +246,7 @@ def last_assistant_text(path):
         for blk in content:
             if isinstance(blk, dict) and blk.get("type") == "text" and blk.get("text"):
                 text = blk["text"]
-    return text
+    return text or None
 
 
 def closer_body(text):
@@ -214,9 +261,32 @@ def closer_body(text):
     return lines[-1].split("👤 You:", 1)[1].strip()
 
 
+def normalize_closer(text):
+    """Strip HTML entities and collapse whitespace before a verb comparison.
+
+    Panes have emitted `👤 You: &nbsp;&nbsp;&nbsp;&nbsp;nothing`. The entity is
+    text, so a raw `startswith("nothing")` missed it and a session that had closed
+    clean was reclassified as an open question (`who-needs-me.py:127`, pinned at
+    `test_who_needs_me.py:114`). The same miss here has the mirror cost: the session
+    is held as gated for as long as the registry lists it `idle` — a gate stuck open
+    for a worker that already closed.
+    """
+    return " ".join(_ENTITY.sub(" ", text or "").split()).strip()
+
+
 def is_ask(body):
-    """Whether a closer body is a live ask rather than the `nothing` panel."""
-    return bool(body) and not body.lower().startswith("nothing")
+    """Whether a closer body is a live ask.
+
+    Not a live ask: the `nothing` panel, and a `later (on <trigger>):` parked wait —
+    neither is something the operator can answer now. Both tests run on the
+    NORMALIZED body, because the raw one carries entity padding that defeats a
+    prefix match.
+    """
+    verb = normalize_closer(body)
+    if not verb:
+        return False
+    return not (verb.lower().startswith("nothing")
+                or verb.startswith(PARKED_VERBS))
 
 
 def is_gated(status, body):
@@ -230,6 +300,11 @@ def is_gated(status, body):
         return None, "unregistered"
     if status == "waiting":
         return True, "registry:waiting"
+    if body is _CLOSER_UNKNOWN:
+        # The transcript read reached no text block at all, so "no closer" is
+        # unknown rather than observed. HELD, never cleared: this is a failed read,
+        # and a failed read must not be representable as an empty result.
+        return None, "closer-unknown"
     if status == "idle" and is_ask(body):
         return True, "idle+closer"
     return False, "registry:" + str(status)
@@ -271,9 +346,22 @@ def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
                       f"not a quiet sweep", file=sys.stderr, flush=True)
             continue
         text = last_assistant_text(cands[0])
-        body = closer_body(text)
-        verdict, reason = is_gated(registry_status(sid8, sessions_dir), body)
-        state[sid8] = (label, (body or reason)[:150], reason, verdict)
+        if text is None:
+            # The tail window held no assistant text at all. Warned, because this
+            # is the one degraded read here that would otherwise be silent — and
+            # `is_gated` holds it rather than reading it as "no closer".
+            if sid8 not in warned:
+                warned.add(sid8)
+                print(f"WATCH WARN: no assistant text in the transcript tail for "
+                      f"{sid8} ({label}) — closer unknown; held, not cleared",
+                      file=sys.stderr, flush=True)
+            body = _CLOSER_UNKNOWN
+        else:
+            body = closer_body(text)
+        verdict, reason = is_gated(
+            registry_status(sid8, sessions_dir, warned), body)
+        detail = body if isinstance(body, str) and body else reason
+        state[sid8] = (label, detail[:150], reason, verdict)
     return state
 
 
@@ -289,13 +377,21 @@ def transitions(prev, key, state):
     whether a `CLEARED` is honest, can be tested directly instead of only by
     constructing inputs that avoid it.
 
-    The `HELD` branch is the reason this is three-valued. A session that left the
-    gated set because it became UNREGISTERED was not answered, so it must not be
-    announced as a clear — and the guard has to test membership in `state` first,
-    because an id that is not in `state` at all is the shared-state case: with a
+    The `HELD` branch is the reason this is three-valued, and it has TWO causes,
+    both of which mean "the watcher cannot justify a clear":
+
+    - the session is in `state` with a `None` verdict — it became UNREGISTERED, so
+      nothing was answered;
+    - the session is absent from `state` entirely — the watcher lost sight of it,
+      which is equally not an answer.
+
+    ⚠️ The second case is the one the earlier version got wrong: absent-from-`state`
+    fell through to a bare `CLEARED`. That is the shared-state-file failure — with a
     state file belonging to another manager, every one of that manager's sessions
-    lands in `prevset - set(key)` with no entry here, and takes the bare
-    `CLEARED` branch. See `state_path_for`.
+    lands in `prevset - set(key)` with no entry here — but it is reachable with no
+    shared file at all, via a transcript that vanished or a `claude_session_id` that
+    changed. `state_path_for` removes the shared-file cause; this guard removes the
+    whole class.
     """
     out = []
     prevset = set(prev or [])
@@ -304,7 +400,17 @@ def transitions(prev, key, state):
             label, detail, reason, _ = state[sid8]
             out.append(("NEW GATE", sid8, label, f"{reason} :: {detail}"))
     for sid8 in sorted(prevset - set(key)):
-        if sid8 in state and state[sid8][3] is None:
+        if sid8 not in state:
+            # Lost sight of it: no transcript under `--projects-root`, or the id
+            # left `tracked_ids()` because the task file went away or its
+            # `claude_session_id` changed. Neither is an answer, so neither is a
+            # clear — this was the last path emitting a `CLEARED` the code cannot
+            # justify.
+            out.append(("HELD", sid8, "",
+                        "no longer resolved (no transcript, or no longer "
+                        "tracked); no CLEARED emitted"))
+            continue
+        if state[sid8][3] is None:
             out.append(("HELD", sid8, state[sid8][0],
                         "unregistered; no CLEARED emitted"))
             continue
@@ -381,7 +487,16 @@ def main(argv=None):
     try:
         with open(state_path) as fh:
             prev = json.load(fh)
-    except Exception:
+    except FileNotFoundError:
+        prev = None  # first run — the ordinary case, not a degraded read
+    except Exception as exc:
+        # A state file that exists but cannot be read is a degraded read, and its
+        # consequence is loud rather than silent: with `prev = None`, `key != prev`
+        # holds for every gated session, so the next poll re-emits `NEW GATE` for
+        # all of them. Say so instead of letting that read as a fresh start.
+        print(f"WATCH WARN: state file unreadable ({exc}) — treating as a first "
+              f"run; every currently-gated session will re-emit NEW GATE once",
+              file=sys.stderr, flush=True)
         prev = None
 
     # STABILITY GATE. A worker mid-turn flips between "has a closer" and
@@ -421,9 +536,16 @@ def main(argv=None):
                         print(f"CLEARED  {sid8}", flush=True)
                     log_event(log_path, kind, sid8, label, detail)
                 prev = key
+                # tmp + os.replace, never a bare `open(state_path, "w")`: that
+                # truncates first, so a kill or a serialisation error part-way
+                # through leaves a truncated or zero-byte file — which the read
+                # path above cannot distinguish from a first run, and answers with
+                # a `NEW GATE` burst. Same convention as `fleet-snapshot.py:56`.
                 os.makedirs(os.path.dirname(state_path), exist_ok=True)
-                with open(state_path, "w") as fh:
+                tmp_path = state_path + ".tmp"
+                with open(tmp_path, "w") as fh:
                     json.dump(prev, fh)
+                os.replace(tmp_path, state_path)
             pending = key
         except Exception as exc:  # never let one bad poll kill the watch
             # stderr, never stdout: stdout is the event stream the `Monitor`

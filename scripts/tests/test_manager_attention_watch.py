@@ -311,9 +311,14 @@ class StateScopeTest(unittest.TestCase):
 
     This is the defect the pr-reviewer bot found on PR #130: with one shared
     `state.json`, each poll reads the other manager's gated set as its own `prev`,
-    every one of those sessions lands in `prevset - set(key)`, misses the HELD
-    guard, and prints a bare `CLEARED` — the silent direction this file exists to
-    close, reintroduced by a filename.
+    and every one of those sessions lands in `prevset - set(key)`.
+
+    ⚠️ **Two independent fixes cover it, and the second is the wider one.**
+    `state_path_for()` keys the file by tracked set, so the shared file no longer
+    arises; and `transitions()` HELDs an id absent from `state` rather than clearing
+    it — the guard that makes the *class* unreachable, since a vanished transcript or
+    a changed `claude_session_id` reaches the same branch with no shared file
+    anywhere. The round-4 review is why the second exists.
     """
 
     def test_state_file_is_keyed_by_tracked_set(self):
@@ -329,16 +334,32 @@ class StateScopeTest(unittest.TestCase):
             self.assertNotEqual(
                 os.path.basename(watch.state_path_for("/s", name)), "state.json")
 
-    def test_shared_state_manufactures_a_bare_cleared(self):
+    def test_shared_state_no_longer_manufactures_a_bare_cleared(self):
         # THE DEFECT ITSELF, reproduced rather than avoided — path inequality
         # alone would pin the fix by construction and never show the failure.
         # Manager B's poll reads manager A's gated set as its `prev`; A's session
-        # is absent from B's `state`, so it misses the HELD guard and takes the
-        # bare CLEARED branch.
+        # is absent from B's `state`.
+        #
+        # ⚠️ The assertion is INVERTED from the version that first pinned this,
+        # deliberately. It used to require the bare `CLEARED`, because that is what
+        # the code did; the round-4 review showed the same branch is reachable with
+        # no shared file at all, so `transitions()` now HELDs it. The case still
+        # runs through the same call — it simply no longer clears.
         b_state = {"bbbb2222": ("B", "y", "idle+closer", True)}
         got = watch.transitions(["aaaa1111"], ["bbbb2222"], b_state)
-        self.assertIn(("CLEARED", "aaaa1111", "", "left the gated set"), got,
-                      "this is the failure the per-scope state file prevents")
+        self.assertNotIn(("CLEARED", "aaaa1111", "", "left the gated set"), got,
+                         "a bare CLEARED for a session this manager never saw")
+        self.assertEqual([k for k, s, *_ in got if s == "aaaa1111"], ["HELD"],
+                         "an id absent from state is HELD, never cleared")
+
+    def test_an_id_absent_from_state_is_held_not_cleared(self):
+        # The same branch, with no shared state file involved: the watcher lost
+        # sight of a session it had been holding. `probe()` reaches this when a
+        # transcript vanishes or the id leaves `tracked_ids()`.
+        got = watch.transitions(["aaaa1111"], [], {})
+        self.assertEqual([k for k, *_ in got], ["HELD"],
+                         "losing sight of a session is not an answer")
+        self.assertIn("no longer resolved", got[0][3])
 
     def test_unregistered_is_held_never_cleared(self):
         state = {"aaaa1111": ("A", "x", "unregistered", None)}
@@ -356,6 +377,88 @@ class StateScopeTest(unittest.TestCase):
         got = watch.transitions(["aaaa1111"], ["aaaa1111", "bbbb2222"], state)
         self.assertEqual([(k, s) for k, s, *_ in got], [("NEW GATE", "bbbb2222")],
                          "an unchanged gate must not be re-announced")
+
+
+class CloserVerbTest(unittest.TestCase):
+    """`is_ask` must read the VERB, not its padding or its kind.
+
+    Both inputs here are copied from `who-needs-me.py`, which fixed them first and
+    measured both. Getting them wrong in this file has the mirror cost to the row's
+    defect: a session that closed clean, or one deliberately parked on a future
+    event, is held as gated for as long as the registry lists it `idle` — a gate
+    stuck open for a worker that is not waiting on anyone.
+    """
+
+    def test_entity_padded_nothing_is_not_an_ask(self):
+        # `&nbsp;` is six literal characters, not whitespace, so a raw
+        # `startswith("nothing")` misses it.
+        self.assertFalse(watch.is_ask("&nbsp;&nbsp;&nbsp;&nbsp;nothing"))
+        self.assertFalse(watch.is_ask("&#160; nothing"))
+        self.assertFalse(watch.is_ask("&#xa0;nothing"))
+
+    def test_plain_nothing_is_not_an_ask(self):
+        self.assertFalse(watch.is_ask("nothing"))
+        self.assertFalse(watch.is_ask(NOTHING))
+
+    def test_parked_wait_is_not_an_ask(self):
+        # `later (on <trigger>):` names the event that resumes the work; until it
+        # fires there is nothing for the operator to answer.
+        self.assertFalse(watch.is_ask("later (on CI green): merge #130"))
+
+    def test_a_real_ask_is_still_an_ask(self):
+        self.assertTrue(watch.is_ask(CLOSER))
+        self.assertTrue(watch.is_ask("approve: /vault-cli:session-close"))
+
+    def test_entity_padded_nothing_does_not_hold_a_session(self):
+        # The end-to-end consequence, not just the predicate: `idle` plus a padded
+        # `nothing` must read NOT gated, or the gate never clears.
+        verdict, reason = watch.is_gated("idle", "&nbsp;&nbsp;&nbsp;&nbsp;nothing")
+        self.assertFalse(verdict, "a clean close must not be held as gated")
+        self.assertEqual(reason, "registry:idle")
+
+
+class UnknownCloserTest(unittest.TestCase):
+    """An unread closer is unknown, never absent.
+
+    The transcript tail is a fixed 400 KB window. A transcript that appended more
+    than that in `tool_result` records after its closer pushes the closer out of
+    reach, and reading "no text found" as "no closer" would clear a worker that is
+    still parked — the exact false-`CLEARED` direction this file exists to close.
+    """
+
+    def test_closer_unknown_is_held_never_cleared(self):
+        verdict, reason = watch.is_gated("idle", watch._CLOSER_UNKNOWN)
+        self.assertIsNone(verdict, "an unread closer is held, never cleared")
+        self.assertEqual(reason, "closer-unknown")
+
+    def test_waiting_still_wins_over_an_unknown_closer(self):
+        # A worker parked on a harness gate is gated on the registry alone, so an
+        # unreadable transcript must not downgrade it.
+        verdict, _ = watch.is_gated("waiting", watch._CLOSER_UNKNOWN)
+        self.assertTrue(verdict)
+
+    def test_last_assistant_text_returns_none_when_no_text_is_found(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.jsonl")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(assistant(tool="Bash")) + "\n")
+            self.assertIsNone(
+                watch.last_assistant_text(p),
+                "no text found must be distinguishable from no closer")
+
+    def test_probe_holds_a_session_whose_tail_holds_no_text(self):
+        fx = Fixture([assistant(tool="Bash")], "idle")
+        try:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                state = watch.probe(fx.tracked, fx.tasks, fx.projects,
+                                    fx.sessions)
+            self.assertIsNone(state[SID8][3], "an unread closer is HELD")
+            self.assertEqual(state[SID8][2], "closer-unknown")
+            self.assertIn("closer unknown", err.getvalue(),
+                          "a degraded transcript read must not be silent")
+        finally:
+            shutil.rmtree(fx.dir, ignore_errors=True)
 
 
 class MissingTranscriptTest(unittest.TestCase):
