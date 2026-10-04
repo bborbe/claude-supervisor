@@ -1748,6 +1748,42 @@ def verdicts_grandfathered(parsed, stored) -> list[str]:
     return sorted(out)
 
 
+def derive_verdict_names(parsed, tasks_dir: str, index: dict[str, str]):
+    """`parsed` re-keyed onto the task files' own titles, or the collision that stops it.
+
+    The name half of the cache key. The cache is keyed by task *name*, so the key is the
+    one thing a later tick matches a row by — and until this ran, it was whatever spelling
+    the caller sent. Where a name resolves against `tasks_dir`, the file's own basename is
+    used instead, so case and spacing drift cannot key an entry.
+
+    A name that does *not* resolve is left exactly as sent rather than refused: `--vault`
+    names one vault, and a subject's rows may live in another (`bro-21389-mdm-via-rest`'s
+    13 rows are all in `seibert-brogrammers/25 Tasks`), so refusing the unresolvable would
+    brick every write for those subjects — and a row whose file was deleted would do the
+    same to this one. The detectable sub-case is the abbreviation, and
+    `verdicts_shape_error` refuses that one before this is reached.
+
+    Returns `(rekeyed, None)`, or `(parsed, reason)` when two keys resolve to one row: the
+    payload then does not say which verdict is that row's, and keeping the later one would
+    drop the other silently — the same loss this writer refuses everywhere else.
+    """
+    out: dict = {}
+    source: dict[str, str] = {}
+    for name, entry in parsed.items():
+        path = resolve_task_file(tasks_dir, name, index)
+        title = (
+            os.path.splitext(os.path.basename(path))[0] if os.path.exists(path) else name
+        )
+        if title in out:
+            return parsed, (
+                f"{name!r} and {source[title]!r} both name {title!r} — one row cannot "
+                "carry two verdicts"
+            )
+        out[title] = entry
+        source[title] = name
+    return out, None
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="manager pre-dispatch change gate")
     ap.add_argument("--subject", required=True, help="goal or topic name")
@@ -1924,6 +1960,20 @@ def main(argv: list[str]) -> int:
                 stored = loaded
         except (OSError, json.JSONDecodeError):
             stored = {}
+        # The name half of the key, and the reason a rename no longer strands an entry —
+        # see `derive_verdict_names`. It runs *before* the shape check because the `reason`
+        # carry-forward compares payload keys against stored ones, so both sides have to be
+        # re-keyed onto the files' own titles for that comparison to mean anything. A
+        # non-dict payload is left alone: `verdicts_shape_error` owns that refusal, and it
+        # is the only place the message lives.
+        if isinstance(parsed, dict):
+            tasks_dir = os.path.join(args.vault, "25 Tasks")
+            index = task_index(tasks_dir)
+            parsed, collision = derive_verdict_names(parsed, tasks_dir, index)
+            if collision:
+                print(f"refusing to write these verdicts: {collision}", file=sys.stderr)
+                return EXIT_USAGE
+            stored, _ = derive_verdict_names(stored, tasks_dir, index)
         shape_error = verdicts_shape_error(parsed, stored)
         if shape_error:
             # A refused write must not clobber a good cache. The reason is sharper here
@@ -1933,42 +1983,6 @@ def main(argv: list[str]) -> int:
             # state this writer exists to end.
             print(f"refusing to write these verdicts: {shape_error}", file=sys.stderr)
             return EXIT_USAGE
-        # The name half of the key, and the reason a rename no longer strands an entry.
-        # The cache is keyed by task *name*, so the key is the one thing a later tick
-        # matches a row by — and until now it was whatever spelling the caller sent. Where
-        # that name resolves against the tasks dir, the file's own basename is stored
-        # instead, so case and spacing drift cannot key an entry either. A name that does
-        # *not* resolve is left exactly as sent rather than refused: `--vault` names one
-        # vault, and a subject's rows may live in another (`bro-21389-mdm-via-rest`'s 13
-        # rows are all in `seibert-brogrammers/25 Tasks`), so refusing the unresolvable
-        # would brick every write for those subjects — and a row whose file was deleted
-        # would do the same to this one. The unresolvable case is what the abbreviation
-        # refusal above already covers where it is detectable.
-        tasks_dir = os.path.join(args.vault, "25 Tasks")
-        index = task_index(tasks_dir)
-        resolved: dict = {}
-        source: dict[str, str] = {}
-        for name, entry in parsed.items():
-            path = resolve_task_file(tasks_dir, name, index)
-            title = (
-                os.path.splitext(os.path.basename(path))[0]
-                if os.path.exists(path)
-                else name
-            )
-            if title in resolved:
-                # Two keys naming one row — `ATask` and `atask` are distinct JSON keys and
-                # both resolve to `ATask.md`. The payload does not say which verdict is the
-                # row's, and keeping the later one silently would drop the other, which is
-                # the same class of silent loss this writer exists to end.
-                print(
-                    f"refusing to write these verdicts: {name!r} and {source[title]!r} both "
-                    f"name {title!r} — one row cannot carry two verdicts",
-                    file=sys.stderr,
-                )
-                return EXIT_USAGE
-            resolved[title] = entry
-            source[title] = name
-        parsed = resolved
         for name in verdicts_grandfathered(parsed, stored):
             # Not a failure and not silent: a row written before `reason` existed cannot
             # render its grounds, and a reader should see which rows are in that state

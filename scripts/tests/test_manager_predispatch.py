@@ -1711,6 +1711,22 @@ class TestVerdictsCache(Base):
         )
         self.assertEqual(rc, self.m.EXIT_USAGE)
 
+    def test_a_stored_key_that_drifted_in_spelling_still_grandfathers(self):
+        """The carry-forward lookup runs against the *stored* cache, so the stored keys are
+        normalised through the same rule as the payload. Without that, a legacy entry keyed
+        `atask` would read as a fresh audit of `ATask` and be refused for a missing reason —
+        the cost the grandfather rule exists to remove, reintroduced by the name fix."""
+        self.seed_verdicts(
+            "ATopic",
+            {"atask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+        )
+        rc, out = self.verdicts(
+            "ATopic",
+            {"ATask": {"verdict": "needs-you", "score": None, "content_key": "a" * 16}},
+        )
+        self.assertEqual(rc, self.m.EXIT_WRITE_OK, out)
+        self.assertEqual(list(self.read_verdicts("ATopic")), ["ATask"])
+
     def test_a_renamed_row_lands_under_its_current_title(self):
         """The defect the task names: a rename must not strand the entry. The caller reads
         the row's current title off disk, the writer resolves it, and the entry lands under
