@@ -180,7 +180,11 @@ export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL', con
     }
   }
   if (typeof raw !== 'string') {
-    return { error: `${label} is ${JSON.stringify(raw)}, which is not a URL` }
+    // ⚠️ Type, not value, in THIS branch only. The two branches below echo a string URL, because
+    // a refusal that says nothing about the value stops diagnosing. Here the value is a
+    // STRUCTURE — a nested object under cluster.url — which JSON.stringify would render whole,
+    // secret included, into a string that travels back to the client.
+    return { error: `${label} is a ${typeof raw}, which is not a URL` }
   }
   let url
   try {
@@ -309,7 +313,7 @@ export async function startClusterSession({
     // the reader looking at their network for what is a credential mismatch.
     const hint =
       response.status === 401
-        ? ' — the service rejected the credential: check that INTERACTIVE_AUTH_TOKEN matches the token the service was started with'
+        ? ' — the service rejected the credential: check that the token matches the one the service was started with. It comes from INTERACTIVE_AUTH_TOKEN on the server entry or from "cluster.token" in the supervisor config file — and where both are set the env var wins, so a file-sourced token is not the one being sent'
         : ''
     return {
       error: `the cluster service refused the prompt: HTTP ${response.status}${body.trim() ? ` — ${body.trim()}` : ''}${hint}`,
