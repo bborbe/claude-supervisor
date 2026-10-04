@@ -53,7 +53,7 @@ If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a
 
 ⚠️ **This step is for the single-name path only. `--flagged` does NOT use it** — the batch scans every vault with a `tasks_dir` (Step 0.5), so resolving one vault from cwd would be exactly the narrowing that hid 8 `brogrammers` candidates and 2 `octopusagent` ones on 2026-09-21.
 
-**Never hardcode a vault.** Precedence: `--vault` flag → the vault whose `path` contains the cwd → `default_vault` from the config.
+**Never hardcode a vault.** Precedence: `--vault` flag → the vault whose `path` contains the cwd → `default_vault` from the config. **None of the three → STOP.** Command substitution discards the resolver's exit status, so the block below ends with an explicit `[ -n "$VAULT" ]` guard that exits non-zero rather than letting Step 0 continue against an empty vault — the same fail-closed shape `docs/subject-resolution.md:15` uses.
 
 ```bash
 VAULT="${VAULT_FLAG:-$(python3 -c "
@@ -68,11 +68,13 @@ if hit:
     print(hit[0])
 else:
     cfg=os.path.expanduser('~/.config/vault-cli/config.yaml')
-    v=yaml.safe_load(open(cfg)).get('default_vault')
+    d2=yaml.safe_load(open(cfg))
+    v=d2.get('default_vault') if isinstance(d2, dict) else None
     if not v:
-        raise SystemExit('cwd is not inside any configured vault and ' + cfg + ' has no default_vault key - pass --vault <name>')
+        raise SystemExit('cwd is not inside any configured vault and ' + cfg + ' carries no usable default_vault - pass --vault <name>')
     print(v)
 ")}"
+[ -n "$VAULT" ] || { echo '❌ no vault resolved — pass --vault <name>' >&2; exit 1; }
 ```
 
 **The `cwd==p` arm is load-bearing, not defensive.** A session started in a vault is normally *at* the vault root, where `startswith(p + '/')` is false — measured 2026-09-15: from `~/Documents/Obsidian/other-vault`, the equality held and the `+os.sep` form matched nothing, so every vault-root session would have silently fallen through to `default_vault` and run the whole command against the wrong vault.
