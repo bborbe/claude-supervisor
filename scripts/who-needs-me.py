@@ -882,8 +882,17 @@ def posted_closer(session_id):
     # case the docstring above says it prevents. A clock-skewed or buggy poster
     # is enough to trigger it, so anything meaningfully ahead of now expires too.
     # Mirrors the hook's guard; the two halves must agree on the window.
+    #
+    # `NaN` reaches the same unbounded case by another route, so it is rejected
+    # here rather than left to the comparisons: `json.load` accepts a bare `NaN`
+    # by default (`allow_nan=True` on decode), and `nan > x` and `x - nan > y`
+    # are BOTH False — a non-finite `ts` would pass every clause below and keep
+    # the record authoritative forever. That is the identical reasoning applied
+    # to the TTL override above ("inf and nan parse as floats but make every
+    # comparison false"), and it has to hold for the record's own clock too.
+    # `isfinite` covers `inf` and `-inf` with it.
     now = time.time()
-    if ts > now + 60 or now - ts > POSTED_CLOSER_TTL:
+    if not math.isfinite(ts) or ts > now + 60 or now - ts > POSTED_CLOSER_TTL:
         return ""
     # A record is a local hint written by another process, so its shape is not
     # guaranteed: `normalize_closer` calls `.sub()` on the value and raises on a

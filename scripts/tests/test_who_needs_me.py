@@ -1849,6 +1849,19 @@ class PostedCloserTest(unittest.TestCase):
         self._write({"closer": "pick — 1. x", "ts": time.time() + 86400})
         self.assertEqual(wnm.posted_closer("session-a"), "")
 
+    def test_a_non_finite_ts_is_ignored(self):
+        # `json.load` accepts a bare `NaN` by default (`allow_nan=True` on
+        # decode), and BOTH comparisons in the guard are False against it --
+        # `nan > now + 60` and `now - nan > TTL` -- so a non-finite `ts` would
+        # pass every clause and keep the record authoritative forever: the same
+        # unbounded case a future-dated `ts` reaches by another route. `inf` is
+        # caught incidentally by `ts > now + 60`; `NaN` is not, which is why the
+        # guard tests `isfinite` rather than relying on the comparisons.
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(ts=bad):
+                self._write('{"closer": "pick — 1. x", "ts": %s}' % bad)
+                self.assertEqual(wnm.posted_closer("session-a"), "")
+
 
 class PostedCloserTtlFromEnv(unittest.TestCase):
     """`_ttl_from_env` must cost the window, never the import.
