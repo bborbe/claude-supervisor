@@ -83,6 +83,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
@@ -135,52 +136,172 @@ def _record_start_epoch(proc_start):
         return None
 
 
+# --- the start-time probe, cached and time-bounded ------------------------------------------
+#
+# ⚠️ **Measured 2026-10-04, and it inverts the batching this probe used to be built around.**
+# `ps -o pid=,lstart= -p <n>` costs **0.026 s at n=1 and 3.7–7.4 s at every n ≥ 2** (medians
+# of 5 runs, 38 registry pids, host at load ~100): macOS `ps` takes a fast single-pid path
+# for one `-p` argument and falls back to enumerating the WHOLE process table for two or
+# more. The batched call was therefore the most expensive thing this function did, on every
+# call, from every caller. Cache-first, the uncached set is normally 0–3 pids, so per-pid is
+# both far cheaper and bounded.
+#
+# ⚠️ **The cache is PERSISTENT — a file, not a per-process dict — and that is what makes it
+# work.** Every caller is a short-lived process (`session-liveness.py --check` from a manager
+# loop, `who-needs-me.py`, `fleet-board.py`), so an in-process dict starts empty on every
+# call and saves nothing at all. Measured 2026-10-04 before this change: ~3 probe processes
+# per second, each making one `ps` that lived ~45 s under load, held **~134 concurrent `ps`
+# children, 134 of them with ppid 1** — their python parent had been killed by a caller
+# timeout — and pinned the load average at ~100.
+#
+# ⚠️ **A pid's start time is immutable, but its MEANING is not: pids are recycled.** A cached
+# entry is trusted for `_START_CACHE_TTL` seconds and then re-read. That TTL is bounded by the
+# pid-reuse window, which is measurable and was measured: pids allocate at **~420/s** on this
+# host (2129 and 2091 across two 5 s windows) and the space is 99999 wide, so a given number
+# cannot come round again for **~238 s**. 60 s leaves ~4x margin. ⚠️ **The failure this
+# bounds is precisely the one the identity check exists to catch** — a stale record plus a
+# recycled pid reading LIVE — so the margin is not decoration: at a churn rate above
+# ~1667 pids/s the window closes and this TTL has to come down with it.
+#
+# ⚠️ **Every `ps` call stays inside `_ps_starts`, and that is load-bearing.**
+# `transport-read-walk.py` derives transport sites from `subprocess` calls, and
+# `transport-read-check.py` fails when the walk derives a site outside its `SITE_LIST`, which
+# names `("session-liveness.py", "_ps_starts")`. A `ps` call moved into a helper would be a
+# new site that enumeration does not carry.
+_START_CACHE_DEFAULT = os.path.expanduser("~/.claude/state/session-liveness-starts.json")
+# Seconds a cached start time is trusted. Bounded by the pid-reuse window — see above.
+_START_CACHE_TTL = float(os.environ.get("SUPERVISOR_START_CACHE_TTL") or 60)
+# Seconds any single `ps` may run before it is killed. A single-pid `ps` measured 0.026 s, so
+# this is a backstop against a wedged process, never a routine path.
+_PS_TIMEOUT = float(os.environ.get("SUPERVISOR_PS_TIMEOUT") or 5)
+
+# `{pid: [start_epoch, read_epoch]}`, loaded once per process. `None` until first use.
+_START_CACHE = None
+
+
+def _start_cache_path():
+    """Where the start-time cache lives, resolved PER CALL rather than at import.
+
+    ⚠️ **Resolved per call so a test can redirect the store with one environment variable**,
+    which is not a convenience — it is the same rule the heartbeat store already carries
+    ("an isolated heartbeat store, and it is not optional"): a suite that reads the real
+    store has a result that depends on the machine's mood rather than on the code. Five test
+    modules load this one, and a pid-keyed cache is exactly the shape that goes flaky against
+    a real store — a pid recycled between runs answers for the wrong process.
+    """
+    return os.environ.get("SUPERVISOR_START_CACHE") or _START_CACHE_DEFAULT
+
+
+def _load_start_cache():
+    """The persisted `{pid: [start, read_at]}` map; `{}` when absent or unreadable.
+
+    ⚠️ **Unreadable is NOT an error here, and the contrast with the registry is the point.**
+    `read_registry()` returns `None` for an unreadable directory because the registry *is*
+    the answer — "could not tell" must never collapse into "not live". This cache only
+    shortens the path to that answer: every entry it cannot supply is simply re-read from
+    `ps`, so a missing or corrupt file costs latency and never correctness.
+    """
+    global _START_CACHE
+    if _START_CACHE is None:
+        _START_CACHE = {}
+        try:
+            with open(_start_cache_path(), encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return _START_CACHE
+        if isinstance(data, dict):
+            for key, val in data.items():
+                if not isinstance(val, list) or len(val) != 2:
+                    continue
+                try:
+                    _START_CACHE[int(key)] = [int(val[0]), float(val[1])]
+                except (TypeError, ValueError):
+                    continue
+    return _START_CACHE
+
+
+def _save_start_cache(cache):
+    """Persist the cache atomically. A write that fails is swallowed — see `_load_start_cache`.
+
+    ⚠️ **No lock, deliberately.** `os.replace` on a temp file in the same directory means no
+    reader ever sees a partial write, and the entries are immutable per pid, so the worst a
+    concurrent writer can do is drop an entry another process just learned. That costs one
+    re-read; it cannot produce a wrong start time, which is the only outcome worth locking
+    against.
+    """
+    path = _start_cache_path()
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({str(k): v for k, v in cache.items()}, fh, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        return
+
+
 def _ps_starts(pids):
-    """`{pid: start-epoch}` for the pids `ps` reported. Never raises, never guesses."""
+    """`{pid: start-epoch}` for the pids `ps` reported. Never raises, never guesses.
+
+    Cache-first: a pid whose start time is known and younger than `_START_CACHE_TTL` is
+    returned from the cache and never re-read. A pid absent from the cache is read with **one
+    `ps` call of its own** — see the module note above on why that is per-pid, not batched.
+
+    ⚠️ **The per-pid retry this function's caller used to hold is gone with the batching, and
+    nothing was lost.** That retry existed because `ps` fails ALL-OR-NOTHING — measured
+    2026-10-01, `ps -o pid=,lstart= -p 1,999999` exits 1, prints `process id too large`, and
+    emits no rows at all, so one unreadable record blanked every session's identity at once.
+    One pid per call contains a failure to the pid it happened to, by construction.
+
+    ⚠️ **A pid whose read fails is simply ABSENT from the result, and that is deliberate.**
+    `_pid_identity` answers `None` for it, and `None` is UNKNOWN — never death. Inventing a
+    start time here would be the one direction that permits a caller to resume onto a live
+    session, which is the answer this whole file exists to withhold.
+    """
     if not pids:
         return {}
-    try:
-        proc = subprocess.run(
-            ["ps", "-o", "pid=,lstart=", "-p", ",".join(str(p) for p in pids)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        return {}
-    out = {}
-    for line in proc.stdout.splitlines():
-        parts = line.strip().split(None, 1)
-        if len(parts) != 2 or not parts[0].isdigit():
+    now = time.time()
+    cache = _load_start_cache()
+    out, learned = {}, False
+    for pid in sorted(set(pids)):
+        entry = cache.get(pid)
+        if entry is not None and 0 <= now - entry[1] < _START_CACHE_TTL:
+            out[pid] = entry[0]
             continue
         try:
-            # `ps` prints in the host's LOCAL zone; a naive datetime's `.astimezone()` reads
-            # it as local, which is exactly what is wanted on this side of the comparison.
-            out[int(parts[0])] = int(
-                datetime.strptime(parts[1], _CTIME_FMT).astimezone(timezone.utc).timestamp()
+            proc = subprocess.run(
+                ["ps", "-o", "pid=,lstart=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_PS_TIMEOUT,
             )
-        except ValueError:
+        except (OSError, subprocess.TimeoutExpired):
+            # ⚠️ `subprocess.run`'s timeout kills the child AND waits for it, so the `ps` is
+            # reaped here rather than reparented to launchd still running — which is exactly
+            # how the ~134 orphans this change exists to remove were produced.
             continue
-    return out
-
-
-def _live_start_epochs(pids):
-    """Start times for `pids`, batched into ONE `ps` call, with a per-pid retry for stragglers.
-
-    Batched deliberately: the registry holds one file per live session (26 measured
-    2026-10-01), and a `ps` per record would spawn a process per entry on every `--check`,
-    every `--list`, and every import by `who-needs-me.py` / `manager-predispatch.py`.
-
-    ⚠️ **The per-pid retry exists because `ps` fails ALL-OR-NOTHING.** Measured 2026-10-01:
-    `ps -o pid=,lstart= -p 1,999999` exits 1, prints `process id too large`, and emits **no
-    rows at all** — the valid pid is dropped along with the invalid one. Without the retry a
-    single unreadable record would blank every session's identity at once and turn the whole
-    registry UNKNOWN. With it, the blast radius of one bad record is one record.
-    """
-    pids = sorted(set(pids))
-    out = _ps_starts(pids)
-    for pid in [p for p in pids if p not in out]:
-        out.update(_ps_starts([pid]))
+        for line in proc.stdout.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2 or not parts[0].isdigit():
+                continue
+            try:
+                # `ps` prints in the host's LOCAL zone; a naive datetime's `.astimezone()`
+                # reads it as local, which is exactly what is wanted on this side of the
+                # comparison.
+                start = int(
+                    datetime.strptime(parts[1], _CTIME_FMT).astimezone(timezone.utc).timestamp()
+                )
+            except ValueError:
+                continue
+            cache[pid] = [start, now]
+            out[pid] = start
+            learned = True
+            break
+    if learned:
+        _save_start_cache(cache)
     return out
 
 
@@ -282,9 +403,10 @@ def read_registry(registry_dir=None):
             "nameSource": rec.get("nameSource", ""),
             "alive": held,
         }
-    # Identity pass, after every file is read so the `ps` lookups batch into one call.
+    # Identity pass, after every file is read so the probe sees the whole occupied set at
+    # once and can answer each pid from the shared cache.
     if occupied:
-        starts = _live_start_epochs([p for _, p, _ in occupied])
+        starts = _ps_starts([p for _, p, _ in occupied])
         for sid, pid, proc_start in occupied:
             out[sid]["alive"] = _pid_identity(pid, proc_start, starts)
     return out

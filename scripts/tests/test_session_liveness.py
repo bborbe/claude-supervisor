@@ -20,6 +20,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -86,8 +87,21 @@ class SessionLiveness(unittest.TestCase):
         self.blocked = os.path.join(self.tmp.name, "blocked-file")
         with open(self.blocked, "w", encoding="utf-8") as fh:
             fh.write("not a directory\n")
+        # The start-time cache, isolated for the same reason the heartbeat store is — and it
+        # is not optional either. It is keyed by PID, so a suite reading the real one would
+        # answer for whatever process held that number when the machine last wrote it, and
+        # the result would depend on the host rather than on the code.
+        self._prior_cache_env = os.environ.get("SUPERVISOR_START_CACHE")
+        os.environ["SUPERVISOR_START_CACHE"] = os.path.join(self.tmp.name, "starts.json")
 
     def tearDown(self):
+        # Restored, never popped: the sibling suites that load this module set one shared
+        # isolated store at import, and popping here would send every later test back to the
+        # real one — the leak this isolation exists to close, re-entered by the cleanup.
+        if self._prior_cache_env is None:
+            os.environ.pop("SUPERVISOR_START_CACHE", None)
+        else:
+            os.environ["SUPERVISOR_START_CACHE"] = self._prior_cache_env
         self.tmp.cleanup()
 
     def plant(self, session_id, pid, name="synth", status="running", proc_start=_DEFAULT):
@@ -278,6 +292,156 @@ class SessionLiveness(unittest.TestCase):
         )
         _, out = self.listing()
         self.assertNotIn("Recycled", out)
+
+    # ---- the start-time probe: the cache and the timeout ---------------------------------
+    #
+    # SC1 and SC2 of the 2026-10-04 task. Measured that day, and it is why the probe is
+    # per-pid rather than batched: `ps -o pid=,lstart= -p <n>` costs 0.026 s at n=1 and
+    # 3.7-7.4 s at EVERY n >= 2 (medians of 5), because macOS `ps` takes a fast single-pid
+    # path and falls back to enumerating the whole process table for two or more. At ~3 probe
+    # processes/s, each holding one ~45 s `ps`, that produced ~134 concurrent `ps` children —
+    # 134 of them with ppid 1, their python parent having been killed by a caller timeout.
+
+    # A ctime in `ps -o lstart=`'s format. Fixed, so an assertion never depends on the clock.
+    _PS_LINE = "Sun Oct  4 11:18:04 2026"
+
+    def _stub_probe(self, spawns, stdout_for=None, raises=None):
+        """Replace the module's `subprocess` with a recorder of `run` calls.
+
+        Only `run` is overridden; everything else delegates, so `subprocess.TimeoutExpired`
+        still resolves by name — the module catches it by that name, and a bare object
+        without it would turn a clean `return {}` into an `AttributeError`.
+        """
+        real = self.m.subprocess
+
+        class Stub:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def run(self, argv, **kwargs):
+                spawns.append(list(argv))
+                if raises is not None:
+                    raise raises
+                text = stdout_for(argv) if stdout_for else ""
+                return real.CompletedProcess(argv, 0, text, "")
+
+        self.m.subprocess = Stub()
+        return lambda: setattr(self.m, "subprocess", real)
+
+    def test_a_second_call_for_the_same_pids_spawns_no_ps(self):
+        # SC1, verbatim: "a second call for the same pids spawns no `ps`". The first call has
+        # to read the pid or the second proves nothing — a probe that never read it would
+        # satisfy "no second spawn" by never spawning at all.
+        spawns = []
+        restore = self._stub_probe(spawns, lambda argv: "%s %s\n" % (argv[-1], self._PS_LINE))
+        try:
+            first = self.m._ps_starts([os.getpid()])
+            reads_after_first = len(spawns)
+            second = self.m._ps_starts([os.getpid()])
+        finally:
+            restore()
+        self.assertEqual(reads_after_first, 1, "the first call must read the pid")
+        self.assertEqual(len(spawns), 1, "a second call for the same pid must spawn no `ps`")
+        self.assertEqual(first, second, "the cached answer must equal the read one")
+
+    def test_the_ps_call_carries_a_timeout_and_a_timeout_answers_nothing(self):
+        # SC2's first clause. `subprocess.run`'s timeout is what kills the child; without it
+        # the probe blocks until `ps` finishes, a caller gives up, and `ps` is reparented to
+        # launchd still running — the orphan this task exists to remove.
+        spawns, seen = [], {}
+        real = self.m.subprocess
+
+        class Stub:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def run(self, argv, **kwargs):
+                spawns.append(list(argv))
+                seen.update(kwargs)
+                raise real.TimeoutExpired(argv, kwargs.get("timeout"))
+
+        self.m.subprocess = Stub()
+        try:
+            out = self.m._ps_starts([os.getpid()])
+        finally:
+            self.m.subprocess = real
+        self.assertEqual(len(spawns), 1, "the pid was never probed — the timeout never fired")
+        self.assertEqual(seen.get("timeout"), self.m._PS_TIMEOUT, "the `ps` call must be bounded")
+        self.assertEqual(out, {}, "a timed-out read answers nothing, never a guess")
+
+    def test_a_timed_out_ps_is_killed_not_orphaned(self):
+        """SC2's second clause — the child is reaped, not left running.
+
+        ⚠️ **The marker file is what makes the absence assertion mean anything.** A test that
+        only checked "no such process survives" passes for a command that never started, which
+        is the failure mode where a probe proves nothing while reading as rigorous. So the
+        child records that it ran, and only then is its absence evidence.
+
+        ⚠️ **Only the COMMAND is swapped.** Every kwarg — `timeout` above all — comes from the
+        code under test, so the kill under assertion is the real one and not a mock of it.
+        """
+        marker = "session-liveness-timeout-probe-%d" % os.getpid()
+        ran = os.path.join(self.tmp.name, "ran")
+        real_run = self.m.subprocess.run
+        # A single process that carries the marker in its own argv and outlives the timeout.
+        probe_argv = [
+            sys.executable,
+            "-c",
+            "open(%r, 'w').write('ran'); import time; time.sleep(300)" % ran,
+            marker,
+        ]
+        real_subprocess = self.m.subprocess
+
+        class Stub:
+            def __getattr__(self, name):
+                return getattr(real_subprocess, name)
+
+            def run(self, _argv, **kwargs):
+                return real_run(probe_argv, **kwargs)
+
+        self.m.subprocess = Stub()
+        original_timeout = self.m._PS_TIMEOUT
+        self.m._PS_TIMEOUT = 1.5
+        try:
+            out = self.m._ps_starts([os.getpid()])
+        finally:
+            self.m.subprocess = real_subprocess
+            self.m._PS_TIMEOUT = original_timeout
+
+        self.assertEqual(out, {}, "a timed-out read answers nothing")
+        self.assertTrue(
+            os.path.exists(ran), "the child never started — its absence would prove nothing"
+        )
+        survivors = real_run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout
+        self.assertNotIn(marker, survivors, "the timed-out child survived — orphaned, not killed")
+
+    def test_a_stale_cache_entry_is_read_again(self):
+        # A pid's start time is immutable, but its MEANING is not: pids are recycled. The TTL
+        # is what bounds that, so an expired entry must not be served.
+        spawns = []
+        restore = self._stub_probe(spawns, lambda argv: "%s %s\n" % (argv[-1], self._PS_LINE))
+        try:
+            self.m._ps_starts([os.getpid()])
+            self.m._START_CACHE_TTL = 0  # every entry is now stale
+            self.m._ps_starts([os.getpid()])
+        finally:
+            restore()
+        self.assertEqual(len(spawns), 2, "a stale entry must be read again, not served")
+
+    def test_a_corrupt_cache_file_is_ignored_not_fatal(self):
+        # The cache only shortens the path to the answer; an unreadable one costs latency and
+        # never correctness. It must not raise, and it must not answer from garbage.
+        with open(os.environ["SUPERVISOR_START_CACHE"], "w", encoding="utf-8") as fh:
+            fh.write("{not json at all")
+        spawns = []
+        restore = self._stub_probe(spawns, lambda argv: "%s %s\n" % (argv[-1], self._PS_LINE))
+        try:
+            out = self.m._ps_starts([os.getpid()])
+        finally:
+            restore()
+        self.assertEqual(len(spawns), 1, "a corrupt cache must fall through to a real read")
+        self.assertEqual(sorted(out), [os.getpid()], "the read answer must survive the garbage")
+        self.assertIsInstance(out[os.getpid()], int)
 
     # ---- --list -------------------------------------------------------------------------
 

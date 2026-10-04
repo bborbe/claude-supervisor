@@ -44,6 +44,14 @@ import time
 import unittest
 from unittest import mock
 
+# The start-time cache is keyed by PID, so the suite must not read the machine's real one —
+# the rule the heartbeat store already carries, and not a convenience: an entry cached for a
+# pid the OS has since recycled would answer for the wrong process. One store per test run.
+os.environ.setdefault(
+    "SUPERVISOR_START_CACHE",
+    os.path.join(tempfile.gettempdir(), "claude-supervisor-test-starts-%d.json" % os.getpid()),
+)
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "who-needs-me.py")
 _FIXTURE = os.path.join(_HERE, "fixtures", "attention-feed-baseline.json")
