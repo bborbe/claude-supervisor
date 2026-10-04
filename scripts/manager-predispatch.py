@@ -1810,8 +1810,9 @@ def derive_verdict_names(parsed, index: dict[str, str], *, strict: bool = True):
     filename rather than the stem (`ATask.md`) is stripped to `ATask` before the lookup, so
     both spellings reach the same row.
 
-    Resolution is a lookup in `task_index` — which *is* `os.listdir` of the tasks dir —
-    rather than a stat of a path assembled from the name. That keeps the contract below
+    Resolution is a lookup in the tasks index — the `{lowercased name: name}` dict that
+    `task_index` and `tasks_index_for_write` both build from `os.listdir` of the tasks dir
+    — rather than a stat of a path assembled from the name. That keeps the contract below
     exactly true: a name carrying a separator is not reduced to its basename, and nothing
     outside the tasks dir is ever stat-ed.
 
