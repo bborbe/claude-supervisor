@@ -92,8 +92,13 @@ The mode a worker opens in is a **fleet-wide decision**, so it lives in a file y
 
 ```json
 // ~/.config/claude-supervisor/config.json   (SUPERVISOR_CONFIG)
-{ "spawn": { "mode": "interactive", "maxConcurrent": 30, "maxConcurrentHard": 50 } }
+{ "spawn": { "mode": "interactive", "maxConcurrent": 30, "maxConcurrentHard": 50 },
+  "cluster": { "url": "https://claude-interactive.<env>.<domain>", "token": "…" } }
 ```
+
+⚠️ `cluster.token` is a **secret**, and the server only ever reads this file — it never writes it, so it sets no permissions. `chmod 600 ~/.config/claude-supervisor/config.json` is yours to do, and worth doing before you put a token in it.
+
+`cluster.url` and `cluster.token` configure the **cluster spawn target** — `docs/fleet-surface.md` § Spawn a worker item 7. They live here rather than only in the server entry's `env` block for one reason worth knowing: an MCP `env` block is cached at **session start**, so a value added to it reaches no *running* session by any in-session route, while a file the **server** reads at its own start reaches it on a Reconnect. ⚠️ The env var still **wins** when it is set, so remove it once you move to the file — otherwise the file looks inert and nothing refuses.
 
 `mode` is `interactive` or `headless`. Four sources, highest first:
 
@@ -104,7 +109,7 @@ The mode a worker opens in is a **fleet-wide decision**, so it lives in a file y
 | `spawn.mode` in `config.json` | **the fleet** — one edit, every manager |
 | built-in | `interactive` |
 
-The file is read **once at server start**, so restart the MCP server after editing it. It is optional: no file means the built-in default, and that is silent. A file that exists but does not parse is reported, because that is a file you wrote and believe is in effect.
+The file is read **once at server start**, so a `/mcp` → `supervisor` → **Reconnect** picks up an edit — a Reconnect re-execs the server, and that is what re-reads the file. ⚠️ The server entry's `env` block is the one case a Reconnect does **not** cover: it is cached at session start, so changing it needs a new session. It is optional: no file means the built-in default, and that is silent. A file that exists but does not parse is reported, because that is a file you wrote and believe is in effect.
 
 `agent_status`, `list_agents` and each ledger record carry `mode_source` (`argument` / `env` / `config` / `default`), so a worker that opened the wrong way tells you which of the four decided it instead of leaving you to guess.
 

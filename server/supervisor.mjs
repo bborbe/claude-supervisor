@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
-import { newSessionId, startClusterSession } from './cluster-spawn.mjs'
+import { newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
@@ -833,9 +833,21 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
   const minted = newSessionId()
   if (minted.error) return { error: minted.error }
 
+  // Resolved here rather than in config.mjs, mirroring resolveSpawnMode: that module owns the
+  // environment surface and hands over the raw file, and the module that owns the MEANING
+  // decides precedence and refuses a bad value. See resolveClusterTarget for why the config
+  // file is the only source that can reach an already-running server.
+  const target = resolveClusterTarget({
+    envUrl: config.clusterUrl,
+    envToken: config.clusterAuthToken,
+    file: config.configFileContents,
+    path: config.configFile,
+  })
+  if (target.error) return { error: target.error }
+
   const started = await startClusterSession({
-    baseUrl: config.clusterUrl,
-    authToken: config.clusterAuthToken,
+    baseUrl: target.url,
+    authToken: target.token,
     prompt,
     sessionId: minted.sessionId,
   })

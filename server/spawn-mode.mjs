@@ -44,8 +44,13 @@ function stringSources({ env, file }) {
 // refusal: a key this version does not know is how a config written for a newer version
 // looks, and refusing every spawn over one would make the file impossible to roll
 // forward. An unknown VALUE is different — it is a typo in a key that IS load-bearing.
-const KNOWN_TOP_LEVEL = ['spawn']
+// ⚠️ `cluster` is here because cluster-spawn.mjs READS it. Omitting it does not merely miss a
+// warning — it emits a false one, every boot, telling an operator that the key the docs just
+// told them to set is ignored. A key that is read while being reported as unread is worse
+// than an unknown key, because it argues the operator out of a working configuration.
+const KNOWN_TOP_LEVEL = ['spawn', 'cluster']
 const KNOWN_SPAWN_KEYS = ['mode', 'maxConcurrent', 'maxConcurrentHard']
+const KNOWN_CLUSTER_KEYS = ['url', 'token']
 
 export function unknownKeyWarnings(file, path) {
   if (!file || typeof file !== 'object' || Array.isArray(file)) return []
@@ -60,6 +65,29 @@ export function unknownKeyWarnings(file, path) {
     for (const key of Object.keys(spawn)) {
       if (!KNOWN_SPAWN_KEYS.includes(key)) {
         warnings.push(`${path} has an unknown key "spawn.${key}" — ignored. Known: spawn.${KNOWN_SPAWN_KEYS.join(', spawn.')}`)
+      }
+    }
+  }
+  // Descended into for the same reason `spawn` is: a typo like "urll" is a typo in a key that
+  // IS load-bearing, and the top-level loop above cannot see it.
+  const cluster = file.cluster
+  if (cluster !== undefined && cluster !== null) {
+    if (typeof cluster !== 'object' || Array.isArray(cluster)) {
+      // ⚠️ The non-object case needs its OWN warning, and it is the case the descent below
+      // cannot reach. Listing `cluster` as known stops the top-level loop warning about it, so
+      // without this branch a malformed value — `"cluster": "https://…"` — was silent at boot
+      // from BOTH loops and surfaced only as a spawn-time refusal. That is the same failure this
+      // key was added to fix, one level down: a key that is read but wrong is as quiet as a key
+      // that is read and reported unread.
+      warnings.push(
+        `${path} has "cluster" as a ${typeof cluster}, which is not an object — it is IGNORED, and a ` +
+          `cluster spawn will refuse until it is. Expected {"url": "…", "token": "…"}.`,
+      )
+    } else {
+      for (const key of Object.keys(cluster)) {
+        if (!KNOWN_CLUSTER_KEYS.includes(key)) {
+          warnings.push(`${path} has an unknown key "cluster.${key}" — ignored. Known: cluster.${KNOWN_CLUSTER_KEYS.join(', cluster.')}`)
+        }
       }
     }
   }

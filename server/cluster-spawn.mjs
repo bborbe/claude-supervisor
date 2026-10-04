@@ -76,6 +76,89 @@ export function newSessionId(random = randomUUID) {
   return { sessionId: id }
 }
 
+// Which of the two sources each cluster value comes from. The env var wins, the config file
+// is the fallback — the same precedence `spawn-mode.mjs` applies to `spawn.mode`, and for the
+// same reason: an env var is a per-invocation override, the file is the machine's standing
+// configuration.
+//
+// ⚠️ **The file is not a convenience — it is the only source that reaches a RUNNING server.**
+// An MCP server's `env` block is read by Claude Code and cached at session start, so a value
+// added to it reaches no already-running session by any in-session route: `/mcp` Reconnect
+// re-spawns the child from that cached definition rather than re-reading the file. Measured
+// 2026-10-04 — a server restarted three minutes *after* an env-block write still refused with
+// "no service URL is set". A file read by the *server* at its own start has no such problem,
+// because a Reconnect re-execs the server and the file is read again. That distinction was
+// already recorded in `config.mjs`'s header ("editing it takes effect on the next server
+// start"); this function is what makes it true for the cluster pair.
+//
+// Raw and unvalidated, deliberately: the legal shapes stay in resolveClusterBaseUrl and
+// resolveAuthToken below, so an env value and a file value meet one validator rather than two.
+export function resolveClusterTarget({ envUrl, envToken, file, path = 'the supervisor config' } = {}) {
+  const section = file == null ? null : file.cluster
+  if (section != null && (typeof section !== 'object' || Array.isArray(section))) {
+    // ⚠️ The offending VALUE is deliberately not echoed. An operator who wrote a scalar under
+    // `cluster` may have written the token, and this string travels back to the client —
+    // resolveAuthToken refuses its own bad values without echoing for the same reason.
+    return {
+      error:
+        `"cluster" in ${path} is not an object — refusing rather than guessing, since a half-read ` +
+        `cluster target is discovered only by noticing it. Expected {"url": "…", "token": "…"}.`,
+    }
+  }
+
+  // BOTH sources are validated, not only the winner — the sibling precedent's explicit rule
+  // (spawn-mode.mjs: "validation is deliberately NOT limited to the winner … an invalid value
+  // anywhere refuses every spawn"). A bad value in the LOSER sits dormant until the winner is
+  // removed, and then the spawn breaks with an error that was present all along.
+  //
+  // Each value is validated under its OWN label, so a bad file-sourced value names the file
+  // key rather than the env var it never came from — the repo's rule that a refusal names the
+  // thing the operator must change.
+  const urlSources = [
+    { label: 'SUPERVISOR_CLUSTER_URL', value: envUrl, check: resolveClusterBaseUrl },
+    { label: `"cluster.url" in ${path}`, value: section?.url, check: resolveClusterBaseUrl },
+  ]
+  const tokenSources = [
+    { label: 'INTERACTIVE_AUTH_TOKEN', value: envToken, check: resolveAuthToken },
+    { label: `"cluster.token" in ${path}`, value: section?.token, check: resolveAuthToken },
+  ]
+  // ⚠️ A whitespace-only value counts as SET, deliberately, and the asymmetry with `''` is the
+  // point rather than an oversight. `''` is absence — an unset variable that got exported — so
+  // it falls through. `' '` is a value the operator put there, and the repo's rule is
+  // refuse-rather-than-trim (trimming here would silently repair a value the service compares
+  // exactly, so a mis-pasted token would match on this side and stop matching on the other).
+  // It therefore wins the source and is refused by resolveAuthToken's whitespace rule, naming
+  // the key. The cost is real and worth stating: a trailing newline in an exported env value
+  // shadows a perfectly good `cluster.token`, and the fix is to remove the env value.
+  const set = (s) => s.value !== undefined && s.value !== null && s.value !== ''
+  for (const { label, value, check } of [...urlSources, ...tokenSources]) {
+    if (!set({ value })) continue
+    const checked = check(value, label)
+    if (checked.error) return { error: checked.error }
+  }
+  const pick = (sources) => {
+    const winner = sources.find(set)
+    return winner ? winner.value : null
+  }
+  const url = pick(urlSources)
+  const token = pick(tokenSources)
+
+  // The UNSET case is refused here rather than left to startClusterSession, and the reason is
+  // the config path: that call site has none, so its refusal would name the DEFAULT location and
+  // point a `SUPERVISOR_CONFIG` operator at a file that does not exist on their machine. Both
+  // messages name the file to edit, so the file has to be the one the server actually read.
+  // Non-null winners were already validated in the loop above; only the nulls need this pass.
+  if (url === null) {
+    const checked = resolveClusterBaseUrl(url, undefined, path)
+    if (checked.error) return { error: checked.error }
+  }
+  if (token === null) {
+    const checked = resolveAuthToken(token, undefined, path)
+    if (checked.error) return { error: checked.error }
+  }
+  return { url, token }
+}
+
 // Normalize the service's base URL, or refuse it.
 //
 // Refused rather than defaulted, and the refusal is the point: the service has no Service
@@ -83,26 +166,44 @@ export function newSessionId(random = randomUUID) {
 // operator's cluster rules forbid a port-forward — so there is no address to guess, and a
 // guessed one either fails confusingly or reaches the wrong thing. An unset URL therefore
 // means "the cluster target is not configured here", which is an answer, not an absence.
-export function resolveClusterBaseUrl(raw) {
+// ⚠️ A URL may carry credentials in its userinfo — `https://user:token@host` — and the two
+// string refusals below echo the value so the operator can see what they typed. Redacting the
+// userinfo keeps that diagnosis while stopping a pasted credential riding out to the client in
+// the message. The non-string branch withholds the value entirely instead, because there it is a
+// structure rather than a URL and JSON.stringify would render it whole.
+const redactUserinfo = (value) =>
+  typeof value === 'string' ? value.replace(/\/\/[^@/]*@/, '//<redacted>@') : value
+
+export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL', configPath = '~/.config/claude-supervisor/config.json') {
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
-        'the cluster target is not configured: no service URL is set. Set SUPERVISOR_CLUSTER_URL to the ' +
-        'claude-interactive service address reachable from this machine (the pod publishes none by itself — ' +
-        'it needs a Service and a NodePort in nuke dev), then restart the MCP server.',
+        'the cluster target is not configured: no service URL is set. Set "cluster.url" in the supervisor ' +
+        `config file (${configPath}) — a /mcp Reconnect picks that up, because the ` +
+        'server re-reads the file at its own start. Setting SUPERVISOR_CLUSTER_URL on the server entry also ' +
+        'works but needs a NEW session: an MCP env block is cached at session start, so a Reconnect re-spawns ' +
+        'from the cached definition and cannot see a later edit. The address is the claude-interactive service ' +
+        'as reachable from this machine (the pod publishes none by itself — it needs a Service and a NodePort ' +
+        'in nuke dev).',
     }
   }
   if (typeof raw !== 'string') {
-    return { error: `SUPERVISOR_CLUSTER_URL is ${JSON.stringify(raw)}, which is not a URL` }
+    // ⚠️ Type, not value, in THIS branch only. The two branches below echo a string URL, because
+    // a refusal that says nothing about the value stops diagnosing. Here the value is a
+    // STRUCTURE — a nested object under cluster.url — which JSON.stringify would render whole,
+    // secret included, into a string that travels back to the client.
+    return { error: `${label} is a ${typeof raw}, which is not a URL` }
   }
   let url
   try {
     url = new URL(raw)
   } catch {
-    return { error: `SUPERVISOR_CLUSTER_URL is ${JSON.stringify(raw)}, which is not a valid URL` }
+    return { error: `${label} is ${JSON.stringify(redactUserinfo(raw))}, which is not a valid URL` }
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return { error: `SUPERVISOR_CLUSTER_URL is ${JSON.stringify(raw)}, whose scheme is not http or https` }
+    // `url.protocol` rather than the whole value: it is the one part that explains the refusal,
+    // and a URL is parsed by this point so the scheme is already isolated.
+    return { error: `${label} is ${JSON.stringify(redactUserinfo(raw))}, whose scheme (${url.protocol}) is not http or https` }
   }
   return { baseUrl: url.origin + url.pathname.replace(/\/+$/, '') }
 }
@@ -113,18 +214,24 @@ export function resolveClusterBaseUrl(raw) {
 // reason: the service answers a header-less request with 401 *before* the route's handler
 // runs, so an unconfigured supervisor and a wrong token produce one indistinguishable
 // observable. Refusing here is what turns that into a sentence naming the variable to set.
-export function resolveAuthToken(raw) {
+export function resolveAuthToken(raw, label = 'INTERACTIVE_AUTH_TOKEN', configPath = '~/.config/claude-supervisor/config.json') {
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
-        "the cluster target has no token: INTERACTIVE_AUTH_TOKEN is not set in this server's environment. " +
+        'the cluster target has no token: neither INTERACTIVE_AUTH_TOKEN nor "cluster.token" is set. ' +
         'The claude-interactive service requires `Authorization: Bearer <token>` on POST /prompt and refuses ' +
-        'without it, so a spawn would fail as a 401 naming nothing to fix. Set INTERACTIVE_AUTH_TOKEN on the ' +
-        'supervisor server entry, then restart the MCP server.',
+        'without it, so a spawn would fail as a 401 naming nothing to fix. Set "cluster.token" in the ' +
+        `supervisor config file (${configPath}) — a /mcp Reconnect picks that up, ` +
+        'because the server re-reads the file at its own start — or set INTERACTIVE_AUTH_TOKEN on the server ' +
+        'entry, which needs a NEW session, since an MCP env block is cached at session start.',
     }
   }
   if (typeof raw !== 'string') {
-    return { error: `INTERACTIVE_AUTH_TOKEN is ${JSON.stringify(raw)}, which is not a token string` }
+    // ⚠️ The TYPE, not the value. A non-string can never be the real token, so echoing it buys
+    // no diagnosis — while a nested object under `cluster.token` would be rendered whole,
+    // including the secret inside it, into a string that travels back to the client. The guard
+    // two functions up withholds its offending value for exactly this reason.
+    return { error: `${label} is a ${typeof raw}, which is not a token string` }
   }
   // Whitespace is refused, NOT trimmed away, and both halves of that matter.
   //
@@ -142,7 +249,7 @@ export function resolveAuthToken(raw) {
   if (raw.trim() !== raw) {
     return {
       error:
-        'INTERACTIVE_AUTH_TOKEN has leading or trailing whitespace, which is not a legal header value. ' +
+        `${label} has leading or trailing whitespace, which is not a legal header value. ` +
         'A trailing newline — a secret file read whole rather than its value — is the usual cause. Fix the ' +
         'value rather than trimming it here: the service compares against the token it was started with, so a ' +
         'value this side silently repairs is one the two ends would then disagree about.',
@@ -214,7 +321,7 @@ export async function startClusterSession({
     // the reader looking at their network for what is a credential mismatch.
     const hint =
       response.status === 401
-        ? ' — the service rejected the credential: check that INTERACTIVE_AUTH_TOKEN matches the token the service was started with'
+        ? ' — the service rejected the credential: check that the token matches the one the service was started with. It comes from INTERACTIVE_AUTH_TOKEN on the server entry or from "cluster.token" in the supervisor config file — and where both are set the env var wins, so a file-sourced token is not the one being sent'
         : ''
     return {
       error: `the cluster service refused the prompt: HTTP ${response.status}${body.trim() ? ` — ${body.trim()}` : ''}${hint}`,

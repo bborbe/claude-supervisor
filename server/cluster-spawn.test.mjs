@@ -8,6 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   CLUSTER_SESSION_ID_PATTERN,
   DEFAULT_TIMEOUT_MS,
@@ -16,6 +17,7 @@ import {
   newSessionId,
   resolveAuthToken,
   resolveClusterBaseUrl,
+  resolveClusterTarget,
   startClusterSession,
 } from './cluster-spawn.mjs'
 
@@ -270,4 +272,167 @@ test('the default timeout is bounded', () => {
   // Unbounded would let a wedged pod hold a manager session inside a tool call indefinitely;
   // the service answers in one response, so there is no partial progress to wait for.
   assert.ok(Number.isFinite(DEFAULT_TIMEOUT_MS) && DEFAULT_TIMEOUT_MS > 0)
+})
+
+// --- resolveClusterTarget: which source each cluster value comes from ----------------------
+
+test('the env var wins over the config file for both cluster values', () => {
+  const r = resolveClusterTarget({
+    envUrl: 'https://from-env.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(r.url, 'https://from-env.example')
+  assert.equal(r.token, 'env-token')
+})
+
+test('the config file supplies a value the env does not', () => {
+  const r = resolveClusterTarget({
+    envUrl: null,
+    envToken: null,
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(r.url, 'https://from-file.example')
+  assert.equal(r.token, 'file-token')
+})
+
+test('an empty env string falls through to the file rather than counting as set', () => {
+  // resolveClusterBaseUrl and resolveAuthToken both treat '' as unset, so counting it as set
+  // here would hand them a value they immediately refuse — a server that reads as configured
+  // and refuses every spawn.
+  const r = resolveClusterTarget({
+    envUrl: '',
+    envToken: '',
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(r.url, 'https://from-file.example')
+  assert.equal(r.token, 'file-token')
+})
+
+test('neither source set refuses HERE, naming the config file the server actually read', () => {
+  // Refused inside resolveClusterTarget rather than left to startClusterSession, because only
+  // this frame holds the real config path — a refusal naming the default location points a
+  // SUPERVISOR_CONFIG operator at a file that does not exist on their machine.
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: null, path: '/etc/sup.json' })
+  assert.match(r.error, /not configured/)
+  assert.match(r.error, /\/etc\/sup\.json/, 'must name the file the server read')
+  assert.ok(!r.error.includes('~/.config/claude-supervisor'), 'must not name the default location')
+
+  const t = resolveClusterTarget({ envUrl: 'https://x.example', envToken: null, file: null, path: '/etc/sup.json' })
+  assert.match(t.error, /no token/)
+  assert.match(t.error, /\/etc\/sup\.json/)
+})
+
+test('a file with no cluster key is not an error — absent is the normal case', () => {
+  const r = resolveClusterTarget({ envUrl: 'https://x.example', envToken: 't', file: { spawn: {} } })
+  assert.equal(r.url, 'https://x.example')
+  assert.equal(r.token, 't')
+})
+
+test('a non-object cluster key refuses rather than reading half of it, and is not echoed', () => {
+  // `[]` and a scalar both slip past a bare `typeof === 'object'` check, which is why the
+  // guard is `typeof !== 'object' || Array.isArray` — deleting either half keeps a weaker
+  // suite green.
+  for (const bad of ['https://x.example', 5, [], true]) {
+    const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: bad } })
+    assert.match(r.error, /is not an object/, `cluster: ${JSON.stringify(bad)} must refuse`)
+  }
+  // The scalar case is the one that could BE the token — an operator writing `cluster: "<token>"`
+  // by mistake — and this string travels back to the client, so it is not echoed.
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: 'a-secret-value' } })
+  assert.ok(!r.error.includes('a-secret-value'), 'the offending value must not be echoed')
+})
+
+test('a bad value in the LOSING source refuses too, not only the winner', () => {
+  // The sibling precedent's explicit rule (spawn-mode.mjs: "validation is deliberately NOT
+  // limited to the winner"). Unchecked, the file's bad value sits dormant until the env var is
+  // removed — and then the spawn breaks with an error that was present all along.
+  const r = resolveClusterTarget({
+    envUrl: 'https://ok.example',
+    envToken: 'good',
+    file: { cluster: { url: 'not a url' } },
+  })
+  assert.match(r.error, /not a valid URL/)
+})
+
+test('a file-sourced bad value names the file key, not the env var it never came from', () => {
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: { url: 'not a url' } } })
+  assert.match(r.error, /"cluster\.url" in the supervisor config/)
+  assert.ok(!r.error.includes('SUPERVISOR_CLUSTER_URL'), 'must not name the env var for a file value')
+})
+
+test('supervisor.mjs actually resolves through resolveClusterTarget', () => {
+  // The WIRING is the feature. Every other test here calls resolveClusterTarget directly, so
+  // reverting the call site to `baseUrl: config.clusterUrl` would leave the whole suite green
+  // with the feature dead. Pinned by reading supervisor.mjs's text, the remedy this repo
+  // already uses for the same reason in attention-poll.test.mjs — it starts an MCP server at
+  // import, so it cannot be imported behaviourally.
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(src, /resolveClusterTarget\(\{/)
+  assert.match(src, /file: config\.configFileContents/)
+  assert.match(src, /baseUrl: target\.url/)
+  assert.match(src, /authToken: target\.token/)
+})
+
+test('url and token resolve INDEPENDENTLY — a mixed pair takes each from its own source', () => {
+  // The whole point of the feature is per-value resolution, and both precedence tests above set
+  // BOTH values from the SAME source — so a future edit routing them through one shared loop
+  // would keep them green. These two cases pin the independence in both directions.
+  const urlFromFile = resolveClusterTarget({
+    envUrl: null,
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(urlFromFile.url, 'https://from-file.example')
+  assert.equal(urlFromFile.token, 'env-token')
+
+  const tokenFromFile = resolveClusterTarget({
+    envUrl: 'https://from-env.example',
+    envToken: null,
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(tokenFromFile.url, 'https://from-env.example')
+  assert.equal(tokenFromFile.token, 'file-token')
+})
+
+test('a file-sourced bad TOKEN names the token key, not the url key', () => {
+  // The mirror of the bad-URL case above, and unasserted until now: swapping the two `label`
+  // strings in resolveClusterTarget's source arrays kept the suite green.
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: { token: 1234567890 } } })
+  assert.match(r.error, /"cluster\.token" in the supervisor config/)
+  assert.ok(!r.error.includes('"cluster.url"'), 'must not name the url key for a token value')
+  assert.ok(!r.error.includes('1234567890'), 'and must not echo the value')
+})
+
+test('a credential in a url userinfo is redacted before the refusal echoes it', () => {
+  const r = resolveClusterBaseUrl('ftp://user:secret@host/x')
+  assert.match(r.error, /<redacted>@/)
+  assert.ok(!r.error.includes('secret'), 'the userinfo must not ride out in the message')
+})
+
+test('a whitespace-only env token WINS and is refused, rather than falling through to the file', () => {
+  // The asymmetry with '' is deliberate and argued at length in the source: '' is absence, so it
+  // falls through; ' ' is a value the operator put there, and trimming it would silently repair
+  // a value the service compares exactly. That cost is real — a trailing newline in an exported
+  // env value shadows a perfectly good `cluster.token` — so it is pinned rather than left to the
+  // comment: a future change making whitespace fall through would otherwise stay green.
+  const r = resolveClusterTarget({ envToken: ' ', file: { cluster: { token: 'file-token' } } })
+  assert.match(r.error, /INTERACTIVE_AUTH_TOKEN/)
+  assert.match(r.error, /whitespace/)
+  assert.ok(!r.error.includes('cluster.token'), 'must not fall through to the file value')
+})
+
+test('a non-string token reports its TYPE and never echoes the value', () => {
+  // The hardening this pins: a nested object under `cluster.token` would be rendered whole by
+  // JSON.stringify — secret included — into a string that travels back to the client. Asserting
+  // only `/not a token string/` passes identically against the old echoing message, so the
+  // assertion has to be about the ABSENCE of the value, which is the whole point.
+  const nested = resolveAuthToken({ value: 'a-secret-value' }, '"cluster.token" in /c.json')
+  assert.match(nested.error, /not a token string/)
+  assert.ok(!nested.error.includes('a-secret-value'), 'the value must not be echoed')
+  assert.ok(!nested.error.includes('value'), 'nor any of its nested contents')
+
+  const numeric = resolveAuthToken(1234567890)
+  assert.match(numeric.error, /not a token string/)
+  assert.ok(!numeric.error.includes('1234567890'), 'the value must not be echoed')
 })
