@@ -180,16 +180,18 @@ export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL', con
     }
   }
   if (typeof raw !== 'string') {
-    return { error: `${label} is a ${typeof raw}, which is not a URL` }
+    return { error: `${label} is ${JSON.stringify(raw)}, which is not a URL` }
   }
   let url
   try {
     url = new URL(raw)
   } catch {
-    return { error: `${label} is a ${typeof raw}, which is not a valid URL` }
+    return { error: `${label} is ${JSON.stringify(raw)}, which is not a valid URL` }
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return { error: `${label} is a ${typeof raw}, whose scheme is not http or https` }
+    // `url.protocol` rather than the whole value: it is the one part that explains the refusal,
+    // and a URL is parsed by this point so the scheme is already isolated.
+    return { error: `${label} is ${JSON.stringify(raw)}, whose scheme (${url.protocol}) is not http or https` }
   }
   return { baseUrl: url.origin + url.pathname.replace(/\/+$/, '') }
 }
