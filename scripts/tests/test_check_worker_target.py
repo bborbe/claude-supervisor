@@ -26,13 +26,17 @@ SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-worker-target.p
 #: pointer, which the real file also carries at two unrelated places that cite the rule.
 HOME = (
     "## Spawn a worker\n\n"
-    "5. **Respect the fleet-wide worker target.** The default is 20.\n"
+    "5. **Respect the fleet-wide worker target.** The default is 20. The hard default is 50.\n"
     "An absent key resolves to `DEFAULT_MAX_CONCURRENT`; `0` means unlimited.\n"
 )
-#: The code side. The regex reads the exported constant, so the shape matters.
+#: The code side. The regex reads the exported constant, so the shape matters. Both
+#: thresholds are here because (c) is asserted per constant: `DEFAULT_MAX_CONCURRENT` must
+#: not read the `_HARD` line, and the `\s*=` anchor is what keeps them apart.
 CODE = (
     "export const MAX_CONCURRENT_ENV = 'SUPERVISOR_MAX_CONCURRENT'\n"
     "export const DEFAULT_MAX_CONCURRENT = 20\n"
+    "export const MAX_CONCURRENT_HARD_ENV = 'SUPERVISOR_MAX_CONCURRENT_HARD'\n"
+    "export const DEFAULT_MAX_CONCURRENT_HARD = 50\n"
 )
 #: A referencing site: names the constant and points at the home rather than restating it.
 SITE = (
@@ -126,6 +130,25 @@ class CheckWorkerTargetTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("have drifted apart", result.stderr)
+
+    def test_hard_default_moves_without_the_doc(self):
+        """The hard half of (c), asserted against its OWN constant. A check reading one
+        marker for both numbers would let the soft default satisfy the hard one, so the band
+        could be widened or closed in code while the home still described the old pair."""
+        self.write("server/spawn-mode.mjs", CODE.replace("= 50", "= 70"))
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("have drifted apart", result.stderr)
+        self.assertIn("The hard default is 70", result.stderr)
+
+    def test_a_home_stating_only_the_soft_default_fails(self):
+        """One marker cannot satisfy both halves. A home naming only the soft number
+        describes half the enforcement — the operator-named band would be undocumented — so
+        it fails even though every other assertion about the home still passes."""
+        self.write("docs/fleet-surface.md", HOME.replace(" The hard default is 50.", ""))
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("The hard default is 50", result.stderr)
 
     def test_unreadable_constant_fails_rather_than_passing(self):
         """'Could not check' must never read as 'they agree'. A missing or renamed

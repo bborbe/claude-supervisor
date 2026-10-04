@@ -369,6 +369,25 @@ Measured 2026-09-23 on the first real run: both probes ended `READINESS: ready 8
 
 ⚠️ **A readiness string in this file is not a gate.** The 2026-09-21 predecessor recorded the trap: a file-level grep for the reference satisfies a naive check while individual sites stay ungated. Each site (CREATE branch, batch dispatch) links here by name — check each one's own window.
 
+### Gate 3 — the fleet cap, and the operator-named exemption
+
+**Runs last, at the spawn itself, because it is the only gate whose answer depends on the fleet's live count rather than on the row.** The thresholds, their defaults and the marker's definition have **one home** — `docs/fleet-surface.md` § Spawn a worker item 5, where `spawn.maxConcurrent` (soft) and `spawn.maxConcurrentHard` (hard) are resolved — so read them there and **never restate a number here**. In one line, for orientation only: **below the soft cap everything opens; between the soft and hard caps only an operator-named task opens; at the hard cap nothing opens and the refusal is carded.**
+
+**Resolve the marker before you spawn.** Read the row's own flag provenance — the same two fields § Step 0.5 already filters on:
+
+```bash
+vault-cli --vault "<vault>" task get "<task>" flag flag_set_by
+```
+
+A row is **operator-named** when `flag` is true **and** `flag_set_by` is an opening actor (`operator`, or the `legacy` rows § Step 0.5 admits). Pass `operator_named: true` on the `spawn_agent` call for such a row, and omit it for every other row. ⚠️ **Never infer it and never write it into the row's prose** — the server does not read the vault, so this assertion is entirely this step's, and a default of true would make the soft cap unenforceable. ⚠️ **An agent-set flag is not an operator-named row.** § Step 0.5 refuses those upstream; this gate must not re-admit one by reading the flag alone, which is why the test is on the *pair* and never on `flag` by itself.
+
+**On a refusal, read WHICH threshold refused — the server's message names the cap and its source.**
+
+- **The soft cap refused an ordinary row** → print the refusal and STOP. This is the intended state, not a defect: the row is picked up next sweep, and `⏸️ CONCURRENCY LIMIT` is the line a sweep already knows.
+- **The hard cap refused — including an operator-named row** → the fleet is FULL. **Post one attention-board card naming the fleet-full condition** through `attention-ask.py post`, keyed on the fleet-full state so a second attempt while the fleet stays full does not ask the same question twice, then print the refusal and STOP. ⚠️ **A silent refusal is the exact shape this gate exists to remove** — the operator asked for one task by name and must not be left to infer that the fleet was full. ⚠️ **The card is the operator's to answer, never the caller's to clear**: opening past the hard cap is not something this command may do, whatever the card says.
+
+⚠️ **This gate is advisory to the server, not a substitute for it.** `spawn_agent` re-resolves both thresholds and re-reads the live count itself and refuses on its own — so a stale count here costs a refused spawn the next sweep picks up, never an overrun. Never describe this gate as what keeps the fleet inside its limits.
+
 ## Step 2A — Task branch
 
 **Probe for a live session first.**
