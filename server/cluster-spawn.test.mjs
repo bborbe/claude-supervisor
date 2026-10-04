@@ -309,12 +309,18 @@ test('an empty env string falls through to the file rather than counting as set'
   assert.equal(r.token, 'file-token')
 })
 
-test('neither source set yields nulls, which the resolvers below then refuse', () => {
-  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: null })
-  assert.equal(r.url, null)
-  assert.equal(r.token, null)
-  assert.match(resolveClusterBaseUrl(r.url).error, /not configured/)
-  assert.match(resolveAuthToken(r.token).error, /no token/)
+test('neither source set refuses HERE, naming the config file the server actually read', () => {
+  // Refused inside resolveClusterTarget rather than left to startClusterSession, because only
+  // this frame holds the real config path — a refusal naming the default location points a
+  // SUPERVISOR_CONFIG operator at a file that does not exist on their machine.
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: null, path: '/etc/sup.json' })
+  assert.match(r.error, /not configured/)
+  assert.match(r.error, /\/etc\/sup\.json/, 'must name the file the server read')
+  assert.ok(!r.error.includes('~/.config/claude-supervisor'), 'must not name the default location')
+
+  const t = resolveClusterTarget({ envUrl: 'https://x.example', envToken: null, file: null, path: '/etc/sup.json' })
+  assert.match(t.error, /no token/)
+  assert.match(t.error, /\/etc\/sup\.json/)
 })
 
 test('a file with no cluster key is not an error — absent is the normal case', () => {

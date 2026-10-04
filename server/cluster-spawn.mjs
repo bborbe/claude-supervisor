@@ -132,7 +132,23 @@ export function resolveClusterTarget({ envUrl, envToken, file, path = 'the super
     const winner = sources.find(set)
     return winner ? winner.value : null
   }
-  return { url: pick(urlSources), token: pick(tokenSources) }
+  const url = pick(urlSources)
+  const token = pick(tokenSources)
+
+  // The UNSET case is refused here rather than left to startClusterSession, and the reason is
+  // the config path: that call site has none, so its refusal would name the DEFAULT location and
+  // point a `SUPERVISOR_CONFIG` operator at a file that does not exist on their machine. Both
+  // messages name the file to edit, so the file has to be the one the server actually read.
+  // Non-null winners were already validated in the loop above; only the nulls need this pass.
+  if (url === null) {
+    const checked = resolveClusterBaseUrl(url, undefined, path)
+    if (checked.error) return { error: checked.error }
+  }
+  if (token === null) {
+    const checked = resolveAuthToken(token, undefined, path)
+    if (checked.error) return { error: checked.error }
+  }
+  return { url, token }
 }
 
 // Normalize the service's base URL, or refuse it.
@@ -142,12 +158,12 @@ export function resolveClusterTarget({ envUrl, envToken, file, path = 'the super
 // operator's cluster rules forbid a port-forward — so there is no address to guess, and a
 // guessed one either fails confusingly or reaches the wrong thing. An unset URL therefore
 // means "the cluster target is not configured here", which is an answer, not an absence.
-export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL') {
+export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL', configPath = '~/.config/claude-supervisor/config.json') {
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
         'the cluster target is not configured: no service URL is set. Set "cluster.url" in the supervisor ' +
-        'config file (~/.config/claude-supervisor/config.json) — a /mcp Reconnect picks that up, because the ' +
+        `config file (${configPath}) — a /mcp Reconnect picks that up, because the ` +
         'server re-reads the file at its own start. Setting SUPERVISOR_CLUSTER_URL on the server entry also ' +
         'works but needs a NEW session: an MCP env block is cached at session start, so a Reconnect re-spawns ' +
         'from the cached definition and cannot see a later edit. The address is the claude-interactive service ' +
@@ -176,20 +192,24 @@ export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL') {
 // reason: the service answers a header-less request with 401 *before* the route's handler
 // runs, so an unconfigured supervisor and a wrong token produce one indistinguishable
 // observable. Refusing here is what turns that into a sentence naming the variable to set.
-export function resolveAuthToken(raw, label = 'INTERACTIVE_AUTH_TOKEN') {
+export function resolveAuthToken(raw, label = 'INTERACTIVE_AUTH_TOKEN', configPath = '~/.config/claude-supervisor/config.json') {
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
         'the cluster target has no token: neither INTERACTIVE_AUTH_TOKEN nor "cluster.token" is set. ' +
         'The claude-interactive service requires `Authorization: Bearer <token>` on POST /prompt and refuses ' +
         'without it, so a spawn would fail as a 401 naming nothing to fix. Set "cluster.token" in the ' +
-        'supervisor config file (~/.config/claude-supervisor/config.json) — a /mcp Reconnect picks that up, ' +
+        `supervisor config file (${configPath}) — a /mcp Reconnect picks that up, ` +
         'because the server re-reads the file at its own start — or set INTERACTIVE_AUTH_TOKEN on the server ' +
         'entry, which needs a NEW session, since an MCP env block is cached at session start.',
     }
   }
   if (typeof raw !== 'string') {
-    return { error: `${label} is ${JSON.stringify(raw)}, which is not a token string` }
+    // ⚠️ The TYPE, not the value. A non-string can never be the real token, so echoing it buys
+    // no diagnosis — while a nested object under `cluster.token` would be rendered whole,
+    // including the secret inside it, into a string that travels back to the client. The guard
+    // two functions up withholds its offending value for exactly this reason.
+    return { error: `${label} is a ${typeof raw}, which is not a token string` }
   }
   // Whitespace is refused, NOT trimmed away, and both halves of that matter.
   //
