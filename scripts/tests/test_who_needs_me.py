@@ -1835,6 +1835,121 @@ class PostedCloserTest(unittest.TestCase):
         self._write({"closer": "pick — 1. x"})
         self.assertEqual(wnm.posted_closer("session-a"), "")
 
+    def test_a_non_object_record_is_ignored(self):
+        # Valid JSON is not necessarily an object: `[]`, `"x"`, `42` and `null`
+        # all parse cleanly, then raise AttributeError on `.get` -- which is not
+        # a TypeError, so the `ts` guard alone would not catch it and one bad
+        # file would take the whole feed down.
+        for bad in ("[]", '"a string"', "42", "null"):
+            with self.subTest(record=bad):
+                self._write(bad)
+                self.assertEqual(wnm.posted_closer("session-a"), "")
+
+    def test_a_future_dated_record_is_ignored(self):
+        # A `ts` ahead of now makes the delta negative, so it would never exceed
+        # the TTL and the record would stay authoritative indefinitely -- the
+        # unbounded case the window exists to prevent, reached by a clock-skewed
+        # or buggy poster rather than by a typo.
+        self._write({"closer": "pick — 1. x", "ts": time.time() + 86400})
+        self.assertEqual(wnm.posted_closer("session-a"), "")
+
+    def test_a_non_finite_ts_is_ignored(self):
+        # `json.load` accepts a bare `NaN` by default (`allow_nan=True` on
+        # decode), and BOTH comparisons in the guard are False against it --
+        # `nan > now + 60` and `now - nan > TTL` -- so a non-finite `ts` would
+        # pass every clause and keep the record authoritative forever: the same
+        # unbounded case a future-dated `ts` reaches by another route. `inf` is
+        # caught incidentally by `ts > now + 60`; `NaN` is not, which is why the
+        # guard tests `isfinite` rather than relying on the comparisons.
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(ts=bad):
+                self._write('{"closer": "pick — 1. x", "ts": %s}' % bad)
+                self.assertEqual(wnm.posted_closer("session-a"), "")
+
+    def test_an_out_of_range_integer_ts_is_ignored(self):
+        # A bare integer literal of unbounded size decodes to a Python `int`, and
+        # `float()` of one beyond the float range raises OverflowError -- neither
+        # a TypeError nor a ValueError, so without it in the except tuple the
+        # raise escapes posted_closer and takes the render down with it, the
+        # class of failure this guard exists to prevent. `math.isfinite` cannot
+        # catch it: the raise happens before `ts` exists.
+        self._write('{"closer": "pick — 1. x", "ts": %s}' % ("9" * 400))
+        self.assertEqual(wnm.posted_closer("session-a"), "")
+
+    def test_a_ts_inside_the_skew_allowance_is_honoured(self):
+        # The 60 s allowance is the value the whole future-`ts` guard rests on,
+        # and only the far-future case was covered: a guard that rejected EVERY
+        # future `ts`, or an off-by-one at the boundary, passed the suite
+        # unchanged. This pins the allow-side.
+        self._write({"closer": "pick — 1. x", "ts": time.time() + 30})
+        self.assertEqual(wnm.posted_closer("session-a"), "pick — 1. x")
+
+
+class PostedCloserTtlFromEnv(unittest.TestCase):
+    """`_ttl_from_env` must cost the window, never the import.
+
+    An unguarded `float()` at module scope raises ValueError at import, which
+    kills the reader outright rather than falling back to the default -- and
+    `inf`/`nan` parse as floats while making every comparison false, so the
+    record would never expire. Both are the unbounded case arriving by a
+    different route, which is why only a finite positive window is accepted.
+    """
+
+    def _ttl(self, value):
+        original = os.environ.get("ATTENTION_POSTED_CLOSER_TTL")
+        try:
+            os.environ.pop("ATTENTION_POSTED_CLOSER_TTL", None)
+            if value is not None:
+                os.environ["ATTENTION_POSTED_CLOSER_TTL"] = value
+            return wnm._ttl_from_env()
+        finally:
+            if original is None:
+                os.environ.pop("ATTENTION_POSTED_CLOSER_TTL", None)
+            else:
+                os.environ["ATTENTION_POSTED_CLOSER_TTL"] = original
+
+    def test_unset_uses_the_default(self):
+        self.assertEqual(self._ttl(None), 6 * 3600)
+
+    def test_a_non_numeric_override_falls_back(self):
+        self.assertEqual(self._ttl("abc"), 6 * 3600)
+
+    def test_infinity_does_not_disable_expiry(self):
+        self.assertEqual(self._ttl("inf"), 6 * 3600)
+
+    def test_nan_does_not_disable_expiry(self):
+        self.assertEqual(self._ttl("nan"), 6 * 3600)
+
+    def test_zero_and_negative_fall_back(self):
+        self.assertEqual(self._ttl("0"), 6 * 3600)
+        self.assertEqual(self._ttl("-5"), 6 * 3600)
+
+    def test_a_valid_override_is_honoured(self):
+        self.assertEqual(self._ttl("7200"), 7200.0)
+
+    def test_the_module_constant_is_the_guarded_value(self):
+        # Every case above calls `_ttl_from_env()` directly, so they pin the
+        # helper and NOT the module-scope wiring: reverting the constant to the
+        # old unguarded `float(os.environ.get(...))` would leave all six green
+        # while the import-time ValueError this fix exists to remove came back
+        # uncaught. Importing the script fresh under a bad override is what
+        # actually pins it -- the import must survive, and the constant must be
+        # the default rather than a traceback.
+        original = os.environ.get("ATTENTION_POSTED_CLOSER_TTL")
+        try:
+            os.environ["ATTENTION_POSTED_CLOSER_TTL"] = "abc"
+            spec = importlib.util.spec_from_file_location(
+                "who_needs_me_reimport", _SCRIPT
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            self.assertEqual(mod.POSTED_CLOSER_TTL, 6 * 3600)
+        finally:
+            if original is None:
+                os.environ.pop("ATTENTION_POSTED_CLOSER_TTL", None)
+            else:
+                os.environ["ATTENTION_POSTED_CLOSER_TTL"] = original
+
 
 if __name__ == "__main__":
     unittest.main()
