@@ -24,6 +24,10 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
+# Side effect only: points the start-time cache at an isolated per-run store, in one shared
+# home so five suites cannot each assign the same key and leave only the last standing.
+import start_cache_isolation  # noqa: E402,F401
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "approved-not-started.py")
 
