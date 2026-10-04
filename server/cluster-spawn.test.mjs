@@ -8,6 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   CLUSTER_SESSION_ID_PATTERN,
   DEFAULT_TIMEOUT_MS,
@@ -322,8 +323,47 @@ test('a file with no cluster key is not an error — absent is the normal case',
   assert.equal(r.token, 't')
 })
 
-test('a non-object cluster key refuses rather than reading half of it', () => {
-  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: 'https://x.example' } })
-  assert.match(r.error, /which is not an object/)
-  assert.match(r.error, /refusing rather than/)
+test('a non-object cluster key refuses rather than reading half of it, and is not echoed', () => {
+  // `[]` and a scalar both slip past a bare `typeof === 'object'` check, which is why the
+  // guard is `typeof !== 'object' || Array.isArray` — deleting either half keeps a weaker
+  // suite green.
+  for (const bad of ['https://x.example', 5, [], true]) {
+    const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: bad } })
+    assert.match(r.error, /is not an object/, `cluster: ${JSON.stringify(bad)} must refuse`)
+  }
+  // The scalar case is the one that could BE the token — an operator writing `cluster: "<token>"`
+  // by mistake — and this string travels back to the client, so it is not echoed.
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: 'a-secret-value' } })
+  assert.ok(!r.error.includes('a-secret-value'), 'the offending value must not be echoed')
+})
+
+test('a bad value in the LOSING source refuses too, not only the winner', () => {
+  // The sibling precedent's explicit rule (spawn-mode.mjs: "validation is deliberately NOT
+  // limited to the winner"). Unchecked, the file's bad value sits dormant until the env var is
+  // removed — and then the spawn breaks with an error that was present all along.
+  const r = resolveClusterTarget({
+    envUrl: 'https://ok.example',
+    envToken: 'good',
+    file: { cluster: { url: 'not a url' } },
+  })
+  assert.match(r.error, /not a valid URL/)
+})
+
+test('a file-sourced bad value names the file key, not the env var it never came from', () => {
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: { url: 'not a url' } } })
+  assert.match(r.error, /"cluster\.url" in the supervisor config/)
+  assert.ok(!r.error.includes('SUPERVISOR_CLUSTER_URL'), 'must not name the env var for a file value')
+})
+
+test('supervisor.mjs actually resolves through resolveClusterTarget', () => {
+  // The WIRING is the feature. Every other test here calls resolveClusterTarget directly, so
+  // reverting the call site to `baseUrl: config.clusterUrl` would leave the whole suite green
+  // with the feature dead. Pinned by reading supervisor.mjs's text, the remedy this repo
+  // already uses for the same reason in attention-poll.test.mjs — it starts an MCP server at
+  // import, so it cannot be imported behaviourally.
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(src, /resolveClusterTarget\(\{/)
+  assert.match(src, /file: config\.configFileContents/)
+  assert.match(src, /baseUrl: target\.url/)
+  assert.match(src, /authToken: target\.token/)
 })

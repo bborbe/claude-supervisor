@@ -129,6 +129,20 @@ test('unknown keys warn by name and known keys stay quiet', () => {
   assert.match(nested[0], /spawn\.colour/)
 })
 
+test('the cluster key is KNOWN — warning about it is a false alarm about a key that IS read', () => {
+  // cluster-spawn.mjs reads exactly this key, so listing it as unknown told an operator, on
+  // every boot, that the key the docs had just told them to set was ignored — and the
+  // likeliest response is to remove it and conclude the docs are wrong. A key that is read
+  // while being reported as unread is worse than an unknown one.
+  assert.deepEqual(unknownKeyWarnings({ cluster: { url: 'https://x.example', token: 't' } }, '/c.json'), [])
+
+  // Descended into for the same reason `spawn` is: a typo in a key that IS load-bearing is
+  // exactly the case the top-level loop cannot see.
+  const nested = unknownKeyWarnings({ cluster: { urll: 'https://x.example' } }, '/c.json')
+  assert.equal(nested.length, 1)
+  assert.match(nested[0], /cluster\.urll/)
+})
+
 test('an unknown key warns but never refuses', () => {
   // A config written for a newer version must still be usable by this one; refusing every
   // spawn over a key we do not recognise would make the file impossible to roll forward.

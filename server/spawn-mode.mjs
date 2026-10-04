@@ -44,8 +44,13 @@ function stringSources({ env, file }) {
 // refusal: a key this version does not know is how a config written for a newer version
 // looks, and refusing every spawn over one would make the file impossible to roll
 // forward. An unknown VALUE is different — it is a typo in a key that IS load-bearing.
-const KNOWN_TOP_LEVEL = ['spawn']
+// ⚠️ `cluster` is here because cluster-spawn.mjs READS it. Omitting it does not merely miss a
+// warning — it emits a false one, every boot, telling an operator that the key the docs just
+// told them to set is ignored. A key that is read while being reported as unread is worse
+// than an unknown key, because it argues the operator out of a working configuration.
+const KNOWN_TOP_LEVEL = ['spawn', 'cluster']
 const KNOWN_SPAWN_KEYS = ['mode', 'maxConcurrent', 'maxConcurrentHard']
+const KNOWN_CLUSTER_KEYS = ['url', 'token']
 
 export function unknownKeyWarnings(file, path) {
   if (!file || typeof file !== 'object' || Array.isArray(file)) return []
@@ -60,6 +65,16 @@ export function unknownKeyWarnings(file, path) {
     for (const key of Object.keys(spawn)) {
       if (!KNOWN_SPAWN_KEYS.includes(key)) {
         warnings.push(`${path} has an unknown key "spawn.${key}" — ignored. Known: spawn.${KNOWN_SPAWN_KEYS.join(', spawn.')}`)
+      }
+    }
+  }
+  // Descended into for the same reason `spawn` is: a typo like "urll" is a typo in a key that
+  // IS load-bearing, and the top-level loop above cannot see it.
+  const cluster = file.cluster
+  if (cluster && typeof cluster === 'object' && !Array.isArray(cluster)) {
+    for (const key of Object.keys(cluster)) {
+      if (!KNOWN_CLUSTER_KEYS.includes(key)) {
+        warnings.push(`${path} has an unknown key "cluster.${key}" — ignored. Known: cluster.${KNOWN_CLUSTER_KEYS.join(', cluster.')}`)
       }
     }
   }

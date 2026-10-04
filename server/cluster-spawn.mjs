@@ -96,16 +96,43 @@ export function newSessionId(random = randomUUID) {
 export function resolveClusterTarget({ envUrl, envToken, file, path = 'the supervisor config' } = {}) {
   const section = file == null ? null : file.cluster
   if (section != null && (typeof section !== 'object' || Array.isArray(section))) {
+    // ⚠️ The offending VALUE is deliberately not echoed. An operator who wrote a scalar under
+    // `cluster` may have written the token, and this string travels back to the client —
+    // resolveAuthToken refuses its own bad values without echoing for the same reason.
     return {
       error:
-        `"cluster" in ${path} is ${JSON.stringify(section)}, which is not an object — refusing rather than ` +
-        `guessing, since a half-read cluster target is discovered only by noticing it. ` +
-        `Expected {"url": "…", "token": "…"}.`,
+        `"cluster" in ${path} is not an object — refusing rather than guessing, since a half-read ` +
+        `cluster target is discovered only by noticing it. Expected {"url": "…", "token": "…"}.`,
     }
   }
-  const pick = (env, key) =>
-    env !== undefined && env !== null && env !== '' ? env : (section?.[key] ?? null)
-  return { url: pick(envUrl, 'url'), token: pick(envToken, 'token') }
+
+  // BOTH sources are validated, not only the winner — the sibling precedent's explicit rule
+  // (spawn-mode.mjs: "validation is deliberately NOT limited to the winner … an invalid value
+  // anywhere refuses every spawn"). A bad value in the LOSER sits dormant until the winner is
+  // removed, and then the spawn breaks with an error that was present all along.
+  //
+  // Each value is validated under its OWN label, so a bad file-sourced value names the file
+  // key rather than the env var it never came from — the repo's rule that a refusal names the
+  // thing the operator must change.
+  const urlSources = [
+    { label: 'SUPERVISOR_CLUSTER_URL', value: envUrl, check: resolveClusterBaseUrl },
+    { label: `"cluster.url" in ${path}`, value: section?.url, check: resolveClusterBaseUrl },
+  ]
+  const tokenSources = [
+    { label: 'INTERACTIVE_AUTH_TOKEN', value: envToken, check: resolveAuthToken },
+    { label: `"cluster.token" in ${path}`, value: section?.token, check: resolveAuthToken },
+  ]
+  const set = (s) => s.value !== undefined && s.value !== null && s.value !== ''
+  for (const { label, value, check } of [...urlSources, ...tokenSources]) {
+    if (!set({ value })) continue
+    const checked = check(value, label)
+    if (checked.error) return { error: checked.error }
+  }
+  const pick = (sources) => {
+    const winner = sources.find(set)
+    return winner ? winner.value : null
+  }
+  return { url: pick(urlSources), token: pick(tokenSources) }
 }
 
 // Normalize the service's base URL, or refuse it.
@@ -115,7 +142,7 @@ export function resolveClusterTarget({ envUrl, envToken, file, path = 'the super
 // operator's cluster rules forbid a port-forward — so there is no address to guess, and a
 // guessed one either fails confusingly or reaches the wrong thing. An unset URL therefore
 // means "the cluster target is not configured here", which is an answer, not an absence.
-export function resolveClusterBaseUrl(raw) {
+export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL') {
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
@@ -129,16 +156,16 @@ export function resolveClusterBaseUrl(raw) {
     }
   }
   if (typeof raw !== 'string') {
-    return { error: `SUPERVISOR_CLUSTER_URL is ${JSON.stringify(raw)}, which is not a URL` }
+    return { error: `${label} is ${JSON.stringify(raw)}, which is not a URL` }
   }
   let url
   try {
     url = new URL(raw)
   } catch {
-    return { error: `SUPERVISOR_CLUSTER_URL is ${JSON.stringify(raw)}, which is not a valid URL` }
+    return { error: `${label} is ${JSON.stringify(raw)}, which is not a valid URL` }
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return { error: `SUPERVISOR_CLUSTER_URL is ${JSON.stringify(raw)}, whose scheme is not http or https` }
+    return { error: `${label} is ${JSON.stringify(raw)}, whose scheme is not http or https` }
   }
   return { baseUrl: url.origin + url.pathname.replace(/\/+$/, '') }
 }
@@ -149,7 +176,7 @@ export function resolveClusterBaseUrl(raw) {
 // reason: the service answers a header-less request with 401 *before* the route's handler
 // runs, so an unconfigured supervisor and a wrong token produce one indistinguishable
 // observable. Refusing here is what turns that into a sentence naming the variable to set.
-export function resolveAuthToken(raw) {
+export function resolveAuthToken(raw, label = 'INTERACTIVE_AUTH_TOKEN') {
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
@@ -162,7 +189,7 @@ export function resolveAuthToken(raw) {
     }
   }
   if (typeof raw !== 'string') {
-    return { error: `INTERACTIVE_AUTH_TOKEN is ${JSON.stringify(raw)}, which is not a token string` }
+    return { error: `${label} is ${JSON.stringify(raw)}, which is not a token string` }
   }
   // Whitespace is refused, NOT trimmed away, and both halves of that matter.
   //
@@ -180,7 +207,7 @@ export function resolveAuthToken(raw) {
   if (raw.trim() !== raw) {
     return {
       error:
-        'INTERACTIVE_AUTH_TOKEN has leading or trailing whitespace, which is not a legal header value. ' +
+        `${label} has leading or trailing whitespace, which is not a legal header value. ` +
         'A trailing newline — a secret file read whole rather than its value — is the usual cause. Fix the ' +
         'value rather than trimming it here: the service compares against the token it was started with, so a ' +
         'value this side silently repairs is one the two ends would then disagree about.',
