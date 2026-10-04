@@ -70,7 +70,7 @@ else:
     cfg=os.path.expanduser('~/.config/vault-cli/config.yaml')
     d2=yaml.safe_load(open(cfg))
     v=d2.get('default_vault') if isinstance(d2, dict) else None
-    if not isinstance(v, str) or not v:
+    if not isinstance(v, str) or not v or v not in {x.get('name') for x in d}:
         raise SystemExit('cwd is not inside any configured vault and ' + cfg + ' carries no usable default_vault - pass --vault <name>')
     print(v)
 ")}"
