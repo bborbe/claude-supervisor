@@ -31,7 +31,7 @@ store's `pkg/session-liveness-checker.go`. Pane existence alone is not liveness 
 panes are renumbered and reused, and a session killed without `SessionEnd` leaves
 its item open on a pane that outlives it, which is how orphans reached this feed.
 """
-import argparse, glob, importlib.util, json, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, glob, importlib.util, json, math, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
 STATE = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser("~/.claude/state/attention")
@@ -52,7 +52,30 @@ LIVE_WINDOW = 5 * 60
 # forever — "identity, not recency" is the right call for a *different* ask, but
 # unbounded text equality is a weaker identity than it looks. Past the window the
 # record is ignored and the closer is judged on its own merits.
-POSTED_CLOSER_TTL = float(os.environ.get("ATTENTION_POSTED_CLOSER_TTL", str(6 * 3600)))
+def _ttl_from_env():
+    """The posted-closer window, falling back to the default on a bad override.
+
+    Guarded because this is a documented tunable, so an operator WILL set it, and
+    an unguarded `float()` at module scope raises ValueError at import — killing
+    the reader outright rather than costing it the window. The hook's
+    `_ttl_from_env` carries the full rationale; the two halves must agree on the
+    window, so the shape is mirrored here deliberately.
+    """
+    try:
+        ttl = float(os.environ.get("ATTENTION_POSTED_CLOSER_TTL") or 6 * 3600)
+    except ValueError:
+        return 6 * 3600
+    # `inf` and `nan` parse as floats but make every comparison false, so the
+    # record would never expire — the same unbounded case a typo would have
+    # caused, reached by a value that looks numeric. Zero and negatives would
+    # silently disable suppression instead. Only a finite positive window is a
+    # window; anything else falls back to the default rather than to no bound.
+    if not math.isfinite(ttl) or ttl <= 0:
+        return 6 * 3600
+    return ttl
+
+
+POSTED_CLOSER_TTL = _ttl_from_env()
 
 # The attention store. Tried first; the event log is the fallback, so a stopped
 # store degrades the feed rather than emptying it.
@@ -840,13 +863,47 @@ def posted_closer(session_id):
             rec = json.load(f)
     except Exception:
         return ""
+    # Valid JSON is not necessarily an OBJECT. A list, string, number or null
+    # parses cleanly and then raises `AttributeError` on `.get` — which is not a
+    # TypeError, so the guard below would not catch it and a single bad file
+    # would take the whole feed down. Same fail-open direction as the rest: an
+    # unreadable record means the echo returns, never a wrong suppression.
+    if not isinstance(rec, dict):
+        return ""
     # A record with no usable `ts` is treated as expired rather than as
     # unbounded: failing open here means the echo returns, which is the safe
     # direction — the alternative suppresses a closer on an unreadable clock.
+    # `OverflowError` is in the tuple because a bare integer literal of unbounded
+    # size decodes to a Python `int`, and `float()` of one beyond the float range
+    # raises it — neither a `TypeError` nor a `ValueError`, so it would escape
+    # this function entirely and take the render down with it, the exact class of
+    # failure this guard exists to prevent. `math.isfinite` below cannot help:
+    # the raise happens before `ts` exists. The tuple is now total for JSON —
+    # `float()` on a decoded str/int/float/bool/list/dict/None raises only these
+    # three.
     try:
-        if time.time() - float(rec.get("ts") or 0) > POSTED_CLOSER_TTL:
-            return ""
-    except (TypeError, ValueError):
+        ts = float(rec.get("ts") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    # A future-dated `ts` makes the delta negative, so it would never exceed the
+    # TTL and the record would stay authoritative indefinitely — the unbounded
+    # case the docstring above says it prevents. A clock-skewed or buggy poster
+    # is enough to trigger it, so anything meaningfully ahead of now expires too.
+    # Mirrors the hook's guard; the two halves must agree on the window. The
+    # counterpart is NOT in this repository — it is `hooks/attention-log.py` in
+    # `bborbe/claude` (its `Stop` branch), so a reader here has no local file to
+    # follow and the agreement cannot be verified from this worktree.
+    #
+    # `NaN` reaches the same unbounded case by another route, so it is rejected
+    # here rather than left to the comparisons: `json.load` accepts a bare `NaN`
+    # by default (`allow_nan=True` on decode), and `nan > x` and `x - nan > y`
+    # are BOTH False — a non-finite `ts` would pass every clause below and keep
+    # the record authoritative forever. That is the identical reasoning applied
+    # to the TTL override above ("inf and nan parse as floats but make every
+    # comparison false"), and it has to hold for the record's own clock too.
+    # `isfinite` covers `inf` and `-inf` with it.
+    now = time.time()
+    if not math.isfinite(ts) or ts > now + 60 or now - ts > POSTED_CLOSER_TTL:
         return ""
     # A record is a local hint written by another process, so its shape is not
     # guaranteed: `normalize_closer` calls `.sub()` on the value and raises on a
