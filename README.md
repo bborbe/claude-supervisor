@@ -92,7 +92,7 @@ The mode a worker opens in is a **fleet-wide decision**, so it lives in a file y
 
 ```json
 // ~/.config/claude-supervisor/config.json   (SUPERVISOR_CONFIG)
-{ "spawn": { "mode": "interactive", "maxConcurrent": "" } }
+{ "spawn": { "mode": "interactive", "maxConcurrent": 30, "maxConcurrentHard": 50 } }
 ```
 
 `mode` is `interactive` or `headless`. Four sources, highest first:
@@ -110,13 +110,15 @@ The file is read **once at server start**, so restart the MCP server after editi
 
 ### Setting the fleet-wide concurrent limit
 
-`spawn.maxConcurrent` bounds how many workers the fleet may hold open **at once** — one value, fleet-wide. It replaces the per-manager spawn cap (2 per sweep, 4 per rolling 30 min) that `docs/fleet-surface.md` § Spawn a worker carried until 2026-09-27. Source order matches `mode`: `SUPERVISOR_MAX_CONCURRENT`, then the config file.
+`spawn.maxConcurrent` (soft) and `spawn.maxConcurrentHard` (hard) bound how many workers the fleet may hold open **at once** — one pair, fleet-wide. They replace the per-manager spawn cap (2 per sweep, 4 per rolling 30 min) that `docs/fleet-surface.md` § Spawn a worker carried until 2026-09-27. Source order matches `mode`: `SUPERVISOR_MAX_CONCURRENT` / `SUPERVISOR_MAX_CONCURRENT_HARD`, then the config file.
 
-⚠️ **It ships empty, and empty means unlimited.** That is the correct shipped state, not a placeholder awaiting a value. The operator's ruling of 2026-09-27, verbatim: *"These limits are artificial and should be removed … It's more a global concurrent limit we should aim than these local limits"* and *"For now there is no global limit."* Nothing here invents a number on the operator's behalf — set one when load demands it, and `0` is accepted as the same answer because that is the value you reach for to turn a limit **off**.
+**Two thresholds, because one number could not express the operator's ruling.** The **soft** cap (`maxConcurrent`) is where the manager loops stop proposing and an *ordinary* spawn is refused. The **hard** cap (`maxConcurrentHard`) is where *every* spawn is refused — including one the operator has named by hand. Between them **an operator-named priority task may still open**: a task carrying the operator-set `flag: true` opens while the fleet sits in the band, so the fleet never refuses the operator's own named work for a reason the operator did not choose. `0` on the soft key means **unlimited**, and it switches **both** thresholds off. ⚠️ **`0` on the hard key is refused**, not read as unlimited: it would silently delete the ceiling while the soft cap stayed in force, leaving a fleet that looks capped and is not. The off switch is the soft key. ⚠️ **Their resolved defaults are deliberately NOT restated here** — the numbers have one home, `docs/fleet-surface.md` § Spawn a worker item 5, and a second copy is a counter nothing checks: the drift check that guards those constants reads `commands/` and `agents/`, so a number written here would go stale behind a green run.
 
-**The count is live workers, not live sessions.** It is read from the heartbeat store the spawner stamps for every worker it opens; the session registry would also count the operator's own sessions and the manager's, which makes a small limit unusable in practice.
+Operator's ruling of 2026-10-04, verbatim: *"lets start with 30 = soft cap and 50 = hard cap."* It **reinstates** the fleet-wide limit the 2026-09-27 ruling removed — *"These limits are artificial and should be removed … For now there is no global limit"* — as a pair of thresholds rather than unbounded, so a reader who finds only the 2026-09-27 note concludes the fleet is unbounded, which is no longer true. ⚠️ **30/50 is the operator's CONFIGURED pair, not the shipped default** — the ruling quotes his config, and the code ships its own numbers, which the home states. Taking one for the other is how the first draft of this section went wrong.
 
-An unusable value — a negative number, a fraction, a stray boolean — **refuses every spawn** and names the file, on the same reasoning as the mode refusals above: `Number(true)` is `1`, so a blind coercion would read a stray `true` as "one worker at a time" and never say so. An unreadable heartbeat store also refuses, rather than opening past a limit it cannot count.
+**The count is live worker sessions — not live sessions, and not the heartbeat store.** It is the session registry joined to the spawn ledger, so the operator's own sessions and the managers are excluded. ⚠️ **Not the heartbeat store:** it is stamped only for in-process (headless) workers, so it answered **0 while 11 interactive workers were live** (measured 2026-10-01), and a target that reads 0 on a busy fleet is inert.
+
+An unusable value — a negative number, a fraction, a stray boolean — **refuses every spawn** and names the file, on the same reasoning as the mode refusals above: `Number(true)` is `1`, so a blind coercion would read a stray `true` as "one worker at a time" and never say so. A hard cap **below** the soft one also refuses, because a ceiling beneath its own floor would empty the operator-named band. An unreadable store also refuses, rather than opening past a limit it cannot count.
 
 ⚠️ **An unknown `mode` value refuses every spawn**, naming the file and the two valid values — same reasoning as the policy refusals below. A typo that silently fell back to a default would be discovered only by noticing a whole fleet running the wrong way, long after the edit. An unknown *key* only warns, so a config written for a newer version stays usable by this one.
 

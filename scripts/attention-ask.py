@@ -91,6 +91,31 @@ STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("
 # Local store; a hung one must cost a clear failure, never a stalled loop tick.
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 
+# A store item id is the store's own: 32 lowercase hex characters, hex over 16
+# random bytes (`attention-controller`, `pkg/item-id-generator.go`). `post`
+# prints it on its `ITEM_ID:` line, and that line is the only place a pollable id
+# comes from. Everything else that reaches `poll` is a different kind of id, and
+# until this guard existed the difference was invisible: an 8-char id — a store
+# id truncated by hand, or the `open-items` ledger's own display id — went to the
+# store, 404'd, and printed `FAILED: no such item <id>`, which a manager read as
+# the card being gone. Measured 2026-10-03 at tick 127 of the Manager Layer loop:
+# a live card was recorded absent, and the false finding reached the goal page.
+# Refusing the shape here is what lets the message name the mistake; the 404
+# cannot, because by then both cases are one.
+STORE_ITEM_ID_LEN = 32
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def is_store_item_id(candidate):
+    """Whether `candidate` has the shape the store mints for an item id.
+
+    Shape only: this asks whether the string *could* be one of the store's ids,
+    never whether the store holds it. A well-formed id that is unknown is a
+    genuine absence, and still reaches the store to be told so.
+    """
+    return len(candidate) == STORE_ITEM_ID_LEN and all(c in _HEX_DIGITS for c in candidate)
+
+
 # The answer mechanisms this script posts. It asks questions, so `message` is
 # the only one it offers: a `permission` item is approve-shaped and only the
 # operator may answer it, in the session that raised it, and an `ack` item asks
@@ -384,6 +409,22 @@ def cmd_post_batch(args, out=sys.stdout):
 
 
 def cmd_poll(item_id, out=sys.stdout):
+    if not is_store_item_id(item_id):
+        # ⚠️ Refused here rather than at the store's 404, and that placement is
+        # the whole point: a short id and an unknown full id both printed
+        # `FAILED: no such item <id>`, so a caller could not tell "you polled
+        # the wrong id" from "the card is gone" — and read a live card as gone.
+        # The exit code is 2 for the same reason: this is a bad argument, not a
+        # failed lookup, and it must not read as the `1` a real absence returns.
+        print(
+            f"REFUSED: {item_id!r} is not a store item id — one is "
+            f"{STORE_ITEM_ID_LEN} hex characters, and this is {len(item_id)}. "
+            "A store id truncated by hand and the open-items ledger's own "
+            "display id both land here. Neither is pollable and NEITHER MEANS "
+            "THE ITEM IS GONE: poll the id from the post's `ITEM_ID:` line.",
+            file=out,
+        )
+        return 2
     try:
         item = fetch_item(item_id)
     except urllib.error.HTTPError as err:

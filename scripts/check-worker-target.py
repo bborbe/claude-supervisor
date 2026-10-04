@@ -22,6 +22,16 @@ So this check asserts three things:
 without the doc, or the doc without the code, fails here — which is exactly the drift a
 reader cannot see, because both surfaces look self-consistent while they disagree.
 
+⚠️ **(c) covers BOTH thresholds since 2026-10-04.** The cap is a pair — a soft cap
+(`DEFAULT_MAX_CONCURRENT`) and a hard cap (`DEFAULT_MAX_CONCURRENT_HARD`) — so a home that
+states only the soft number is a doc that describes half the enforcement, and a code change
+moving the hard constant without the prose would leave the reader believing a band that no
+longer exists. Each half is asserted against its own code constant, so the two cannot be
+cross-satisfied.
+⚠️ **The constants are named here, never their values** — this file exists to refuse doc/code
+drift, so a docstring restating the numbers would be the one copy nothing checks, going stale
+behind its own green run. The values are read from the code at run time; the prose is not.
+
 **What this check does not prove.** It is a prose-shape check over markdown plus one
 constant read, because a command file *is* prose — there is no function to call. It cannot
 prove the target is *consulted* at a tick. What (d) now proves is that the **instrument is
@@ -49,9 +59,16 @@ HOME_ANCHOR = "Spawn a worker item 5"
 #: after the section it points at has been renamed or renumbered away.
 HOME_HEADING = "## Spawn a worker"
 HOME_ITEM = re.compile(r"^5\. \*\*Respect the fleet-wide worker target", re.M)
-#: The number's home in code.
+#: The numbers' home in code.
 CODE = "server/spawn-mode.mjs"
 CODE_CONSTANT = "DEFAULT_MAX_CONCURRENT"
+CODE_CONSTANT_HARD = "DEFAULT_MAX_CONCURRENT_HARD"
+
+#: The two prose markers the home must carry, one per constant. They are deliberately
+#: different sentences: a single marker read for both would let one number satisfy the check
+#: for the other, which is the cross-satisfaction this pair exists to refuse.
+SOFT_MARKER = "The default is {}"
+HARD_MARKER = "The hard default is {}"
 
 #: Directories whose files may *reference* the constant but must never restate it.
 REFERENCING_DIRS = ("commands", "agents")
@@ -64,18 +81,23 @@ COUNT_INSTRUMENT = "worker-sessions.py --count"
 TARGET_INSTRUMENT = "worker-target.py"
 
 
-def code_default(root):
-    """`DEFAULT_MAX_CONCURRENT`'s value, or None when it cannot be read.
+def code_default(root, constant=CODE_CONSTANT):
+    """`constant`'s value in `CODE`, or None when it cannot be read.
 
     None is reported as a failure, never as a pass: an unreadable constant means the
     cross-check could not run, and "could not check" reading as "they agree" is the
     defect one level down.
+
+    The `\\s*=` after the name is what keeps the pair apart: `DEFAULT_MAX_CONCURRENT` must
+    not match the `DEFAULT_MAX_CONCURRENT_HARD` line, and it cannot, because the underscore
+    that follows is not whitespace. Read the other way round the two would silently report
+    the same number and each half's check would pass on the other's evidence.
     """
     path = root / CODE
     if not path.exists():
         return None
     match = re.search(
-        rf"^export const {CODE_CONSTANT}\s*=\s*(\d+)\s*$",
+        rf"^export const {constant}\s*=\s*(\d+)\s*$",
         path.read_text(encoding="utf-8"),
         re.M,
     )
@@ -103,18 +125,19 @@ def check(root):
             f"pointer into it now lands somewhere else"
         )
 
-    default = code_default(root)
-    if default is None:
-        failures.append(
-            f"{CODE}: could not read `{CODE_CONSTANT}` — the doc/code cross-check could "
-            f"not run, which is not the same as passing"
-        )
-    else:
-        # (c) the prose default and the code default must agree.
-        if f"The default is {default}" not in home:
+    # (c) each prose default and its own code constant must agree. Checked per threshold, so
+    # a home stating one number twice cannot satisfy the check for both.
+    for constant, marker in ((CODE_CONSTANT, SOFT_MARKER), (CODE_CONSTANT_HARD, HARD_MARKER)):
+        value = code_default(root, constant)
+        if value is None:
             failures.append(
-                f"{HOME}: does not state `The default is {default}` — the home's prose and "
-                f"`{CODE_CONSTANT}` in {CODE} have drifted apart, and both read as "
+                f"{CODE}: could not read `{constant}` — the doc/code cross-check could "
+                f"not run, which is not the same as passing"
+            )
+        elif marker.format(value) not in home:
+            failures.append(
+                f"{HOME}: does not state `{marker.format(value)}` — the home's prose and "
+                f"`{constant}` in {CODE} have drifted apart, and both read as "
                 f"self-consistent while they disagree"
             )
 
@@ -155,7 +178,8 @@ def main():
             print(f"  worker-target FAIL: {f}", file=sys.stderr)
         sys.exit(1)
 
-    default = code_default(ROOT)
+    soft = code_default(ROOT, CODE_CONSTANT)
+    hard = code_default(ROOT, CODE_CONSTANT_HARD)
     referencing = sum(
         1
         for sub in REFERENCING_DIRS
@@ -163,9 +187,10 @@ def main():
         if CONSTANT_NAME in path.read_text(encoding="utf-8")
     )
     print(
-        f"  worker-target ok: one home ({HOME} {HOME_ANCHOR}) states the default "
-        f"({default}), agrees with {CODE_CONSTANT}, and {referencing} referencing "
-        f"file(s) point at it rather than restating it"
+        f"  worker-target ok: one home ({HOME} {HOME_ANCHOR}) states the soft default "
+        f"({soft}) and the hard default ({hard}), agrees with {CODE_CONSTANT} and "
+        f"{CODE_CONSTANT_HARD}, and {referencing} referencing file(s) point at it rather "
+        f"than restating it"
     )
 
 
