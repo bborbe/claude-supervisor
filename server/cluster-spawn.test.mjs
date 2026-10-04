@@ -374,6 +374,42 @@ test('supervisor.mjs actually resolves through resolveClusterTarget', () => {
   assert.match(src, /authToken: target\.token/)
 })
 
+test('url and token resolve INDEPENDENTLY — a mixed pair takes each from its own source', () => {
+  // The whole point of the feature is per-value resolution, and both precedence tests above set
+  // BOTH values from the SAME source — so a future edit routing them through one shared loop
+  // would keep them green. These two cases pin the independence in both directions.
+  const urlFromFile = resolveClusterTarget({
+    envUrl: null,
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(urlFromFile.url, 'https://from-file.example')
+  assert.equal(urlFromFile.token, 'env-token')
+
+  const tokenFromFile = resolveClusterTarget({
+    envUrl: 'https://from-env.example',
+    envToken: null,
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(tokenFromFile.url, 'https://from-env.example')
+  assert.equal(tokenFromFile.token, 'file-token')
+})
+
+test('a file-sourced bad TOKEN names the token key, not the url key', () => {
+  // The mirror of the bad-URL case above, and unasserted until now: swapping the two `label`
+  // strings in resolveClusterTarget's source arrays kept the suite green.
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: { token: 1234567890 } } })
+  assert.match(r.error, /"cluster\.token" in the supervisor config/)
+  assert.ok(!r.error.includes('"cluster.url"'), 'must not name the url key for a token value')
+  assert.ok(!r.error.includes('1234567890'), 'and must not echo the value')
+})
+
+test('a credential in a url userinfo is redacted before the refusal echoes it', () => {
+  const r = resolveClusterBaseUrl('ftp://user:secret@host/x')
+  assert.match(r.error, /<redacted>@/)
+  assert.ok(!r.error.includes('secret'), 'the userinfo must not ride out in the message')
+})
+
 test('a whitespace-only env token WINS and is refused, rather than falling through to the file', () => {
   // The asymmetry with '' is deliberate and argued at length in the source: '' is absence, so it
   // falls through; ' ' is a value the operator put there, and trimming it would silently repair

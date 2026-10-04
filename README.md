@@ -93,7 +93,7 @@ The mode a worker opens in is a **fleet-wide decision**, so it lives in a file y
 ```json
 // ~/.config/claude-supervisor/config.json   (SUPERVISOR_CONFIG)
 { "spawn": { "mode": "interactive", "maxConcurrent": 30, "maxConcurrentHard": 50 },
-  "cluster": { "url": "https://claude-interactive.dev.nuke.benjamin-borbe.de", "token": "…" } }
+  "cluster": { "url": "https://claude-interactive.<env>.<domain>", "token": "…" } }
 ```
 
 ⚠️ `cluster.token` is a **secret**, and the server only ever reads this file — it never writes it, so it sets no permissions. `chmod 600 ~/.config/claude-supervisor/config.json` is yours to do, and worth doing before you put a token in it.

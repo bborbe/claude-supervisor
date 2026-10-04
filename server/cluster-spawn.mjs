@@ -166,6 +166,14 @@ export function resolveClusterTarget({ envUrl, envToken, file, path = 'the super
 // operator's cluster rules forbid a port-forward — so there is no address to guess, and a
 // guessed one either fails confusingly or reaches the wrong thing. An unset URL therefore
 // means "the cluster target is not configured here", which is an answer, not an absence.
+// ⚠️ A URL may carry credentials in its userinfo — `https://user:token@host` — and the two
+// string refusals below echo the value so the operator can see what they typed. Redacting the
+// userinfo keeps that diagnosis while stopping a pasted credential riding out to the client in
+// the message. The non-string branch withholds the value entirely instead, because there it is a
+// structure rather than a URL and JSON.stringify would render it whole.
+const redactUserinfo = (value) =>
+  typeof value === 'string' ? value.replace(/\/\/[^@/]*@/, '//<redacted>@') : value
+
 export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL', configPath = '~/.config/claude-supervisor/config.json') {
   if (raw === undefined || raw === null || raw === '') {
     return {
@@ -190,12 +198,12 @@ export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL', con
   try {
     url = new URL(raw)
   } catch {
-    return { error: `${label} is ${JSON.stringify(raw)}, which is not a valid URL` }
+    return { error: `${label} is ${JSON.stringify(redactUserinfo(raw))}, which is not a valid URL` }
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     // `url.protocol` rather than the whole value: it is the one part that explains the refusal,
     // and a URL is parsed by this point so the scheme is already isolated.
-    return { error: `${label} is ${JSON.stringify(raw)}, whose scheme (${url.protocol}) is not http or https` }
+    return { error: `${label} is ${JSON.stringify(redactUserinfo(raw))}, whose scheme (${url.protocol}) is not http or https` }
   }
   return { baseUrl: url.origin + url.pathname.replace(/\/+$/, '') }
 }
