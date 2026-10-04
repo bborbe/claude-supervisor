@@ -61,19 +61,30 @@ carries `parent_session: null` too (see `CLAUDE.md` § The spawn ledger), but it
 has a ledger record of its OWN, so it is not a manager and must keep emitting.
 Keying 3b on the empty spawner would drop every such worker.
 
-⚠️ **HOP 3b CANNOT SEPARATE AN OPERATOR-STARTED MANAGER FROM A RECORD-LESS
-WORKER, and that is the one case it over-filters.** The same `CLAUDE.md`
-paragraph continues: *"A worker whose session id never resolved gets no record
-rather than one filed under a key nothing would look up, and the server logs that
-rather than staying quiet."* Such a worker is absent from the ledger **and**
-resolves no spawner, so it satisfies both halves of this branch — and if the
-registry lists it, it drops. Before this change it emitted. It is the same
-"nobody's to route" shape hop 4 protects with `dead-manager`. **No predicate fix
-is available:** a record-less live session is indistinguishable from an
-operator-started manager by the evidence this hop has, and the alternative —
-dropping the branch — restores the peer-manager wake the branch exists to remove.
-The compensating control is that the condition is *discoverable* rather than
-invisible: the server logs the unresolved id at spawn, per the same paragraph.
+⚠️ **HOP 3b DROPS ON "NO LEDGER RECORD AND LIVE", AND THAT CLASS IS WIDER THAN
+"MANAGER".** What makes the drop correct is NOT the shape hop 4 protects — hop 4
+*keeps* a gate nobody can act on, this *drops* one — but that the gated session is
+live and is therefore **its own reporter**: a live session raises its own gate and
+sees its own closer, so a second watcher surfacing it buys nothing. That is what
+the liveness guard encodes, and it is why a DEAD peer manager's gate still emits.
+
+The class that test admits is any live session with **no ledger record**, and an
+operator-started manager is only its most common member. Two others are named here
+rather than left to be discovered:
+
+  * a worker whose session id never resolved — `CLAUDE.md` § The spawn ledger:
+    *"A worker whose session id never resolved gets no record rather than one
+    filed under a key nothing would look up, and the server logs that rather than
+    staying quiet."* It is absent from the ledger **and** resolves no spawner, so
+    it satisfies both halves of the branch; before this change it emitted.
+  * an operator-opened interactive session that never went through `spawn_agent`
+    — no record, for the same reason a manager has none.
+
+**No predicate fix is available** for either: by the evidence this hop has, a
+record-less live session is indistinguishable from a manager, and the alternative
+— dropping the branch — restores the peer-manager wake the branch exists to
+remove. The compensating control is that the condition is *discoverable* rather
+than invisible: the server logs an unresolved id at spawn, per the same paragraph.
 Named here rather than left to be rediscovered, for the reason the PREDECESSOR
 section above states its own limitation.
 
@@ -483,6 +494,12 @@ def main():
         return 0
 
     if args.explain:
+        # ⚠️ `:16` is filled EXACTLY by `peer-manager-own` and `liveness-unknown`,
+        # and the `pane` column stays aligned only because no reason exceeds it
+        # (measured 2026-10-04: `pane` at column 23 on every row, both reasons
+        # included). A reason longer than 16 characters must widen this field, or
+        # every row's columns shift by its overrun -- in a diagnostic whose whole
+        # job is legibility.
         for r in rows:
             print(
                 f"{r['verdict']:4} {r['reason']:16} pane {r['pane']:>5}  "
