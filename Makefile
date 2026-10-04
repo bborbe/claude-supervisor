@@ -15,6 +15,9 @@ check-worker-target:
 check-recording-step:
 	@python3 scripts/check-recording-step.py
 
+check-bucket-clause:
+	@python3 scripts/check-bucket-clause.py
+
 check:
 	@for f in server/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server modules parse"
 	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json']]" && echo "  manifests parse"
@@ -26,6 +29,6 @@ test: check
 	python3 -m unittest discover -s scripts/tests || rc=1; \
 	exit $$rc
 
-precommit: check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check
+precommit: check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check-bucket-clause check
 
-.PHONY: default check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check test precommit
+.PHONY: default check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check-bucket-clause check test precommit
