@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.100.1
 
 - fix: offer `/vault-cli:session-close` in `worker-drive` when the anchor is `aborted` as well as `completed`. An aborted anchor is equally terminal and its open boxes are moot by construction, so requiring `completed` alone left a session with no closer at all; `hold` deliberately still does not qualify, being parked rather than finished.
 
