@@ -19,6 +19,11 @@ Covers the three decisions that make a posted question answerable:
     `kind: value`; and a `skip` rendered as the bare word, since `skip ` with
     nothing after it reads as a truncated option answer.
 
+  * the poll id-shape guard -- a short id (a hand-truncated store id, or the
+    `open-items` ledger's own display id) is refused before the store is asked,
+    because both used to print `FAILED: no such item` and read as the card
+    having gone away. A well-formed id the store does not hold is still absence.
+
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
@@ -38,6 +43,13 @@ _SCRIPT = os.path.join(os.path.dirname(_HERE), "attention-ask.py")
 _spec = importlib.util.spec_from_file_location("attention_ask", _SCRIPT)
 ask = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ask)
+
+# A store item id: 32 lowercase hex characters, the shape the store mints
+# (`attention-controller`, `pkg/item-id-generator.go`). `poll` refuses any other
+# shape before it reaches the store, so every id a fixture hands to `cmd_poll`
+# has to be one of these — an 8-char stand-in would exercise the refusal instead
+# of the branch under test.
+STORE_ITEM_ID = "0123456789abcdef0123456789abcdef"
 
 
 class FakeResponse:
@@ -207,7 +219,7 @@ class PostTest(unittest.TestCase):
         def fake_urlopen(req, timeout=None):
             captured["url"] = req.full_url
             captured["body"] = json.loads(req.data.decode())
-            return FakeResponse({"item_id": "abc123"})
+            return FakeResponse({"item_id": STORE_ITEM_ID})
 
         out = io.StringIO()
         with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
@@ -225,14 +237,14 @@ class PostTest(unittest.TestCase):
         self.assertEqual(body["liveness_ref"], "session:session-a")
         self.assertEqual(body["answer_mechanism"], "message")
         self.assertEqual(body["options"][0], {"label": "the board", "recommended": True})
-        self.assertIn("ITEM_ID: abc123", out.getvalue())
+        self.assertIn(f"ITEM_ID: {STORE_ITEM_ID}", out.getvalue())
 
     def test_empty_optionals_are_omitted_not_sent_blank(self):
         captured = {}
 
         def fake_urlopen(req, timeout=None):
             captured["body"] = json.loads(req.data.decode())
-            return FakeResponse({"item_id": "abc123"})
+            return FakeResponse({"item_id": STORE_ITEM_ID})
 
         with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
             ask.cmd_post(post_args(), out=io.StringIO())
@@ -246,7 +258,7 @@ class PostTest(unittest.TestCase):
 
         def fake_urlopen(req, timeout=None):
             captured["body"] = json.loads(req.data.decode())
-            return FakeResponse({"item_id": "abc123"})
+            return FakeResponse({"item_id": STORE_ITEM_ID})
 
         with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
             ask.cmd_post(
@@ -298,18 +310,18 @@ class PollTest(unittest.TestCase):
             ask.urllib.request, "urlopen", lambda req, timeout=None: FakeResponse(item)
         ):
             out = io.StringIO()
-            rc = ask.cmd_poll("abc123", out=out)
+            rc = ask.cmd_poll(STORE_ITEM_ID, out=out)
         return rc, out.getvalue()
 
     def test_open_item_reads_as_open(self):
-        rc, text = self.poll({"item_id": "abc123", "state": "open"})
+        rc, text = self.poll({"item_id": STORE_ITEM_ID, "state": "open"})
         self.assertEqual(rc, 0)
         self.assertIn("OPEN", text)
 
     def test_option_answer_is_rendered_with_its_value(self):
         rc, text = self.poll(
             {
-                "item_id": "abc123",
+                "item_id": STORE_ITEM_ID,
                 "state": "answered",
                 "answer": {"kind": "option", "value": "the board"},
                 "answered_by": "attention-board",
@@ -331,7 +343,7 @@ class PollTest(unittest.TestCase):
     def test_skip_is_rendered_without_a_trailing_value(self):
         _, text = self.poll(
             {
-                "item_id": "abc123",
+                "item_id": STORE_ITEM_ID,
                 "state": "answered",
                 "answer": {"kind": "skip"},
                 "answered_client": {"user_agent": "curl/8.7.1", "remote_addr": "127.0.0.1:1"},
@@ -347,7 +359,7 @@ class PollTest(unittest.TestCase):
         # store could not describe. It must NOT satisfy a caller's gate.
         rc, text = self.poll(
             {
-                "item_id": "abc123",
+                "item_id": STORE_ITEM_ID,
                 "state": "answered",
                 "answer": {"kind": "option", "value": "the board"},
                 "answered_by": "attention-board",
@@ -363,7 +375,7 @@ class PollTest(unittest.TestCase):
         # navigator.webdriver, the store records it, and the gate stays shut.
         _, text = self.poll(
             {
-                "item_id": "abc123",
+                "item_id": STORE_ITEM_ID,
                 "state": "answered",
                 "answer": {"kind": "option", "value": "the board"},
                 "answered_by": "attention-board",
@@ -383,7 +395,7 @@ class PollTest(unittest.TestCase):
         # A consumer reading `closed` as resolved would release the gate here.
         _, text = self.poll(
             {
-                "item_id": "abc123",
+                "item_id": STORE_ITEM_ID,
                 "state": "closed",
                 "answered_by": "attention-board",
             }
@@ -398,7 +410,7 @@ class PollTest(unittest.TestCase):
         # contentless, which is the state a manager polls to escape.
         _, text = self.poll(
             {
-                "item_id": "abc123",
+                "item_id": STORE_ITEM_ID,
                 "state": "answered",
                 "answered_at": "2026-09-26T21:01:27Z",
                 "answered_by": "attention-board",
@@ -412,7 +424,7 @@ class PollTest(unittest.TestCase):
     def test_multiple_pick_answer_renders_its_values(self):
         _, text = self.poll(
             {
-                "item_id": "abc123",
+                "item_id": STORE_ITEM_ID,
                 "state": "answered",
                 "answered_at": "2026-09-26T21:01:27Z",
                 "answered_client": OPERATOR_CLIENT,
@@ -431,7 +443,7 @@ class PollTest(unittest.TestCase):
         # `OPEN` would invite a caller to keep polling a settled gate.
         _, text = self.poll(
             {
-                "item_id": "abc123",
+                "item_id": STORE_ITEM_ID,
                 "state": "answered",
                 "answered_at": "2026-09-26T21:01:27Z",
                 "answered_by": "attention-board",
@@ -448,7 +460,7 @@ class PollTest(unittest.TestCase):
         # what happened to the item.
         _, text = self.poll(
             {
-                "item_id": "abc123",
+                "item_id": STORE_ITEM_ID,
                 "state": "answered",
                 "answered_at": "2026-09-26T21:01:27Z",
                 "answered_client": OPERATOR_CLIENT,
@@ -461,7 +473,7 @@ class PollTest(unittest.TestCase):
         # The dominant closed shape in the live store is a reap: no
         # answered_at, no answered_by, no client. It is not an act by anyone,
         # so it must not be reported as an answer in either direction.
-        rc, text = self.poll({"item_id": "abc123", "state": "closed"})
+        rc, text = self.poll({"item_id": STORE_ITEM_ID, "state": "closed"})
         self.assertEqual(rc, 0)
         self.assertIn("OPEN", text)
         self.assertNotIn("NOT_OPERATOR_ANSWERED", text)
@@ -470,7 +482,7 @@ class PollTest(unittest.TestCase):
         # A permission-class item is answered with a `decision` and carries no
         # `answer`, so the poll must not report content that is not there.
         rc, text = self.poll(
-            {"item_id": "abc123", "state": "answered", "decision": "allow"}
+            {"item_id": STORE_ITEM_ID, "state": "answered", "decision": "allow"}
         )
         self.assertEqual(rc, 0)
         self.assertIn("OPEN", text)
@@ -484,21 +496,70 @@ class PollTest(unittest.TestCase):
 
         with mock.patch.object(ask.urllib.request, "urlopen", fake):
             out = io.StringIO()
-            rc = ask.cmd_poll("abc123", out=out)
+            rc = ask.cmd_poll(STORE_ITEM_ID, out=out)
         return rc, out.getvalue()
 
     def test_missing_item_names_the_item(self):
         rc, text = self.poll_error(404)
         self.assertEqual(rc, 1)
-        self.assertIn("no such item abc123", text)
+        self.assertIn(f"no such item {STORE_ITEM_ID}", text)
 
     def test_store_error_names_the_item_and_carries_the_detail(self):
         # A poll runs unattended on a loop tick, so a bare "store returned 500"
         # naming no item is not something a manager can act on.
         rc, text = self.poll_error(500, b'{"error":"boom"}')
         self.assertEqual(rc, 1)
-        self.assertIn("abc123", text)
+        self.assertIn(STORE_ITEM_ID, text)
         self.assertIn("boom", text)
+
+    # --- the id-shape guard -------------------------------------------------
+    #
+    # The control has to be two-sided. Before the guard, a short id and an
+    # unknown full id both printed `FAILED: no such item <id>` and differed only
+    # by the echoed id, so any assertion that the output merely *changed* passed
+    # on the unfixed code. What discriminates is the pair below: a short id is
+    # refused without the store being asked, and a well-formed id the store does
+    # not hold still reads as absence (the 404 tests above, which now carry a
+    # real 32-hex id).
+
+    def test_a_short_id_is_refused_before_the_store_is_asked(self):
+        # The store is mocked to blow up if it is reached at all: a refusal that
+        # still issued the request would be a message change, not a guard.
+        # `70eb5521` is the tick-127 id from the incident, verbatim.
+        def explode(url, timeout=None):
+            raise AssertionError(f"poll reached the store with {url!r}")
+
+        with mock.patch.object(ask.urllib.request, "urlopen", explode):
+            out = io.StringIO()
+            rc = ask.cmd_poll("70eb5521", out=out)
+        text = out.getvalue()
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED", text)
+        # The false negative the guard exists to remove: this must not be
+        # readable as the item having gone away.
+        self.assertNotIn("no such item", text)
+        self.assertIn("NEITHER MEANS", text)
+
+    def test_the_ledger_display_id_is_refused_too(self):
+        # `open-items.py` mints its own 8-char id (`uuid.uuid4().hex[:8]`) and
+        # `cmd_list` renders it. It is NOT a truncation of a store id -- it is
+        # an unrelated uuid -- and it is equally unpollable, so the refusal has
+        # to cover it without claiming it was truncated.
+        def explode(url, timeout=None):
+            raise AssertionError(f"poll reached the store with {url!r}")
+
+        with mock.patch.object(ask.urllib.request, "urlopen", explode):
+            out = io.StringIO()
+            rc = ask.cmd_poll("8e1854a7", out=out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED", out.getvalue())
+
+    def test_a_well_formed_id_still_reaches_the_store(self):
+        # The positive control: the guard refuses a shape, not everything. Every
+        # other test in this class leans on it, since they all poll STORE_ITEM_ID.
+        rc, text = self.poll({"item_id": STORE_ITEM_ID, "state": "open"})
+        self.assertEqual(rc, 0)
+        self.assertIn("OPEN", text)
 
 
 class RecordPostedCloserTest(unittest.TestCase):
