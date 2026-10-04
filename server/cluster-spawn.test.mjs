@@ -16,6 +16,7 @@ import {
   newSessionId,
   resolveAuthToken,
   resolveClusterBaseUrl,
+  resolveClusterTarget,
   startClusterSession,
 } from './cluster-spawn.mjs'
 
@@ -270,4 +271,59 @@ test('the default timeout is bounded', () => {
   // Unbounded would let a wedged pod hold a manager session inside a tool call indefinitely;
   // the service answers in one response, so there is no partial progress to wait for.
   assert.ok(Number.isFinite(DEFAULT_TIMEOUT_MS) && DEFAULT_TIMEOUT_MS > 0)
+})
+
+// --- resolveClusterTarget: which source each cluster value comes from ----------------------
+
+test('the env var wins over the config file for both cluster values', () => {
+  const r = resolveClusterTarget({
+    envUrl: 'https://from-env.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(r.url, 'https://from-env.example')
+  assert.equal(r.token, 'env-token')
+})
+
+test('the config file supplies a value the env does not', () => {
+  const r = resolveClusterTarget({
+    envUrl: null,
+    envToken: null,
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(r.url, 'https://from-file.example')
+  assert.equal(r.token, 'file-token')
+})
+
+test('an empty env string falls through to the file rather than counting as set', () => {
+  // resolveClusterBaseUrl and resolveAuthToken both treat '' as unset, so counting it as set
+  // here would hand them a value they immediately refuse — a server that reads as configured
+  // and refuses every spawn.
+  const r = resolveClusterTarget({
+    envUrl: '',
+    envToken: '',
+    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+  })
+  assert.equal(r.url, 'https://from-file.example')
+  assert.equal(r.token, 'file-token')
+})
+
+test('neither source set yields nulls, which the resolvers below then refuse', () => {
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: null })
+  assert.equal(r.url, null)
+  assert.equal(r.token, null)
+  assert.match(resolveClusterBaseUrl(r.url).error, /not configured/)
+  assert.match(resolveAuthToken(r.token).error, /no token/)
+})
+
+test('a file with no cluster key is not an error — absent is the normal case', () => {
+  const r = resolveClusterTarget({ envUrl: 'https://x.example', envToken: 't', file: { spawn: {} } })
+  assert.equal(r.url, 'https://x.example')
+  assert.equal(r.token, 't')
+})
+
+test('a non-object cluster key refuses rather than reading half of it', () => {
+  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: 'https://x.example' } })
+  assert.match(r.error, /which is not an object/)
+  assert.match(r.error, /refusing rather than/)
 })

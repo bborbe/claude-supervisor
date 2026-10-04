@@ -76,6 +76,38 @@ export function newSessionId(random = randomUUID) {
   return { sessionId: id }
 }
 
+// Which of the two sources each cluster value comes from. The env var wins, the config file
+// is the fallback — the same precedence `spawn-mode.mjs` applies to `spawn.mode`, and for the
+// same reason: an env var is a per-invocation override, the file is the machine's standing
+// configuration.
+//
+// ⚠️ **The file is not a convenience — it is the only source that reaches a RUNNING server.**
+// An MCP server's `env` block is read by Claude Code and cached at session start, so a value
+// added to it reaches no already-running session by any in-session route: `/mcp` Reconnect
+// re-spawns the child from that cached definition rather than re-reading the file. Measured
+// 2026-10-04 — a server restarted three minutes *after* an env-block write still refused with
+// "no service URL is set". A file read by the *server* at its own start has no such problem,
+// because a Reconnect re-execs the server and the file is read again. That distinction was
+// already recorded in `config.mjs`'s header ("editing it takes effect on the next server
+// start"); this function is what makes it true for the cluster pair.
+//
+// Raw and unvalidated, deliberately: the legal shapes stay in resolveClusterBaseUrl and
+// resolveAuthToken below, so an env value and a file value meet one validator rather than two.
+export function resolveClusterTarget({ envUrl, envToken, file, path = 'the supervisor config' } = {}) {
+  const section = file == null ? null : file.cluster
+  if (section != null && (typeof section !== 'object' || Array.isArray(section))) {
+    return {
+      error:
+        `"cluster" in ${path} is ${JSON.stringify(section)}, which is not an object — refusing rather than ` +
+        `guessing, since a half-read cluster target is discovered only by noticing it. ` +
+        `Expected {"url": "…", "token": "…"}.`,
+    }
+  }
+  const pick = (env, key) =>
+    env !== undefined && env !== null && env !== '' ? env : (section?.[key] ?? null)
+  return { url: pick(envUrl, 'url'), token: pick(envToken, 'token') }
+}
+
 // Normalize the service's base URL, or refuse it.
 //
 // Refused rather than defaulted, and the refusal is the point: the service has no Service
@@ -87,9 +119,13 @@ export function resolveClusterBaseUrl(raw) {
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
-        'the cluster target is not configured: no service URL is set. Set SUPERVISOR_CLUSTER_URL to the ' +
-        'claude-interactive service address reachable from this machine (the pod publishes none by itself — ' +
-        'it needs a Service and a NodePort in nuke dev), then restart the MCP server.',
+        'the cluster target is not configured: no service URL is set. Set "cluster.url" in the supervisor ' +
+        'config file (~/.config/claude-supervisor/config.json) — a /mcp Reconnect picks that up, because the ' +
+        'server re-reads the file at its own start. Setting SUPERVISOR_CLUSTER_URL on the server entry also ' +
+        'works but needs a NEW session: an MCP env block is cached at session start, so a Reconnect re-spawns ' +
+        'from the cached definition and cannot see a later edit. The address is the claude-interactive service ' +
+        'as reachable from this machine (the pod publishes none by itself — it needs a Service and a NodePort ' +
+        'in nuke dev).',
     }
   }
   if (typeof raw !== 'string') {
@@ -117,10 +153,12 @@ export function resolveAuthToken(raw) {
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
-        "the cluster target has no token: INTERACTIVE_AUTH_TOKEN is not set in this server's environment. " +
+        'the cluster target has no token: neither INTERACTIVE_AUTH_TOKEN nor "cluster.token" is set. ' +
         'The claude-interactive service requires `Authorization: Bearer <token>` on POST /prompt and refuses ' +
-        'without it, so a spawn would fail as a 401 naming nothing to fix. Set INTERACTIVE_AUTH_TOKEN on the ' +
-        'supervisor server entry, then restart the MCP server.',
+        'without it, so a spawn would fail as a 401 naming nothing to fix. Set "cluster.token" in the ' +
+        'supervisor config file (~/.config/claude-supervisor/config.json) — a /mcp Reconnect picks that up, ' +
+        'because the server re-reads the file at its own start — or set INTERACTIVE_AUTH_TOKEN on the server ' +
+        'entry, which needs a NEW session, since an MCP env block is cached at session start.',
     }
   }
   if (typeof raw !== 'string') {

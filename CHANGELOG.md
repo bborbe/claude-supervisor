@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: let a cluster spawn's URL and token come from the supervisor config file, so they can reach a **running** server. `resolveClusterTarget` resolves both env-first and falls back to a `cluster` object in `~/.config/claude-supervisor/config.json`; the two refusal messages now name that file and say which route needs a new session. ⚠️ **Why the file and not just the env block:** an MCP server's `env` is read by Claude Code and **cached at session start**, so a value added to it reaches no running session by any in-session route — `/mcp` Reconnect re-spawns the child from the cached definition rather than re-reading the file. Measured 2026-10-04: a server restarted three minutes *after* an env-block write still refused with *"no service URL is set"*. A file read by the **server** at its own start has no such problem, because a Reconnect re-execs the server. The env route therefore needs a new session; the file route needs only a Reconnect. `docs/fleet-surface.md` item 7 carries the same reasoning, and the six new tests in `cluster-spawn.test.mjs` pin the precedence, the empty-string fallthrough, and the refusal on a malformed `cluster` key.
+
 ## v0.100.1
 
 - fix: offer `/vault-cli:session-close` in `worker-drive` when the anchor is `aborted` as well as `completed`. An aborted anchor is equally terminal and its open boxes are moot by construction, so requiring `completed` alone left a session with no closer at all; `hold` deliberately still does not qualify, being parked rather than finished.
