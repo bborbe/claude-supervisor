@@ -373,3 +373,30 @@ test('supervisor.mjs actually resolves through resolveClusterTarget', () => {
   assert.match(src, /baseUrl: target\.url/)
   assert.match(src, /authToken: target\.token/)
 })
+
+test('a whitespace-only env token WINS and is refused, rather than falling through to the file', () => {
+  // The asymmetry with '' is deliberate and argued at length in the source: '' is absence, so it
+  // falls through; ' ' is a value the operator put there, and trimming it would silently repair
+  // a value the service compares exactly. That cost is real — a trailing newline in an exported
+  // env value shadows a perfectly good `cluster.token` — so it is pinned rather than left to the
+  // comment: a future change making whitespace fall through would otherwise stay green.
+  const r = resolveClusterTarget({ envToken: ' ', file: { cluster: { token: 'file-token' } } })
+  assert.match(r.error, /INTERACTIVE_AUTH_TOKEN/)
+  assert.match(r.error, /whitespace/)
+  assert.ok(!r.error.includes('cluster.token'), 'must not fall through to the file value')
+})
+
+test('a non-string token reports its TYPE and never echoes the value', () => {
+  // The hardening this pins: a nested object under `cluster.token` would be rendered whole by
+  // JSON.stringify — secret included — into a string that travels back to the client. Asserting
+  // only `/not a token string/` passes identically against the old echoing message, so the
+  // assertion has to be about the ABSENCE of the value, which is the whole point.
+  const nested = resolveAuthToken({ value: 'a-secret-value' }, '"cluster.token" in /c.json')
+  assert.match(nested.error, /not a token string/)
+  assert.ok(!nested.error.includes('a-secret-value'), 'the value must not be echoed')
+  assert.ok(!nested.error.includes('value'), 'nor any of its nested contents')
+
+  const numeric = resolveAuthToken(1234567890)
+  assert.match(numeric.error, /not a token string/)
+  assert.ok(!numeric.error.includes('1234567890'), 'the value must not be echoed')
+})
