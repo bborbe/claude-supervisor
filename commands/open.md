@@ -68,11 +68,14 @@ if hit:
     print(hit[0])
 else:
     cfg=os.path.expanduser('~/.config/vault-cli/config.yaml')
-    print(yaml.safe_load(open(cfg)).get('default_vault','personal'))
+    v=yaml.safe_load(open(cfg)).get('default_vault')
+    if not v:
+        raise SystemExit('cwd is not inside any configured vault and ' + cfg + ' has no default_vault key - pass --vault <name>')
+    print(v)
 ")}"
 ```
 
-**The `cwd==p` arm is load-bearing, not defensive.** A session started in a vault is normally *at* the vault root, where `startswith(p + '/')` is false — measured 2026-09-15: from `~/Documents/Obsidian/other-vault`, the equality held and the `+os.sep` form matched nothing, so every vault-root session would have silently fallen through to `default_vault` (personal) and run the whole command against the wrong vault.
+**The `cwd==p` arm is load-bearing, not defensive.** A session started in a vault is normally *at* the vault root, where `startswith(p + '/')` is false — measured 2026-09-15: from `~/Documents/Obsidian/other-vault`, the equality held and the `+os.sep` form matched nothing, so every vault-root session would have silently fallen through to `default_vault` and run the whole command against the wrong vault.
 
 **`is_default` is not a field.** `default_vault` lives at the config's top level, not inside a vault entry — `config list --output json` returns entries with no such key (all 11 `None`). `vault-cli config` exposes only `current-user` and `list`; there is no `config get`.
 
@@ -83,14 +86,14 @@ vault-cli config list --output json    # → claude_script, session_project_dir,
 ```
 
 - **`topics_dir`** — use the vault's value, defaulting to `23 Topics`. A vault without a topics folder (another vault) simply never resolves a topic; that is correct, not a failure — say so if a topic was asked for.
-- **`claude_script`** — the vault's own launcher. `personal` → `cc-private-deepseek`, `brogrammers` → `cc-seibert-deepseek`. Never carry one vault's script into another.
-- **`session_project_dir`** — the new tab's start dir. It is **absent** for `personal` and `brogrammers`, and points at `my-vault` for several sibling vaults; the `cc-*` launchers `cd` into their own vault themselves, so an absent value is fine — pass no `cd`.
+- **`claude_script`** — the vault's own launcher. `private-personal` → `cc-private-deepseek`, `brogrammers` → `cc-seibert-deepseek`. Never carry one vault's script into another.
+- **`session_project_dir`** — the new tab's start dir. It is **absent** for `private-personal` and `brogrammers`, and points at `my-vault` for several sibling vaults; the `cc-*` launchers `cd` into their own vault themselves, so an absent value is fine — pass no `cd`.
 
 ## Step 0.5 — Flagged batch branch (`--flagged`)
 
 Skip Steps 1–4 when `--flagged` was given: a batch has no single name to resolve. Runs after Step 0, which supplied `<vault>`.
 
-**Selector — ALL VAULTS by default, and an absent `defer_date` does NOT exclude.** Both halves changed 2026-09-21 on the operator's instruction (*"default should be … all vaults"*), after a run against `personal` alone opened 8 rows and silently missed every other vault.
+**Selector — ALL VAULTS by default, and an absent `defer_date` does NOT exclude.** Both halves changed 2026-09-21 on the operator's instruction (*"default should be … all vaults"*), after a run against the primary vault alone opened 8 rows and silently missed every other vault.
 
 `flag: true` AND `status: in_progress` AND (`defer_date` absent OR `defer_date <= today`), read from the CLI per vault — blocked state has the same single source, never a frontmatter grep:
 
@@ -140,7 +143,7 @@ done
 
 ⚠️ **The absent-`defer_date` clause is the half that actually surfaces other vaults — do not drop it while keeping the loop.** Measured: `brogrammers` holds 856 tasks and 46 `flag: true`, of which **8 are `flag: true` AND `in_progress`** — genuine candidates — and **0 carry a `defer_date`**, because that vault does not use the field. Under the old three-way AND, every one of those 8 was excluded. So widening the scan **alone** would still have returned zero for `brogrammers`: the fix would have looked delivered and changed nothing. `defer_date` means *do not surface before this date*; reading its absence as *never surface* inverts it.
 
-**Print the vault on every row.** Task titles are not namespaced across vaults — `a recurring task - 2026-09-21` exists in both `personal` and `octopusagent` as two different tasks, measured the same day. A table without a vault column collapses those into one row and opens the wrong one.
+**Print the vault on every row.** Task titles are not namespaced across vaults — `a recurring task - 2026-09-21` exists in both `private-personal` and `octopusagent` as two different tasks, measured the same day. A table without a vault column collapses those into one row and opens the wrong one.
 
 
 The count is a property of the day, not of the command — **never hardcode it and never treat a row count as a check**. Measured 2026-09-20: 79 tasks in `25 Tasks/` carried `flag: true` and the filter returned 12 at 10:45, then 11, 10 and 7 across the next two hours as workers completed their tasks. A shrinking set is the selector working, not the selector failing.
@@ -404,7 +407,7 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 pgrep -fl "<PRIOR_SID>" || echo "no process holding this session"
 ```
 
-A live pid → **wait for it to exit, then resume** (Step 3). JUMP is unavailable — there is no pane to activate. Observed 2026-09-13: `wezterm cli list` matched **0** panes for the task while pids `33052`/`33055` ran `cc-personal-deepseek --print … --session-id <sid>`; the branch logic below would have spawned onto it, putting two writers on one conversation.
+A live pid → **wait for it to exit, then resume** (Step 3). JUMP is unavailable — there is no pane to activate. Observed 2026-09-13: `wezterm cli list` matched **0** panes for the task while pids `33052`/`33055` ran the vault's `cc-*` launcher with `--print … --session-id <sid>`; the branch logic below would have spawned onto it, putting two writers on one conversation.
 
 **Then refuse if the session is live but reachable from nowhere here — this is the cluster worker.** A worker running as a pod in nuke holds **no pane** on this Mac and **no local process**, so both probes above read "not running here" for a session that is working right now — and branch 2 below would then resume it, putting a second writer on a live conversation. That is the same duplicate-writer failure the headless probe exists to prevent, one store over. Probe through the plugin's single reader; **never open the registry here**:
 
@@ -519,7 +522,7 @@ Requires `mcp__supervisor__*` in **this** session — see the recipe's precondit
 
 **Fallback when `mcp__supervisor__*` is unavailable.** Every `cc-*` launcher passes `--strict-mcp-config`, which turns its config file into an allowlist — plugin-provided servers are never loaded, so a vault whose `~/.claude/mcp-obsidian-<vault>.json` does not itself name `supervisor` carries no supervisor tools at all. Then spawn the wezterm way and send the work command afterwards.
 
-⚠️ **The fallback cannot produce a headless worker — a wezterm spawn is a tab by construction.** On such a vault the worker's prompts go to its own pane and this session cannot answer them, so "the operator never visits a worker tab" is not achievable there. `supervisor` is named in the **personal** and **brogrammers** launcher configs only; the other vault configs do not have it. If you are opening into a vault whose workers must be managed, add the entry there first — the install guide's § Step 2.
+⚠️ **The fallback cannot produce a headless worker — a wezterm spawn is a tab by construction.** On such a vault the worker's prompts go to its own pane and this session cannot answer them, so "the operator never visits a worker tab" is not achievable there. `supervisor` is named in the **private-personal** and **brogrammers** launcher configs only; the other vault configs do not have it. If you are opening into a vault whose workers must be managed, add the entry there first — the install guide's § Step 2.
 
 ### 3.0 Resolve the session's role → window + colour
 
@@ -628,7 +631,7 @@ vault-cli task set "<task>" claude_session_id "<uuid>" --vault <vault>
 ## Notes
 
 - Managers (`/supervisor:manager-loop`, `/supervisor:fleet-loop`) *recommend* opening sessions; this command is the executor — run it when the human approves.
-- **Global since 2026-09-15** (moved from `my-vault/.claude/commands/open.md`). The vault is now resolved at runtime instead of defaulting to `personal`; `topics_dir`, `claude_script` and `session_project_dir` all come from that vault's config entry. The primary vault keeps its own topic pages, so `/supervisor:open <topic>` still works there — and now works in another vault for task/goal, which the vault-local copy could not reach.
+- **Global since 2026-09-15** (moved from `my-vault/.claude/commands/open.md`). The vault is now resolved at runtime instead of defaulting to the primary vault; `topics_dir`, `claude_script` and `session_project_dir` all come from that vault's config entry. The primary vault keeps its own topic pages, so `/supervisor:open <topic>` still works there — and now works in another vault for task/goal, which the vault-local copy could not reach.
 - **Readiness gate measured 2026-09-23** (first real `/supervisor:open --flagged`, run from the Fleet Manager session at ~14:20): 4 rows; 2 live → JUMP, ungated; 2 CREATE-bound primary-vault rows gated concurrently, both HELD at 8/10 with all 5 hard gates passing. The probes' own label read `ready 8/10`, so § Step 1.5 now pins the bar in the prompt and parses the score. No recurring row was CREATE-bound in that run, so the recurring-passes claim is still unmeasured.
 - Replaces `.claude/commands/open-session.md`, removed 2026-09-13. The old command was task-only and its pane probe ended in STOP; the jump branch and the goal/topic resolution are the additions.
 - **Renaming a command? Grep all four roots, not just the vault.** The 2026-09-13 rename swept the vault tree and missed `~/.claude/commands/fleet-loop.md`, which kept telling the fleet manager to spawn via a name that no longer existed — the exact breakage the rename was meant to prevent, one directory outside where the grep looked. Caught by the Fleet Manager session, not by the sweep. The full path list:
