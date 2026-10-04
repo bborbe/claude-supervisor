@@ -275,6 +275,7 @@ def _save_start_cache(cache):
     """
     path = _start_cache_path()
     tmp = "%s.tmp.%d" % (path, os.getpid())
+    owned = False  # set once the `os.open` below succeeds — see the handler
     try:
         parent = os.path.dirname(path)
         if parent:
@@ -296,6 +297,7 @@ def _save_start_cache(cache):
         except FileExistsError:
             os.unlink(tmp)
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        owned = True
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({str(k): v for k, v in cache.items()}, fh, sort_keys=True)
         os.replace(tmp, path)
@@ -306,15 +308,28 @@ def _save_start_cache(cache):
         # contract from the one function whose entire job is to be skippable. And `tmp` is
         # named per process and never reused, so no other path will ever clean it: without the
         # unlink a single failed write is permanent litter in the state directory.
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        # ⚠️ **Only a file WE created is unlinked.** The name is pid-derived and therefore
+        # predictable, so between the `EEXIST` recovery's unlink and its retry another process
+        # could take the name — and an unconditional unlink here would delete *theirs*. Gating
+        # on `owned` keeps the cleanup aimed at our own leftovers. (Same-uid threat model: such
+        # a process could write the cache directly, so this is hygiene rather than escalation.)
+        if owned:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         return
 
 
-def _ps_starts(pids, refresh=False):
+def _ps_starts(pids, refresh=False, deadline=None):
     """`{pid: start-epoch}` for the pids `ps` reported. Never raises, never guesses.
+
+    ⚠️ **`deadline` is threaded in by a caller that makes TWO passes over one probe.** The
+    identity pass in `read_registry` calls this once for the whole occupied set and again for
+    the pids whose identity it declined to trust; without threading, each pass derives its own
+    `_PS_BUDGET` and a single `read_registry` spends **twice** the bound the module note
+    advertises — re-entering, on the mismatch path, the unbounded-fan-out shape this change
+    exists to remove. One deadline, two passes.
 
     Cache-first: a pid whose start time is known and younger than `_START_CACHE_TTL` is
     returned from the cache and never re-read. A pid absent from the cache is read with **one
@@ -350,7 +365,8 @@ def _ps_starts(pids, refresh=False):
     # halves of one bound measuring against different clocks: a backwards step inflates
     # `remaining` past the budget, a forwards one trips the break early. `now` stays wall-clock
     # because the cache epoch genuinely is a wall-clock fact.
-    deadline = time.monotonic() + _PS_BUDGET
+    if deadline is None:
+        deadline = time.monotonic() + _PS_BUDGET
     for pid in sorted(set(pids)):
         entry = cache.get(pid)
         if not refresh and entry is not None and 0 <= now - entry[1] < _START_CACHE_TTL:
@@ -411,7 +427,11 @@ def _ps_starts(pids, refresh=False):
         # dead pid per session the host has ever run. ⚠️ **The prune sits inside `learned`
         # deliberately:** in a fully-warm steady state no write happens, so no prune does
         # either — moving it out would buy a write on the hot path for no correctness gain.
-        for dead in [k for k, v in cache.items() if now - v[1] >= _START_CACHE_TTL]:
+        # ⚠️ **Pruned by "not currently servable", not by age.** `now - read_at >= TTL` misses a
+        # FUTURE-dated `read_at` — clock skew, or a hand-edited file — and that is the one input
+        # that would otherwise let the map grow without bound, since the read guard's `0 <=`
+        # lower bound already refuses to serve such an entry.
+        for dead in [k for k, v in cache.items() if not 0 <= now - v[1] < _START_CACHE_TTL]:
             cache.pop(dead, None)
         _save_start_cache(cache)
     return out
@@ -518,7 +538,11 @@ def read_registry(registry_dir=None):
     # Identity pass, after every file is read so the probe sees the whole occupied set at
     # once and can answer each pid from the shared cache.
     if occupied:
-        starts = _ps_starts([p for _, p, _ in occupied])
+        # ⚠️ **One deadline across BOTH passes** — see `_ps_starts`. Deriving a second one for
+        # the re-prove below would let a single `read_registry` spend twice the bound the
+        # module note advertises.
+        deadline = time.monotonic() + _PS_BUDGET
+        starts = _ps_starts([p for _, p, _ in occupied], deadline=deadline)
         # ⚠️ **A mismatch is re-proved UNCACHED before it is allowed to become a negative.**
         # Inside the TTL a cached entry is the start time of whatever process *last held* that
         # pid, so a pid the OS recycled within the window hands back the dead holder's start,
@@ -533,7 +557,17 @@ def read_registry(registry_dir=None):
         if doubtful:
             for pid in doubtful:
                 starts.pop(pid, None)
-            starts.update(_ps_starts(doubtful, refresh=True))
+            starts.update(_ps_starts(doubtful, refresh=True, deadline=deadline))
+        # ⚠️ **The hardening above is ASYMMETRIC, deliberately, and the asymmetry is the point.**
+        # A cached value is "whatever process last held that pid" for a MATCH exactly as for a
+        # mismatch, so a session that died and whose pid the OS recycled inside the TTL can
+        # still read LIVE off its own stale holder's start — where the pre-cache code answered
+        # ABSENT, since `ps` then always spoke for the current holder. That residual is accepted,
+        # not overlooked: re-proving a match uncached would mean re-reading every cached pid, and
+        # the cache would save nothing at all. It is bounded by the same measured reuse window as
+        # the other polarity (~238 s against a 60 s TTL), and it errs toward **LIVE — the
+        # direction that withholds** the resume permission, where the mismatch arm errs toward
+        # ABSENT, which grants it.
         for sid, pid, proc_start in occupied:
             out[sid]["alive"] = _pid_identity(pid, proc_start, starts)
     return out

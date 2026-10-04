@@ -493,6 +493,35 @@ class SessionLiveness(unittest.TestCase):
         self.assertIn("UNKNOWN", err.getvalue(), "a budget break must say so on stderr")
         self.assertIn("2 pid(s) unanswered", err.getvalue(), "and name how many were left")
 
+    def test_an_exhausted_threaded_deadline_spawns_nothing(self):
+        # ⚠️ The identity pass makes TWO calls over one probe. A second derived deadline would
+        # let one `read_registry` spend twice the bound the module note advertises — the
+        # unbounded-fan-out shape this change exists to remove, re-entered on the mismatch arm.
+        spawns = []
+        restore = self._stub_probe(spawns, lambda argv: "%s %s\n" % (argv[-1], self._PS_LINE))
+        try:
+            out = self.m._ps_starts([os.getpid()], deadline=time.monotonic() - 1)
+        finally:
+            restore()
+        self.assertEqual(spawns, [], "a threaded deadline already in the past spawns no `ps`")
+        self.assertEqual(out, {}, "and answers nothing, which is UNKNOWN rather than death")
+
+    def test_a_future_dated_entry_is_pruned_not_kept_forever(self):
+        # ⚠️ `now - read_at >= TTL` misses a FUTURE-dated `read_at` — clock skew, or a
+        # hand-edited file — and that is the one input that lets the map grow without bound,
+        # since the read guard's `0 <=` lower bound already refuses to serve such an entry.
+        never_occupied = 999999  # nothing will re-read it, so only the prune can remove it
+        self.m._START_CACHE = {never_occupied: [123, time.time() + 10_000]}
+        spawns = []
+        restore = self._stub_probe(spawns, lambda argv: "%s %s\n" % (argv[-1], self._PS_LINE))
+        try:
+            self.m._ps_starts([os.getpid()])  # learning one pid is what triggers the prune
+        finally:
+            restore()
+        self.assertNotIn(
+            never_occupied, self.m._START_CACHE, "a future-dated entry must be pruned, not kept"
+        )
+
     def test_a_failed_cache_write_neither_raises_nor_strands_its_temp_file(self):
         # ⚠️ `_ps_starts` documents "Never raises" and calls this on its way out, so the guard
         # is widened past `OSError` — an unserialisable value raises `TypeError` from
