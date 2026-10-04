@@ -96,6 +96,8 @@ The mode a worker opens in is a **fleet-wide decision**, so it lives in a file y
   "cluster": { "url": "https://claude-interactive.dev.nuke.benjamin-borbe.de", "token": "…" } }
 ```
 
+⚠️ `cluster.token` is a **secret**, and the server only ever reads this file — it never writes it, so it sets no permissions. `chmod 600 ~/.config/claude-supervisor/config.json` is yours to do, and worth doing before you put a token in it.
+
 `cluster.url` and `cluster.token` configure the **cluster spawn target** — `docs/fleet-surface.md` § Spawn a worker item 7. They live here rather than only in the server entry's `env` block for one reason worth knowing: an MCP `env` block is cached at **session start**, so a value added to it reaches no *running* session by any in-session route, while a file the **server** reads at its own start reaches it on a Reconnect. ⚠️ The env var still **wins** when it is set, so remove it once you move to the file — otherwise the file looks inert and nothing refuses.
 
 `mode` is `interactive` or `headless`. Four sources, highest first:

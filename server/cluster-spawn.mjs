@@ -122,6 +122,14 @@ export function resolveClusterTarget({ envUrl, envToken, file, path = 'the super
     { label: 'INTERACTIVE_AUTH_TOKEN', value: envToken, check: resolveAuthToken },
     { label: `"cluster.token" in ${path}`, value: section?.token, check: resolveAuthToken },
   ]
+  // ⚠️ A whitespace-only value counts as SET, deliberately, and the asymmetry with `''` is the
+  // point rather than an oversight. `''` is absence — an unset variable that got exported — so
+  // it falls through. `' '` is a value the operator put there, and the repo's rule is
+  // refuse-rather-than-trim (trimming here would silently repair a value the service compares
+  // exactly, so a mis-pasted token would match on this side and stop matching on the other).
+  // It therefore wins the source and is refused by resolveAuthToken's whitespace rule, naming
+  // the key. The cost is real and worth stating: a trailing newline in an exported env value
+  // shadows a perfectly good `cluster.token`, and the fix is to remove the env value.
   const set = (s) => s.value !== undefined && s.value !== null && s.value !== ''
   for (const { label, value, check } of [...urlSources, ...tokenSources]) {
     if (!set({ value })) continue
@@ -172,16 +180,16 @@ export function resolveClusterBaseUrl(raw, label = 'SUPERVISOR_CLUSTER_URL', con
     }
   }
   if (typeof raw !== 'string') {
-    return { error: `${label} is ${JSON.stringify(raw)}, which is not a URL` }
+    return { error: `${label} is a ${typeof raw}, which is not a URL` }
   }
   let url
   try {
     url = new URL(raw)
   } catch {
-    return { error: `${label} is ${JSON.stringify(raw)}, which is not a valid URL` }
+    return { error: `${label} is a ${typeof raw}, which is not a valid URL` }
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return { error: `${label} is ${JSON.stringify(raw)}, whose scheme is not http or https` }
+    return { error: `${label} is a ${typeof raw}, whose scheme is not http or https` }
   }
   return { baseUrl: url.origin + url.pathname.replace(/\/+$/, '') }
 }

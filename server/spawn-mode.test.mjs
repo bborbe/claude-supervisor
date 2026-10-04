@@ -141,6 +141,14 @@ test('the cluster key is KNOWN — warning about it is a false alarm about a key
   const nested = unknownKeyWarnings({ cluster: { urll: 'https://x.example' } }, '/c.json')
   assert.equal(nested.length, 1)
   assert.match(nested[0], /cluster\.urll/)
+
+  // A MALFORMED cluster is the case the descent cannot reach — listing `cluster` as known stops
+  // the top-level loop warning about it — so without its own branch it was silent at boot from
+  // both loops and surfaced only as a spawn-time refusal.
+  const malformed = unknownKeyWarnings({ cluster: 'https://x.example' }, '/c.json')
+  assert.equal(malformed.length, 1)
+  assert.match(malformed[0], /"cluster" as a string/)
+  assert.match(malformed[0], /IGNORED/)
 })
 
 test('an unknown key warns but never refuses', () => {

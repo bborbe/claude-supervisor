@@ -71,10 +71,23 @@ export function unknownKeyWarnings(file, path) {
   // Descended into for the same reason `spawn` is: a typo like "urll" is a typo in a key that
   // IS load-bearing, and the top-level loop above cannot see it.
   const cluster = file.cluster
-  if (cluster && typeof cluster === 'object' && !Array.isArray(cluster)) {
-    for (const key of Object.keys(cluster)) {
-      if (!KNOWN_CLUSTER_KEYS.includes(key)) {
-        warnings.push(`${path} has an unknown key "cluster.${key}" — ignored. Known: cluster.${KNOWN_CLUSTER_KEYS.join(', cluster.')}`)
+  if (cluster !== undefined && cluster !== null) {
+    if (typeof cluster !== 'object' || Array.isArray(cluster)) {
+      // ⚠️ The non-object case needs its OWN warning, and it is the case the descent below
+      // cannot reach. Listing `cluster` as known stops the top-level loop warning about it, so
+      // without this branch a malformed value — `"cluster": "https://…"` — was silent at boot
+      // from BOTH loops and surfaced only as a spawn-time refusal. That is the same failure this
+      // key was added to fix, one level down: a key that is read but wrong is as quiet as a key
+      // that is read and reported unread.
+      warnings.push(
+        `${path} has "cluster" as a ${typeof cluster}, which is not an object — it is IGNORED, and a ` +
+          `cluster spawn will refuse until it is. Expected {"url": "…", "token": "…"}.`,
+      )
+    } else {
+      for (const key of Object.keys(cluster)) {
+        if (!KNOWN_CLUSTER_KEYS.includes(key)) {
+          warnings.push(`${path} has an unknown key "cluster.${key}" — ignored. Known: cluster.${KNOWN_CLUSTER_KEYS.join(', cluster.')}`)
+        }
       }
     }
   }
