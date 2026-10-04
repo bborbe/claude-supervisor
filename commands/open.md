@@ -53,7 +53,7 @@ If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a
 
 ⚠️ **This step is for the single-name path only. `--flagged` does NOT use it** — the batch scans every vault with a `tasks_dir` (Step 0.5), so resolving one vault from cwd would be exactly the narrowing that hid 8 `brogrammers` candidates and 2 `octopusagent` ones on 2026-09-21.
 
-**Never hardcode a vault.** Precedence: `--vault` flag → the vault whose `path` contains the cwd → `default_vault` from the config. **None of the three → STOP.** Command substitution discards the resolver's exit status, so the block below ends with an explicit `[ -n "$VAULT" ]` guard that exits non-zero rather than letting Step 0 continue against an empty vault.
+**Never hardcode a vault.** Precedence: `--vault` flag → the vault whose `path` contains the cwd → `default_vault` from the config. **If the resolver's two arms both fail, STOP** — command substitution discards the resolver's exit status, so the block below ends with an explicit `[ -n "$VAULT" ]` guard that exits non-zero rather than letting Step 0 continue against an empty vault. ⚠️ **The `--vault` flag is deliberately NOT validated here.** Bash's `${VAR:-…}` expands lazily, so a non-empty `--vault` skips the resolver — and the membership check with it. That is intentional (an explicit operator choice, and `vault-cli` errors loudly on a name it does not know), but it means `--vault personal` still fails *downstream* rather than here.
 
 ```bash
 VAULT="${VAULT_FLAG:-$(python3 -c "
@@ -68,7 +68,10 @@ if hit:
     print(hit[0])
 else:
     cfg=os.path.expanduser('~/.config/vault-cli/config.yaml')
-    d2=yaml.safe_load(open(cfg))
+    try:
+        d2=yaml.safe_load(open(cfg))
+    except OSError:
+        d2=None
     v=d2.get('default_vault') if isinstance(d2, dict) else None
     if not isinstance(v, str) or not v or v not in {x.get('name') for x in d}:
         raise SystemExit('cwd is not inside any configured vault and ' + cfg + ' carries no usable default_vault - pass --vault <name>')
