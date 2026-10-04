@@ -1708,6 +1708,11 @@ def verdicts_shape_error(parsed, stored=None) -> str | None:
     carry the reason. Omitting `stored` is the strict reading, correct only for a caller
     that genuinely has no prior cache.
 
+    A key carrying `…` is refused outright, and it is the only name rule here that reads
+    the *name* rather than the entry: a name rendered short is not a name, and guessing its
+    remainder is what stored six stale titles on 2026-10-02. `ABBREVIATION_MARKER` above
+    carries the reasoning for why that marker and not the ASCII `...`.
+
     The empty-object case is refused for the reason `bucket_shape_error` gives: `{}` gates
     nothing while looking like a cache that was written.
     """
