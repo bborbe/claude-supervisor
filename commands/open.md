@@ -70,11 +70,11 @@ else:
     cfg=os.path.expanduser('~/.config/vault-cli/config.yaml')
     d2=yaml.safe_load(open(cfg))
     v=d2.get('default_vault') if isinstance(d2, dict) else None
-    if not v:
+    if not isinstance(v, str) or not v:
         raise SystemExit('cwd is not inside any configured vault and ' + cfg + ' carries no usable default_vault - pass --vault <name>')
     print(v)
 ")}"
-[ -n "$VAULT" ] || { echo '❌ no vault resolved — pass --vault <name>' >&2; exit 1; }
+[ -n "$VAULT" ] || { echo '❌ no vault resolved — stopping' >&2; exit 1; }
 ```
 
 **The `cwd==p` arm is load-bearing, not defensive.** A session started in a vault is normally *at* the vault root, where `startswith(p + '/')` is false — measured 2026-09-15: from `~/Documents/Obsidian/other-vault`, the equality held and the `+os.sep` form matched nothing, so every vault-root session would have silently fallen through to `default_vault` and run the whole command against the wrong vault.
