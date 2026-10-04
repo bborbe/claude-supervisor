@@ -133,12 +133,19 @@ def tracked_ids(tracked_path, tasks_dir):
         print(f"WATCH WARN: tracked set is empty ({tracked_path}) — NOTHING is "
               f"being watched; this is not a quiet sweep",
               file=sys.stderr, flush=True)
+    unresolved = []
     for name in names:
         path = os.path.join(tasks_dir, name + ".md")
         try:
             with open(path, encoding="utf-8") as fh:
                 txt = fh.read()
         except OSError:
+            # NOT a silent skip. A tracked name that resolves to no file
+            # contributes no sessions, and `fleet-sweep-reader` resolves the same
+            # names under `tasks_dir` **then `goals_dir` — may be a goal** — so a
+            # manager whose tracked set holds a goal would otherwise watch
+            # nothing for it, quietly.
+            unresolved.append(name)
             continue
         fm = txt.split("---", 2)[1] if txt.startswith("---") else ""
         ids = []
@@ -155,6 +162,22 @@ def tracked_ids(tracked_path, tasks_dir):
             i = i.strip().strip('"\'')
             if len(i) >= 8:
                 out[i[:8]] = name
+    if unresolved:
+        print(f"WATCH WARN: {len(unresolved)} tracked name(s) resolve to no file "
+              f"under {tasks_dir} ({', '.join(sorted(unresolved)[:5])}"
+              f"{'…' if len(unresolved) > 5 else ''}) — they contribute NO "
+              f"sessions. A tracked name may be a GOAL rather than a task "
+              f"(`fleet-sweep-reader` resolves both; this watcher reads "
+              f"--tasks-dir only).", file=sys.stderr, flush=True)
+    if names and not out:
+        # The emptiness test is on the RESULT, not the name list. A tracked set
+        # of goals, or of task files carrying no `claude_session_id`, leaves
+        # `names` non-empty while nothing at all is watched — the exact shape
+        # this module's docstring forbids: a broken watcher looking precisely
+        # like a quiet sweep.
+        print(f"WATCH WARN: {len(names)} tracked name(s) yielded ZERO sessions "
+              f"({tracked_path}) — NOTHING is being watched; this is not a "
+              f"quiet sweep", file=sys.stderr, flush=True)
     return out
 
 
@@ -370,6 +393,27 @@ def gated_keys(state):
     return sorted(sid8 for sid8, (_, _, _, v) in state.items() if v is True)
 
 
+def stable_sessions(prev, pending, key):
+    """The sessions whose gated membership has held across the last two polls.
+
+    The stability gate's whole decision, extracted so the honest-`CLEARED`
+    question can be tested directly rather than only by driving the poll loop.
+
+    ⚠️ **Per session, never whole-set.** A set alternating `{A}` / `{A,B}` never
+    equals its own previous value, so a whole-set test withholds EVERY session's
+    transition for as long as ANY one of them churns — including A's own
+    `CLEARED` when A is answered. That is this file's own defect direction (a gate
+    stuck open) reached through a peer's churn. Found in review 2026-10-04.
+
+    `prev` is in the universe on purpose: a departure is only stable once the
+    absence is two polls old, and a session that has left both `key` and `pending`
+    is still in `prev` and still owes its transition.
+    """
+    key_set, pending_set = set(key), set(pending or [])
+    return {s for s in key_set | pending_set | set(prev or [])
+            if (s in key_set) == (s in pending_set)}
+
+
 def transitions(prev, key, state):
     """The transitions one poll emits — `(kind, sid8, label, detail)` records.
 
@@ -479,6 +523,12 @@ def main(argv=None):
     ap.add_argument("--interval", type=int, default=POLL_SECONDS)
     ap.add_argument("--once", action="store_true",
                     help="one poll, print the verdict, exit (diagnostic only)")
+    ap.add_argument("--max-polls", type=int, default=None,
+                    help="stop after N polls (diagnostic/test only; default: "
+                         "run until killed). ⚠️ `--once` returns BEFORE the "
+                         "stability gate and the commit loop, so it cannot "
+                         "exercise the path that decides whether a `CLEARED` is "
+                         "honest — this flag is how that path is driven.")
     args = ap.parse_args(argv)
 
     state_path = state_path_for(args.state, args.tracked)
@@ -503,8 +553,12 @@ def main(argv=None):
     # "doesn't" as records interleave, and a single poll reads that as a gate
     # opening and closing. A genuine gate holds for minutes; churn does not. So
     # require the new state to survive one poll before announcing it.
-    pending = None
+    # The last COMMITTED gated set, held as a set because it now advances PER
+    # SESSION rather than by whole-set replacement — see the stability gate below.
+    prev = set(prev or [])
+    pending = None          # the previous poll's gated set
     warned = set()
+    polls = 0
     while True:
         try:
             state = probe(args.tracked, args.tasks_dir, args.projects_root,
@@ -517,35 +571,58 @@ def main(argv=None):
                 held = sorted(s for s, v in state.items() if v[3] is None)
                 print(f"gated: {len(key)}  unregistered(held): {len(held)}")
                 return 0
-            if key == pending and key != prev:
-                # Diff PER SESSION, not per key-set: announcing every member of
-                # the new set re-fires an unchanged gate whenever any OTHER
-                # session leaves it — measured 2026-10-01, one session dropped
-                # out and another, untouched, was re-printed as NEW GATE.
-                for kind, sid8, label, detail in transitions(prev, key, state):
+            # STABILITY GATE — PER SESSION. A worker mid-turn flips between "has
+            # a closer" and "doesn't" as records interleave, and a single poll
+            # reads that as a gate opening and closing; a genuine gate holds for
+            # minutes. So each session's membership must survive one poll before
+            # its transition is announced.
+            #
+            # ⚠️ **PER SESSION, never whole-set.** The earlier form was
+            # `key == pending and key != prev`, which withholds EVERY session's
+            # transition for as long as ANY one of them churns: a set alternating
+            # `{A}` / `{A,B}` never equals its own previous value, so `prev` never
+            # advanced and A's own `CLEARED` was never emitted. That is this
+            # file's own defect direction — a gate stuck open — reached through a
+            # peer's churn rather than the session's own. The original comment's
+            # premise ("a genuine gate holds for minutes; churn does not") is true
+            # per session and false for the set. Found in review 2026-10-04.
+            #
+            # The diff stays PER SESSION too: announcing every member of the new
+            # set re-fires an unchanged gate whenever any OTHER session leaves it
+            # — measured 2026-10-01, one session dropped out and another,
+            # untouched, was re-printed as NEW GATE.
+            if pending is not None:
+                stable = stable_sessions(prev, pending, key)
+                committed = False
+                for kind, sid8, label, detail in transitions(sorted(prev), key, state):
+                    if sid8 not in stable:
+                        continue
                     # A HELD transition is recorded, never announced: a dead
                     # worker is neither progress nor a gate, and reporting it as
                     # either is the silent direction this file exists to close.
-                    if kind == "HELD":
-                        log_event(log_path, kind, sid8, label, detail)
-                        continue
                     if kind == "NEW GATE":
                         print(f"NEW GATE  {sid8}  {label[:46]}  ::  {detail}",
                               flush=True)
+                        prev.add(sid8)
+                    elif kind == "HELD":
+                        prev.discard(sid8)
                     else:
                         print(f"CLEARED  {sid8}", flush=True)
+                        prev.discard(sid8)
                     log_event(log_path, kind, sid8, label, detail)
-                prev = key
-                # tmp + os.replace, never a bare `open(state_path, "w")`: that
-                # truncates first, so a kill or a serialisation error part-way
-                # through leaves a truncated or zero-byte file — which the read
-                # path above cannot distinguish from a first run, and answers with
-                # a `NEW GATE` burst. Same convention as `fleet-snapshot.py:56`.
-                os.makedirs(os.path.dirname(state_path), exist_ok=True)
-                tmp_path = state_path + ".tmp"
-                with open(tmp_path, "w") as fh:
-                    json.dump(prev, fh)
-                os.replace(tmp_path, state_path)
+                    committed = True
+                if committed:
+                    # tmp + os.replace, never a bare `open(state_path, "w")`:
+                    # that truncates first, so a kill or a serialisation error
+                    # part-way through leaves a truncated or zero-byte file —
+                    # which the read path above cannot distinguish from a first
+                    # run, and answers with a `NEW GATE` burst. Same convention
+                    # as `fleet-snapshot.py:56`.
+                    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+                    tmp_path = state_path + ".tmp"
+                    with open(tmp_path, "w") as fh:
+                        json.dump(sorted(prev), fh)
+                    os.replace(tmp_path, state_path)
             pending = key
         except Exception as exc:  # never let one bad poll kill the watch
             # stderr, never stdout: stdout is the event stream the `Monitor`
@@ -554,6 +631,9 @@ def main(argv=None):
             # WARN lines on stderr.
             print(f"WATCH ERROR: {type(exc).__name__}: {exc}",
                   file=sys.stderr, flush=True)
+        polls += 1
+        if args.max_polls is not None and polls >= args.max_polls:
+            return 0
         time.sleep(args.interval)
 
 

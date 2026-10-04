@@ -28,6 +28,7 @@ import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SID = "d91bf7c1-0000-0000-0000-000000000000"
@@ -459,6 +460,105 @@ class UnknownCloserTest(unittest.TestCase):
                           "a degraded transcript read must not be silent")
         finally:
             shutil.rmtree(fx.dir, ignore_errors=True)
+
+
+class StabilityGateTest(unittest.TestCase):
+    """The gate is per SESSION, never per key-set.
+
+    A whole-set test (`key == pending`) withholds EVERY session's transition for
+    as long as ANY one of them churns: a set alternating `{A}` / `{A,B}` never
+    equals its own previous value, so `prev` never advances and A's own `CLEARED`
+    is never emitted. That is this file's own defect direction — a gate stuck
+    open — reached through a peer's churn instead of the session's own. Found in
+    review 2026-10-04.
+    """
+
+    def test_a_peers_churn_does_not_mask_another_sessions_stability(self):
+        stable = watch.stable_sessions({"aaaa1111"},
+                                       ["aaaa1111", "bbbb2222"],
+                                       ["aaaa1111"])
+        self.assertIn("aaaa1111", stable,
+                      "A held its membership across both polls")
+        self.assertNotIn("bbbb2222", stable,
+                         "B genuinely churned and must still be debounced")
+
+    def test_a_newly_gated_session_waits_one_poll(self):
+        # The debounce itself: in `key` but not in `pending` is not yet stable,
+        # so a single-poll flicker is never announced.
+        self.assertEqual(watch.stable_sessions(set(), [], ["aaaa1111"]), set())
+
+    def test_a_settled_gate_is_stable(self):
+        self.assertEqual(
+            watch.stable_sessions(set(), ["aaaa1111"], ["aaaa1111"]),
+            {"aaaa1111"})
+
+    def test_a_departure_needs_two_polls(self):
+        # Gone from `key` but still in `pending` — not yet stable.
+        self.assertNotIn("aaaa1111",
+                         watch.stable_sessions({"aaaa1111"}, ["aaaa1111"], []))
+        # Absent from both, still in `prev` — stable, and it owes a transition.
+        self.assertIn("aaaa1111", watch.stable_sessions({"aaaa1111"}, [], []))
+
+
+class CommitLoopTest(unittest.TestCase):
+    """The commit loop, driven for real — `--once` returns before it.
+
+    Everything this watcher guarantees about `CLEARED` honesty is decided inside
+    this loop: the stability gate, the HELD-logged-not-printed branch, and the
+    atomic state write. `--once` returns at the top of the loop, so before this
+    test the tested units were the honest parts and the untested one was where
+    dishonesty is decided. Found in review 2026-10-04.
+    """
+
+    GATED = {"aaaa1111": ("A", "pick — 1. alpha", "idle+closer", True)}
+
+    def _drive(self, scripted):
+        """Run main() over a scripted sequence of probe() results."""
+        seq = list(scripted)
+        out, err = io.StringIO(), io.StringIO()
+
+        def fake_probe(*a, **kw):
+            return seq.pop(0) if seq else {}
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "probe", fake_probe), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 redirect_stdout(out), redirect_stderr(err):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", str(len(scripted))])
+        return out.getvalue()
+
+    def test_a_gate_is_announced_once_and_cleared_once(self):
+        clear = {"aaaa1111": ("A", "registry:busy", "registry:busy", False)}
+        out = self._drive([{}, self.GATED, self.GATED, clear, clear])
+        self.assertEqual(out.count("NEW GATE"), 1, out)
+        self.assertEqual(out.count("CLEARED"), 1, out)
+        self.assertIn("CLEARED  aaaa1111", out)
+
+    def test_an_unregistered_session_is_held_and_never_printed(self):
+        held = {"aaaa1111": ("A", "unregistered", "unregistered", None)}
+        out = self._drive([{}, self.GATED, self.GATED, held, held])
+        self.assertEqual(out.count("NEW GATE"), 1, out)
+        self.assertNotIn("CLEARED", out,
+                         "an unregistered session is HELD, never cleared")
+
+    def test_a_churning_set_does_not_withhold_a_settled_clear(self):
+        # A is gated throughout; B flips on every poll. Under the whole-set gate
+        # this sequence emits nothing at all, including A's own CLEARED.
+        b_on = {"bbbb2222": ("B", "pick — 1. alpha", "idle+closer", True)}
+        a_clear = {"aaaa1111": ("A", "registry:busy", "registry:busy", False)}
+        out = self._drive([
+            {}, self.GATED,
+            dict(self.GATED, **b_on),
+            self.GATED,
+            dict(a_clear, **b_on),
+            a_clear,
+            a_clear,
+        ])
+        self.assertIn("CLEARED  aaaa1111", out,
+                      "a peer's churn must not withhold A's clear")
 
 
 class MissingTranscriptTest(unittest.TestCase):
