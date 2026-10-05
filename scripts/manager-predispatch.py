@@ -1083,6 +1083,14 @@ def digest_of(tracked: list[dict]) -> str:
     all" and a gate opening changes no row's *eligibility*. Every other narrowing in
     this file is named; this one is named too.
 
+    ⚠️ **The first run after an UPGRADE reports one spurious CHANGE, and that is expected
+    rather than a fault.** The liveness term's shape changed (the raw word -> a bare
+    `0`/`1`), and the stored record carries no version, so every subject holding a
+    pre-collapse digest compares unequal exactly once: `load_stored` returns the old
+    string and `digest_moved` fires with nothing about the tree moved. Bounded and
+    fail-open -- a CHANGE authorises a sweep, it never suppresses one -- and self-healing:
+    the loop's own `--save` rewrites the digest in the new format on its first tick.
+
     ⚠️ **The hold is a digest input, and deliberately NOT a suppression here.** This gate
     decides whether the sweep runs at all, so suppressing it for a held session would
     stop the sweep and the held row would never render -- the exact failure the hold
