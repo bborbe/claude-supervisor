@@ -28,6 +28,7 @@ import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } f
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
+import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
@@ -910,22 +911,10 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
   }
 }
 
-// Stamp the named task's `claude_session_id` with the created session's id.
-//
-// Through `vault-cli`, which owns both the vault lookup and the frontmatter write — the
-// server already shells out to it for the launcher (`vault-cli config list`), so this adds no
-// new dependency. `--vault` is passed whenever the caller supplies one, because task names
-// collide across boards and a bare name can resolve to the wrong one.
-function bindSessionToTask({ task, vault, sessionId }) {
-  const args = ['task', 'set', task, 'claude_session_id', sessionId]
-  if (vault) args.push('--vault', vault)
-  const proc = spawnSync('vault-cli', args, { encoding: 'utf8' })
-  if (proc.error) return { error: `vault-cli could not be run: ${proc.error.message}` }
-  if (proc.status !== 0) {
-    return { error: (proc.stderr || proc.stdout || `vault-cli exited ${proc.status}`).trim() }
-  }
-  return { vault: vault ?? null }
-}
+// `bindSessionToTask` lives in task-binding.mjs — it is no longer a one-line `task set`,
+// and the rule it implements (stamp only when the field is empty, otherwise record the
+// session in `metrics_sessions`) is the kind of thing that needs a test beside it. See that
+// module's header for why displacing an existing owner is the defect it exists to prevent.
 
 async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed }) {
   const id = `agent_${++seq}`
