@@ -21,6 +21,13 @@ defect the filter has actually shipped or would ship:
     membership rather than on an empty spawner, so a WORKER whose
     `parent_session` never resolved is not mistaken for a manager -- and a dead
     peer manager's own gate stays kept (SC3).
+  * an EMPTY feed is a SUCCESSFUL READ, not a usage error -- the guard tests
+    whether a source was SUPPLIED, not whether it produced rows. Collapsing the
+    two made the documented watcher arm exit 2 on every quiet tick, so a
+    `Monitor` armed with it died with `script failed (exit 2)` within seconds
+    (measured 2026-10-05, manager loop tick 154). The negative control is pinned
+    beside it: a call with neither `--pane` nor `--feed` still exits 2, so the
+    fix cannot be "delete the guard".
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -704,6 +711,81 @@ class SummaryLine(unittest.TestCase):
         self.assertIn("emit: 0", result.stderr, result.stderr)
         self.assertIn("dropped(peer-manager): 1", result.stderr, result.stderr)
         self.assertIn("dropped(peer-manager-own): 1", result.stderr, result.stderr)
+
+
+class EmptyFeedIsNotAUsageError(unittest.TestCase):
+    """An empty feed is a successful read; only a sourceless call is an error.
+
+    The two states that leave the derived row set empty are different facts, and
+    the guard used to collapse them. `--feed` with no `[<pane>]` rows is a
+    *successful* read of an empty feed -- the common case -- while a call
+    carrying neither `--pane` nor `--feed` is malformed. Testing the row set
+    instead of the source made the documented watcher arm
+
+        who-needs-me.py --section needs-you | gate-owner-filter.py --feed --self <sid>
+
+    exit 2 with `pass --pane, --feed, or both` on every quiet tick, so a
+    `Monitor` armed with it died with `script failed (exit 2)` within seconds
+    while its sibling watchers stayed up: the manager's push channel was dead
+    exactly when the fleet was quiet, and the failure read as a bad command
+    rather than as a lost watch. Measured 2026-10-05 (manager loop tick 154) --
+    the feed read `Needs you (0)` / `Nothing needs you.` and the pipeline died
+    with the usage error, reproduced in both argument orders and against a
+    synthetic empty feed on stdin.
+
+    Both halves are pinned. The empty-feed cases would pass on a filter that
+    deleted the guard outright, so the sourceless call is asserted beside them:
+    the fix is "test the source", never "drop the check".
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.ledger = os.path.join(self.dir, "ledger")
+        for path in (self.state, self.registry, self.ledger):
+            os.makedirs(path)
+
+    def invoke(self, *argv, feed=None):
+        return subprocess.run(
+            [sys.executable, _SCRIPT,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", self.ledger,
+             "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
+            input=feed, capture_output=True, text=True,
+        )
+
+    def test_an_empty_feed_exits_zero_and_emits_nothing(self):
+        result = self.invoke("--feed", "--self", ME, feed="Needs you (0)\nNothing needs you.\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "", result.stdout)
+        self.assertIn("gates: 0", result.stderr, result.stderr)
+
+    def test_argument_order_does_not_matter(self):
+        """The measured failure reproduced in both orders, so both are pinned."""
+        result = self.invoke("--self", ME, "--feed", feed="Needs you (0)\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_an_empty_stdin_is_the_same_read(self):
+        """No header line at all -- the synthetic case the reproduction used."""
+        result = self.invoke("--feed", "--self", ME, feed="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_a_call_with_no_source_at_all_still_errors(self):
+        """The negative control: widening the guard must not delete it."""
+        result = self.invoke("--self", ME)
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("pass --pane, --feed, or both", result.stderr)
+
+    def test_pane_alone_is_still_a_source(self):
+        """`--pane` is the guard's other half and must keep working."""
+        result = self.invoke("--pane", "372", "--self", ME)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gates: 1", result.stderr, result.stderr)
 
 
 if __name__ == "__main__":
