@@ -124,6 +124,15 @@ def is_store_item_id(candidate):
 MECHANISM = "message"
 
 
+# The producer kinds the store accepts. It validates this field against a closed
+# enum and rejects anything else with a `400` naming the field, so an invented
+# value costs a round trip and still does not tell the caller what the valid set
+# is — the failure reads as a store fault rather than a bad argument. Pinning the
+# enum here lets argparse reject it before the request is sent, and list the
+# accepted values in `--help`.
+PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+
+
 def resolved_session_id(environ=None):
     """The session id of whoever is running this arm, or "".
 
@@ -489,7 +498,7 @@ def main(argv=None):
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
     post.add_argument("--producer-id", default="")
-    post.add_argument("--producer-kind", default="session")
+    post.add_argument("--producer-kind", default="session", choices=PRODUCER_KINDS)
     post.add_argument("--liveness-ref", default="")
     post.add_argument("--interrupt-class", default="pick")
     post.add_argument("--expires-at", default="")
@@ -504,7 +513,7 @@ def main(argv=None):
     batch.add_argument("--task", action="append", default=[], required=True)
     batch.add_argument("--context", default="")
     batch.add_argument("--producer-id", default="")
-    batch.add_argument("--producer-kind", default="session")
+    batch.add_argument("--producer-kind", default="session", choices=PRODUCER_KINDS)
     batch.add_argument("--liveness-ref", default="")
     batch.add_argument("--interrupt-class", default="pick")
     batch.add_argument("--expires-at", default="")
