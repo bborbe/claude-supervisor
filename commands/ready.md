@@ -2,7 +2,7 @@
 description: "Ready ONE named task and open it — run the audit → repair → re-audit loop in a sub-agent until the audit returns zero hard-gate failures, then act on the Gate 2 verdict: open via `/supervisor:open`, or escalate naming the gap. Cross-tier — runnable by the fleet manager and by a goal/topic manager. It readies a task; it never approves one."
 allowed-tools:
   - Bash(vault-cli:*)
-  - Bash(grep:*)
+  - Bash(python3:*)
   - Task
 argument-hint: "<task name> [--vault <vault>]"
 ---
@@ -25,11 +25,10 @@ prints a verdict line and nothing else; every gap and every fix diff stays in th
 
 ## Process
 
-### 1. Resolve the task
+### 1. Resolve the task — exactly, never fuzzily
 
-`vault-cli --vault "<vault>" task search "<name>"`. Exactly one match → continue. More than one →
-print each and STOP; task titles are not namespaced, so never guess. None → print the closest
-candidates and STOP; never create a task from an unmatched name.
+`python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/inbox.py --resolve "<name>"` — the exact resolver; append `--vault "<vault>"` when `$ARGUMENTS` carried one.
+Parse `$ARGUMENTS` yourself: `<name>` is the non-flag remainder, quoted. Branch on the exit code per `commands/inbox.md`'s "Resolve the vault first": `rc 0` → continue; `rc 2` / `rc 3` / `rc 4` → report and **STOP**. ⚠️ Never `vault-cli task search` — it is a **semantic** search, so this step's own "exactly one match" is unreachable; never create a task from an unmatched name.
 
 ### 2. Gate 1 — approval, before any audit
 
