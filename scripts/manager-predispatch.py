@@ -1010,16 +1010,28 @@ def liveness_change_term(t: dict) -> int:
     docstring's *"a worker dying changes session liveness ... this is the criterion the
     whole gate is graded on"* is why the term is COLLAPSED rather than deleted: `live`
     and `parked` are both *alive* and hash identically, while an owner that has gone
-    `LIVE -> ABSENT` (`LIVENESS_NONE` with a session id present) still moves the digest.
-    Deleting the term satisfies the churn half and regresses this one -- see
-    `TestLiveness.test_a_worker_dying_still_moves_the_digest`, which is that guard.
+    `LIVE -> ABSENT` still moves the digest. Deleting the term satisfies the churn half
+    and regresses this one -- see `TestLiveness.test_a_worker_dying_still_moves_the_digest`.
 
-    A row with NO session id also reads `LIVENESS_NONE`, and is deliberately NOT death:
-    nothing died, and hashing it as dead would make every never-started row move the
-    digest -- which the `session` term above already covers when one gains an owner.
+    ⚠️ **It is deliberately UNGUARDED, and that is load-bearing rather than lax.** An
+    earlier cut of this function returned `0` for a row with no `session` key, to keep a
+    never-started row off the death term. That silently dropped death detection for every
+    row whose ids live only in `metrics_sessions`: `read_task` sets `session` from the
+    frontmatter `claude_session_id` ALONE (line 555) while `sessions` carries the whole
+    id set (line 556, `session_id_set`), and `liveness_of` probes `sessions` FIRST with
+    `roster_owner` as the fallback when that set is empty. **Any guard keyed on a subset
+    of the ownership signals regresses whatever shape it excludes**, because pre-fix
+    EVERY row's `live -> none` moved the digest -- so the guard's cost is a silently
+    missed death, and its only benefit is suppressing a transition that cannot occur.
+
+    ⚠️ **No guard is needed, because a never-started row cannot churn.** Such a row reads
+    `liveness_of` -> `roster_owner`, which is `none` unless a live roster name matches --
+    and `none` on both sides of a comparison is the same value, so it moves nothing. The
+    only transitions this term can make are `alive -> absent` and `absent -> alive`, both
+    real ownership changes. `TestLiveness.test_death_is_detected_for_every_ownership_shape`
+    pins the shapes; `test_liveness_churn_alone_does_not_move_the_digest` pins the churn
+    half.
     """
-    if not t.get("session"):
-        return 0
     return int(t.get("liveness", LIVENESS_NONE) == LIVENESS_NONE)
 
 

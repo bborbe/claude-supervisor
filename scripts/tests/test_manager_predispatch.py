@@ -518,31 +518,49 @@ class TestLiveness(Base):
         dead = self.digest_with("s-dies")
         self.assertNotEqual(live, dead, "a worker dying did not move the digest")
 
-    def test_a_session_less_row_is_not_death(self):
-        """The guard the collapse rests on: `LIVENESS_NONE` is death ONLY with a session id.
+    def test_death_is_detected_for_every_ownership_shape(self):
+        """The term is UNGUARDED on purpose — a guard on any subset of the ownership
+        signals drops death detection for the shapes it excludes.
 
-        Without it a never-started row hashes as dead — the same term a genuinely absent
-        owner produces — so the two populations become indistinguishable in the digest,
-        and dropping the guard would leave this suite green while re-merging them.
+        `read_task` sets `session` from the frontmatter `claude_session_id` alone while
+        `sessions` carries the whole id set, and `liveness_of` probes `sessions` FIRST.
+        A row whose ids live only in `metrics_sessions` is therefore owned, and its
+        owner's death must move the digest exactly as a frontmatter-owned row's does.
+        An earlier cut keyed the term on `session` alone and silently missed that shape.
         """
         term = self.m.liveness_change_term
+        dead = self.m.LIVENESS_NONE
+
+        # Death, across every shape ownership is expressed in.
         self.assertEqual(
-            term({"name": "T", "session": "", "liveness": self.m.LIVENESS_NONE}),
-            0,
-            "a never-started row hashed as death",
-        )
-        self.assertEqual(
-            term({"name": "T", "session": "s-gone", "liveness": self.m.LIVENESS_NONE}),
+            term({"name": "T", "session": "s-1", "liveness": dead}),
             1,
-            "an absent owner did not hash as death",
-        )
-        # Both ALIVE verdicts collapse to the same value — that IS the churn fix.
-        self.assertEqual(
-            term({"name": "T", "session": "s-gone", "liveness": self.m.LIVENESS_LIVE}), 0
+            "a frontmatter-owned row's death was not detected",
         )
         self.assertEqual(
-            term({"name": "T", "session": "s-gone", "liveness": self.m.LIVENESS_PARKED}), 0
+            term({"name": "T", "session": "", "sessions": ["s-1"], "liveness": dead}),
+            1,
+            "an id-set-only row's death was not detected",
         )
+        # A never-started row hashes the SAME value on both sides of a comparison, so it
+        # cannot churn — which is why it needs no guard of its own.
+        self.assertEqual(
+            term({"name": "T", "session": "", "liveness": dead}),
+            1,
+            "a never-started row must hash the death term (constant, so it moves nothing)",
+        )
+
+        # Every ALIVE verdict collapses to the same value — that IS the churn fix.
+        for shape in (
+            {"name": "T", "session": "s-1"},
+            {"name": "T", "session": "", "sessions": ["s-1"]},
+        ):
+            for verdict in (self.m.LIVENESS_LIVE, self.m.LIVENESS_PARKED):
+                self.assertEqual(
+                    term(dict(shape, liveness=verdict)),
+                    0,
+                    "%s did not collapse to the alive term" % verdict,
+                )
 
     def test_an_unenriched_row_defaults_to_the_death_term(self):
         """The default is deliberate, not an oversight — and it is the OPPOSITE direction
