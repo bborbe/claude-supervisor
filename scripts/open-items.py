@@ -16,7 +16,8 @@ Kinds:
 
 The three close paths are distinct claims and must not be collapsed into one another:
 `answer` (the operator replied to a question), `close --evidence` (the entry's own resolution
-condition was met, verified on disk), and `withdraw` (the entry was never an ask at all). A
+condition was met, verified on disk), and `withdraw` (the operator withdrew the ask, so it
+should not be outstanding — filed in error, superseded, or never real). A
 withdrawal records `operator withdrew it: <reason>` and is REFUSED on `asked-of-you`, whose
 only close path is `answer` — a withdrawal there would forge the operator attribution that
 kind exists to protect. Without this verb an entry naming no task could never reach a terminal
@@ -720,13 +721,32 @@ def cmd_set(args):
             "  Record the link with `note` instead:  note --id %s --text \"<the link>\""
             % item["id"]
         )
+    if args.resolves_on is not None and not args.resolves_on.strip():
+        # REFUSE. An empty close condition is one nothing can check — the same defect the
+        # `⚠️ NO TASK` marker exists to make visible. Omit the flag to leave it unchanged.
+        sys.exit(
+            "error: set --resolves-on needs a non-empty value — nothing written.\n"
+            "  An empty close condition is one nothing can check. Omit the flag to leave\n"
+            "  the entry's existing condition unchanged."
+        )
     dirs = task_dirs_for(args)
+    previous = item.get("task")
     item["task"] = args.task
     item["task_path"] = resolve_task(args.task, dirs)
     if args.resolves_on:
         item["resolves_on"] = args.resolves_on
     save(data)
     print("set task on %s [%s]: %s" % (item["id"], item["kind"], args.task))
+    if previous and previous != args.task:
+        # WARN, never refuse: re-pointing is the legitimate way to correct a wrong title, and
+        # a wrong one cannot fake a resolution because `list` re-resolves on every read. But a
+        # silent re-point rewrites a decision leaving no trace, so name what was replaced —
+        # the same discipline `warn_unresolvable_task` applies to a name backing no file.
+        print(
+            "⚠️  replaced task %r with %r on %s — the prior title is not recorded"
+            % (previous, args.task, item["id"]),
+            file=sys.stderr,
+        )
     warn_unresolvable_task(args.task, item["task_path"], dirs)
     return 0
 
@@ -785,7 +805,7 @@ def cmd_note(args):
 
 
 def cmd_withdraw(args):
-    """Close an entry that was never an ask, on the OPERATOR's withdrawal.
+    """Close an entry on the OPERATOR's withdrawal.
 
     The third close path, and deliberately not a synonym for `close --evidence`: `close`
     asserts the entry's OWN resolution condition was met and verified on disk, while this
@@ -839,6 +859,17 @@ def cmd_withdraw(args):
             "  `withdrawn_at` is the only field that tells the two apart.\n"
             "  A close you believe is wrong is corrected by a new entry, not by re-closing\n"
             "  this one." % (item["id"], item.get("closed_evidence") or "(none recorded)")
+        )
+    if not args.reason.strip():
+        # REFUSE. This verb's whole rationale is that the OPERATOR spoke, and the record it
+        # writes is `operator withdrew it: <reason>` — so a blank reason records a withdrawal
+        # carrying zero operator words: the attribution forgery the docstring warns about,
+        # reached by omission rather than by intent. `cmd_close` guards the same field the
+        # same way, for the same reason.
+        sys.exit(
+            "error: withdraw needs a non-empty --reason — nothing written.\n"
+            "  The recorded evidence is 'operator withdrew it: <reason>', so a blank reason\n"
+            "  records a withdrawal the operator never voiced."
         )
     stamp = now()
     item["state"] = "closed"
@@ -1055,7 +1086,7 @@ def main():
 
     p_withdraw = sub.add_parser(
         "withdraw",
-        help="close an entry that was never an ask, on the OPERATOR's withdrawal — the "
+        help="close an entry on the OPERATOR's withdrawal — the "
         "third close path, distinct from `answer` and `close --evidence`. REFUSED on "
         "--kind asked-of-you, whose only close path is `answer`",
     )

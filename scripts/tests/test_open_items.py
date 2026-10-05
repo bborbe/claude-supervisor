@@ -686,6 +686,21 @@ class WithdrawVerb(Base):
         self.assertEqual(after["closed_evidence"], "task reads status: completed")
         self.assertIsNone(after["withdrawn_at"])
 
+    def test_refuses_an_empty_reason(self):
+        """A blank reason records `operator withdrew it: ` — a withdrawal carrying zero
+        operator words, which is the attribution forgery this verb exists to prevent,
+        reached by omission. `cmd_close` guards the same field the same way."""
+        self.add("--kind", "pushed", "--text", "a log, not an ask")
+        item = self.ledger()[0]
+        for reason in ("", "   "):
+            code, _, err = self.withdraw(item, reason)
+            self.assertIsInstance(code, str)
+            self.assertIn("non-empty --reason", code)
+            self.assertEqual(err, "")
+        after = self.ledger()[0]
+        self.assertEqual(after["state"], "open")
+        self.assertIsNone(after["closed_evidence"])
+
     def test_does_not_forge_an_operator_answer(self):
         """`answer` / `answered_at` assert the operator REPLIED. A withdrawal is a
         different claim, and writing either here would be the forgery the `answer` rule
@@ -735,6 +750,18 @@ class NoTaskMarker(Base):
         )
         _, out, _ = self.listing()
         self.assertNotIn("UNRESOLVABLE", out)
+        self.assertNotIn("NO TASK", out)
+
+    def test_does_not_flag_an_asked_of_you_when_no_task_dir_was_searchable(self):
+        """The carve-out is by KIND, so it must cover all THREE `target_state` values —
+        `unknown` is reached when no task dir was searchable, and it carries its own
+        marker, so pinning only `none` and `unresolvable` would leave it live."""
+        self.add(
+            "--kind", "asked-of-you", "--text", "should I ship it?", "--task", "Never Filed"
+        )
+        code, out, _ = self.run_cli_unsearchable(["list"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("UNCHECKED", out)
         self.assertNotIn("NO TASK", out)
 
     def test_does_not_flag_an_entry_whose_task_resolves(self):
@@ -817,6 +844,41 @@ class SetTask(Base):
         self.assertIn("already closed", code)
         self.assertEqual(err, "")
         self.assertIsNone(self.everything()[0]["task"])
+
+    def test_warns_when_it_replaces_an_existing_task(self):
+        """Re-pointing is the legitimate way to correct a wrong title, but a silent
+        re-point rewrites a decision leaving no trace — so the prior title is named."""
+        self.task_file("First Task")
+        self.task_file("Second Task")
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s", "--task", "First Task")
+        item = self.ledger()[0]
+        code, _, err = self.run_cli(["set", "--id", item["id"], "--task", "Second Task"])
+        self.assertEqual(code, 0)
+        self.assertIn("First Task", err)
+        self.assertEqual(self.ledger()[0]["task"], "Second Task")
+
+    def test_does_not_warn_when_the_task_is_unchanged(self):
+        """Negative control: re-setting the same title replaces nothing."""
+        self.task_file("Covering Task")
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s")
+        item = self.ledger()[0]
+        self.run_cli(["set", "--id", item["id"], "--task", "Covering Task"])
+        code, _, err = self.run_cli(["set", "--id", item["id"], "--task", "Covering Task"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("replaced task", err)
+
+    def test_refuses_an_empty_resolves_on(self):
+        """An empty close condition is one nothing can check — the defect the `NO TASK`
+        marker exists to make visible, reintroduced through a flag."""
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s")
+        item = self.ledger()[0]
+        code, _, err = self.run_cli(
+            ["set", "--id", item["id"], "--task", "Covering Task", "--resolves-on", "  "]
+        )
+        self.assertIsInstance(code, str)
+        self.assertIn("non-empty", code)
+        self.assertEqual(err, "")
+        self.assertIsNone(self.ledger()[0]["task"])
 
     def test_records_the_resolved_path(self):
         self.task_file("Covering Task")
