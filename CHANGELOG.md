@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.105.1
 - fix: **`attention-ask.py` refuses an invented `--producer-kind` before it is sent.** The store validates the field against a closed enum (`attention-controller` `pkg/producer-kind.go`: `session` / `agent` / `cron` / `dark-factory`) and answers anything else with a `400` naming the field, so a guessed kind cost a round trip and read as a store fault rather than a bad argument — and `--help` could not list the accepted set either, because both arguments declared a `default` and no `choices`. `post` and `post-batch` now constrain it, so argparse rejects the value locally and prints the valid ones. ⚠️ **The round trip was the cheap half of the cost; the expensive half was that nothing said which values exist.** Two cases pin it: the refusal must name the offending value, because a bare exit `2` is also what a missing required argument produces and would pass whether or not the constraint is there; and the accepted tuple is pinned to the four this repo records, so a local edit that widens or narrows it fails in the suite rather than at the next e2e. ⚠️ **That is not the same as guarding the store's side** — the enum's source is a sibling repo this suite cannot read, so a change there still passes silently and the e2e remains the check for it.
 
 ## v0.105.0
