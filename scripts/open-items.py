@@ -95,12 +95,11 @@ ROOT = os.path.expanduser("~/.claude/state/open-items")
 # 2026-10-05 against a live 72-entry ledger: seven entries match, all `pushed` — the six
 # open ones this guard exists for, plus one already closed that had named a task.
 #
-# The pattern stays `^`-anchored and the CALLER lstrips its input, rather than the pattern
-# growing a `^\s*`: the shape above is the one measured against real entries, and a pattern
-# that loosens to accommodate input nobody has produced would make that measurement describe
-# something else. Stripping first closes the accidental-leading-whitespace bypass without
-# touching the measured shape. A deliberately quoted tick (`> Manager-loop tick …`) is a
-# different thing from a filed one and is still not refused.
+# The pattern stays `^`-anchored and the CALLER normalises its input (`tick_summary_text`),
+# rather than the pattern growing a `^\s*(?:[-*+>]\s*)?`: the shape above is the one measured
+# against real entries, and a pattern that loosens to accommodate input would make that
+# measurement describe something else. Normalising first closes the whitespace AND the
+# list/quote-marker bypasses without touching the measured shape.
 TICK_SUMMARY_RE = re.compile(r"^Manager-loop tick \d+ \(\d{4}-\d{2}-\d{2}")
 
 # Rendered on an OPEN entry's summary line. `unknown` gets its own wording rather
@@ -540,6 +539,23 @@ def task_dirs_for(args):
     return [d for d in dirs if os.path.isdir(d)]
 
 
+def tick_summary_text(text):
+    """`text` normalised for the tick-summary guard: leading whitespace and list markers off.
+
+    The marker strip is why this is not just `lstrip()`. A tick summary is copied out of a
+    sweep's own output, where it arrives as a bullet (`- Manager-loop tick 9 (…)`) or a
+    quoted block (`> Manager-loop tick 9 (…)`), so an `^`-anchored pattern with only the
+    whitespace stripped would refuse the unprefixed form and admit both of the forms the
+    text actually comes in. Stripping is confined to LEADING markers, so a `pushed` text
+    that merely begins with punctuation (`- Added the retry guard`) is unaffected: only the
+    remainder matching the tick shape refuses, and that remainder is `Added the retry guard`.
+    """
+    stripped = text.lstrip()
+    while stripped[:1] in ("-", "*", "+", ">"):
+        stripped = stripped[1:].lstrip()
+    return stripped
+
+
 def cmd_add(args):
     sid = session_id(args)
     if args.kind == "asked-of-you" and args.held_in_pane:
@@ -567,7 +583,7 @@ def cmd_add(args):
             "  the supervisor's permission channel. Those close normally."
             % (args.held_in_pane, args.held_in_pane)
         )
-    if args.kind == "pushed" and TICK_SUMMARY_RE.match(args.text.lstrip()):
+    if args.kind == "pushed" and TICK_SUMMARY_RE.match(tick_summary_text(args.text)):
         # REFUSE, and write nothing at all — the same discipline as the held_in_pane
         # refusal above, and for the same reason: the entry could never close. `pushed`
         # resolves on its task file reading `status: completed`, a tick summary names no

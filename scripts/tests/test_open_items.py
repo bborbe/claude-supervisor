@@ -594,12 +594,28 @@ class TickSummaryGuard(Base):
         self.assertEqual(self.ledger(), [])
 
     def test_refuses_a_tick_summary_with_leading_whitespace(self):
-        """The pattern stays `^`-anchored and the caller strips, so a leading space is not
-        a silent bypass of the guard."""
+        """The pattern stays `^`-anchored and the caller normalises, so a leading space is
+        not a silent bypass of the guard."""
         for pad in (" ", "  ", "\n", "\t"):
             code, _, _ = self.add("--kind", "pushed", "--text", pad + self.TICK)
             self.assertNotEqual(code, 0, "accepted with pad %r" % pad)
         self.assertEqual(self.ledger(), [])
+
+    def test_refuses_a_tick_summary_copied_out_of_a_list_or_quote(self):
+        """The shape the text actually arrives in: a tick summary is copied out of a sweep's
+        own output, where it is a bullet or a quoted block. A guard that refused only the
+        unprefixed form would admit both."""
+        for pad in ("- ", "* ", "+ ", "> ", "  - ", "> > "):
+            code, _, _ = self.add("--kind", "pushed", "--text", pad + self.TICK)
+            self.assertNotEqual(code, 0, "accepted with pad %r" % pad)
+        self.assertEqual(self.ledger(), [])
+
+    def test_still_accepts_a_pushed_text_that_merely_starts_with_punctuation(self):
+        """Negative control for the marker strip: only the REMAINDER has to match, so
+        stripping a leading marker must not turn real work into a refusal."""
+        for text in ("- Added the retry guard", "* Ship the ledger fix", "> see the PR"):
+            code, _, _ = self.add("--kind", "pushed", "--text", text)
+            self.assertEqual(code, 0, "refused %r" % text)
 
     def test_does_not_refuse_a_merely_similar_text(self):
         """A guard that refused anything mentioning a tick would refuse real work."""

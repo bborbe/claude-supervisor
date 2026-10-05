@@ -102,7 +102,7 @@ A round reads four channels and none replaces another — the attention feed (**
 
 ## The open-items ledger — the operator's asks
 
-Not a fifth channel: it holds what the operator asked and is still waiting on — the stretch before a task exists, and between a question and its answer. Read and write it only through the **`supervisor:open-items` skill** — `/supervisor:open-items <list|add|answer|note|close> …`, the single home of its kinds and rules; never restate them here. The fleet layer's specifics:
+Not a fifth channel: it holds what the operator asked and is still waiting on — the stretch before a task exists, and between a question and its answer. Read and write it only through the **`supervisor:open-items` skill** — `/supervisor:open-items <subcommand> …`, the single home of its kinds, its subcommands and its rules; never restate them here. ⚠️ **The subcommands are deliberately NOT enumerated on this line** — the copy that stood here went stale the moment the skill gained `set` and `withdraw`; the skill's `argument-hint` is the list. The fleet layer's specifics:
 
 - **Read at round start** (Step 0b, in the digest), **render every round** under `📋 Open with the operator`.
 - **Close on evidence only:** a task file's `status: completed` read *this round* (Step 4), or the operator's own answer.

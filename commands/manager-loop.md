@@ -161,7 +161,7 @@ Print the resolved set at manager start (`Tracked (N): <task> · <task> …`) an
 
 A manager keeps the **same ledger as the fleet manager**, keyed by its own session and scoped to its subject: it owns the stretch from an instruction being said to a task existing, and from a question being asked to its answer.
 
-Read and write it only through the **`supervisor:open-items` skill** — `/supervisor:open-items <list|add|answer|note|close> …`. The skill is the single home of the kinds, the render rule, the act-every-sweep rule, `answer`-vs-`note`, and `close --evidence`; follow it verbatim, never restate it here. The session id is derived by the script — no `SID` to pass for your own ledger.
+Read and write it only through the **`supervisor:open-items` skill** — `/supervisor:open-items <subcommand> …`. The skill is the single home of the kinds, the subcommands, the render rule, the act-every-sweep rule, `answer`-vs-`note`-vs-`withdraw`, and `close --evidence`; follow it verbatim, never restate it here. ⚠️ **The subcommand list is deliberately NOT enumerated on this line**, though it used to be: the copy went stale the moment the skill gained `set` and `withdraw`, so a manager reading only this file never learned they existed. The skill's `argument-hint` is the list. The session id is derived by the script — no `SID` to pass for your own ledger.
 
 ## Procedure
 
