@@ -81,6 +81,42 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(watch.items_of({"nope": 1}), [])
         self.assertEqual(watch.items_of("junk"), [])
 
+    def test_fetch_history_passes_an_explicit_limit(self):
+        # ⚠️ The store's history read is PAGED and the default page is 1000 items,
+        # so a bare read truncates silently. `reconcile()` re-baselines from this
+        # on every (re)connect, so the truncation drops an answer that arrived
+        # while the stream was down — a missed wake, the failure this arm exists
+        # to prevent. Asserted on the URL the reader actually builds, so dropping
+        # the query string again fails here rather than in production.
+        seen = []
+
+        class Response:
+            def read(self):
+                return b"[]"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(url, timeout=None):
+            seen.append(url)
+            return Response()
+
+        with mock.patch("urllib.request.urlopen", urlopen):
+            watch.fetch_history("http://store")
+
+        self.assertEqual(
+            seen,
+            [f"http://store/api/1.0/attention/history?limit={watch.HISTORY_LIMIT}"],
+        )
+
+    def test_history_limit_defaults_to_the_reference_readers(self):
+        # Same default as attention-card-lookup.py, so the two readers cannot
+        # drift apart; 50000 clears the store's measured 25,683 items.
+        self.assertEqual(watch.HISTORY_LIMIT, 50000)
+
 
 class EmitFormatTest(unittest.TestCase):
     def test_line_is_exactly_the_token_and_the_id(self):

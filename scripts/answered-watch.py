@@ -57,6 +57,15 @@ from datetime import datetime, timezone
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "10"))
+# ⚠️ The history read is PAGED, and the default page is 1000 items. `reconcile()`
+# re-baselines on every (re)connect, so an unpaged read there means an answer
+# that arrived while the stream was down and has since fallen outside the window
+# is neither adopted into `seen` nor emitted — a MISSED WAKE, the exact failure
+# this arm exists to prevent. Measured 2026-10-05: the unpaged read returns 1,000
+# of the store's 25,683 items, and a key that reads 2 cards unpaged reads 9 here.
+# Same constant name, env var and default as `attention-card-lookup.py`, so the
+# two readers cannot drift apart.
+HISTORY_LIMIT = int(os.environ.get("ATTENTION_HISTORY_LIMIT", "50000"))
 # A long-lived stream: the read blocks between events, so this timeout is
 # generous and its expiry is treated as a drop-and-reconnect, not as an error.
 STREAM_TIMEOUT = float(os.environ.get("ANSWERED_WATCH_STREAM_TIMEOUT", "900"))
@@ -113,8 +122,10 @@ def fetch_json(url, timeout):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def fetch_history(store):
-    return items_of(fetch_json(f"{store}/api/1.0/attention/history", STORE_TIMEOUT))
+def fetch_history(store, limit=HISTORY_LIMIT):
+    return items_of(
+        fetch_json(f"{store}/api/1.0/attention/history?limit={limit}", STORE_TIMEOUT)
+    )
 
 
 def fetch_item(store, item_id):
