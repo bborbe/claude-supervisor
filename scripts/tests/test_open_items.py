@@ -710,6 +710,17 @@ class NoTaskMarker(Base):
         _, out, _ = self.listing()
         self.assertNotIn("NO TASK", out)
 
+    def test_does_not_flag_an_asked_of_you_carrying_an_unresolvable_task(self):
+        """The carve-out is by KIND, covering every state — not only `none`. A question whose
+        task is context rather than a resolution path must not be flagged, and `set`, the
+        repair verb the UNRESOLVABLE rule names, refuses that kind."""
+        self.add(
+            "--kind", "asked-of-you", "--text", "should I ship it?", "--task", "Never Filed"
+        )
+        _, out, _ = self.listing()
+        self.assertNotIn("UNRESOLVABLE", out)
+        self.assertNotIn("NO TASK", out)
+
     def test_does_not_flag_an_entry_whose_task_resolves(self):
         self.task_file("Ship the ledger fix")
         self.add("--kind", "pushed", "--text", "ship it", "--task", "Ship the ledger fix")

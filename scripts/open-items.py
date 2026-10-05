@@ -350,16 +350,20 @@ def marker_for(item, state):
     nothing, and flagging it would make the very entries this check explains look broken
     after they were closed correctly.
 
-    `none` is scoped by KIND as well as by state, and that scoping is why this is a function
-    rather than a dict lookup. An `asked-of-you` resolves on the operator's answer and
-    legitimately names no task, so flagging it would fire on every question the ledger holds
-    — and a check that flags everything satisfies its positive case while catching nothing.
-    `asked-of-me` and `pushed` both resolve on a task file, so an entry of either kind naming
-    none is exactly the entry whose close condition can never fire.
+    An `asked-of-you` is carved out by KIND, covering EVERY state rather than only `none`,
+    and that is why this is a function rather than a dict lookup. That kind resolves on the
+    operator's answer and makes no file claim, so no task-state marker is a true statement
+    about it: `none` would fire on every question the ledger holds, and `unresolvable` would
+    fire on a question whose task is context rather than a resolution path — and `set`, the
+    verb the UNRESOLVABLE rule tells a manager to repair with, refuses this kind. Covering
+    only `none` leaves the second case live: an `asked-of-you` added with `--task` naming no
+    file renders `⚠️ UNRESOLVABLE` with no verb able to clear it. `asked-of-me` and `pushed`
+    both resolve on a task file, so an entry of either kind naming none is exactly the entry
+    whose close condition can never fire.
     """
     if item["state"] != "open":
         return ""
-    if state == "none" and item["kind"] == "asked-of-you":
+    if item["kind"] == "asked-of-you":
         return ""
     return MARKERS.get(state, "")
 
@@ -808,8 +812,10 @@ def cmd_withdraw(args):
         # never real — replacing its on-disk evidence with a withdrawal claim and stamping
         # `withdrawn_at`. That is precisely the indistinguishability this verb's docstring
         # says it exists to prevent, defeated by the verb itself. `find()` matches on an id
-        # PREFIX, so a stale or partial `--id` landing on the wrong entry is easy — and the
+        # PREFIX, so a stale `--id` landing on an already-CLOSED entry is easy — and the
         # skill's act rule has a manager acting on rows from a render taken before a close.
+        # (A prefix landing on a different OPEN entry is the same exposure `close` and
+        # `answer` already carry; this guard does not reach that case and does not claim to.)
         sys.exit(
             "error: %s is already closed — nothing written.\n"
             "  Its close record is on disk: %s\n"
