@@ -490,6 +490,34 @@ class TestLiveness(Base):
         self.assertNotEqual(live, dead, "an absent session did not move the digest")
         self.assertNotEqual(live, live_now, "gaining a live session did not move the digest")
 
+    def test_liveness_churn_alone_does_not_move_the_digest(self):
+        """SC2(a) — a worker opening or closing a gate is CHURN, not a change.
+
+        The raw liveness word sat in the digest before this fix, so a `LIVE` -> `PARKED`
+        flip — a worker starting or ending a turn — answered CHANGE on a tick where no
+        row's eligibility moved. Measured 2026-09-30: three consecutive act legs returned
+        the identical decision set on exactly such ticks. The digest must be identical
+        across the flip.
+        """
+        self.registry("s-churn")
+        live = self.digest_with("s-churn")
+        self.registry("s-churn", status="waiting")
+        parked = self.digest_with("s-churn")
+        self.assertEqual(live, parked, "liveness churn alone moved the digest")
+
+    def test_a_worker_dying_still_moves_the_digest(self):
+        """SC2(b) — the guard against the cheap fix.
+
+        Dropping the liveness term outright satisfies the churn test above and regresses
+        the graded death-detection (`liveness_of` -> `LIVENESS_NONE`). The SAME row on the
+        SAME sid, its owner going `LIVE` -> `ABSENT`, must still move the digest.
+        """
+        self.registry("s-dies")
+        live = self.digest_with("s-dies")
+        os.remove(os.path.join(self.m.REGISTRY_DIR, "1.json"))
+        dead = self.digest_with("s-dies")
+        self.assertNotEqual(live, dead, "a worker dying did not move the digest")
+
     def test_live_worker_with_stale_heartbeat_is_not_dead(self):
         """The NEGATIVE CONTROL.
 
