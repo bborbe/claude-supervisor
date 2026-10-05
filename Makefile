@@ -29,6 +29,9 @@ test: check
 	python3 -m unittest discover -s scripts/tests || rc=1; \
 	exit $$rc
 
-precommit: check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check-bucket-clause check
+# `test`, not `check`: `check` only parses, `test` runs the suites — and `test: check`, so
+# the parse checks stay implied. CI runs this target, so depending on `check` alone is what
+# let a red suite report green: `node --test` and `unittest discover` had never run in CI.
+precommit: check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check-bucket-clause test
 
 .PHONY: default check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check-bucket-clause check test precommit

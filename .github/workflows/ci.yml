@@ -12,5 +12,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      # The server suites import the Agent SDK, so `node --test server/*.test.mjs` cannot
+      # run without node_modules. This step is new rather than long-standing because
+      # `make precommit` ran no tests at all until it depended on `test` — `make check`
+      # only parses, so it never resolved an import. No package-lock.json in the tree,
+      # so `npm install`, not `npm ci`.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install server dependencies
+        run: npm install --no-audit --no-fund
+        working-directory: server
       - name: Run precommit checks
         run: make precommit
