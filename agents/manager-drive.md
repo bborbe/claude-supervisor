@@ -103,9 +103,15 @@ Three limbs, tried in this order: **the registry**, then the **marker**, then th
 
 **Limb 1 — the session registry's `status`.** Read `~/.claude/sessions/<pid>.json` for the session and take its `status` word. The vocabulary is fixed at four — `idle` · `busy` · `waiting` · `shell` (`CLAUDE.md` § Reading a worker):
 
-- **`shell`** → the session is inside a tool call. **Working — drop the candidate.**
+- **`shell`** → the session holds a live child shell. **Working — drop the candidate**, subject to the carve-out below.
 - **`waiting`** → the session is blocked on input, i.e. **parked — quiet.** Do not drop on this check.
 - **`idle` or `busy`** → **no signal.** Neither word describes the tool loop, so fall through to limb 2. Do **not** read `busy` as working.
+- **no file, or an unreadable one** → **no signal.** Fall through to limb 2, and **never read an absent or unreadable registry as `quiet`**. The registry is pruned on exit, so absence proves nothing — a headless worker has no record at all — and a read that failed is not a measurement. This is the three-state discipline `agents/manager-sweep-reader.md`'s inputs 10, 12 and 13 each state for themselves (UNKNOWN is not ABSENT; `unread` is not `clear`; `unread` is not `none`); limb 1 is not exempt from it, and stating it here is what keeps the fall-through a rule rather than an inference.
+
+⚠️ **The `shell` carve-out — a live child shell is not proof the TURN is live, and without this limb 1 relocates the defect rather than closing it.** A `run_in_background` Bash watcher is a child shell that outlives the turn, so a worker whose turn has **ENDED** still reads `shell`. That is precisely the shape `agents/manager-sweep-reader.md` documents for the `waiting-external` cell, whose discriminator is the worker's own `⏰ Ends:` declaration and explicitly **not** the in-flight verdict — *"which cannot tell the two apart by construction."* Limb 1 fires more eagerly than the transcript limb beneath it, so a `shell` drop on its own would suppress the park check-in for a stopped worker. Two things keep it honest, and both are load-bearing:
+
+- **In the sweep**, `waiting-external` is evaluated **before** the in-flight branch, so a row carrying an `⏰ Ends:` declaration is claimed by that cell and never reaches limb 1 at all.
+- **In this check** — the nudge path, which has no such branch — read the session's **newest** `event: "Stop"` record from `~/.claude/state/attention/<session_id>.events.jsonl` first. If it carries a non-empty `⏰ Ends:` slot, do **not** drop on limb 1 alone: fall through to limb 3 and let the transcript decide. The log is append-only, so the newest record is the rule — an older `⏰ Ends:` outlives its wait and would otherwise pin the row forever.
 
 ⚠️ **This limb exists because the two below it are wrong in both directions, and it sits first because it was right in both.** Measured 2026-10-05 against a live registry: **six** sessions read `shell` while the transcript limb called them `quiet` (a long tool call writes no transcript — one had been silent 54.8 min inside a live child shell), and **one** read `waiting` while the transcript limb called it in flight (a parked worker's re-render moves its transcript inside the window). The registry carried the answer in a field both cases already had on disk.
 
