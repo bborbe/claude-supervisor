@@ -1038,11 +1038,19 @@ def digest_of(tracked: list[dict]) -> str:
     holds for one cell: `parked` is what makes a row render `⌛ waiting-on-human`
     (`agents/manager-sweep-reader.md` step 7), so a worker newly opening a gate no longer
     moves the digest -- and the exit-0 replay path (`commands/manager-status.md` step 1)
-    reproduces the stored table with whatever cell the row last had. Accepted, because
-    the gate's question is "is this run worth a dispatch at all" and a gate opening
-    changes no row's *eligibility*, while `/manager-loop` step 5 reads the attention feed
-    independently -- so a raised gate is still surfaced where it must be. Every other
-    narrowing in this file is named; this one is named too.
+    reproduces the stored table with whatever cell the row last had.
+
+    ⚠️ **That stale cell is REAL and UNCOVERED on the two surfaces that replay** --
+    `/manager-status` step 1 and `/manager-drive` step 2 -- because both STOP on exit 0
+    before reading anything else. ⚠️ **`/manager-loop` is NOT one of them and is NOT a
+    mitigation:** it never calls `--print` or `--check`, so it never consults this digest
+    at all, and its attention-feed read is step 4's first bullet
+    (`commands/manager-loop.md:186`), which runs before any verdict. The independent
+    surfacing that does hold is step 7's `manager-attention-watch.py` / feed-Monitor
+    arms, which fire `NEW GATE` off the registry and the feed rather than off this
+    digest. Accepted because the gate's question is "is this run worth a dispatch at
+    all" and a gate opening changes no row's *eligibility*. Every other narrowing in
+    this file is named; this one is named too.
 
     ⚠️ **The hold is a digest input, and deliberately NOT a suppression here.** This gate
     decides whether the sweep runs at all, so suppressing it for a held session would

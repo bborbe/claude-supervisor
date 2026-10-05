@@ -491,7 +491,7 @@ class TestLiveness(Base):
         self.assertNotEqual(live, live_now, "gaining a live session did not move the digest")
 
     def test_liveness_churn_alone_does_not_move_the_digest(self):
-        """SC2(a) — a worker opening or closing a gate is CHURN, not a change.
+        """Task-SC2(a) — a worker opening or closing a gate is CHURN, not a change.
 
         The raw liveness word sat in the digest before this fix, so a `LIVE` -> `PARKED`
         flip — a worker starting or ending a turn — answered CHANGE on a tick where no
@@ -506,7 +506,7 @@ class TestLiveness(Base):
         self.assertEqual(live, parked, "liveness churn alone moved the digest")
 
     def test_a_worker_dying_still_moves_the_digest(self):
-        """SC2(b) — the guard against the cheap fix.
+        """Task-SC2(b) — the guard against the cheap fix.
 
         Dropping the liveness term outright satisfies the churn test above and regresses
         the graded death-detection (`liveness_of` -> `LIVENESS_NONE`). The SAME row on the
