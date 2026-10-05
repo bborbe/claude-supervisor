@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -74,6 +75,24 @@ def _broken(*_a, **_k):
 def _empty(*_a, **_k):
     """A transport that answered, with nothing. `[]` parses for both wezterm and ps."""
     return _Proc(stdout="[]", returncode=0)
+
+
+def _fixture_registry() -> str:
+    """A session registry holding one entry, so `pane_sessions` reaches its `ps` read.
+
+    `jump.py`'s `pane_sessions` short-circuits to `{}` when the registry holds nothing —
+    it never calls `ps` at all. That is the correct answer for a genuinely empty registry,
+    but it means the accessor is only drivable into its **broken** state when there is an
+    entry to join. Left to the host's real `~/.claude/sessions`, the site was exercised on
+    a developer's Mac and silently skipped on a clean CI runner — where the short-circuit
+    produced `{}` and this check reported it as a collapse, failing CI for a defect that
+    was not there. The check owns the states it drives an accessor into, so it supplies
+    the registry rather than inheriting whatever the machine happens to hold.
+    """
+    d = tempfile.mkdtemp(prefix="transport-read-registry-")
+    with open(os.path.join(d, "1.json"), "w", encoding="utf-8") as fh:
+        json.dump({"pid": 1, "sessionId": "11111111-2222-3333-4444-555555555555"}, fh)
+    return d
 
 
 # What a healthy transport holding content answers, per reader. Each accessor
@@ -162,6 +181,12 @@ def main():
             ("sp", "stop-probe.py"),
         )
     }
+
+    # Pin the registry the accessors join through — see `_fixture_registry`. Without it
+    # `jmp.pane_sessions` never reaches its `ps` read on a machine with no
+    # `~/.claude/sessions`, so the broken-state assertion below is skipped there.
+    if mods["jmp"] is not None:
+        mods["jmp"].SESSIONS_DIR = _fixture_registry()
 
     failures, checked = [], 0
 
