@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.102.2
 
 - fix: **the test suites are hermetic, so `make precommit` can depend on them and CI can actually run them.** Three of the four failures came from `fleet-sessions.py` resolving its two ambient roots as module constants at import (`PROJECTS = HOME / ".claude" / "projects"`, `OBSIDIAN = …`), so on a clean runner `main()` took its `no ~/.claude/projects` early return and the render assertions then read *that string* instead of a render. Both roots now resolve **per call** via `projects_dir()` / `obsidian_dir()`, overridable by `SUPERVISOR_PROJECTS_DIR` (the key `server/config.mjs` already reads) and `OBSIDIAN_DIR` — the same per-call shape this file's own `ledger_dir()` uses, and the shape `session-liveness.py`'s `_start_cache_path()` established. `_walk_task_stamps` also gained a missing-root guard, matching the file's stated "degrades, never aborts" contract. ⚠️ **The fourth failure was NOT `wezterm`, which is what the audit assumed:** `jump.py`'s `pane_sessions` short-circuits `if not sid_by_pid: return {}` on an empty session registry, never reaching the `ps` read that `transport-read-check.py` stubs — so the check's broken-state assertion was silently **skipped** on a machine with no `~/.claude/sessions`, and the short-circuit's `{}` was then reported as a collapse. `{}` is the correct answer for a genuinely empty registry, so the probe's premise was the defect, not the accessor: the check now supplies a one-entry fixture registry and pins `jmp.SESSIONS_DIR`.
 
