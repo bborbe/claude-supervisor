@@ -232,6 +232,95 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(rc, 3)
 
 
+class LocateTest(unittest.TestCase):
+    """The phase-agnostic lookup — exact title in, owning vault out.
+
+    This is the resolver `/supervisor:ready` needs, and `--resolve` is not it:
+    ready operates on APPROVED rows (Gate 1 refuses `phase: todo`), while
+    `--resolve` is scoped to the inbox, so it resolves the *complement* of
+    ready's input and returns rc 3 for every row ready exists to ready.
+    `test_settled_row_does_not_resolve` above is that behaviour, deliberately
+    pinned — which is why the fix is a second verb, not a widened filter.
+
+    Locate answers the lookup question instead: which vault holds this exact
+    title? Any phase, any status. Eligibility is the caller's, not this verb's.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+
+    def vault(self, name):
+        d = os.path.join(self.root, name, "25 Tasks")
+        os.makedirs(d, exist_ok=True)
+        return (name, os.path.join(self.root, name), "25 Tasks", False), d
+
+    def run_locate(self, title, extra=()):
+        with mock.patch.object(inbox, "load_vaults", lambda: self.vaults):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = inbox.main(["--locate", title, *extra])
+        return rc, out.getvalue().strip(), err.getvalue().strip()
+
+    def test_approved_row_locates(self):
+        # The case that motivated the verb — ready's primary input, and the one
+        # `--resolve` refuses.
+        a, da = self.vault("a")
+        self.vaults = [a]
+        write(da, "Approved row", phase="planning", status="in_progress")
+        rc, out, _ = self.run_locate("Approved row")
+        self.assertEqual((rc, out), (0, "a"))
+
+    def test_todo_row_also_locates(self):
+        # Phase-agnostic: the inbox population is a subset of locate's scope,
+        # not its boundary.
+        a, da = self.vault("a")
+        self.vaults = [a]
+        write(da, "Pending row")
+        rc, out, _ = self.run_locate("Pending row")
+        self.assertEqual((rc, out), (0, "a"))
+
+    def test_substring_does_not_locate(self):
+        # Exact means exact. `vault-cli task get` resolves a middle fragment, so
+        # a substring that matches is precisely the defect not to reproduce.
+        a, da = self.vault("a")
+        self.vaults = [a]
+        write(da, "The Full Title", phase="planning", status="in_progress")
+        rc, _, err = self.run_locate("Full Title")
+        self.assertEqual(rc, 3)
+        self.assertIn("no task named", err)
+
+    def test_unknown_row_refuses(self):
+        a, da = self.vault("a")
+        self.vaults = [a]
+        write(da, "Something else", phase="planning", status="in_progress")
+        rc, _, err = self.run_locate("Not a task")
+        self.assertEqual(rc, 3)
+        self.assertIn("no task named", err)
+
+    def test_same_title_in_two_vaults_refuses(self):
+        a, da = self.vault("a")
+        b, db = self.vault("b")
+        self.vaults = [a, b]
+        write(da, "Shared title", phase="planning", status="in_progress")
+        write(db, "Shared title", phase="planning", status="in_progress")
+        rc, _, err = self.run_locate("Shared title")
+        self.assertEqual(rc, 4)
+        self.assertIn("more than one vault", err)
+
+    def test_vault_flag_narrows_before_the_ambiguity_check(self):
+        # --vault suppresses the rc 4 refusal — which is what makes the flag
+        # load-bearing rather than decorative on this path.
+        a, da = self.vault("a")
+        b, db = self.vault("b")
+        self.vaults = [a, b]
+        write(da, "Shared title", phase="planning", status="in_progress")
+        write(db, "Shared title", phase="planning", status="in_progress")
+        rc, out, _ = self.run_locate("Shared title", extra=["--vault", "b"])
+        self.assertEqual((rc, out), (0, "b"))
+
+
 def row(title, goals=(), blocked_by=()):
     return {"title": title, "vault": "v", "why": "", "goals": list(goals),
             "blocked_by": list(blocked_by)}

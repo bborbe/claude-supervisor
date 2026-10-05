@@ -70,11 +70,25 @@ The cap is READ from clause (7) — never restated here. Ordering picks nothing:
 no row is marked as the one to approve, and every verb still needs a named row.
 `--all` restores the flat, every-row render.
 
+TWO RESOLVERS, AND THEY ANSWER DIFFERENT QUESTIONS. `--resolve` asks the inbox
+question — "is this row still decision-pending?" — and is scoped to `phase: todo`
+by the same filter the view uses, so it returns rc 3 for an already-approved row
+by design. `--locate` asks the *lookup* question — "which vault holds this exact
+title?" — and scans every task file at any phase. A caller that already holds a
+name and needs its vault wants `--locate`; using `--resolve` there resolves the
+complement of what it holds. Measured 2026-10-05: `/supervisor:ready` operates on
+approved rows, so `--resolve` refused every row it exists to ready. `--locate`
+lives here because this script already owns vault enumeration and frontmatter
+parsing; it is not a second inbox reader.
+
 Usage:
     inbox.py [--vault <name>] [--json] [--all] [--session <id>]
     inbox.py --resolve <title>
+    inbox.py --locate <title>
 
-Exit codes: 0 ok, 2 vault config unreadable, 3 no such live row, 4 ambiguous.
+Exit codes: 0 ok, 2 vault config unreadable, 4 ambiguous, and 3 for both
+resolvers — `--resolve` reads it as "no such *live* row", `--locate` as "no such
+row at any phase". The per-verb stderr strings say which; this line covers both.
 """
 import argparse
 import importlib.util
@@ -191,8 +205,18 @@ def topic_of(fm, body, vault_has_topics):
     return m.group(1).strip() if m else None
 
 
-def scan(vaults, only=None):
-    """([(group, row)], [skipped]) for every live row."""
+def scan(vaults, only=None, *, inbox_only=True):
+    """([(group, row)], [skipped]) for every row the caller asked for.
+
+    `inbox_only` (the default) keeps only `phase: todo` rows — the inbox
+    population the view and `--resolve` both serve. `--locate` passes False:
+    a caller resolving a name it already holds is not asking the inbox
+    question, and answering it there is what made `/supervisor:ready` refuse
+    every row it exists to ready. Ready's input is the *complement* of the
+    inbox — Gate 1 refuses `phase: todo` and proceeds only on approved rows —
+    so a resolver scoped to `phase: todo` resolves precisely the set ready
+    must reject. Measured 2026-10-05.
+    """
     rows, skipped = [], []
     for name, path, tasks_dir, has_topics in vaults:
         if only and name != only:
@@ -216,10 +240,10 @@ def scan(vaults, only=None):
                 skipped.append(f"{name}/{entry} ({e.__class__.__name__})")
                 continue
             fm, body = parse(text)
-            if fm.get("phase") != "todo" or fm.get("status") in NOT_LIVE:
+            if inbox_only and (fm.get("phase") != "todo" or fm.get("status") in NOT_LIVE):
                 continue
             title = entry[:-3]
-            if is_recurring(fm, title):
+            if inbox_only and is_recurring(fm, title):
                 continue
             group = topic_of(fm, body, has_topics) or name
             rows.append((group, {"title": title, "vault": name,
@@ -363,6 +387,9 @@ def main(argv=None):
                     help="session whose manager record scopes the view")
     ap.add_argument("--resolve", metavar="TITLE",
                     help="print the vault owning this live row (refuses if ambiguous)")
+    ap.add_argument("--locate", metavar="TITLE",
+                    help="print the vault holding this task at ANY phase "
+                         "(refuses if ambiguous)")
     args = ap.parse_args(argv)
 
     try:
@@ -373,6 +400,25 @@ def main(argv=None):
     if not vaults:
         print("❌ no vault declares a tasks_dir", file=sys.stderr)
         return 2
+
+    if args.locate:
+        rows, skipped = scan(vaults, args.vault, inbox_only=False)
+        hits = sorted({r["vault"] for _, r in rows if r["title"] == args.locate})
+        if not hits:
+            print(f"❌ no task named {args.locate!r} in any scanned vault",
+                  file=sys.stderr)
+            if skipped:
+                # A SHORT list must never read as a complete one: without this the
+                # rc 3 message asserts absence when a vault simply failed to parse.
+                print(f"⚠️ {len(skipped)} vault(s) could not be read — the row may "
+                      f"exist there: " + "; ".join(skipped), file=sys.stderr)
+            return 3
+        if len(hits) > 1:
+            print(f"❌ {args.locate!r} exists in more than one vault: "
+                  + ", ".join(hits) + " — pass --vault to say which", file=sys.stderr)
+            return 4
+        print(hits[0])
+        return 0
 
     rows, skipped = scan(vaults, args.vault)
     if args.resolve:
