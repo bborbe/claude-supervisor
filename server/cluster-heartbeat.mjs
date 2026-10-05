@@ -22,7 +22,7 @@
 // cluster stamps: deleting one would destroy the evidence that a cluster worker existed, and
 // `heartbeat.mjs`'s `sweepStale` already collects anything past the TTL.
 
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -37,21 +37,61 @@ export { REACHABILITY_FILE }
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const READER = join(HERE, '..', 'scripts', 'cluster-heartbeat.py')
 
+// ⚠️ Async, and that is the point of this function rather than a style choice. `spawnSync`
+// blocked the whole event loop for the full 20 s budget, and the headless stamp timers share
+// that loop — so a hanging cluster reader delayed a worker's heartbeat by the same 20 s.
+// Measured 2026-10-05: the worst stamp gap was 50 007 ms against a 60 000 ms TTL, ~10 s of
+// margin, and anything else blocking the loop spent it. `spawn` + a promise waits the same
+// 20 s without stopping the world; the result shape is identical, so `run`'s seam and every
+// caller's contract are unchanged.
+const RUN_TIMEOUT_MS = 20_000
+
 function defaultRun(argv) {
-  return spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 20_000 })
+  return new Promise((resolve) => {
+    const child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    let timer
+
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(result)
+    }
+
+    timer = setTimeout(() => {
+      child.kill('SIGTERM')
+      finish({ status: null, signal: 'SIGTERM', stdout, stderr, error: new Error('ETIMEDOUT') })
+    }, RUN_TIMEOUT_MS)
+    timer.unref?.()
+
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk
+    })
+    child.stderr?.on('data', (chunk) => {
+      stderr += chunk
+    })
+    child.on('error', (error) => finish({ status: null, signal: null, stdout, stderr, error }))
+    child.on('close', (status, signal) => finish({ status, signal, stdout, stderr }))
+  })
 }
 
-// Returns `{ok, reason?, stamped}`. `ok: false` means the cluster was not read — the caller may
-// log it, but must not treat it as "no cluster workers are live": that is the reader's job, and
-// it reaches the right answer only because the marker was left unrefreshed.
-export function pollCluster({
+// Resolves to `{ok, reason?, stamped}`. `ok: false` means the cluster was not read — the caller
+// may log it, but must not treat it as "no cluster workers are live": that is the reader's job,
+// and it reaches the right answer only because the marker was left unrefreshed.
+//
+// Async so that a hanging reader cannot block the loop its callers share — see `defaultRun`.
+// An injected `run` may be sync or async; `await` covers both.
+export async function pollCluster({
   dir = config.heartbeatDir,
   reader = READER,
   run = defaultRun,
   now = Date.now(),
   fs = { mkdirSync, writeFileSync, renameSync },
 } = {}) {
-  const proc = run(['python3', reader, '--list', '--json'])
+  const proc = await run(['python3', reader, '--list', '--json'])
   if (!proc || proc.status !== 0) {
     return { ok: false, reason: 'cluster store unreadable', stamped: [] }
   }
