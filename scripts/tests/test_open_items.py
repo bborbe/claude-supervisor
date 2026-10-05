@@ -523,5 +523,228 @@ class ClassifyCommand(Base):
         self.assertEqual(payload["items"][0]["origin_verdict"], "gone")
 
 
+class TickSummaryGuard(Base):
+    """A manager tick summary can no longer enter the ledger as an operator ask.
+
+    The positive case alone is satisfied by a guard that refuses everything, so the
+    negative controls carry the weight: the identical text on `asked-of-me` must be
+    ACCEPTED (that kind holds the operator's words verbatim, and refusing there could
+    block a genuine instruction that quotes a tick), and a `pushed` entry whose text is
+    the task it filed must be accepted too.
+    """
+
+    TICK = (
+        "Manager-loop tick 9 (2026-10-06 09:00, probe). Drive leg returned reaped 0 / "
+        "nudged 0 / to resume 0 / to open 0."
+    )
+
+    def test_refuses_a_tick_summary_as_a_pushed_entry(self):
+        code, _, err = self.add("--kind", "pushed", "--text", self.TICK)
+        # The refusal must be the RULE's refusal, not argparse's, and the two are
+        # distinguishable here rather than by "non-zero exit": argparse exits with the
+        # integer 2 and writes "unrecognized arguments" to stderr, while the rule exits
+        # with the message itself — `sys.exit(str)` carries it as the exit code, and the
+        # harness catches SystemExit before the interpreter can print it.
+        self.assertIsInstance(code, str)
+        self.assertNotIn("unrecognized arguments", code)
+        self.assertIn("tick summary", code)
+        self.assertIn("--kind pushed", code)
+        self.assertEqual(err, "")
+
+    def test_writes_nothing_when_it_refuses(self):
+        """A refusal that still recorded the entry would be the defect wearing a
+        non-zero exit code."""
+        self.add("--kind", "pushed", "--text", self.TICK)
+        self.assertEqual(self.ledger(), [])
+
+    def test_accepts_the_same_text_as_an_asked_of_me(self):
+        code, _, _ = self.add("--kind", "asked-of-me", "--text", self.TICK)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.ledger()), 1)
+
+    def test_accepts_a_pushed_entry_whose_text_is_the_task(self):
+        code, _, _ = self.add(
+            "--kind",
+            "pushed",
+            "--text",
+            "Ship the ledger fix",
+            "--task",
+            "Ship the ledger fix",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.ledger()), 1)
+
+    def test_refuses_every_real_tick_shape_from_the_ledger(self):
+        """The shape is taken from the six entries that motivated the guard, not invented:
+        ticks 2, 4, 5, 6, 7 and 8, in the date form the live ledger actually carries."""
+        for n in (2, 4, 5, 6, 7, 8):
+            code, _, _ = self.add(
+                "--kind", "pushed", "--text", "Manager-loop tick %d (2026-09-29 09:41)" % n
+            )
+            self.assertNotEqual(code, 0, "tick %d was accepted" % n)
+        self.assertEqual(self.ledger(), [])
+
+    def test_does_not_refuse_a_merely_similar_text(self):
+        """A guard that refused anything mentioning a tick would refuse real work."""
+        for text in (
+            "Manager-loop tick summary handling is broken",
+            "Fix the Manager-loop tick (2026-09-29) filing path",
+            "the manager-loop tick logs are filed into the ledger",
+        ):
+            code, _, _ = self.add("--kind", "pushed", "--text", text)
+            self.assertEqual(code, 0, "refused %r" % text)
+
+
+class WithdrawVerb(Base):
+    """The exit SC2 chose: an entry that was never an ask reaches a terminal state."""
+
+    def withdraw(self, item, reason="filed in error"):
+        return self.run_cli(["withdraw", "--id", item["id"], "--reason", reason])
+
+    def everything(self):
+        """Every entry including closed ones — `ledger()` reads the default render, which
+        excludes them by design, so it cannot see the thing this class exists to check."""
+        code, out, _ = self.run_cli(
+            ["list", "--state", "all", "--include-closed", "--format", "json"]
+        )
+        self.assertEqual(code, 0)
+        return json.loads(out)["items"]
+
+    def test_closes_a_pushed_entry_naming_no_task(self):
+        self.add("--kind", "pushed", "--text", "a log, not an ask")
+        code, _, _ = self.withdraw(self.ledger()[0])
+        self.assertEqual(code, 0)
+        closed = self.everything()[0]
+        self.assertEqual(closed["state"], "closed")
+        self.assertEqual(
+            closed["closed_evidence"], "operator withdrew it: filed in error"
+        )
+        self.assertIsNotNone(closed["withdrawn_at"])
+
+    def test_closes_an_asked_of_me_entry_naming_no_task(self):
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s")
+        code, _, _ = self.withdraw(self.ledger()[0], "superseded")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.everything()[0]["state"], "closed")
+
+    def test_refuses_an_asked_of_you_and_writes_nothing(self):
+        """Its only close path is `answer` — a withdrawal here would stamp an operator
+        act onto a question they may never have seen."""
+        self.add("--kind", "asked-of-you", "--text", "should I ship it?")
+        item = self.ledger()[0]
+        code, _, err = self.withdraw(item)
+        # The rule's refusal carries the message as the exit code, not on stderr — see
+        # `test_refuses_a_tick_summary_as_a_pushed_entry` for why the two are told apart.
+        self.assertIsInstance(code, str)
+        self.assertNotIn("unrecognized arguments", code)
+        self.assertIn("answer", code)
+        self.assertEqual(err, "")
+        still = self.everything()[0]
+        self.assertEqual(still["state"], "open")
+        self.assertIsNone(still["withdrawn_at"])
+
+    def test_does_not_forge_an_operator_answer(self):
+        """`answer` / `answered_at` assert the operator REPLIED. A withdrawal is a
+        different claim, and writing either here would be the forgery the `answer` rule
+        exists to prevent — reached through a second verb."""
+        self.add("--kind", "pushed", "--text", "a log, not an ask")
+        self.withdraw(self.ledger()[0])
+        closed = self.everything()[0]
+        self.assertIsNone(closed["answer"])
+        self.assertIsNone(closed["answered_at"])
+
+    def test_a_withdrawn_entry_leaves_the_default_render(self):
+        """The render rule prints every OPEN entry; a terminal one must not print."""
+        self.add("--kind", "pushed", "--text", "a log, not an ask")
+        self.withdraw(self.ledger()[0])
+        code, out, _ = self.listing()
+        self.assertEqual(code, 0)
+        self.assertIn("(none open)", out)
+
+
+class NoTaskMarker(Base):
+    """The render half: an entry whose close condition can never fire is visible."""
+
+    def test_flags_an_open_pushed_entry_naming_no_task(self):
+        self.add("--kind", "pushed", "--text", "a log, not an ask")
+        code, out, _ = self.listing()
+        self.assertEqual(code, 0)
+        self.assertIn("NO TASK", out)
+
+    def test_flags_an_open_asked_of_me_entry_naming_no_task(self):
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s")
+        _, out, _ = self.listing()
+        self.assertIn("NO TASK", out)
+
+    def test_does_not_flag_an_asked_of_you(self):
+        """It resolves on the operator's answer and legitimately names no task, so a
+        marker here would fire on every question the ledger holds."""
+        self.add("--kind", "asked-of-you", "--text", "should I ship it?")
+        _, out, _ = self.listing()
+        self.assertNotIn("NO TASK", out)
+
+    def test_does_not_flag_an_entry_whose_task_resolves(self):
+        self.task_file("Ship the ledger fix")
+        self.add("--kind", "pushed", "--text", "ship it", "--task", "Ship the ledger fix")
+        _, out, _ = self.listing()
+        self.assertNotIn("NO TASK", out)
+
+    def test_does_not_flag_an_unresolvable_target(self):
+        """A NAMED task backing no file is a different fact from no task at all, and it
+        already has its own marker — collapsing the two would lose which one happened."""
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s", "--task", "Never Filed")
+        _, out, _ = self.listing()
+        self.assertIn("UNRESOLVABLE", out)
+        self.assertNotIn("NO TASK", out)
+
+    def test_does_not_flag_a_closed_entry(self):
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s")
+        item = self.ledger()[0]
+        self.run_cli(["withdraw", "--id", item["id"], "--reason", "superseded"])
+        _, out, _ = self.listing("--state", "closed")
+        self.assertIn("stop the 500s", out)
+        self.assertNotIn("NO TASK", out)
+
+
+class SetTask(Base):
+    """The act step: naming a covering task on an entry that already exists.
+
+    `add` was the only writer of `task`, so the act rule's own trigger — an open entry
+    with no task behind it — named an action no verb could perform.
+    """
+
+    def test_clears_the_marker_once_a_task_is_named(self):
+        self.task_file("Covering Task")
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s")
+        item = self.ledger()[0]
+        _, before, _ = self.listing()
+        self.assertIn("NO TASK", before)
+        code, _, _ = self.run_cli(["set", "--id", item["id"], "--task", "Covering Task"])
+        self.assertEqual(code, 0)
+        _, after, _ = self.listing()
+        self.assertNotIn("NO TASK", after)
+
+    def test_a_named_task_backing_no_file_is_unresolvable_not_clean(self):
+        """`set` must not be usable to fake a resolution: the target is re-resolved on
+        every read, so a task that backs no file still reports the truth."""
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s")
+        item = self.ledger()[0]
+        code, _, err = self.run_cli(["set", "--id", item["id"], "--task", "Never Filed"])
+        self.assertEqual(code, 0)
+        self.assertIn("UNRESOLVABLE", err)
+        _, out, _ = self.listing()
+        self.assertIn("UNRESOLVABLE", out)
+        self.assertNotIn("NO TASK", out)
+
+    def test_records_the_resolved_path(self):
+        self.task_file("Covering Task")
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s")
+        item = self.ledger()[0]
+        self.run_cli(["set", "--id", item["id"], "--task", "Covering Task"])
+        row = self.ledger()[0]
+        self.assertEqual(row["task"], "Covering Task")
+        self.assertEqual(row["task_state"], "ok")
+
+
 if __name__ == "__main__":
     unittest.main()

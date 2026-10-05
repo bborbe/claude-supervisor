@@ -5,12 +5,35 @@ Storage: ~/.claude/state/open-items/<session-id>.json — never hand-written, sa
 write discipline as fleet-snapshot.py (atomic tmp+rename, timestamps stamped here).
 
 Kinds:
-  asked-of-me   an operator instruction; resolves when its task reads status: completed
+  asked-of-me   an operator instruction; resolves when its task reads status: completed, or
+                when the operator withdraws it
   asked-of-you  a question put to the operator; resolves on their explicit answer — so `answer`
                 closes it outright. On the other two kinds `answer` records a note and leaves
                 the entry `open`: they resolve on their task, and only `asked-of-you` is a kind
-                the operator can resolve by replying.
-  pushed        a task filed/spawned on the operator's behalf; resolves on status: completed
+                the operator can resolve by replying. `withdraw` is REFUSED here — see below.
+  pushed        a task filed/spawned on the operator's behalf; resolves on status: completed,
+                or when the operator withdraws it
+
+The three close paths are distinct claims and must not be collapsed into one another:
+`answer` (the operator replied to a question), `close --evidence` (the entry's own resolution
+condition was met, verified on disk), and `withdraw` (the entry was never an ask at all). A
+withdrawal records `operator withdrew it: <reason>` and is REFUSED on `asked-of-you`, whose
+only close path is `answer` — a withdrawal there would forge the operator attribution that
+kind exists to protect. Without this verb an entry naming no task could never reach a terminal
+state: `asked-of-me` and `pushed` resolve on a task file, and a manager tick summary filed as
+one of them has no task behind it, so no close condition could ever fire.
+
+A tick summary cannot become a `pushed` entry in the first place — `add` REFUSES a `pushed`
+text matching TICK_SUMMARY_RE. That kind is for a task the manager filed, so its text records
+that task, never the tick log that spawned it. Measured 2026-10-05: six 2026-09-29 manager-loop
+tick summaries sat open in one ledger with no resolution path, indistinguishable in the render
+from an ask genuinely still outstanding.
+
+An OPEN `asked-of-me` / `pushed` entry naming no task now renders `⚠️ NO TASK`: `target_state`
+returned `none` for it and `MARKERS` had no key for `none`, so it printed exactly like a
+healthy entry — the render half of the same defect. The marker is deliberately scoped to those
+two kinds, because an `asked-of-you` legitimately names no task and flagging it would be a
+false positive.
 
 An `asked-of-you` whose ask is HELD IN A WORKER'S PANE cannot be a ledger entry, and `add`
 REFUSES one. The operator releases such a gate with their own keystroke in that pane, and a
@@ -29,7 +52,7 @@ a ledger carries that same session — so the PANE is the discriminator, and it 
 here. `classify` reads the field and reports `gone` / `live` / `unknown` per entry; it
 renders nothing itself and adds no close path.
 
-Subcommands: add | answer | note | close | list | classify
+Subcommands: add | set | answer | note | withdraw | close | list | classify
 
 `--task` is resolved to a vault file on both write and read. `add` stores the path it
 found (and warns when it finds none); `list` re-resolves and marks any OPEN entry whose
@@ -54,6 +77,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -62,12 +86,27 @@ KINDS = ("asked-of-me", "asked-of-you", "pushed")
 STATES = ("open", "closed")
 ROOT = os.path.expanduser("~/.claude/state/open-items")
 
+# A manager-loop tick summary filed as a `pushed` entry. Such a log is the manager's own
+# record, not a task filed on the operator's behalf, and it names no task — so `pushed`'s
+# close condition (its task file reading `status: completed`) can never fire and the entry
+# can never reach a terminal state. Scoped to `pushed` on purpose: that kind's text is the
+# manager's own writing, whereas `asked-of-me` carries the operator's words verbatim and a
+# refusal there could block a genuine instruction that happens to quote a tick. Measured
+# 2026-10-05 against a live 72-entry ledger: seven entries match, all `pushed` — the six
+# open ones this guard exists for, plus one already closed that had named a task.
+TICK_SUMMARY_RE = re.compile(r"^Manager-loop tick \d+ \(\d{4}-\d{2}-\d{2}")
+
 # Rendered on an OPEN entry's summary line. `unknown` gets its own wording rather
 # than sharing UNRESOLVABLE's: a search that could not run and a search that found
 # nothing are different facts, and only one of them is a problem with the entry.
 MARKERS = {
     "unresolvable": " · ⚠️ UNRESOLVABLE",
     "unknown": " · ⚠️ UNCHECKED (no task dirs)",
+    # `none` is what `target_state` returns for an entry naming no task at all. Scoped by
+    # KIND at the render site (`marker_for`), never here: an `asked-of-you` legitimately
+    # names no task because it resolves on the operator's answer, so a bare key would flag
+    # every question the ledger holds. Only `asked-of-me` / `pushed` must name one.
+    "none": " · ⚠️ NO TASK",
 }
 DETAIL_SUFFIX = {"ok": "", "unknown": " (not searched)"}
 
@@ -297,6 +336,27 @@ def target_state(item, dirs):
     return "unresolvable", None
 
 
+def marker_for(item, state):
+    """The marker to render on an entry's summary line, or "".
+
+    Only an OPEN entry can be flagged: a closed one is terminal, its close condition gates
+    nothing, and flagging it would make the very entries this check explains look broken
+    after they were closed correctly.
+
+    `none` is scoped by KIND as well as by state, and that scoping is why this is a function
+    rather than a dict lookup. An `asked-of-you` resolves on the operator's answer and
+    legitimately names no task, so flagging it would fire on every question the ledger holds
+    — and a check that flags everything satisfies its positive case while catching nothing.
+    `asked-of-me` and `pushed` both resolve on a task file, so an entry of either kind naming
+    none is exactly the entry whose close condition can never fire.
+    """
+    if item["state"] != "open":
+        return ""
+    if state == "none" and item["kind"] == "asked-of-you":
+        return ""
+    return MARKERS.get(state, "")
+
+
 def load(sid):
     path = path_for(sid)
     if not os.path.exists(path):
@@ -340,6 +400,11 @@ def migrate(item):
     # whole reason the field had to be added at the write site.
     item.setdefault("origin_pane", None)
     item.setdefault("origin_session", None)
+    # The withdrawal stamp is forward-only, like the origin record: entries closed before the
+    # verb existed carry no key, and healing them to an explicit None keeps the schema uniform
+    # so a reader tells a withdrawal from an evidence-close by one field rather than by
+    # testing for absence. NOT back-filled — a past close cannot be reclassified from its data.
+    item.setdefault("withdrawn_at", None)
     if item["kind"] != "asked-of-you":
         # Only an asked-of-you may carry `answer` / `answered_at` — on any other kind they
         # assert an operator reply that never happened. Two broken shapes exist and BOTH are
@@ -491,6 +556,27 @@ def cmd_add(args):
             "  the supervisor's permission channel. Those close normally."
             % (args.held_in_pane, args.held_in_pane)
         )
+    if args.kind == "pushed" and TICK_SUMMARY_RE.match(args.text):
+        # REFUSE, and write nothing at all — the same discipline as the held_in_pane
+        # refusal above, and for the same reason: the entry could never close. `pushed`
+        # resolves on its task file reading `status: completed`, a tick summary names no
+        # task, so no close condition could ever fire. It would sit open forever,
+        # indistinguishable in the render from an ask genuinely still outstanding — which
+        # is exactly what six of them did (measured 2026-10-05).
+        sys.exit(
+            "error: a manager-loop tick summary is not a `pushed` entry — nothing "
+            "written.\n"
+            "  `pushed` is for a task this manager filed or spawned on the operator's\n"
+            "  behalf, and it resolves when that task reads `status: completed`. A tick\n"
+            "  summary names no task, so that condition can never fire and the entry\n"
+            "  would sit open forever — indistinguishable from an ask still outstanding.\n"
+            "  The tick's record belongs in the sweep output, not in the ledger. If the\n"
+            "  tick DID file a task, add an entry whose text is that task:\n"
+            "    python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py add --kind pushed \\\n"
+            "      --text \"<the task>\" --task \"<the task>\"\n"
+            "  An operator instruction that happens to quote a tick is `asked-of-me`,\n"
+            "  which this guard deliberately does not touch."
+        )
     data = load(sid)
     dirs = task_dirs_for(args)
     item = {
@@ -530,25 +616,61 @@ def cmd_add(args):
     data["items"].append(item)
     save(data)
     print("added %s [%s] %s" % (item["id"], item["kind"], item["text"]))
-    if args.task and not item["task_path"]:
-        # WARN, never refuse: the ledger exists to record an instruction BEFORE its
-        # task exists — the stretch between being said and becoming a task — so an
-        # unresolvable --task is often correct at add time. Refusing would delete the
-        # ledger's reason to exist; saying nothing would let the entry look resolved
-        # until someone audits it by hand, which is the defect itself.
-        print(
-            (
-                "⚠️  --task %r resolves to no file in any configured vault — the entry "
-                "is recorded and will render as UNRESOLVABLE until a task by that "
-                "title exists."
-                if dirs
-                else "⚠️  --task %r was NOT checked — no vault task dir was searchable "
-                "(vault-cli missing, or its config unreadable). The entry is recorded "
-                "and will render as UNCHECKED."
-            )
-            % args.task,
-            file=sys.stderr,
+    warn_unresolvable_task(args.task, item["task_path"], dirs)
+    return 0
+
+
+def warn_unresolvable_task(task, path, dirs):
+    """Warn on stderr that a named task backs no file, or could not be checked at all.
+
+    WARN, never refuse: the ledger exists to record an instruction BEFORE its task exists —
+    the stretch between being said and becoming a task — so an unresolvable `--task` is often
+    correct at write time. Refusing would delete the ledger's reason to exist; saying nothing
+    would let the entry look resolved until someone audits it by hand, which is the defect.
+
+    The two branches are not one message with a suffix: a search that could not run and a
+    search that found nothing are different facts, and only one of them is a problem with
+    the entry. `add` and `set` share this so the wording cannot drift between them.
+    """
+    if not task or path:
+        return
+    print(
+        (
+            "⚠️  --task %r resolves to no file in any configured vault — the entry "
+            "will render as UNRESOLVABLE until a task by that title exists."
+            if dirs
+            else "⚠️  --task %r was NOT checked — no vault task dir was searchable "
+            "(vault-cli missing, or its config unreadable). The entry will render "
+            "as UNCHECKED."
         )
+        % task,
+        file=sys.stderr,
+    )
+
+
+def cmd_set(args):
+    """Name a task on an entry that already exists.
+
+    The act step's missing half, and the reason the `⚠️ NO TASK` marker can be acted on at
+    all. `add` was the only writer of `task`, so a sweep that found an open entry with no
+    task behind it — the act rule's own trigger — could file a task but could not name it
+    on the entry: the entry stayed unresolvable forever and the rule stayed prose nothing
+    could follow. Naming it here is what makes the entry's close condition checkable.
+
+    It cannot be used to fake a resolution: `list` re-resolves the target on every read, so
+    a task that backs no file renders `⚠️ UNRESOLVABLE` regardless of what was written here.
+    """
+    sid = session_id(args)
+    data = load(sid)
+    item = find(data, args.id)
+    dirs = task_dirs_for(args)
+    item["task"] = args.task
+    item["task_path"] = resolve_task(args.task, dirs)
+    if args.resolves_on:
+        item["resolves_on"] = args.resolves_on
+    save(data)
+    print("set task on %s [%s]: %s" % (item["id"], item["kind"], args.task))
+    warn_unresolvable_task(args.task, item["task_path"], dirs)
     return 0
 
 
@@ -605,6 +727,51 @@ def cmd_note(args):
     return 0
 
 
+def cmd_withdraw(args):
+    """Close an entry that was never an ask, on the OPERATOR's withdrawal.
+
+    The third close path, and deliberately not a synonym for `close --evidence`: `close`
+    asserts the entry's OWN resolution condition was met and verified on disk, while this
+    asserts the entry should never have existed. Both end at `state: closed`, but a later
+    reader tells them apart by `withdrawn_at` — and a reader who cannot tell them apart
+    cannot tell a resolved ask from one that was never real.
+
+    It exists because an entry can otherwise be permanently open: `asked-of-me` / `pushed`
+    resolve on a task file, and a manager tick summary filed as one of them has no task, so
+    no close condition could ever fire. `skills/open-items/SKILL.md` already promised this
+    path for `asked-of-me` ("or the operator withdraws it") with no verb behind it.
+    """
+    sid = session_id(args)
+    data = load(sid)
+    item = find(data, args.id)
+    if item["kind"] == "asked-of-you":
+        # REFUSE, and write nothing. `answer` is this kind's only close path — the skill's
+        # kind table says so outright — because the operator answering a question is the one
+        # fact that resolves it. A withdrawal here would stamp an operator act onto a
+        # question they may never have seen: the forgery `answer`'s own docstring warns
+        # about, reached through a second verb instead of the first.
+        sys.exit(
+            "error: an `asked-of-you` cannot be withdrawn — nothing written.\n"
+            "  Its only close path is `answer`, because the operator replying to a\n"
+            "  question is the fact that resolves it; a withdrawal would record an\n"
+            "  operator act on a question they may never have seen.\n"
+            "  If the operator answered it:  answer --id %s --answer \"<their words>\"\n"
+            "  If it was filed in error:     close  --id %s --evidence \"<on-disk fact>\""
+            % (args.id, args.id)
+        )
+    stamp = now()
+    item["state"] = "closed"
+    item["closed_at"] = stamp
+    item["closed_evidence"] = "operator withdrew it: %s" % args.reason
+    item["withdrawn_at"] = stamp
+    save(data)
+    print(
+        "withdrew %s [%s] — operator withdrew it: %s"
+        % (item["id"], item["kind"], args.reason)
+    )
+    return 0
+
+
 def cmd_close(args):
     sid = session_id(args)
     data = load(sid)
@@ -652,7 +819,8 @@ def cmd_list(args):
         # condition no longer gates anything, so an unresolvable target on it is
         # history, not a problem, and marking it would make the entries this fix
         # exists to explain look broken *after* they were correctly closed.
-        marker = MARKERS.get(state, "") if item["state"] == "open" else ""
+        # `marker_for` also carries the kind scoping `none` needs; see its docstring.
+        marker = marker_for(item, state)
         # The marker rides the summary line, not the detail line: a manager renders
         # these one per line under "📋 Open with the operator", and the detail line is
         # exactly what a reader skimming that list does not see.
@@ -769,6 +937,18 @@ def main():
     )
     p_add.set_defaults(func=cmd_add)
 
+    p_set = sub.add_parser(
+        "set",
+        help="name a task on an existing entry — the act step's missing half, so a "
+        "task-less entry can stop rendering `⚠️ NO TASK` and become closable",
+    )
+    p_set.add_argument("--id", required=True)
+    p_set.add_argument("--task", required=True, help="the vault task covering this entry")
+    p_set.add_argument(
+        "--resolves-on", dest="resolves_on", help="what closes this entry (rarely needed)"
+    )
+    p_set.set_defaults(func=cmd_set)
+
     p_answer = sub.add_parser(
         "answer",
         help="record the OPERATOR's answer — closes an asked-of-you outright; on the other "
@@ -791,6 +971,23 @@ def main():
     p_note.add_argument("--id", required=True)
     p_note.add_argument("--text", required=True)
     p_note.set_defaults(func=cmd_note)
+
+    p_withdraw = sub.add_parser(
+        "withdraw",
+        help="close an entry that was never an ask, on the OPERATOR's withdrawal — the "
+        "third close path, distinct from `answer` and `close --evidence`. REFUSED on "
+        "--kind asked-of-you, whose only close path is `answer`",
+    )
+    p_withdraw.add_argument("--id", required=True)
+    p_withdraw.add_argument(
+        "--reason",
+        required=True,
+        help="why the entry is withdrawn, quoting the operator where they spoke. Recorded "
+        "as 'operator withdrew it: <reason>' — a withdrawal is an OPERATOR act, so never "
+        "pass a manager's own tidying-up here; an entry whose own condition was met is a "
+        "`close --evidence`, and one that was answered is an `answer`.",
+    )
+    p_withdraw.set_defaults(func=cmd_withdraw)
 
     p_close = sub.add_parser("close", help="close an entry on evidence")
     p_close.add_argument("--id", required=True)
