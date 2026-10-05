@@ -49,7 +49,8 @@ this row" read), while `recent` takes the newest card by `created_at` whatever
 its state (it is the "which card carries this hold" read). A hold is usually on
 a card not yet answered, so `latest` alone leaves the hold line's case unserved.
 
-Exit codes: 0 ok · 3 no cards for the key · 2 refused (ambiguous or bad input).
+Exit codes: 0 ok · 3 no cards / none answered / no created_at · 2 refused
+(ambiguous or bad input) · 1 store unreadable (`FAILED:`).
 """
 import argparse
 import json
@@ -106,13 +107,23 @@ def fetch_history(store, timeout, limit=HISTORY_LIMIT):
 
 
 def parse_ts(value):
-    """The store's RFC3339 stamps, as aware datetimes. None when unparseable."""
+    """The store's RFC3339 stamps, as aware datetimes. None when unparseable.
+
+    ⚠️ A stamp carrying no offset parses NAIVE, and comparing a naive datetime to
+    an aware one raises `TypeError` — out of `main()`'s try/except, which wraps
+    only the fetch. The store's contract is RFC3339 with a `Z` or an offset, so a
+    naive stamp is out of contract; it is read as UTC rather than allowed to
+    crash the lookup.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def answered_at(item):

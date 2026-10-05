@@ -21,6 +21,8 @@ import importlib.util
 import io
 import os
 import unittest
+import urllib.error
+from unittest import mock
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -194,6 +196,39 @@ class CommandExitCodeTest(unittest.TestCase):
         code, text = self.run_latest(items, KEY_A)
         self.assertEqual(3, code)
         self.assertIn("NO_ANSWERED:", text)
+
+
+class MainExitCodeTest(unittest.TestCase):
+    """The two paths the command-level tests cannot reach, because they live in
+    `main()` rather than in a `cmd_*` helper."""
+
+    def test_store_unreachable_exits_one(self):
+        # `FAILED:` is its own exit, deliberately not 3: a store that is down
+        # must not read as a key with nothing under it, because the caller's
+        # next act is to quote a card and "no cards" is the token that would
+        # otherwise invite a re-post.
+        with mock.patch.object(
+            lookup.urllib.request, "urlopen", side_effect=urllib.error.URLError("boom")
+        ):
+            code = lookup.main(["latest", "--dedup-key", KEY_A])
+        self.assertEqual(1, code)
+
+    def test_empty_dedup_key_is_refused(self):
+        self.assertEqual(2, lookup.main(["latest", "--dedup-key", "   "]))
+
+
+class NaiveStampTest(unittest.TestCase):
+    def test_naive_stamp_is_read_as_utc_not_raised(self):
+        # A naive stamp among aware ones raises TypeError out of main()'s
+        # try/except, which wraps only the fetch. The store's contract carries
+        # an offset, so this is out of contract — but it must not crash.
+        items = [
+            card("naive", KEY_A, "2026-10-05T09:00:00", created="2026-10-05T08:00:00"),
+            card("aware", KEY_A, "2026-10-05T10:00:00Z", created="2026-10-05T09:00:00Z"),
+        ]
+        chosen, err = lookup.select_latest(items)
+        self.assertIsNone(err)
+        self.assertEqual("aware", chosen["item_id"])
 
 
 if __name__ == "__main__":
