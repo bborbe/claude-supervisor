@@ -575,6 +575,32 @@ class TestLiveness(Base):
                     "%s did not collapse to the alive term" % verdict,
                 )
 
+    def test_a_pre_collapse_stored_digest_reports_one_change_then_heals(self):
+        """The consequence EVERY subject hits at once on deploy, and it is fail-open.
+
+        The liveness term's SHAPE changed (the raw word -> a bare `0`/`1`) and the stored
+        record carries no version, so `load_stored` returns the old string and
+        `digest_moved` fires once with nothing about the tree moved. Pinned because a
+        one-shot spurious CHANGE is indistinguishable from a real one in a log, and
+        because the healing half -- `--save` rewriting the digest in the new format -- is
+        what bounds it to exactly once per subject.
+        """
+        self.prime("ATopic")
+        state = json.loads(self.read_state("ATopic"))
+        self.assertIn("digest", state)
+        state["digest"] = "0" * 64  # no build computes this — stands in for the old shape
+        with open(self.m.state_path("ATopic"), "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+
+        rc, out = self.check("ATopic")
+        self.assertEqual(
+            rc, self.m.EXIT_CHANGE, "a pre-collapse digest did not report a change"
+        )
+
+        self.save("ATopic")
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
     def test_an_id_set_only_rows_death_moves_the_digest(self):
         """The shape the unguarded term exists for, driven through the REAL path.
 

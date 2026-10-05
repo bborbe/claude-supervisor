@@ -1083,6 +1083,17 @@ def digest_of(tracked: list[dict]) -> str:
     all" and a gate opening changes no row's *eligibility*. Every other narrowing in
     this file is named; this one is named too.
 
+    ⚠️ **The churn suppression is NOT absolute, and the second route is named here rather
+    than left to be inferred from the term alone.** `stuck` is a SEPARATE digest input
+    (the same tuple, below), and `idle_stuck` returns `False` for a PARKED row -- so a row
+    already flagged stuck (idle past `STUCK_SECONDS`, `phase: execution`, holding an open
+    box) that then opens a gate flips `stuck` 1 -> 0 and **still moves the digest on a
+    pure `live -> parked` flip**. That is intended, not a leak: a stuck row that parks on
+    a human genuinely stops being stuck, so its rendered state really did change and
+    replaying a stale table over it would be the worse failure. What the collapse removes
+    is the churn that informed nothing -- not every transition whose *cause* happens to be
+    a gate.
+
     ⚠️ **The first run after an UPGRADE reports one spurious CHANGE, and that is expected
     rather than a fault.** The liveness term's shape changed (the raw word -> a bare
     `0`/`1`), and the stored record carries no version, so every subject holding a
