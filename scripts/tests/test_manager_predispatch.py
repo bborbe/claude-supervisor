@@ -536,17 +536,28 @@ class TestLiveness(Base):
             1,
             "an absent owner did not hash as death",
         )
-        self.assertEqual(
-            term({"name": "T", "session": "s-gone"}),
-            1,
-            "an unenriched row did not default to the death term",
-        )
         # Both ALIVE verdicts collapse to the same value — that IS the churn fix.
         self.assertEqual(
             term({"name": "T", "session": "s-gone", "liveness": self.m.LIVENESS_LIVE}), 0
         )
         self.assertEqual(
             term({"name": "T", "session": "s-gone", "liveness": self.m.LIVENESS_PARKED}), 0
+        )
+
+    def test_an_unenriched_row_defaults_to_the_death_term(self):
+        """The default is deliberate, not an oversight — and it is the OPPOSITE direction
+        from the session-less guard above, which is why it is a test of its own.
+
+        An unenriched row *with* a session id hashes the DEATH term: `liveness` defaults
+        to `LIVENESS_NONE`, and with a session id present that IS the death verdict. The
+        sole production call site (`evaluate`) always enriches first, so this is a fixture
+        path — pinned anyway, because it is the value any caller that skips enrichment
+        gets, and `digest_of`'s docstring names it.
+        """
+        self.assertEqual(
+            self.m.liveness_change_term({"name": "T", "session": "s-gone"}),
+            1,
+            "an unenriched row did not default to the death term",
         )
 
     def test_live_worker_with_stale_heartbeat_is_not_dead(self):

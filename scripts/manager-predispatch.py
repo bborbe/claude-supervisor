@@ -1026,8 +1026,13 @@ def liveness_change_term(t: dict) -> int:
 def digest_of(tracked: list[dict]) -> str:
     """What the sweep would render, plus the Progress signal it reports.
 
-    `liveness` and `stuck` are set by the caller before this runs; both default to absent
-    so a caller that has not enriched them (a fixture) still gets a stable digest.
+    `liveness` and `stuck` are set by the caller before this runs; both default to a
+    STABLE value for a caller that has not enriched them (a fixture). ⚠️ **But the
+    liveness default is no longer "absent", and that changed with the collapse below:**
+    it routes through `liveness_change_term`, so an unenriched row *with* a session id
+    hashes the DEATH term (1) rather than an absent value. Still stable, and unreachable
+    in production -- the sole call site (`evaluate`) calls `enrich_liveness` first -- but
+    the value differs from pre-collapse, so it is named rather than left to be inferred.
 
     ⚠️ **Liveness reaches the digest through `liveness_change_term`, never raw.** The
     split is deliberate: a session-liveness *churn* delta must not authorise a dispatch,
