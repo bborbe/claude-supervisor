@@ -34,9 +34,21 @@ A live per-subject snapshot already exists: `~/.claude/state/sweep-gate-loop/<va
 is worth keeping because it cuts both ways:
 
   IT CARRIES the digest inputs — `status`, `phase`, `progress_hash`, `session`,
-  `liveness`, `stuck` per task. That is the exact set `digest_of()` below hashes, so the
-  contract is CONFIRMED rather than merely assumed: the loop's writer and this gate agree
-  on what "unchanged" means, which is the property that keeps two gates from drifting.
+  `liveness`, `stuck` per task. That WAS the exact set `digest_of()` below hashed when
+  this was checked, so the contract was CONFIRMED rather than merely assumed: the loop's
+  writer and this gate agreed on what "unchanged" means, which is the property that keeps
+  two gates from drifting.
+
+  ⚠️ **THAT AGREEMENT NO LONGER HOLDS AT ONE TERM, since 2026-10-05.** `digest_of` now
+  hashes `liveness_change_term` rather than the raw `liveness` word, so the two stores
+  agree on the field SET and disagree on the liveness term's DERIVATION — deliberately,
+  because session churn must not authorise a dispatch while session death still must.
+  The snapshot keeps the raw word for its render, and its writer
+  `sweep-gate-classify.py` keeps its own `liveness -> parked` trigger (a different gate
+  with a different job). ⚠️ **Recorded HERE and not only in `docs/fleet-surface.md`,
+  because this block is the digest contract's declared single home** —
+  `commands/manager-status.md` step 1 reads it rather than restating it, so a stale
+  agreement here is what a reader would take as current.
 
   IT LACKS the rendered table, and it has no member list. The no-change branch must
   replay the table (the operator sees the frame on every run — silence would be
@@ -51,8 +63,10 @@ is worth keeping because it cuts both ways:
   failure `a frozen-tree remedy` closed for the
   loop, and reintroducing it here would be a regression dressed as reuse.
 
-So: same contract, different surface. This gate owns its own store, and the two cannot
-disagree about a tree because they hash the same inputs.
+So: same contract, different surface, one deliberately diverged term. This gate owns its
+own store; the two agree on the field SET and — since 2026-10-05 — disagree on the
+liveness term's derivation by design. See the note above, which is this contract's single
+home.
 
 Exit codes (same three the loop gate uses)
   0   digest equal to the stored one AND no moved bucket set AND no actionable row in the
@@ -102,9 +116,14 @@ quietly, because failing to record the digest must never read as "no change" nex
 
 Digest inputs — verbatim from the loop gate
   per tracked task: name, status, phase, claude_session_id, a hash of its `# Progress`
-  section, its Session-column liveness word, and its stuck verdict — plus the sorted
+  section, a DEATH-ONLY liveness term, and its stuck verdict — plus the sorted
   member-name list, so a task added to or removed from the tracked set moves the digest
   even if every remaining task is untouched.
+
+⚠️ The liveness term is DEATH-ONLY, not the Session-column word. It was the raw word until
+2026-10-05, and that made a worker starting or ending a turn — `live` <-> `parked` — move
+the digest, so the gate answered CHANGE on ticks where no row's eligibility moved. See
+`liveness_change_term`: churn must not authorise a dispatch, death still must.
 
 ⚠️ mtime is deliberately EXCLUDED as a raw digest input. A touch with no content change
 is not a change the sweep reports, and including it would wake the model on every
@@ -123,6 +142,14 @@ alone would see the dead worker's task as unchanged and replay the stored table 
 over the death. Liveness is therefore computed HERE, in the gate — never inside the
 dispatched `manager-sweep-reader` agent, which is forbidden to probe liveness
 (`agents/manager-sweep-reader.md`) and could not see it anyway.
+
+⚠️ **But only its DEATH half belongs in the digest, and the two must not be conflated.**
+"Liveness is in the digest" is true of the death transition and false of the churn: a
+worker opening or closing a gate flips `live` <-> `parked` several times a turn, and
+hashing the raw word made that churn authorise a dispatch it could not inform. The digest
+carries `liveness_change_term`, which is identical for every ALIVE verdict and moves only
+when an owner goes absent — so this criterion is still graded on death, and is no longer
+graded on churn.
 
 ⚠️ The liveness verdict must not be over-eager, and that is a graded case too. Deciding
 "dead" by heartbeat age alone satisfies "a dead worker is reported" while mis-reporting
@@ -982,11 +1009,98 @@ def is_held(session_id: str) -> bool:
     return isinstance(read_holds().get(session_id), dict)
 
 
+def liveness_change_term(t: dict) -> int:
+    """The digest's liveness contribution: DEATH only, never churn.
+
+    ⚠️ **The raw liveness word used to be hashed here, and collapsing it is this
+    function's whole job.** `liveness_of` returns `parked` while a worker holds an open
+    gate and `live` the moment it closes one, so a worker merely starting or ending a
+    turn moved the digest and the gate answered CHANGE (exit 10) on a tick where no
+    row's *eligibility* moved. Measured 2026-09-30: three consecutive act legs returned
+    the identical decision set -- `to open 0 · to resume 0 · reaped 0 · nudged 0` -- at
+    roughly 150k subagent tokens each, because the fleet's normal state is churn.
+
+    ⚠️ **Death must survive, and that is what the gate is graded on.** The module
+    docstring's *"a worker dying changes session liveness ... this is the criterion the
+    whole gate is graded on"* is why the term is COLLAPSED rather than deleted: `live`
+    and `parked` are both *alive* and hash identically, while an owner that has gone
+    `LIVE -> ABSENT` still moves the digest. Deleting the term satisfies the churn half
+    and regresses this one -- see `TestLiveness.test_a_worker_dying_still_moves_the_digest`.
+
+    ⚠️ **It is deliberately UNGUARDED, and that is load-bearing rather than lax.** An
+    earlier cut of this function returned `0` for a row with no `session` key, to keep a
+    never-started row off the death term. That silently dropped death detection for every
+    row whose ids live only in `metrics_sessions`: `read_task` sets `session` from the
+    frontmatter `claude_session_id` ALONE (line 555) while `sessions` carries the whole
+    id set (line 556, `session_id_set`), and `liveness_of` probes `sessions` FIRST with
+    `roster_owner` as the fallback when that set is empty. **Any guard keyed on a subset
+    of the ownership signals regresses whatever shape it excludes**, because pre-fix
+    EVERY row's `live -> none` moved the digest -- so the guard's cost is a silently
+    missed death, and its only benefit is suppressing a transition that cannot occur.
+
+    ⚠️ **No guard is needed, because a never-started row cannot churn.** Such a row reads
+    `liveness_of` -> `roster_owner`, which is `none` unless a live roster name matches --
+    and `none` on both sides of a comparison is the same value, so it moves nothing. The
+    only transitions this term can make are `alive -> absent` and `absent -> alive`, both
+    real ownership changes. `TestLiveness.test_death_is_detected_for_every_ownership_shape`
+    pins the shapes; `test_liveness_churn_alone_does_not_move_the_digest` pins the churn
+    half.
+    """
+    return int(t.get("liveness", LIVENESS_NONE) == LIVENESS_NONE)
+
+
 def digest_of(tracked: list[dict]) -> str:
     """What the sweep would render, plus the Progress signal it reports.
 
-    `liveness` and `stuck` are set by the caller before this runs; both default to absent
-    so a caller that has not enriched them (a fixture) still gets a stable digest.
+    `liveness` and `stuck` are set by the caller before this runs; both default to a
+    STABLE value for a caller that has not enriched them (a fixture). ⚠️ **But the
+    liveness default is no longer "absent", and that changed with the collapse below:**
+    it routes through `liveness_change_term`, so an unenriched row *with* a session id
+    hashes the DEATH term (1) rather than an absent value. Still stable, and unreachable
+    in production -- the sole call site (`evaluate`) calls `enrich_liveness` first -- but
+    the value differs from pre-collapse, so it is named rather than left to be inferred.
+
+    ⚠️ **Liveness reaches the digest through `liveness_change_term`, never raw.** The
+    split is deliberate: a session-liveness *churn* delta must not authorise a dispatch,
+    while a session-*death* transition still must. See that function.
+
+    ⚠️ **That split NARROWS THIS DOCSTRING'S OWN CONTRACT, and the narrowing is named
+    here rather than left to be rediscovered.** "What the sweep would render" no longer
+    holds for one cell: `parked` is what makes a row render `⌛ waiting-on-human`
+    (`agents/manager-sweep-reader.md` step 7), so a worker newly opening a gate no longer
+    moves the digest -- and the exit-0 replay path (`commands/manager-status.md` step 1)
+    reproduces the stored table with whatever cell the row last had.
+
+    ⚠️ **That stale cell is REAL and UNCOVERED on the two surfaces that replay** --
+    `/manager-status` step 1 and `/manager-drive` step 2 -- because both STOP on exit 0
+    before reading anything else. ⚠️ **`/manager-loop` is NOT one of them and is NOT a
+    mitigation:** it never calls `--print` or `--check`, so it never consults this digest
+    at all, and its attention-feed read is step 4's first bullet
+    (`commands/manager-loop.md:186`), which runs before any verdict. The independent
+    surfacing that does hold is step 7's `manager-attention-watch.py` / feed-Monitor
+    arms, which fire `NEW GATE` off the registry and the feed rather than off this
+    digest. Accepted because the gate's question is "is this run worth a dispatch at
+    all" and a gate opening changes no row's *eligibility*. Every other narrowing in
+    this file is named; this one is named too.
+
+    ⚠️ **The churn suppression is NOT absolute, and the second route is named here rather
+    than left to be inferred from the term alone.** `stuck` is a SEPARATE digest input
+    (the same tuple, below), and `idle_stuck` returns `False` for a PARKED row -- so a row
+    already flagged stuck (idle past `STUCK_SECONDS`, `phase: execution`, holding an open
+    box) that then opens a gate flips `stuck` 1 -> 0 and **still moves the digest on a
+    pure `live -> parked` flip**. That is intended, not a leak: a stuck row that parks on
+    a human genuinely stops being stuck, so its rendered state really did change and
+    replaying a stale table over it would be the worse failure. What the collapse removes
+    is the churn that informed nothing -- not every transition whose *cause* happens to be
+    a gate.
+
+    ⚠️ **The first run after an UPGRADE reports one spurious CHANGE, and that is expected
+    rather than a fault.** The liveness term's shape changed (the raw word -> a bare
+    `0`/`1`), and the stored record carries no version, so every subject holding a
+    pre-collapse digest compares unequal exactly once: `load_stored` returns the old
+    string and `digest_moved` fires with nothing about the tree moved. Bounded and
+    fail-open -- a CHANGE authorises a sweep, it never suppresses one -- and self-healing:
+    the loop's own `--save` rewrites the digest in the new format on its first tick.
 
     ⚠️ **The hold is a digest input, and deliberately NOT a suppression here.** This gate
     decides whether the sweep runs at all, so suppressing it for a held session would
@@ -1000,7 +1114,7 @@ def digest_of(tracked: list[dict]) -> str:
         h.update(
             (
                 f"{t['name']}|{t['status']}|{t['phase']}|{t['session']}"
-                f"|{t.get('progress_hash', '')}|{t.get('liveness', LIVENESS_NONE)}"
+                f"|{t.get('progress_hash', '')}|{liveness_change_term(t)}"
                 f"|{int(bool(t.get('stuck')))}|{int(is_held(t['session']))}\n"
             ).encode()
         )
