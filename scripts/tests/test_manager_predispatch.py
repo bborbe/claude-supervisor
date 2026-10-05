@@ -481,6 +481,19 @@ class TestLiveness(Base):
         _, _, payload, _ = self.m.evaluate(self.vault, "ATopic")
         return self.m.digest_of(payload["tracked"])
 
+    def digest_with_metrics_only(self, sid):
+        """`digest_with`'s shape for a row whose ids live ONLY in `metrics_sessions`.
+
+        `read_task` sets `session` from the frontmatter `claude_session_id` ALONE while
+        `sessions` carries the whole id set, so this row reaches the digest with
+        `session == ""` — the shape the unguarded term exists for. Driving it through
+        `evaluate` (rather than asserting on `liveness_change_term` directly) is what
+        makes the regression this guards against reproducible end to end.
+        """
+        self.write("25 Tasks/ATask.md", TASK_WITH_METRICS.format(ids=sid))
+        _, _, payload, _ = self.m.evaluate(self.vault, "ATopic")
+        return self.m.digest_of(payload["tracked"])
+
     def test_dead_worker_moves_the_digest(self):
         """A worker dying is a change — it must never be swallowed."""
         live = self.digest_with("s-live")
@@ -561,6 +574,26 @@ class TestLiveness(Base):
                     0,
                     "%s did not collapse to the alive term" % verdict,
                 )
+
+    def test_an_id_set_only_rows_death_moves_the_digest(self):
+        """The shape the unguarded term exists for, driven through the REAL path.
+
+        `read_task` sets `session` from the frontmatter `claude_session_id` alone while
+        `sessions` carries the whole id set, so a row whose ids live only in
+        `metrics_sessions` reaches the digest with `session == ""`. An earlier cut keyed
+        the term on `session` and silently stopped detecting this row's death — a shape
+        this module measures as common (64 of 124 rows carrying a `metrics_sessions`
+        block have no `claude_session_id`). This drives `evaluate` -> `liveness_of` ->
+        `digest_of` rather than the term alone, so that regression is reproducible here
+        and not only in the docstring.
+        """
+        self.registry("s-set")
+        live = self.digest_with_metrics_only("s-set")
+        os.remove(os.path.join(self.m.REGISTRY_DIR, "1.json"))
+        dead = self.digest_with_metrics_only("s-set")
+        self.assertNotEqual(
+            live, dead, "an id-set-only row's death did not move the digest"
+        )
 
     def test_an_unenriched_row_defaults_to_the_death_term(self):
         """The default is deliberate, not an oversight — and it is the OPPOSITE direction
