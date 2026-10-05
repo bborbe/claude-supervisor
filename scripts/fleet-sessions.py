@@ -42,9 +42,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HOME = Path.home()
-PROJECTS = HOME / ".claude" / "projects"
-OBSIDIAN = Path(os.environ.get("OBSIDIAN_DIR", HOME / "Documents" / "Obsidian"))
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+# Both ambient roots resolve PER CALL rather than at import, the way
+# `session-liveness.py`'s `_start_cache_path()` does. The documented run command
+# (`python3 -m unittest discover -s scripts/tests`) loads every test module into ONE
+# process, so an import-time read is already fixed by the time any suite could isolate
+# it — and a suite that reads the machine's real roots answers for the host rather than
+# for the code. On a clean CI runner neither root exists, so `main()` printed
+# `no ~/.claude/projects` and every render assertion then failed against that string
+# instead of against the render.
+
+def projects_dir() -> Path:
+    """Transcript root. `SUPERVISOR_PROJECTS_DIR` overrides; default `~/.claude/projects`.
+
+    The override is the repo's established name for this root — `server/config.mjs`
+    reads the same key — so the reader and the server resolve one root, not two.
+    """
+    override = os.environ.get("SUPERVISOR_PROJECTS_DIR")
+    return Path(os.path.expanduser(override)) if override else HOME / ".claude" / "projects"
+
+def obsidian_dir() -> Path:
+    """Vault root. `OBSIDIAN_DIR` overrides; default `~/Documents/Obsidian`."""
+    override = os.environ.get("OBSIDIAN_DIR")
+    return Path(os.path.expanduser(override)) if override else HOME / "Documents" / "Obsidian"
 
 # Retired scoping flags — `--all`, `--minutes N` and `--vault NAME` are accepted
 # and ignored (removed 2026-09-19). They used to narrow the roster to a single
@@ -122,7 +143,9 @@ def _walk_task_stamps():
     """
     pat = re.compile(r'claude_session_id:\s*["\']?(' + UUID_RE.pattern + ')')
     known = vault_dirs_from_cli()
-    for vault in OBSIDIAN.iterdir():
+    root = obsidian_dir()
+    if not root.is_dir(): return
+    for vault in root.iterdir():
         if not vault.is_dir(): continue
         for sub in known.get(os.path.realpath(vault)) or PROBE_DIRS:
             d = vault / sub
@@ -340,7 +363,8 @@ def render_row(age: float, proj: str, sid: str, working: str, live: bool, rec: d
 
 def main():
     now = time.time()
-    if not PROJECTS.is_dir():
+    projects = projects_dir()
+    if not projects.is_dir():
         print("no ~/.claude/projects"); return
     work = build_work_map()
     ledger = read_ledger()
@@ -348,7 +372,7 @@ def main():
     proc_count, resumed = (None, set()) if live is None else live
 
     rows = []
-    for jsonl in PROJECTS.glob("*/*.jsonl"):
+    for jsonl in projects.glob("*/*.jsonl"):
         sid = jsonl.stem
         if not UUID_RE.fullmatch(sid): continue
         proj = project_label(jsonl.parent.name)

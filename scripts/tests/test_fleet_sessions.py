@@ -33,6 +33,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+# Isolates both ambient roots the subject reads (`~/.claude/projects`, `~/Documents/Obsidian`).
+# Imported for its side effect, and deliberately before `fs` is loaded — see its docstring for
+# why one module owns the assignment.
+import fleet_sessions_isolation  # noqa: F401
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "fleet-sessions.py")
 
@@ -83,6 +88,36 @@ class LedgerDirResolution(unittest.TestCase):
             clear=True,
         ):
             self.assertNotIn("registry", str(fs.ledger_dir()))
+
+
+class AmbientRootsResolvePerCall(unittest.TestCase):
+    """The transcript and vault roots are injectable, and resolved per call.
+
+    Per call, not at import: `unittest discover` loads every test module into ONE
+    process, so an import-time read would already be fixed before a suite could isolate
+    it — which is how these suites came to depend on the host's `~/.claude` in the first
+    place. On a clean runner that dependency made `main()` early-return, so the render
+    assertions were reading `no ~/.claude/projects` rather than a render.
+    """
+
+    def test_projects_dir_honours_the_override(self):
+        with mock.patch.dict(os.environ, {"SUPERVISOR_PROJECTS_DIR": "/tmp/projects-fixture"}):
+            self.assertEqual(fs.projects_dir(), Path("/tmp/projects-fixture"))
+
+    def test_projects_dir_falls_back_to_claude_home(self):
+        env = {k: v for k, v in os.environ.items() if k != "SUPERVISOR_PROJECTS_DIR"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(fs.projects_dir(), Path.home() / ".claude" / "projects")
+
+    def test_obsidian_dir_honours_the_override(self):
+        with mock.patch.dict(os.environ, {"OBSIDIAN_DIR": "/tmp/vaults-fixture"}):
+            self.assertEqual(fs.obsidian_dir(), Path("/tmp/vaults-fixture"))
+
+    def test_the_suite_runs_against_fixtures_not_the_host(self):
+        """The whole point: a green run here says nothing about whose Mac it ran on."""
+        self.assertTrue(fs.projects_dir().is_dir())
+        self.assertTrue(fs.obsidian_dir().is_dir())
+        self.assertNotEqual(fs.projects_dir(), Path.home() / ".claude" / "projects")
 
 
 class ReadLedger(unittest.TestCase):
@@ -282,7 +317,11 @@ class RetiredFlags(unittest.TestCase):
     def test_no_scope_reaches_the_roster(self):
         """The roster is always every project — no cwd/vault narrowing survived."""
         source = Path(_SCRIPT).read_text(encoding="utf-8")
-        self.assertIn('PROJECTS.glob("*/*.jsonl")', source)
+        # The glob is `*/*.jsonl` under the RESOLVED transcript root: every project,
+        # no scope argument. Asserted as two facts so neither the root's name nor the
+        # local binding's name can drift the test off the property it guards.
+        self.assertIn("projects = projects_dir()", source)
+        self.assertIn('.glob("*/*.jsonl")', source)
 
 
 class CountsRestOnSpawnedAt(unittest.TestCase):
