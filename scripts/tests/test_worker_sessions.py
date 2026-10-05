@@ -81,9 +81,11 @@ class WorkerSessionsTest(unittest.TestCase):
         with open(os.path.join(self.registry, f"{session_id}.json"), "w", encoding="utf-8") as fh:
             json.dump({"sessionId": session_id, "pid": os.getpid(), "status": status}, fh)
 
-    def ledger_entry(self, session_id, label):
+    def ledger_entry(self, session_id, label, **extra):
+        record = {"session_id": session_id, "label": label, "mode": "interactive"}
+        record.update(extra)
         with open(os.path.join(self.ledger, f"{session_id}.json"), "w", encoding="utf-8") as fh:
-            json.dump({"session_id": session_id, "label": label, "mode": "interactive"}, fh)
+            json.dump(record, fh)
 
     def run_script(self, *args):
         return subprocess.run(
@@ -128,6 +130,26 @@ class WorkerSessionsTest(unittest.TestCase):
         self.ledger_entry(sid, "cluster worker")
         self.heartbeat_stamp(sid, mode="cluster", source="cluster")
         self.assertEqual(self.run_script("--count").stdout.strip(), "1")
+
+    def test_an_auto_resumed_worker_is_not_counted(self):
+        """Auto-resumes answer to the auto-resume gate's own 30-min crash-loop cap, not this
+        one: counting them would leave a sweep that revived two dead workers unable to open a
+        new one. The marker is the ledger record's `resumed_from`, the same field
+        `check-spawn-ledger.py` reads."""
+        sid = "ffffffff-0000-0000-0000-000000000004"
+        self.ledger_entry(sid, "auto-resumed", resumed_from="aaaaaaaa-0000-0000-0000-000000000009")
+        self.heartbeat_stamp(sid)
+        self.assertEqual(self.run_script("--count").stdout.strip(), "0")
+
+    def test_list_names_the_mode_for_a_heartbeat_sourced_worker(self):
+        """`status` names whichever channel answered. For a worker with no registry entry that
+        is the stamp's `mode` — and `read_live` dropping the field left this column permanently
+        `None` while the mjs twin read the real value off the stamp file."""
+        sid = "ffffffff-0000-0000-0000-000000000005"
+        self.ledger_entry(sid, "Some Worker")
+        self.heartbeat_stamp(sid, mode="cluster", source="cluster")
+        line = [ln for ln in self.run_script("--list").stdout.splitlines() if sid in ln][0]
+        self.assertIn("cluster", line)
 
     def test_a_stale_heartbeat_is_not_counted(self):
         """The verdict is the stamp's AGE against the TTL, never the file's existence — a store

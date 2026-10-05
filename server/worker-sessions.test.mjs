@@ -44,10 +44,10 @@ function register(dir, sessionId, status = 'busy') {
   )
 }
 
-function ledger(dir, sessionId, label, mode = 'interactive') {
+function ledger(dir, sessionId, label, extra = {}) {
   writeFileSync(
     join(dir.ledgerDir, `${sessionId}.json`),
-    JSON.stringify({ session_id: sessionId, label, mode }),
+    JSON.stringify({ session_id: sessionId, label, mode: 'interactive', ...extra }),
   )
 }
 
@@ -105,6 +105,21 @@ test('a registry session with no ledger record is not a worker', () => {
   // every registry session would count the operator's own sessions too.
   const dir = fixture()
   register(dir, 'bbbbbbbb-0000-0000-0000-000000000001')
+  assert.equal(workerSessions(dir).length, 0)
+})
+
+test('an auto-resumed worker is not counted', () => {
+  // Auto-resumes answer to the auto-resume gate's own 30-min crash-loop cap, not this one:
+  // counting them would leave a sweep that revived two dead workers unable to open a new one.
+  // ⚠️ The marker is the ledger's `resumed_from`, and this exclusion used to hold by ACCIDENT
+  // — every auto-resume is headless, and a headless worker held no registry entry under the
+  // old registry-only count. Reading the heartbeat store is what removes that accident, so
+  // the rule is written down here for the first time.
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000004'
+  ledger(dir, sid, 'auto-resumed', { resumed_from: 'aaaaaaaa-0000-0000-0000-000000000009' })
+  beat(dir, sid)
+
   assert.equal(workerSessions(dir).length, 0)
 })
 

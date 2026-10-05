@@ -142,12 +142,23 @@ def read_live(directory, ttl=TTL_SECONDS, now=None):
                         "session_id": session_id,
                         "age_seconds": round(age, 1),
                         "pid": meta.get("pid"),
+                        # `mode` is carried so a caller can name the channel that answered —
+                        # `worker-sessions.py` reports it as the row's `status`, and a reader
+                        # that dropped it left that column permanently `None` while the mjs
+                        # twin read the real value off the stamp file. Descriptive only.
+                        "mode": meta.get("mode"),
                         "state": "unknown",
                     }
                 )
             continue
         live.append(
-            {"session_id": session_id, "age_seconds": round(age, 1), "pid": meta.get("pid"), "state": "live"}
+            {
+                "session_id": session_id,
+                "age_seconds": round(age, 1),
+                "pid": meta.get("pid"),
+                "mode": meta.get("mode"),
+                "state": "live",
+            }
         )
     return live
 

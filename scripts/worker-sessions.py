@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Count live **worker sessions** — the fleet-wide worker target's unit.
 
-The target bounds the laptop's load, and the load is the interactive worker tabs. The
+The target bounds the laptop's load, and that load is every worker the supervisor opened:
+interactive tabs, headless in-process workers, and cluster workers running as pods. The
 instrument that shipped for it read the headless heartbeat store, which is stamped only
 for in-process workers (`server/supervisor.mjs` writes `mode: 'headless'`, from
 `server/agent-loop.mjs`) — so it answered **0 while 11 interactive workers were live**
@@ -88,11 +89,16 @@ def ledger_dir():
 
 
 def read_ledger(directory):
-    """Every session id the ledger knows, mapped to its label — or None when unreadable.
+    """Every session id the ledger knows, mapped to its full record — or None when unreadable.
 
     None and `{}` are different answers and must stay so: `{}` is "read it, nobody is
     recorded", None is "could not read it". Collapsing them turns a permissions error into
     a confident empty fleet.
+
+    ⚠️ **The whole record, not just its label.** The filter below needs `resumed_from`, and a
+    map that keeps only the label cannot express it — the caller would have to reopen every
+    file to answer a question the read already had in hand. The mjs twin returns the record
+    for the same reason, and the two must stay in step or the pair stops being one definition.
     """
     try:
         names = os.listdir(directory)
@@ -112,7 +118,7 @@ def read_ledger(directory):
             continue
         session_id = record.get("session_id")
         if session_id:
-            known[session_id] = record.get("label")
+            known[session_id] = record
     return known
 
 
@@ -163,14 +169,24 @@ def live_workers(registry_dir=None, ledger=None, heartbeat_dir=None, now=None):
 
     workers = []
     for session_id, record in ledger.items():
-        if session_id in live:
-            workers.append(
-                {
-                    "session_id": session_id,
-                    "status": live[session_id],
-                    "label": record,
-                }
-            )
+        if session_id not in live:
+            continue
+        # Auto-resumes are excluded — they answer to the auto-resume gate's own 30-min
+        # crash-loop cap, and counting them here would leave a sweep that revived two dead
+        # workers unable to start any new one (docs/fleet-surface.md § Spawn a worker item 5).
+        # The marker is the ledger record's `resumed_from`, the same field
+        # `check-spawn-ledger.py` reads. See the mjs twin for why this filter is written down
+        # for the first time rather than inherited: the exclusion used to hold by accident,
+        # because every auto-resume is headless and a headless worker held no registry entry.
+        if record.get("resumed_from"):
+            continue
+        workers.append(
+            {
+                "session_id": session_id,
+                "status": live[session_id],
+                "label": record.get("label"),
+            }
+        )
     return workers
 
 

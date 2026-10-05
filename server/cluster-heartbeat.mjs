@@ -28,10 +28,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { config } from './config.mjs'
-import { stampRecord } from './heartbeat.mjs'
+import { REACHABILITY_FILE, stampRecord } from './heartbeat.mjs'
 
-// Must match `REACHABILITY_FILE` in `scripts/live-workers.py` — the reader that consults it.
-export const REACHABILITY_FILE = '_cluster-reachability.json'
+// The marker's name has one home — `heartbeat.mjs`, which owns the store and now skips the
+// marker when it lists stamps. Re-exported here so this module's consumers are unchanged.
+export { REACHABILITY_FILE }
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const READER = join(HERE, '..', 'scripts', 'cluster-heartbeat.py')

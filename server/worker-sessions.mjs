@@ -117,6 +117,19 @@ export function workerSessions({ registryDir, ledgerDir, heartbeatDir, now } = {
   const workers = []
   for (const [sessionId, record] of Object.entries(ledger)) {
     if (!live.has(sessionId)) continue
+    // Auto-resumes are excluded — they answer to the auto-resume gate's own 30-min crash-loop
+    // cap, and counting them here would leave a sweep that revived two dead workers unable to
+    // start any new one (docs/fleet-surface.md § Spawn a worker item 5). The marker is the
+    // ledger's `resumed_from`, the same field `scripts/check-spawn-ledger.py` reads.
+    //
+    // ⚠️ **This filter is not new behaviour being invented; it is a contract that used to hold
+    // by accident.** The exclusion was never implemented in code, and every auto-resume is
+    // HEADLESS — the gate hands over path A, which `resumeSupportError` refuses alongside an
+    // interactive resolution — so under the old registry-only count a resumed worker held a
+    // ledger record and no registry entry and was excluded *by construction*. Reading the
+    // heartbeat store is exactly what removes that accident, so the rule has to be written
+    // down for the first time or the union silently un-excludes the population item 5 names.
+    if (record.resumed_from) continue
     workers.push({ sessionId, status: live.get(sessionId), label: record.label })
   }
   return workers
