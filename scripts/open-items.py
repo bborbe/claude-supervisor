@@ -20,7 +20,16 @@ genuinely still outstanding. Surface the gate and hand over the pane instead. Th
 is ordinary provenance on `asked-of-me` / `pushed`, which close on their task file, so
 `--held-in-pane` is accepted and stored there.
 
-Subcommands: add | answer | note | close | list
+An `asked-of-you` also records WHERE its gate was raised — the raising session and the pane
+it was raised in (`$WEZTERM_PANE`) — captured automatically at `add` time, never via a flag.
+This is provenance, not a close path: it is what lets a later reader tell a gate whose pane
+is gone from one still outstanding. A session-liveness check cannot make that distinction —
+the ledger's own session stays LIVE long after one of its panes is gone, and every entry in
+a ledger carries that same session — so the PANE is the discriminator, and it is stored
+here. `classify` reads the field and reports `gone` / `live` / `unknown` per entry; it
+renders nothing itself and adds no close path.
+
+Subcommands: add | answer | note | close | list | classify
 
 `--task` is resolved to a vault file on both write and read. `add` stores the path it
 found (and warns when it finds none); `list` re-resolves and marks any OPEN entry whose
@@ -114,6 +123,64 @@ def session_id(args):
 
 def path_for(sid):
     return os.path.join(ROOT, "%s.json" % sid)
+
+
+def current_pane():
+    """The pane the calling process runs in (`$WEZTERM_PANE`), or None outside WezTerm.
+
+    Read from the environment rather than resolved through the session registry: the
+    registry carries no pane field (measured 2026-10-05 — its keys are `cwd`, `name`,
+    `pid`, `procStart`, `sessionId`, … and no pane), and a pane id is a lease WezTerm
+    renumbers and reuses, so a resolution through titles is a join that goes stale
+    silently. `$WEZTERM_PANE` is the pane `add` ran in, which is exactly the question
+    `classify` later asks of it.
+
+    ⚠️ A headless worker INHERITS its spawner's `WEZTERM_PANE` (who-needs-me.py:1161), so
+    the recorded pane is the spawner's there. Acceptable because the field is provenance
+    and never a resolution: on `asked-of-you` — the only kind that records it —
+    `--held-in-pane` is refused, so the value is always the pane the asking session runs in.
+    """
+    pane = os.environ.get("WEZTERM_PANE")
+    return str(pane) if pane else None
+
+
+def live_panes():
+    """The set of live WezTerm pane ids (strings), or None when the query failed.
+
+    `None`, never `{}` — the convention `jump.py:46` and `who-needs-me.py` already use: a
+    failed `wezterm cli list` cannot prove a pane is gone any more than it can prove one is
+    live, so no caller may read it as "no panes exist". `{}` is reserved for a WezTerm that
+    answered with zero panes — a real empty answer that must keep working.
+    """
+    try:
+        proc = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode != 0:
+            return None
+        return {str(p["pane_id"]) for p in json.loads(proc.stdout)}
+    except (OSError, ValueError, subprocess.SubprocessError, KeyError, TypeError):
+        return None
+
+
+def classify_origin(item, panes):
+    """`gone` | `live` | `unknown` — does the entry's recorded origin pane still exist?
+
+    Three answers, not two, and the third must never collapse into `gone`: `unknown` means
+    either that the entry records no origin (a legacy entry written before the field
+    existed) or that the pane probe could not run. Reading "could not tell" as "gone" is
+    the same false-negative shape the whole ledger exists to remove — a dead pane and an
+    unprobed one must not render alike.
+    """
+    pane = item.get("origin_pane")
+    if not pane:
+        return "unknown"
+    if panes is None:
+        return "unknown"
+    return "live" if str(pane) in panes else "gone"
 
 
 _TASK_DIRS = None
@@ -266,6 +333,13 @@ def migrate(item):
     item.setdefault("note", None)
     item.setdefault("noted_at", None)
     item.setdefault("held_in_pane", None)
+    # The origin record (where an asked-of-you's gate was raised) is forward-only: entries
+    # written before it existed carry no key, and healing them to an explicit None keeps the
+    # schema uniform so `classify` reads one shape rather than testing for absence. It is
+    # NOT back-filled — the origin is not recoverable from an entry's data, which is the
+    # whole reason the field had to be added at the write site.
+    item.setdefault("origin_pane", None)
+    item.setdefault("origin_session", None)
     if item["kind"] != "asked-of-you":
         # Only an asked-of-you may carry `answer` / `answered_at` — on any other kind they
         # assert an operator reply that never happened. Two broken shapes exist and BOTH are
@@ -436,6 +510,15 @@ def cmd_add(args):
         # was given to a worker, not here. On `asked-of-you` it can never be set; see the
         # refusal above.
         "held_in_pane": args.held_in_pane,
+        # The origin record: where THIS ask was raised. Captured automatically at write
+        # time — never a flag — and only on `asked-of-you`, the one kind whose close path
+        # (`answer`) needs this session to receive the operator's words. It is what lets a
+        # later reader tell a gate whose pane is gone from one still outstanding; the
+        # session alone cannot, because every entry in a ledger carries this same session.
+        # `origin_session` is the raising session, `origin_pane` the pane it ran in
+        # (`$WEZTERM_PANE`, None outside WezTerm). `classify` is the reader.
+        "origin_pane": current_pane() if args.kind == "asked-of-you" else None,
+        "origin_session": sid if args.kind == "asked-of-you" else None,
         "state": "open",
         "answer": None,
         "answered_at": None,
@@ -602,6 +685,60 @@ def cmd_list(args):
     return 0
 
 
+def cmd_classify(args):
+    """Report, per entry, whether its recorded origin pane still exists.
+
+    The READ half of the origin record: `add` stores where an `asked-of-you` was raised,
+    and this is the code path that reads it back to distinguish a gate whose pane is gone
+    from one still outstanding. It renders nothing on any surface the ledger's consumers
+    already read — `list`'s summary line is untouched and no marker is added to it — so the
+    classification is available without changing what a manager sweep prints. A verdict is
+    `gone` / `live` / `unknown`; `unknown` covers both an entry with no recorded origin
+    (legacy) and a probe that could not run.
+    """
+    sid = session_id(args)
+    data = load(sid)
+    panes = live_panes()
+    items = data["items"]
+    if args.state != "all":
+        items = [i for i in items if i["state"] == args.state]
+    elif not args.include_closed:
+        items = [i for i in items if i["state"] != "closed"]
+    if args.format == "json":
+        rendered = [dict(i, origin_verdict=classify_origin(i, panes)) for i in items]
+        print(
+            json.dumps(
+                {"session_id": sid, "panes_readable": panes is not None, "items": rendered},
+                indent=2,
+            )
+        )
+        return 0
+    if not items:
+        print("(none)")
+        return 0
+    for item in items:
+        verdict = classify_origin(item, panes)
+        print(
+            "- %s · %s · %s · origin %s · %s"
+            % (
+                item["id"],
+                item["kind"],
+                item["state"],
+                item.get("origin_pane") or "(none)",
+                verdict,
+            )
+        )
+    if panes is None:
+        # A probe that could not run must say so, not leave the reader to infer it from a
+        # column of `unknown` — the same rule `list` follows for an unsearchable task dir.
+        print(
+            "⚠️  `wezterm cli list` unreadable — pane existence unknown; every verdict is "
+            "`unknown`.",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -665,6 +802,16 @@ def main():
     p_list.add_argument("--include-closed", action="store_true")
     p_list.add_argument("--format", default="text", choices=("text", "json"))
     p_list.set_defaults(func=cmd_list)
+
+    p_classify = sub.add_parser(
+        "classify",
+        help="report whether each entry's recorded origin pane still exists "
+        "(gone / live / unknown) — reads the origin field; renders no marker",
+    )
+    p_classify.add_argument("--state", default="all", choices=("all",) + STATES)
+    p_classify.add_argument("--include-closed", action="store_true")
+    p_classify.add_argument("--format", default="text", choices=("text", "json"))
+    p_classify.set_defaults(func=cmd_classify)
 
     args = parser.parse_args()
     sys.exit(args.func(args))

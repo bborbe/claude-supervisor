@@ -48,11 +48,20 @@ class Base(unittest.TestCase):
         self._root = oi.ROOT
         oi.ROOT = os.path.join(self.tmp, "state")
         oi._TASK_DIRS = None
+        # `$WEZTERM_PANE` is read at `add` time to record an asked-of-you's origin, and the
+        # test process inherits it from whatever pane ran the suite. Popped here so a test
+        # that asserts on the origin controls the value rather than reading the runner's
+        # pane — the same isolation ROOT gets, for the same reason.
+        self._pane = os.environ.pop("WEZTERM_PANE", None)
         self.addCleanup(self._restore)
 
     def _restore(self):
         oi.ROOT = self._root
         oi._TASK_DIRS = None
+        if self._pane is None:
+            os.environ.pop("WEZTERM_PANE", None)
+        else:
+            os.environ["WEZTERM_PANE"] = self._pane
 
     def task_file(self, stem, status="completed"):
         path = os.path.join(self.tasks, stem + ".md")
@@ -393,6 +402,125 @@ class Resolution(unittest.TestCase):
         open(path, "w", encoding="utf-8").close()
         self.assertEqual(oi.resolve_task("Found", [os.path.join(tmp, "no"), other]), path)
         self.assertIsNone(oi.resolve_task("Absent", [os.path.join(tmp, "no"), other]))
+
+
+class OriginRecording(Base):
+    """SC1: an asked-of-you records WHERE its gate was raised — raising pane + session.
+
+    Captured automatically at write time, never via a flag: `add` refuses `--held-in-pane`
+    on this kind outright, so the value cannot be supplied by the caller. The field exists
+    because the SESSION cannot be the discriminator — every entry in a ledger carries the
+    ledger's own session, which stays LIVE long after one of its panes is gone — so the
+    PANE is what a later reader needs, and nothing stored it before this change.
+    """
+
+    def test_asked_of_you_records_the_raising_pane_and_session(self):
+        os.environ["WEZTERM_PANE"] = "19"
+        self.add("--kind", "asked-of-you", "--text", "should the PR carry the specs?")
+        item = self.ledger()[0]
+        self.assertEqual(item["origin_pane"], "19")
+        self.assertEqual(item["origin_session"], "s1")
+
+    def test_the_recorded_pane_follows_the_actual_pane_not_a_constant(self):
+        """A constant would also read back, so the equality is the probe: change the pane
+        and the recorded value must follow it."""
+        os.environ["WEZTERM_PANE"] = "19"
+        self.add("--kind", "asked-of-you", "--text", "one")
+        os.environ["WEZTERM_PANE"] = "481"
+        self.add("--kind", "asked-of-you", "--text", "two")
+        self.assertEqual([i["origin_pane"] for i in self.ledger()], ["19", "481"])
+
+    def test_asked_of_you_outside_wezterm_records_no_pane(self):
+        os.environ.pop("WEZTERM_PANE", None)
+        self.add("--kind", "asked-of-you", "--text", "headless?")
+        item = self.ledger()[0]
+        self.assertIsNone(item["origin_pane"])
+        self.assertEqual(item["origin_session"], "s1")
+
+    def test_other_kinds_do_not_record_an_origin(self):
+        """Only `asked-of-you` needs it: the other kinds already carry `held_in_pane` as
+        their pane provenance, and stamping this session's pane on them would assert an
+        origin the ask may not have had — the instruction was given to a worker, not here."""
+        os.environ["WEZTERM_PANE"] = "19"
+        self.add("--kind", "pushed", "--text", "ship it")
+        item = self.ledger()[0]
+        self.assertIsNone(item["origin_pane"])
+        self.assertIsNone(item["origin_session"])
+
+
+class ClassifyOrigin(unittest.TestCase):
+    """SC2: the classify path reads the STORED origin and returns two different verdicts
+    for a gone pane and a live one — not a note, and not the entry's session."""
+
+    def test_gone_when_the_recorded_pane_is_not_live(self):
+        self.assertEqual(oi.classify_origin({"origin_pane": "19"}, {"20", "21"}), "gone")
+
+    def test_live_when_the_recorded_pane_is_live(self):
+        self.assertEqual(oi.classify_origin({"origin_pane": "19"}, {"19", "20"}), "live")
+
+    def test_unknown_when_no_origin_is_recorded(self):
+        """A legacy entry — or any non-asked-of-you — records no origin. `unknown` is not
+        `gone`: "could not tell" must never read as "dead", the false-negative this whole
+        ledger exists to remove."""
+        self.assertEqual(oi.classify_origin({"origin_pane": None}, {"19"}), "unknown")
+        self.assertEqual(oi.classify_origin({}, {"19"}), "unknown")
+
+    def test_unknown_when_the_probe_could_not_run(self):
+        self.assertEqual(oi.classify_origin({"origin_pane": "19"}, None), "unknown")
+
+
+class ClassifyCommand(Base):
+    """The CLI read path: two entries whose origins differ get two verdicts, and the
+    verdict tracks the stored field with NO note written or changed on either."""
+
+    def setUp(self):
+        super().setUp()
+        self._panes = oi.live_panes
+        self.addCleanup(lambda: setattr(oi, "live_panes", self._panes))
+
+    def _stub_panes(self, value):
+        oi.live_panes = lambda: value
+
+    def _two_rows(self):
+        os.environ["WEZTERM_PANE"] = "19"
+        self.add("--kind", "asked-of-you", "--text", "gone one")
+        os.environ["WEZTERM_PANE"] = "20"
+        self.add("--kind", "asked-of-you", "--text", "live one")
+
+    def test_two_entries_with_different_origins_get_two_verdicts(self):
+        self._two_rows()
+        self._stub_panes({"20"})
+        code, out, _ = self.run_cli(["classify"])
+        self.assertEqual(code, 0)
+        self.assertIn("origin 19 · gone", out)
+        self.assertIn("origin 20 · live", out)
+
+    def test_classify_writes_no_note_on_either_entry(self):
+        self._two_rows()
+        self._stub_panes({"20"})
+        self.run_cli(["classify"])
+        for item in self.ledger():
+            self.assertIsNone(item["note"])
+            self.assertIsNone(item["noted_at"])
+
+    def test_an_unreadable_probe_says_so_and_reports_unknown(self):
+        os.environ["WEZTERM_PANE"] = "19"
+        self.add("--kind", "asked-of-you", "--text", "x")
+        self._stub_panes(None)
+        code, out, err = self.run_cli(["classify"])
+        self.assertEqual(code, 0)
+        self.assertIn("origin 19 · unknown", out)
+        self.assertIn("unreadable", err)
+
+    def test_json_carries_the_verdict_and_a_panes_readable_flag(self):
+        os.environ["WEZTERM_PANE"] = "19"
+        self.add("--kind", "asked-of-you", "--text", "x")
+        self._stub_panes({"20"})
+        code, out, _ = self.run_cli(["classify", "--format", "json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["panes_readable"])
+        self.assertEqual(payload["items"][0]["origin_verdict"], "gone")
 
 
 if __name__ == "__main__":
