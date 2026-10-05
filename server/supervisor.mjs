@@ -1656,17 +1656,36 @@ log('supervisor ready')
 // logging it every 30s would bury the signal, and logging it as a failure would invite a
 // reader to treat "could not tell" as "not live". That inversion is the one this whole store
 // exists to prevent.
-const clusterPollState = { ok: null }
-const clusterTimer = setInterval(() => {
-  const result = pollCluster()
-  if (!result.ok) {
-    if (clusterPollState.ok !== false) {
-      log(`cluster heartbeat: ${result.reason} — cluster stamps will read UNKNOWN until it clears`)
+const clusterPollState = { ok: null, inFlight: false }
+const clusterTimer = setInterval(async () => {
+  // A hung reader must not stack polls. With the 20 s budget against a 30 s interval one poll
+  // cannot outlive its own tick, but an injected `run` carries no such bound.
+  if (clusterPollState.inFlight) return
+  clusterPollState.inFlight = true
+  try {
+    const result = await pollCluster()
+    if (!result.ok) {
+      if (clusterPollState.ok !== false) {
+        log(`cluster heartbeat: ${result.reason} — cluster stamps will read UNKNOWN until it clears`)
+      }
+    } else if (clusterPollState.ok === false) {
+      log(`cluster heartbeat: cluster reachable again (${result.stamped.length} stamped)`)
     }
-  } else if (clusterPollState.ok === false) {
-    log(`cluster heartbeat: cluster reachable again (${result.stamped.length} stamped)`)
+    clusterPollState.ok = result.ok
+  } catch (error) {
+    // An async interval callback that throws has no caller to reject to, so it must not throw.
+    // ⚠️ Transition-gated exactly like the `ok: false` branch above, and for the reason the block
+    // comment gives: a throw source that persists — ENOSPC on the marker write, say — would
+    // otherwise log every 30 s and bury the signal this design exists to keep readable. Recording
+    // `ok: false` is what makes the gate work: the next throw stays quiet, and a following success
+    // logs "reachable again" through the branch above.
+    if (clusterPollState.ok !== false) {
+      log(`cluster heartbeat: poll failed: ${error?.message ?? error}`)
+    }
+    clusterPollState.ok = false
+  } finally {
+    clusterPollState.inFlight = false
   }
-  clusterPollState.ok = result.ok
 }, HEARTBEAT_INTERVAL_MS)
 clusterTimer.unref?.()
 
