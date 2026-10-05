@@ -64,9 +64,16 @@ export function currentOwner({ task, vault, run = runVaultCli }) {
   } catch {
     return { error: `vault-cli task get returned unparseable output: ${res.stdout.trim()}` }
   }
-  // An absent key answers `{"value": ""}` with exit 0, so emptiness is the whole signal —
-  // there is no not-found error to tell apart from a real failure.
-  const value = typeof parsed?.value === 'string' ? parsed.value.trim() : ''
+  // ⚠️ The exit code is NOT the whole error signal, and guarding on it alone re-opens the
+  // displacement through the error path. Measured against the real CLI: a task that does not
+  // exist answers `{"error": "...file not found", "success": false}` with **exit 0** — so the
+  // check above never fires, `parsed.value` is absent, and a naive read calls the task
+  // UNOWNED and stamps it. `value` is the discriminator: a valid answer always carries it as
+  // a string, empty when the key is unset (`{"key": …, "name": …, "value": ""}`, also exit 0).
+  if (typeof parsed?.value !== 'string') {
+    return { error: parsed?.error ?? `vault-cli task get returned no value: ${res.stdout.trim()}` }
+  }
+  const value = parsed.value.trim()
   return { owner: value === '' ? null : value }
 }
 

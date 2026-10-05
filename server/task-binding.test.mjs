@@ -74,6 +74,26 @@ test('an unreadable owner REFUSES rather than reading as unowned', () => {
   assert.deepEqual(writes(calls), [])
 })
 
+test('a task that does not exist REFUSES — vault-cli reports it in the BODY with exit 0', () => {
+  // The shape the guard above cannot see, measured against the real CLI:
+  //   $ vault-cli task get <missing> claude_session_id --output json ; echo $?
+  //   {"error": "find task: find task file: <missing>: file not found", "success": false}
+  //   0
+  // A guard on the exit code alone reads this as UNOWNED and issues the stamping write —
+  // the displacement, reached by the error path, exactly as the sibling test's comment
+  // warns. The two are different shapes of the same failure and both must refuse.
+  const { run, calls } = fakeCli({
+    read: {
+      status: 0,
+      stdout: JSON.stringify({ error: 'find task: find task file: Gone: file not found', success: false }),
+      stderr: '',
+    },
+  })
+  const res = bindSessionToTask({ task: TASK, sessionId: NEW, run })
+  assert.match(res.error, /file not found/)
+  assert.deepEqual(writes(calls), [])
+})
+
 test('unparseable read output REFUSES', () => {
   const { run, calls } = fakeCli({ read: { status: 0, stdout: 'not json', stderr: '' } })
   const res = bindSessionToTask({ task: TASK, sessionId: NEW, run })
