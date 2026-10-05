@@ -181,6 +181,12 @@ CLAIMS = os.environ.get("SUPERVISOR_OWNERSHIP_CLAIMS") or os.path.expanduser(
 EMIT = "emit"
 DROP = "drop"
 
+# The mark `who-needs-me.py` stamps on a row it returned from the event-log
+# fallback, matched literally against the feed line. It is the feed's own
+# spelling -- keep the two in lockstep, or the filter carries a signal the feed
+# no longer emits and every row reads live.
+REPLAY_MARK = "⟳replay"
+
 
 def load_ledger(ledger_dir=LEDGER):
     """Spawn records keyed by session id, or {} when the directory is unreadable.
@@ -416,8 +422,8 @@ def evaluate(pane, ledger, live, items, self_id, claims=None):
     return call, reason, session_id, spawner
 
 
-def panes_from_feed(stream):
-    """Pane ids in a `who-needs-me.py` render, in order of first appearance.
+def feed_rows(stream):
+    """(pane, replayed) pairs in a `who-needs-me.py` render, first-appearance order.
 
     Reads the `[<pane>]` row marker rather than any `--pane-id` flag: the flag
     also appears on the activate command of a row whose pane may already be
@@ -431,19 +437,36 @@ def panes_from_feed(stream):
     pass. Measured 2026-10-01 against the live feed (8 pane rows, exit 2); the
     fixtures in `tests/test_gate_owner_filter.py` used unpadded ids and so never
     caught it. Tolerate whitespace on both sides.
+
+    ⚠️ **`replayed` is read off the same line, and it is a guard rather than
+    noise.** `who-needs-me.py` stamps `⟳replay` on every row it returns from its
+    event-log fallback — the branch it takes when the attention store is
+    unreachable — precisely so a manager does not act on a gate answered hours
+    ago. This function used to return the pane id alone and discard the rest of
+    the line, so the filter emitted `864` for a row the feed had rendered
+    `5h49m  ⟳replay  ⚙ …` and the watcher woke on an already-answered gate.
+    Measured 2026-10-03 (Manager Layer, ticks 89-90): **10 firings in ~70
+    minutes, 2 real.** The mark is carried, never re-derived: it is a property
+    of the read that produced the row, and `--pane` callers have no line to
+    read it from.
     """
     import re
 
-    out, seen = [], set()
+    out, marks = [], {}
     for line in stream:
         match = re.match(r"\s*\[\s*(\d+)\s*\]", line)
         if not match:
             continue
         pane = match.group(1)
-        if pane not in seen:
-            seen.add(pane)
+        if pane not in marks:
+            marks[pane] = REPLAY_MARK in line
             out.append(pane)
-    return out
+    return [(pane, marks[pane]) for pane in out]
+
+
+def panes_from_feed(stream):
+    """Pane ids alone — `feed_rows` projected to its first element."""
+    return [pane for pane, _ in feed_rows(stream)]
 
 
 def main():
@@ -464,20 +487,21 @@ def main():
     items = log_items(args.state_dir)
     claims = load_claims(args.claims_file)
 
-    panes = list(args.pane)
+    panes = [(pane, False) for pane in args.pane]
     if args.feed:
-        panes += panes_from_feed(sys.stdin)
+        panes += feed_rows(sys.stdin)
     if not panes:
         parser.error("pass --pane, --feed, or both")
 
     rows = []
-    for pane in panes:
+    for pane, replayed in panes:
         call, reason, session_id, spawner = evaluate(
             pane, ledger, live, items, args.self_id, claims
         )
         rows.append(
             {
                 "pane": pane,
+                "replayed": replayed,
                 "verdict": call,
                 "reason": reason,
                 "session_id": session_id,
@@ -507,8 +531,15 @@ def main():
             )
     elif args.feed:
         # The watcher's own shape: the panes worth a turn, nothing else.
+        # ⚠️ A replayed row carries the feed's own mark, because this line is
+        # the watcher's entire input: it prints a pane id and nothing else, so
+        # a replayed row was byte-identical to a live one and the watcher woke
+        # on gates already answered. A LIVE row renders exactly as it always
+        # did -- the no-regression requirement is that a responsive store's
+        # output is unchanged, and a mark that was always present would fail it
+        # (the same rule `who-needs-me.py`'s own render states).
         for r in kept:
-            print(r["pane"])
+            print(f"{r['pane']}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
     else:
         for r in rows:
             print(r["verdict"])

@@ -481,6 +481,19 @@ class TestLiveness(Base):
         _, _, payload, _ = self.m.evaluate(self.vault, "ATopic")
         return self.m.digest_of(payload["tracked"])
 
+    def digest_with_metrics_only(self, sid):
+        """`digest_with`'s shape for a row whose ids live ONLY in `metrics_sessions`.
+
+        `read_task` sets `session` from the frontmatter `claude_session_id` ALONE while
+        `sessions` carries the whole id set, so this row reaches the digest with
+        `session == ""` — the shape the unguarded term exists for. Driving it through
+        `evaluate` (rather than asserting on `liveness_change_term` directly) is what
+        makes the regression this guards against reproducible end to end.
+        """
+        self.write("25 Tasks/ATask.md", TASK_WITH_METRICS.format(ids=sid))
+        _, _, payload, _ = self.m.evaluate(self.vault, "ATopic")
+        return self.m.digest_of(payload["tracked"])
+
     def test_dead_worker_moves_the_digest(self):
         """A worker dying is a change — it must never be swallowed."""
         live = self.digest_with("s-live")
@@ -489,6 +502,140 @@ class TestLiveness(Base):
         dead = self.digest_with("s-dead")
         self.assertNotEqual(live, dead, "an absent session did not move the digest")
         self.assertNotEqual(live, live_now, "gaining a live session did not move the digest")
+
+    def test_liveness_churn_alone_does_not_move_the_digest(self):
+        """Task-SC2(a) — a worker opening or closing a gate is CHURN, not a change.
+
+        The raw liveness word sat in the digest before this fix, so a `LIVE` -> `PARKED`
+        flip — a worker starting or ending a turn — answered CHANGE on a tick where no
+        row's eligibility moved. Measured 2026-09-30: three consecutive act legs returned
+        the identical decision set on exactly such ticks. The digest must be identical
+        across the flip.
+        """
+        self.registry("s-churn")
+        live = self.digest_with("s-churn")
+        self.registry("s-churn", status="waiting")
+        parked = self.digest_with("s-churn")
+        self.assertEqual(live, parked, "liveness churn alone moved the digest")
+
+    def test_a_worker_dying_still_moves_the_digest(self):
+        """Task-SC2(b) — the guard against the cheap fix.
+
+        Dropping the liveness term outright satisfies the churn test above and regresses
+        the graded death-detection (`liveness_of` -> `LIVENESS_NONE`). The SAME row on the
+        SAME sid, its owner going `LIVE` -> `ABSENT`, must still move the digest.
+        """
+        self.registry("s-dies")
+        live = self.digest_with("s-dies")
+        os.remove(os.path.join(self.m.REGISTRY_DIR, "1.json"))
+        dead = self.digest_with("s-dies")
+        self.assertNotEqual(live, dead, "a worker dying did not move the digest")
+
+    def test_death_is_detected_for_every_ownership_shape(self):
+        """The term is UNGUARDED on purpose — a guard on any subset of the ownership
+        signals drops death detection for the shapes it excludes.
+
+        `read_task` sets `session` from the frontmatter `claude_session_id` alone while
+        `sessions` carries the whole id set, and `liveness_of` probes `sessions` FIRST.
+        A row whose ids live only in `metrics_sessions` is therefore owned, and its
+        owner's death must move the digest exactly as a frontmatter-owned row's does.
+        An earlier cut keyed the term on `session` alone and silently missed that shape.
+        """
+        term = self.m.liveness_change_term
+        dead = self.m.LIVENESS_NONE
+
+        # Death, across every shape ownership is expressed in.
+        self.assertEqual(
+            term({"name": "T", "session": "s-1", "liveness": dead}),
+            1,
+            "a frontmatter-owned row's death was not detected",
+        )
+        self.assertEqual(
+            term({"name": "T", "session": "", "sessions": ["s-1"], "liveness": dead}),
+            1,
+            "an id-set-only row's death was not detected",
+        )
+        # A never-started row hashes the SAME value on both sides of a comparison, so it
+        # cannot churn — which is why it needs no guard of its own.
+        self.assertEqual(
+            term({"name": "T", "session": "", "liveness": dead}),
+            1,
+            "a never-started row must hash the death term (constant, so it moves nothing)",
+        )
+
+        # Every ALIVE verdict collapses to the same value — that IS the churn fix.
+        for shape in (
+            {"name": "T", "session": "s-1"},
+            {"name": "T", "session": "", "sessions": ["s-1"]},
+        ):
+            for verdict in (self.m.LIVENESS_LIVE, self.m.LIVENESS_PARKED):
+                self.assertEqual(
+                    term(dict(shape, liveness=verdict)),
+                    0,
+                    "%s did not collapse to the alive term" % verdict,
+                )
+
+    def test_a_pre_collapse_stored_digest_reports_one_change_then_heals(self):
+        """The consequence EVERY subject hits at once on deploy, and it is fail-open.
+
+        The liveness term's SHAPE changed (the raw word -> a bare `0`/`1`) and the stored
+        record carries no version, so `load_stored` returns the old string and
+        `digest_moved` fires once with nothing about the tree moved. Pinned because a
+        one-shot spurious CHANGE is indistinguishable from a real one in a log, and
+        because the healing half -- `--save` rewriting the digest in the new format -- is
+        what bounds it to exactly once per subject.
+        """
+        self.prime("ATopic")
+        state = json.loads(self.read_state("ATopic"))
+        self.assertIn("digest", state)
+        state["digest"] = "0" * 64  # no build computes this — stands in for the old shape
+        with open(self.m.state_path("ATopic"), "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+
+        rc, out = self.check("ATopic")
+        self.assertEqual(
+            rc, self.m.EXIT_CHANGE, "a pre-collapse digest did not report a change"
+        )
+
+        self.save("ATopic")
+        rc, out = self.check("ATopic")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+
+    def test_an_id_set_only_rows_death_moves_the_digest(self):
+        """The shape the unguarded term exists for, driven through the REAL path.
+
+        `read_task` sets `session` from the frontmatter `claude_session_id` alone while
+        `sessions` carries the whole id set, so a row whose ids live only in
+        `metrics_sessions` reaches the digest with `session == ""`. An earlier cut keyed
+        the term on `session` and silently stopped detecting this row's death — a shape
+        this module measures as common (64 of 124 rows carrying a `metrics_sessions`
+        block have no `claude_session_id`). This drives `evaluate` -> `liveness_of` ->
+        `digest_of` rather than the term alone, so that regression is reproducible here
+        and not only in the docstring.
+        """
+        self.registry("s-set")
+        live = self.digest_with_metrics_only("s-set")
+        os.remove(os.path.join(self.m.REGISTRY_DIR, "1.json"))
+        dead = self.digest_with_metrics_only("s-set")
+        self.assertNotEqual(
+            live, dead, "an id-set-only row's death did not move the digest"
+        )
+
+    def test_an_unenriched_row_defaults_to_the_death_term(self):
+        """The default is deliberate, not an oversight — and it is the OPPOSITE direction
+        from the session-less guard above, which is why it is a test of its own.
+
+        An unenriched row *with* a session id hashes the DEATH term: `liveness` defaults
+        to `LIVENESS_NONE`, and with a session id present that IS the death verdict. The
+        sole production call site (`evaluate`) always enriches first, so this is a fixture
+        path — pinned anyway, because it is the value any caller that skips enrichment
+        gets, and `digest_of`'s docstring names it.
+        """
+        self.assertEqual(
+            self.m.liveness_change_term({"name": "T", "session": "s-gone"}),
+            1,
+            "an unenriched row did not default to the death term",
+        )
 
     def test_live_worker_with_stale_heartbeat_is_not_dead(self):
         """The NEGATIVE CONTROL.

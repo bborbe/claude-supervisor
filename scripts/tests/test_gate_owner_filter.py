@@ -270,6 +270,43 @@ class PanesFromFeed(unittest.TestCase):
         ]
         self.assertEqual(gf.panes_from_feed(feed), ["417", "90", "0"])
 
+    def test_replayed_row_is_flagged(self):
+        """The mark the feed stamps on an event-log-fallback row is carried.
+
+        ⚠️ This is the guard, not decoration: `who-needs-me.py` stamps
+        `⟳replay` on every row it returns when the attention store is
+        unreachable, precisely so a manager does not act on a gate answered
+        hours ago. `feed_rows` used to return the pane id alone and discard the
+        rest of the line, so the filter emitted `864` for a row the feed had
+        rendered `5h49m  ⟳replay  ⚙ …`.
+        """
+        feed = [
+            "Needs you (2)\n",
+            "  [ 864]  5h49m  ⟳replay  ⚙ The Bucket Refusal Validates Shape\n",
+            "  [ 417]     0m  ⚙ PR Review - 2026W40-thu\n",
+        ]
+        self.assertEqual(gf.feed_rows(feed), [("864", True), ("417", False)])
+
+    def test_live_rows_carry_no_mark(self):
+        """A responsive store's render is unchanged — no mark is ever present."""
+        feed = ["  [ 417]     0m  ⚙ a\n", "  [  90]    18m  Vuln Fix Agent\n"]
+        self.assertEqual(gf.feed_rows(feed), [("417", False), ("90", False)])
+
+    def test_mark_is_read_from_the_row_it_appears_on(self):
+        """A mark on one row must not leak to its neighbours."""
+        feed = [
+            "  [ 1]  0m  ⟳replay  ⚙ a\n",
+            "  [ 2]  0m  ⚙ b\n",
+            "  [ 3]  0m  ⟳replay  ⚙ c\n",
+        ]
+        self.assertEqual(gf.feed_rows(feed), [("1", True), ("2", False), ("3", True)])
+
+    def test_panes_from_feed_is_feed_rows_projected(self):
+        """The old contract is preserved: ids alone, same order, same dedup."""
+        feed = ["  [ 7] a\n", "  [ 7] b\n", "  [ 8] c\n"]
+        self.assertEqual(gf.panes_from_feed(feed), ["7", "8"])
+        self.assertEqual(gf.feed_rows(feed), [("7", False), ("8", False)])
+
 
 class UnreadableSourcesAreUnknown(unittest.TestCase):
     """An empty read is a SUCCESSFUL read returning a decisive negative.
@@ -561,6 +598,63 @@ class ClaimsFilePath(unittest.TestCase):
     def test_absent_claim_file_still_emits(self):
         result = self.run_filter("--claims-file", os.path.join(self.dir, "absent.json"))
         self.assertIn("emit unowned", result.stdout, result.stderr)
+
+
+class FeedEmitCarriesTheReplayMark(unittest.TestCase):
+    """The watcher's entire input is this line, so the mark has to be on it.
+
+    `--feed` prints a pane id and nothing else, which made a replayed row
+    byte-identical to a live one. The arm
+    `who-needs-me.py --section needs-you | gate-owner-filter.py --feed --self <sid>`
+    hands the watcher whatever this prints, so a row the feed had already marked
+    `⟳replay` reached it as a bare `864` and the watcher woke on a gate that had
+    been answered. Measured 2026-10-03 (Manager Layer, ticks 89-90): **10
+    firings in ~70 minutes, 2 real.**
+
+    Both rows are KEPT here — an empty ledger and registry fail open, so each
+    pane reads `unowned` — which is what makes the two lines comparable. The
+    assertion is that they differ, not that either is present.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.ledger = os.path.join(self.dir, "ledger")
+        for path in (self.state, self.registry, self.ledger):
+            os.makedirs(path)
+
+    def emit(self, feed):
+        return subprocess.run(
+            [sys.executable, _SCRIPT, "--feed", "--self", ME,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", self.ledger,
+             "--claims-file", os.path.join(self.dir, "no-claims.json")],
+            input=feed, capture_output=True, text=True,
+        )
+
+    def test_replayed_and_live_rows_are_distinguishable(self):
+        result = self.emit(
+            "Needs you (2)\n"
+            "  [ 864]  5h49m  ⟳replay  ⚙ an answered gate\n"
+            "  [ 417]     0m  ⚙ a live gate\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2, result.stdout)
+        replayed, live = lines
+        self.assertNotEqual(replayed, live)
+        self.assertIn("864", replayed)
+        self.assertIn(gf.REPLAY_MARK, replayed)
+        self.assertEqual(live, "417")
+
+    def test_a_live_only_feed_renders_bare_pane_ids(self):
+        """No regression: a responsive store's output is byte-for-byte unchanged."""
+        result = self.emit("Needs you (1)\n  [ 417]     0m  ⚙ a live gate\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "417\n")
 
 
 class SummaryLine(unittest.TestCase):
