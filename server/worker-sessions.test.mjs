@@ -16,7 +16,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -132,28 +132,30 @@ test('a stale heartbeat stamp is not a worker', () => {
   assert.equal(workerSessions(dir).length, 0)
 })
 
+// ⚠️ Both unreadable-store cases below point the store at a REGULAR FILE rather than calling
+// `chmod 0o000` on it. A 0o000 directory is still readable by root (`CAP_DAC_OVERRIDE`), so the
+// chmod spelling passes or fails on the euid of whoever runs it — green on CI, red under root.
+// `readdirSync` on a file throws ENOTDIR, which is not ENOENT, so the store reads as unreadable
+// under both.
+function unreadable(path) {
+  rmSync(path, { recursive: true })
+  writeFileSync(path, '')
+}
+
 test('an unreadable ledger returns null, not an empty fleet', () => {
   // `null` refuses the spawn and `[]` permits it, so collapsing an I/O error into "nobody is
   // live" is the one direction that opens past a limit that cannot be counted.
   const dir = fixture()
-  chmodSync(dir.ledgerDir, 0o000)
-  try {
-    assert.equal(workerSessions(dir), null)
-  } finally {
-    chmodSync(dir.ledgerDir, 0o755)
-  }
+  unreadable(dir.ledgerDir)
+  assert.equal(workerSessions(dir), null)
 })
 
 test('an unreadable heartbeat store returns null, not an empty fleet', () => {
   // The heartbeat is a liveness channel now, so failing to read it is UNKNOWN for the same
   // reason the registry is: the unread channel may be hiding the very session being counted.
   const dir = fixture()
-  chmodSync(dir.heartbeatDir, 0o000)
-  try {
-    assert.equal(workerSessions(dir), null)
-  } finally {
-    chmodSync(dir.heartbeatDir, 0o755)
-  }
+  unreadable(dir.heartbeatDir)
+  assert.equal(workerSessions(dir), null)
 })
 
 test('an absent heartbeat store is an empty fleet, not an error', () => {

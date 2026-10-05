@@ -173,9 +173,17 @@ class WorkerSessionsTest(unittest.TestCase):
     def test_an_unreadable_heartbeat_store_exits_two(self):
         """The heartbeat store is a liveness channel now, so failing to read it is UNKNOWN for
         the same reason the registry is: a channel that cannot be read may be hiding the very
-        session being counted, and folding that into a number under-counts the fleet."""
-        os.chmod(self.beats, 0o000)
-        self.addCleanup(os.chmod, self.beats, 0o755)
+        session being counted, and folding that into a number under-counts the fleet.
+
+        ⚠️ **A regular file, not `chmod 0o000`.** A 0o000 directory is still readable by root
+        (`CAP_DAC_OVERRIDE`), so the chmod spelling of this test passes or fails on the euid of
+        whoever runs it — green on CI, red under root. `os.listdir` on a regular file raises
+        `NotADirectoryError`, which is an `OSError` but not a `FileNotFoundError`, so
+        `read_live` returns `None` and the case holds under both.
+        """
+        shutil.rmtree(self.beats)
+        with open(self.beats, "w", encoding="utf-8") as fh:
+            fh.write("")
         result = self.run_script("--count")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
@@ -201,9 +209,15 @@ class WorkerSessionsTest(unittest.TestCase):
 
     def test_an_unreadable_ledger_exits_two_with_an_empty_stdout(self):
         """'Could not check' must never read as 'zero workers' — an idle fleet and a broken
-        instrument must not render the same."""
-        os.chmod(self.ledger, 0o000)
-        self.addCleanup(os.chmod, self.ledger, 0o755)
+        instrument must not render the same.
+
+        Same regular-file spelling as the heartbeat case above, and for the same reason: a
+        0o000 directory is readable by root, so the chmod form of this test is green or red
+        depending on who runs it.
+        """
+        shutil.rmtree(self.ledger)
+        with open(self.ledger, "w", encoding="utf-8") as fh:
+            fh.write("")
         result = self.run_script("--count")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
