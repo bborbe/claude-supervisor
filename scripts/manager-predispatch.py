@@ -34,9 +34,21 @@ A live per-subject snapshot already exists: `~/.claude/state/sweep-gate-loop/<va
 is worth keeping because it cuts both ways:
 
   IT CARRIES the digest inputs — `status`, `phase`, `progress_hash`, `session`,
-  `liveness`, `stuck` per task. That is the exact set `digest_of()` below hashes, so the
-  contract is CONFIRMED rather than merely assumed: the loop's writer and this gate agree
-  on what "unchanged" means, which is the property that keeps two gates from drifting.
+  `liveness`, `stuck` per task. That WAS the exact set `digest_of()` below hashed when
+  this was checked, so the contract was CONFIRMED rather than merely assumed: the loop's
+  writer and this gate agreed on what "unchanged" means, which is the property that keeps
+  two gates from drifting.
+
+  ⚠️ **THAT AGREEMENT NO LONGER HOLDS AT ONE TERM, since 2026-10-05.** `digest_of` now
+  hashes `liveness_change_term` rather than the raw `liveness` word, so the two stores
+  agree on the field SET and disagree on the liveness term's DERIVATION — deliberately,
+  because session churn must not authorise a dispatch while session death still must.
+  The snapshot keeps the raw word for its render, and its writer
+  `sweep-gate-classify.py` keeps its own `liveness -> parked` trigger (a different gate
+  with a different job). ⚠️ **Recorded HERE and not only in `docs/fleet-surface.md`,
+  because this block is the digest contract's declared single home** —
+  `commands/manager-status.md` step 1 reads it rather than restating it, so a stale
+  agreement here is what a reader would take as current.
 
   IT LACKS the rendered table, and it has no member list. The no-change branch must
   replay the table (the operator sees the frame on every run — silence would be
@@ -51,8 +63,10 @@ is worth keeping because it cuts both ways:
   failure `a frozen-tree remedy` closed for the
   loop, and reintroducing it here would be a regression dressed as reuse.
 
-So: same contract, different surface. This gate owns its own store, and the two cannot
-disagree about a tree because they hash the same inputs.
+So: same contract, different surface, one deliberately diverged term. This gate owns its
+own store; the two agree on the field SET and — since 2026-10-05 — disagree on the
+liveness term's derivation by design. See the note above, which is this contract's single
+home.
 
 Exit codes (same three the loop gate uses)
   0   digest equal to the stored one AND no moved bucket set AND no actionable row in the
