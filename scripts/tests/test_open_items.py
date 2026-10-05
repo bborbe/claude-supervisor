@@ -111,6 +111,15 @@ class Base(unittest.TestCase):
         self.assertEqual(code, 0)
         return json.loads(out)["items"]
 
+    def everything(self):
+        """Every entry including closed ones — `ledger()` reads the default render, which
+        excludes them by design, so it cannot see a closed entry's record."""
+        code, out, _ = self.run_cli(
+            ["list", "--state", "all", "--include-closed", "--format", "json"]
+        )
+        self.assertEqual(code, 0)
+        return json.loads(out)["items"]
+
 
 class UnresolvableTarget(Base):
     """Defect 1: the entry names a task file that does not exist."""
@@ -584,6 +593,14 @@ class TickSummaryGuard(Base):
             self.assertNotEqual(code, 0, "tick %d was accepted" % n)
         self.assertEqual(self.ledger(), [])
 
+    def test_refuses_a_tick_summary_with_leading_whitespace(self):
+        """The pattern stays `^`-anchored and the caller strips, so a leading space is not
+        a silent bypass of the guard."""
+        for pad in (" ", "  ", "\n", "\t"):
+            code, _, _ = self.add("--kind", "pushed", "--text", pad + self.TICK)
+            self.assertNotEqual(code, 0, "accepted with pad %r" % pad)
+        self.assertEqual(self.ledger(), [])
+
     def test_does_not_refuse_a_merely_similar_text(self):
         """A guard that refused anything mentioning a tick would refuse real work."""
         for text in (
@@ -600,15 +617,6 @@ class WithdrawVerb(Base):
 
     def withdraw(self, item, reason="filed in error"):
         return self.run_cli(["withdraw", "--id", item["id"], "--reason", reason])
-
-    def everything(self):
-        """Every entry including closed ones — `ledger()` reads the default render, which
-        excludes them by design, so it cannot see the thing this class exists to check."""
-        code, out, _ = self.run_cli(
-            ["list", "--state", "all", "--include-closed", "--format", "json"]
-        )
-        self.assertEqual(code, 0)
-        return json.loads(out)["items"]
 
     def test_closes_a_pushed_entry_naming_no_task(self):
         self.add("--kind", "pushed", "--text", "a log, not an ask")
@@ -642,6 +650,25 @@ class WithdrawVerb(Base):
         still = self.everything()[0]
         self.assertEqual(still["state"], "open")
         self.assertIsNone(still["withdrawn_at"])
+
+    def test_refuses_an_already_closed_entry_and_preserves_its_record(self):
+        """Without the state guard the unconditional write replaces an evidence-close with a
+        withdrawal claim — recording a resolved ask as one that was never real, which is the
+        indistinguishability this verb exists to preserve."""
+        self.task_file("Ship the ledger fix")
+        self.add("--kind", "pushed", "--text", "ship it", "--task", "Ship the ledger fix")
+        item = self.ledger()[0]
+        self.run_cli(
+            ["close", "--id", item["id"], "--evidence", "task reads status: completed"]
+        )
+        code, _, err = self.withdraw(item)
+        self.assertIsInstance(code, str)
+        self.assertIn("already closed", code)
+        self.assertEqual(err, "")
+        after = self.everything()[0]
+        self.assertEqual(after["state"], "closed")
+        self.assertEqual(after["closed_evidence"], "task reads status: completed")
+        self.assertIsNone(after["withdrawn_at"])
 
     def test_does_not_forge_an_operator_answer(self):
         """`answer` / `answered_at` assert the operator REPLIED. A withdrawal is a
@@ -735,6 +762,34 @@ class SetTask(Base):
         _, out, _ = self.listing()
         self.assertIn("UNRESOLVABLE", out)
         self.assertNotIn("NO TASK", out)
+
+    def test_refuses_an_asked_of_you(self):
+        """Naming a task would move `target_state` off `none` — the value `marker_for`'s
+        kind carve-out keys on — so an unresolvable name would render `UNRESOLVABLE` on a
+        question whose real resolution is the operator's answer."""
+        self.add("--kind", "asked-of-you", "--text", "should I ship it?")
+        item = self.ledger()[0]
+        code, _, err = self.run_cli(["set", "--id", item["id"], "--task", "Never Filed"])
+        self.assertIsInstance(code, str)
+        self.assertIn("asked-of-you", code)
+        self.assertEqual(err, "")
+        after = self.ledger()[0]
+        self.assertIsNone(after["task"])
+        self.assertEqual(after["task_state"], "none")
+        _, out, _ = self.listing()
+        self.assertNotIn("NO TASK", out)
+        self.assertNotIn("UNRESOLVABLE", out)
+
+    def test_refuses_a_closed_entry(self):
+        self.task_file("Covering Task")
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s")
+        item = self.ledger()[0]
+        self.run_cli(["close", "--id", item["id"], "--evidence", "shipped"])
+        code, _, err = self.run_cli(["set", "--id", item["id"], "--task", "Covering Task"])
+        self.assertIsInstance(code, str)
+        self.assertIn("already closed", code)
+        self.assertEqual(err, "")
+        self.assertIsNone(self.everything()[0]["task"])
 
     def test_records_the_resolved_path(self):
         self.task_file("Covering Task")

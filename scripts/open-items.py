@@ -94,6 +94,13 @@ ROOT = os.path.expanduser("~/.claude/state/open-items")
 # refusal there could block a genuine instruction that happens to quote a tick. Measured
 # 2026-10-05 against a live 72-entry ledger: seven entries match, all `pushed` — the six
 # open ones this guard exists for, plus one already closed that had named a task.
+#
+# The pattern stays `^`-anchored and the CALLER lstrips its input, rather than the pattern
+# growing a `^\s*`: the shape above is the one measured against real entries, and a pattern
+# that loosens to accommodate input nobody has produced would make that measurement describe
+# something else. Stripping first closes the accidental-leading-whitespace bypass without
+# touching the measured shape. A deliberately quoted tick (`> Manager-loop tick …`) is a
+# different thing from a filed one and is still not refused.
 TICK_SUMMARY_RE = re.compile(r"^Manager-loop tick \d+ \(\d{4}-\d{2}-\d{2}")
 
 # Rendered on an OPEN entry's summary line. `unknown` gets its own wording rather
@@ -556,7 +563,7 @@ def cmd_add(args):
             "  the supervisor's permission channel. Those close normally."
             % (args.held_in_pane, args.held_in_pane)
         )
-    if args.kind == "pushed" and TICK_SUMMARY_RE.match(args.text):
+    if args.kind == "pushed" and TICK_SUMMARY_RE.match(args.text.lstrip()):
         # REFUSE, and write nothing at all — the same discipline as the held_in_pane
         # refusal above, and for the same reason: the entry could never close. `pushed`
         # resolves on its task file reading `status: completed`, a tick summary names no
@@ -659,10 +666,40 @@ def cmd_set(args):
 
     It cannot be used to fake a resolution: `list` re-resolves the target on every read, so
     a task that backs no file renders `⚠️ UNRESOLVABLE` regardless of what was written here.
+
+    REFUSED on an `asked-of-you` and on a closed entry. Both refusals write nothing: the
+    first because that kind makes no file claim, so naming a task would move its
+    `target_state` off the `none` that `marker_for`'s kind carve-out keys on and render
+    `⚠️ UNRESOLVABLE` on a question the answer resolves; the second because a closed entry's
+    task is history, not a resolution path.
     """
     sid = session_id(args)
     data = load(sid)
     item = find(data, args.id)
+    if item["state"] == "closed":
+        # REFUSE. A closed entry is terminal and its task is history; re-pointing it would
+        # change what `list --state closed` reports about a decision already taken.
+        sys.exit(
+            "error: %s is already closed — nothing written.\n"
+            "  A closed entry is terminal, so its task is history rather than a resolution\n"
+            "  path: re-pointing it would rewrite the record of a decision already taken."
+            % item["id"]
+        )
+    if item["kind"] == "asked-of-you":
+        # REFUSE. This kind resolves on the operator's ANSWER and makes no file claim, so a
+        # task named on it is not a resolution path — and naming one would move its
+        # `target_state` off `none`, which is the value `marker_for` keys its kind carve-out
+        # on. An unresolvable name would then render `⚠️ UNRESOLVABLE` on a question whose
+        # real resolution is the answer: the false positive that carve-out exists to prevent,
+        # reachable through a verb that did not exist when it was written.
+        sys.exit(
+            "error: an `asked-of-you` cannot take a task — nothing written.\n"
+            "  This kind resolves on the operator's ANSWER and makes no file claim, so a\n"
+            "  task named on it is not a resolution path, and naming one would render\n"
+            "  `⚠️ UNRESOLVABLE` on a question the answer resolves.\n"
+            "  Record the link with `note` instead:  note --id %s --text \"<the link>\""
+            % item["id"]
+        )
     dirs = task_dirs_for(args)
     item["task"] = args.task
     item["task_path"] = resolve_task(args.task, dirs)
@@ -740,6 +777,12 @@ def cmd_withdraw(args):
     resolve on a task file, and a manager tick summary filed as one of them has no task, so
     no close condition could ever fire. `skills/open-items/SKILL.md` already promised this
     path for `asked-of-me` ("or the operator withdraws it") with no verb behind it.
+
+    REFUSED on an `asked-of-you`, and on an entry that is ALREADY closed. Both write nothing.
+    The second is not symmetry for its own sake: without it the unconditional write below
+    replaces an evidence-close's `closed_evidence` with a withdrawal claim, so a resolved ask
+    is retrospectively recorded as one that was never real — the exact indistinguishability
+    this docstring says the verb exists to prevent.
     """
     sid = session_id(args)
     data = load(sid)
@@ -758,6 +801,22 @@ def cmd_withdraw(args):
             "  If the operator answered it:  answer --id %s --answer \"<their words>\"\n"
             "  If it was filed in error:     close  --id %s --evidence \"<on-disk fact>\""
             % (args.id, args.id)
+        )
+    if item["state"] == "closed":
+        # REFUSE, and write nothing. Without this guard the unconditional write below turns
+        # an entry already closed by `close --evidence` or `answer` into one recorded as
+        # never real — replacing its on-disk evidence with a withdrawal claim and stamping
+        # `withdrawn_at`. That is precisely the indistinguishability this verb's docstring
+        # says it exists to prevent, defeated by the verb itself. `find()` matches on an id
+        # PREFIX, so a stale or partial `--id` landing on the wrong entry is easy — and the
+        # skill's act rule has a manager acting on rows from a render taken before a close.
+        sys.exit(
+            "error: %s is already closed — nothing written.\n"
+            "  Its close record is on disk: %s\n"
+            "  Overwriting it would record a resolved ask as one that was never real, and\n"
+            "  `withdrawn_at` is the only field that tells the two apart.\n"
+            "  A close you believe is wrong is corrected by a new entry, not by re-closing\n"
+            "  this one." % (item["id"], item.get("closed_evidence") or "(none recorded)")
         )
     stamp = now()
     item["state"] = "closed"
