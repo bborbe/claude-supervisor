@@ -39,8 +39,15 @@ member would report an answer the operator may never have given. The caller's
 contract is to report the key as ambiguous in that case, never to pick.
 
 Usage:
-    attention-card-lookup.py latest --dedup-key K
+    attention-card-lookup.py latest --dedup-key K   # the answer that governs
+    attention-card-lookup.py recent --dedup-key K   # the card the hold names
     attention-card-lookup.py list   --dedup-key K
+
+⚠️ `latest` and `recent` answer different questions and neither substitutes for
+the other: `latest` filters to ANSWERED cards (it is the "which answer governs
+this row" read), while `recent` takes the newest card by `created_at` whatever
+its state (it is the "which card carries this hold" read). A hold is usually on
+a card not yet answered, so `latest` alone leaves the hold line's case unserved.
 
 Exit codes: 0 ok · 3 no cards for the key · 2 refused (ambiguous or bad input).
 """
@@ -228,13 +235,60 @@ def cmd_list(args, items, out=sys.stdout):
     return 0
 
 
+def cmd_recent(args, items, out=sys.stdout):
+    """The key's newest card by `created_at`, whatever state it is in.
+
+    ⚠️ This is a DIFFERENT question from `latest`, and the hold line needs this
+    one. A hold is usually on a card the operator has **not** answered yet, so a
+    lookup restricted to answered cards returns `NO_ANSWERED:` for exactly the
+    case it most needs to serve — and the clause that consumes it forbids
+    re-posting, leaving the reader no way to obtain the id at all. `latest`
+    answers "which answer governs"; `recent` answers "which card carries this".
+    """
+    cards, err = cards_for_key(items, args.dedup_key)
+    if err:
+        print(f"REFUSED: {err}", file=out)
+        return 2
+    if not cards:
+        print(f"NO_CARDS: no card carries dedup key {args.dedup_key!r}", file=out)
+        return 3
+    stamped = [(it, parse_ts(it.get("created_at"))) for it in cards]
+    stamped = [(it, ts) for it, ts in stamped if ts is not None]
+    if not stamped:
+        print(
+            f"NO_CREATED_AT: {len(cards)} card(s) under {args.dedup_key!r}, "
+            "none carrying a parseable created_at",
+            file=out,
+        )
+        return 3
+    top = max(ts for _, ts in stamped)
+    leaders = [it for it, ts in stamped if ts == top]
+    if len(leaders) > 1:
+        ids = ", ".join(sorted(str(it.get("item_id", "")) for it in leaders))
+        print(
+            f"REFUSED: {len(leaders)} cards share the maximum created_at "
+            f"({top.isoformat()}) — {ids}. The newest card is undecidable, so "
+            "no card id is quoted.",
+            file=out,
+        )
+        return 2
+    card = leaders[0]
+    answered = answered_at(card)
+    print(f"ITEM_ID: {card.get('item_id', '')}", file=out)
+    print(f"STATE: {card.get('state', '')}", file=out)
+    print(f"ANSWERED_AT: {answered.isoformat() if answered else '-'}", file=out)
+    print(f"CARDS: {len(cards)}", file=out)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Resolve a dedup key to its latest-answered attention card"
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
     for name, helptext in (
-        ("latest", "print the key's latest-answered card id"),
+        ("latest", "print the key's latest-ANSWERED card id"),
+        ("recent", "print the key's newest card id, any state — the hold line's id"),
         ("list", "print every card under the key, oldest answer first"),
     ):
         p = sub.add_parser(name, help=helptext)
@@ -257,7 +311,9 @@ def main(argv=None):
     except json.JSONDecodeError as err:
         print(f"FAILED: attention store returned unparseable history ({err})")
         return 1
-    return (cmd_latest if args.cmd == "latest" else cmd_list)(args, items)
+    return {"latest": cmd_latest, "recent": cmd_recent, "list": cmd_list}[args.cmd](
+        args, items
+    )
 
 
 if __name__ == "__main__":

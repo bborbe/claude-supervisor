@@ -40,11 +40,12 @@ def load(name, filename):
 lookup = load("attention_card_lookup", "attention-card-lookup.py")
 
 
-def card(item_id, key, answered, state="closed", answer="raise it now"):
+def card(item_id, key, answered, state="closed", answer="raise it now", created=None):
     return {
         "item_id": item_id,
         "dedup_key": key,
         "state": state,
+        "created_at": created,
         "answered_at": answered,
         "answer": {"kind": "option", "value": answer} if answer else None,
     }
@@ -110,6 +111,54 @@ class SelectLatestTest(unittest.TestCase):
         ]
         chosen, _ = lookup.select_latest(cards)
         self.assertEqual("answered", chosen["item_id"])
+
+
+class RecentTest(unittest.TestCase):
+    """`recent` answers a DIFFERENT question from `latest`, and the hold line
+    needs this one: the card that carries the hold is usually still OPEN, so a
+    lookup restricted to answered cards returns nothing for the common case."""
+
+    def run_recent(self, items, key):
+        out = io.StringIO()
+        code = lookup.cmd_recent(type("A", (), {"dedup_key": key})(), items, out=out)
+        return code, out.getvalue()
+
+    def test_newest_card_wins_even_when_unanswered(self):
+        items = [
+            card("old", KEY_A, "2026-10-04T16:03:52Z", created="2026-10-04T11:55:19Z"),
+            card("open", KEY_A, None, state="open", answer=None, created="2026-10-05T09:26:34Z"),
+        ]
+        code, text = self.run_recent(items, KEY_A)
+        self.assertEqual(0, code)
+        self.assertIn("ITEM_ID: open", text)
+        self.assertIn("STATE: open", text)
+        self.assertIn("ANSWERED_AT: -", text)
+
+    def test_latest_would_not_serve_that_case(self):
+        # The negative probe for the split: the same items through `latest` do
+        # NOT return the open card, which is why one verb cannot cover both.
+        items = [
+            card("old", KEY_A, "2026-10-04T16:03:52Z", created="2026-10-04T11:55:19Z"),
+            card("open", KEY_A, None, state="open", answer=None, created="2026-10-05T09:26:34Z"),
+        ]
+        out = io.StringIO()
+        lookup.cmd_latest(type("A", (), {"dedup_key": KEY_A})(), items, out=out)
+        self.assertNotIn("ITEM_ID: open", out.getvalue())
+
+    def test_tie_on_created_at_is_refused(self):
+        items = [
+            card("aa", KEY_A, None, created="2026-10-05T09:00:00Z"),
+            card("bb", KEY_A, None, created="2026-10-05T09:00:00Z"),
+        ]
+        code, text = self.run_recent(items, KEY_A)
+        self.assertEqual(2, code)
+        self.assertIn("REFUSED:", text)
+        self.assertIn("undecidable", text)
+
+    def test_no_cards_exits_three(self):
+        code, text = self.run_recent([card("aa", KEY_A, None, created="2026-10-05T09:00:00Z")], KEY_B1)
+        self.assertEqual(3, code)
+        self.assertIn("NO_CARDS:", text)
 
 
 class CommandExitCodeTest(unittest.TestCase):
