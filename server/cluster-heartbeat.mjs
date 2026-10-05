@@ -22,7 +22,7 @@
 // cluster stamps: deleting one would destroy the evidence that a cluster worker existed, and
 // `heartbeat.mjs`'s `sweepStale` already collects anything past the TTL.
 
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -37,21 +37,103 @@ export { REACHABILITY_FILE }
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const READER = join(HERE, '..', 'scripts', 'cluster-heartbeat.py')
 
-function defaultRun(argv) {
-  return spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 20_000 })
+// ⚠️ Async, and that is the point of this function rather than a style choice. `spawnSync`
+// blocked the whole event loop for the full 20 s budget, and the headless stamp timers share
+// that loop — so a hanging cluster reader delayed a worker's heartbeat by the same 20 s.
+// Measured 2026-10-05: the worst stamp gap was 50 007 ms against a 60 000 ms TTL, ~10 s of
+// margin, and anything else blocking the loop spent it. `spawn` + a promise waits the same
+// 20 s without stopping the world; the result shape is identical, so `run`'s seam and every
+// caller's contract are unchanged.
+const RUN_TIMEOUT_MS = 20_000
+
+// `spawnSync` capped a child's output at Node's default `maxBuffer` of 1 MB and failed the call
+// past it; `spawn` has no such bound, so the cap is restored here rather than left implicit. It
+// is not decoration: without it an oversized reader would grow this process's heap, and it would
+// do so on the very event loop the async change exists to keep free.
+const RUN_MAX_OUTPUT_BYTES = 1_048_576
+
+// How long a child gets to honour SIGTERM before SIGKILL. Without the escalation a reader that
+// traps or ignores SIGTERM is never reaped: `finish`'s `settled` guard drops the later `close`,
+// so the child and its pipes stay live handles for the rest of the server's life.
+const RUN_KILL_GRACE_MS = 2_000
+
+// Exported, and both knobs injectable, so the spawn path itself is testable. Every other test
+// injects `run`, which left the only code that can actually spawn and hang with no coverage —
+// and a real 20 s timeout is not something a unit test can wait for.
+export function defaultRun(argv, { timeoutMs = RUN_TIMEOUT_MS, maxOutputBytes = RUN_MAX_OUTPUT_BYTES } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    let bytes = 0
+    let settled = false
+    let timer
+    let escalation
+
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(result)
+    }
+
+    const kill = () => {
+      child.kill('SIGTERM')
+      escalation = setTimeout(() => child.kill('SIGKILL'), RUN_KILL_GRACE_MS)
+      escalation.unref?.()
+    }
+
+    // Past the cap the child is killed and the poll fails, which is what `spawnSync` did on
+    // hitting the same bound: a truncated read must never be parsed as a session list.
+    const collect = (chunk, toStderr) => {
+      if (settled) return
+      bytes += chunk.length
+      if (bytes > maxOutputBytes) {
+        kill()
+        finish({ status: null, signal: 'SIGTERM', stdout, stderr, error: new Error('ENOBUFS') })
+        return
+      }
+      if (toStderr) stderr += chunk
+      else stdout += chunk
+    }
+
+    timer = setTimeout(() => {
+      kill()
+      finish({ status: null, signal: 'SIGTERM', stdout, stderr, error: new Error('ETIMEDOUT') })
+    }, timeoutMs)
+    timer.unref?.()
+
+    child.stdout?.on('data', (chunk) => collect(chunk, false))
+    child.stderr?.on('data', (chunk) => collect(chunk, true))
+    child.on('error', (error) => finish({ status: null, signal: null, stdout, stderr, error }))
+    // ⚠️ The escalation is cancelled HERE, not in `finish`, and the difference is the whole point
+    // of it. `finish` runs at the moment `kill()` schedules the escalation — on the timeout and
+    // ENOBUFS paths both — so clearing it there would cancel the SIGKILL in the one case it
+    // exists for, leaving a SIGTERM-trapping reader alive for the server's remaining life.
+    // `close` is the event that means the child is actually gone, which is when a pending
+    // escalation has nothing left to reap and would otherwise fire a stray SIGKILL at a pid this
+    // process no longer owns.
+    child.on('close', (status, signal) => {
+      clearTimeout(escalation)
+      finish({ status, signal, stdout, stderr })
+    })
+  })
 }
 
-// Returns `{ok, reason?, stamped}`. `ok: false` means the cluster was not read — the caller may
-// log it, but must not treat it as "no cluster workers are live": that is the reader's job, and
-// it reaches the right answer only because the marker was left unrefreshed.
-export function pollCluster({
+// Resolves to `{ok, reason?, stamped}`. `ok: false` means the cluster was not read — the caller
+// may log it, but must not treat it as "no cluster workers are live": that is the reader's job,
+// and it reaches the right answer only because the marker was left unrefreshed.
+//
+// Async so that a hanging reader cannot block the loop its callers share — see `defaultRun`.
+// An injected `run` may be sync or async; `await` covers both.
+export async function pollCluster({
   dir = config.heartbeatDir,
   reader = READER,
   run = defaultRun,
   now = Date.now(),
   fs = { mkdirSync, writeFileSync, renameSync },
 } = {}) {
-  const proc = run(['python3', reader, '--list', '--json'])
+  const proc = await run(['python3', reader, '--list', '--json'])
   if (!proc || proc.status !== 0) {
     return { ok: false, reason: 'cluster store unreadable', stamped: [] }
   }
