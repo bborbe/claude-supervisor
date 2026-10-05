@@ -27,8 +27,8 @@ prints a verdict line and nothing else; every gap and every fix diff stays in th
 
 ### 1. Resolve the task — exactly, never fuzzily
 
-`python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/inbox.py --resolve "<name>"` — the exact resolver; append `--vault "<vault>"` when `$ARGUMENTS` carried one.
-Parse `$ARGUMENTS` yourself: `<name>` is the non-flag remainder, quoted. Branch on the exit code per `commands/inbox.md`'s "Resolve the vault first": `rc 0` → continue; `rc 2` / `rc 3` / `rc 4` → report and **STOP**. ⚠️ Never `vault-cli task search` — it is a **semantic** search, so this step's own "exactly one match" is unreachable; never create a task from an unmatched name.
+`python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/inbox.py --locate "<name>"` — the exact resolver; append `--vault "<vault>"` when `$ARGUMENTS` carried one. Parse `$ARGUMENTS` yourself: `<name>` is the non-flag remainder, quoted; `rc 0` prints the owning vault — **capture it as `<vault>`**, which steps 2–4 interpolate.
+`rc 2` / `rc 3` / `rc 4` → report and **STOP**. ⚠️ Never `--resolve` — it is scoped to `phase: todo`, the *complement* of the approved rows this verb readies — and never `vault-cli task search`, which substring-matches, so "exactly one match" is unreachable. Never create a task from an unmatched name.
 
 ### 2. Gate 1 — approval, before any audit
 
