@@ -98,8 +98,11 @@ export function readLive(sessionId, { dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_
     if (error.code === 'ENOENT') return { live: false, reason: 'no heartbeat stamp' }
     return { live: null, reason: `the heartbeat directory could not be read: ${error.code ?? error.message}` }
   }
-  if (age < ttlMs) return { live: true, reason: `heartbeat stamped ${Math.round(age / 1000)}s ago` }
-  return { live: false, reason: `heartbeat stale by ${Math.round((age - ttlMs) / 1000)}s` }
+  // `ageMs` is carried so a caller that needs the age does not have to stat the path a second
+  // time. A second stat is not merely wasteful: it is unguarded, so a stamp unlinked between
+  // the two calls throws out of the caller — and `listLive` is on the spawn path now.
+  if (age < ttlMs) return { live: true, ageMs: age, reason: `heartbeat stamped ${Math.round(age / 1000)}s ago` }
+  return { live: false, ageMs: age, reason: `heartbeat stale by ${Math.round((age - ttlMs) / 1000)}s` }
 }
 
 // Every fresh stamp, with its metadata — the reader a non-spawning process runs.
@@ -136,7 +139,11 @@ export function listLive({ dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_MS, now = D
       // because its metadata is malformed would invert the failure into the dangerous one.
       meta = {}
     }
-    live.push({ sessionId, ageMs: now - statSync(stampPath(dir, sessionId)).mtimeMs, ...meta })
+    // The age comes from the verdict `readLive` already took, never a second bare `statSync`:
+    // that stat was unguarded, so a stamp unlinked between the two calls would throw ENOENT
+    // out of `listLive` — and `listLive` is on the spawn path now, via `workerSessions()` and
+    // `concurrentLimitError()`, where an uncaught throw is a failed spawn rather than a count.
+    live.push({ sessionId, ageMs: verdict.ageMs, ...meta })
   }
   return live
 }
