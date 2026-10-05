@@ -25,7 +25,7 @@ An MCP server + Claude Code plugin that lets one manager session spawn worker se
 - Agent: supervisor:gate-relay-read (the manager's gate relay, read leg — reads a blocked tab worker's pane and returns a compact per-pane summary so the manager can batch the operator's question without paying the pane-dump cost in its own context; holds no `send-text` grant, a permission boundary rather than a capability guarantee)
 - Agent: supervisor:gate-relay-send (the manager's gate relay, send leg — delivers the operator's already-given answer into a tab worker's pane, re-reading the gate immediately before typing, repeating a bare `\r` until the composer clears, reporting `not sent` with no pane mutation when the gate cleared meanwhile, and handing over a `jump-link.py` line instead of ever driving a selection modal)
 - Skill: supervising-workers (when to delegate to a worker, which spawn mode to use, and how to run the loop)
-- Skill: open-items (/supervisor:open-items — the per-session ledger of operator asks: kinds, render rule, answer-vs-note, close on evidence)
+- Skill: open-items (/supervisor:open-items — the per-session ledger of operator asks: its kinds, the render rule, the three close paths — `answer`, `close --evidence`, `withdraw` — and the `NO TASK` marker)
 
 ## Two spawn modes
 

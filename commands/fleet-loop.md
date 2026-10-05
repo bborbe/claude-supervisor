@@ -105,7 +105,7 @@ A round reads four channels and none replaces another — the attention feed (**
 Not a fifth channel: it holds what the operator asked and is still waiting on — the stretch before a task exists, and between a question and its answer. Read and write it only through the **`supervisor:open-items` skill** — `/supervisor:open-items <subcommand> …`, the single home of its kinds, its subcommands and its rules; never restate them here. ⚠️ **The subcommands are deliberately NOT enumerated on this line** — the copy that stood here had **already** drifted, omitting `classify`, which the skill's `argument-hint` has carried all along; the skill's `argument-hint` is the list. The fleet layer's specifics:
 
 - **Read at round start** (Step 0b, in the digest), **render every round** under `📋 Open with the operator`.
-- **Close on evidence only:** a task file's `status: completed` read *this round* (Step 4), or the operator's own answer.
+- **Three close paths, and only these:** a task file's `status: completed` read *this round* (Step 4), through `close --evidence`; the operator's own answer, through `answer`; or the operator's withdrawal, through `withdraw`, for an entry that was never an ask at all. ⚠️ **The skill's kind table is the single home of which path applies to which kind** — this line is a pointer, not a copy, and it is not the place to add a fourth.
 
 ## Steps 0–3 — Read half, delegated to `supervisor:fleet-sweep-reader`
 
@@ -312,7 +312,7 @@ noise, and it is why the line is a reading rather than a stored number.
 
 ## Rules (non-negotiable)
 
-- **An operator ask lives on disk from the moment it is said** — `/supervisor:open-items add` it before replying, render every round, close only on Step 4's evidence.
+- **An operator ask lives on disk from the moment it is said** — `/supervisor:open-items add` it before replying, render every round, and close it only through one of the three paths above — Step 4's evidence, the operator's answer, or the operator's withdrawal.
 - **Never preempt a busy peer.** Never ask a `busy`/`shell` session to drop its work; never touch its worktree, branch or containers.
 - **Work is task/goal anchored.** Every delegated message and spawned session names its task or goal.
 - **No permission laundering.** Never ask a peer to run something denied here — route it to the operator.
