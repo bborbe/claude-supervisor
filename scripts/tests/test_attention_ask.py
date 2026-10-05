@@ -208,8 +208,16 @@ class ProducerKindTest(unittest.TestCase):
     """The store validates `producer_kind` against a closed enum and rejects an
     unknown value with a `400` naming the field, so an invented kind used to cost
     a round trip and read as a store fault rather than a bad argument. `choices=`
-    refuses it client-side instead — which is true only while the enum here
-    matches the store's, and that is what the second case pins.
+    refuses it client-side instead, which is correct only while this tuple still
+    carries the four the store accepts.
+
+    ⚠️ **Nothing here checks that against the store.** The enum's source is
+    `attention-controller` `pkg/producer-kind.go`, a sibling repo this suite does
+    not read, so the second case pins the tuple to the four values this repo
+    *records* — the comment block at `scripts/pod-attention.py:104` and its mirror
+    in `test_pod_attention.py`. A local edit that widens or narrows the tuple
+    fails there; a change on the store's side passes silently, and the e2e is what
+    catches that.
     """
 
     def test_an_invented_kind_is_refused_before_the_store_is_asked(self):
@@ -230,7 +238,9 @@ class ProducerKindTest(unittest.TestCase):
                 self.assertIn("invalid choice", err.getvalue())
                 self.assertIn("worker", err.getvalue())
 
-    def test_the_accepted_kinds_are_the_stores_enum(self):
+    def test_the_accepted_kinds_are_pinned_to_the_recorded_four(self):
+        # The recorded four, not a read of the store's Go source — see the class
+        # docstring. A divergence on the store's side is the e2e's to catch.
         self.assertEqual(
             ask.PRODUCER_KINDS, ("session", "agent", "cron", "dark-factory")
         )
