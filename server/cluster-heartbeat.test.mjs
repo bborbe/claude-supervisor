@@ -111,7 +111,10 @@ test('a reader that answers asynchronously is awaited, not misread as a failed p
   assert.equal(result.ok, true, 'a promise returned by run must be awaited, not mistaken for a failed poll')
   assert.deepEqual(result.stamped, ['c3d4e5f6-3333'])
   assert.equal(existsSync(join(dir, REACHABILITY_FILE)), true)
-  assert.ok(ticks >= 5, `the loop kept running while the reader waited (${ticks} ticks in ~200 ms)`)
+  // The discriminating assertion is `result.ok` above; this is supporting evidence that the loop
+  // stayed free, so the floor is deliberately loose. A tight count would turn a GC pause on a
+  // loaded runner into a red build, while the pre-fix behaviour it guards against yields zero.
+  assert.ok(ticks >= 3, `the loop kept running while the reader waited (${ticks} ticks in ~200 ms)`)
 })
 
 // `defaultRun` is the only code here that can actually spawn and hang, so it carries its own

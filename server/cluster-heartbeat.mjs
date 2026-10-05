@@ -68,6 +68,7 @@ export function defaultRun(argv, { timeoutMs = RUN_TIMEOUT_MS, maxOutputBytes = 
     let bytes = 0
     let settled = false
     let timer
+    let escalation
 
     const finish = (result) => {
       if (settled) return
@@ -78,7 +79,7 @@ export function defaultRun(argv, { timeoutMs = RUN_TIMEOUT_MS, maxOutputBytes = 
 
     const kill = () => {
       child.kill('SIGTERM')
-      const escalation = setTimeout(() => child.kill('SIGKILL'), RUN_KILL_GRACE_MS)
+      escalation = setTimeout(() => child.kill('SIGKILL'), RUN_KILL_GRACE_MS)
       escalation.unref?.()
     }
 
@@ -105,7 +106,17 @@ export function defaultRun(argv, { timeoutMs = RUN_TIMEOUT_MS, maxOutputBytes = 
     child.stdout?.on('data', (chunk) => collect(chunk, false))
     child.stderr?.on('data', (chunk) => collect(chunk, true))
     child.on('error', (error) => finish({ status: null, signal: null, stdout, stderr, error }))
-    child.on('close', (status, signal) => finish({ status, signal, stdout, stderr }))
+    // ⚠️ The escalation is cancelled HERE, not in `finish`, and the difference is the whole point
+    // of it. `finish` runs at the moment `kill()` schedules the escalation — on the timeout and
+    // ENOBUFS paths both — so clearing it there would cancel the SIGKILL in the one case it
+    // exists for, leaving a SIGTERM-trapping reader alive for the server's remaining life.
+    // `close` is the event that means the child is actually gone, which is when a pending
+    // escalation has nothing left to reap and would otherwise fire a stray SIGKILL at a pid this
+    // process no longer owns.
+    child.on('close', (status, signal) => {
+      clearTimeout(escalation)
+      finish({ status, signal, stdout, stderr })
+    })
   })
 }
 

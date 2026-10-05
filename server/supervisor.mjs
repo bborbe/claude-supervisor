@@ -1674,7 +1674,15 @@ const clusterTimer = setInterval(async () => {
     clusterPollState.ok = result.ok
   } catch (error) {
     // An async interval callback that throws has no caller to reject to, so it must not throw.
-    log(`cluster heartbeat: poll failed: ${error.message}`)
+    // ⚠️ Transition-gated exactly like the `ok: false` branch above, and for the reason the block
+    // comment gives: a throw source that persists — ENOSPC on the marker write, say — would
+    // otherwise log every 30 s and bury the signal this design exists to keep readable. Recording
+    // `ok: false` is what makes the gate work: the next throw stays quiet, and a following success
+    // logs "reachable again" through the branch above.
+    if (clusterPollState.ok !== false) {
+      log(`cluster heartbeat: poll failed: ${error?.message ?? error}`)
+    }
+    clusterPollState.ok = false
   } finally {
     clusterPollState.inFlight = false
   }
