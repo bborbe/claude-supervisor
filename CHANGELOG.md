@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.105.0
 - feat: **`/supervisor:manager-loop` and `/supervisor:fleet-loop` no longer cap their tick at `min(<interval>, 900)` while the session owns a live headless worker.** The cap, added in `## v0.57.1`, made two things mutually exclusive that need not be: owning a headless worker and running a long tick. ⚠️ **The fact survives; only the binding goes.** A headless permission park still auto-denies after 15 minutes (`skills/supervising-workers/SKILL.md:70`), so a tick longer than that window can still resume a worker with a denial it did not earn — that is now a **choice the manager accepts**, not a constraint forced on it. The substitute is the wrangler auto-policy (`/supervisor:manager-drain` → the `supervisor:manager-wrangler` agent), which answers parks without the manager's tick. ⚠️ **And it is a ONE-SHOT loop — it stops as soon as its queue empties**, so a long tick behind a live headless worker needs it **run repeatedly for the life of the tick**, or a standing form; measured 2026-10-05, it answered 10 parks and then stopped while the worker was still mid-flow, its own report warning that any park raised after that point would auto-deny. Both commands state the same rule, and `manager-loop.md` § Interval's heading and framing were reconciled to match (the attention watcher was never an interval cap — it stays on its own 30-min-bounded arm). The released `## v0.57.1` entry is left as historical record.
 
 ## v0.104.0
