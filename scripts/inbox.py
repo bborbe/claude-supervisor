@@ -86,7 +86,9 @@ Usage:
     inbox.py --resolve <title>
     inbox.py --locate <title>
 
-Exit codes: 0 ok, 2 vault config unreadable, 3 no such row, 4 ambiguous.
+Exit codes: 0 ok, 2 vault config unreadable, 4 ambiguous, and 3 for both
+resolvers — `--resolve` reads it as "no such *live* row", `--locate` as "no such
+row at any phase". The per-verb stderr strings say which; this line covers both.
 """
 import argparse
 import importlib.util
@@ -400,11 +402,16 @@ def main(argv=None):
         return 2
 
     if args.locate:
-        rows, _ = scan(vaults, args.vault, inbox_only=False)
+        rows, skipped = scan(vaults, args.vault, inbox_only=False)
         hits = sorted({r["vault"] for _, r in rows if r["title"] == args.locate})
         if not hits:
             print(f"❌ no task named {args.locate!r} in any scanned vault",
                   file=sys.stderr)
+            if skipped:
+                # A SHORT list must never read as a complete one: without this the
+                # rc 3 message asserts absence when a vault simply failed to parse.
+                print(f"⚠️ {len(skipped)} vault(s) could not be read — the row may "
+                      f"exist there: " + "; ".join(skipped), file=sys.stderr)
             return 3
         if len(hits) > 1:
             print(f"❌ {args.locate!r} exists in more than one vault: "

@@ -2,7 +2,7 @@
 description: "Ready ONE named task and open it — run the audit → repair → re-audit loop in a sub-agent until the audit returns zero hard-gate failures, then act on the Gate 2 verdict: open via `/supervisor:open`, or escalate naming the gap. Cross-tier — runnable by the fleet manager and by a goal/topic manager. It readies a task; it never approves one."
 allowed-tools:
   - Bash(vault-cli:*)
-  - Bash(python3:*)
+  - Bash(python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/*)
   - Task
 argument-hint: "<task name> [--vault <vault>]"
 ---
@@ -32,7 +32,7 @@ prints a verdict line and nothing else; every gap and every fix diff stays in th
 
 ### 2. Gate 1 — approval, before any audit
 
-`vault-cli --vault "<vault>" task get "<task>" phase`.
+`vault-cli --vault "<vault>" task get "<name>" phase`.
 
 `phase: todo` means the operator has not approved the row. Print the `⛔ NOT APPROVED` block
 verbatim from `commands/open.md` § Step 1.5 Gate 1 and **STOP** — spawn nothing, do not run
@@ -57,7 +57,7 @@ own stop rule unenforced for every other entry into it.
 Reuse `commands/open.md` § Step 1.5 Gate 2 for the decision. Never re-implement score parsing and
 never soften the bar.
 
-- **Clears the readiness ladder** → hand to `/supervisor:open "<task>"` for this single named task.
+- **Clears the readiness ladder** → hand to `/supervisor:open "<name>"` for this single named task.
   The readiness ladder's four branches and their thresholds have one home,
   `docs/fleet-surface.md` § Spawn a worker item 2 — read them there; this step never restates a
   number.
@@ -77,7 +77,7 @@ never soften the bar.
 The calling session prints **one line**, carrying all three fields:
 
 ```
-READY: <task> — <before>/10 → <after>/10 — opened | escalated: <gap> | refused: not approved
+READY: <name> — <before>/10 → <after>/10 — opened | escalated: <gap> | refused: not approved
 ```
 
 Nothing else reaches the manager's context, and the whole response stays within the line budget
