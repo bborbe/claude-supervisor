@@ -57,6 +57,21 @@ from datetime import datetime, timezone
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "10"))
+# ⚠️ The history read is PAGED, and the default page is 1000 items. `reconcile()`
+# re-baselines on every (re)connect, so an unpaged read there means an answer
+# that arrived while the stream was down and has since fallen outside the window
+# is neither adopted into `seen` nor emitted — a MISSED WAKE, the exact failure
+# this arm exists to prevent. Measured 2026-10-05: the unpaged read returns 1,000
+# of the store's 25,683 items, and a key that reads 2 cards unpaged reads 9 here.
+# Same constant name, env var and default as `attention-card-lookup.py`, so the
+# two readers cannot drift apart.
+# ⚠️ The widened read is not free. This file's own docstring measured the history
+# read at 16.4 MB / 19,167 items and called it "not viable as a poll"; at the
+# store's now-measured 25,683 items this is ~22 MB fetched and json-parsed on
+# EVERY stream (re)connect, under the unchanged 10 s STORE_TIMEOUT. Correctness
+# over cost is the right trade — a missed wake is the worse failure — but the
+# budget is deliberate, not incidental, so do not shrink this back to a bare read.
+HISTORY_LIMIT = int(os.environ.get("ATTENTION_HISTORY_LIMIT", "50000"))
 # A long-lived stream: the read blocks between events, so this timeout is
 # generous and its expiry is treated as a drop-and-reconnect, not as an error.
 STREAM_TIMEOUT = float(os.environ.get("ANSWERED_WATCH_STREAM_TIMEOUT", "900"))
@@ -113,8 +128,25 @@ def fetch_json(url, timeout):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def fetch_history(store):
-    return items_of(fetch_json(f"{store}/api/1.0/attention/history", STORE_TIMEOUT))
+def fetch_history(store, limit=HISTORY_LIMIT):
+    items = items_of(
+        fetch_json(f"{store}/api/1.0/attention/history?limit={limit}", STORE_TIMEOUT)
+    )
+    if len(items) >= limit:
+        # ⚠️ A full page is the ONLY signal the read has a ceiling at all. Past
+        # it `reconcile()` re-baselines from a truncated page and silently drops
+        # an answer that arrived during an outage — the same missed wake the
+        # limit exists to remove, just at a higher volume. Warn, never raise: a
+        # truncated baseline still beats none, and the watch must not die on a
+        # store that merely grew. `reconcile()` carries no `err` handle, so this
+        # writes to stderr directly rather than through the caller's stream.
+        print(
+            f"WARN: history read returned {len(items)} items at limit={limit} — "
+            "it may be truncated; raise ATTENTION_HISTORY_LIMIT",
+            file=sys.stderr,
+            flush=True,
+        )
+    return items
 
 
 def fetch_item(store, item_id):
