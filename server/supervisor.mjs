@@ -732,11 +732,14 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
 // path consulted would be a second counter by omission, which is the defect this number's
 // single home exists to prevent.
 //
-// The count is live WORKER SESSIONS — the session registry joined to the spawn ledger. It is
-// deliberately NOT the heartbeat store, which is stamped only for in-process (headless)
-// workers and therefore read 0 while 11 interactive workers were live (measured 2026-10-01).
-// A cap counting one population while the managers' target counts another is a defect with no
-// error on either side — and the target IS this number, so they must agree by construction.
+// The count is live WORKER SESSIONS — the spawn ledger joined to the registry OR the heartbeat
+// store, minus auto-resumes. ⚠️ **Both liveness channels are needed, and reading either alone
+// is the defect this instrument has now had twice:** the heartbeat store alone answered 0 while
+// 11 interactive workers were live (measured 2026-10-01), and the registry alone rendered every
+// headless and cluster worker dead (corrected 2026-10-05) — the registry is pid-keyed and
+// local-only, so it cannot see a worker with no pid of its own. A cap counting one population
+// while the managers' target counts another is a defect with no error on either side — and the
+// target IS this number, so they must agree by construction.
 // Definition and its two stated limits: `worker-sessions.mjs`.
 // ⚠️ TWO THRESHOLDS SINCE 2026-10-04, ON THE OPERATOR'S RULING — *"lets start with 30 = soft
 // cap and 50 = hard cap"*. The SOFT cap refuses ORDINARY spawns; the HARD cap refuses EVERY
@@ -968,12 +971,13 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // guards, before a worker, a tab or a ledger record exists. A limit checked after the
   // spawn has already spent the budget it exists to protect.
   //
-  // The count is live WORKER SESSIONS — the session registry joined to the spawn ledger.
-  // It is deliberately NOT the heartbeat store, which is stamped only for in-process
-  // (headless) workers and therefore read 0 while 11 interactive workers were live (measured
-  // 2026-10-01). A cap counting one population while the managers' target counts another is
-  // a defect with no error on either side — and the target IS this number, so they must
-  // agree by construction. Definition and its two stated limits: `worker-sessions.mjs`.
+  // The count is live WORKER SESSIONS — the spawn ledger joined to the registry OR the
+  // heartbeat store, minus auto-resumes. Both channels are needed: the registry is pid-keyed
+  // and local-only, and the heartbeat store is what covers a worker with no pid of its own.
+  // Reading either alone is the defect this instrument has had twice — see the longer note on
+  // `concurrentLimitError`. A cap counting one population while the managers' target counts
+  // another is a defect with no error on either side — and the target IS this number, so they
+  // must agree by construction. Definition and its two stated limits: `worker-sessions.mjs`.
   const limitError = concurrentLimitError({ operatorNamed })
   if (limitError) return { error: limitError }
 

@@ -47,6 +47,12 @@ import { config } from './config.mjs'
 export const HEARTBEAT_INTERVAL_MS = 30_000
 export const HEARTBEAT_TTL_MS = 60_000
 
+// The cluster mirror's reachability marker lives in the store directory but is NOT a session.
+// Its name has ONE home — here, because this module owns the store and lists it — and it must
+// match `REACHABILITY_FILE` in `scripts/live-workers.py`, the other reader that consults it.
+// `cluster-heartbeat.mjs` re-exports this rather than restating the literal.
+export const REACHABILITY_FILE = '_cluster-reachability.json'
+
 export const heartbeatDir = config.heartbeatDir
 
 export function stampPath(dir, sessionId) {
@@ -112,7 +118,13 @@ export function listLive({ dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_MS, now = D
   const live = []
   for (const name of names) {
     if (!name.endsWith('.json')) continue
+    // The cluster mirror's reachability marker lives in this directory and is not a session.
+    // Without this the reader reports a phantom `sessionId: "_cluster-reachability"`, which
+    // no ledger key can match today but is a divergence from `live-workers.py` — the other
+    // reader of this same store — which has always skipped it.
+    if (name === REACHABILITY_FILE) continue
     const sessionId = name.replace(/\.json$/, '')
+    if (!sessionId) continue
     const verdict = readLive(sessionId, { dir, ttlMs, now })
     if (verdict.live !== true) continue
     let meta = {}
