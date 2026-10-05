@@ -1033,6 +1033,17 @@ def digest_of(tracked: list[dict]) -> str:
     split is deliberate: a session-liveness *churn* delta must not authorise a dispatch,
     while a session-*death* transition still must. See that function.
 
+    ⚠️ **That split NARROWS THIS DOCSTRING'S OWN CONTRACT, and the narrowing is named
+    here rather than left to be rediscovered.** "What the sweep would render" no longer
+    holds for one cell: `parked` is what makes a row render `⌛ waiting-on-human`
+    (`agents/manager-sweep-reader.md` step 7), so a worker newly opening a gate no longer
+    moves the digest -- and the exit-0 replay path (`commands/manager-status.md` step 1)
+    reproduces the stored table with whatever cell the row last had. Accepted, because
+    the gate's question is "is this run worth a dispatch at all" and a gate opening
+    changes no row's *eligibility*, while `/manager-loop` step 5 reads the attention feed
+    independently -- so a raised gate is still surfaced where it must be. Every other
+    narrowing in this file is named; this one is named too.
+
     ⚠️ **The hold is a digest input, and deliberately NOT a suppression here.** This gate
     decides whether the sweep runs at all, so suppressing it for a held session would
     stop the sweep and the held row would never render -- the exact failure the hold

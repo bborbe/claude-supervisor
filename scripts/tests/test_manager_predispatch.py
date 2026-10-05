@@ -518,6 +518,37 @@ class TestLiveness(Base):
         dead = self.digest_with("s-dies")
         self.assertNotEqual(live, dead, "a worker dying did not move the digest")
 
+    def test_a_session_less_row_is_not_death(self):
+        """The guard the collapse rests on: `LIVENESS_NONE` is death ONLY with a session id.
+
+        Without it a never-started row hashes as dead — the same term a genuinely absent
+        owner produces — so the two populations become indistinguishable in the digest,
+        and dropping the guard would leave this suite green while re-merging them.
+        """
+        term = self.m.liveness_change_term
+        self.assertEqual(
+            term({"name": "T", "session": "", "liveness": self.m.LIVENESS_NONE}),
+            0,
+            "a never-started row hashed as death",
+        )
+        self.assertEqual(
+            term({"name": "T", "session": "s-gone", "liveness": self.m.LIVENESS_NONE}),
+            1,
+            "an absent owner did not hash as death",
+        )
+        self.assertEqual(
+            term({"name": "T", "session": "s-gone"}),
+            1,
+            "an unenriched row did not default to the death term",
+        )
+        # Both ALIVE verdicts collapse to the same value — that IS the churn fix.
+        self.assertEqual(
+            term({"name": "T", "session": "s-gone", "liveness": self.m.LIVENESS_LIVE}), 0
+        )
+        self.assertEqual(
+            term({"name": "T", "session": "s-gone", "liveness": self.m.LIVENESS_PARKED}), 0
+        )
+
     def test_live_worker_with_stale_heartbeat_is_not_dead(self):
         """The NEGATIVE CONTROL.
 
