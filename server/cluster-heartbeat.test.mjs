@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { pollCluster, REACHABILITY_FILE } from './cluster-heartbeat.mjs'
+import { defaultRun, pollCluster, REACHABILITY_FILE } from './cluster-heartbeat.mjs'
 
 const ok = (stamps) => () => ({ status: 0, stdout: JSON.stringify(stamps), stderr: '' })
 const fail = (status = 1) => () => ({ status, stdout: '', stderr: 'connection refused' })
@@ -112,4 +112,26 @@ test('a reader that answers asynchronously is awaited, not misread as a failed p
   assert.deepEqual(result.stamped, ['c3d4e5f6-3333'])
   assert.equal(existsSync(join(dir, REACHABILITY_FILE)), true)
   assert.ok(ticks >= 5, `the loop kept running while the reader waited (${ticks} ticks in ~200 ms)`)
+})
+
+// `defaultRun` is the only code here that can actually spawn and hang, so it carries its own
+// coverage rather than being reached only through an injected `run`. Both knobs are injectable
+// for exactly that reason: the timeout and the output cap are otherwise 20 s and 1 MB away.
+test('defaultRun resolves the spawn result, times out to the spawnSync shape, and caps output', async () => {
+  const ok = await defaultRun(['echo', 'hello'])
+  assert.equal(ok.status, 0)
+  assert.equal(ok.stdout, 'hello\n')
+
+  const missing = await defaultRun(['definitely-not-a-real-binary-xyz'])
+  assert.equal(missing.status, null, 'a spawn error resolves rather than rejecting')
+  assert.ok(missing.error)
+
+  const timedOut = await defaultRun(['sleep', '5'], { timeoutMs: 50 })
+  assert.equal(timedOut.status, null, 'a timed-out child fails the poll, as it did under spawnSync')
+  assert.equal(timedOut.error.message, 'ETIMEDOUT')
+
+  const overflowed = await defaultRun([process.execPath, '-e', "process.stdout.write('x'.repeat(5000))"], {
+    maxOutputBytes: 1024,
+  })
+  assert.equal(overflowed.error.message, 'ENOBUFS', 'an oversized reader is bounded, never accumulated')
 })

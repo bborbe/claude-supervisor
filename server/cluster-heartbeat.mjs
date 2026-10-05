@@ -46,11 +46,26 @@ export const READER = join(HERE, '..', 'scripts', 'cluster-heartbeat.py')
 // caller's contract are unchanged.
 const RUN_TIMEOUT_MS = 20_000
 
-function defaultRun(argv) {
+// `spawnSync` capped a child's output at Node's default `maxBuffer` of 1 MB and failed the call
+// past it; `spawn` has no such bound, so the cap is restored here rather than left implicit. It
+// is not decoration: without it an oversized reader would grow this process's heap, and it would
+// do so on the very event loop the async change exists to keep free.
+const RUN_MAX_OUTPUT_BYTES = 1_048_576
+
+// How long a child gets to honour SIGTERM before SIGKILL. Without the escalation a reader that
+// traps or ignores SIGTERM is never reaped: `finish`'s `settled` guard drops the later `close`,
+// so the child and its pipes stay live handles for the rest of the server's life.
+const RUN_KILL_GRACE_MS = 2_000
+
+// Exported, and both knobs injectable, so the spawn path itself is testable. Every other test
+// injects `run`, which left the only code that can actually spawn and hang with no coverage —
+// and a real 20 s timeout is not something a unit test can wait for.
+export function defaultRun(argv, { timeoutMs = RUN_TIMEOUT_MS, maxOutputBytes = RUN_MAX_OUTPUT_BYTES } = {}) {
   return new Promise((resolve) => {
     const child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
+    let bytes = 0
     let settled = false
     let timer
 
@@ -61,18 +76,34 @@ function defaultRun(argv) {
       resolve(result)
     }
 
-    timer = setTimeout(() => {
+    const kill = () => {
       child.kill('SIGTERM')
+      const escalation = setTimeout(() => child.kill('SIGKILL'), RUN_KILL_GRACE_MS)
+      escalation.unref?.()
+    }
+
+    // Past the cap the child is killed and the poll fails, which is what `spawnSync` did on
+    // hitting the same bound: a truncated read must never be parsed as a session list.
+    const collect = (chunk, toStderr) => {
+      if (settled) return
+      bytes += chunk.length
+      if (bytes > maxOutputBytes) {
+        kill()
+        finish({ status: null, signal: 'SIGTERM', stdout, stderr, error: new Error('ENOBUFS') })
+        return
+      }
+      if (toStderr) stderr += chunk
+      else stdout += chunk
+    }
+
+    timer = setTimeout(() => {
+      kill()
       finish({ status: null, signal: 'SIGTERM', stdout, stderr, error: new Error('ETIMEDOUT') })
-    }, RUN_TIMEOUT_MS)
+    }, timeoutMs)
     timer.unref?.()
 
-    child.stdout?.on('data', (chunk) => {
-      stdout += chunk
-    })
-    child.stderr?.on('data', (chunk) => {
-      stderr += chunk
-    })
+    child.stdout?.on('data', (chunk) => collect(chunk, false))
+    child.stderr?.on('data', (chunk) => collect(chunk, true))
     child.on('error', (error) => finish({ status: null, signal: null, stdout, stderr, error }))
     child.on('close', (status, signal) => finish({ status, signal, stdout, stderr }))
   })
