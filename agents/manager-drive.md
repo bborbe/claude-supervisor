@@ -99,13 +99,33 @@ The sweep returns each `stuck` task's observed task-file mtime (its report secti
 
 **Check 2 — in flight: is the session executing tools?**
 
-The roster's `idle` word is a point-in-time pane status; it does not describe the tool loop inside the session. Read the session's own in-flight marker, `~/.claude/state/attention/<session_id>.tool.json` — a hook-written file whose `state` is `open` for the duration of a tool call, carrying the call in `detail` and its start in `ts`:
+Three limbs, tried in this order: **the registry**, then the **marker**, then the **transcript**. The registry limb is decisive on two of its four values and falls through on the other two; the marker limb falls through when there is no marker; the transcript limb always answers.
+
+**Limb 1 — the session registry's `status`.** Read `~/.claude/sessions/<pid>.json` for the session and take its `status` word. The vocabulary is fixed at four — `idle` · `busy` · `waiting` · `shell` (`CLAUDE.md` § Reading a worker):
+
+- **`shell`** → the session is inside a tool call. **Working — drop the candidate.**
+- **`waiting`** → the session is blocked on input, i.e. **parked — quiet.** Do not drop on this check.
+- **`idle` or `busy`** → **no signal.** Neither word describes the tool loop, so fall through to limb 2. Do **not** read `busy` as working.
+
+⚠️ **This limb exists because the two below it are wrong in both directions, and it sits first because it was right in both.** Measured 2026-10-05 against a live registry: **six** sessions read `shell` while the transcript limb called them `quiet` (a long tool call writes no transcript — one had been silent 54.8 min inside a live child shell), and **one** read `waiting` while the transcript limb called it in flight (a parked worker's re-render moves its transcript inside the window). The registry carried the answer in a field both cases already had on disk.
+
+⚠️ **Do not widen this limb to `busy`.** `agents/manager-sweep-reader.md`'s input 11 rejects the roster's `busy` word as *"the weaker of the two candidates"*, on the ground that trusting `busy` while distrusting `idle` is inconsistent — they are the same field. `shell` carries tool-loop meaning and `waiting` carries park meaning; `idle` and `busy` carry neither, which is why they fall through rather than being read.
+
+⚠️ **This is a CALLER read.** The reader may not take it — `agents/manager-sweep-reader.md`'s `<constraints>` forbid it the registry, `pgrep`/`ps`, transcript recency and the clock — so the verdict stays the caller-supplied input 11. This limb changes how the **caller** computes that verdict, never what the reader may do.
+
+**Limb 2 — the session's own in-flight marker**, `~/.claude/state/attention/<session_id>.tool.json` — a hook-written file whose `state` is `open` for the duration of a tool call, carrying the call in `detail` and its start in `ts`:
 
 - **`state: "open"` and the call started less than ~20 min ago** → the session is inside a tool call and is working. Drop the candidate.
 - **`state: "open"` for ~20 min or more** → that is the `--stuck-min` reading `scripts/who-needs-me.py` already owns and renders as *probably stuck*. Do **not** drop on this check; the stuck path is what should fire.
-- **no marker, or a cleared one** → the session is between turns. Fall back to the transcript: drop the candidate when its mtime is inside `scripts/who-needs-me.py`'s `LIVE_WINDOW` (5 min) — the same reading clause 7 already takes, read in the opposite direction.
+- **no marker, or a cleared one** → fall through to limb 3.
+
+⚠️ **Limb 2 is effectively dead today** — nothing writes the marker any more, so no live session carries one and this limb answers nothing. It is kept rather than deleted because it is what a restored writer needs, and because the copies below restate it. That gap is tracked on its own row; the age test above is load-bearing the moment the writer returns.
+
+**Limb 3 — the transcript.** Drop the candidate when its mtime is inside `scripts/who-needs-me.py`'s `LIVE_WINDOW` (5 min) — the same reading clause 7 already takes, read in the opposite direction.
 
 ⚠️ **Reuse that shipped reading; do not add a fourth definition of "idle".** `LIVE_WINDOW`, `session_transcript_age()` and `reclassify_idle()` live in `scripts/who-needs-me.py`, and `scripts/fleet-board.py` mirrors its pipeline on purpose — *"one definition, two renderings."* A private threshold here would drift from both.
+
+⚠️ **Every restatement of this check moves with it, in one change.** `agents/manager-sweep-reader.md`'s input 11 and its `working (session)` branch, the caller bullets in `commands/manager-loop.md` and `commands/manager-status.md`, the runbook's two restatements (`65 Runbooks/Manager Session.md`), and `sweep-gate.py`'s `session_in_flight()` — the runbook's *"four surfaces, and they must agree"* rule (`:165`) makes them one edit, and the gate is the surface that decides whether a wake happens.
 
 Only a candidate that survives **both** checks is nudged:
 
