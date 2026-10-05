@@ -602,18 +602,28 @@ class TickSummaryGuard(Base):
         self.assertEqual(self.ledger(), [])
 
     def test_refuses_a_tick_summary_copied_out_of_a_list_or_quote(self):
-        """The shape the text actually arrives in: a tick summary is copied out of a sweep's
-        own output, where it is a bullet or a quoted block. A guard that refused only the
-        unprefixed form would admit both."""
-        for pad in ("- ", "* ", "+ ", "> ", "  - ", "> > "):
+        """Every form the text actually arrives in: a tick summary is copied out of a sweep's
+        own output, where it renders as a bullet, a quoted block, a task-list checkbox line
+        or an ordered item. A guard that refused only the unprefixed form would admit all of
+        them — and the checkbox and ordinal shapes are the ones a rendered task list emits."""
+        for pad in (
+            "- ", "* ", "+ ", "> ", "  - ", "> > ",
+            "- [ ] ", "- [x] ", "[ ] ", "1. ", "2) ", "  1. ", "– ", "— ",
+        ):
             code, _, _ = self.add("--kind", "pushed", "--text", pad + self.TICK)
             self.assertNotEqual(code, 0, "accepted with pad %r" % pad)
         self.assertEqual(self.ledger(), [])
 
     def test_still_accepts_a_pushed_text_that_merely_starts_with_punctuation(self):
         """Negative control for the marker strip: only the REMAINDER has to match, so
-        stripping a leading marker must not turn real work into a refusal."""
-        for text in ("- Added the retry guard", "* Ship the ledger fix", "> see the PR"):
+        stripping a leading marker or ordinal must not turn real work into a refusal."""
+        for text in (
+            "- Added the retry guard",
+            "* Ship the ledger fix",
+            "> see the PR",
+            "1) Fix the thing",
+            "1.5 million rows is the wrong figure",
+        ):
             code, _, _ = self.add("--kind", "pushed", "--text", text)
             self.assertEqual(code, 0, "refused %r" % text)
 
@@ -866,6 +876,21 @@ class SetTask(Base):
         code, _, err = self.run_cli(["set", "--id", item["id"], "--task", "Covering Task"])
         self.assertEqual(code, 0)
         self.assertNotIn("replaced task", err)
+
+    def test_refuses_an_empty_task(self):
+        """`resolve_task("")` returns None, so an empty --task writes `task: ""` with no path
+        and STRIPS a previously valid resolution path — the same empty-value hole --reason
+        and --resolves-on are guarded against on this verb."""
+        self.task_file("First Task")
+        self.add("--kind", "asked-of-me", "--text", "stop the 500s", "--task", "First Task")
+        item = self.ledger()[0]
+        code, _, err = self.run_cli(["set", "--id", item["id"], "--task", "  "])
+        self.assertIsInstance(code, str)
+        self.assertIn("--task needs a non-empty value", code)
+        self.assertEqual(err, "")
+        after = self.ledger()[0]
+        self.assertEqual(after["task"], "First Task")
+        self.assertEqual(after["task_state"], "ok")
 
     def test_refuses_an_empty_resolves_on(self):
         """An empty close condition is one nothing can check — the defect the `NO TASK`

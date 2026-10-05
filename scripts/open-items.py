@@ -103,6 +103,13 @@ ROOT = os.path.expanduser("~/.claude/state/open-items")
 # list/quote-marker bypasses without touching the measured shape.
 TICK_SUMMARY_RE = re.compile(r"^Manager-loop tick \d+ \(\d{4}-\d{2}-\d{2}")
 
+# A LEADING run of list markers, stripped by `tick_summary_text` before the pattern above is
+# applied. The set is the forms a sweep's own output actually renders: bullets (`-`, `*`, `+`,
+# and the en/em dashes a paste can carry), quotes (`>`), checkboxes (`[ ]` / `[x]` / `[X]`),
+# and ordered items (`1.` / `1)`). It is a RUN, so `- [ ] …` — a checkbox inside a bullet,
+# which is how a task-list line renders — reduces in one pass rather than needing a second.
+LIST_MARKER_RE = re.compile(r"^(?:\s|[-*+>–—]|\[[ xX]\]|\d+[.)])+")
+
 # Rendered on an OPEN entry's summary line. `unknown` gets its own wording rather
 # than sharing UNRESOLVABLE's: a search that could not run and a search that found
 # nothing are different facts, and only one of them is a problem with the entry.
@@ -544,17 +551,18 @@ def tick_summary_text(text):
     """`text` normalised for the tick-summary guard: leading whitespace and list markers off.
 
     The marker strip is why this is not just `lstrip()`. A tick summary is copied out of a
-    sweep's own output, where it arrives as a bullet (`- Manager-loop tick 9 (…)`) or a
-    quoted block (`> Manager-loop tick 9 (…)`), so an `^`-anchored pattern with only the
-    whitespace stripped would refuse the unprefixed form and admit both of the forms the
-    text actually comes in. Stripping is confined to LEADING markers, so a `pushed` text
-    that merely begins with punctuation (`- Added the retry guard`) is unaffected: only the
-    remainder matching the tick shape refuses, and that remainder is `Added the retry guard`.
+    sweep's own output, where it arrives as a bullet (`- Manager-loop tick 9 (…)`), a quoted
+    block (`> Manager-loop tick 9 (…)`), a checkbox line (`- [ ] Manager-loop tick 9 (…)`)
+    or an ordered item (`1. Manager-loop tick 9 (…)`), so an `^`-anchored pattern with only
+    the whitespace stripped would refuse the unprefixed form and admit every form the text
+    actually comes in. Stripping is confined to LEADING markers and is a run, so a checkbox
+    behind a bullet (`- [ ] …`) reduces in one pass.
+
+    Only the REMAINDER has to match the tick shape, so a `pushed` text that merely begins
+    with punctuation or an ordinal is unaffected: `- Added the retry guard` and
+    `1) Fix the thing` both reduce to something the pattern does not match, and are accepted.
     """
-    stripped = text.lstrip()
-    while stripped[:1] in ("-", "*", "+", ">"):
-        stripped = stripped[1:].lstrip()
-    return stripped
+    return LIST_MARKER_RE.sub("", text)
 
 
 def cmd_add(args):
@@ -720,6 +728,15 @@ def cmd_set(args):
             "  `⚠️ UNRESOLVABLE` on a question the answer resolves.\n"
             "  Record the link with `note` instead:  note --id %s --text \"<the link>\""
             % item["id"]
+        )
+    if not args.task.strip():
+        # REFUSE. `resolve_task("")` returns None, so this writes `task: ""` with no path and
+        # STRIPS a previously valid resolution path — the same empty-value hole `--reason` and
+        # `--resolves-on` are guarded against on this verb, and the third and last flag that
+        # carried one.
+        sys.exit(
+            "error: set --task needs a non-empty value — nothing written.\n"
+            "  An empty task names nothing, so the entry would carry no resolution path."
         )
     if args.resolves_on is not None and not args.resolves_on.strip():
         # REFUSE. An empty close condition is one nothing can check — the same defect the
