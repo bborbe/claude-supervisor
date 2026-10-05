@@ -373,9 +373,11 @@ export function concurrentLimitRefusal({ limits, liveCount, operatorNamed = fals
   if (liveCount === null) {
     return (
       `the concurrent-worker limit is set to ${limits.limit} but the live-worker count could not be ` +
-      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. Both the ` +
-      `session registry and the spawn ledger must be readable; point SUPERVISOR_SESSIONS_DIR and ` +
-      `SUPERVISOR_LEDGER_DIR at them if they live elsewhere.`
+      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. The ` +
+      `spawn ledger, the session registry and the heartbeat store must all be readable, because a ` +
+      `channel that cannot be read may be hiding the very session being counted; point ` +
+      `SUPERVISOR_LEDGER_DIR, SUPERVISOR_SESSIONS_DIR and SUPERVISOR_HEARTBEAT_DIR at them if they ` +
+      `live elsewhere.`
     )
   }
 

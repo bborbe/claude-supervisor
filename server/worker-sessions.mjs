@@ -1,25 +1,39 @@
 // Live **worker sessions** — the fleet-wide worker target's unit, on the server side.
 //
-// The target bounds the laptop's load, and that load is the interactive worker tabs. The
-// instrument this replaced read the headless heartbeat store, which is stamped only for
-// in-process workers (`mode: 'headless'`, written from the agent loop) — so it answered **0
-// while 11 interactive workers were live** (measured 2026-10-01). A cap that reads 0 on a
-// busy fleet never binds, and a target that reads 0 always proposes; the two must count the
-// same population or they disagree with no error on either.
+// The target bounds the laptop's load, and that load is every worker the supervisor opened:
+// interactive tabs, headless in-process workers, and cluster workers running as pods.
 //
-// **The definition takes two stores.** A worker session is one that is
+// **The definition takes one identity store and two liveness channels.** A worker session is
+// one that is
 //
-//   (a) present in the **live registry** (`~/.claude/sessions/<pid>.json`) — the liveness
-//       authority, whose entry is deleted on exit; and
-//   (b) present in the **spawn ledger** (`config.ledgerDir`) — which is what makes it a
-//       session this supervisor opened, rather than a manager or one of the operator's own.
+//   (a) present in the **spawn ledger** (`config.ledgerDir`) — which is what makes it a
+//       session this supervisor opened, rather than a manager or one of the operator's own;
+//       and
+//   (b) **live**, which the registry OR the heartbeat store answers.
 //
-// Neither answers alone:
+// Neither liveness channel answers alone, and the reason is structural rather than
+// historical:
+//
+//   * The **registry** (`~/.claude/sessions/<pid>.json`) is pid-keyed and local-only. It sees
+//     every session holding a socket — every interactive tab — and its entry is deleted on
+//     exit, which is what makes absence meaningful. It cannot see a worker with no pid of its
+//     own: a headless worker is an in-process SDK `query()` inside the server, and a cluster
+//     worker is a process on another machine.
+//   * The **heartbeat store** is what covers those. `supervisor.mjs` stamps a headless worker
+//     from its agent loop, and `cluster-heartbeat.mjs`'s `pollCluster()` mirrors cluster
+//     sessions into the same store on the server's own timer.
+//
+// ⚠️ **This is a correction, and the shape of the defect is worth keeping.** Until
+// 2026-10-05 the count was *registry ∩ ledger* alone — itself a fix, because the instrument
+// before it read the heartbeat store only, which is stamped for headless workers, so it
+// answered **0 while 11 interactive tabs were live** (measured 2026-10-01). That fix traded
+// one blindness for another: it restored the tabs and lost every worker with no registry
+// entry, which is both headless and cluster. Two populations cannot be recovered by fixing
+// one channel, so the union is the only reading that counts what the cap exists to bound.
 //
 //   * The ledger's own `status` is **not** a liveness source — measured 2026-10-01, 824 of
 //     its 1075 entries read `running` against 26 live registry sessions. It is the durable
-//     half; the registry is the live half.
-//   * The registry has **no name field**, so "is this a worker" is not derivable from it.
+//     half, never the live one.
 //
 // ⚠️ A manager ever opened through `spawn_agent` would be counted, because it would hold a
 // ledger record like any worker. Managers are normally started by hand, which is why all
@@ -29,6 +43,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { config } from './config.mjs'
+import { heartbeatDir as defaultHeartbeatDir, listLive } from './heartbeat.mjs'
 import { readRegistry } from './liveness.mjs'
 
 // `{sessionId: record}`, or `null` when the ledger directory cannot be read.
@@ -59,21 +74,50 @@ export function readLedger(dir = config.ledgerDir) {
 
 // Live worker sessions as `[{sessionId, status, label}]`, or `null` when a store failed.
 //
-// The registry supplies liveness, the ledger supplies the worker identity. A session in the
-// registry but not the ledger is a manager or one of the operator's own; a session in the
-// ledger but not the registry has exited.
-export function workerSessions({ registryDir, ledgerDir } = {}) {
-  const registry = readRegistry(registryDir)
-  if (registry === null) return null
+// The ledger supplies the worker identity; the registry and the heartbeat store supply
+// liveness, as a UNION. A session in either liveness channel but not the ledger is a manager
+// or one of the operator's own; a session in the ledger and in neither channel has exited.
+//
+// `null` from either channel is "could not be read", and it is returned rather than folded
+// into an empty set: the caller refuses on `null` and opens on `[]`, so collapsing the two
+// turns a permissions error into permission to spawn onto live work. The heartbeat store
+// carries the same rule one level down — a cluster stamp whose own store could not be read
+// is reported `unknown` by `live-workers.py` and is therefore not counted here, while the
+// read itself still succeeds.
+//
+// `status` names whichever channel answered: the registry's own `status` for a session
+// holding a socket, the stamp's `mode` for a headless or cluster worker. It is descriptive
+// only — nothing decides on it.
+export function workerSessions({ registryDir, ledgerDir, heartbeatDir, now } = {}) {
   const ledger = readLedger(ledgerDir)
   if (ledger === null) return null
 
-  const workers = []
+  // Both channels are read ONCE, not once per ledger entry. `checkLiveness` answers for a
+  // single id and re-reads the registry on every call, which over a ~1000-record ledger is a
+  // directory listing per record; the union it computes is the same one built here.
+  const registry = readRegistry(registryDir)
+  if (registry === null) return null
+  const stamps = listLive({ dir: heartbeatDir ?? defaultHeartbeatDir, now })
+  if (stamps === null) return null
+
+  const live = new Map()
   for (const entry of registry) {
-    const record = ledger[entry.sessionId]
-    if (record) {
-      workers.push({ sessionId: entry.sessionId, status: entry.status, label: record.label })
-    }
+    // Presence is the claim, and this channel's rule is deliberately UNCHANGED by the union
+    // above: the registry's entry is deleted on exit, so its existence is what the counter
+    // has always read. Tightening it here to `pidIsAlive` would be a second, silent change
+    // to the population this fix is not about.
+    live.set(entry.sessionId, entry.status)
+  }
+  for (const stamp of stamps) {
+    // The registry wins where both speak: a session holding a socket is the case the readers
+    // already understood, and its `status` is the richer descriptor.
+    if (!live.has(stamp.sessionId)) live.set(stamp.sessionId, stamp.mode ?? null)
+  }
+
+  const workers = []
+  for (const [sessionId, record] of Object.entries(ledger)) {
+    if (!live.has(sessionId)) continue
+    workers.push({ sessionId, status: live.get(sessionId), label: record.label })
   }
   return workers
 }

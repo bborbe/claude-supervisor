@@ -8,8 +8,18 @@ binds — and nothing looks wrong, because 0 is a plausible count for the wrong 
 
 The load-bearing cases are the two negatives. A session in the registry but **not** the
 ledger is a manager or one of the operator's own and must not be counted; a session in the
-ledger but **not** the registry has exited and must not be counted either. A check that
-only asserted the positive would pass while counting every session on the machine.
+ledger with **neither** liveness channel behind it has exited and must not be counted either.
+A check that only asserted the positive would pass while counting every session on the
+machine.
+
+⚠️ **The second negative was too strong, and this file was pinning the defect.** Until
+2026-10-05 a session in the ledger but not the registry read as *exited* — true for a tab
+whose process is gone, and false for every worker that never had a registry entry to begin
+with. A headless worker is an in-process SDK `query()` inside the server, and a cluster worker
+is a process on another machine; both hold a ledger record and a heartbeat stamp and no
+registry entry, so both were counted as dead. The registry is one liveness channel, not the
+liveness authority, and `test_a_ledger_record_with_a_fresh_heartbeat_is_a_worker` is the case
+that separates the two readings.
 """
 import json
 import os
@@ -18,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 # Side effect only: points the start-time cache at an isolated per-run store, in one shared
@@ -34,14 +45,37 @@ class WorkerSessionsTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.registry = os.path.join(self.dir, "registry")
         self.ledger = os.path.join(self.dir, "ledger")
+        self.beats = os.path.join(self.dir, "heartbeats")
         os.makedirs(self.registry)
         os.makedirs(self.ledger)
-        # `worker-sessions.py` imports `session-liveness.py` by path from its own directory,
-        # so the temp tree needs the real script beside a copy of itself.
+        os.makedirs(self.beats)
+        # `worker-sessions.py` imports `session-liveness.py` by path from its own directory, so
+        # the temp tree needs the real script beside a copy of itself — and `session-liveness.py`
+        # in turn loads `live-workers.py`, which is where the heartbeat store is read. All three
+        # travel together; a fixture missing the third makes the counter exit 2, which the
+        # negatives below would read as "not counted" and pass on a broken instrument.
         self.bin = os.path.join(self.dir, "scripts")
         os.makedirs(self.bin)
         shutil.copy(SCRIPT, self.bin)
         shutil.copy(SCRIPTS / "session-liveness.py", self.bin)
+        shutil.copy(SCRIPTS / "live-workers.py", self.bin)
+
+    def heartbeat_stamp(self, session_id, mode="headless", source=None, age_seconds=0.0):
+        """A heartbeat stamp, with its AGE set by mtime — the field the verdict rests on.
+
+        `source: "cluster"` is what marks a mirrored cluster session, and it is load-bearing
+        rather than descriptive: a STALE cluster stamp is `unknown` (the cluster could not be
+        read), never dead.
+        """
+        path = os.path.join(self.beats, f"{session_id}.json")
+        record = {"sessionId": session_id, "mode": mode}
+        if source is not None:
+            record["source"] = source
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(record, fh)
+        if age_seconds:
+            when = time.time() - age_seconds
+            os.utime(path, (when, when))
 
     def register(self, session_id, status="busy"):
         with open(os.path.join(self.registry, f"{session_id}.json"), "w", encoding="utf-8") as fh:
@@ -54,7 +88,8 @@ class WorkerSessionsTest(unittest.TestCase):
     def run_script(self, *args):
         return subprocess.run(
             [sys.executable, os.path.join(self.bin, "worker-sessions.py"),
-             "--dir", self.registry, "--ledger-dir", self.ledger, *args],
+             "--dir", self.registry, "--ledger-dir", self.ledger,
+             "--heartbeat-dir", self.beats, *args],
             capture_output=True, text=True,
         )
 
@@ -76,11 +111,53 @@ class WorkerSessionsTest(unittest.TestCase):
         self.register("bbbbbbbb-0000-0000-0000-000000000001")
         self.assertEqual(self.run_script("--count").stdout.strip(), "0")
 
-    def test_a_ledger_record_with_no_registry_entry_has_exited(self):
+    def test_a_ledger_record_with_neither_liveness_channel_has_exited(self):
         """THE LIVENESS CASE. The ledger is the durable half and keeps a record forever; the
-        registry is deleted on exit. A dead worker must not be counted."""
+        registry entry is deleted on exit and the heartbeat stamp goes stale. A worker with
+        neither behind it must not be counted."""
         self.ledger_entry("cccccccc-0000-0000-0000-000000000001", "long gone")
         self.assertEqual(self.run_script("--count").stdout.strip(), "0")
+
+    def test_a_ledger_record_with_a_fresh_heartbeat_is_a_worker(self):
+        """THE FIX, and the case this file used to pin wrongly. A worker with no registry entry
+        is not thereby dead: a headless worker is an in-process `query()` and a cluster worker
+        runs on another machine, so neither can hold a pid-keyed registry file. Their liveness
+        is the heartbeat stamp, and the count must include them or `spawn.maxConcurrent` bounds
+        a population it cannot see."""
+        sid = "ffffffff-0000-0000-0000-000000000001"
+        self.ledger_entry(sid, "cluster worker")
+        self.heartbeat_stamp(sid, mode="cluster", source="cluster")
+        self.assertEqual(self.run_script("--count").stdout.strip(), "1")
+
+    def test_a_stale_heartbeat_is_not_counted(self):
+        """The verdict is the stamp's AGE against the TTL, never the file's existence — a store
+        whose writer was killed keeps its files, so existence reports the wrong answer for the
+        case the store exists to catch."""
+        sid = "ffffffff-0000-0000-0000-000000000002"
+        self.ledger_entry(sid, "finished hours ago")
+        self.heartbeat_stamp(sid, mode="headless", age_seconds=3600)
+        self.assertEqual(self.run_script("--count").stdout.strip(), "0")
+
+    def test_a_stale_cluster_stamp_with_no_reachability_marker_is_not_counted(self):
+        """'Cannot tell' is not 'live'. A stale cluster stamp with the mirror's reachability
+        marker also stale means the cluster could not be read, so this stamp's staleness proves
+        nothing about the worker — `read_live` reports it `unknown`, and counting it would put
+        a possibly-dead session on the fleet's books."""
+        sid = "ffffffff-0000-0000-0000-000000000003"
+        self.ledger_entry(sid, "cluster worker behind an outage")
+        self.heartbeat_stamp(sid, mode="cluster", source="cluster", age_seconds=3600)
+        self.assertEqual(self.run_script("--count").stdout.strip(), "0")
+
+    def test_an_unreadable_heartbeat_store_exits_two(self):
+        """The heartbeat store is a liveness channel now, so failing to read it is UNKNOWN for
+        the same reason the registry is: a channel that cannot be read may be hiding the very
+        session being counted, and folding that into a number under-counts the fleet."""
+        os.chmod(self.beats, 0o000)
+        self.addCleanup(os.chmod, self.beats, 0o755)
+        result = self.run_script("--count")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("UNKNOWN", result.stderr)
 
     def test_list_shows_the_label_and_status(self):
         sid = "dddddddd-0000-0000-0000-000000000001"
