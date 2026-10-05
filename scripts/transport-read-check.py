@@ -45,6 +45,12 @@ SITE_LIST = {
     ("jump.py", "current_window"), ("jump.py", "main"),
     ("jump.py", "pane_sessions"), ("jump.py", "wezterm_panes"),
     ("session-holds.py", "pane_title"),
+    # added 2026-10-05 — `open-items.py`'s pane-existence probe, the read half of the new
+    # origin record. `classify` asks whether an entry's recorded raising pane still exists;
+    # `live_panes` is that query, and it must keep the same three-state contract as every
+    # other transport read: `None` when the query failed, `set()` for a reachable WezTerm
+    # holding nothing.
+    ("open-items.py", "live_panes"),
     # added 2026-10-01 — the pid-identity probe's `ps -o lstart=` read. It is the first
     # transport call `session-liveness.py` has ever held: before the identity fix that file
     # only globbed the registry and called `os.kill`, neither of which shells out.
@@ -110,6 +116,7 @@ POPULATED = {
     ("jmp", "pane_sessions"): "101 ttys001",
     ("fs", "live_processes"): "claude --settings {} --model m",
     ("sp", "gate_processes"): "101 00:01 sweep-gate",
+    ("oi", "live_panes"): '[{"pane_id": "204", "title": "t"}]',
 }
 
 
@@ -179,6 +186,7 @@ def main():
             ("jmp", "jump.py"),
             ("fs", "fleet-sessions.py"),
             ("sp", "stop-probe.py"),
+            ("oi", "open-items.py"),
         )
     }
 
@@ -202,6 +210,7 @@ def main():
         ("fc", "pane_titles", ()), ("fc", "pid_ttys", ()),
         ("jmp", "wezterm_panes", ()), ("jmp", "pane_sessions", ({},)),
         ("fs", "live_processes", ()), ("sp", "gate_processes", ()),
+        ("oi", "live_panes", ()),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")
