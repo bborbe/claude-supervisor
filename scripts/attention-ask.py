@@ -105,21 +105,43 @@ attribution = _load("answered_attribution", "answered-attribution.py")
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 
 
+class _ConfigRefused(Exception):
+    """A malformed environment value, refused where a caller can report it.
+
+    ⚠️ An exception rather than a `SystemExit`, and the distinction is the whole
+    point: a refusal has to reach the arm that owns `out` so it can print
+    `REFUSED:` and return `2` like every other refusal in this file. Exiting from
+    the helper instead would put the message on stderr and the code at `1` —
+    which is this script's *store failed* code, so a bad argument would read as a
+    dead store to anything branching on the documented tokens.
+    """
+
+
 def _positive_float_env(name, default):
     """Read a POSITIVE, FINITE float from the env; unset OR empty means `default`.
 
     ⚠️ Empty is the case this exists for, and it is not hypothetical. `VAR= cmd`
-    is exactly what an unset shell variable expands to, and these are evaluated at
-    import — so a bare `ATTENTION_ASK_TTL_HOURS=` raised ValueError before any
-    subcommand dispatched, taking down `poll`, which never reads the TTL at all.
-    The script already treats an empty value as absent one layer down
+    is exactly what an unset shell variable expands to, and a bare
+    `ATTENTION_ASK_TTL_HOURS=` used to raise ValueError before any subcommand
+    dispatched, taking down `poll`, which never reads the TTL at all. The script
+    already treats an empty value as absent one layer down
     (`_expires_at_or_default` guards with `if args.expires_at`); this is the same
     rule at the layer that reads the environment.
 
     ⚠️ A value that is present but unusable is REFUSED by name rather than
-    silently defaulted: a typo'd bound is a real misconfiguration, and import is
-    the last place it can be named. Refusing is loud, which is the point — the
-    failure being fixed was a bare traceback from a command that never uses it.
+    silently defaulted: a typo'd bound is a real misconfiguration, and this is the
+    place it can be named.
+
+    ⚠️ It raises `_ConfigRefused`, which `_post_and_report` reports — it is NOT a
+    `SystemExit` from here, which is what an earlier revision of this helper did.
+    That shape wrote the message to stderr and exited 1, breaking the file's own
+    convention: every other refusal prints `REFUSED:` to `out` and returns 2, and
+    `1` is this script's store-failed code. A caller branching on the stdout token
+    the docs teach saw nothing and read a bad argument as a dead store.
+
+    ⚠️ And the environment is read on the POSTING path, not at import — see
+    `DEFAULT_ASK_TTL_HOURS`. Only `post` and `post-batch` reach this, so a bad
+    value cannot take down `poll`.
 
     ⚠️ `nan`, `inf` and `<= 0` are refused alongside the unparseable, and each is
     a distinct defect rather than a tidiness check. `float("nan")` and
@@ -140,9 +162,9 @@ def _positive_float_env(name, default):
     except ValueError:
         value = None
     if value is None or not math.isfinite(value) or value <= 0:
-        raise SystemExit(
-            f"REFUSED: {name}={raw!r} is not a positive finite number. Unset it "
-            f"to use the default ({default}), or give a number greater than 0."
+        raise _ConfigRefused(
+            f"{name}={raw!r} is not a positive finite number. Unset it to use the "
+            f"default ({default}), or give a number greater than 0."
         )
     return value
 
@@ -163,6 +185,15 @@ STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 # only grow. The store enforces the field: `attention-controller` PR #95
 # (`feat/expires-at-enforcement`, merged 2026-10-06) removes an item past its
 # deadline on the read path, so this default is what that enforcement acts on.
+#
+# ⚠️ **Requires attention-controller ≥ `v0.42.0`**, which carries both features
+# this default depends on — `owner:` (`feat/owner-liveness`, PR #94) and the
+# `expires_at` enforcement (PR #95). Against an older store `owner` is absent
+# from `AvailableLivenessModels` and the push is rejected with a 400 naming the
+# field, so the default `post` path fails outright rather than degrading; that is
+# a version mismatch, not a bad declaration, and it must be reported as such and
+# not retried. Same convention as `commands/attention-next.md`'s attempt-endpoint
+# floor.
 #
 # ⚠️ A LITERAL, and deliberately NOT read from the environment here. Resolving
 # `$ATTENTION_ASK_TTL_HOURS` at import meant a set-but-invalid value raised
@@ -509,6 +540,18 @@ def _expires_at_or_default(args):
 
 def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
     """POST one item and print its id and poll line. Returns the exit code."""
+    # ⚠️ Resolved BEFORE the store call, and reported HERE rather than raised out
+    # of the helper, so a bad `$ATTENTION_ASK_TTL_HOURS` follows the file's own
+    # refusal convention: `REFUSED:` on stdout and exit 2, like every other
+    # refusal. Exiting from deep in the parse instead put the message on stderr
+    # and the code at 1 — this script's *store failed* code — so a caller
+    # branching on the documented token read a bad argument as a dead store.
+    # Nothing is posted and no closer is recorded on this path.
+    try:
+        expires_at = _expires_at_or_default(args)
+    except _ConfigRefused as err:
+        print(f"REFUSED: {err}", file=out)
+        return 2
     try:
         item = post_question(
             producer_id=producer_id,
@@ -519,7 +562,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             payload=payload,
             context=args.context,
             options=options,
-            expires_at=_expires_at_or_default(args),
+            expires_at=expires_at,
         )
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")

@@ -422,11 +422,14 @@ class PostTest(unittest.TestCase):
     def test_an_empty_ttl_env_var_is_unset_not_a_parse_error(self):
         """`VAR=` is what an unset shell variable expands to, and it must not throw.
 
-        ⚠️ The regression this pins is not cosmetic: the constant is evaluated at
-        import, so a bare `ATTENTION_ASK_TTL_HOURS=` used to raise ValueError
-        before any subcommand dispatched — breaking `poll`, which never reads the
-        TTL. The assertion is on the helper rather than on a subprocess because
-        the import is what fails.
+        ⚠️ The regression this pins is not cosmetic: a bare `ATTENTION_ASK_TTL_HOURS=`
+        used to raise ValueError before any subcommand dispatched — breaking
+        `poll`, which never reads the TTL.
+
+        ⚠️ The assertion is on the helper because that is where the read now
+        lives: the environment is resolved on the POSTING path (`_ask_ttl_hours`),
+        not at import, so there is no import-time failure left to reproduce from a
+        subprocess. An earlier revision of this docstring said the opposite.
         """
         with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": ""}):
             self.assertEqual(ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
@@ -458,7 +461,7 @@ class PostTest(unittest.TestCase):
         for bad in ("nan", "inf", "-inf", "0", "-1", "abc"):
             with self.subTest(value=bad):
                 with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": bad}):
-                    with self.assertRaises(SystemExit) as caught:
+                    with self.assertRaises(ask._ConfigRefused) as caught:
                         ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24)
                     # Names the variable AND the offending value — a bare "bad
                     # value" would not say which knob to go and fix.
