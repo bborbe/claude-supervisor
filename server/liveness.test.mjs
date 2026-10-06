@@ -22,6 +22,7 @@ import { HEARTBEAT_TTL_MS, stampPath, stampRecord } from './heartbeat.mjs'
 import {
   checkLiveness,
   findRegisteredByName,
+  liveSessionIds,
   pidIsAlive,
   readRegistry,
   registeredAsLive,
@@ -338,4 +339,26 @@ test('uniqueTabName leaves the name alone when the registry cannot be read', () 
   // An unreadable registry is "no information", not "nothing holds this name": renaming
   // on that answer would rename on every spawn whenever the directory is briefly gone.
   assert.equal(uniqueTabName('⚙ x', { dir: '/nonexistent/supervisor/sessions' }), '⚙ x')
+})
+
+test('liveSessionIds REQUIRES isAlive — a default would silently pick one caller\'s reading', () => {
+  // This function is the one home for two callers that want OPPOSITE answers: the cap counter
+  // wants presence (over-counting fails safe), a roster wants pid-checked liveness (presence
+  // resurrects a crashed session's left-behind file). A default would answer one of them
+  // wrongly and say nothing, which is the failure this throw exists to make loud.
+  assert.throws(() => liveSessionIds({ registryDir: '/nonexistent' }), /needs an explicit isAlive/)
+})
+
+test('liveSessionIds treats a null heartbeatDir as unset, not as a directory named null', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'liveness-null-beats-'))
+  try {
+    // `checkLiveness` still passes `heartbeatDir: null` to mean "use the default". A default
+    // PARAMETER fires only on `undefined`, so `listLive({ dir: null })` would throw and the
+    // union would answer `null` — a permissions-shaped answer for a caller that meant
+    // "default", which is the contract this consolidation is supposed to keep.
+    const live = liveSessionIds({ registryDir: dir, heartbeatDir: null, isAlive: () => true })
+    assert.ok(live instanceof Map, 'a null heartbeatDir must fall back, not answer null')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

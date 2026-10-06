@@ -22,7 +22,7 @@ Verify ONE subject — **a topic or a goal** — and **suggest** the fixes. Reso
 
 ## Subject resolution — when `$1` is omitted
 
-**The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the four-source chain, the case-insensitive vault test, the recording contract and the "no fallback, ever" clause. Read it there; **it is not restated here.**
+**The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the four-source chain, the case-insensitive vault test, the recording contract, the subject-status reconcile and the "no fallback, ever" clause. Read it there; **it is not restated here.**
 
 **Only source 3 stays inline**, because it is the one an agent cannot reach:
 
@@ -32,7 +32,7 @@ Verify ONE subject — **a topic or a goal** — and **suggest** the fixes. Reso
 
 **Print the source.** The first output line is `Subject: <name> (from <explicit|session|name|conversation|last>)`, so a wrong pick is interruptable before the report runs — the same reason `/vault-cli:task-status` prints `Detected task:`.
 
-⚠️ **This copy can run neither half of the shared doc's executable contract, and that is deliberate — but both halves must be stated, not just one.** Its 2026-09-20 read-only re-scope trimmed `Bash(python3:*)`, `Bash(mkdir:*)` **and `Bash(vault-cli:*)`**, so the vault lookup and the recording block are both unavailable here. So it **resolves the vault the way it always has** — from cwd, through the literal `24 Goals/` / `23 Topics/` probes in § Branch detection, which already assume the vault root — and **records nothing**. Neither divergence is a regression: this command could never run either block. Both are named in `docs/subject-resolution.md` § *Recording*, which carries the same carve-out.
+⚠️ **This copy can run none of the shared doc's executable contract, and that is deliberate — but every half must be stated, not just one.** Its 2026-09-20 read-only re-scope trimmed `Bash(python3:*)`, `Bash(mkdir:*)` **and `Bash(vault-cli:*)`**, so three things are unavailable here: the vault lookup, the recording block, and § *Reconcile the subject's status*. So it **resolves the vault the way it always has** — from cwd, through the literal `24 Goals/` / `23 Topics/` probes in § Branch detection, which already assume the vault root — **records nothing**, and **leaves the subject's `status` exactly as it finds it**, reporting that status rather than reconciling it. None of the three is a regression: this command could never run any of them. ⚠️ **The reconcile is the one that would read as an omission rather than a refusal** — a reader who knows `/manager-loop` and `/manager-drive` flip a `todo` subject to `in_progress` could take its absence here for a gap, so it is stated rather than left to be inferred. It is the write-scope carve-out in `docs/subject-resolution.md` § *Reconcile the subject's status*, which names this command and `/manager-status` as resolving-but-not-writing; § *Resolve the vault first* and § *Recording* carry the same shape for the other two halves.
 
 ## Branch detection — never assume one
 

@@ -4,6 +4,7 @@ allowed-tools:
   - Task
   - Read
   - Bash(grep:*)
+  - Bash(awk:*)
   - Bash(vault-cli:*)
   - Bash(pgrep:*)
   - Bash(ps:*)
@@ -39,7 +40,7 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 ## Subject resolution — when `$1` is omitted
 
-**The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the vault resolution, the four-source chain, the case-insensitive vault test, the "no fallback, ever" clause, the `Subject:` line, and the recording contract (which files, on which resolution). Read it there; **it is not restated here.**
+**The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the vault resolution, the four-source chain, the case-insensitive vault test, the "no fallback, ever" clause, the `Subject:` line, the recording contract (which files, on which resolution), and the subject-status reconcile. Read it there; **it is not restated here.**
 
 **Only source 3 stays inline**, because it is the one source no agent can be handed — a subagent runs in a fresh context and cannot see the parent conversation:
 
@@ -49,7 +50,11 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 **Print the source.** The first output line is `Subject: <name> (from <explicit|session|name|conversation|last>)`, so a wrong pick is interruptable before the report runs.
 
+**Print the branch as well** — `Branch: <goal|topic> (<the page it came from>)`, which the shared doc's § *Print the source* requires of every resolving command and which this one was missing. ⚠️ **The reconcile below depends on it:** that step needs the *detected* branch, and a command that never states which branch it resolved is the one whose reconcile can silently take the goal write.
+
 ⚠️ **Resolve the vault first** — this command carries no `## Resolution` section of its own, so it takes the vault paragraph from the shared doc (`cwd → vault-cli config path`) instead of deriving the vault there.
+
+**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.** Having resolved a subject, run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *Reconcile the subject's status* **now** — once the page and the branch are known, and before the gate. ⚠️ **That precondition is this command's own page test, wherever the file puts it** — not this line: where the two sit in different sections, run the step at the page test. Read the subject page's frontmatter `status` and, when it reads `todo`/`next` **or is absent**, set it to `in_progress`; then read the page back and say what it now reads — or say plainly that the write failed, never proceeding as though it landed. ⚠️ **Once at resolution, never again mid-run**, and it writes `in_progress` over `todo`/`next`/absent **only** — an already-`in_progress` subject, and one at `hold`/`backlog`/terminal, is left alone. ⚠️ **The rule, its rationale, the exact commands and the write-scope table live in the doc — read them there; they are not restated here.**
 
 **⚠️ Record the resolution — a step to run, not a reference to follow.** Having resolved a subject, run the recording block at `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § Recording **now**, before the gate. It writes `~/.claude/state/worker-manager/<CLAUDE_CODE_SESSION_ID>.json` — and, on an explicit resolution, `last-<vault>.json` too. ⚠️ **Which files on which resolution is the doc's asymmetry, not this line's — read the block's three cases there before running it**, because running it on an *inferred* subject wrongly promotes that subject into cross-session state for every later tick.
 
@@ -59,7 +64,7 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 ## Procedure
 
-1. **Resolve the subject (§ Subject resolution).** This prints the `Subject:` line and nothing more — the declared-set read is step 3, deliberately after the gate, so a no-change run never pays for it.
+1. **Resolve the subject (§ Subject resolution).** This prints the `Subject:` and `Branch:` lines and nothing more — the declared-set read is step 3, deliberately after the gate, so a no-change run never pays for it.
 
 2. **Pre-dispatch check — decide whether this run is worth a dispatch at all.** Run the gate first. Measured 2026-09-25 on a 26-task tree with 25 done: the sweep-reader cost **91,598 tokens** and the drive leg **71,275**, for zero new information — three times in one session the manager bypassed the agents by hand to avoid it.
 
