@@ -162,6 +162,22 @@ def stranded_workers(ledger, live):
     return {parent: sorted(workers) for parent, workers in out.items()}
 
 
+def already_owned(worker, claims, live):
+    """True when a LIVE manager already holds this worker -- the adoption has happened.
+
+    ⚠️ **Without this, every later tick re-reports the same adoption forever.** The
+    stranded set is derived from the spawn edge, which does not change when a worker is
+    adopted: the manager stays exited, so the worker keeps reading as stranded and the
+    tick keeps printing its exit line and a zero adoption count. Measured cost of that
+    shape elsewhere in this plugin is the same one the filter was built for -- a line
+    that repeats every round stops being read, and the round it matters reads like the
+    rounds it did not. A claim held by a manager that is GONE is not ownership (the
+    filter fails open on a dead holder for the same reason), so the holder must be live.
+    """
+    holder = claims.get(worker)
+    return bool(holder) and holder in live
+
+
 def resolve_adopter(exited, live, self_id, subjects_dir=SUBJECTS):
     """(adopter sid, how) for one exited manager -- successor when unique, else fallback."""
     subject = subject_of(exited, subjects_dir)
@@ -258,7 +274,15 @@ def main(argv=None):
         )
         return 1
 
-    stranded = stranded_workers(ledger, live)
+    claims = gf.load_claims(args.claims_file) if args.claims_file else gf.load_claims()
+
+    # Drop the workers a live manager already holds, and then the managers left with
+    # nothing to do. A row that survives is one this round actually acts on.
+    stranded = {
+        exited: [w for w in workers if not already_owned(w, claims, live)]
+        for exited, workers in stranded_workers(ledger, live).items()
+    }
+    stranded = {exited: workers for exited, workers in stranded.items() if workers}
 
     rows = []
     for exited in sorted(stranded):

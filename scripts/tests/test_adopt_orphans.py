@@ -320,6 +320,37 @@ class Claiming(Base):
         self.assertEqual(calls, [(WORKER, ME)])
         self.assertEqual(self.holders(), {})
 
+    def test_settled_worker_is_not_re_reported_on_a_later_tick(self):
+        """The tick after the adoption must be QUIET.
+
+        The stranded set comes from the spawn edge, which does not change when a worker is
+        adopted -- the manager stays exited. Without the claims read, every later tick
+        reprints the same exit line and a zero adoption count forever.
+        """
+        self.run_script()
+        self.assertEqual(self.holders().get(WORKER), ME)
+        self.live(ME)  # the adopting manager is live, as it is in production
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+    def test_claim_held_by_a_gone_manager_is_re_adopted(self):
+        """A dead holder is not ownership -- the filter fails open on one, and so does this."""
+        with open(self.claims_file, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "version": 1,
+                    "claims": {
+                        WORKER: {"session": WORKER, "manager": "00000000-0000-4000-8000-000000000000"}
+                    },
+                },
+                fh,
+            )
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("1 workers adopted from exited manager", proc.stdout)
+        self.assertEqual(self.holders().get(WORKER), ME)
+
     def test_dry_run_claims_nothing(self):
         proc = self.run_script("--dry-run")
         self.assertEqual(proc.returncode, 0, proc.stderr)
