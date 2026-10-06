@@ -29,8 +29,9 @@
 // Nothing here refreshes a row once adopted, and the ledger cannot supply the refresh. A
 // worker that dies after this process starts therefore keeps its adoption-time status, which
 // is why `supervisor.mjs` prunes rehydrated rows at read time and why it must never let one
-// count as an in-process live holder — see the THREE call sites there (`pruneRehydratedAgents`,
-// the `findLiveHolder` filter, and `stampUnobservedWorkers`).
+// count as a live holder it should not be — see the call sites there: `pruneRehydratedAgents`
+// (now run on the RESUME path too, not only the read paths, so a live rehydrated row still
+// holds the guard while a dead one is already gone) and `stampUnobservedWorkers`.
 //
 // ⚠️ **And an adopted id shares a namespace with this process's own mints.** `supervisor.mjs`
 // numbers workers from a per-process counter that restarts at 0 on every reconnect, so the
