@@ -64,7 +64,7 @@ This is the third leg of the triad `manager-status` (show) · `manager-verify` (
 
 ## Procedure
 
-1. **Resolve the subject (§ Subject resolution).** This prints the `Subject:` line and nothing more — the declared-set read is step 3, deliberately after the gate, so a no-change run never pays for it.
+1. **Resolve the subject (§ Subject resolution).** This prints the `Subject:` and `Branch:` lines and nothing more — the declared-set read is step 3, deliberately after the gate, so a no-change run never pays for it.
 
 2. **Pre-dispatch check — decide whether this run is worth a dispatch at all.** Run the gate first. Measured 2026-09-25 on a 26-task tree with 25 done: the sweep-reader cost **91,598 tokens** and the drive leg **71,275**, for zero new information — three times in one session the manager bypassed the agents by hand to avoid it.
 
