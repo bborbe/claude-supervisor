@@ -174,6 +174,14 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Bash(awk:*)", result.stderr)
 
+    def test_writer_with_unreadable_frontmatter_fails(self):
+        # The writer-side half of the fail-closed frontmatter branch; the non-writer copy is
+        # pinned separately, and the two paths are distinct code.
+        self.mutate("commands/manager-loop.md", "---\n", "--- \n")
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("its grants were never checked", result.stderr)
+
     def test_non_writer_regaining_the_grant_fails(self):
         self.mutate(
             "commands/manager-verify.md",

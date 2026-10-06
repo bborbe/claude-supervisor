@@ -109,6 +109,17 @@ def main() -> int:
             if para is None:
                 failures.append(f"{rel}: carries the invocation but not the shared paragraph marker")
                 continue
+            # Assert the fold actually fired. Without this a third step word degrades the
+            # comparison to a strict literal, and the invariant silently stops being checked
+            # in the direction that matters — a shared word is not drift, but an unchecked
+            # one is not a check.
+            if STEP_SLOT.search(para) is None:
+                failures.append(
+                    f"{rel}: its invocation paragraph carries no step word matching "
+                    f"{STEP_SLOT.pattern} — the fold never fired, so the two writers are being "
+                    f"compared as literals"
+                )
+                continue
             writers[rel] = STEP_SLOT.sub("before the <STEP>", para)
         else:
             if carries:

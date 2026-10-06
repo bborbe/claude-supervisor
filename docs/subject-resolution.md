@@ -97,7 +97,7 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 | `/manager-status` | yes | **no** — read-only by its own contract (*"No vault writes"*) |
 | `/manager-verify` | yes | **no** — holds no `Bash(vault-cli:*)` |
 
-⚠️ **This is a write-scope carve-out, never a resolution one** — both non-writers still resolve, and neither is a *"does not resolve a subject"* case to fall back on. They report the page's status as they find it, exactly as before. `manager-status` states the read-only contract in its own frontmatter, and `docs/fleet-surface.md` § Session end calls the status/drive split *"the look from the act"*; `manager-verify`'s trim is the same one § Resolve the vault first and § Recording already record. Each non-writer's body states its own divergence.
+⚠️ **This is a write-scope carve-out, never a resolution one** — both non-writers still resolve, and neither is a *"does not resolve a subject"* case to fall back on. They report the page's status as they find it, exactly as before. `manager-status` states the read-only contract in its own frontmatter, and `docs/fleet-surface.md` § *Session roles* calls the status/drive split *"the look from the act"*; `manager-verify`'s trim is the same one § Resolve the vault first and § Recording already record. Each non-writer's body states its own divergence.
 
 ## Recording
 
