@@ -17,12 +17,19 @@ refuses this case.
 
 The ladder, and why it stops:
 
-  death 1  → resume headless once. A first death is a transient; the channel
-             restarts and the worker carries on in the same session id.
-  death 2  → reopen as an INTERACTIVE tab. The first resume did not hold, so the
-             cause is the channel, not the blip — and a second headless resume
-             would loop on a worker that cannot run headless here.
-  death 3+ → report only. Never a third headless resume.
+  not yet resumed → resume headless once. A first death is a transient; the
+                    channel restarts and the worker carries on in the same id.
+  resumed already → reopen as an INTERACTIVE tab. The first resume did not hold,
+                    so the cause is the channel, not the blip.
+
+⚠️ There is no third rung, and that is structural rather than an omission. The
+spawn ledger is keyed by session id and a resume keeps the SAME id, so a resume
+OVERWRITES its record in place: the ledger can say "resumed at least once" and
+never "resumed twice". The bound therefore holds through the second rung itself —
+the interactive reopen is a new TAB session, which the watcher reads as
+`stuck-tab:` and never feeds back here, and the dead headless session has no
+heartbeat left to raise another gate with. A failed reopen is reported and not
+retried: the operator decides, the ladder does not loop.
 
 A parked JUDGEMENT gate is not a death and is never healed: it is reported, and
 `answer_permission` is never called. Auto-answering a judgement gate is out of
@@ -34,11 +41,6 @@ import json
 import os
 import sys
 
-# How many headless resumes a session gets before the ladder moves on. One: the
-# second death is evidence the channel does not survive, not evidence for another
-# try.
-HEADLESS_RESUMES = 1
-
 ACTION_RESUME_HEADLESS = "resume-headless"
 ACTION_REOPEN_INTERACTIVE = "reopen-interactive"
 ACTION_REPORT_ONLY = "report-only"
@@ -47,16 +49,18 @@ ACTION_REPORT_ONLY = "report-only"
 # docstring — and an unrecognised kind is reported rather than guessed at.
 KIND_STREAM_CLOSED = "stream-closed"
 
-LEDGER_DIR = os.path.expanduser("~/.local/state/claude-supervisor/sessions")
+# Resolved as `server/config.mjs:167` does.
+LEDGER_DIR = os.environ.get("SUPERVISOR_LEDGER_DIR") or os.path.join(
+    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+    "claude-supervisor", "sessions")
 
 
 def decide(kind, deaths):
     """The action for a death of `kind`, given `deaths` prior headless resumes.
 
-    ⚠️ `deaths` counts HEADLESS RESUMES, not deaths. The two differ at the second
-    death: one resume has already happened, so the ladder is already at the
-    interactive rung. Counting deaths instead would resume headless twice, which is
-    exactly the loop the bound exists to stop.
+    ⚠️ `deaths` counts HEADLESS RESUMES, not deaths, and from the real ledger it is
+    only ever 0 or 1 (see the module docstring). Any non-zero value is the
+    interactive rung — never a second headless resume.
 
     ⚠️ A kind that is not `stream-closed` is REPORT-ONLY, never a resume and never
     an answer. A parked judgement gate reaching a resume would restart a worker
@@ -65,11 +69,9 @@ def decide(kind, deaths):
     """
     if kind != KIND_STREAM_CLOSED:
         return ACTION_REPORT_ONLY
-    if deaths < HEADLESS_RESUMES:
+    if deaths == 0:
         return ACTION_RESUME_HEADLESS
-    if deaths == HEADLESS_RESUMES:
-        return ACTION_REOPEN_INTERACTIVE
-    return ACTION_REPORT_ONLY
+    return ACTION_REOPEN_INTERACTIVE
 
 
 def deaths_from_ledger(session_id, ledger_dir=LEDGER_DIR):
@@ -97,6 +99,9 @@ def deaths_from_ledger(session_id, ledger_dir=LEDGER_DIR):
             with open(os.path.join(ledger_dir, name)) as fh:
                 rec = json.load(fh)
         except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict):
+            # Well-formed JSON that is not a record — skip it, never crash on it.
             continue
         # ⚠️ A PREFIX is a legal lookup and is the form a manager actually holds:
         # the watcher prints 8 chars, so an exact match would silently count 0 and
@@ -137,8 +142,12 @@ def heal(session_id, task, kind, deaths, *, spawn_headless, spawn_interactive,
             # Never leave the task saying `interactive` with no tab behind it: put
             # the mode back and tell the operator, then let the failure surface.
             set_task_mode(task, "headless")
-            post_card(f"{task} died twice with a closed permission channel — the "
-                      f"interactive reopen FAILED; mode restored to headless", None)
+            try:
+                post_card(f"{task} died twice with a closed permission channel — "
+                          f"the interactive reopen FAILED; mode restored to "
+                          f"headless", None)
+            except Exception:
+                pass  # the spawn failure below is the one the operator needs
             raise
         post_card(f"{task} died twice with a closed permission channel — reopened "
                   f"as an interactive tab", jump_link(pane))

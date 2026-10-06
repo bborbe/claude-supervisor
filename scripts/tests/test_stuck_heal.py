@@ -37,9 +37,9 @@ class HealDecideTest(unittest.TestCase):
     def test_second_death_reopens_interactive(self):
         self.assertEqual(heal.decide("stream-closed", 1), "reopen-interactive")
 
-    def test_a_third_death_reports_only(self):
-        self.assertEqual(heal.decide("stream-closed", 2), "report-only")
-        self.assertEqual(heal.decide("stream-closed", 9), "report-only")
+    def test_any_prior_resume_reopens_and_never_resumes_headless_again(self):
+        for deaths in (1, 2, 9):
+            self.assertEqual(heal.decide("stream-closed", deaths), "reopen-interactive")
 
     def test_a_parked_gate_is_never_healed_whatever_the_count(self):
         # SC4's structural half: no count makes a judgement gate resumable.
@@ -110,6 +110,15 @@ class HealTest(unittest.TestCase):
         import inspect
         self.assertNotIn("answer_permission", inspect.signature(heal.heal).parameters)
 
+    def test_a_failing_card_does_not_mask_the_spawn_failure(self):
+        def boom(*a):
+            raise RuntimeError("spawn failed")
+        def card_boom(*a):
+            raise ValueError("card failed")
+        effects = dict(self.effects, spawn_interactive=boom, post_card=card_boom)
+        with self.assertRaisesRegex(RuntimeError, "spawn failed"):
+            heal.heal(SID, TASK, "stream-closed", 1, **effects)
+
     def test_a_failed_interactive_reopen_restores_the_mode(self):
         def boom(sid):
             self.calls.append(("spawn_interactive", (sid,)))
@@ -138,10 +147,21 @@ class DeathsFromLedgerTest(unittest.TestCase):
     def test_resumes_of_this_session_are_counted_by_resumed_from(self):
         # A resume keeps the SAME session id, so counting distinct ids would
         # always read 1 and the ladder would never leave the first rung.
-        self.write("a", session_id=SID, resumed_from=None)
-        self.write("b", session_id=SID, resumed_from=SID)
-        self.write("c", session_id="other", resumed_from="other")
+        # Real shape: one `<session_id>.json` per session, overwritten in place
+        # on a resume (server/ledger.mjs recordPath).
+        self.write(SID, session_id=SID, resumed_from=SID)
+        self.write("other", session_id="other", resumed_from="other")
         self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 1)
+
+    def test_a_fresh_record_is_zero(self):
+        self.write(SID, session_id=SID, resumed_from=None)
+        self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 0)
+
+    def test_non_object_json_is_skipped_not_a_crash(self):
+        for i, body in enumerate(("[1,2,3]", '"str"', "7", "null")):
+            with open(os.path.join(self.dir, f"odd{i}.json"), "w") as fh:
+                fh.write(body)
+        self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 0)
 
     def test_an_eight_char_prefix_resolves(self):
         # The form a manager actually holds: the watcher prints 8 chars, and an
@@ -186,6 +206,12 @@ class MainTest(unittest.TestCase):
     def test_kind_is_passed_through_and_non_stream_closed_only_reports(self):
         _, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "permission-failures")
         self.assertTrue(line.endswith("-> report-only"), line)
+
+    def test_line_shape_after_one_resume_reopens(self):
+        with open(os.path.join(self.dir, SID + ".json"), "w") as fh:
+            json.dump({"session_id": SID, "resumed_from": SID}, fh)
+        _, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")
+        self.assertEqual(line, f"HEAL {SID8} [stream-closed] resumes=1 -> reopen-interactive")
 
     def test_kind_is_required(self):
         import contextlib, io
