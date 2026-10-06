@@ -109,6 +109,16 @@ def main() -> int:
             if para is None:
                 failures.append(f"{rel}: carries the invocation but not the shared paragraph marker")
                 continue
+            # A pointer, not a copy. Dropping the home from *both* writers passes the equality
+            # check and the invocation assertion together, so it is asserted separately — the
+            # same discipline the sibling guard's assertion (b) applies to the recording step.
+            if DOC not in para:
+                failures.append(
+                    f"{rel}: its invocation paragraph does not name its home ({DOC}) — the "
+                    f"writers' paragraphs matching is not enough if they both stopped pointing "
+                    f"at the rule"
+                )
+                continue
             # Assert the fold actually fired. Without this a third step word degrades the
             # comparison to a strict literal, and the invariant silently stops being checked
             # in the direction that matters — a shared word is not drift, but an unchecked
@@ -134,9 +144,11 @@ def main() -> int:
                     f"missing step rather than a stated carve-out"
                 )
 
-    # The table's stated *reason* is a claim in its own right. Where it names a missing
-    # grant, assert the command really lacks it — that is the half that goes stale silently
-    # if the grant ever returns, which is the failure this whole check exists to catch.
+    # The table's stated *reason* is a claim in its own right, and it is what the grant
+    # assertion is keyed on. It is **derived from the frontmatter** rather than matched against
+    # a set of accepted strings: accepting either reason let a row reworded to the other one
+    # clear this gate and then skip the grant assertion entirely — the silent skip this loop
+    # exists to prevent, reachable by editing prose.
     for name, verdict, tail in table:
         if verdict != "no":
             continue
@@ -144,31 +156,25 @@ def main() -> int:
         path = REPO / rel
         if not path.is_file():
             continue
-        # Fail closed on the *reason* before checking the grant. Keying the grant check on a
-        # literal tail phrase means a reworded cell skips the loop and reports green — and this
-        # is the assertion guarding the write authority the rule hands out, so a silent skip is
-        # the one outcome that must not be reachable.
-        if not any(reason in tail for reason in REASONS):
-            failures.append(
-                f"{DOC}: the row for `/{name}` is a non-writer but states neither recognised "
-                f"reason ({' / '.join(REASONS)}) — the grant check is keyed on those, so a "
-                f"reworded cell would skip it silently"
-            )
-            continue
-        if "holds no `Bash(vault-cli:*)`" not in tail:
-            continue
         # Fail closed: a frontmatter block this regex cannot read is a block whose grants were
         # never checked, and a skipped assertion reports green against text it does not cover.
         front = FRONTMATTER.match(path.read_text(encoding="utf-8"))
         if front is None:
             failures.append(
-                f"{rel}: its frontmatter could not be read, so the table's `Bash(vault-cli:*)` "
-                f"claim was never checked — failing closed rather than passing vacuously"
+                f"{rel}: its frontmatter could not be read, so the table's claim about it was "
+                f"never checked — failing closed rather than passing vacuously"
             )
-        elif "Bash(vault-cli:*)" in front.group(1):
+            continue
+        # A non-writer barred by a *missing grant* states the grant; one that holds the grant
+        # and is barred by contract states the contract. The frontmatter decides which applies,
+        # so the row cannot choose the reason that skips the assertion.
+        holds = "Bash(vault-cli:*)" in front.group(1)
+        expected = REASONS[1] if holds else REASONS[0]
+        if expected not in tail:
             failures.append(
-                f"{rel}: the table says it holds no `Bash(vault-cli:*)`, but its allowed-tools "
-                f"grants it — the stated reason is stale"
+                f"{rel}: the table calls it a non-writer, but its row does not state the reason "
+                f"its frontmatter implies — expected `{expected}`, since it "
+                f"{'holds' if holds else 'holds no'} `Bash(vault-cli:*)`"
             )
 
     # § Reconcile the subject's status guarantees the commands it names use only binaries both

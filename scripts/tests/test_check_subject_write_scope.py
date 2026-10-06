@@ -154,9 +154,10 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("shared paragraph marker", result.stderr)
 
-    def test_reworded_non_writer_reason_fails(self):
-        # The grant check is keyed on the row's stated reason, so a reworded cell must fail
-        # rather than skip the assertion silently.
+    def test_unrecognised_non_writer_reason_fails(self):
+        # An unrecognised reason must fail rather than skip the assertion silently. Distinct
+        # from the reworded-to-the-other-reason case below, which passes an older version of
+        # this gate and skipped the grant check entirely.
         self.mutate(
             DOC,
             "**no** — holds no `Bash(vault-cli:*)` |",
@@ -164,7 +165,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("neither recognised reason", result.stderr)
+        self.assertIn("does not state the reason its frontmatter implies", result.stderr)
 
     def test_writer_missing_a_required_grant_fails(self):
         # The guarantee that shipped false: manager-drive carried the invocation without the
@@ -181,6 +182,38 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("its grants were never checked", result.stderr)
+
+    def test_step_word_missing_fails(self):
+        # The STEP_SLOT fold is asserted to have fired; without this the assertion is itself
+        # unchecked, and a third step word would degrade the compare to a strict literal.
+        self.mutate("commands/manager-drive.md", "before the gate", "before the pass")
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the fold never fired", result.stderr)
+
+    def test_writer_paragraph_losing_its_home_fails(self):
+        # Dropping the pointer from *both* writers would otherwise pass every other assertion.
+        for rel in ("commands/manager-loop.md", "commands/manager-drive.md"):
+            self.mutate(
+                rel,
+                "run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *Reconcile the subject's status*",
+                "run § *Reconcile the subject's status*",
+            )
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not name its home", result.stderr)
+
+    def test_non_writer_row_reworded_to_the_other_reason_fails(self):
+        # The silent skip: manager-verify holds no grant, so its row must state the grant reason.
+        # Rewording it to the read-only reason must fail rather than skip the assertion.
+        self.mutate(
+            DOC,
+            "**no** — holds no `Bash(vault-cli:*)` |",
+            "**no** — read-only by its own contract |",
+        )
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not state the reason its frontmatter implies", result.stderr)
 
     def test_non_writer_regaining_the_grant_fails(self):
         self.mutate(
