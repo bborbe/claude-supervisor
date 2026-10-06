@@ -222,11 +222,17 @@ class IsManager(unittest.TestCase):
         self.assertFalse(gf.is_manager("w", ledger))
 
     def test_a_record_with_no_role_is_a_worker(self):
-        """A pre-field record. `spawn_agent` defaults the role to `agent` before
-        the record is built, so an absent field means "written before the field
-        existed" — and every manager from that era has no record at all."""
-        ledger = {"w": {"parent_session": "m", "role": None}}
-        self.assertFalse(gf.is_manager("w", ledger))
+        """Two shapes, one behaviour, and BOTH are real.
+
+        A record written before the field existed has no `role` KEY at all; a record
+        written by the cluster path carries an explicit `role: null` (the agent
+        literal in `supervisor.mjs` hardcodes it there, because that path returns
+        before role resolution). `record.get("role")` reads both as absent, which is
+        what this asserts. The fixture used to carry only the explicit-null shape
+        while its docstring claimed the key-less one — two different records.
+        """
+        self.assertFalse(gf.is_manager("w", {"w": {"parent_session": "m"}}))
+        self.assertFalse(gf.is_manager("w", {"w": {"parent_session": "m", "role": None}}))
 
 
 class SessionForPane(unittest.TestCase):

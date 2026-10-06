@@ -936,13 +936,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // ⚠️ The ROLE skip now has a consequence beyond the colour it used to decide, so it is
   // named here rather than left to be rediscovered: `gate-owner-filter.py` reads a ledger
   // record's `role` to tell a manager from a worker, and a cluster record is written with
-  // `role: null` (the agent literal below), which reads as a worker. A cluster spawn that
-  // declares `role: "manager"` therefore gets its workers' gates re-escalated by every peer
-  // — the same defect the local path no longer has. Kept as-is deliberately: managers are
-  // local by design, and this short-circuit exists precisely so a cluster spawn touches none
-  // of the local machinery. The consistent alternative is to REFUSE the combination the way
-  // `shippingSupportError` refuses cluster+shipping two lines below, which is a
-  // cluster-semantics decision rather than a fix to make silently here.
+  // `role: null` (the agent literal below), which reads as a worker. The consequence is that
+  // the CLUSTER SESSION ITSELF is filed as a worker — NOT that its children's gates
+  // re-escalate: a cluster worker's children run on the remote target and never enter the
+  // local ledger, registry or event log, so the filter cannot see their panes at all. Kept
+  // as-is deliberately: managers are local by design, and this short-circuit exists precisely
+  // so a cluster spawn touches none of the local machinery. The consistent alternative is to
+  // REFUSE the combination the way `shippingSupportError` refuses cluster+shipping two lines
+  // below, which is a cluster-semantics decision rather than a fix to make silently here.
   //
   // Refused rather than defaulted, and that is the whole reason it is a separate question
   // from the mode: a spawn that fell back to `local` when the caller asked for the cluster
