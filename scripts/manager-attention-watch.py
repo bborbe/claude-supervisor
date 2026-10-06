@@ -203,10 +203,12 @@ _CLOSER_UNKNOWN = object()
 # How long a transcript may go unwritten before the session counts as not moving
 # (5 min). Copied from `who-needs-me.py`'s `LIVE_WINDOW` rather than imported, for
 # the same reason `_ENTITY` is: this script ships as a plugin artifact that must run
-# with no sibling on the path. `fleet-board.py` mirrors it and `restart-precheck.py`
-# imports it; ⚠️ `agents/manager-drive.md:132` reads *"Reuse that shipped reading; do
-# not add a fourth definition of 'idle'."* — so if that value changes, change it here
-# in the same commit rather than letting the two drift.
+# with no sibling on the path. ⚠️ Both siblings IMPORT it rather than copying it —
+# `fleet-board.py` as `wnm.LIVE_WINDOW` and `restart-precheck.py` from
+# `who-needs-me.py` — so this literal is a THIRD copy, and
+# `agents/manager-drive.md:132` reads *"Reuse that shipped reading; do not add a
+# fourth definition of 'idle'."* If that value changes, change it here in the same
+# commit rather than letting the copies drift.
 LIVE_WINDOW = 5 * 60
 
 
@@ -451,7 +453,7 @@ def transcript_frozen(path):
         return False
 
 
-def pending_tool_call(path):
+def pending_tool_call(tail):
     """The name of the last `tool_use` with no matching `tool_result`, or None.
 
     ⚠️ **A pending call does NOT mean parked, and this function does not claim it
@@ -463,14 +465,22 @@ def pending_tool_call(path):
     pending one is a wait by construction. The caller supplies the "is it moving"
     half from `transcript_frozen`.
 
-    Shares `read_tail`'s one window with the other readers rather than paying for a
-    second read on every poll. A `tool_use` whose `tool_result` fell outside the
-    window therefore reads as pending — the false-positive direction, which is the
-    louder failure here. It is bounded by the caller's freeze requirement rather than
-    by this read: a session that answered and kept working writes its transcript, so
-    it is not frozen and never reaches the branch.
+    ⚠️ **Takes the DECODED TAIL, never a path.** `probe` already reads that window once
+    for the closer half and this reads the same bytes, so taking a path here cost a
+    second 400 KB read per tracked session per poll while the docstring claimed the
+    two shared one window. Passing the tail in is what makes that claim true.
+
+    ⚠️ **`pending` holds ONE slot — the last `tool_use` seen.** For an assistant message
+    carrying `[AskUserQuestion, Bash]` in one record, the `Bash` result clears the slot
+    and masks the still-unanswered modal. That is the MISS direction, which is the
+    safer one here, but it is not the set-based rule the sentence above could be read
+    as describing.
+
+    A `tool_use` whose `tool_result` fell outside the window reads as pending — the
+    false-positive direction. The caller's freeze requirement bounds it, though not
+    perfectly: a result outside the window followed by a long silent tool would read
+    frozen and gate spuriously.
     """
-    tail = read_tail(path)
     if tail is None:
         return None
     pending = None
@@ -746,11 +756,12 @@ def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
         verdict, reason = is_gated(
             registry_status(sid8, sessions_dir, warned), body,
             headless_live=heartbeat_live(sid8, live_dir), stuck=stuck,
-            # The third limb's two halves, read from the transcript. Taken
-            # unconditionally rather than only for `busy` rows: the read is cheap and
-            # shares `read_tail`'s window, and gating it on the registry word would
+            # The third limb's two halves. `tail` is the window already read above for
+            # the closer half — passed in rather than re-read, so the two readers share
+            # ONE 400 KB read per session per poll. Both are taken unconditionally
+            # rather than only for `busy` rows: gating them on the registry word would
             # put one decision in two places.
-            pending=pending_tool_call(cands[0]),
+            pending=pending_tool_call(tail),
             frozen=transcript_frozen(cands[0]))
         if stuck:
             # The reason is the signal; the closer body is context for whoever

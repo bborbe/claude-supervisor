@@ -1199,7 +1199,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // because the response is easy to drop.
     let bind = null
     if (task && agent.sessionId) {
-      const bound = bindSessionToTask({ task, vault, sessionId: agent.sessionId })
+      // ⚠️ `workerTarget.vault`, never the raw `vault` argument. The argument is
+      // `undefined` for a cwd-only spawn — an explicitly supported shape — and
+      // `bindSessionToTask` omits `--vault` when it is falsy, so the write would land
+      // in vault-cli's DEFAULT vault rather than the one this worker resolved to. The
+      // agent record above already carries `workerTarget.vault` for the same reason.
+      const bound = bindSessionToTask({ task, vault: workerTarget.vault, sessionId: agent.sessionId })
       if (bound.error) {
         bind = { error: bound.error }
         log(`WARNING: worker ${id} spawned but binding it to task "${task}" failed: ${bound.error}`)
