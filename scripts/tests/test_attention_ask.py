@@ -468,6 +468,24 @@ class PostTest(unittest.TestCase):
                     self.assertIn("ATTENTION_ASK_TTL_HOURS", str(caught.exception))
                     self.assertIn(bad, str(caught.exception))
 
+    def test_an_unusable_explicit_expires_at_is_refused(self):
+        """The flag path needs the env path's guard, and for the same reason.
+
+        ⚠️ A deadline already in the past is removed by the store on the first
+        read, so the card vanishes after a `201` — this change's own defect,
+        reachable here with no clock skew and no env var at all. A timestamp with
+        no offset is refused too: it cannot be compared against the store's
+        clock. `urlopen` is deliberately unmocked, so a refusal that reached the
+        store fails loudly instead of passing.
+        """
+        for bad in ("not-a-date", "2020-01-01T00:00:00+00:00", "2030-01-01T00:00:00"):
+            with self.subTest(value=bad):
+                out = io.StringIO()
+                rc = ask.cmd_post(post_args(expires_at=bad), out=out)
+                self.assertEqual(rc, 2)
+                self.assertIn("REFUSED:", out.getvalue())
+                self.assertIn("--expires-at", out.getvalue())
+
     def test_a_bad_ttl_env_is_refused_on_stdout_with_exit_two(self):
         """The refusal CONTRACT, driven through the command a caller actually runs.
 
@@ -537,13 +555,19 @@ class PostTest(unittest.TestCase):
 
         with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
             ask.cmd_post(
-                post_args(context="why", option=["a"], expires_at="2026-10-01T00:00:00Z"),
+                post_args(context="why", option=["a"], expires_at="2030-01-01T00:00:00Z"),
                 out=io.StringIO(),
             )
 
         body = captured["body"]
         self.assertEqual(body["context"], "why")
-        self.assertEqual(body["expires_at"], "2026-10-01T00:00:00Z")
+        # ⚠️ A FUTURE date, deliberately. This fixture read `2026-10-01` until the
+        # flag path gained the same past-deadline guard the env path has — at
+        # which point it stopped being a valid input and this test started
+        # failing, which is the guard working. A fixture with a date that rots is
+        # a fixture that will fail again; 2030 is far enough out to be a
+        # statement rather than a countdown.
+        self.assertEqual(body["expires_at"], "2030-01-01T00:00:00Z")
         self.assertEqual(len(body["options"]), 1)
 
     def test_store_rejection_is_reported_with_its_detail(self):

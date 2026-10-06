@@ -203,9 +203,18 @@ STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 # `expires_at` enforcement (PR #95). Against an older store `owner` is absent
 # from `AvailableLivenessModels` and the push is rejected with a 400 naming the
 # field, so the default `post` path fails outright rather than degrading; that is
-# a version mismatch, not a bad declaration, and it must be reported as such and
-# not retried. Same convention as `commands/attention-next.md`'s attempt-endpoint
-# floor.
+# a version mismatch, not a bad declaration.
+#
+# ⚠️ It is NOT reported as one, and this says so rather than claiming otherwise:
+# the 400 surfaces through the generic `except urllib.error.HTTPError` as
+# `FAILED: store returned 400 for the push -- <detail>` with exit 1, which is
+# byte-identical to a dead store, a 500, or any other rejection. The store's own
+# detail names the offending field, so the cause is readable — but a caller
+# branching on exit codes cannot tell a version mismatch from an outage, and a
+# retry loop keyed on 1 would retry a request that can never succeed. Giving it a
+# distinct token is a real improvement and belongs with whoever owns the retry
+# policy, not folded in here. Same floor convention as
+# `commands/attention-next.md`'s attempt-endpoint note.
 #
 # ⚠️ A LITERAL, and deliberately NOT read from the environment here. Resolving
 # `$ATTENTION_ASK_TTL_HOURS` at import meant a set-but-invalid value raised
@@ -523,6 +532,37 @@ def _producer_or_refuse(args, out):
     return producer_id, (args.liveness_ref or f"owner:{producer_id}")
 
 
+def _validated_expires_at(raw):
+    """The caller's `--expires-at`, refused when it cannot be a usable deadline.
+
+    ⚠️ The FLAG path needs the same guard as the environment path, and for the
+    same reason — the two differ only in where the value comes from, so bounding
+    one and not the other is the asymmetry rather than a scoping decision. A
+    deadline already in the past is removed by the store on the first read, so
+    the card vanishes after a `201`: this change's own defect, reachable here
+    with no clock skew and no env var at all. Unparseable input is refused here
+    too rather than left to the store's 400, so the failure names the argument a
+    caller actually typed.
+    """
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise _ConfigRefused(
+            f"--expires-at {raw!r} is not an RFC3339 timestamp."
+        ) from None
+    if parsed.tzinfo is None:
+        raise _ConfigRefused(
+            f"--expires-at {raw!r} carries no timezone offset, so it cannot be "
+            f"compared against the store's clock."
+        )
+    if parsed <= datetime.now(timezone.utc):
+        raise _ConfigRefused(
+            f"--expires-at {raw!r} is already in the past, so the store would "
+            f"remove the card on its first read."
+        )
+    return raw
+
+
 def _expires_at_or_default(args):
     """The `expires_at` to send: the caller's, or now + `_ask_ttl_hours()`.
 
@@ -551,7 +591,7 @@ def _expires_at_or_default(args):
     `TZ`-only mistake is not one, since the value is absolute UTC.
     """
     if args.expires_at:
-        return args.expires_at
+        return _validated_expires_at(args.expires_at)
     return (datetime.now(timezone.utc) + timedelta(hours=_ask_ttl_hours())).isoformat()
 
 
