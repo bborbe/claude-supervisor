@@ -641,8 +641,14 @@ def declared_members(topic_path: str) -> list[str]:
     # 2026-10-06: `23 Topics/Unattended Execution.md` splits its membership into
     # `### Phase 1` / `### Phase 2`), and terminating on `###` silently truncated
     # the member list — 52 of 59 entries on `Manager Layer`, and 0 of 4 on
-    # `Unattended Execution`. Mirrored in `sweep-gate.py` and `reset.py`; all three
-    # must change together.
+    # `Unattended Execution`. This boundary matches `fleet-board.py`, which has
+    # always stopped at `## ` and so never truncated.
+    #
+    # ⚠️ The same lookahead is duplicated in `reset.py` (same repo, mirrored below)
+    # and in the VAULT's own gate at `<vault>/.claude/scripts/sweep-gate.py`. That
+    # third copy is NOT in this repository — it lives in `bborbe/obsidian-personal`
+    # — so it cannot be found by a grep from here, and a reader must not conclude
+    # the trio is incomplete when `find` turns up only two.
     m = re.search(r"^## Goals\s*\n(.*?)(?=\n## |\n# |\Z)", text, re.S | re.M)
     if not m:
         raise ValueError(f"no `## Goals` section in {topic_path}")

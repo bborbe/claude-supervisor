@@ -237,8 +237,11 @@ def members_of(topic_page):
         text = fh.read()
     # Section ends at the next `##` or `#`, never at a `###`: topic pages carry
     # `###` prose notes and phase sub-headings inside `## Goals`, and terminating
-    # on `###` truncated the member list (measured 2026-10-06). Mirrored in
-    # `sweep-gate.py` and `manager-predispatch.py`; all three change together.
+    # on `###` truncated the member list (measured 2026-10-06). Matches
+    # `fleet-board.py`, which has always stopped at `## `. ⚠️ The same lookahead
+    # is duplicated in `manager-predispatch.py` (same repo) and in the VAULT's
+    # `<vault>/.claude/scripts/sweep-gate.py` — that third copy is NOT in this
+    # repository (`bborbe/obsidian-personal`), so a grep here finds only two.
     m = re.search(r"^## Goals\s*\n(.*?)(?=\n## |\n# |\Z)", text, re.S | re.M)
     if not m:
         return []

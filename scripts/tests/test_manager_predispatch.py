@@ -2888,5 +2888,67 @@ class TestBlockedVerdictsMode(Base):
         self.assertEqual(out.strip(), "")
 
 
+class DeclaredMembersBoundary(unittest.TestCase):
+    """`## Goals` membership must not be truncated by a `###`.
+
+    Topic pages legitimately carry `###` prose notes and phase sub-headings inside
+    `## Goals` — `23 Topics/Unattended Execution.md` splits its membership into
+    `### Phase 1` / `### Phase 2`. The section lookahead used to terminate on
+    `#{2,3}`, i.e. on a `###` as well as a `##`, so every member below the first
+    `###` was invisible to the tracked set: measured 2026-10-06 at **52 of 59** on
+    `Manager Layer` and **0 of 4** on `Unattended Execution`.
+
+    ⚠️ Both halves are asserted. A "fix" that widened the capture to the end of the
+    document would satisfy the first test and silently make every later section a
+    membership list — the second test is what makes the first one mean anything.
+    ⚠️ `reset.py:members_of` carries the same lookahead and has no other coverage.
+    """
+
+    PAGE = """---
+page_type: topic
+---
+
+## Goals
+
+- [[BeforeTheNote]]
+
+### Phase 1 — a prose note or a phase sub-heading
+
+- [[AfterTheNote]]
+
+## Non-goals
+
+- [[NotAMember]]
+"""
+
+    def page(self):
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "Topic.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(self.PAGE)
+        return tmp, path
+
+    def test_an_h3_inside_goals_does_not_truncate_the_member_list(self):
+        tmp, path = self.page()
+        m = load(os.path.join(tmp, "state"))
+        self.assertEqual(m.declared_members(path), ["BeforeTheNote", "AfterTheNote"])
+
+    def test_a_later_h2_section_still_terminates_the_section(self):
+        tmp, path = self.page()
+        m = load(os.path.join(tmp, "state"))
+        self.assertNotIn("NotAMember", m.declared_members(path))
+
+    def test_reset_members_of_shares_the_boundary(self):
+        # reset.py carries the same lookahead and had no coverage at all; if the two
+        # ever diverge, the gate and `reset` disagree about the tracked set silently.
+        tmp, path = self.page()
+        spec = importlib.util.spec_from_file_location(
+            "reset", os.path.join(os.path.dirname(_SCRIPT), "reset.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.members_of(path), ["BeforeTheNote", "AfterTheNote"])
+
+
 if __name__ == "__main__":
     unittest.main()
