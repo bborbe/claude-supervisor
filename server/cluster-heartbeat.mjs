@@ -57,10 +57,15 @@ const RUN_MAX_OUTPUT_BYTES = 1_048_576
 // so the child and its pipes stay live handles for the rest of the server's life.
 const RUN_KILL_GRACE_MS = 2_000
 
-// Exported, and both knobs injectable, so the spawn path itself is testable. Every other test
+// Exported, and all three knobs injectable, so the spawn path itself is testable. Every other test
 // injects `run`, which left the only code that can actually spawn and hang with no coverage —
 // and a real 20 s timeout is not something a unit test can wait for.
-export function defaultRun(argv, { timeoutMs = RUN_TIMEOUT_MS, maxOutputBytes = RUN_MAX_OUTPUT_BYTES } = {}) {
+//
+// `killGraceMs` is the third knob and the last to become injectable. Without it the escalation
+// below is unreachable from a test at all: the existing timeout test lets SIGTERM kill the child,
+// so the 2 s grace is never reached, and the one path that reaps a SIGTERM-trapping reader — the
+// path this constant exists for — carried no coverage.
+export function defaultRun(argv, { timeoutMs = RUN_TIMEOUT_MS, maxOutputBytes = RUN_MAX_OUTPUT_BYTES, killGraceMs = RUN_KILL_GRACE_MS } = {}) {
   return new Promise((resolve) => {
     const child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
@@ -79,7 +84,7 @@ export function defaultRun(argv, { timeoutMs = RUN_TIMEOUT_MS, maxOutputBytes = 
 
     const kill = () => {
       child.kill('SIGTERM')
-      escalation = setTimeout(() => child.kill('SIGKILL'), RUN_KILL_GRACE_MS)
+      escalation = setTimeout(() => child.kill('SIGKILL'), killGraceMs)
       escalation.unref?.()
     }
 
