@@ -18,7 +18,9 @@
 // ⚠️ `Bash(git push:*)` is in the allowlist, so a shipping worker can push without
 // the channel. That is the point of the class, and it is also its blast radius:
 // this list is the whole of what a shipping worker may do unattended, so widen it
-// only with that sentence in mind.
+// only with that sentence in mind. It is also wider than it reads: `git push` takes
+// a remote helper, so `git push "ext::sh -c '<cmd>'"` or `--receive-pack=<cmd>`
+// matches the prefix and runs arbitrary shell. Treat the entry as shell access.
 //
 // ⚠️ The tier this lands in is NOT arbitrary. `mode.mjs` trusts
 // `['user', 'local', 'managed', 'flag']` and the SDK's `filterEscalatingDefaultMode`

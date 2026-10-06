@@ -513,6 +513,7 @@ function writeLedger(agent, patch) {
       paneId: agent.paneId ?? null,
       resumedFrom: agent.resumedFrom ?? null,
       policy: agent.policyPath ?? null,
+      shipping: agent.shipping === true,
       parentSession: agent.parentSession ?? null,
       spawnedAt: agent.createdAt,
     })
@@ -1014,7 +1015,10 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // matter. A policy that cannot be REACHED is the same failure as one that is never
     // read — accepted, reported as applied, and inert — which is the failure this repo
     // already shipped once, so it is refused rather than warned about.
-    const mode = await effectivePermissionMode(workerCwd)
+    // A shipping worker's mode arrives inline in the `flag` tier, which the on-disk
+    // resolution below cannot see — so resolving from disk would refuse a reachable
+    // policy on a machine whose user tier says `auto`. Use the mode it will run under.
+    const mode = shipping === true ? SHIPPING_PERMISSION_MODE : await effectivePermissionMode(workerCwd)
     if (POLICY_UNREACHABLE_MODES.includes(mode)) {
       return {
         error:
@@ -1116,6 +1120,9 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // was named, its own overlay when one was.
     rules: workerRules ?? policy.rules,
     policyPath: resolvedPolicyPath,
+    // Recorded so a resume can see the worker was shipping; without it a resumed
+    // shipping worker silently reverts to `default` and re-arms the dead-channel failure.
+    shipping: shipping === true,
     sessionId: null,
     // Which conversation this one continues, when it is an adoption rather than a
     // fresh start. `sessionId` alone cannot say: on resume the SDK reports the SAME
@@ -1271,6 +1278,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // Reported so a caller can see which policy actually took effect, rather than
     // inferring it from the absence of an error.
     policy: agent.policyPath,
+    shipping: agent.shipping === true,
   }
 }
 
@@ -1309,6 +1317,7 @@ const agentView = (a) => {
     // Null means the worker runs under the server policy — the same absence-means-default
     // the ledger record uses, so the two cannot disagree about what "no policy" reads as.
     policy: a.policyPath ?? null,
+    shipping: a.shipping === true,
     // Which source decided interactive-vs-headless: argument, env, config or default. A
     // worker that opened the wrong way is otherwise diagnosed by guessing which of four
     // places was consulted.
