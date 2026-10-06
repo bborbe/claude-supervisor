@@ -43,6 +43,9 @@ IMPERATIVE = "§ *Reconcile the subject's status* **now**"
 # The two reasons a non-writer's row may state. Every `no` row must carry one, so a reworded
 # cell fails the check rather than silently skipping the grant assertion keyed on it.
 REASONS = ("holds no `Bash(vault-cli:*)`", "read-only by its own contract")
+# The binaries § Reconcile the subject's status guarantees every writer is granted. `awk` reads
+# the page and `vault-cli` writes it; the section states both, so both are asserted.
+WRITER_GRANTS = ("Bash(awk:*)", "Bash(vault-cli:*)")
 PARAGRAPH_MARKER = "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.**"
 STEP_SLOT = re.compile(r"before the (sweep|gate)\b")
 
@@ -156,6 +159,33 @@ def main() -> int:
                 f"{rel}: the table says it holds no `Bash(vault-cli:*)`, but its allowed-tools "
                 f"grants it — the stated reason is stale"
             )
+
+    # § Reconcile the subject's status guarantees the commands it names use only binaries both
+    # writers are granted — `awk` and `vault-cli`. Assert it rather than trusting the prose:
+    # this guarantee shipped false for `manager-drive`, which carried the invocation without
+    # the grant, and the non-writer pass below checks only the *absence* of a grant.
+    for name, verdict, _tail in table:
+        if verdict != "yes":
+            continue
+        rel = f"commands/{name}.md"
+        path = REPO / rel
+        if not path.is_file():
+            continue
+        front = FRONTMATTER.match(path.read_text(encoding="utf-8"))
+        if front is None:
+            failures.append(
+                f"{rel}: the table calls it a writer, but its frontmatter could not be read, "
+                f"so its grants were never checked"
+            )
+            continue
+        for grant in WRITER_GRANTS:
+            if grant not in front.group(1):
+                failures.append(
+                    f"{rel}: the table calls it a writer, but its allowed-tools omits "
+                    f"`{grant}` — the section guarantees the writers are granted the binaries "
+                    f"the rule needs, and a pipeline reaching for an ungranted one parks on an "
+                    f"approval the command was never scoped for"
+                )
 
     if len(writers) > 1:
         first_rel, first = next(iter(writers.items()))

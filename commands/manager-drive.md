@@ -4,6 +4,7 @@ allowed-tools:
   - Task
   - Read
   - Bash(grep:*)
+  - Bash(awk:*)
   - Bash(vault-cli:*)
   - Bash(pgrep:*)
   - Bash(ps:*)

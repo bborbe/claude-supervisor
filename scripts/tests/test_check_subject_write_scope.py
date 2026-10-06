@@ -166,6 +166,14 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("neither recognised reason", result.stderr)
 
+    def test_writer_missing_a_required_grant_fails(self):
+        # The guarantee that shipped false: manager-drive carried the invocation without the
+        # awk grant the rule needs, and nothing asserted the writers' grants.
+        self.mutate("commands/manager-drive.md", "  - Bash(awk:*)\n", "")
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Bash(awk:*)", result.stderr)
+
     def test_non_writer_regaining_the_grant_fails(self):
         self.mutate(
             "commands/manager-verify.md",
