@@ -524,6 +524,17 @@ def save(data):
 
 
 def find(data, item_id):
+    if not item_id.strip():
+        # REFUSE, here rather than per verb, so all six share it. `item["id"].startswith("")`
+        # is true for EVERY entry, so `--id ""` — what an unset shell variable expands to —
+        # silently resolves to the ledger's first one. On `withdraw` that stamps an operator
+        # attribution onto an entry nobody named; on `set` it re-points one. An empty id is
+        # never a choice somebody made, and the first entry is not a guess worth making.
+        sys.exit(
+            "error: --id is empty — refusing to guess which entry you meant.\n"
+            "  A prefix match on an empty string matches every entry, and the first one is\n"
+            "  not a choice anybody made. Pass a real id (run `list` to see them)."
+        )
     for item in data["items"]:
         if item["id"] == item_id or item["id"].startswith(item_id):
             return item
@@ -826,7 +837,8 @@ def cmd_withdraw(args):
 
     The third close path, and deliberately not a synonym for `close --evidence`: `close`
     asserts the entry's OWN resolution condition was met and verified on disk, while this
-    asserts the entry should never have existed. Both end at `state: closed`, but a later
+    asserts the operator withdrew the ask, so it should not be outstanding. Both end at
+    `state: closed`, but a later
     reader tells them apart by `withdrawn_at` — and a reader who cannot tell them apart
     cannot tell a resolved ask from one that was never real.
 

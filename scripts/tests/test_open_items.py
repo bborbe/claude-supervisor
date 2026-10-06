@@ -915,5 +915,42 @@ class SetTask(Base):
         self.assertEqual(row["task_state"], "ok")
 
 
+class EmptyId(Base):
+    """An empty `--id` must not resolve to the ledger's first entry.
+
+    `find()` matches on a PREFIX and `item["id"].startswith("")` is true for every entry, so
+    `--id ""` — what an unset shell variable expands to — silently targets the first one. On
+    `withdraw` that stamps `operator withdrew it: <reason>` onto an entry nobody named; on
+    `set` it re-points one. Guarded in `find()` so all six verbs share the refusal.
+    """
+
+    def test_every_mutating_verb_refuses_an_empty_id(self):
+        self.add("--kind", "pushed", "--text", "a log, not an ask")
+        before = self.ledger()[0]
+        for cmd in (
+            ["withdraw", "--id", "", "--reason", "x"],
+            ["withdraw", "--id", "   ", "--reason", "x"],
+            ["set", "--id", "", "--task", "Covering Task"],
+            ["close", "--id", "", "--evidence", "x"],
+            ["note", "--id", "", "--text", "x"],
+            ["answer", "--id", "", "--answer", "x"],
+        ):
+            code, _, _ = self.run_cli(cmd)
+            self.assertIsInstance(code, str, "%r was not refused by the rule" % cmd)
+            self.assertIn("--id is empty", code)
+        after = self.ledger()[0]
+        self.assertEqual(after["id"], before["id"])
+        self.assertEqual(after["state"], "open")
+        self.assertIsNone(after["closed_evidence"])
+        self.assertIsNone(after["task"])
+
+    def test_a_real_id_still_resolves(self):
+        """Negative control: the guard must subtract only the empty case."""
+        self.add("--kind", "pushed", "--text", "a log, not an ask")
+        item = self.ledger()[0]
+        code, _, _ = self.run_cli(["note", "--id", item["id"], "--text", "seen"])
+        self.assertEqual(code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
