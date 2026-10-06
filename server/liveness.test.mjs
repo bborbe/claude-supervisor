@@ -22,6 +22,7 @@ import { HEARTBEAT_TTL_MS, stampPath, stampRecord } from './heartbeat.mjs'
 import {
   checkLiveness,
   findRegisteredByName,
+  liveSessionIds,
   pidIsAlive,
   readRegistry,
   registeredAsLive,
@@ -338,4 +339,35 @@ test('uniqueTabName leaves the name alone when the registry cannot be read', () 
   // An unreadable registry is "no information", not "nothing holds this name": renaming
   // on that answer would rename on every spawn whenever the directory is briefly gone.
   assert.equal(uniqueTabName('⚙ x', { dir: '/nonexistent/supervisor/sessions' }), '⚙ x')
+})
+
+test('liveSessionIds REQUIRES isAlive — a default would silently pick one caller\'s reading', () => {
+  // This function is the one home for two callers that want OPPOSITE answers: the cap counter
+  // wants presence (over-counting fails safe), a roster wants pid-checked liveness (presence
+  // resurrects a crashed session's left-behind file). A default would answer one of them
+  // wrongly and say nothing, which is the failure this throw exists to make loud.
+  assert.throws(() => liveSessionIds({ registryDir: '/nonexistent' }), /needs an explicit isAlive/)
+})
+
+test('liveSessionIds treats a null heartbeatDir as unset, not as a directory named null', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'liveness-null-beats-'))
+  try {
+    // `checkLiveness` still passes `heartbeatDir: null` to mean "use the default". A default
+    // PARAMETER fires only on `undefined`, so a null would reach `listLive({ dir: null })` —
+    // where `readdirSync(null)` raises ERR_INVALID_ARG_TYPE (not ENOENT), so `listLive`'s own
+    // catch answers `null` and the union returns null: a permissions-shaped answer for a
+    // caller that meant "default".
+    //
+    // Asserted as EQUIVALENCE rather than `instanceof Map`, deliberately. The default is
+    // module config and cannot be injected, so both spellings read the machine's real
+    // heartbeat store; on a host where that store is unreadable both answer null and the
+    // assertion still holds, because what is pinned is that `null` and `undefined` take the
+    // SAME path. The defect this guards produces the opposite — null for one, a Map for the
+    // other — so the comparison still fails on it.
+    const viaNull = liveSessionIds({ registryDir: dir, heartbeatDir: null, isAlive: () => true })
+    const viaUndefined = liveSessionIds({ registryDir: dir, isAlive: () => true })
+    assert.deepEqual([...(viaNull ?? [])], [...(viaUndefined ?? [])])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

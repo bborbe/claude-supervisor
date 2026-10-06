@@ -38,7 +38,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { config } from './config.mjs'
-import { HEARTBEAT_TTL_MS, heartbeatDir, readLive } from './heartbeat.mjs'
+import { HEARTBEAT_TTL_MS, heartbeatDir, listLive, readLive } from './heartbeat.mjs'
 
 // Read from the config module rather than the environment: a library module has no
 // business consulting ambient process state, and a default resolved here would make
@@ -79,6 +79,62 @@ export function readRegistry(dir = SESSIONS_DIR) {
     }
   }
   return entries
+}
+
+// The registry ∪ heartbeat union — the ONE home for "which sessions are live?".
+//
+// Two readers ask it: `worker-sessions.mjs` counts the fleet against the concurrent-worker
+// cap, and `registry-rehydrate.mjs` decides which ledger records to adopt into a roster.
+// They differ on ONE input and must not differ on the union itself — a second copy of the
+// rule is how the two would come to answer "is this session live?" differently, and the cap
+// counter would pick up a new liveness channel that the roster silently did not.
+//
+// `isAlive` is that one input, and it is REQUIRED rather than defaulted — the two callers want
+// opposite readings, and a default would silently pick one for a caller that forgot. The cap
+// counter passes presence: over-counting a *cap* fails safe, because it refuses a spawn rather
+// than permitting one. A *roster* passes `pidIsAlive` instead — a registry file left behind by
+// a crashed session would otherwise be adopted as a live worker, the opposite direction.
+//
+// A Map rather than a Set, because the counter needs the per-session status the two channels
+// disagree about; a caller that only needs membership uses `.has`.
+//
+// `null` from either channel is "could not read", returned rather than folded into an empty
+// map: callers refuse on `null` and open on an empty one, so collapsing the two turns a
+// permissions error into permission to spawn onto live work.
+export function liveSessionIds({ registryDir: regDir, heartbeatDir: beatsDir, now, isAlive } = {}) {
+  // ⚠️ `isAlive` is REQUIRED, deliberately, and it is the one thing the two callers disagree
+  // about: `worker-sessions.mjs` wants presence (over-counting a *cap* fails safe — it refuses
+  // a spawn), while a *roster* wants pid-checked liveness (presence would resurrect a crashed
+  // session's left-behind file). A default would silently pick one of those for a caller that
+  // forgot, and this module's own header calls presence "the most persuasive kind of wrong".
+  // It also keeps this signature honest beside `registeredAsLive` below, whose `isAlive`
+  // defaults to `pidIsAlive` — two functions, one parameter name, opposite defaults, is a trap
+  // for a reader scanning top-down.
+  if (typeof isAlive !== 'function') {
+    throw new Error('liveSessionIds needs an explicit isAlive — presence and pid-checked liveness are different questions')
+  }
+  // Both directories take `??` rather than a default parameter, and for the same reason: a
+  // default fires only on `undefined`, so the `dir: null` idiom — which `checkLiveness` still
+  // uses for "use the default" — would reach `readdirSync(null)`. `readRegistry` happens to
+  // catch that and answer `null` (a permissions-shaped answer for a caller that meant
+  // "default"), and `listLive` would throw. Guarding one and not the other is the asymmetry
+  // that made this worth writing down.
+  const registry = readRegistry(regDir ?? SESSIONS_DIR)
+  if (registry === null) return null
+  const stamps = listLive({ dir: beatsDir ?? heartbeatDir, now })
+  if (stamps === null) return null
+
+  const live = new Map()
+  for (const entry of registry) {
+    if (!isAlive(entry.pid)) continue
+    live.set(entry.sessionId, entry.status)
+  }
+  for (const stamp of stamps) {
+    // The registry wins where both speak: a session holding a socket is the case the readers
+    // already understood, and its `status` is the richer descriptor.
+    if (!live.has(stamp.sessionId)) live.set(stamp.sessionId, stamp.mode ?? null)
+  }
+  return live
 }
 
 // null = could not tell, false = registered but its pid is gone (a stale file).
