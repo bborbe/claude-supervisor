@@ -292,10 +292,11 @@ test('status maps from the ledger mode, so a rehydrated row reads like a spawned
   assert.equal(rehydratedStatus({ mode: 'headless' }), 'running')
 })
 
-test('none of the three rehydrated statuses is terminal — which is why the guard needs the marker', () => {
-  // `resume-guard.mjs` treats every non-terminal status as a live in-process holder, so a
-  // rehydrated row for a dead worker would refuse its own resume. The exclusion is by the
-  // `rehydrated` marker, and this pins the premise that makes it necessary.
+test('none of the three rehydrated statuses is terminal — which is why liveness, not the status, decides', () => {
+  // `resume-guard.mjs` treats every non-terminal status as a live in-process holder, and this
+  // pins the premise that makes liveness the ONLY thing that may decide a rehydrated row's
+  // fate: a dead worker's row would refuse its own resume, so such rows are pruned rather than
+  // excluded by the `rehydrated` marker — and a row that survives the prune holds the guard.
   for (const mode of ['interactive', 'cluster', 'headless']) {
     assert.equal(isFinished(rehydratedStatus({ mode })), false, `${mode} must not read as finished`)
   }
@@ -313,8 +314,12 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // Called before both readers answer, so a worker that died after boot leaves the roster.
   assert.match(src, /case 'list_agents':\n\s+pruneRehydratedAgents\(\)/)
   assert.match(src, /case 'agent_status': \{\n\s+pruneRehydratedAgents\(\)/)
-  // Excluded from the resume guard, or a dead worker's row refuses its own recovery.
-  assert.match(src, /findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter\(\(a\) => !a\.rehydrated\), resume\)/)
+  // ⚠️ The resume path must PRUNE and then guard on EVERY row — never filter rehydrated rows
+  // out. Filtering fixed the dead-worker deadlock by breaking the live case: a rehydrated row
+  // whose worker still runs must keep blocking a resume, or two writers land on one
+  // conversation.
+  assert.match(src, /pruneRehydratedAgents\(\)\n\s+const holder = findLiveHolder\(agents\.values\(\), resume\)/)
+  assert.ok(!/findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')
   // Not stamped on shutdown — that record belongs to the server that spawned the worker.
   assert.match(src, /if \(agent\.rehydrated\) continue/)
   // ⚠️ The MINT must never land on an adopted id. `seq` restarts at 0 on every reconnect, so

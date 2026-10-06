@@ -29,8 +29,9 @@
 // Nothing here refreshes a row once adopted, and the ledger cannot supply the refresh. A
 // worker that dies after this process starts therefore keeps its adoption-time status, which
 // is why `supervisor.mjs` prunes rehydrated rows at read time and why it must never let one
-// count as an in-process live holder — see the THREE call sites there (`pruneRehydratedAgents`,
-// the `findLiveHolder` filter, and `stampUnobservedWorkers`).
+// count as a live holder it should not be — see the call sites there: `pruneRehydratedAgents`
+// (now run on the RESUME path too, not only the read paths, so a live rehydrated row still
+// holds the guard while a dead one is already gone) and `stampUnobservedWorkers`.
 //
 // ⚠️ **And an adopted id shares a namespace with this process's own mints.** `supervisor.mjs`
 // numbers workers from a per-process counter that restarts at 0 on every reconnect, so the
@@ -116,12 +117,13 @@ export function toAgentRecord(record, id = record.agent_id) {
     shipping: false,
     result: record.result ?? null,
     error: null,
-    // Observable rather than inferred, and load-bearing at three call sites in
-    // `supervisor.mjs`: a rehydrated row must not count as an in-process live holder
-    // (`findLiveHolder`), must not be stamped on shutdown (`stampUnobservedWorkers`), and is
-    // pruned at read time (`pruneRehydratedAgents`). The acceptance evidence also rests on
-    // it — without a marker a reader cannot tell a rehydrated row from one this process
-    // spawned itself.
+    // Observable rather than inferred, and load-bearing at two call sites in
+    // `supervisor.mjs`: a rehydrated row must not be stamped on shutdown
+    // (`stampUnobservedWorkers`), and it is pruned wherever liveness is consulted
+    // (`pruneRehydratedAgents` — the read paths AND the resume path). ⚠️ It is deliberately
+    // NOT excluded from `findLiveHolder`: a row that survives the prune holds the guard
+    // exactly as an in-process row does. The acceptance evidence also rests on it — without
+    // a marker a reader cannot tell a rehydrated row from one this process spawned itself.
     rehydrated: true,
   }
 }
@@ -133,10 +135,12 @@ export function toAgentRecord(record, id = record.agent_id) {
 // `cluster` verbatim, and `headless` as `running`, which is the state its agent loop leaves
 // it in while it works.
 //
-// ⚠️ **None of these three is terminal** (`resume-guard.mjs` owns `TERMINAL_STATUSES`), which
-// is exactly why a rehydrated row must be excluded from the resume guard by its `rehydrated`
-// marker rather than by its status: a dead worker's row would otherwise assert it is still
-// mid-turn and refuse the resume that is that worker's only recovery.
+// ⚠️ **None of these three is terminal** (`resume-guard.mjs` owns `TERMINAL_STATUSES`), and
+// that cuts both ways. It is why a rehydrated row must be PRUNED rather than left to answer
+// for itself: a dead worker's row would otherwise assert it is still mid-turn and refuse the
+// resume that is that worker's only recovery. It is equally why a row that SURVIVES the prune
+// must hold the resume guard like any other — the status cannot tell the two apart, so
+// liveness is the only thing that may.
 export function rehydratedStatus(record) {
   if (record.mode === 'interactive') return 'interactive'
   if (record.mode === 'cluster') return 'cluster'
