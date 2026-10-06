@@ -329,6 +329,13 @@ def main(argv=None):
             "%d workers adopted from exited manager %s"
             % (len(row["adopted"]), sid8(row["exited"]))
         )
+        # ⚠️ The adopter and WHICH BRANCH resolved it are on their own line, never folded
+        # into the count line above: that line's format is pinned by the criterion, and a
+        # reader matching it should not have to account for a suffix. Without this the
+        # round cannot tell whether a same-subject successor took the workers or this
+        # session did -- which is the adoption rule's headline decision, and the one thing
+        # an operator cannot recover from the claim store without a second command.
+        print("  adopted by %s (%s)" % (sid8(row["adopter"]), row["how"]))
         if row["held"]:
             # A held claim is the single-owner guarantee, not a failure -- but it is also
             # not this round's adoption, so it is reported apart from the count above.

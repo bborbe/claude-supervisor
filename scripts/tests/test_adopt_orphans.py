@@ -145,6 +145,7 @@ class Stranding(Base):
         self.assertIn("1 workers adopted from exited manager %s" % EXITED[:8], proc.stdout)
         self.assertEqual(self.holders().get(WORKER), ME)
         self.assertEqual(self.note(WORKER), "adopted from exited manager %s" % EXITED[:8])
+        self.assertIn("adopted by %s (fallback)" % ME[:8], proc.stdout)
 
     def test_worker_under_live_manager_is_untouched(self):
         """The negative control: a live manager keeps its own workers' gates."""
@@ -197,6 +198,19 @@ class AdopterResolution(Base):
         proc = self.run_script()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.holders().get(WORKER), SUCCESSOR)
+
+    def test_successor_branch_is_named_on_its_own_line(self):
+        """The round must say WHICH branch resolved -- the rule's headline decision.
+
+        Without this the count line is the same whether a successor took the workers or
+        the tick session did, and the operator cannot recover it without a second command.
+        """
+        self._stranded()
+        self.subject(EXITED, SUBJECT)
+        self.subject(SUCCESSOR, SUBJECT)
+        self.live(SUCCESSOR)
+        proc = self.run_script()
+        self.assertIn("adopted by %s (successor)" % SUCCESSOR[:8], proc.stdout)
 
     def test_subject_match_is_case_and_whitespace_folded(self):
         self._stranded()
