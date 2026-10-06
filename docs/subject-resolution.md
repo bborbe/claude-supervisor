@@ -65,17 +65,23 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 
 ## Reconcile the subject's status
 
-**Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **The condition is the guard, not decoration** — the block below is illustrative, and a literal copy of it *without* the condition writes `in_progress` over a `hold`:
+**Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **The condition is the guard, not decoration** — a copy of the block below *without* it writes `in_progress` over a `hold`. The block is runnable as written: it **reads** `STATUS` off the page rather than assuming a caller set it, runs **exactly one** branch rather than firing both on one subject, and uses `case` so a declined guard exits `0` instead of tripping `set -e`:
 
 ```bash
 # STATUS is the subject page's own frontmatter `status`, read as part of resolution.
-# Goal branch — 24 Goals/<Goal>.md:
-[ -z "$STATUS" ] || [ "$STATUS" = todo ] || [ "$STATUS" = next ] \
-  && vault-cli goal set "<subject>" status in_progress
-# Topic branch — 23 Topics/<Topic>.md:
-[ -z "$STATUS" ] || [ "$STATUS" = todo ] || [ "$STATUS" = next ] \
-  && vault-cli topic set "<subject>" status in_progress
+# Exactly one branch runs — whichever § The page test resolved.
+if [ -n "$TOPIC" ]; then
+  STATUS=$(awk '/^---$/{n++; next} n==1' "23 Topics/<Topic>.md" | sed -n 's/^status:[[:space:]]*//p')
+  case "$STATUS" in ""|todo|next) vault-cli topic set "<subject>" status in_progress ;; esac
+else
+  STATUS=$(awk '/^---$/{n++; next} n==1' "24 Goals/<Goal>.md" | sed -n 's/^status:[[:space:]]*//p')
+  case "$STATUS" in ""|todo|next) vault-cli goal set "<subject>" status in_progress ;; esac
+fi
 ```
+
+⚠️ **Then read the page back and say what it now reads.** This is the one write in the file that had no read-back contract, and a silent failure leaves the defect above standing for the whole life of the session. Present → `✅ Reconciled: <subject> <old> → in_progress`. Absent, or unchanged → `⚠️ Not reconciled — <subject> still reads <value>`, and continue; **never proceed as though the write landed.**
+
+⚠️ **The read and the write are two acts, so an operator flip landing between them is lost.** The window is narrow — this fires once, at resolution — but the status at risk is `hold`, which this section calls irreplaceable. Where being wrong is expensive, re-read immediately before the write and say which read the write was based on.
 
 ⚠️ **Why, measured 2026-10-06.** A manager tick resolved the goal `Attention Controller Ultra-Fast Reads`, swept its declared set and printed a table every tick — while the goal page itself read `status: todo` (the legacy alias for `next`) and a task under it sat at `phase: execution` with a live worker. Every reader — the operator, the sweep table, the model-free gate — saw queued work where there was running work, and the operator flipped the page by hand. **The manager is the one party that already knows the difference**, because it is the party that resolved the subject; leaving the page at `todo` makes its own report read as a tree it has not started.
 
@@ -115,4 +121,4 @@ for n in (os.environ['CLAUDE_CODE_SESSION_ID']+'.json','last-'+vault+'.json'):
 
 **On a `last-<vault>` resolution, write neither.** A subject taken from that file was itself only inferred, and promoting it would widen the same way. The asymmetry is deliberate: session-local sources may be recorded, the cross-session one may not.
 
-⚠️ **`/manager-verify` cannot run the block above, and the divergence covers two halves, not one.** Its `allowed-tools` omits `Bash(python3:*)`, `Bash(mkdir:*)` **and `Bash(vault-cli:*)`**, so it can run neither the vault lookup nor the recording write. It follows the **contract** (which files, which cases) rather than the snippet, and states both divergences in its own body. Intentional, and the only region where its copy legitimately diverges.
+⚠️ **`/manager-verify` cannot run the block above — nor either of this file's other two executable blocks — and the divergence covers three, not two.** Its `allowed-tools` omits `Bash(python3:*)`, `Bash(mkdir:*)` **and `Bash(vault-cli:*)`**, so it can run none of: the vault lookup in § *Resolve the vault first*, the recording write above, and the reconcile in § *Reconcile the subject's status*. It follows the **contract** (which files, which cases) rather than the snippets, and states all three divergences in its own body. Intentional, and the only region where its copy legitimately diverges.
