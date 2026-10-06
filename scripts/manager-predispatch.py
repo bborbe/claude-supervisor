@@ -523,15 +523,21 @@ def progress_hash(text: str) -> str:
     ⚠️ **The derivation is stated here so a reader outside this module can reproduce a
     stored value instead of guessing at one** — the value is persisted in every snapshot
     and is meaningless to a reader who cannot recompute it. It is `sha256` over the **raw
-    bytes of the section body**, truncated to the **first 16 hex characters**:
+    bytes of the section body**, truncated to the **first 16 hex characters**. The body is
+    `_PROGRESS`'s group 1, and each of its two boundaries sits one byte off the obvious
+    reading — which is why they are spelled out here rather than described:
 
-    - the body is `_PROGRESS`'s group 1 — everything after the `# Progress` heading line
-      and before the next top-level `# ` heading, or EOF
-    - **the heading line itself is not hashed**, and nothing is normalised: the newline
-      before the next heading is kept, and the text is read from the file rather than
-      from a YAML or markdown re-render
-    - an absent or empty section hashes the empty string, so every Progress-less task
-      shares one value rather than raising
+    - **Start — after the `# Progress` heading line**, which is itself not hashed. ⚠️ The
+      pattern's `\\s*` is greedy and backtracks to leave one newline for the literal `\\n`,
+      so **a section that is empty and followed by another heading does NOT start empty**:
+      it starts at that heading and hashes the *following* section's body. Only an absent
+      section, or one that runs to EOF, hashes the empty string.
+    - **End — immediately BEFORE the newline that precedes the next top-level `# `
+      heading.** That delimiter newline is not part of the body, so `foo\\n\\n# Other`
+      hashes `foo\\n` (the blank line is dropped) and `foo\\n# Other` hashes `foo` (the
+      content line's own trailing newline goes with it).
+    - **Nothing else is normalised** — no YAML parse, no re-serialisation — and the text is
+      read from the file rather than from a markdown re-render.
 
     ⚠️ **The boundary is the half a reader gets wrong, and the error is silent in the
     expensive direction.** Measured 2026-10-01: a reader that hashed the section
