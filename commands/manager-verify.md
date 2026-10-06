@@ -22,7 +22,7 @@ Verify ONE subject — **a topic or a goal** — and **suggest** the fixes. Reso
 
 ## Subject resolution — when `$1` is omitted
 
-**The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the four-source chain, the case-insensitive vault test, the recording contract and the "no fallback, ever" clause. Read it there; **it is not restated here.**
+**The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the four-source chain, the case-insensitive vault test, the recording contract, the subject-status reconcile and the "no fallback, ever" clause. Read it there; **it is not restated here.**
 
 **Only source 3 stays inline**, because it is the one an agent cannot reach:
 

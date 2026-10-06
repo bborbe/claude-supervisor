@@ -68,15 +68,28 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 **Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **The condition is the guard, not decoration** — a copy of the block below *without* it writes `in_progress` over a `hold`. The block is runnable as written: it **reads** `STATUS` off the page rather than assuming a caller set it, runs **exactly one** branch rather than firing both on one subject, and uses `case` so a declined guard exits `0` instead of tripping `set -e`:
 
 ```bash
-# STATUS is the subject page's own frontmatter `status`, read as part of resolution.
-# Exactly one branch runs — whichever § The page test resolved.
-if [ -n "$TOPIC" ]; then
-  STATUS=$(awk '/^---$/{n++; next} n==1' "23 Topics/<Topic>.md" | sed -n 's/^status:[[:space:]]*//p')
-  case "$STATUS" in ""|todo|next) vault-cli topic set "<subject>" status in_progress ;; esac
+# BRANCH, SUBJECT and TOPICS_DIR come from the resolution chain above; PAGE is the page
+# § The page test found. Exactly one branch runs.
+if [ "$BRANCH" = topic ]; then
+  PAGE="$TOPICS_DIR/$SUBJECT.md"
 else
-  STATUS=$(awk '/^---$/{n++; next} n==1' "24 Goals/<Goal>.md" | sed -n 's/^status:[[:space:]]*//p')
-  case "$STATUS" in ""|todo|next) vault-cli goal set "<subject>" status in_progress ;; esac
+  PAGE="24 Goals/$SUBJECT.md"
 fi
+# Read the page's own status, normalised — a trailing space or a CRLF page would otherwise
+# leave "todo " / "todo\r", fall through the guard below, and reinstate the exact defect
+# this section fixes: a page reading todo while its manager sweeps it.
+STATUS=$(awk '/^---$/{n++; next} n==1' "$PAGE" \
+  | sed -n 's/^status:[[:space:]]*//p' \
+  | tr -d '\r' | tr '[:upper:]' '[:lower:]' | sed -e 's/[[:space:]]*$//')
+case "$STATUS" in
+  ""|todo|next)
+    if [ "$BRANCH" = topic ]; then
+      vault-cli topic set "$SUBJECT" status in_progress
+    else
+      vault-cli goal set "$SUBJECT" status in_progress
+    fi
+    ;;
+esac
 ```
 
 ⚠️ **Then read the page back and say what it now reads.** This is the one write in the file that had no read-back contract, and a silent failure leaves the defect above standing for the whole life of the session. Present → `✅ Reconciled: <subject> <old> → in_progress`. Absent, or unchanged → `⚠️ Not reconciled — <subject> still reads <value>`, and continue; **never proceed as though the write landed.**
