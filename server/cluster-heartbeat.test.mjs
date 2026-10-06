@@ -138,3 +138,77 @@ test('defaultRun resolves the spawn result, times out to the spawnSync shape, an
   })
   assert.equal(overflowed.error.message, 'ENOBUFS', 'an oversized reader is bounded, never accumulated')
 })
+
+// The SIGTERM→SIGKILL escalation. It had no coverage for two reasons, and the second is why this
+// test asserts on the child's disappearance rather than on the returned signal:
+//
+//  1. `killGraceMs` was the one knob in `defaultRun` that was not injectable, and the existing
+//     timeout test lets SIGTERM kill the child, so the 2 s grace was never reached.
+//  2. The escalation is invisible in the resolved value. The timeout path calls `kill()` and then
+//     `finish(...)` immediately, so `settled` is already true when the child's `close` arrives and
+//     the real signal is dropped by the guard. Measured on the pre-change code: a SIGTERM-ignoring
+//     child resolves at ~55 ms with `signal: 'SIGTERM'`, is still alive at resolve and at +500 ms,
+//     and is reaped only after the grace elapses. The caller can never observe `SIGKILL`.
+//
+// The observable is therefore the reaping itself — which is the contract the escalation exists for
+// ("a reader that traps or ignores SIGTERM is never reaped ... the child and its pipes stay live
+// handles for the rest of the server's life"). The timing bound is the discriminating half: with
+// the grace ignored the child survives the window at the 2 s default, so asserting only "eventually
+// gone" would pass on the pre-change code and prove nothing.
+test('defaultRun reaps a SIGTERM-ignoring child inside the injected grace window', async (t) => {
+  const pidFile = join(tmp(), 'child.pid')
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // The child reports its pid to a FILE, not to stdout. `defaultRun` resolves at the timeout with
+  // whatever stdout it has collected by then, so reading the pid from the result races the child's
+  // own start-up — measured under the full suite, where a 50 ms timeout won that race and returned
+  // an empty stdout while the same test passed when its file was run alone. The file is written
+  // within a few milliseconds, far inside the 1 s budget below, so this read is deterministic.
+  const script =
+    "import('node:fs').then((fs) => fs.writeFileSync(" +
+    `${JSON.stringify(pidFile)}, String(process.pid))); ` +
+    "process.on('SIGTERM', () => {}); setTimeout(() => {}, 60000)"
+
+  const result = await defaultRun([process.execPath, '-e', script], {
+    timeoutMs: 1000,
+    killGraceMs: 50,
+  })
+  assert.ok(existsSync(pidFile), 'the child wrote its pid well before the 1 s timeout')
+  const pid = Number(readFileSync(pidFile, 'utf8').trim())
+  assert.ok(Number.isInteger(pid) && pid > 0, `the child reported its pid (${pid})`)
+
+  // Bound the damage on the failure path. If an assertion below throws, or the escalation regresses
+  // and the grace is ignored, the child would otherwise outlive the test by its own 60 s timer and
+  // keep the suite's event loop alive — a red test stalling the run instead of failing fast. Costs
+  // nothing on the pass path: the pid is already gone, so the kill raises ESRCH and is swallowed.
+  t.after(() => {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // already reaped — the expected case
+    }
+  })
+
+  // The prompt-resolve half: the escalation must not be bought by making callers wait for it.
+  assert.equal(result.signal, 'SIGTERM', 'a timed-out reader resolves as it did under spawnSync')
+  assert.equal(result.error.message, 'ETIMEDOUT')
+
+  // The escalation half, bounded well under the 2 s default grace: with the grace ignored the child
+  // survives this window, with it honoured the child is gone ~100 ms in. Polled rather than slept,
+  // so a slow runner reports the bound it actually missed instead of racing a fixed delay.
+  const deadline = Date.now() + 1200
+  while (alive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+
+  assert.equal(
+    alive(pid),
+    false,
+    'a reader that traps SIGTERM must be reaped inside the grace, or it holds its pipes for the life of the server',
+  )
+})
