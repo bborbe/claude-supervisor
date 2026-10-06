@@ -91,9 +91,9 @@ export function workerSessions({ registryDir, ledgerDir, heartbeatDir, now } = {
   const ledger = readLedger(ledgerDir)
   if (ledger === null) return null
 
-  // The union's ONE home is `liveness.mjs`, and this counter takes its default `isAlive`
-  // (registry presence) — the note on why presence is the right reading *here* lives with the
-  // helper, so the roster reader and the cap counter cannot drift apart on what "live" means.
+  // The union's ONE home is `liveness.mjs`, and this counter passes presence explicitly — the
+  // helper REQUIRES `isAlive`, so the roster reader and the cap counter cannot drift apart on
+  // what "live" means, and the note on why presence is the right reading *here* lives there.
   // Both channels are read once, not once per ledger entry: `checkLiveness` answers for a
   // single id and re-reads the registry on every call, which over a ~1000-record ledger is a
   // directory listing per record.

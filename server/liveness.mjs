@@ -89,11 +89,11 @@ export function readRegistry(dir = SESSIONS_DIR) {
 // rule is how the two would come to answer "is this session live?" differently, and the cap
 // counter would pick up a new liveness channel that the roster silently did not.
 //
-// `isAlive` is that one input. The default is presence, which is what the cap counter reads
-// and wants: over-counting a *cap* fails safe, because it refuses a spawn rather than
-// permitting one. A *roster* must pid-check instead — a registry file left behind by a
-// crashed session would otherwise be adopted as a live worker, the opposite direction — so
-// it passes `pidIsAlive`.
+// `isAlive` is that one input, and it is REQUIRED rather than defaulted — the two callers want
+// opposite readings, and a default would silently pick one for a caller that forgot. The cap
+// counter passes presence: over-counting a *cap* fails safe, because it refuses a spawn rather
+// than permitting one. A *roster* passes `pidIsAlive` instead — a registry file left behind by
+// a crashed session would otherwise be adopted as a live worker, the opposite direction.
 //
 // A Map rather than a Set, because the counter needs the per-session status the two channels
 // disagree about; a caller that only needs membership uses `.has`.
