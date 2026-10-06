@@ -83,6 +83,27 @@ SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
 DEFAULT_STATE = os.path.expanduser("~/.claude/state/manager-attention-watch")
 DEFAULT_PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
 
+# The supervisor's heartbeat store — the second liveness source, and the only
+# world-readable one that covers a HEADLESS worker. A headless worker is an
+# in-process SDK `query()` with no pid, so `SESSIONS_DIR` can never list it and
+# every such worker reads UNREGISTERED forever without this. Constants mirror
+# `server/heartbeat.mjs:47-48`; keep the two in step.
+LIVE_DIR = os.path.expanduser("~/.local/state/claude-supervisor/live")
+HEARTBEAT_TTL_S = 60
+
+# Stamps that are not session ids. `heartbeat.mjs:125` skips the reachability file
+# for the same reason: read as a session it reports a phantom.
+LIVE_SKIP = ("_cluster-reachability",)
+
+# How many permission failures in a row mark a worker STUCK. ⚠️ Counted among
+# PERMISSION OUTCOMES, not consecutive records — see `permission_failure_run`.
+STUCK_PERM_FAILURES = 3
+PERM_FAILURE_MARK = "permission request failed"
+
+# The state line a worker writes when it gives up. Matched as a line PREFIX, not a
+# substring: the e4fd1919 transcript also *quotes* the phrase while discussing it.
+BLOCKED_PREFIX = "🔴 BLOCKED"
+
 # `&nbsp;` is six literal characters, not whitespace, so `strip()` does not remove
 # it. Copied verbatim from `who-needs-me.py:127` (`normalize_closer`) rather than
 # imported: `manager-predispatch.py` carries the same pair for the same reason, and
@@ -181,6 +202,43 @@ def tracked_ids(tracked_path, tasks_dir):
     return out
 
 
+def heartbeat_live(sid8, live_dir=LIVE_DIR, ttl_s=HEARTBEAT_TTL_S, now=None):
+    """True when the heartbeat store holds a FRESH stamp for `sid8`.
+
+    The union's second half. It is the only liveness source that covers a headless
+    worker: such a worker is an in-process SDK `query()` with no pid, so
+    `registry_status` can never list it, and without this the registry half is
+    UNAVAILABLE rather than negative — which is why `is_gated` needs to tell the
+    two apart instead of reading both as UNREGISTERED.
+
+    ⚠️ The stamp's **mtime** is the age authority, never the `at` field inside it
+    (`server/heartbeat.mjs:62`). The write sets mtime, so it cannot disagree with
+    itself; an `at` left behind by a crashed writer would report a dead session
+    live for as long as the file survives.
+
+    A missing or unreadable store is False rather than an exception: an absent
+    heartbeat is exactly what every session on a host without the store produces,
+    and the registry half already covers those.
+    """
+    now = time.time() if now is None else now
+    try:
+        names = os.listdir(live_dir)
+    except OSError:
+        return False
+    for name in sorted(names):
+        if not name.endswith(".json") or name[:-5] in LIVE_SKIP:
+            continue
+        if not name.startswith(sid8):
+            continue
+        try:
+            age = now - os.path.getmtime(os.path.join(live_dir, name))
+        except OSError:
+            continue
+        if age <= ttl_s:
+            return True
+    return False
+
+
 def registry_status(sid8, sessions_dir=SESSIONS_DIR, warned=None):
     """Registry status for a session id or its 8-char prefix, or None if unlisted.
 
@@ -232,8 +290,27 @@ def registry_status(sid8, sessions_dir=SESSIONS_DIR, warned=None):
     return None
 
 
-def last_assistant_text(path):
-    """Last assistant text block in the transcript, or None when there is none.
+def read_tail(path, window=400_000):
+    """The decoded tail of the transcript, or None when it cannot be read.
+
+    ⚠️ The window is lossy, and the loss is measured rather than theoretical. On
+    the e4fd1919 transcript (3.8 MB, measured 2026-10-05): of 26 `Stream closed`
+    records, 18 fall inside a 400 KB tail and 8 outside, the first sitting 69%
+    through the file. Enough to fire on that fixture; a longer-lived worker drifts
+    further out. Both readers below share this ONE window rather than paying for a
+    second read on every poll.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            fh.seek(max(0, size - window))
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def assistant_text_from_tail(tail):
+    """Last assistant text block in a decoded tail, or None when there is none.
 
     ⚠️ `None` means "the tail window held no assistant text at all", which is NOT
     the same as "the last text block carries no closer". Collapsing the two is a
@@ -241,17 +318,7 @@ def last_assistant_text(path):
     appended more than that in `tool_result` records after the closer pushes the
     closer out of reach, and an `idle` worker still parked on a live ask would read
     as "no closer" and be cleared. The caller holds instead; see `_CLOSER_UNKNOWN`.
-
-    Reads the tail only. A transcript is unbounded and this runs every poll for
-    every tracked worker; the last message is at the end by definition.
     """
-    try:
-        size = os.path.getsize(path)
-        with open(path, "rb") as fh:
-            fh.seek(max(0, size - 400_000))
-            tail = fh.read().decode("utf-8", "replace")
-    except OSError:
-        return None
     text = ""
     for line in tail.splitlines():
         line = line.strip()
@@ -270,6 +337,16 @@ def last_assistant_text(path):
             if isinstance(blk, dict) and blk.get("type") == "text" and blk.get("text"):
                 text = blk["text"]
     return text or None
+
+
+def last_assistant_text(path):
+    """`assistant_text_from_tail` for a transcript path, or None when unreadable.
+
+    Reads the tail only. A transcript is unbounded and this runs every poll for
+    every tracked worker; the last message is at the end by definition.
+    """
+    tail = read_tail(path)
+    return None if tail is None else assistant_text_from_tail(tail)
 
 
 def closer_body(text):
@@ -312,15 +389,88 @@ def is_ask(body):
                 or verb.startswith(PARKED_VERBS))
 
 
-def is_gated(status, body):
+def permission_failure_run(tail):
+    """Longest run of consecutive permission failures in the transcript tail.
+
+    ⚠️ **"Consecutive" counts among PERMISSION OUTCOMES, not consecutive records.**
+    The run breaks on a `tool_result` that is not a permission failure and ignores
+    every other record type. A record-consecutive reading resets on the assistant
+    text and attachments interleaved between failures, and the longest such run in
+    the e4fd1919 transcript is **1** — the ≥3 trigger would never fire and would be
+    dead code. Measured 2026-10-05; the operator chose the outcome reading.
+
+    A permission failure is a `tool_result` carrying `is_error` and the harness's
+    own wording: `Tool permission request failed: AbortError: Stream closed`.
+    """
+    if not tail:
+        return 0
+    run = best = 0
+    for line in tail.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        content = (rec.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for blk in content:
+            if not isinstance(blk, dict) or blk.get("type") != "tool_result":
+                continue
+            if blk.get("is_error") and PERM_FAILURE_MARK in str(blk.get("content") or ""):
+                run += 1
+                best = max(best, run)
+            else:
+                run = 0
+    return best
+
+
+def stuck_reason(text, tail):
+    """Why a worker reads STUCK, or None. Three triggers, OR'd, most specific first.
+
+    Ordering is not cosmetic: when a worker both lost its channel and counted three
+    failures, the reason should name the CAUSE (`stream-closed`) rather than the
+    symptom (`permission-failures`) — the operator reading the card acts on the
+    first and merely confirms the second.
+
+    `blocked-closer` matches the state line as a line PREFIX. The phrase also occurs
+    mid-line in a worker's own prose about it (the e4fd1919 transcript quotes it),
+    and a substring match would fire on a worker that is merely discussing a block.
+    """
+    if tail and "Stream closed" in tail:
+        return "stream-closed"
+    if text and any(l.strip().startswith(BLOCKED_PREFIX) for l in text.splitlines()):
+        return "blocked-closer"
+    if permission_failure_run(tail) >= STUCK_PERM_FAILURES:
+        return "permission-failures"
+    return None
+
+
+def is_gated(status, body, headless_live=False, stuck=None):
     """The composite predicate. Returns (gated, reason).
 
     See the module docstring for why it is a union rather than either half.
     `None` status means UNREGISTERED, which is held rather than cleared and is
     reported as such so the caller can record it.
+
+    ⚠️ UNREGISTERED and HEADLESS are different facts and must not collapse. A
+    `None` status with a fresh heartbeat means the registry cannot list this
+    session — a headless worker, which has no pid — so the registry half is
+    UNAVAILABLE rather than negative, and the transcript half decides alone.
+    Reading both as UNREGISTERED is what holds every headless worker forever.
     """
+    if stuck:
+        return True, "stuck:" + stuck
     if status is None:
-        return None, "unregistered"
+        if not headless_live:
+            return None, "unregistered"
+        if body is _CLOSER_UNKNOWN:
+            return None, "closer-unknown"
+        if is_ask(body):
+            return True, "headless+closer"
+        return False, "headless:no-ask"
     if status == "waiting":
         return True, "registry:waiting"
     if body is _CLOSER_UNKNOWN:
@@ -334,7 +484,7 @@ def is_gated(status, body):
 
 
 def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
-          warned=None):
+          warned=None, live_dir=LIVE_DIR):
     """{sid8: (task name, detail, reason, verdict)} for every tracked worker
     that has a transcript.
 
@@ -368,7 +518,8 @@ def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
                       f"({label}) under {projects_root} — NOT watched; this is "
                       f"not a quiet sweep", file=sys.stderr, flush=True)
             continue
-        text = last_assistant_text(cands[0])
+        tail = read_tail(cands[0])
+        text = None if tail is None else assistant_text_from_tail(tail)
         if text is None:
             # The tail window held no assistant text at all. Warned, because this
             # is the one degraded read here that would otherwise be silent — and
@@ -381,9 +532,16 @@ def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
             body = _CLOSER_UNKNOWN
         else:
             body = closer_body(text)
+        stuck = stuck_reason(text, tail)
         verdict, reason = is_gated(
-            registry_status(sid8, sessions_dir, warned), body)
-        detail = body if isinstance(body, str) and body else reason
+            registry_status(sid8, sessions_dir, warned), body,
+            headless_live=heartbeat_live(sid8, live_dir), stuck=stuck)
+        if stuck:
+            # The reason is the signal; the closer body is context for whoever
+            # reads the card, so it is appended rather than replacing it.
+            detail = f"{reason} — {body}" if isinstance(body, str) and body else reason
+        else:
+            detail = body if isinstance(body, str) and body else reason
         state[sid8] = (label, detail[:150], reason, verdict)
     return state
 
@@ -513,6 +671,10 @@ def main(argv=None):
                          "resolved across all of them (default: %(default)s)")
     ap.add_argument("--sessions-dir", default=SESSIONS_DIR,
                     help="the session registry (default: %(default)s)")
+    ap.add_argument("--live-dir", default=LIVE_DIR,
+                    help="the supervisor's heartbeat store — the second liveness "
+                         "source, and the only one that covers a headless worker "
+                         "(default: %(default)s)")
     ap.add_argument("--state", default=DEFAULT_STATE,
                     help="state + event-log directory (default: %(default)s). "
                          "⚠️ The state FILE is keyed by --tracked, so two "
@@ -562,7 +724,7 @@ def main(argv=None):
     while True:
         try:
             state = probe(args.tracked, args.tasks_dir, args.projects_root,
-                          args.sessions_dir, warned)
+                          args.sessions_dir, warned, args.live_dir)
             key = gated_keys(state)
             if args.once:
                 for sid8 in key:

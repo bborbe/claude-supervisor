@@ -1,0 +1,12 @@
+{"type":"assistant","message":{"content":[{"type":"text","text":"Starting the index rebuild."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"ok"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"That worked — continuing."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Edit","input":{}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","is_error":false,"content":"ok"}]}}
+{"type":"attachment","message":{"content":"unrelated record between calls"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"Bash","input":{}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t3","is_error":false,"content":"ok"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t4","name":"Write","input":{}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t4","is_error":false,"content":"ok"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"📌 Task: Vault UI Serves Task and Assignee Lists from a Watcher-Maintained Index\n\n🟢 ACTIVE · nothing running · nothing needed\n👤 You: nothing — the topic manager drives this pane; no operator action"}]}}
