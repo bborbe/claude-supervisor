@@ -43,6 +43,15 @@ says so honestly, and the embedded re-check is what settles it for the reader.
 Output is one line on stdout. Exit 0 for the runnable line, 1 for the candidate,
 2 for a usage error.
 
+⚠️ **A `check=True` caller must not read exit 1 as failure.** The candidate is a
+normal outcome — a done task whose session is not confirmed live — and the exit
+code exists so a CLI consumer can branch on it, not so a caller can abort. This
+matters because the wiring this script exists for is `sweep-gate.py`'s
+`action_lines()`, which shells out to its sibling `BOX_TABLE` with
+`subprocess.run(..., check=True)`; copying that pattern verbatim would raise
+`CalledProcessError` on every candidate and take the whole sweep frame down.
+Capture stdout and read the exit code, or call without `check`.
+
 Run: python3 scripts/close-line.py --help
 """
 
