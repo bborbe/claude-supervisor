@@ -65,29 +65,16 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 
 ## Reconcile the subject's status
 
-**Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **The condition is the guard, not decoration** — a copy of the block below *without* it writes `in_progress` over a `hold`. The block is runnable as written: it takes `PAGE` and `BRANCH` from § The page test rather than re-deriving them, **refuses on an unreadable page instead of defaulting**, runs **exactly one** branch rather than firing both on one subject, and uses `case` so a declined guard exits `0` instead of tripping `set -e`. ⚠️ **The refusal is load-bearing, and it is the part that is easy to omit.** Every path that leaves `STATUS` empty for a reason *other* than a genuinely absent field lands on the `""` arm — which writes. A wrong `PAGE` is the likeliest such path, so it must fail closed before the read rather than being folded into the same empty value:
+**Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **The condition is the guard, not decoration** — a write that skips it lands `in_progress` over a `hold`.
 
-```bash
-# PAGE is the path § The page test's find returned, and BRANCH is the branch it detected.
-# ⚠️ Never re-derive PAGE from $SUBJECT: that test matches with -iname, so a plain join
-# would miss a subject typed in a different case than its filename.
-[ -n "$PAGE" ] && [ -f "$PAGE" ] || { echo "❌ subject page not readable at ${PAGE:-<unset>}"; exit 1; }
-# Read the page's own status, normalised. The file is de-CRLF'd *before* awk, because
-# '/^---$/' never matches a CRLF '---\r': on a fully-CRLF page the frontmatter counter never
-# reaches 1, no status is read at all, and the resulting empty STATUS would take the "" arm.
-STATUS=$(tr -d '\r' < "$PAGE" | awk '/^---$/{n++; next} n==1' \
-  | sed -n 's/^status:[[:space:]]*//p' \
-  | tr '[:upper:]' '[:lower:]' | sed -e 's/[[:space:]]*$//')
-case "$STATUS" in
-  ""|todo|next)
-    if [ "$BRANCH" = topic ]; then
-      vault-cli topic set "$SUBJECT" status in_progress
-    else
-      vault-cli goal set "$SUBJECT" status in_progress
-    fi
-    ;;
-esac
-```
+⚠️ **This section carries no runnable snippet, deliberately.** It carried one through six review rounds and it was wrong a different way each time: inputs never assigned anywhere in the tree, an `awk` that never matched a CRLF delimiter, an external `tr`/`sed` that neither writer's `allowed-tools` grants, a branch test whose `else` silently made the goal write the default, and a read keyed on the resolved page while the write was keyed on the raw name. **A markdown block is not executed by `make test`**, so every one of those was a claim nothing could check — and it read as authoritative the whole time, which is the failure mode, not a footnote to it. The guarantees are stated instead, and each is a thing to satisfy rather than a line to copy:
+
+- **Read the page § The page test found** — the path it returned, never a re-derivation from the subject name. That test matches with `-iname`, so a plain `"$TOPICS_DIR/$SUBJECT.md"` join misses a subject typed in a different case than its filename.
+- **Refuse on an unreadable page, before the read.** ⚠️ **This one is load-bearing.** Every path that leaves the status empty for a reason *other* than a genuinely absent field takes the same write arm as an absent field, so a wrong page must fail closed rather than be read as *no status*.
+- **Normalise the value** — strip a trailing CR, strip trailing whitespace, fold case. A CRLF page is the sharp case: `/^---$/` never matches `---\r`, so the read returns nothing at all and the empty result looks exactly like an absent field. This doc mandates case-insensitive comparison three times; the guard is no exception.
+- **Branch on the branch § The page test detected**, and **write through that branch's own command** (`vault-cli goal set` / `vault-cli topic set`). ⚠️ **Never let one branch be the fallback** — a branch that is unset or mistyped and silently takes the goal write puts a topic's name into a goal command.
+- **Write the name derived from the page you read**, not the raw subject argument, or the read and the write can address different pages.
+- **Use only binaries both writers are granted.** `awk` and `vault-cli` are; `tr` and `sed` are not, and a pipeline that reaches for them parks on an approval the command was never scoped for.
 
 ⚠️ **Then read the page back and say what it now reads.** This is the one write in the file that had no read-back contract, and a silent failure leaves the defect above standing for the whole life of the session. Present → `✅ Reconciled: <subject> <old> → in_progress`. Absent, or unchanged → `⚠️ Not reconciled — <subject> still reads <value>`, and continue; **never proceed as though the write landed.**
 

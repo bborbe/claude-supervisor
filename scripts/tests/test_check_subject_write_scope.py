@@ -142,6 +142,30 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("could not be read", result.stderr)
 
+    def test_writer_losing_the_paragraph_marker_fails(self):
+        # The one branch with no mutation pinning it: the imperative can survive while the
+        # shared marker does not, and the paragraph comparison then has nothing to compare.
+        self.mutate(
+            "commands/manager-drive.md",
+            "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.**",
+            "**⚠️ Reconcile the subject's status.**",
+        )
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shared paragraph marker", result.stderr)
+
+    def test_reworded_non_writer_reason_fails(self):
+        # The grant check is keyed on the row's stated reason, so a reworded cell must fail
+        # rather than skip the assertion silently.
+        self.mutate(
+            DOC,
+            "**no** — holds no `Bash(vault-cli:*)` |",
+            "**no** — lacks the grant |",
+        )
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("neither recognised reason", result.stderr)
+
     def test_non_writer_regaining_the_grant_fails(self):
         self.mutate(
             "commands/manager-verify.md",

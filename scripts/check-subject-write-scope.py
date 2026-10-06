@@ -40,17 +40,32 @@ FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---", re.S)
 # The imperative the writers carry. Deliberately the full phrase: a bare mention of the
 # section is what the non-writers carry, so it cannot be the discriminator.
 IMPERATIVE = "§ *Reconcile the subject's status* **now**"
+# The two reasons a non-writer's row may state. Every `no` row must carry one, so a reworded
+# cell fails the check rather than silently skipping the grant assertion keyed on it.
+REASONS = ("holds no `Bash(vault-cli:*)`", "read-only by its own contract")
 PARAGRAPH_MARKER = "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.**"
 STEP_SLOT = re.compile(r"before the (sweep|gate)\b")
 
 
 def paragraph(text: str) -> str | None:
-    """The invocation paragraph — marker to the next blank line."""
+    """The invocation paragraph — bounded at the next blank line, marker or heading.
+
+    Every bound is applied, not just the first found: a marker in a file's last paragraph
+    would otherwise return to end-of-file, and a truncated chunk that happened to match the
+    other writer's full one would mask real drift instead of failing loudly.
+    """
     start = text.find(PARAGRAPH_MARKER)
     if start == -1:
         return None
-    end = text.find("\n\n", start)
-    return text[start:] if end == -1 else text[start:end]
+    end = len(text)
+    for bound in (
+        text.find("\n\n", start),
+        text.find("\n**⚠️ ", start),
+        text.find("\n## ", start),
+    ):
+        if bound != -1:
+            end = min(end, bound)
+    return text[start:end]
 
 
 def main() -> int:
@@ -108,12 +123,25 @@ def main() -> int:
     # The table's stated *reason* is a claim in its own right. Where it names a missing
     # grant, assert the command really lacks it — that is the half that goes stale silently
     # if the grant ever returns, which is the failure this whole check exists to catch.
-    for name, _verdict, tail in table:
-        if "holds no `Bash(vault-cli:*)`" not in tail:
+    for name, verdict, tail in table:
+        if verdict != "no":
             continue
         rel = f"commands/{name}.md"
         path = REPO / rel
         if not path.is_file():
+            continue
+        # Fail closed on the *reason* before checking the grant. Keying the grant check on a
+        # literal tail phrase means a reworded cell skips the loop and reports green — and this
+        # is the assertion guarding the write authority the rule hands out, so a silent skip is
+        # the one outcome that must not be reachable.
+        if not any(reason in tail for reason in REASONS):
+            failures.append(
+                f"{DOC}: the row for `/{name}` is a non-writer but states neither recognised "
+                f"reason ({' / '.join(REASONS)}) — the grant check is keyed on those, so a "
+                f"reworded cell would skip it silently"
+            )
+            continue
+        if "holds no `Bash(vault-cli:*)`" not in tail:
             continue
         # Fail closed: a frontmatter block this regex cannot read is a block whose grants were
         # never checked, and a skipped assertion reports green against text it does not cover.
