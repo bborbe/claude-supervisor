@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.107.0
 - feat: **`spawn_agent` gains `shipping: true`: the headless worker runs under `acceptEdits` with `git add` / `git commit` / `git push` pre-allowed,** so its edits and commits never depend on the supervisor permission channel — a worker whose channel dies (`Tool permission request failed: AbortError: Stream closed`, observed 2026-10-05) can otherwise neither edit nor commit. Delivered through the SDK `settings` option, which loads into the trusted `flag` tier, so no settings file is written. `acceptEdits` is deliberately not one of `POLICY_UNREACHABLE_MODES`, so every other tool still prompts and the approval policy stays in force; a node test fails if that ever changes. Refused on a tab or cluster spawn, mirroring `policySupportError`.
 
 ## v0.106.1
