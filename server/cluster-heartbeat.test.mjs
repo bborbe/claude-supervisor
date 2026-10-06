@@ -155,7 +155,7 @@ test('defaultRun resolves the spawn result, times out to the spawnSync shape, an
 // handles for the rest of the server's life"). The timing bound is the discriminating half: with
 // the grace ignored the child survives the window at the 2 s default, so asserting only "eventually
 // gone" would pass on the pre-change code and prove nothing.
-test('defaultRun reaps a SIGTERM-ignoring child inside the injected grace window', async () => {
+test('defaultRun reaps a SIGTERM-ignoring child inside the injected grace window', async (t) => {
   const pidFile = join(tmp(), 'child.pid')
   const alive = (pid) => {
     try {
@@ -183,6 +183,18 @@ test('defaultRun reaps a SIGTERM-ignoring child inside the injected grace window
   assert.ok(existsSync(pidFile), 'the child wrote its pid well before the 1 s timeout')
   const pid = Number(readFileSync(pidFile, 'utf8').trim())
   assert.ok(Number.isInteger(pid) && pid > 0, `the child reported its pid (${pid})`)
+
+  // Bound the damage on the failure path. If an assertion below throws, or the escalation regresses
+  // and the grace is ignored, the child would otherwise outlive the test by its own 60 s timer and
+  // keep the suite's event loop alive — a red test stalling the run instead of failing fast. Costs
+  // nothing on the pass path: the pid is already gone, so the kill raises ESRCH and is swallowed.
+  t.after(() => {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // already reaped — the expected case
+    }
+  })
 
   // The prompt-resolve half: the escalation must not be bought by making callers wait for it.
   assert.equal(result.signal, 'SIGTERM', 'a timed-out reader resolves as it did under spawnSync')

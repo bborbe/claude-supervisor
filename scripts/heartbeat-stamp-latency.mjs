@@ -146,11 +146,12 @@ setTimeout(() => {
   console.log(`run shape:           ${RUN}`)
   console.log(`interval / TTL:      ${HEARTBEAT_INTERVAL_MS} / ${HEARTBEAT_TTL_MS} ms`)
   // `[].every()` is true, so an all-throws run would otherwise render `0 (all ok=true)` — the one
-  // summary row an operator scans, reading healthy off zero evidence. Say what the sample set is.
+  // summary row an operator scans, reading healthy off zero evidence. And the throw count belongs
+  // OUTSIDE the ternary: a MIXED run (some polls resolved, some threw) renders the all-ok form too,
+  // which is the same unevidenced reading one case over. Append it whenever there were throws.
   const pollSummary =
-    polls.length > 0
-      ? `${polls.length} (all ok=${polls.every((p) => p.ok)})`
-      : `0 successful${pollFailures > 0 ? `, ${pollFailures} threw — see failed-instrument above` : ''}`
+    (polls.length > 0 ? `${polls.length} (all ok=${polls.every((p) => p.ok)})` : '0 successful') +
+    (pollFailures > 0 ? `, ${pollFailures} threw — see failed-instrument above` : '')
   console.log(`cluster polls:       ${pollSummary}`)
   console.log(`worst loop gap:      ${worstLoop} ms   <- how long the event loop was unavailable`)
   console.log(`listLive misses:     ${liveMisses} of ${liveReads} reads   <- a miss is a worker the cap counts dead`)
