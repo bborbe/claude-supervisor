@@ -130,10 +130,21 @@ class PredicateTest(unittest.TestCase):
         # The case the transcript half alone would get wrong in the other
         # direction: a worker that resumed and is working still carries its old
         # closer in the transcript. It is not a gate.
-        self.assertIs(watch.is_gated("busy", CLOSER)[0], False)
+        #
+        # ⚠️ HELD (`None`), not `False`. Both keep it out of the gated set, so
+        # neither raises a false `NEW GATE` — but `False` would also CLEAR a
+        # session that was ALREADY gated, which is the 2026-10-04 defect. See
+        # `test_a_gated_worker_that_starts_a_new_turn_stays_gated`.
+        gated, reason = watch.is_gated("busy", CLOSER)
+        self.assertIsNone(gated)
+        self.assertEqual(reason, "held:busy")
 
     def test_shell_is_not_gated(self):
-        self.assertIs(watch.is_gated("shell", CLOSER)[0], False)
+        # Same shape as `busy`: a status that is neither `waiting` nor `idle`
+        # cannot justify a clear.
+        gated, reason = watch.is_gated("shell", CLOSER)
+        self.assertIsNone(gated)
+        self.assertEqual(reason, "held:shell")
 
     def test_unregistered_is_held_not_cleared(self):
         # None is a three-way answer: UNREGISTERED, never "no gate".
@@ -212,11 +223,46 @@ class DefectTest(unittest.TestCase):
         self.assertIsNone(watch.closer_body(text))
         self.assertNotIn(SID8, watch.gated_keys(self.fx.probe()))
 
-    def test_genuine_answer_clears(self):
-        # SC2's shape: the worker resumed and is working, so it is not a gate.
+    def test_a_gated_worker_that_starts_a_new_turn_stays_gated(self):
+        """THE DEFECT — measured 2026-10-04, reproduced against v0.109.0 2026-10-06.
+
+        A tracked worker sat gated (`idle` + closer), then began new work without
+        answering: ordinary prose displacing the closer, registry `busy`. The
+        watcher emitted a bare `CLEARED` at the mid-turn point even though nothing
+        had been answered and the worker had not finished with the operator.
+
+        The laziest passing fix is a suppression list keyed to the measured
+        session; this fixture carries its own id, so that cannot satisfy it.
+        """
+        self.fx.cleanup()
+        self.fx = Fixture(
+            [assistant(text=CLOSER_LINE), assistant(text=PROSE)], "busy")
+        state = self.fx.probe()
+        self.assertIn(SID8, state, "still tracked, so the caller can see it")
+        self.assertIsNone(state[SID8][3], "mid-turn is HELD, never False")
+        self.assertEqual(state[SID8][2], "held:busy")
+        self.assertNotIn(SID8, watch.gated_keys(state))
+        # The diff over the gated set emits neither a clear nor a re-raise.
+        got = watch.transitions([SID8], watch.gated_keys(state), state)
+        self.assertEqual([k for k, *_ in got], [],
+                         "a mid-turn session keeps its membership")
+
+    def test_genuine_answer_clears_only_once_the_worker_settles(self):
+        # SC2's shape. A worker that resumed and is WORKING is not a gate — but it
+        # is HELD, not cleared, because `busy` is also exactly what a worker that
+        # moved on WITHOUT answering reads. The clear lands when it settles at
+        # `idle` with no live ask, the only state that justifies one.
         self.fx.cleanup()
         self.fx = Fixture([assistant(text=CLOSER_LINE), assistant(text=PROSE)], "busy")
         self.assertNotIn(SID8, watch.gated_keys(self.fx.probe()))
+        self.fx.cleanup()
+        self.fx = Fixture(
+            [assistant(text=CLOSER_LINE), assistant(text=NOTHING_LINE)], "idle")
+        state = self.fx.probe()
+        self.assertEqual(state[SID8][3], False, "settled idle + no ask")
+        self.assertEqual(state[SID8][2], "idle:no-ask")
+        self.assertEqual([k for k, *_ in watch.transitions([SID8], [], state)],
+                         ["CLEARED"], "the answer's one clear")
 
     def test_dead_session_is_held_not_cleared(self):
         # A session that dies while gated must not be announced as a clear. It
@@ -368,9 +414,19 @@ class StateScopeTest(unittest.TestCase):
                          ["HELD"])
 
     def test_genuine_answer_still_clears(self):
-        state = {"aaaa1111": ("A", "x", "registry:busy", False)}
+        # The verdict a genuine answer now produces is the settle at `idle` with
+        # no ask — NOT `registry:busy`, which is HELD. See `is_gated`.
+        state = {"aaaa1111": ("A", "x", "idle:no-ask", False)}
         self.assertEqual([k for k, *_ in watch.transitions(["aaaa1111"], [], state)],
                          ["CLEARED"])
+
+    def test_a_mid_turn_session_keeps_its_membership(self):
+        # HELD-mid-turn must NOT drop the membership the way UNREGISTERED does:
+        # dropping it would forget the gate, and the answer that eventually
+        # arrives would then clear silently — no `CLEARED` at all.
+        state = {"aaaa1111": ("A", "held:busy", "held:busy", None)}
+        self.assertEqual(watch.transitions(["aaaa1111"], [], state), [],
+                         "neither CLEARED nor a re-raise")
 
     def test_new_gate_only_for_newly_gated(self):
         state = {"aaaa1111": ("A", "x", "idle+closer", True),
@@ -412,10 +468,11 @@ class CloserVerbTest(unittest.TestCase):
 
     def test_entity_padded_nothing_does_not_hold_a_session(self):
         # The end-to-end consequence, not just the predicate: `idle` plus a padded
-        # `nothing` must read NOT gated, or the gate never clears.
+        # `nothing` must read NOT gated, or the gate never clears. `idle:no-ask` is
+        # the one verdict that justifies a `CLEARED`.
         verdict, reason = watch.is_gated("idle", "&nbsp;&nbsp;&nbsp;&nbsp;nothing")
-        self.assertFalse(verdict, "a clean close must not be held as gated")
-        self.assertEqual(reason, "registry:idle")
+        self.assertIs(verdict, False, "a clean close must not be held as gated")
+        self.assertEqual(reason, "idle:no-ask")
 
 
 class UnknownCloserTest(unittest.TestCase):
@@ -531,11 +588,30 @@ class CommitLoopTest(unittest.TestCase):
         return out.getvalue()
 
     def test_a_gate_is_announced_once_and_cleared_once(self):
-        clear = {"aaaa1111": ("A", "registry:busy", "registry:busy", False)}
+        clear = {"aaaa1111": ("A", "idle:no-ask", "idle:no-ask", False)}
         out = self._drive([{}, self.GATED, self.GATED, clear, clear])
         self.assertEqual(out.count("NEW GATE"), 1, out)
         self.assertEqual(out.count("CLEARED"), 1, out)
         self.assertIn("CLEARED  aaaa1111", out)
+
+    def test_a_gated_worker_that_starts_a_new_turn_emits_no_cleared(self):
+        """THE DEFECT, at the commit loop — where CLEARED honesty is decided.
+
+        The predicate test pins the verdict; this one pins that the loop turns
+        neither that verdict nor a dropped membership into a printed `CLEARED`.
+        """
+        busy = {"aaaa1111": ("A", "held:busy", "held:busy", None)}
+        out = self._drive([{}, self.GATED, self.GATED, busy, busy])
+        self.assertEqual(out.count("NEW GATE"), 1, out)
+        self.assertNotIn("CLEARED", out, "starting a new turn is not an answer")
+
+    def test_the_clear_lands_when_the_worker_settles(self):
+        """The pair that makes the hold meaningful: SC2's one clear still lands."""
+        busy = {"aaaa1111": ("A", "held:busy", "held:busy", None)}
+        settled = {"aaaa1111": ("A", "idle:no-ask", "idle:no-ask", False)}
+        out = self._drive([{}, self.GATED, self.GATED, busy, busy, settled, settled])
+        self.assertEqual(out.count("NEW GATE"), 1, out)
+        self.assertEqual(out.count("CLEARED"), 1, out)
 
     def test_an_unregistered_session_is_held_and_never_printed(self):
         held = {"aaaa1111": ("A", "unregistered", "unregistered", None)}
@@ -548,7 +624,7 @@ class CommitLoopTest(unittest.TestCase):
         # A is gated throughout; B flips on every poll. Under the whole-set gate
         # this sequence emits nothing at all, including A's own CLEARED.
         b_on = {"bbbb2222": ("B", "pick — 1. alpha", "idle+closer", True)}
-        a_clear = {"aaaa1111": ("A", "registry:busy", "registry:busy", False)}
+        a_clear = {"aaaa1111": ("A", "idle:no-ask", "idle:no-ask", False)}
         out = self._drive([
             {}, self.GATED,
             dict(self.GATED, **b_on),
