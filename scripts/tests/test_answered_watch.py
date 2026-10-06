@@ -252,24 +252,36 @@ class ReconcileTest(unittest.TestCase):
         """
         import urllib.error
 
+        # The name is deliberately identical to `HandleItemTest`'s: these are
+        # twins, one per guarded read path, and the symmetry is the point.
         for exc in (urllib.error.URLError("boom"), OSError("boom")):
-            self.out = io.StringIO()
-            self.err = io.StringIO()
-            seen = {"already"}
-            with mock.patch.object(watch, "fetch_history", side_effect=exc):
-                result = watch.reconcile(
-                    "http://store",
-                    ME,
-                    seen,
-                    self.started,
-                    FakeAttribution(set()),
-                    self.out,
-                    self.err,
-                )
-            self.assertEqual(self.out.getvalue(), "", type(exc).__name__)
-            self.assertIn("could not read history", self.err.getvalue())
-            self.assertIs(result, seen)
-            self.assertEqual(result, {"already"})
+            with self.subTest(exc=type(exc).__name__):
+                self.out = io.StringIO()
+                self.err = io.StringIO()
+                seen = {"already"}
+                with mock.patch.object(watch, "fetch_history", side_effect=exc):
+                    result = watch.reconcile(
+                        "http://store",
+                        ME,
+                        seen,
+                        self.started,
+                        FakeAttribution(set()),
+                        self.out,
+                        self.err,
+                    )
+                self.assertEqual(self.out.getvalue(), "")
+                self.assertIn("could not read history", self.err.getvalue())
+                self.assertIs(result, seen)
+                self.assertEqual(result, {"already"})
+
+        # The recovery the guard exists for, and the half a warn-only assertion
+        # would miss: a failed pass must not poison the next one.
+        # `stream_item_ids` yields `CONNECTED` on every reconnect, so `watch()`
+        # re-enters `reconcile` — assert that second pass still emits.
+        self.err = io.StringIO()
+        recovered = self.run_reconcile([item("late")], seen={"already"})
+        self.assertEqual(self.out.getvalue(), "ANSWERED late\n")
+        self.assertIn("late", recovered)
 
 
 class HandleItemTest(unittest.TestCase):

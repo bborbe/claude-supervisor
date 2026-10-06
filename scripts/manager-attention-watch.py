@@ -49,6 +49,43 @@ The defect needs new assistant TEXT (which displaces the closer) *and* the worke
 still blocked. Also measured: `thinking` and `tool_use` records carry no text, so
 raising a prompt does not by itself change what the transcript half reads.
 
+A MID-TURN SESSION IS HELD, NOT CLEARED
+---------------------------------------
+The union above decides when a session IS gated; it does not by itself decide when
+one STOPS being gated. The complement of the union is not "answered" — it is "not
+currently in one of the two gated shapes", which a worker that simply starts a new
+turn also satisfies.
+
+Measured 2026-10-04, then reproduced against the deployed v0.109.0 copy on
+2026-10-06: a tracked worker sat gated (`idle` + closer), then began new work
+without answering — ordinary assistant prose displacing the closer, registry
+`busy` — and the watcher emitted a bare `CLEARED` at the mid-turn point. Nothing
+had been answered, and the worker had not finished with the operator.
+
+So a status that is neither `waiting` nor `idle` is HELD, and HELD here means
+**membership is unchanged**: no `CLEARED` is emitted (nothing was answered) and no
+`NEW GATE` is raised (the session is already in the set). The gate stays up until
+the worker settles. A `CLEARED` is justified only by a settle at `idle` carrying no
+live ask.
+
+⚠️ **HELD-mid-turn and HELD-unregistered are different facts and must not be
+collapsed.** Both yield no `CLEARED`, but only UNREGISTERED drops the membership —
+there is nothing left to hold for a worker that no longer exists. Dropping a
+mid-turn session instead would forget the gate, and the answer that eventually
+arrives would clear *silently*: a fix for one false clear that produces no true
+one. `transitions` branches on the reason for exactly this.
+
+⚠️ **The accepted cost, stated because it is the decision this limb exists to
+make.** The registry cannot separate "the worker resumed BECAUSE the gate was
+answered" from "the worker moved on WITHOUT answering it" — both read `busy` with
+the closer displaced — so no registry-only predicate distinguishes them. Holding
+therefore OVER-REPORTS: a worker that stays busy indefinitely remains listed as
+gated until it next goes `idle`. That direction is chosen deliberately. A false
+`CLEARED` reads as progress and suppresses the manager's escalation on a gate that
+was never answered; a false `NEW GATE` costs one pane read. The asymmetry is the
+argument — and a closer-text heuristic or a longer debounce is not an alternative
+to it, because the distinction was never in that input (see THE DISCRIMINATOR).
+
 UNREGISTERED IS NOT CLEAR
 -------------------------
 A session the registry does not list yields `None`, which means *unregistered* —
@@ -480,9 +517,19 @@ def stuck_reason(text, tail):
 def is_gated(status, body, headless_live=False, stuck=None):
     """The composite predicate. Returns (gated, reason).
 
-    See the module docstring for why it is a union rather than either half.
-    `None` status means UNREGISTERED, which is held rather than cleared and is
-    reported as such so the caller can record it.
+    See the module docstring for why it is a union rather than either half, and
+    its A MID-TURN SESSION IS HELD section for the `held:<status>` third answer.
+
+    Three answers, and the caller must keep all three apart: `True` gated,
+    `False` NOT gated, `None` HELD — the watcher cannot justify a clear. `None`
+    has two causes and both mean exactly that: UNREGISTERED (the registry cannot
+    list this session) and a status that is neither `waiting` nor `idle` (the
+    worker is mid-turn, so nothing has been answered yet). Collapsing either into
+    `False` emits a `CLEARED` that nothing earned.
+
+    ⚠️ The two `None` causes are NOT interchangeable downstream: a mid-turn hold
+    keeps its gated membership and an unregistered one drops it. `transitions`
+    branches on the `held:` reason prefix — see the module docstring.
 
     ⚠️ UNREGISTERED and HEADLESS are different facts and must not collapse. A
     `None` status with a fresh heartbeat means the registry cannot list this
@@ -512,9 +559,17 @@ def is_gated(status, body, headless_live=False, stuck=None):
         # unknown rather than observed. HELD, never cleared: this is a failed read,
         # and a failed read must not be representable as an empty result.
         return None, "closer-unknown"
-    if status == "idle" and is_ask(body):
-        return True, "idle+closer"
-    return False, "registry:" + str(status)
+    if status == "idle":
+        # Only a SETTLED `idle` decides either way: `idle` + a live ask is a gate,
+        # `idle` + no ask is the one state that justifies a `CLEARED`.
+        return (True, "idle+closer") if is_ask(body) else (False, "idle:no-ask")
+    # ⚠️ Anything else — `busy` (mid-turn), `shell` — is HELD, never cleared.
+    # A gated worker that starts a NEW TURN reads `busy`, which is neither
+    # `waiting` nor `idle`; returning False here emitted a bare `CLEARED` for a
+    # worker that had answered nothing and was still mid-turn. See the module
+    # docstring's A MID-TURN SESSION IS HELD section for the measured sequence and
+    # for the over-report this direction accepts.
+    return None, "held:" + str(status)
 
 
 def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
@@ -616,10 +671,16 @@ def transitions(prev, key, state):
     The `HELD` branch is the reason this is three-valued, and it has TWO causes,
     both of which mean "the watcher cannot justify a clear":
 
-    - the session is in `state` with a `None` verdict — it became UNREGISTERED, so
-      nothing was answered;
+    - the session is in `state` with a `None` verdict and a non-`held:` reason — it
+      became UNREGISTERED, so nothing was answered;
     - the session is absent from `state` entirely — the watcher lost sight of it,
       which is equally not an answer.
+
+    ⚠️ A `None` verdict with a `held:` reason is the THIRD case and takes NEITHER
+    branch: the worker is mid-turn, so the gate stays up and the membership is left
+    exactly as it was — no `CLEARED`, no `NEW GATE`, and no record. Recording a hold
+    on every poll would fill the event log with a state that has not changed. See
+    the module docstring's A MID-TURN SESSION IS HELD section.
 
     ⚠️ The second case is the one the earlier version got wrong: absent-from-`state`
     fell through to a bare `CLEARED`. That is the shared-state-file failure — with a
@@ -647,8 +708,22 @@ def transitions(prev, key, state):
                         "tracked); no CLEARED emitted"))
             continue
         if state[sid8][3] is None:
+            # Two causes, and they need OPPOSITE handling.
+            reason = state[sid8][2]
+            if reason.startswith("held:"):
+                # MID-TURN. The worker has not answered, so the gate stays up.
+                # Membership is left EXACTLY as it was — no `CLEARED` (nothing was
+                # answered) and no `NEW GATE` (it is already in the set).
+                # ⚠️ Keeping it in `prev` is what lets the eventual settle at
+                # `idle` emit the one `CLEARED` a genuine answer earns; discarding
+                # here would forget the gate, and the answer would then clear
+                # SILENTLY — a fix for one false clear that produces no true one.
+                continue
+            # UNREGISTERED: a dead or never-spawned worker. Nothing was answered
+            # here either, but there is nothing left to hold, so the membership is
+            # dropped and the transition is recorded rather than announced.
             out.append(("HELD", sid8, state[sid8][0],
-                        "unregistered; no CLEARED emitted"))
+                        f"{reason}; no CLEARED emitted"))
             continue
         out.append(("CLEARED", sid8, "", "left the gated set"))
     return out
@@ -765,7 +840,7 @@ def main(argv=None):
                     label, detail, reason, _ = state[sid8]
                     print(f"GATED {sid8} [{reason}] {label}: {detail}")
                 held = sorted(s for s, v in state.items() if v[3] is None)
-                print(f"gated: {len(key)}  unregistered(held): {len(held)}")
+                print(f"gated: {len(key)}  held: {len(held)}")
                 return 0
             # STABILITY GATE — PER SESSION. A worker mid-turn flips between "has
             # a closer" and "doesn't" as records interleave, and a single poll

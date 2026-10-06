@@ -138,8 +138,8 @@ def fetch_history(store, limit=HISTORY_LIMIT):
         # an answer that arrived during an outage — the same missed wake the
         # limit exists to remove, just at a higher volume. Warn, never raise: a
         # truncated baseline still beats none, and the watch must not die on a
-        # store that merely grew. This fires on the read's *success* path, so it
-        # writes to stderr directly rather than through a caller's stream.
+        # store that merely grew. `fetch_history` takes no stream parameter, so
+        # it writes to stderr directly rather than through a caller's stream.
         print(
             f"WARN: history read returned {len(items)} items at limit={limit} — "
             "it may be truncated; raise ATTENTION_HISTORY_LIMIT",
@@ -179,12 +179,23 @@ def reconcile(store, session, seen, started_at, attribution, out, err):
         items = fetch_history(store)
     except (urllib.error.URLError, OSError) as exc:
         # ⚠️ An unreadable history must not kill the watch. This read runs on
-        # EVERY (re)connect, and it is the widened ~22 MB one under a 10 s
-        # timeout, so a slow or remote store hits it as a routine condition
-        # rather than a fault. Dying here IS the missed wake the arm exists to
-        # prevent — and a dead watcher is indistinguishable from a quiet one.
-        # Warn and return `seen` unchanged; the next reconnect retries. Mirrors
-        # `handle_item`, which guards its own single-item read the same way.
+        # EVERY (re)connect, and it is the widened ~22 MB one, so a slow or
+        # remote store hits it as a routine condition rather than a fault — and
+        # a dead watcher is indistinguishable from a quiet one until the wake it
+        # was armed for never fires. Warn and return `seen` unchanged; the next
+        # reconnect retries. Mirrors `handle_item`, which guards its own
+        # single-item read with the same tuple.
+        #
+        # Scope of this tuple, stated exactly rather than implied. It covers the
+        # transport failures (`URLError`, `OSError`) and the 10 s read timeout —
+        # `socket.timeout` has been an alias of `TimeoutError`, itself an
+        # `OSError`, since Python 3.10. It does NOT cover
+        # `http.client.IncompleteRead` (an `HTTPException`, hence a bare
+        # `Exception`) or `json.JSONDecodeError` (a `ValueError`), which a
+        # truncated or malformed body raises; those still kill the watch.
+        # Widening the tuple is deliberately out of scope here: the point is to
+        # mirror `handle_item`, and `handle_item` carries the identical gap, so
+        # widening one call site and not the other is the worse inconsistency.
         print(f"WARN: could not read history: {exc}", file=err, flush=True)
         return seen
     for item in items:
