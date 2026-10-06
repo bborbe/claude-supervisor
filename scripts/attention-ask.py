@@ -524,7 +524,12 @@ def _producer_or_refuse(args, out):
 
 
 def _expires_at_or_default(args):
-    """The `expires_at` to send: the caller's, or now + `DEFAULT_ASK_TTL_HOURS`.
+    """The `expires_at` to send: the caller's, or now + `_ask_ttl_hours()`.
+
+    ⚠️ Name the ACCESSOR, not the constant: `_ask_ttl_hours()` honours
+    `$ATTENTION_ASK_TTL_HOURS` first and falls back to `DEFAULT_ASK_TTL_HOURS`,
+    so the two differ exactly when the env knob is set — the case a reader
+    checking this is most likely to be in.
 
     ⚠️ A DEFAULT rather than leaving the field absent, and that is the point of
     the change it ships with. `--expires-at` used to default to `""`, so every
