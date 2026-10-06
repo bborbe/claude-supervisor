@@ -97,6 +97,7 @@ export function buildRecord({
   resumedFrom = null,
   policy = null,
   parentSession = null,
+  role = null,
   spawnedAt,
 }) {
   if (!sessionId) throw new Error('buildRecord needs a sessionId — it is the key')
@@ -118,6 +119,21 @@ export function buildRecord({
     // server policy — the same absence-means-default the other spawn fields use.
     policy,
     parent_session: parentSession,
+    // The role this spawn declared, as resolved by `spawn_agent` from the role map.
+    //
+    // The spawn edge alone cannot say whether a spawned session is a worker or a
+    // manager, and `gate-owner-filter.py`'s `is_manager()` used to read a record as
+    // proof of "worker" for exactly that reason. `spawn_agent(role="manager")` is a
+    // documented call that writes a record, so a manager opened that way was
+    // indistinguishable from the workers it spawns — every peer resolved its workers
+    // `worker-spawner` and re-escalated gates it had already handled. Measured
+    // 2026-10-06: the CDB in Weldall Manager (`1d379d23`, spawned by the Fleet
+    // Manager) had its workers' gates escalated by UI Manager and Fleet Manager at once.
+    //
+    // Null means no role reached this call — a record written before the field
+    // existed. `spawn_agent` defaults the role to `agent` before this point, so a
+    // null here is a pre-field record rather than a spawn that declared nothing.
+    role: role ?? null,
     spawned_at: spawnedAt ?? new Date().toISOString(),
     ended_at: null,
     status: 'running',

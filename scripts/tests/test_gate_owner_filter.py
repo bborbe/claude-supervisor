@@ -88,6 +88,42 @@ class Verdict(unittest.TestCase):
             self.call("w", "worker-1"), (gf.EMIT, "worker-spawner")
         )
 
+    def test_worker_of_a_manager_opened_through_the_worker_path_is_dropped(self):
+        """The measured 2026-10-06 incident, at the hop it actually travels.
+
+        The CDB in Weldall Manager was spawned by the Fleet Manager, so it HAS a
+        ledger record -- hop 3b's `not spawner` guard never fires for it, and the
+        gates that re-escalated are its WORKERS', resolved here at hop 3. The
+        record's `role` is the whole difference: without it this returns
+        `worker-spawner`, which is the reported bug.
+        """
+        ledger = {
+            "mgr-spawned": {
+                "session_id": "mgr-spawned",
+                "parent_session": "fleet",
+                "role": "manager",
+            },
+            "w": {"session_id": "w", "parent_session": "mgr-spawned", "role": "agent"},
+        }
+        live = {"mgr-spawned", "w", "fleet"}
+        self.assertEqual(
+            self.call("w", "mgr-spawned", ledger=ledger, live=live),
+            (gf.DROP, "peer-manager"),
+        )
+
+    def test_worker_of_a_role_agent_spawner_still_emits(self):
+        """The inverse control at the same hop: a fix that dropped every gate
+        would satisfy the case above and destroy the filter."""
+        ledger = {
+            "w2": {"session_id": "w2", "parent_session": "w", "role": "agent"},
+            "w": {"session_id": "w", "parent_session": "mgr", "role": "agent"},
+        }
+        live = {"w2", "w", "mgr"}
+        self.assertEqual(
+            self.call("w2", "w", ledger=ledger, live=live),
+            (gf.EMIT, "worker-spawner"),
+        )
+
     def test_unowned_pane_is_kept(self):
         self.assertEqual(self.call("w", None), (gf.EMIT, "unowned"))
 
@@ -98,6 +134,48 @@ class Verdict(unittest.TestCase):
         """A dead manager's panes are nobody's to route, so they emit."""
         self.assertEqual(
             self.call("w", "manager-gone"), (gf.EMIT, "dead-manager")
+        )
+
+    def test_dead_role_manager_spawner_is_still_kept(self):
+        """The widened class reaches hop 4 too, and must still emit there.
+
+        `is_manager` now returns True for a record declaring `role: "manager"`, so a
+        spawner holding such a record and ABSENT from the live set is a new arrival
+        at the dead-manager arm. It must emit: a dead manager cannot act on its own
+        gate, so nothing duplicates this wake and dropping it would leave the gate
+        owned by nobody.
+        """
+        ledger = {
+            "mgr-dead": {
+                "session_id": "mgr-dead",
+                "parent_session": "fleet",
+                "role": "manager",
+            },
+            "w": {"session_id": "w", "parent_session": "mgr-dead", "role": "agent"},
+        }
+        self.assertEqual(
+            self.call("w", "mgr-dead", ledger=ledger, live={"w"}),
+            (gf.EMIT, "dead-manager"),
+        )
+
+    def test_live_spawnerless_role_manager_own_gate_is_dropped(self):
+        """Hop 3b's second arm, newly reachable.
+
+        A record-bearing manager normally resolves at hop 3 through its spawner and
+        never reaches hop 3b -- but one whose `parent_session` never resolved has no
+        spawner and does. Its own gate must drop as `peer-manager-own`, exactly as a
+        record-less manager's does.
+        """
+        ledger = {
+            "mgr-nospawner": {
+                "session_id": "mgr-nospawner",
+                "parent_session": None,
+                "role": "manager",
+            }
+        }
+        self.assertEqual(
+            self.call("mgr-nospawner", None, ledger=ledger, live={"mgr-nospawner"}),
+            (gf.DROP, "peer-manager-own"),
         )
 
     def test_unknown_liveness_fails_open(self):
@@ -170,6 +248,33 @@ class IsManager(unittest.TestCase):
 
     def test_missing_id_is_not_a_manager(self):
         self.assertFalse(gf.is_manager(None, {}))
+
+    def test_a_record_declaring_the_manager_role_is_a_manager(self):
+        """The case the spawn edge cannot reach: a manager opened through
+        `spawn_agent(role="manager")` has a record of its own, and reading that as
+        proof of "worker" made every peer re-escalate its workers' gates."""
+        ledger = {"m": {"parent_session": "fleet", "role": "manager"}}
+        self.assertTrue(gf.is_manager("m", ledger))
+
+    def test_a_record_declaring_the_agent_role_is_still_a_worker(self):
+        """The inverse control: recording a role must not make every record a
+        manager. A fix that dropped every gate would satisfy the manager case
+        above and destroy the filter."""
+        ledger = {"w": {"parent_session": "m", "role": "agent"}}
+        self.assertFalse(gf.is_manager("w", ledger))
+
+    def test_a_record_with_no_role_is_a_worker(self):
+        """Two shapes, one behaviour, and BOTH are real.
+
+        A record written before the field existed has no `role` KEY at all; a record
+        written by the cluster path carries an explicit `role: null` (the agent
+        literal in `supervisor.mjs` hardcodes it there, because that path returns
+        before role resolution). `record.get("role")` reads both as absent, which is
+        what this asserts. The fixture used to carry only the explicit-null shape
+        while its docstring claimed the key-less one — two different records.
+        """
+        self.assertFalse(gf.is_manager("w", {"w": {"parent_session": "m"}}))
+        self.assertFalse(gf.is_manager("w", {"w": {"parent_session": "m", "role": None}}))
 
 
 class SessionForPane(unittest.TestCase):
