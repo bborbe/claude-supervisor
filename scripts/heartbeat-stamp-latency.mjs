@@ -29,6 +29,15 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+// ⚠️ This is the repo's only `scripts/` → `server/` import edge, and it is kept deliberately.
+// The harness exists to measure the REAL stamp path — `pollCluster`'s actual spawn behaviour and
+// `stampRecord`/`listLive`'s actual write and read — so re-implementing either here would measure
+// the copy rather than the server, which is the one thing this comparison cannot survive. The edge
+// only ever runs this way: `server/` reaches `scripts/` by spawning the Python readers as
+// subprocesses — `server/cluster-heartbeat.mjs:38` resolves `READER` and `:141` runs it — and never
+// by import, since no file under `server/` imports from `scripts/`. And this file is a dev instrument
+// run by hand, not part of the shipped server, so the direction is inverted for a diagnostic
+// rather than for runtime code.
 import { pollCluster } from '../server/cluster-heartbeat.mjs'
 import { HEARTBEAT_INTERVAL_MS, HEARTBEAT_TTL_MS, listLive, stampRecord } from '../server/heartbeat.mjs'
 
@@ -60,6 +69,7 @@ const run = RUN === 'async' ? asyncRun : blockingRun
 
 const sessions = OFFSETS_MS.map((offset) => ({ offset, id: `probe-${offset}`, writes: [] }))
 const polls = []
+let pollFailures = 0
 const timers = []
 
 // Loop liveness: the worst gap between ticks is how long the loop was unavailable.
@@ -85,8 +95,23 @@ liveTicker.unref?.()
 timers.push(
   setInterval(async () => {
     const started = Date.now()
-    const result = await pollCluster({ dir, run })
-    polls.push({ started, ended: Date.now(), ok: result.ok })
+    try {
+      const result = await pollCluster({ dir, run })
+      polls.push({ started, ended: Date.now(), ok: result.ok })
+    } catch (error) {
+      // A throw here is a broken instrument, not a measurement — `pollCluster` rejects on something
+      // the harness itself did wrong (an ENOSPC inside `stampRecord`, say). Left uncaught it becomes
+      // an unhandled rejection that takes the whole run down before it prints anything, so every
+      // OTHER instrument's numbers are lost with it. Print the failure and let the run finish: the
+      // line is the signal, and the per-offset table that follows is still the measurement.
+      //
+      // Deliberately not a `process.on('unhandledRejection')` handler. The rule that one must exit
+      // non-zero (node/lifecycle/crash-on-unhandled-rejection) is about a service left in an unknown
+      // state after an uncaught exception, and its enforcement matches that registration. This
+      // handles one known call's failure at its own call site, which is the narrower thing.
+      pollFailures += 1
+      console.error(`failed-instrument: cluster poll threw: ${error?.stack ?? error}`)
+    }
   }, HEARTBEAT_INTERVAL_MS),
 )
 
@@ -120,7 +145,14 @@ setTimeout(() => {
 
   console.log(`run shape:           ${RUN}`)
   console.log(`interval / TTL:      ${HEARTBEAT_INTERVAL_MS} / ${HEARTBEAT_TTL_MS} ms`)
-  console.log(`cluster polls:       ${polls.length} (all ok=${polls.every((p) => p.ok)})`)
+  // `[].every()` is true, so an all-throws run would otherwise render `0 (all ok=true)` — the one
+  // summary row an operator scans, reading healthy off zero evidence. And the throw count belongs
+  // OUTSIDE the ternary: a MIXED run (some polls resolved, some threw) renders the all-ok form too,
+  // which is the same unevidenced reading one case over. Append it whenever there were throws.
+  const pollSummary =
+    (polls.length > 0 ? `${polls.length} (all ok=${polls.every((p) => p.ok)})` : '0 successful') +
+    (pollFailures > 0 ? `, ${pollFailures} threw — see failed-instrument above` : '')
+  console.log(`cluster polls:       ${pollSummary}`)
   console.log(`worst loop gap:      ${worstLoop} ms   <- how long the event loop was unavailable`)
   console.log(`listLive misses:     ${liveMisses} of ${liveReads} reads   <- a miss is a worker the cap counts dead`)
   console.log('')
