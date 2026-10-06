@@ -52,6 +52,17 @@ test('buildRecord records which policy the worker ran under', () => {
   assert.equal(spawnRecord({ policy: '/etc/strict.json' }).policy, '/etc/strict.json')
 })
 
+test('buildRecord records the role the spawn declared', () => {
+  // The spawn edge alone cannot say whether a spawned session is a worker or a manager,
+  // and `gate-owner-filter.py` used to read any record as proof of "worker" — so a manager
+  // opened with `spawn_agent(role="manager")` was read as a worker by every peer manager
+  // and its workers' gates were escalated twice. `spawn_agent` defaults the role to `agent`
+  // before this point, so a null here is a pre-field record, not an undeclared role.
+  assert.equal(spawnRecord().role, null, 'a spawn that declared no role records none')
+  assert.equal(spawnRecord({ role: 'manager' }).role, 'manager')
+  assert.equal(spawnRecord({ role: 'agent' }).role, 'agent')
+})
+
 test('buildRecord refuses a record it could not file', () => {
   assert.throws(() => buildRecord({ mode: 'interactive' }), /needs a sessionId/)
   assert.throws(() => buildRecord({ sessionId: SESSION, mode: 'telepathy' }), /unknown mode/)

@@ -171,6 +171,27 @@ class IsManager(unittest.TestCase):
     def test_missing_id_is_not_a_manager(self):
         self.assertFalse(gf.is_manager(None, {}))
 
+    def test_a_record_declaring_the_manager_role_is_a_manager(self):
+        """The case the spawn edge cannot reach: a manager opened through
+        `spawn_agent(role="manager")` has a record of its own, and reading that as
+        proof of "worker" made every peer re-escalate its workers' gates."""
+        ledger = {"m": {"parent_session": "fleet", "role": "manager"}}
+        self.assertTrue(gf.is_manager("m", ledger))
+
+    def test_a_record_declaring_the_agent_role_is_still_a_worker(self):
+        """The inverse control: recording a role must not make every record a
+        manager. A fix that dropped every gate would satisfy the manager case
+        above and destroy the filter."""
+        ledger = {"w": {"parent_session": "m", "role": "agent"}}
+        self.assertFalse(gf.is_manager("w", ledger))
+
+    def test_a_record_with_no_role_is_a_worker(self):
+        """A pre-field record. `spawn_agent` defaults the role to `agent` before
+        the record is built, so an absent field means "written before the field
+        existed" — and every manager from that era has no record at all."""
+        ledger = {"w": {"parent_session": "m", "role": None}}
+        self.assertFalse(gf.is_manager("w", ledger))
+
 
 class SessionForPane(unittest.TestCase):
     def test_newest_open_item_wins(self):

@@ -92,10 +92,13 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
   "session_id": "b26cb46e-…", "agent_id": "agent_1", "label": "ledger-drill-tab",
   "mode": "interactive", "launcher": "…/cc-private-deepseek", "pane_id": "1714",
   "resumed_from": null, "policy": null, "parent_session": "0096a027-…",
+  "role": "agent",
   "spawned_at": "2026-09-14T06:10:31.153Z", "ended_at": null,
   "status": "running", "result": null
 }
 ```
+
+`role` is the role the spawn declared, as resolved by `spawn_agent` from the role map (`manager` / `agent` / `human`; `agent` is the default). It is recorded because **the spawn edge alone cannot tell a manager from a worker**: `/supervisor:open` starts a topic manager in a plain wezterm tab, which writes no record at all, while `spawn_agent(role="manager")` writes one — and `gate-owner-filter.py`'s `is_manager()` reads a record as proof of "worker". Without this field a manager opened through the worker path was invisible to every peer manager, which then re-escalated gates it had already handled (measured 2026-10-06). `null` means the record was written before the field existed; those are read as workers, because every manager from that era has no record at all.
 
 `parent_session` is the **spawn edge** — the manager session that called `spawn_agent`, resolved once by walking up from this server's own pid to the **nearest ancestor the live registry knows**. It is *not* the direct parent pid: `.mcp.json` starts this server through a `bun run` wrapper, so the direct parent is that wrapper and a bare `process.ppid` lookup named nothing — which is why this field was `null` in every record written before the walk existed. When no ancestor is registered — an exited manager, or a chain that never passed through a session — the field stays `null` rather than carrying a guess. Nothing else records it. A worker whose session id never resolved gets no record rather than one filed under a key nothing would look up, and the server logs that rather than staying quiet.
 

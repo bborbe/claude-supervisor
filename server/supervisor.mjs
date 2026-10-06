@@ -515,6 +515,11 @@ function writeLedger(agent, patch) {
       policy: agent.policyPath ?? null,
       shipping: agent.shipping === true,
       parentSession: agent.parentSession ?? null,
+      // The role this spawn declared. Carried into the record because the spawn edge
+      // cannot otherwise distinguish a manager from a worker: `gate-owner-filter.py`
+      // reads a record as proof of "worker", so a manager spawned with
+      // `role="manager"` was read as a worker by every peer manager.
+      role: agent.role ?? null,
       spawnedAt: agent.createdAt,
     })
     writeRecord(config.ledgerDir, record)
