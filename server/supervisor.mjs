@@ -1176,6 +1176,56 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     agent.launcher = res.launcher ?? null
     agent.transcriptDir = transcriptDirFor(agent.cwd)
     writeLedger(agent)
+
+    // ⚠️ **The bind is the tab path's missing half, and it is not bookkeeping.** A tab
+    // worker's session id is learned only by polling the registry (above), and until it
+    // is written to the task's `claude_session_id` the vault cannot resolve the worker
+    // at all. That is what left a parked worker invisible to
+    // `manager-attention-watch.py`: its `parked-on-unregistered-gate` cell fires only
+    // when a LIVE session owns the row, and with no stamp the row falls to the orphan
+    // path instead — measured 2026-10-05, a worker parked on a question sat unnoticed
+    // for 30+ minutes.
+    //
+    // Reuses `bindSessionToTask` rather than writing the field directly: it already
+    // implements the ownership rule (stamp only when the field is EMPTY, else append to
+    // `metrics_sessions`), and a second writer here would be a second definition of who
+    // owns a task — which is exactly the displacement that module's own docstring
+    // records.
+    //
+    // ⚠️ **NOT fatal, unlike the cluster path's bind.** A cluster worker has no pane, so
+    // a failed bind there leaves a session nothing points at and the caller is told. This
+    // worker is reachable by pane and by ledger, so failing the spawn would destroy a live
+    // worker to report a bookkeeping failure. Reported on the response instead, and logged
+    // because the response is easy to drop.
+    let bind = null
+    // ⚠️ `typeof task === 'string'` is not defensive padding: the cluster branch
+    // type-checks `task` at its own entry, but the local path does not, and a
+    // non-string reaches `spawnSync('vault-cli', args)` as an argv element and throws
+    // `ERR_INVALID_ARG_TYPE` — AFTER the tab is spawned and registered. That throw
+    // would lose the response for a worker that is already live.
+    if (typeof task === 'string' && task && agent.sessionId) {
+      // ⚠️ `workerTarget.vault`, never the raw `vault` argument. The argument is
+      // `undefined` for a cwd-only spawn — an explicitly supported shape — and
+      // `bindSessionToTask` omits `--vault` when it is falsy, so the write would land
+      // in vault-cli's DEFAULT vault rather than the one this worker resolved to. The
+      // agent record above already carries `workerTarget.vault` for the same reason.
+      try {
+        const bound = bindSessionToTask({ task, vault: workerTarget.vault, sessionId: agent.sessionId })
+        if (bound.error) {
+          bind = { error: bound.error }
+          log(`WARNING: worker ${id} spawned but binding it to task failed: ${String(bound.error).replace(/[\r\n]+/g, ' ')}`)
+        } else {
+          bind = { action: bound.action, vault: bound.vault }
+        }
+      } catch (error) {
+        // Same reasoning as the non-fatal `bound.error` branch: the worker is live and
+        // reachable, so a bind that throws must be reported, never allowed to escape
+        // and discard the spawn response.
+        bind = { error: String(error && error.message ? error.message : error) }
+        log(`WARNING: worker ${id} spawned but the task bind threw: ${String(bind.error).replace(/[\r\n]+/g, ' ')}`)
+      }
+    }
+
     return {
       agent_id: id,
       label: agent.label,
@@ -1204,6 +1254,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // checked only that the send had not errored — which is how a spawn reported
       // `applied: true` for a colour that never applied (3 of 6 spawns, 2026-09-20).
       color: res.color ? (res.color.error ? { error: res.color.error } : { applied: true }) : null,
+      // The task this worker was opened for, and whether the vault's record of it was
+      // written. `null` when the caller named no task (the stamp is optional for a tab
+      // worker, unlike the cluster path). Reported rather than swallowed for the same
+      // reason the cluster path reports it: a spawn whose owner was never recorded is a
+      // worker the fleet cannot find, and it otherwise reads exactly like a clean one.
+      bind,
     }
   }
 
@@ -1386,7 +1442,7 @@ const TOOLS = [
         task: {
           type: 'string',
           description:
-            'The vault task this worker is opened for. REQUIRED with `target: "cluster"` and ignored otherwise: the cluster path binds the created session id to this task\'s `claude_session_id`, which is what makes the worker reachable from the vault. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+            'The vault task this worker is opened for. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with `target: "cluster"`. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
         },
         vault: {
           type: 'string',

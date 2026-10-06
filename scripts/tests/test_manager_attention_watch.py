@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -138,6 +139,52 @@ class PredicateTest(unittest.TestCase):
         gated, reason = watch.is_gated("busy", CLOSER)
         self.assertIsNone(gated)
         self.assertEqual(reason, "held:busy")
+
+    # --- The third limb: a pending modal on a frozen transcript ---------------
+    #
+    # Measured 2026-10-05 (task: "A Tab Worker Parked on AskUserQuestion Reads
+    # busy in the Session Registry"). A CLEAN park reads `waiting` and the first
+    # half catches it; a park with prose alongside the `AskUserQuestion` tool_use
+    # reads `busy` AND has its closer displaced by that prose, so BOTH existing
+    # halves miss. Neither half is repairable alone — the registry cannot see the
+    # displaced closer, and the transcript cannot see "is it moving".
+    # `CLAUDE.md` § Reading a worker states the pair exactly: "the transcript
+    # answers *which call*, the registry answers *is it moving*".
+
+    def test_busy_parked_on_a_modal_is_gated(self):
+        gated, reason = watch.is_gated("busy", PROSE,
+                                       pending="AskUserQuestion", frozen=True)
+        self.assertIs(gated, True)
+        self.assertEqual(reason, "busy+parked-modal")
+
+    def test_busy_on_a_fresh_modal_is_held_not_gated(self):
+        # An unmatched `tool_use` is not by itself proof of a park: between the
+        # record landing and the modal rendering there is a window where the call
+        # is pending and nothing is frozen. The freeze is what rules it out — and
+        # the answer is HELD (`None`), never a clear, because a `busy` row is
+        # mid-turn and nothing has been answered.
+        self.assertIsNone(
+            watch.is_gated("busy", PROSE, pending="AskUserQuestion",
+                           frozen=False)[0])
+
+    def test_busy_frozen_on_a_non_modal_tool_is_held_not_gated(self):
+        # A long `Bash` call is frozen too. Only a modal is definitionally a wait
+        # on the operator, so the call NAME is load-bearing and the freeze is not
+        # sufficient alone — this is the case `CLAUDE.md:66` measured across 25
+        # live sessions, where a pending call read identically parked or not.
+        # HELD, not cleared: this limb must not widen into "any frozen busy row".
+        self.assertIsNone(
+            watch.is_gated("busy", PROSE, pending="Bash", frozen=True)[0])
+
+    def test_parked_modal_is_gated_even_with_no_readable_closer(self):
+        # The limb does not read the closer at all, so an unreadable transcript
+        # tail must not demote it to HELD — which is what the `_CLOSER_UNKNOWN`
+        # branch below it would otherwise do.
+        gated, reason = watch.is_gated(
+            "busy", watch._CLOSER_UNKNOWN,
+            pending="AskUserQuestion", frozen=True)
+        self.assertIs(gated, True)
+        self.assertEqual(reason, "busy+parked-modal")
 
     def test_shell_is_not_gated(self):
         # Same shape as `busy`: a status that is neither `waiting` nor `idle`
@@ -682,6 +729,62 @@ class OnceModeTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("GATED " + SID8, out.getvalue())
             self.assertIn("idle+closer", out.getvalue())
+        finally:
+            fx.cleanup()
+
+
+class ParkedModalProbeTest(unittest.TestCase):
+    """The third limb end-to-end, through `probe()`.
+
+    The predicate tests above pin the branch; these pin that `probe()` actually
+    FEEDS it. A pending-call read or an mtime read that never reaches `is_gated`
+    would leave every predicate test above green and the defect wide open, so the
+    two halves are pinned separately on purpose.
+    """
+
+    def _fixture(self, tool, status, age_seconds):
+        fx = Fixture([assistant(text=CLOSER_LINE),
+                      assistant(text=PROSE, tool=tool)], status)
+        past = time.time() - age_seconds
+        os.utime(fx.transcript, (past, past))
+        return fx
+
+    def test_parked_modal_is_gated_through_probe(self):
+        fx = self._fixture("AskUserQuestion", "busy", watch.LIVE_WINDOW + 60)
+        try:
+            self.assertIn(SID8, watch.gated_keys(fx.probe()))
+        finally:
+            fx.cleanup()
+
+    def test_fresh_modal_is_not_gated_through_probe(self):
+        fx = self._fixture("AskUserQuestion", "busy", 5)
+        try:
+            self.assertNotIn(SID8, watch.gated_keys(fx.probe()))
+        finally:
+            fx.cleanup()
+
+    def test_frozen_long_tool_is_not_gated_through_probe(self):
+        fx = self._fixture("Bash", "busy", watch.LIVE_WINDOW + 60)
+        try:
+            self.assertNotIn(SID8, watch.gated_keys(fx.probe()))
+        finally:
+            fx.cleanup()
+
+    def test_answered_modal_is_not_gated_through_probe(self):
+        # The worker ANSWERED and moved on: its `tool_result` is in the
+        # transcript, so nothing is pending even though the file is old. Without
+        # this the limb would fire on every long-lived session that ever asked a
+        # question — the false-positive direction, which is the louder failure.
+        fx = Fixture([assistant(text=CLOSER_LINE),
+                      assistant(text=PROSE, tool="AskUserQuestion")], "busy")
+        try:
+            with open(fx.transcript, "a") as fh:
+                fh.write(json.dumps({"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t1",
+                     "content": "answered"}]}}) + "\n")
+            past = time.time() - (watch.LIVE_WINDOW + 60)
+            os.utime(fx.transcript, (past, past))
+            self.assertNotIn(SID8, watch.gated_keys(fx.probe()))
         finally:
             fx.cleanup()
 
