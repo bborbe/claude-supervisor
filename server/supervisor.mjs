@@ -39,7 +39,6 @@ import { fetchOpenCards } from './open-cards.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
-import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -917,7 +916,7 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 // session in `metrics_sessions`) is the kind of thing that needs a test beside it. See that
 // module's header for why displacing an existing owner is the defect it exists to prevent.
 
-async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed, shipping }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed }) {
   const id = `agent_${++seq}`
 
   // The target is resolved before the mode, and it SHORT-CIRCUITS. A cluster worker is not
@@ -934,8 +933,6 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const spawnTarget = resolveSpawnTarget({ target })
   if (spawnTarget.error) return { error: spawnTarget.error }
   if (spawnTarget.target === 'cluster') {
-    const unsupportedShipping = shippingSupportError({ shipping, cluster: true })
-    if (unsupportedShipping) return { error: unsupportedShipping }
     return spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed })
   }
 
@@ -987,9 +984,6 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // refused, not accepted and quietly ignored.
   const unsupportedPolicy = policySupportError({ policy: policyPath, interactive: opensInteractive })
   if (unsupportedPolicy) return { error: unsupportedPolicy }
-  // Same class again: shipping settings a tab worker would never load are refused.
-  const unsupportedShipping = shippingSupportError({ shipping, interactive: opensInteractive })
-  if (unsupportedShipping) return { error: unsupportedShipping }
 
   // Resolved before anything is spawned, so a bad path costs no worker, no ledger
   // record, and no half-started session running under rules nobody chose.
@@ -1230,12 +1224,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // create cannot be supervised, but one you resume you do create.
       ...(resume ? { resume } : {}),
       // Resolved and validated once at module load — never read env in the hot path.
-      // A shipping worker runs under `acceptEdits` instead, so its edits and its three git
-      // verbs never depend on the permission channel; see shipping-settings.mjs for why
-      // that mode and not a wider one. The option and the flag-tier `settings` say the
-      // same thing on purpose: either alone leaves a reader to wonder which one won.
-      permissionMode: shipping === true ? SHIPPING_PERMISSION_MODE : PERMISSION_MODE,
-      ...(shipping === true ? { settings: shippingSettings(true) } : {}),
+      permissionMode: PERMISSION_MODE,
       canUseTool: makeCanUseTool(agent),
       hooks: { PermissionRequest: [{ hooks: [makePermissionHook(agent)] }] },
     },
@@ -1400,11 +1389,6 @@ const TOOLS = [
           },
           required: ['item_id', 'behavior'],
         },
-        shipping: {
-          type: 'boolean',
-          description:
-            'Mark this worker as SHIPPING: it runs under `acceptEdits` with `git add` / `git commit` / `git push` pre-allowed, so its edits and commits never depend on the supervisor permission channel — a headless worker whose channel dies ("Stream closed") can otherwise neither edit nor commit. Every other tool still prompts, so the approval policy stays in force. Headless and local only: combining it with interactive:true or target:"cluster" is refused. Omit for an ordinary worker.',
-        },
         policy: {
           type: 'string',
           description:
@@ -1549,8 +1533,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // omitted argument to a boolean here is what made the mode config unreachable.
           operatorNamed: args.operator_named,
           policy: args.policy,
-          // Only a literal `true` opts in — see shippingSettings.
-          shipping: args.shipping,
           // Passed through raw and validated in role-map.mjs, which owns the legal values
           // and the refusal message — the same split as the spawn mode below.
           role: args.role,
