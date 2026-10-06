@@ -468,6 +468,46 @@ class PostTest(unittest.TestCase):
                     self.assertIn("ATTENTION_ASK_TTL_HOURS", str(caught.exception))
                     self.assertIn(bad, str(caught.exception))
 
+    def test_a_bad_ttl_env_is_refused_on_stdout_with_exit_two(self):
+        """The refusal CONTRACT, driven through the command a caller actually runs.
+
+        ⚠️ Asserting `_ConfigRefused` on the helper is not this test, and the
+        difference is the regression. An earlier revision put the message on
+        stderr and exited 1 — this script's *store failed* code — and the
+        try/except that fixes it lives in `_post_and_report`, which a later edit
+        could drop with the suite staying green. Both halves are pinned: the
+        token on `out`, and the code. `urlopen` is deliberately NOT mocked, so a
+        refusal that reached the store fails loudly here instead of passing.
+        """
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "0"}):
+            rc = ask.cmd_post(post_args(), out=out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out.getvalue())
+        self.assertIn("ATTENTION_ASK_TTL_HOURS", out.getvalue())
+
+    def test_a_bad_ttl_env_is_refused_on_the_batch_arm_too(self):
+        """Both posting arms, because each has its own refusal path to `out`."""
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "1e30"}):
+            rc = ask.cmd_post_batch(batch_args(), out=out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out.getvalue())
+
+    def test_a_large_finite_ttl_is_refused_rather_than_overflowing(self):
+        """The upper bound, which `isfinite` alone does not provide.
+
+        ⚠️ `1e30` is finite and positive, so it passes every guard but the upper
+        one and then raises `OverflowError` inside `timedelta(hours=...)` —
+        uncaught, a bare traceback and exit 1. Same failure the helper exists to
+        prevent, one bound short.
+        """
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "1e30"}):
+            rc = ask.cmd_post(post_args(), out=out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out.getvalue())
+
     def test_empty_optionals_are_omitted_not_sent_blank(self):
         captured = {}
 

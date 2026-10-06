@@ -105,6 +105,18 @@ attribution = _load("answered_attribution", "answered-attribution.py")
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 
 
+# The largest TTL this script will accept.
+#
+# ⚠️ An UPPER bound, and it is not belt-and-braces on the `isfinite` check below:
+# `nan` and `inf` are caught there, but a large *finite* value is not. `1e30`
+# passes every other guard and then raises `OverflowError` inside
+# `timedelta(hours=...)` — uncaught, so the caller gets a bare traceback and exit
+# `1`, which is this script's *store failed* code. That is the same failure the
+# helper exists to prevent, one bound short. A year is far past any ask's useful
+# life and sits well inside `timedelta`'s range.
+MAX_ASK_TTL_HOURS = 24 * 365
+
+
 class _ConfigRefused(Exception):
     """A malformed environment value, refused where a caller can report it.
 
@@ -161,10 +173,10 @@ def _positive_float_env(name, default):
         value = float(raw)
     except ValueError:
         value = None
-    if value is None or not math.isfinite(value) or value <= 0:
+    if value is None or not math.isfinite(value) or value <= 0 or value > MAX_ASK_TTL_HOURS:
         raise _ConfigRefused(
-            f"{name}={raw!r} is not a positive finite number. Unset it to use the "
-            f"default ({default}), or give a number greater than 0."
+            f"{name}={raw!r} is not a number in (0, {MAX_ASK_TTL_HOURS}]. Unset it "
+            f"to use the default ({default}), or give a value in that range."
         )
     return value
 
