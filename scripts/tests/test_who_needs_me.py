@@ -548,6 +548,23 @@ class OrphanLiveness(unittest.TestCase):
         self.assertIn("activate-pane --pane-id 7",
                       wnm.row(rec, {"7": {}}, "question", None))
 
+    def test_store_vouched_row_with_a_dead_pane_is_still_dropped(self):
+        """The exemption's pane half, pinned on the shape that can actually occur.
+
+        `test_pane_backed_row_still_carries_its_own_jump` uses `self.rec(self.LIVE)`,
+        which carries no `store_vouched`, and its pane `"7"` IS a key of `{"7": {}}` --
+        so the pane clause is never reached in the failing direction. Without this
+        case, rewriting the exemption as `if not rec.get("store_vouched"): return False`
+        would pass every other test while admitting pane-backed store-vouched rows
+        whose pane is gone, which is the widening the fix deliberately avoids.
+        """
+        rec = self.rec(self.LIVE, pane="479")
+        rec.update({"ts": 0, "store_vouched": True, "kind": "permission",
+                    "store_item_id": "75264206"})
+        q = self.quiet([rec], [self.LIVE], {self.LIVE: 0})
+        self.assertFalse(wnm.is_live(rec, {"7": {}}, q),
+                         "a pane the map does not hold still drops a vouched row")
+
     # --- the two halves of `quiet`, each of which alone is wrong --------------
 
     def test_live_headless_worker_is_not_quiet_despite_no_registry_entry(self):
