@@ -34,7 +34,8 @@ import { join } from 'node:path'
 // `stampRecord`/`listLive`'s actual write and read — so re-implementing either here would measure
 // the copy rather than the server, which is the one thing this comparison cannot survive. The edge
 // only ever runs this way: `server/` reaches `scripts/` by spawning the Python readers as
-// subprocesses (see `server/fork-probe.mjs`), never by import. And this file is a dev instrument
+// subprocesses — `server/cluster-heartbeat.mjs:38` resolves `READER` and `:141` runs it — and never
+// by import, since no file under `server/` imports from `scripts/`. And this file is a dev instrument
 // run by hand, not part of the shipped server, so the direction is inverted for a diagnostic
 // rather than for runtime code.
 import { pollCluster } from '../server/cluster-heartbeat.mjs'
@@ -68,6 +69,7 @@ const run = RUN === 'async' ? asyncRun : blockingRun
 
 const sessions = OFFSETS_MS.map((offset) => ({ offset, id: `probe-${offset}`, writes: [] }))
 const polls = []
+let pollFailures = 0
 const timers = []
 
 // Loop liveness: the worst gap between ticks is how long the loop was unavailable.
@@ -107,6 +109,7 @@ timers.push(
       // non-zero (node/lifecycle/crash-on-unhandled-rejection) is about a service left in an unknown
       // state after an uncaught exception, and its enforcement matches that registration. This
       // handles one known call's failure at its own call site, which is the narrower thing.
+      pollFailures += 1
       console.error(`failed-instrument: cluster poll threw: ${error?.stack ?? error}`)
     }
   }, HEARTBEAT_INTERVAL_MS),
@@ -142,7 +145,13 @@ setTimeout(() => {
 
   console.log(`run shape:           ${RUN}`)
   console.log(`interval / TTL:      ${HEARTBEAT_INTERVAL_MS} / ${HEARTBEAT_TTL_MS} ms`)
-  console.log(`cluster polls:       ${polls.length} (all ok=${polls.every((p) => p.ok)})`)
+  // `[].every()` is true, so an all-throws run would otherwise render `0 (all ok=true)` — the one
+  // summary row an operator scans, reading healthy off zero evidence. Say what the sample set is.
+  const pollSummary =
+    polls.length > 0
+      ? `${polls.length} (all ok=${polls.every((p) => p.ok)})`
+      : `0 successful${pollFailures > 0 ? `, ${pollFailures} threw — see failed-instrument above` : ''}`
+  console.log(`cluster polls:       ${pollSummary}`)
   console.log(`worst loop gap:      ${worstLoop} ms   <- how long the event loop was unavailable`)
   console.log(`listLive misses:     ${liveMisses} of ${liveReads} reads   <- a miss is a worker the cap counts dead`)
   console.log('')
