@@ -185,6 +185,7 @@ class EmitFormatTest(unittest.TestCase):
 class ReconcileTest(unittest.TestCase):
     def setUp(self):
         self.out = io.StringIO()
+        self.err = io.StringIO()
         self.started = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
 
     def run_reconcile(self, items, attributed=None, seen=None, session=ME):
@@ -198,6 +199,7 @@ class ReconcileTest(unittest.TestCase):
                 self.started,
                 FakeAttribution(attributed),
                 self.out,
+                self.err,
             )
 
     def test_emits_for_own_item_answered_after_start(self):
@@ -232,6 +234,54 @@ class ReconcileTest(unittest.TestCase):
         seen = self.run_reconcile([item("late")], seen=seen)
         self.assertEqual(self.out.getvalue(), "ANSWERED late\n")
         self.assertIn("late", seen)
+
+    def test_a_read_failure_warns_and_does_not_raise(self):
+        """The reconcile twin of `HandleItemTest`'s mirror.
+
+        An unreadable history must warn and leave `seen` unchanged — never
+        propagate, because `main()` catches only `KeyboardInterrupt` and the
+        process dying IS the missed wake the arm exists to prevent.
+
+        ⚠️ Patch `fetch_history` itself. An unreachable store is **not** a
+        discriminating probe: `watch()` reaches `reconcile()` only after
+        `stream_item_ids` yields `CONNECTED`, which it does only once
+        `urlopen(stream_url)` has succeeded — and `stream_item_ids` already
+        swallows `URLError`/`OSError` and reconnects. A dead store therefore
+        never arrives here, and both the pre-fix and post-fix revisions survive
+        it, so that probe would report a false pass.
+        """
+        import urllib.error
+
+        # The name is deliberately identical to `HandleItemTest`'s: these are
+        # twins, one per guarded read path, and the symmetry is the point.
+        for exc in (urllib.error.URLError("boom"), OSError("boom")):
+            with self.subTest(exc=type(exc).__name__):
+                self.out = io.StringIO()
+                self.err = io.StringIO()
+                seen = {"already"}
+                with mock.patch.object(watch, "fetch_history", side_effect=exc):
+                    result = watch.reconcile(
+                        "http://store",
+                        ME,
+                        seen,
+                        self.started,
+                        FakeAttribution(set()),
+                        self.out,
+                        self.err,
+                    )
+                self.assertEqual(self.out.getvalue(), "")
+                self.assertIn("could not read history", self.err.getvalue())
+                self.assertIs(result, seen)
+                self.assertEqual(result, {"already"})
+
+        # The recovery the guard exists for, and the half a warn-only assertion
+        # would miss: a failed pass must not poison the next one.
+        # `stream_item_ids` yields `CONNECTED` on every reconnect, so `watch()`
+        # re-enters `reconcile` — assert that second pass still emits.
+        self.err = io.StringIO()
+        recovered = self.run_reconcile([item("late")], seen={"already"})
+        self.assertEqual(self.out.getvalue(), "ANSWERED late\n")
+        self.assertIn("late", recovered)
 
 
 class HandleItemTest(unittest.TestCase):
