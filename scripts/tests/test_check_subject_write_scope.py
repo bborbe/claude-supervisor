@@ -215,6 +215,27 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("does not state the reason its frontmatter implies", result.stderr)
 
+    def test_table_demoted_to_one_writer_fails(self):
+        # The fail-open: demote a writer's row with the frontmatter-derived reason and drop its
+        # invocation paragraph, and every other assertion still passes while the cross-copy
+        # comparison quietly compares nothing.
+        self.mutate(
+            DOC,
+            "| `/manager-drive` | yes | **yes** |",
+            "| `/manager-drive` | yes | **no** — read-only by its own contract |",
+        )
+        self.mutate(
+            "commands/manager-drive.md",
+            "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.** "
+            "Having resolved a subject, run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` "
+            "§ *Reconcile the subject's status* **now**, before the gate.",
+            "**⚠️ Reconcile the subject's status.** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` "
+            "§ *Reconcile the subject's status* names this command as a non-writer.",
+        )
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("expected 2", result.stderr)
+
     def test_non_writer_regaining_the_grant_fails(self):
         self.mutate(
             "commands/manager-verify.md",

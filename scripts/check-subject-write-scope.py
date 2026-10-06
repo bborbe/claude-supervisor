@@ -88,6 +88,19 @@ def main() -> int:
             f"command exactly once cannot be checked"
         )
 
+    # Derived from the *table*, not from the loop's survivors: the cross-copy equality check
+    # below is gated on there being two writers, so a table demoted to one writer would compare
+    # nothing while the run reported green — the comparison silently not running is exactly what
+    # this guard exists to prevent. Asserting it here also keeps the count independent of any
+    # writer-level failure recorded above.
+    writer_rows = [name for name, verdict, _tail in table if verdict == "yes"]
+    if len(writer_rows) != 2:
+        failures.append(
+            f"{DOC}: the write-scope table names {len(writer_rows)} writer(s), expected 2 — the "
+            f"cross-copy paragraph comparison is gated on two, so one writer means it compares "
+            f"nothing while this run reports green"
+        )
+
     writers: dict[str, str] = {}
     for name, verdict in rows.items():
         rel = f"commands/{name}.md"
