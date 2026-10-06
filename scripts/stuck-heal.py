@@ -131,7 +131,15 @@ def heal(session_id, task, kind, deaths, *, spawn_headless, spawn_interactive,
         # Mode first, then the tab: a tab opened before the task says
         # `interactive` is a tab the next reader will treat as headless.
         set_task_mode(task, "interactive")
-        pane = spawn_interactive(session_id)
+        try:
+            pane = spawn_interactive(session_id)
+        except Exception:
+            # Never leave the task saying `interactive` with no tab behind it: put
+            # the mode back and tell the operator, then let the failure surface.
+            set_task_mode(task, "headless")
+            post_card(f"{task} died twice with a closed permission channel — the "
+                      f"interactive reopen FAILED; mode restored to headless", None)
+            raise
         post_card(f"{task} died twice with a closed permission channel — reopened "
                   f"as an interactive tab", jump_link(pane))
         return action
@@ -144,17 +152,22 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--session", required=True, help="the stuck session id")
     ap.add_argument("--task", required=True, help="its task name")
-    ap.add_argument("--kind", default=KIND_STREAM_CLOSED,
-                    help="the death kind (default: %(default)s)")
+    # Required, not defaulted: a default of `stream-closed` would turn every
+    # caller that forgot it into a headless resume — the one rung that acts.
+    ap.add_argument("--kind", required=True,
+                    help="the stuck cause from the gate reason, e.g. stream-closed")
     ap.add_argument("--ledger-dir", default=LEDGER_DIR)
     args = ap.parse_args(argv)
+    if len(args.session.strip()) < 8:
+        # A short or empty id prefix-matches every ledger record.
+        ap.error("--session must be at least 8 characters of the session id")
 
     deaths = deaths_from_ledger(args.session, args.ledger_dir)
     action = decide(args.kind, deaths)
     # The decision only. The manager holds the tools that perform it; printing the
     # action is how the two halves meet, and it keeps this script runnable on a
     # host with no supervisor at all.
-    print(f"HEAL {args.session} [{args.kind}] deaths={deaths} -> {action}")
+    print(f"HEAL {args.session} [{args.kind}] resumes={deaths} -> {action}")
     return 0
 
 

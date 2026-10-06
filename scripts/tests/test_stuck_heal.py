@@ -106,8 +106,20 @@ class HealTest(unittest.TestCase):
         self.assertEqual(self.named("spawn_interactive"), [])
         self.assertEqual(self.named("set_task_mode"), [])
         self.assertEqual(len(self.named("post_card")), 1)
-        self.assertNotIn("answer_permission", {n for n, _ in self.calls},
-                         "zero answer_permission calls")
+        # Structural: heal() is given no way to answer a permission at all.
+        import inspect
+        self.assertNotIn("answer_permission", inspect.signature(heal.heal).parameters)
+
+    def test_a_failed_interactive_reopen_restores_the_mode(self):
+        def boom(sid):
+            self.calls.append(("spawn_interactive", (sid,)))
+            raise RuntimeError("spawn failed")
+        effects = dict(self.effects, spawn_interactive=boom)
+        with self.assertRaises(RuntimeError):
+            heal.heal(SID, TASK, "stream-closed", 1, **effects)
+        self.assertEqual([a for a in self.named("set_task_mode")],
+                         [(TASK, "interactive"), (TASK, "headless")])
+        self.assertEqual(len(self.named("post_card")), 1)
 
 
 class DeathsFromLedgerTest(unittest.TestCase):
@@ -142,6 +154,49 @@ class DeathsFromLedgerTest(unittest.TestCase):
         with open(os.path.join(self.dir, "broken.json"), "w") as fh:
             fh.write("{not json")
         self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 1)
+
+
+    def test_a_different_session_sharing_only_a_longer_prefix_is_not_counted(self):
+        # Full-id lookup: a record from another session that shares the first 8
+        # chars must not count against this one.
+        other = SID[:8] + "-0000-0000-0000-000000000000"
+        self.write("r1", resumed_from=other)
+        self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 0)
+
+
+class MainTest(unittest.TestCase):
+    """The printed line is the whole contract with the manager."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="heal-main-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def run_main(self, *argv):
+        import contextlib, io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = heal.main(list(argv) + ["--ledger-dir", self.dir])
+        return rc, out.getvalue().strip()
+
+    def test_line_shape_for_a_first_stream_closed_death(self):
+        rc, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")
+        self.assertEqual(rc, 0)
+        self.assertEqual(line, f"HEAL {SID8} [stream-closed] resumes=0 -> resume-headless")
+
+    def test_kind_is_passed_through_and_non_stream_closed_only_reports(self):
+        _, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "permission-failures")
+        self.assertTrue(line.endswith("-> report-only"), line)
+
+    def test_kind_is_required(self):
+        import contextlib, io
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            heal.main(["--session", SID8, "--task", TASK])
+
+    def test_a_short_session_is_refused(self):
+        import contextlib, io
+        for bad in ("", "abc"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                heal.main(["--session", bad, "--task", TASK, "--kind", "stream-closed"])
 
 
 if __name__ == "__main__":
