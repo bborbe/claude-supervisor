@@ -1061,22 +1061,40 @@ def parked_names(tracked: list[dict]) -> list[str]:
     registry's `status` field, so a parked session probes LIVE.
 
     Read from `liveness`, which `enrich_liveness` has already populated on every row.
+
+    ⚠️ **This reads THIS script's `liveness_of`, while the cell it protects is rendered by
+    the caller's sweep reader from a different input** — `session-liveness.py --check` over
+    the row's id set (`agents/manager-sweep-reader.md` input 10). The repo's two-renderer
+    rule keeps those two verdicts independent on purpose, and this clause does not close
+    that gap: a row the reader renders `⌛ waiting-on-human` while the gate reads `live`
+    moves the cell with the parked set unchanged, and the replay is still served. Named
+    here rather than left for rediscovery — it is the same class of residual as the
+    Session cell's own route, and like that one it is deliberately NOT covered.
     """
     return sorted(t["name"] for t in tracked if t.get("liveness") == LIVENESS_PARKED)
 
 
-def parked_set_moved(stored: object, now: list[str]) -> bool:
-    """True when the stored table's parked set is no longer the set that would render.
+def parked_replay_reason(stored: object, now: list[str]) -> str | None:
+    """`None` when the stored table's parked set is still the set that would render.
 
-    `stored` not being a list means the record predates the field. That is "this record
-    cannot say", which is a CHANGE rather than a replay — the same fail-open rule
-    `load_stored` applies to a missing or unreadable state file, and for the same reason:
-    a gate that reports "no change" when it cannot tell is the one failure worth spending
-    a dispatch to avoid. Bounded and self-healing: the next `--save` writes the field.
+    Otherwise the reason the replay is refused. ⚠️ **It returns WHICH of the two situations
+    it hit, rather than a bare bool**, because "the tree moved" and "this record cannot
+    say" are different facts about the store and a reader who cannot tell them apart cannot
+    tell a real change from a first run after an upgrade. Evaluating the predicate once is
+    also what keeps the reason line from drifting from the verdict: a caller that
+    re-derived `isinstance(stored, list)` alongside this would name the wrong situation the
+    moment either half was edited alone.
+
+    `stored` not being a list means the record predates the field — the same fail-open rule
+    `load_stored` applies to a missing or unreadable state file, and for the same reason: a
+    gate that reports "no change" when it cannot tell is the one failure worth spending a
+    dispatch to avoid. Bounded and self-healing: the next `--save` writes the field.
     """
     if not isinstance(stored, list):
-        return True
-    return sorted(str(n) for n in stored) != now
+        return "record predates the parked set — this replay cannot be trusted"
+    if sorted(str(n) for n in stored) != now:
+        return "a row's owner moved live <-> parked since the stored table"
+    return None
 
 
 def digest_of(tracked: list[dict]) -> str:
@@ -1507,15 +1525,23 @@ def save_stored(
         "table": strip_links(table),
         "members": len(tracked),
         "busy_since": busy,
-        # The rows whose Status cell reads `⌛ waiting-on-human` at the moment this table
-        # was rendered. The digest is deliberately DEATH-ONLY (see `liveness_change_term`),
-        # so a `live` <-> `parked` flip moves no digest input -- and the exit-0 branch
-        # would then replay a table whose Status cell is no longer true. This is the field
-        # that makes that replay refusable, and it is read by a SEPARATE clause in
-        # `evaluate` rather than hashed here, so `digest_of` stays a pure function of the
-        # tracked set. A record written before this field existed carries no key, which
-        # `parked_set_moved` reads as "cannot say" -- a CHANGE, self-healed by the next
-        # `--save`, on the same fail-open rule `load_stored` applies.
+        # The rows whose Status cell reads `⌛ waiting-on-human`. The digest is deliberately
+        # DEATH-ONLY (see `liveness_change_term`), so a `live` <-> `parked` flip moves no
+        # digest input -- and the exit-0 branch would then replay a table whose Status cell
+        # is no longer true. This is the field that makes that replay refusable, and it is
+        # read by a SEPARATE clause in `evaluate` rather than hashed here, so `digest_of`
+        # stays a pure function of the tracked set. A record written before this field
+        # existed carries no key, which `parked_replay_reason` reads as "cannot say" -- a
+        # CHANGE, self-healed by the next `--save`, on the same fail-open rule `load_stored`
+        # applies.
+        #
+        # ⚠️ It is computed from the tracked set `evaluate` has just enriched, while the
+        # `table` beside it is read back from the payload file an EARLIER `--write-payload`
+        # wrote. A flip landing between those two moments bakes a stale cell into a record
+        # whose parked set matches, and the next run then replays it at exit 0. That is the
+        # same T1/T2 window the digest already has -- pre-existing in kind rather than
+        # introduced here, and named because the obvious reading of this field is stronger
+        # than the code delivers.
         "parked": parked_names(tracked),
         # Dated from the payload's own mtime whenever the caller read the table back from
         # `payload_path`, so a record can never postdate the render it stores — the
@@ -1612,8 +1638,13 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     # docstring's exit-code note.
     digest_moved = stored != digest
     actionable = actionable_names(stored_bucket_sets)
-    parked_moved = parked_set_moved(prev.get("parked"), parked_names(tracked))
-    changed = fail_reason is not None or digest_moved or bool(actionable) or parked_moved
+    parked_reason = parked_replay_reason(prev.get("parked"), parked_names(tracked))
+    changed = (
+        fail_reason is not None
+        or digest_moved
+        or bool(actionable)
+        or parked_reason is not None
+    )
     if fail_reason:
         reason = fail_reason
     elif digest_moved:
@@ -1623,16 +1654,8 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
         if len(actionable) > 3:
             shown += f" +{len(actionable) - 3} more"
         reason = f"{len(actionable)} actionable row(s) waiting: {shown}"
-    elif parked_moved:
-        # Two situations share this clause and the reason names which, because "the tree
-        # moved" and "this record cannot say" are different facts about the store and a
-        # reader who cannot tell them apart cannot tell a real change from a first run
-        # after an upgrade.
-        reason = (
-            "a row's owner moved live <-> parked since the stored table"
-            if isinstance(prev.get("parked"), list)
-            else "record predates the parked set — this replay cannot be trusted"
-        )
+    elif parked_reason:
+        reason = parked_reason
     else:
         reason = "digest equal"
     payload = {

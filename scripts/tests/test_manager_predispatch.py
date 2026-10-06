@@ -585,6 +585,72 @@ class TestLiveness(Base):
             "the parked clause moved the digest instead of riding beside it",
         )
 
+    def _registry_file(self, fname, sid, status):
+        """A second registry record. `Base.registry` always writes `1.json`, so a test
+        needing TWO live sessions has no helper — this is that, kept local to the two
+        multi-session tests rather than widening the shared fixture."""
+        with open(os.path.join(self.m.REGISTRY_DIR, fname), "w") as fh:
+            json.dump(
+                {
+                    "sessionId": sid,
+                    "pid": os.getpid(),
+                    "procStart": live_proc_start(os.getpid()),
+                    "status": status,
+                },
+                fh,
+            )
+
+    def test_a_record_predating_the_parked_set_is_not_replayed(self):
+        """The branch EVERY existing vault hits once, on its first run after upgrade.
+
+        `save_stored` only began writing `parked` with this change, so every record already
+        on disk carries no key. `parked_replay_reason` reads that as "cannot say" — a
+        CHANGE — because a gate that reports "no change" when it cannot tell is the one
+        failure worth spending a dispatch to avoid. Untested, a refactor flipping that
+        branch to `None` would pass the whole suite and serve stale replays to every vault
+        on upgrade.
+        """
+        self.registry("s-upgrade", status="idle")
+        self.task("ATask", sid="s-upgrade")
+        self.prime("ATopic")
+
+        state = json.loads(self.read_state("ATopic"))
+        del state["parked"]  # a record written before the field existed
+        with open(self.m.state_path("ATopic"), "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("predates the parked set", out)
+
+    def test_the_parked_set_compares_across_rows_not_just_one(self):
+        """Two rows, one parking — the set comparison, not the degenerate one-row case.
+
+        With a single tracked row the comparison is `[] != [name]` on either side, so a
+        build that compared only the first row, or that read the set as a scalar, passes
+        every other test in this class.
+        """
+        self.task("AGoalTask", sid="s-two-a")
+        self.task("ATask", sid="s-two-b")
+        self._registry_file("1.json", "s-two-a", "idle")
+        self._registry_file("2.json", "s-two-b", "idle")
+        # Both rows must actually be tracked, or the test silently degenerates into the
+        # one-element case it exists to get away from.
+        _, _, payload, _ = self.m.evaluate(self.vault, "ATopic")
+        self.assertEqual(
+            len(payload["tracked"]), 2, "fixture must track both rows for this to be a set"
+        )
+        self.prime("ATopic")
+
+        # Park ONE of the two; the other stays live, so the sets differ by one name.
+        self._registry_file("2.json", "s-two-b", "waiting")
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(
+            rc,
+            self.m.EXIT_CHANGE,
+            "one row parking was not seen across a two-row set:\n" + out,
+        )
+
     def test_a_worker_dying_still_moves_the_digest(self):
         """Task-SC2(b) — the guard against the cheap fix.
 
