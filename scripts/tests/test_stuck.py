@@ -160,18 +160,15 @@ class PermissionFailureRunTest(unittest.TestCase):
         ])
         self.assertEqual(watch.permission_failure_run(tail), 3)
 
-    def test_a_successful_result_ends_the_run(self):
-        # The run reported is the LONGEST in the tail, not the last one. A worker
-        # that had a dead channel and then recovered still carries the evidence
-        # inside the window — consistent with the other two triggers, which are
-        # presence-based too. Clearing a healed gate is the heal path's job.
+    def test_a_successful_result_resets_the_run(self):
+        # TRAILING, not longest: a tool that ran means the channel works again.
         tail = "\n".join([
             json.dumps(result(STREAM_CLOSED, True)),
             json.dumps(result(STREAM_CLOSED, True)),
             json.dumps(result("ok", False)),
             json.dumps(result(STREAM_CLOSED, True)),
         ])
-        self.assertEqual(watch.permission_failure_run(tail), 2)
+        self.assertEqual(watch.permission_failure_run(tail), 1)
 
     def test_a_non_permission_error_resets_the_run(self):
         tail = "\n".join([
@@ -212,6 +209,24 @@ class StuckReasonTest(unittest.TestCase):
         three = two + "\n" + json.dumps(result(other, True))
         self.assertIsNone(watch.stuck_reason(None, two))
         self.assertEqual(watch.stuck_reason(None, three), "permission-failures")
+
+    def test_prose_quoting_stream_closed_is_not_stuck(self):
+        # The defect review caught: a worker DISCUSSING the error — quoting it in
+        # its own text, as this detector's own author did — is healthy. Only tool
+        # results count.
+        tail = "\n".join([
+            json.dumps(assistant_text("The worker died with `" + STREAM_CLOSED + "`.")),
+            json.dumps(result("ok", False)),
+        ])
+        self.assertIsNone(watch.stuck_reason(None, tail))
+
+    def test_a_recovered_channel_is_not_stuck(self):
+        # The channel died, then a tool ran: recovered. A longest-run reading kept
+        # this STUCK until the evidence scrolled out, and the heal ladder would have
+        # resumed a working session.
+        tail = "\n".join([json.dumps(result(STREAM_CLOSED, True)) for _ in range(4)]
+                         + [json.dumps(result("ok", False))])
+        self.assertIsNone(watch.stuck_reason(None, tail))
 
     def test_a_clean_transcript_is_not_stuck(self):
         self.assertIsNone(watch.stuck_reason("👤 You: nothing", ""))

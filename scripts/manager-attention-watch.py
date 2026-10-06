@@ -389,22 +389,20 @@ def is_ask(body):
                 or verb.startswith(PARKED_VERBS))
 
 
-def permission_failure_run(tail):
-    """Longest run of consecutive permission failures in the transcript tail.
+def permission_outcomes(tail):
+    """Every `tool_result` in the tail, in order, as `(perm_failure, stream_closed)`.
 
-    ⚠️ **"Consecutive" counts among PERMISSION OUTCOMES, not consecutive records.**
-    The run breaks on a `tool_result` that is not a permission failure and ignores
-    every other record type. A record-consecutive reading resets on the assistant
-    text and attachments interleaved between failures, and the longest such run in
-    the e4fd1919 transcript is **1** — the ≥3 trigger would never fire and would be
-    dead code. Measured 2026-10-05; the operator chose the outcome reading.
+    ⚠️ Only TOOL RESULTS count, never assistant prose. A worker discussing a closed
+    channel — quoting the error, or writing about this very detector — carries the
+    words in its text blocks, and a substring match over the whole tail read that
+    worker as STUCK. The heal ladder would then resume a healthy session.
 
-    A permission failure is a `tool_result` carrying `is_error` and the harness's
-    own wording: `Tool permission request failed: AbortError: Stream closed`.
+    A permission failure is a `tool_result` carrying `is_error` and the harness's own
+    wording, e.g. `Tool permission request failed: AbortError: Stream closed`.
     """
+    out = []
     if not tail:
-        return 0
-    run = best = 0
+        return out
     for line in tail.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -419,31 +417,56 @@ def permission_failure_run(tail):
         for blk in content:
             if not isinstance(blk, dict) or blk.get("type") != "tool_result":
                 continue
-            if blk.get("is_error") and PERM_FAILURE_MARK in str(blk.get("content") or ""):
-                run += 1
-                best = max(best, run)
-            else:
-                run = 0
-    return best
+            body = str(blk.get("content") or "")
+            perm = bool(blk.get("is_error")) and PERM_FAILURE_MARK in body
+            out.append((perm, perm and "Stream closed" in body))
+    return out
+
+
+def trailing_failures(outcomes):
+    """The run of permission failures since the last tool that actually RAN.
+
+    ⚠️ **"Consecutive" counts among PERMISSION OUTCOMES, not consecutive records.**
+    Assistant text and attachments between failures do not break the run; a
+    record-consecutive reading scores the e4fd1919 death as 1 and the ≥3 trigger
+    never fires. The operator's call, 2026-10-05.
+
+    ⚠️ TRAILING, not longest. Any `tool_result` that is not a permission failure —
+    success, or an ordinary tool error — means the tool executed, so the channel
+    works again: the run resets there. A longest-run reading kept a recovered worker
+    STUCK until its evidence scrolled out of the window.
+    """
+    run = 0
+    for perm, _ in outcomes:
+        run = run + 1 if perm else 0
+    return run
+
+
+def permission_failure_run(tail):
+    """`trailing_failures` over a raw tail."""
+    return trailing_failures(permission_outcomes(tail))
 
 
 def stuck_reason(text, tail):
     """Why a worker reads STUCK, or None. Three triggers, OR'd, most specific first.
 
     Ordering is not cosmetic: when a worker both lost its channel and counted three
-    failures, the reason should name the CAUSE (`stream-closed`) rather than the
-    symptom (`permission-failures`) — the operator reading the card acts on the
-    first and merely confirms the second.
+    failures, the reason names the CAUSE (`stream-closed`) rather than the symptom
+    (`permission-failures`).
 
-    `blocked-closer` matches the state line as a line PREFIX. The phrase also occurs
-    mid-line in a worker's own prose about it (the e4fd1919 transcript quotes it),
-    and a substring match would fire on a worker that is merely discussing a block.
+    `stream-closed` fires only when the trailing failure run contains a closed
+    channel — read from tool results, and cleared by any tool that ran after it.
+    `blocked-closer` matches the state line as a line PREFIX: the phrase also occurs
+    mid-line in a worker's prose about it, and a substring match would fire on a
+    worker that is merely discussing a block.
     """
-    if tail and "Stream closed" in tail:
+    outcomes = permission_outcomes(tail)
+    run = trailing_failures(outcomes)
+    if run and any(sc for _, sc in outcomes[len(outcomes) - run:]):
         return "stream-closed"
     if text and any(l.strip().startswith(BLOCKED_PREFIX) for l in text.splitlines()):
         return "blocked-closer"
-    if permission_failure_run(tail) >= STUCK_PERM_FAILURES:
+    if run >= STUCK_PERM_FAILURES:
         return "permission-failures"
     return None
 
