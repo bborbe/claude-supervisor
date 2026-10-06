@@ -43,7 +43,7 @@ the prose. The two that would be silently wrong if guessed are defaulted from
 the environment instead, and both defaults are visible in `--help`:
 
   --producer-id    defaults to $CLAUDE_CODE_SESSION_ID
-  --liveness-ref   defaults to session:<producer-id>
+  --liveness-ref   defaults to owner:<$SUPERVISOR_OWNER_SESSION_ID> when the spawner exported one, else session:<producer-id>
 
 A spawned child is stripped of CLAUDE_CODE_SESSION_ID, so a missing producer id
 is a real case rather than a bug, and it is refused rather than posted: an item
@@ -142,6 +142,44 @@ def resolved_session_id(environ=None):
     caller rather than papered over.
     """
     return (os.environ if environ is None else environ).get("CLAUDE_CODE_SESSION_ID", "")
+
+
+# The spawner's own session id, exported into a worker's environment by the
+# supervisor server at spawn. Its name is mirrored in `server/spawn-mode.mjs`
+# (`OWNER_SESSION_ENV`) — the two must stay in lockstep, or every worker posts an
+# unmarked ask and the store prunes it the moment the worker exits.
+OWNER_SESSION_ENV = "SUPERVISOR_OWNER_SESSION_ID"
+
+# The first attention-controller release whose store accepts an `owner:` ref.
+# An older store rejects the push at `LivenessRef.Parse`, so the failure line
+# names this rather than leaving the operator to infer a mis-ordered deploy.
+OWNER_MIN_STORE_VERSION = "v0.41.0"
+
+
+def resolved_owner_id(environ=None):
+    """The session that owns this arm's asks, or "".
+
+    ⚠️ "" is the ordinary case, not an error: a manager, an interactive session
+    and any process not spawned by the supervisor carry no owner, and their
+    asks keep the `session:` ref — which is what keeps them prunable. A
+    whitespace-only value is treated as absent, because the store would accept
+    `owner: ` and then resolve it to no session at all.
+    """
+    return (os.environ if environ is None else environ).get(OWNER_SESSION_ENV, "").strip()
+
+
+def default_liveness_ref(producer_id, environ=None):
+    """The liveness ref a post carries when its caller declares none.
+
+    A worker spawned by a manager gets `owner:<manager>`: its question is the
+    operator's to answer, and the worker is SUPPOSED to exit, so tying the item
+    to the worker's session removed it before anyone could answer. Everyone
+    else keeps `session:<own id>`, unchanged.
+    """
+    owner = resolved_owner_id(environ)
+    if owner:
+        return f"owner:{owner}"
+    return f"session:{producer_id}"
 
 
 # Resolved exactly as `attention-log.py` resolves it, so the record lands where the
@@ -358,7 +396,7 @@ def _producer_or_refuse(args, out):
             file=out,
         )
         return None
-    return producer_id, (args.liveness_ref or f"session:{producer_id}")
+    return producer_id, (args.liveness_ref or default_liveness_ref(producer_id))
 
 
 def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
@@ -378,6 +416,17 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
         print(f"FAILED: store returned {err.code} for the push -- {detail}", file=out)
+        if liveness_ref.startswith("owner:"):
+            # ⚠️ No fallback to an unmarked re-post, deliberately: that would
+            # re-introduce the defect invisibly, since an unmarked worker ask is
+            # pruned the moment the worker exits. A rejected owner ref almost
+            # always means the poster shipped ahead of the store.
+            print(
+                f"  The store rejected an owner: liveness ref. The store must be "
+                f"attention-controller {OWNER_MIN_STORE_VERSION} or later — deploy the "
+                f"store before the poster. Not retried unmarked.",
+                file=out,
+            )
         return 1
     record_posted_closer(producer_id, getattr(args, "closer", ""), args.dedup_key)
     print(f"ITEM_ID: {item.get('item_id')}", file=out)

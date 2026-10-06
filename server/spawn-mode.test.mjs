@@ -22,6 +22,8 @@ import {
   SPAWN_TARGETS,
   WORKER_MODE_ENV,
   WORKER_MODE_SOURCE_ENV,
+  OWNER_SESSION_ENV,
+  ownerShellExport,
 } from './spawn-mode.mjs'
 
 const file = (mode) => ({ spawn: { mode } })
@@ -420,5 +422,42 @@ test('an unknown target refuses rather than falling back to local', () => {
     const { error } = resolveSpawnTarget({ target: bad })
     assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
     assert.match(error, /not a spawn target/)
+  }
+})
+
+test('the worker is handed its spawner as the owner of its asks', () => {
+  // A worker posts an operator gate and then exits, because a headless worker is
+  // supposed to end its turn. Its ask used to carry `session:<worker>`, so the store
+  // removed it the moment the worker left the registry — before the operator answered.
+  // The spawner's own session id is the only owner anything knows, so it is handed over
+  // here, and `attention-ask.py` defaults the item to `owner:<it>`.
+  const env = workerEnvFor({ mode: 'headless', source: 'argument', env: {}, owner: 'manager-1' })
+  assert.equal(env[OWNER_SESSION_ENV], 'manager-1')
+})
+
+test('the owner env name is the one attention-ask.py reads', () => {
+  // ⚠️ Lockstep with scripts/attention-ask.py's OWNER_SESSION_ENV. A drift is silent:
+  // every worker would post an unmarked ask, and the store would prune each one the
+  // moment its worker exited — the defect this exists to fix, with nothing failing.
+  assert.equal(OWNER_SESSION_ENV, 'SUPERVISOR_OWNER_SESSION_ID')
+})
+
+test('no owner leaves the variable unset rather than exporting an empty or "null" owner', () => {
+  // A spawn whose parent never resolved has no owner. Exporting "" or "null" would mint
+  // `owner:null` — a ref the store keeps forever while routing its answer nowhere.
+  for (const owner of [undefined, null, '', '   ']) {
+    const env = workerEnvFor({ mode: 'headless', source: 'argument', env: {}, owner })
+    assert.equal(env[OWNER_SESSION_ENV], undefined, `owner ${JSON.stringify(owner)} must not be exported`)
+  }
+})
+
+test('a tab worker gets the owner as a quoted shell export, or nothing', () => {
+  // The tab path launches through `bash -lc`, so the owner travels as an export ahead of
+  // the launcher. It is quoted because a session id is data from a registry file, never
+  // a trusted token to splice into a shell line.
+  assert.equal(ownerShellExport('manager-1'), "export SUPERVISOR_OWNER_SESSION_ID='manager-1'; ")
+  assert.equal(ownerShellExport("a'b"), "export SUPERVISOR_OWNER_SESSION_ID='a'\\''b'; ")
+  for (const owner of [undefined, null, '', '   ']) {
+    assert.equal(ownerShellExport(owner), '')
   }
 })

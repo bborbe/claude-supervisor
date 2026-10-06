@@ -25,7 +25,7 @@ import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, ownerShellExport, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
@@ -626,7 +626,7 @@ function resolveMcpServers(claudeCmd) {
   }
 }
 
-async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowId, chip }) {
+async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowId, chip, owner }) {
   // Handed in rather than resolved here. The target is resolved once, in spawnAgent, so a
   // bad path costs no tab — and so the tab path and the headless path cannot disagree about
   // which launcher this spawn uses, which is how a worker's `launcher` field came to mean
@@ -655,7 +655,10 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   // resolved and wrote one.
   const tabName = uniqueTabName(`⚙ ${label}`)
   const preexisting = new Set(sessionIdsNamed(tabName) ?? [])
-  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
+  // The owner export rides ahead of the launcher so the worker's asks default to
+  // `owner:<spawner>` — see OWNER_SESSION_ENV in spawn-mode.mjs. Empty when no parent
+  // session resolved, which leaves the worker's asks on `session:` exactly as before.
+  const inner = `cd ${shellQuote(cwd)} && ${ownerShellExport(owner)}exec ${claudeCmd} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
   // `--window-id` is what puts the tab in a ROLE's window. Omitted, the tab inherits
   // WEZTERM_PANE from the calling session and lands in whatever window the caller is
   // in — which is how a human-only task came up in the Agents window (2026-09-20).
@@ -1153,7 +1156,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip, owner: agent.parentSession })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -1210,7 +1213,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // loses PATH, HOME and ANTHROPIC_BASE_URL, and the last of those silently stops it
       // routing through the router. That base env comes from config.mjs rather than being
       // read here, because this module owns no environment reads at all.
-      env: workerEnvFor({ mode: spawnMode.mode, source: spawnMode.source, env: config.baseEnv }),
+      env: workerEnvFor({ mode: spawnMode.mode, source: spawnMode.source, env: config.baseEnv, owner: agent.parentSession }),
       // Load the same settings an interactive session gets. Without this the SDK
       // starts from nothing — no plugin skills, no settings.json permissions, no
       // user MCP servers — and a worker missing its normal tooling is not a cheaper

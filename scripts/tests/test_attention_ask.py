@@ -346,6 +346,90 @@ def answered_lines(text):
     return [line for line in text.splitlines() if line.startswith("ANSWERED:")]
 
 
+class OwnerLivenessRefTest(unittest.TestCase):
+    """The poster's default liveness ref.
+
+    A worker posts an operator gate and then exits, because a headless worker is
+    supposed to end its turn. Under the `session:<own id>` default the store
+    removed that gate the moment the worker's session left the registry, before
+    the operator could answer it. The store learned `owner:<id>` — a model it
+    never liveness-prunes — and the spawner exports its own session id to the
+    worker, so a worker's ask now defaults to the owner rather than to itself.
+
+    ⚠️ The `session:` fallback is load-bearing and these specs pin it. A post
+    with no owner in its environment is exactly what every manager and
+    interactive session emits, and it must stay prunable — otherwise pruning
+    is turned off for everything rather than re-pointed for worker gates.
+    """
+
+    def _post(self, environ, **overrides):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, environ, clear=True):
+            with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+                rc = ask.cmd_post(post_args(**overrides), out=out)
+        return rc, captured.get("body"), out.getvalue()
+
+    def test_defaults_to_the_owner_when_the_spawner_exported_one(self):
+        rc, body, _ = self._post({ask.OWNER_SESSION_ENV: "manager-1"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["liveness_ref"], "owner:manager-1")
+        # The producer is still the worker: it is what polls the item back.
+        self.assertEqual(body["producer_id"], "session-a")
+
+    def test_falls_back_to_the_own_session_with_no_owner(self):
+        rc, body, _ = self._post({})
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            body["liveness_ref"], "session:session-a",
+            "an unmarked post must stay prunable — this is SC2's negative half",
+        )
+
+    def test_a_whitespace_owner_is_treated_as_absent(self):
+        # The store's `Parse` checks only `value == ""`, so `owner: ` would be
+        # accepted and then resolve to no session at all. Refuse to mint it.
+        rc, body, _ = self._post({ask.OWNER_SESSION_ENV: "   "})
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["liveness_ref"], "session:session-a")
+
+    def test_an_explicit_liveness_ref_wins_over_the_owner(self):
+        rc, body, _ = self._post(
+            {ask.OWNER_SESSION_ENV: "manager-1"},
+            liveness_ref="heartbeat:/tmp/hb",
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["liveness_ref"], "heartbeat:/tmp/hb")
+
+    def test_an_older_store_rejecting_the_owner_ref_fails_loudly(self):
+        # ⚠️ Fail loudly, never fall back: a silent drop reproduces the defect
+        # one layer up, and a silent unmarked re-post re-introduces it invisibly.
+        # The store must ship first; this guard exists to make a mis-ordered
+        # deploy visible.
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(json.loads(req.data.decode()))
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {},
+                io.BytesIO(b"invalid liveness ref: unknown model 'owner'"),
+            )
+
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {ask.OWNER_SESSION_ENV: "manager-1"}, clear=True):
+            with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+                rc = ask.cmd_post(post_args(), out=out)
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 1, "a rejected owner post must not be retried unmarked")
+        self.assertIn("FAILED", out.getvalue())
+        self.assertIn(ask.OWNER_MIN_STORE_VERSION, out.getvalue())
+
+
 class PollTest(unittest.TestCase):
     def poll(self, item):
         with mock.patch.object(

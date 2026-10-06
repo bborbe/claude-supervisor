@@ -429,11 +429,47 @@ export const WORKER_MODE_SOURCE_ENV = 'SUPERVISOR_WORKER_MODE_SOURCE'
 // A missing mode leaves the environment untouched rather than exporting the string
 // "undefined". The caller checks `resolveSpawnMode`'s error first, so this guards a
 // future caller that forgets to, not a reachable state today.
-export function workerEnvFor({ mode, source, env } = {}) {
-  if (!mode) return { ...(env ?? {}) }
+export function workerEnvFor({ mode, source, env, owner } = {}) {
+  const base = { ...(env ?? {}), ...ownerEnv(owner) }
+  if (!mode) return base
   return {
-    ...(env ?? {}),
+    ...base,
     [WORKER_MODE_ENV]: mode,
     [WORKER_MODE_SOURCE_ENV]: source,
   }
+}
+
+// The spawner's own session id, handed to the worker as the owner of its asks.
+//
+// Why this exists: a worker posts an operator gate and then exits, because a headless
+// worker is SUPPOSED to end its turn. Its ask used to carry `session:<worker>`, so the
+// attention store removed it the moment the worker left the session registry — before
+// the operator answered it. The store now has an `owner:<id>` model that it never
+// liveness-prunes, but the worker cannot name its owner by itself: the spawner is the
+// only actor that knows it. So the spawner hands it over, exactly as it hands over the
+// mode, and `scripts/attention-ask.py` defaults the item to `owner:<it>`.
+//
+// ⚠️ Lockstep with `OWNER_SESSION_ENV` in scripts/attention-ask.py. A drift is silent:
+// every worker posts an unmarked ask, and the store prunes each one on exit.
+export const OWNER_SESSION_ENV = 'SUPERVISOR_OWNER_SESSION_ID'
+
+// An absent owner exports nothing — never "", never "null". A spawn whose parent never
+// resolved has no owner, and `owner:null` would be kept forever while routing nowhere.
+function cleanOwner(owner) {
+  return typeof owner === 'string' ? owner.trim() : ''
+}
+
+function ownerEnv(owner) {
+  const id = cleanOwner(owner)
+  return id ? { [OWNER_SESSION_ENV]: id } : {}
+}
+
+// The tab path's half of the same handover. A tab worker launches through `bash -lc`,
+// so the owner travels as an export ahead of the launcher. It is single-quoted because
+// a session id is data read from a registry file, never a token to splice raw into a
+// shell line.
+export function ownerShellExport(owner) {
+  const id = cleanOwner(owner)
+  if (!id) return ''
+  return `export ${OWNER_SESSION_ENV}='${id.replaceAll("'", "'\\''")}'; `
 }
