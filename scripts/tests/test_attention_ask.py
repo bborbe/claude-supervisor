@@ -35,6 +35,7 @@ import shutil
 import tempfile
 import unittest
 import urllib.error
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -274,12 +275,59 @@ class PostTest(unittest.TestCase):
         self.assertTrue(captured["url"].endswith("/api/1.0/attention"))
         body = captured["body"]
         self.assertEqual(body["producer_id"], "session-a")
-        # The liveness ref is derived from the producer, so a manager posting
-        # from its own session needs to declare nothing.
-        self.assertEqual(body["liveness_ref"], "session:session-a")
+        # ⚠️ `owner:`, not `session:` — and this assertion is load-bearing rather
+        # than cosmetic. A `session:` ref ties the card to the life of the
+        # session that posted it, and the store prunes an open asked item whose
+        # liveness subject is gone, removing its history row with it — so a
+        # manager's card was deleted the moment the manager's session ended,
+        # after a `201` and with nothing reported to the producer. Measured
+        # 2026-10-06: a fleet restart killed the poster and the operator's
+        # approval question vanished silently.
+        self.assertEqual(body["liveness_ref"], "owner:session-a")
         self.assertEqual(body["answer_mechanism"], "message")
         self.assertEqual(body["options"][0], {"label": "the board", "recommended": True})
         self.assertIn(f"ITEM_ID: {STORE_ITEM_ID}", out.getvalue())
+
+    def test_expires_at_defaults_to_a_bound_so_an_owner_card_cannot_live_forever(self):
+        """The other half of the `owner:` default, and it has to ship with it.
+
+        ⚠️ An `owner:` item is never pruned by liveness — `OwnerLivenessModel`
+        returns true unconditionally, because a human owner's absence cannot be
+        read from the session registry. So the producer's life stopped being the
+        bound at exactly the moment the card stopped dying with it, and this
+        field is what replaced it. Without a default the board would only grow.
+        """
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        before = datetime.now(timezone.utc)
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(post_args(), out=io.StringIO())
+        after = datetime.now(timezone.utc)
+
+        sent = datetime.fromisoformat(captured["body"]["expires_at"])
+        ttl = timedelta(hours=ask.DEFAULT_ASK_TTL_HOURS)
+        self.assertGreaterEqual(sent, before + ttl)
+        self.assertLessEqual(sent, after + ttl)
+
+    def test_an_explicit_expires_at_wins_over_the_default(self):
+        """The default must not swallow a caller who knows its own bound."""
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(
+                post_args(expires_at="2030-01-01T00:00:00+00:00"),
+                out=io.StringIO(),
+            )
+
+        self.assertEqual(captured["body"]["expires_at"], "2030-01-01T00:00:00+00:00")
 
     def test_empty_optionals_are_omitted_not_sent_blank(self):
         captured = {}
@@ -292,8 +340,14 @@ class PostTest(unittest.TestCase):
             ask.cmd_post(post_args(), out=io.StringIO())
 
         body = captured["body"]
-        for key in ("context", "options", "expires_at"):
+        # ⚠️ `expires_at` is deliberately NOT in this list any more. Omitting it
+        # left every card unbounded, which was harmless only while the store
+        # pruned a dead producer's ask on the next read. The `owner:` liveness
+        # default stops that prune, so the bound moved from "the producer's
+        # life" to this field and the poster now always declares one.
+        for key in ("context", "options"):
             self.assertNotIn(key, body, f"{key} must be omitted when empty, not sent as ''")
+        self.assertIn("expires_at", body)
 
     def test_present_optionals_are_sent(self):
         captured = {}

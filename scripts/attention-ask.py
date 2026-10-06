@@ -43,7 +43,20 @@ the prose. The two that would be silently wrong if guessed are defaulted from
 the environment instead, and both defaults are visible in `--help`:
 
   --producer-id    defaults to $CLAUDE_CODE_SESSION_ID
-  --liveness-ref   defaults to session:<producer-id>
+  --liveness-ref   defaults to owner:<producer-id>
+  --expires-at     defaults to now + $ATTENTION_ASK_TTL_HOURS (24)
+
+⚠️ The `--liveness-ref` default is `owner:` and NOT `session:`, and the
+difference decides whether the card survives at all rather than merely how it is
+tagged: the store prunes an open item that asked (any mechanism but `ack`) whose
+liveness subject is not live, and removes it from the history index too. A
+`session:` default tied every card to the life of the session that posted it, so
+a manager's card died with the manager — silently, after a `201`. See
+`_producer_or_refuse` for the full account.
+
+⚠️ Because the card now outlives its producer, it is bounded instead by
+`--expires-at`, which is why that default exists: without it an `owner:` card
+would stay on the board until something else closed it.
 
 A spawned child is stripped of CLAUDE_CODE_SESSION_ID, so a missing producer id
 is a real case rather than a bug, and it is refused rather than posted: an item
@@ -73,6 +86,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -90,6 +104,15 @@ attribution = _load("answered_attribution", "answered-attribution.py")
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 # Local store; a hung one must cost a clear failure, never a stalled loop tick.
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+
+# How long a posted ask stays on the board before it expires. ⚠️ This exists
+# because the `owner:` liveness default makes a card outlive the session that
+# posted it, and `OwnerLivenessModel` probes NOTHING — so without a bound an
+# unanswered card would stay until something else closed it and the board would
+# only grow. The store is what enforces the field (`attention-controller`); this
+# is the value a producer declares, which is the half the schema gives the
+# producer.
+DEFAULT_ASK_TTL_HOURS = float(os.environ.get("ATTENTION_ASK_TTL_HOURS", "24"))
 
 # A store item id is the store's own: 32 lowercase hex characters, hex over 16
 # random bytes (`attention-controller`, `pkg/item-id-generator.go`). `post`
@@ -358,7 +381,50 @@ def _producer_or_refuse(args, out):
             file=out,
         )
         return None
-    return producer_id, (args.liveness_ref or f"session:{producer_id}")
+    # ⚠️ `owner:`, not `session:` — and the difference decides whether the card
+    # SURVIVES at all, not merely how it is tagged. The store prunes an open item
+    # that *asked* (any mechanism but `ack`) whose liveness subject is not live
+    # (`attention-controller` `pkg/attention-store-impl.go` `classifyForRead`:
+    # `isAsked` + `!live` → `remove`), and `removeItem` clears the item from the
+    # items bucket and every index — so the card leaves no history row either.
+    # A `session:<producer-id>` default therefore tied every card this script
+    # posts to the life of the session that posted it, and a session ends on
+    # every turn boundary, every fleet restart and every crash: the card was
+    # created with a `201` and deleted on the first read after the poster
+    # exited. Measured 2026-10-06 — a fleet restart killed the posting session
+    # and the operator's approval question vanished silently, with a `201` on
+    # the producer's side and no history row on the store's.
+    #
+    # The `owner:` model is the one built for this: `isProducerLiveWith` returns
+    # true for it unconditionally and deliberately, because a human owner's
+    # absence cannot be read from the session registry (a never-registered owner
+    # and an exited one produce the same signal, so reading either as gone
+    # prunes a gate the operator can still answer). Every card this script posts
+    # is an ask the OPERATOR answers on the board — the asking session only
+    # polls the answer back — so the operator's liveness is the honest subject
+    # and the poster's is not. An explicit `--liveness-ref` still wins.
+    #
+    # ⚠️ This makes the card outlive its producer, so it must also be BOUNDED —
+    # which is why `_expires_at_or_default` moves with it and why the store's
+    # own `expires_at` enforcement is the other half of this change.
+    return producer_id, (args.liveness_ref or f"owner:{producer_id}")
+
+
+def _expires_at_or_default(args):
+    """The `expires_at` to send: the caller's, or now + `DEFAULT_ASK_TTL_HOURS`.
+
+    ⚠️ A DEFAULT rather than leaving the field absent, and that is the point of
+    the change it ships with. `--expires-at` used to default to `""`, so every
+    card went out unbounded — harmless while the store pruned a dead producer's
+    ask on the next read, and a leak the moment the `owner:` default stopped
+    that prune. The schema reads an absent `expires_at` as "no bound", so
+    omitting it is the thing that had to change; `""` would be a *present* field
+    holding nothing, which is the distinction `post_question` already draws for
+    `context`.
+    """
+    if args.expires_at:
+        return args.expires_at
+    return (datetime.now(timezone.utc) + timedelta(hours=DEFAULT_ASK_TTL_HOURS)).isoformat()
 
 
 def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
@@ -373,7 +439,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             payload=payload,
             context=args.context,
             options=options,
-            expires_at=args.expires_at,
+            expires_at=_expires_at_or_default(args),
         )
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
