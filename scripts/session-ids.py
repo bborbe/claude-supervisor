@@ -54,7 +54,6 @@ Exit: 0 ok · 1 REJECTED · 2 unreadable/usage
 import argparse
 import importlib.util
 import os
-import re
 import sys
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
@@ -173,7 +172,19 @@ def main(argv=None) -> int:
         )
         return EXIT_REJECTED
 
-    path = a.task or a.frontmatter
+    # `is not None`, never truthiness: the per-task loop this script is written for
+    # expands an unset variable to an EMPTY argument, and `a.task or a.frontmatter`
+    # would turn that into `None` — `open(None)` raises TypeError, which is not an
+    # OSError, so it escapes `read_ids` as a traceback at exit 1: the code this module
+    # reserves for REJECTED. An empty path is its own verdict, reported as unreadable.
+    path = a.task if a.task is not None else a.frontmatter
+    if not path:
+        print(
+            "UNREADABLE: empty path — pass a task file. An unset shell variable "
+            "expands to an empty argument, which names no file.",
+            file=sys.stderr,
+        )
+        return EXIT_UNREADABLE
     ids, refuse, error = read_ids(path)
     if error:
         print(f"UNREADABLE: {error}", file=sys.stderr)

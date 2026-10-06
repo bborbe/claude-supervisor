@@ -183,15 +183,32 @@ class TestReads(Frontmatter):
         self.assertEqual(out.split(), [REAL])
 
 
-class TestDeclaredFieldSet(unittest.TestCase):
-    def test_the_declared_field_set_names_both_read_fields(self):
+class TestDeclaredFieldSet(Frontmatter):
+    def test_the_declared_field_set_is_the_set_the_extractor_reads(self):
         """`commands/manager-loop.md`'s guard bullet must name the same field set the
-        script enforces — the constant is what makes that checkable rather than a
-        restatement a `grep` cannot tell from a real one."""
+        script enforces, so the constant has to track the extractor.
+
+        ⚠️ Asserted against the extractor's BEHAVIOUR, never against the literal: a
+        literal compared to itself passes unconditionally and would not notice
+        `SESSION_ID_FIELDS` drifting from the fields `session_id_set()` actually reads —
+        which is the drift the constant exists to prevent, and it drifts in the
+        direction that names a field set the script does not enforce.
+        """
         mod = load()
+        # One id at each declared location, plus a uuid at a field that is NOT declared.
+        # The set must be exactly the declared ones, and exactly as many as declared.
+        path = self.write(
+            f"---\nclaude_session_id: {REAL}\ntask_identifier: {IDENT}\n"
+            f"metrics_sessions:\n    - session_id: {SECOND}\n---\n"
+        )
+        code, out, err = run("--task", path)
+        self.assertEqual(code, EXIT_OK, err)
+        self.assertEqual(out.split(), [REAL, SECOND])
         self.assertEqual(
-            mod.SESSION_ID_FIELDS,
-            ("claude_session_id", "metrics_sessions[].session_id"),
+            len(out.split()),
+            len(mod.SESSION_ID_FIELDS),
+            "the declared field count and the extractor's output disagree — the guard "
+            "bullet would name a field set the script does not enforce",
         )
 
     def test_task_identifier_is_declared_a_phantom_field(self):
@@ -203,6 +220,37 @@ class TestDeclaredFieldSet(unittest.TestCase):
                 mod.SESSION_ID_FIELDS,
                 "a phantom field must never be in the session-id field set",
             )
+
+
+class TestCliSpellings(Frontmatter):
+    def test_frontmatter_is_the_same_read_as_task(self):
+        """Both flags take one code path; a divergence between them would go unnoticed.
+
+        `--frontmatter` is the spelling the docstring offers for any file carrying
+        frontmatter, so it must return the same set and the same exit codes as `--task`
+        on the same fixture.
+        """
+        body = (
+            f"---\nclaude_session_id: {REAL}\ntask_identifier: {IDENT}\n"
+            f"metrics_sessions:\n    - session_id: {SECOND}\n---\nbody\n"
+        )
+        path = self.write(body)
+        as_task = run("--task", path)
+        as_fm = run("--frontmatter", path)
+        self.assertEqual(as_task, as_fm)
+
+    def test_an_empty_path_is_unreadable_not_a_traceback(self):
+        """An unset shell variable expands to an empty argument in the per-task loop.
+
+        Truthiness (`a.task or a.frontmatter`) turned that into `None`, and `open(None)`
+        raises TypeError — not an OSError — so it escaped as a traceback at exit 1, the
+        code this script reserves for REJECTED. An empty path is its own verdict.
+        """
+        code, out, err = run("--task", "")
+        self.assertEqual(code, EXIT_UNREADABLE)
+        self.assertIn("UNREADABLE:", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(out, "")
 
 
 if __name__ == "__main__":
