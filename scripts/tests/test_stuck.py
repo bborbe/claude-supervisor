@@ -255,6 +255,11 @@ class HeartbeatLiveTest(unittest.TestCase):
         self.fx.stamp("_cluster-reachability", 5)
         self.assertFalse(watch.heartbeat_live(SID8, self.fx.live))
 
+    def test_a_future_dated_stamp_is_not_live(self):
+        # Negative age must not read live forever — that would clear a held gate.
+        self.fx.stamp(SID, -300)
+        self.assertFalse(watch.heartbeat_live(SID8, self.fx.live))
+
     def test_a_missing_store_is_false_not_an_exception(self):
         self.assertFalse(watch.heartbeat_live(SID8, os.path.join(self.fx.dir, "nope")))
 
@@ -290,6 +295,11 @@ class HeadlessGateTest(unittest.TestCase):
         gated, reason = watch.is_gated("waiting", "nothing", headless_live=True)
         self.assertIs(gated, True)
         self.assertEqual(reason, "registry:waiting")
+
+    def test_stuck_outranks_registry_waiting(self):
+        gated, reason = watch.is_gated("waiting", "nothing", stuck="stream-closed")
+        self.assertIs(gated, True)
+        self.assertEqual(reason, "stuck:stream-closed")
 
 
 class HealDecideTest(unittest.TestCase):

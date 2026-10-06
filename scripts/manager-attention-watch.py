@@ -234,7 +234,9 @@ def heartbeat_live(sid8, live_dir=LIVE_DIR, ttl_s=HEARTBEAT_TTL_S, now=None):
             age = now - os.path.getmtime(os.path.join(live_dir, name))
         except OSError:
             continue
-        if age <= ttl_s:
+        # A future-dated mtime (clock skew, restored backup) gives a negative age;
+        # reading it live would turn an UNREGISTERED hold into an unearned CLEARED.
+        if 0 <= age <= ttl_s:
             return True
     return False
 
@@ -484,6 +486,8 @@ def is_gated(status, body, headless_live=False, stuck=None):
     UNAVAILABLE rather than negative, and the transcript half decides alone.
     Reading both as UNREGISTERED is what holds every headless worker forever.
     """
+    # Deliberately ahead of the registry half: a dead permission channel is the
+    # more specific fact, even on a worker the registry also reads as waiting.
     if stuck:
         return True, "stuck:" + stuck
     if status is None:
