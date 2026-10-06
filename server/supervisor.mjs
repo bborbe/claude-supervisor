@@ -40,6 +40,7 @@ import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
 import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
+import { liveSessionIds, rehydratableAgents } from './registry-rehydrate.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -102,6 +103,46 @@ const log = (...a) => {
   try {
     appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}`)
   } catch {}
+}
+
+// ── roster rehydration ──────────────────────────────────────────────────────
+// A reconnected MCP client (`/mcp`) gets a NEW server process, so the `agents` Map above
+// comes up empty and `list_agents` answers `[]` while `agent_status` answers
+// `unknown agent <id>` — even though the worker sessions are still running. The ledger
+// already carries the identity of everything this supervisor spawned; this is the read side
+// that was missing. See registry-rehydrate.mjs for why identity and liveness are separate
+// channels, and why the ledger's own `status` must never be trusted as liveness.
+//
+// Best-effort by design: a store that cannot be read leaves the roster as it was before this
+// fix — empty — rather than taking the server down. The warning is the observable.
+{
+  const rehydrated = rehydratableAgents({ log })
+  if (rehydrated === null) {
+    log('WARNING: a store could not be read — the roster starts empty and will not show workers spawned before this process')
+  } else {
+    for (const agent of rehydrated) agents.set(agent.id, agent)
+    log(`rehydrated ${rehydrated.length} agent(s) from the ledger`)
+  }
+}
+
+// A rehydrated row carries a BOOT-TIME liveness reading and nothing here can refresh it — the
+// ledger is the durable half, never the live one. So a worker that dies after this process
+// starts would otherwise sit in the roster forever under a status that reads as fine, which
+// is the mirror of the hazard the module above names. Re-checking at READ time is where the
+// answer can be fresh, and it is cheap: the liveness channels are a readdir and a handful of
+// files, not the ~1400-record ledger.
+//
+// ⚠️ `null` from the channels means "could not tell", NOT "nothing is live" — the rows are
+// kept, because dropping a live worker on an unreadable store is the failure this whole
+// change exists to remove, one direction over.
+function pruneRehydratedAgents() {
+  const adopted = [...agents.values()].filter((a) => a.rehydrated)
+  if (adopted.length === 0) return
+  const live = liveSessionIds()
+  if (live === null) return
+  for (const agent of adopted) {
+    if (!live.has(agent.sessionId)) agents.delete(agent.id)
+  }
 }
 
 // ── attention-store delivery ────────────────────────────────────────────────
@@ -546,6 +587,12 @@ function writeLedger(agent, patch) {
 function stampUnobservedWorkers() {
   let stamped = 0
   for (const agent of agents.values()) {
+    // ⚠️ A rehydrated row is not this process's to stamp. Its ledger record belongs to the
+    // server that spawned the worker — which may still be running and driving it — so
+    // writing `unknown` here would assert an outcome this process never watched about a
+    // worker it never had. It would also mis-derive `mode` for a rehydrated cluster row,
+    // which the ternary below folds into `headless`.
+    if (agent.rehydrated) continue
     // `done` and `error` are real observed outcomes. Never overwrite one with an unknown.
     if (agent.status === 'done' || agent.status === 'error') continue
     const mode = agent.status === 'interactive' ? 'interactive' : 'headless'
@@ -924,7 +971,17 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 // module's header for why displacing an existing owner is the defect it exists to prevent.
 
 async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed, shipping }) {
-  const id = `agent_${++seq}`
+  // ⚠️ `seq` is per-process and restarts at 0 on every reconnect, while `agents` may already
+  // hold rows adopted from the ledger whose ids a PREVIOUS process minted from this same
+  // counter. Minting straight to `agent_${++seq}` would then land on an adopted id, and the
+  // `agents.set` below would silently overwrite a live worker's row — `list_agents` dropping
+  // it and `agent_status` answering `unknown agent`, which is the exact symptom rehydration
+  // exists to remove. Advancing past anything already held makes the mint collision-free
+  // whatever populated the Map, rather than only for the two-ledger-records case.
+  let id
+  do {
+    id = `agent_${++seq}`
+  } while (agents.has(id))
 
   // The target is resolved before the mode, and it SHORT-CIRCUITS. A cluster worker is not
   // opened on this machine at all, so every guard below — the role/window resolution, the
@@ -1083,7 +1140,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // The test is finished-vs-not, NOT `running` — see resume-guard.mjs. A parked
     // worker carries `blocked-on-permission` while it is blocked inside a tool call,
     // so matching only `running` let it through and left a parked worker resumable.
-    const holder = findLiveHolder(agents.values(), resume)
+    // ⚠️ Rehydrated rows are excluded, and this is load-bearing rather than tidy. The guard's
+    // premise is that a worker in THIS table is alive because it is an in-process `query()`
+    // this server is driving — which a rehydrated row is not: its worker belongs to the
+    // process that spawned it. Its status is never terminal (`rehydratedStatus` returns
+    // interactive/cluster/running), so leaving it in would let a worker that has since died
+    // assert it is still mid-turn and refuse the resume that is its only recovery, for as
+    // long as this process lives.
+    const holder = findLiveHolder([...agents.values()].filter((a) => !a.rehydrated), resume)
     if (holder) {
       return {
         error: `session ${resume} is still running (worker ${holder.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`,
@@ -1391,6 +1455,13 @@ const agentView = (a) => {
     // the ledger record uses, so the two cannot disagree about what "no policy" reads as.
     policy: a.policyPath ?? null,
     shipping: a.shipping === true,
+    // ⚠️ The discriminating signal for a row adopted from the ledger rather than spawned by
+    // this process. Without it three fields a caller DOES see are boot-time or false readings
+    // that read as measurements: `status` is never terminal, `shipping` is unrecoverable
+    // (`buildRecord` never persisted the flag), and `pending_permissions: []` is
+    // indistinguishable from "no gate outstanding" — the exact reading that cost a manager a
+    // misdirected worker in the v0.110.4 incident. See registry-rehydrate.mjs.
+    rehydrated: a.rehydrated === true,
     // Which source decided interactive-vs-headless: argument, env, config or default. A
     // worker that opened the wrong way is otherwise diagnosed by guessing which of four
     // places was consulted.
@@ -1670,9 +1741,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'list_agents':
+      pruneRehydratedAgents()
       return reply([...agents.values()].map(agentView))
 
     case 'agent_status': {
+      pruneRehydratedAgents()
       const agent = agents.get(args.agent_id)
       if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
       // A tab worker's permission prompt never enters the park queue, so
