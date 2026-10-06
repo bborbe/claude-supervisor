@@ -7,6 +7,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import {
   DEFAULT_MAX_CONCURRENT,
   DEFAULT_MAX_CONCURRENT_HARD,
@@ -455,10 +457,10 @@ test('a tab worker gets the owner as a quoted shell export, or nothing', () => {
   // The tab path launches through `bash -lc`, so the owner travels as an export ahead of
   // the launcher. It is quoted because a session id is data from a registry file, never
   // a trusted token to splice into a shell line.
-  assert.equal(ownerShellExport('manager-1'), "export SUPERVISOR_OWNER_SESSION_ID='manager-1'; ")
-  assert.equal(ownerShellExport("a'b"), "export SUPERVISOR_OWNER_SESSION_ID='a'\\''b'; ")
+  assert.equal(ownerShellExport('manager-1'), "export SUPERVISOR_OWNER_SESSION_ID='manager-1' && ")
+  assert.equal(ownerShellExport("a'b"), "export SUPERVISOR_OWNER_SESSION_ID='a'\\''b' && ")
   for (const owner of [undefined, null, '', '   ']) {
-    assert.equal(ownerShellExport(owner), 'unset SUPERVISOR_OWNER_SESSION_ID; ',
+    assert.equal(ownerShellExport(owner), 'unset SUPERVISOR_OWNER_SESSION_ID && ',
       'an absent owner must clear an inherited one, not leave it in place')
   }
 })
@@ -476,4 +478,29 @@ test('an owner inherited from a grandparent never reaches the worker', () => {
   }
   const own = workerEnvFor({ mode: 'headless', source: 'argument', env: inherited, owner: 'parent' })
   assert.equal(own.SUPERVISOR_OWNER_SESSION_ID, 'parent', "this spawn's own owner wins")
+})
+
+test('a failed cd never execs the launcher, with or without an owner', () => {
+  // The regression this guards: an earlier cut joined the export with `; `, which bash
+  // binds LOOSER than `&&`, so `cd <bad> && export …; exec …` ran the launcher after a
+  // failed cd. Executed for real against a directory that does not exist.
+  for (const owner of ['manager-1', undefined]) {
+    const line = `cd /nonexistent-dir-for-owner-test && ${ownerShellExport(owner)}echo LAUNCHED`
+    const res = spawnSync('bash', ['-c', line], { encoding: 'utf8' })
+    assert.notEqual(res.status, 0, `owner ${owner}: the failed cd must fail the line`)
+    assert.ok(!res.stdout.includes('LAUNCHED'), `owner ${owner}: the launcher must not run`)
+  }
+})
+
+test('both spawn paths in supervisor.mjs hand the parent session over as the owner', () => {
+  // The helpers are tested above, but a dropped argument at either call site would pass
+  // every one of those tests and silently revert the feature. A source-level lockstep
+  // check, since spawning a real worker is out of reach in a unit suite.
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(src, /spawnInteractiveAgent\(\{[^}]*owner: agent\.parentSession[^}]*\}\)/,
+    'the tab path must pass owner: agent.parentSession')
+  assert.match(src, /workerEnvFor\(\{[^}]*owner: agent\.parentSession[^}]*\}\)/,
+    'the headless path must pass owner: agent.parentSession')
+  assert.match(src, /\$\{ownerShellExport\(owner\)\}exec /,
+    'the tab line must splice the owner export directly ahead of exec')
 })

@@ -477,6 +477,11 @@ export function ownerShellExport(owner) {
   const id = cleanOwner(owner)
   // ⚠️ `unset`, never '' — the tab shell inherits the server's env, so an absent owner
   // must actively clear an inherited one rather than leave the grandparent's in place.
-  if (!id) return `unset ${OWNER_SESSION_ENV}; `
-  return `export ${OWNER_SESSION_ENV}='${id.replaceAll("'", "'\\''")}'; `
+  // ⚠️ Joined with `&& `, never `; `. The caller splices this between `cd <cwd> &&` and
+  // `exec <launcher>`, and bash gives `;` LOWER precedence than `&&` — so a `; ` here
+  // parses as `(cd <cwd> && export …); exec …`, and a failed `cd` would exec the
+  // launcher anyway, starting the worker in the wrong directory. `export` and `unset`
+  // both exit 0, so `&&` keeps the guard without adding a new failure mode.
+  if (!id) return `unset ${OWNER_SESSION_ENV} && `
+  return `export ${OWNER_SESSION_ENV}='${id.replaceAll("'", "'\\''")}' && `
 }

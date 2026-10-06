@@ -375,6 +375,14 @@ class OwnerLivenessRefTest(unittest.TestCase):
                 rc = ask.cmd_post(post_args(**overrides), out=out)
         return rc, captured.get("body"), out.getvalue()
 
+    def test_the_owner_env_name_is_the_one_the_server_exports(self):
+        # ⚠️ Pinned as a LITERAL, deliberately. The other specs read
+        # `ask.OWNER_SESSION_ENV` symbolically, so a rename here would pass them
+        # all while the server still exports the old name — and every worker
+        # would silently post an unmarked, prunable ask. The Node suite pins the
+        # same literal on its side; together they hold the lockstep.
+        self.assertEqual(ask.OWNER_SESSION_ENV, "SUPERVISOR_OWNER_SESSION_ID")
+
     def test_defaults_to_the_owner_when_the_spawner_exported_one(self):
         rc, body, _ = self._post({ask.OWNER_SESSION_ENV: "manager-1"})
         self.assertEqual(rc, 0)
