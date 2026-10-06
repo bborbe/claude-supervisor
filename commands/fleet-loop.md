@@ -134,6 +134,52 @@ The plugin prefix is required — a bare `fleet-sweep-reader` resolves to a pers
   Then report it in Step 5's grouped report, as its own group. **Never draft a stand-down** — that is a course correction and needs the operator's yes.
 - **Unmanaged topic (Step 2d):** **suggest, never auto-spawn** a manager — report the topic, its live workers and the command that would start one. When the operator says go, apply the spawn readiness precondition. If the topic page is absent, suggest creating the page (manager work) together with the spawn.
 
+## Step 3a — Adopt: give an exited manager's workers an owner
+
+**Runs after the sweep and before the drive leg** — the section sits above Step 3b so
+document order and execution order agree.
+
+⚠️ **That also places adoption AHEAD of reaping**, which is the drive leg's step 1b — so a
+worker this round classifies `finished — reap` is claimed first and reaped second. The
+residue is bounded and harmless, and it is named here rather than left to be discovered:
+the claim is written for a session that then exits, `already_owned` never consults it
+again (the worker is no longer live, so it is not stranded), and `gate-owner-filter.py`'s
+`claim-dead` arm fails open to EMIT rather than silencing the pane.
+
+A manager that exits leaves its live workers behind. Their gates keep the spawn edge's
+`dead-manager` verdict, which hop 4 deliberately keeps rather than drops — so every
+manager's watcher emits them and none owns them. Measured 2026-10-06 20:27–21:01: two
+exited managers stranded three workers, and Attention Manager and UI Manager escalated the
+same gates independently.
+
+```bash
+python3 $P/adopt-orphans.py --self "$CLAUDE_CODE_SESSION_ID"
+```
+
+**Read its exit code.** A refusal writes only to stderr and prints no stdout rows, so a
+round that never checks the code falls through to `(none stranded)` and reports a clean
+round for a read that never happened — the substitution the paragraph below forbids. The
+file already names the check where it matters (`orphan-candidates.py … exit code checked`,
+§ Steps 0–3).
+
+It prints, per exited manager, `manager <sid8> exited` and `<n> workers adopted from
+exited manager <sid8>`, and records each adoption through `ownership-claim.py` — the claim
+store `gate-owner-filter.py` already reads, so no second routing path is introduced.
+
+⚠️ **The adopter is a same-subject live successor when exactly one exists, else THIS
+session.** The rule, its two fallbacks, and why ambiguity falls back rather than picking
+live in the script's own docstring — read them there, never restate them here. `--self`
+names the fallback adopter and defaults to `CLAUDE_CODE_SESSION_ID`, which Claude Code
+exports into every Bash this session runs — so an ordinary round adopts into this session,
+and the refusal fires only where that variable is genuinely absent.
+
+⚠️ **A non-zero exit means NOTHING was adopted, and the REASON differs — so print the
+script's own stderr line, never a fixed phrase.** Three refusals return 1: a missing tick
+session id (returned before any store is read), an unreadable spawn ledger, and an
+unreadable registry or heartbeat store. **Only the last is a liveness-unknown reading.**
+Rendering `liveness unknown` for the other two reports a measurement the round never took
+— the exact failure this section exists to prevent.
+
 ## Step 3b — Drive: dispatch the drive leg
 
 Reap is no longer inlined here — it is the drive leg's, and the ordering is this command's to preserve: **reap runs before drive**, which is why the dispatch sits after the sweep and never before it.
@@ -228,10 +274,11 @@ The sweep reader persists it (its digest quotes `snapshot written: <swept_at>`).
 3. **`📋 Open with the operator`** — the ledger, one line per open entry: kind · what · state · age. **Never omitted**; `(none open)` when empty.
 4. **Needs-input** — the batch over the digest's BLOCKED set, per § Cadence's **Needs-input** (the `AskUserQuestion`, its `asked-ledger` claims, the relays), then the consolidated list beneath it: every open claim across every layer, in one list. **Never omitted** — `(none blocked)` when the digest's BLOCKED section is empty, and a subject one of those rules dropped prints that rule and its line.
 5. **Escalation report** — Step 5's own findings, grouped cause-first: the `stalled`/`parked`/`orphan` rows (orphans as their own group), the `finished — reap` rows as one self-closeable line, and any Step 2c collision as its own group. Omit if nothing needs attention. Mark any cause a sub-agent could not confirm as **unverified**.
-6. **Drive leg** — the agent's report verbatim (its header line, rows, `ESCALATION`, the `Waiting on your keystroke` list, `LEDGER`) plus `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons. On no usable report, say so here **and still print the `Waiting on your keystroke` list**, built from the attention feed per § Step 3b — the section is never omitted on any round. The `Waiting on your keystroke` list is the round's operator to-do list — print it as it arrives, never re-assembled by hand; the drive agent builds it and its rules live in `agents/fleet-drive.md`.
-7. **Read-only context sent this sweep** — what and to whom.
-8. **Course-correction drafts awaiting approval** — exact text + target; ask the operator to approve or edit.
-9. **Snapshot written** — path and `swept_at`.
+6. **Adoption** — Step 3a's lines verbatim: one `manager <sid8> exited` and one `<n> workers adopted from exited manager <sid8>` per exited manager with stranded workers, plus the `already held by a live manager` line where one claimed first. ⚠️ **Render the `  adopted by <sid8> (<successor|fallback>)` line too** — the count above it is identical whether a same-subject successor took the workers or THIS session did, so that line is the only place the round says which branch of the adoption rule resolved, and the branch is the rule's headline decision. On a **non-zero** exit print the script's own stderr line **verbatim** — it distinguishes the three refusals, and only one of them is a liveness-unknown reading — never a fixed paraphrase, which would report a clean round for a read that never happened. ⚠️ **On a ZERO exit, still print any `adopt-orphans: claim failed for <sid8> (exit N)` line.** A failed claim is written per worker to stderr while `main()` still returns 0 — a partial adoption is a real answer, and failing the whole round would misreport the rows that did succeed. Rendering stderr only on a non-zero exit therefore drops it, and a total `ownership-claim.py` outage reads as a bare `0 workers adopted` with the per-worker exit code gone. ⚠️ **Capture stderr as well as stdout, and render the census line on every zero exit** — `adopt-orphans: exited managers with live workers: N  adopted: N  held: N`. The census and the claim-failure lines are **stderr-only** while stdout carries just the per-manager rows, so a round that separates the streams silently drops the one line that proves it ran. ⚠️ **The census line IS the no-rows summary — do not also print `(none stranded)`** — they carry the same fact, and the census is the stronger of the two because it is the script's own reading rather than the round's paraphrase of it.
+7. **Drive leg** — the agent's report verbatim (its header line, rows, `ESCALATION`, the `Waiting on your keystroke` list, `LEDGER`) plus `Sent: <n>` with one line per recipient and `Skipped: <n>` with reasons. On no usable report, say so here **and still print the `Waiting on your keystroke` list**, built from the attention feed per § Step 3b — the section is never omitted on any round. The `Waiting on your keystroke` list is the round's operator to-do list — print it as it arrives, never re-assembled by hand; the drive agent builds it and its rules live in `agents/fleet-drive.md`.
+8. **Read-only context sent this sweep** — what and to whom.
+9. **Course-correction drafts awaiting approval** — exact text + target; ask the operator to approve or edit.
+10. **Snapshot written** — path and `swept_at`.
 
 ## The saturation reading — the ratio, not tok/s
 

@@ -143,6 +143,7 @@ docs/voice-asks.md                               a voiced question is also a boa
 scripts/voice-ask-pairing.py                     flags question `say`s with no `attention-ask.py post` within 60 s
 scripts/manager-predispatch.py                   the pre-dispatch gate both manager commands run first (state: ~/.claude/state/manager-predispatch/)
 scripts/approved-not-started.py                  the approved-but-unstarted reading both loops print (tick = 30 min constant; `unknown`, never `0`, on an unreadable registry)
+scripts/adopt-orphans.py                         adopts an exited manager's live workers into the ownership-claim store (/fleet-loop Step 3a) — successor-by-subject, else the tick session
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/manager-wrangler.md                routine approval loop over headless workers
