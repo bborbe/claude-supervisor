@@ -487,10 +487,27 @@ def main():
     items = log_items(args.state_dir)
     claims = load_claims(args.claims_file)
 
+    # ⚠️ Guard on the SOURCE, never on the derived row set. An empty `panes`
+    # means one of two different things, and only one of them is an operator
+    # error: `--feed` with no `[<pane>]` rows is a *successful* read of an
+    # empty feed (exit 0, nothing emitted, `gates: 0` on stderr), while a call
+    # carrying neither flag is malformed. Testing `panes` collapsed the two, so
+    # the documented watcher arm --
+    # `who-needs-me.py --section needs-you | gate-owner-filter.py --feed --self <sid>`
+    # -- exited 2 with `pass --pane, --feed, or both` on every quiet tick, and a
+    # `Monitor` armed with it died with `script failed (exit 2)` within seconds
+    # while its sibling watchers stayed up: the manager's push channel was dead
+    # exactly when the fleet was quiet, and the failure read as a bad command
+    # rather than as a lost watch. Measured 2026-10-05 (manager loop tick 154):
+    # the feed read `Needs you (0)` / `Nothing needs you.` and the pipeline died
+    # with the usage error, reproduced in both argument orders and against a
+    # synthetic empty feed on stdin. Do not restore the derived-set test: it is
+    # the same shape as the padding defect `feed_rows` documents above -- a
+    # correct extractor whose empty result the caller misreads as a bad call.
     panes = [(pane, False) for pane in args.pane]
     if args.feed:
         panes += feed_rows(sys.stdin)
-    if not panes:
+    if not args.pane and not args.feed:
         parser.error("pass --pane, --feed, or both")
 
     rows = []
