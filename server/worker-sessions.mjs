@@ -43,8 +43,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { config } from './config.mjs'
-import { heartbeatDir as defaultHeartbeatDir, listLive } from './heartbeat.mjs'
-import { readRegistry } from './liveness.mjs'
+import { liveSessionIds } from './liveness.mjs'
 
 // `{sessionId: record}`, or `null` when the ledger directory cannot be read.
 //
@@ -92,27 +91,14 @@ export function workerSessions({ registryDir, ledgerDir, heartbeatDir, now } = {
   const ledger = readLedger(ledgerDir)
   if (ledger === null) return null
 
-  // Both channels are read ONCE, not once per ledger entry. `checkLiveness` answers for a
+  // The union's ONE home is `liveness.mjs`, and this counter takes its default `isAlive`
+  // (registry presence) — the note on why presence is the right reading *here* lives with the
+  // helper, so the roster reader and the cap counter cannot drift apart on what "live" means.
+  // Both channels are read once, not once per ledger entry: `checkLiveness` answers for a
   // single id and re-reads the registry on every call, which over a ~1000-record ledger is a
-  // directory listing per record; the union it computes is the same one built here.
-  const registry = readRegistry(registryDir)
-  if (registry === null) return null
-  const stamps = listLive({ dir: heartbeatDir ?? defaultHeartbeatDir, now })
-  if (stamps === null) return null
-
-  const live = new Map()
-  for (const entry of registry) {
-    // Presence is the claim, and this channel's rule is deliberately UNCHANGED by the union
-    // above: the registry's entry is deleted on exit, so its existence is what the counter
-    // has always read. Tightening it here to `pidIsAlive` would be a second, silent change
-    // to the population this fix is not about.
-    live.set(entry.sessionId, entry.status)
-  }
-  for (const stamp of stamps) {
-    // The registry wins where both speak: a session holding a socket is the case the readers
-    // already understood, and its `status` is the richer descriptor.
-    if (!live.has(stamp.sessionId)) live.set(stamp.sessionId, stamp.mode ?? null)
-  }
+  // directory listing per record.
+  const live = liveSessionIds({ registryDir, heartbeatDir, now })
+  if (live === null) return null
 
   const workers = []
   for (const [sessionId, record] of Object.entries(ledger)) {

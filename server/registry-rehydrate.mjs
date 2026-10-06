@@ -39,13 +39,12 @@
 // answering `unknown agent`, which is the exact symptom this module exists to close. The mint
 // side advances past anything already held; see the `do … while (agents.has(id))` there.
 import { config } from './config.mjs'
-import { heartbeatDir as defaultHeartbeatDir, listLive } from './heartbeat.mjs'
-import { pidIsAlive, readRegistry } from './liveness.mjs'
+import { liveSessionIds as liveSessionIdsFromLiveness, pidIsAlive } from './liveness.mjs'
 import { readLedger } from './worker-sessions.mjs'
 
-// The live session ids, as a Set — or `null` when a channel could not be read.
+// The live session ids, as a Map — or `null` when a channel could not be read.
 //
-// `null` rather than an empty Set, mirroring `workerSessions`: a caller must be able to tell
+// `null` rather than an empty Map, mirroring `workerSessions`: a caller must be able to tell
 // "nothing is live" from "the store is unreadable", and collapsing the two answers a
 // permissions error with a confident empty fleet.
 //
@@ -56,21 +55,12 @@ import { readLedger } from './worker-sessions.mjs'
 // on exit, so a file left behind by a crashed session reads as live forever, and presence
 // alone would resurrect precisely the dead worker this module exists to exclude. The
 // heartbeat store needs no equivalent check — a stamp is aged out by `listLive`.
-export function liveSessionIds({ registryDir, heartbeatDir = defaultHeartbeatDir, now } = {}) {
-  const registry = readRegistry(registryDir)
-  if (registry === null) return null
-  const stamps = listLive({ dir: heartbeatDir, now })
-  if (stamps === null) return null
-
-  // The union, not the intersection: the registry sees every session holding a socket, and
-  // the heartbeat store covers the ones with no pid of their own. Either channel alone
-  // loses a population — see worker-sessions.mjs's header.
-  const live = new Set()
-  for (const entry of registry) {
-    if (pidIsAlive(entry.pid)) live.add(entry.sessionId)
-  }
-  for (const stamp of stamps) live.add(stamp.sessionId)
-  return live
+export function liveSessionIds(opts = {}) {
+  // ⚠️ The union's ONE home is `liveness.mjs`, so this reader and the cap counter cannot come
+  // to answer "is this session live?" differently — the hazard a second copy of the rule
+  // creates. The pid-check is this caller's one difference from `workerSessions()`, and the
+  // reason for it lives with the helper.
+  return liveSessionIdsFromLiveness({ ...opts, isAlive: pidIsAlive })
 }
 
 // The agent-record shape `agentView` needs, built from a ledger record.
@@ -146,13 +136,16 @@ export function rehydratedStatus(record) {
 // addressable but meaningless. Every record measured 2026-10-06 carried one.
 //
 // `log` is injected rather than imported, matching `agent-loop.mjs`: `supervisor.mjs` owns
-// the real logger and importing it back would be a cycle.
+// the real logger and importing it back would be a cycle. ⚠️ It defaults to `console.warn`
+// rather than a no-op — the duplicate-`agent_id` branch exists so a manager can tell why a
+// worker answers under `agent_1~<sid8>`, and a silent default would lose exactly that for any
+// caller that forgot the argument.
 export function rehydratableAgents({
   registryDir,
   ledgerDir = config.ledgerDir,
-  heartbeatDir = defaultHeartbeatDir,
+  heartbeatDir,
   now,
-  log = () => {},
+  log = console.warn,
 } = {}) {
   const ledger = readLedger(ledgerDir)
   if (ledger === null) return null

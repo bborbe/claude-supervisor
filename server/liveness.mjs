@@ -38,7 +38,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { config } from './config.mjs'
-import { HEARTBEAT_TTL_MS, heartbeatDir, readLive } from './heartbeat.mjs'
+import { HEARTBEAT_TTL_MS, heartbeatDir, listLive, readLive } from './heartbeat.mjs'
 
 // Read from the config module rather than the environment: a library module has no
 // business consulting ambient process state, and a default resolved here would make
@@ -79,6 +79,50 @@ export function readRegistry(dir = SESSIONS_DIR) {
     }
   }
   return entries
+}
+
+// The registry ∪ heartbeat union — the ONE home for "which sessions are live?".
+//
+// Two readers ask it: `worker-sessions.mjs` counts the fleet against the concurrent-worker
+// cap, and `registry-rehydrate.mjs` decides which ledger records to adopt into a roster.
+// They differ on ONE input and must not differ on the union itself — a second copy of the
+// rule is how the two would come to answer "is this session live?" differently, and the cap
+// counter would pick up a new liveness channel that the roster silently did not.
+//
+// `isAlive` is that one input. The default is presence, which is what the cap counter reads
+// and wants: over-counting a *cap* fails safe, because it refuses a spawn rather than
+// permitting one. A *roster* must pid-check instead — a registry file left behind by a
+// crashed session would otherwise be adopted as a live worker, the opposite direction — so
+// it passes `pidIsAlive`.
+//
+// A Map rather than a Set, because the counter needs the per-session status the two channels
+// disagree about; a caller that only needs membership uses `.has`.
+//
+// `null` from either channel is "could not read", returned rather than folded into an empty
+// map: callers refuse on `null` and open on an empty one, so collapsing the two turns a
+// permissions error into permission to spawn onto live work.
+export function liveSessionIds({
+  registryDir,
+  heartbeatDir: beatsDir = heartbeatDir,
+  now,
+  isAlive = () => true,
+} = {}) {
+  const registry = readRegistry(registryDir)
+  if (registry === null) return null
+  const stamps = listLive({ dir: beatsDir, now })
+  if (stamps === null) return null
+
+  const live = new Map()
+  for (const entry of registry) {
+    if (!isAlive(entry.pid)) continue
+    live.set(entry.sessionId, entry.status)
+  }
+  for (const stamp of stamps) {
+    // The registry wins where both speak: a session holding a socket is the case the readers
+    // already understood, and its `status` is the richer descriptor.
+    if (!live.has(stamp.sessionId)) live.set(stamp.sessionId, stamp.mode ?? null)
+  }
+  return live
 }
 
 // null = could not tell, false = registered but its pid is gone (a stale file).
