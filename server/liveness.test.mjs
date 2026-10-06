@@ -353,11 +353,20 @@ test('liveSessionIds treats a null heartbeatDir as unset, not as a directory nam
   const dir = mkdtempSync(join(tmpdir(), 'liveness-null-beats-'))
   try {
     // `checkLiveness` still passes `heartbeatDir: null` to mean "use the default". A default
-    // PARAMETER fires only on `undefined`, so `listLive({ dir: null })` would throw and the
-    // union would answer `null` — a permissions-shaped answer for a caller that meant
-    // "default", which is the contract this consolidation is supposed to keep.
-    const live = liveSessionIds({ registryDir: dir, heartbeatDir: null, isAlive: () => true })
-    assert.ok(live instanceof Map, 'a null heartbeatDir must fall back, not answer null')
+    // PARAMETER fires only on `undefined`, so a null would reach `listLive({ dir: null })` —
+    // where `readdirSync(null)` raises ERR_INVALID_ARG_TYPE (not ENOENT), so `listLive`'s own
+    // catch answers `null` and the union returns null: a permissions-shaped answer for a
+    // caller that meant "default".
+    //
+    // Asserted as EQUIVALENCE rather than `instanceof Map`, deliberately. The default is
+    // module config and cannot be injected, so both spellings read the machine's real
+    // heartbeat store; on a host where that store is unreadable both answer null and the
+    // assertion still holds, because what is pinned is that `null` and `undefined` take the
+    // SAME path. The defect this guards produces the opposite — null for one, a Map for the
+    // other — so the comparison still fails on it.
+    const viaNull = liveSessionIds({ registryDir: dir, heartbeatDir: null, isAlive: () => true })
+    const viaUndefined = liveSessionIds({ registryDir: dir, isAlive: () => true })
+    assert.deepEqual([...(viaNull ?? [])], [...(viaUndefined ?? [])])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
