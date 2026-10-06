@@ -71,9 +71,15 @@ test('writeLedger actually passes the agent role into the record', () => {
   // text, the remedy this repo already uses for the same reason in cluster-spawn.test.mjs and
   // attention-poll.test.mjs: that module starts an MCP server at import, so it cannot be
   // imported behaviourally.
+  //
+  // ⚠️ Anchored to a whole non-comment LINE, deliberately. An unanchored
+  // `/role: agent\.role \?\? null,/` is satisfied by a commented-out
+  // `// role: agent.role ?? null,` — a guard that stays green through exactly the
+  // edit it exists to catch, which is the failure mode this whole test is about.
+  // `^[ \t]*role` cannot match a line whose first non-blank characters are `//`.
   const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
-  assert.match(src, /role: agent\.role \?\? null,/)
-  assert.match(src, /const record = buildRecord\(\{/)
+  assert.match(src, /^[ \t]*role: agent\.role \?\? null,[ \t]*$/m)
+  assert.match(src, /^[ \t]*const record = buildRecord\(\{$/m)
 })
 
 test('buildRecord refuses a record it could not file', () => {

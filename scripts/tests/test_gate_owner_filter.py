@@ -136,6 +136,48 @@ class Verdict(unittest.TestCase):
             self.call("w", "manager-gone"), (gf.EMIT, "dead-manager")
         )
 
+    def test_dead_role_manager_spawner_is_still_kept(self):
+        """The widened class reaches hop 4 too, and must still emit there.
+
+        `is_manager` now returns True for a record declaring `role: "manager"`, so a
+        spawner holding such a record and ABSENT from the live set is a new arrival
+        at the dead-manager arm. It must emit: a dead manager cannot act on its own
+        gate, so nothing duplicates this wake and dropping it would leave the gate
+        owned by nobody.
+        """
+        ledger = {
+            "mgr-dead": {
+                "session_id": "mgr-dead",
+                "parent_session": "fleet",
+                "role": "manager",
+            },
+            "w": {"session_id": "w", "parent_session": "mgr-dead", "role": "agent"},
+        }
+        self.assertEqual(
+            self.call("w", "mgr-dead", ledger=ledger, live={"w"}),
+            (gf.EMIT, "dead-manager"),
+        )
+
+    def test_live_spawnerless_role_manager_own_gate_is_dropped(self):
+        """Hop 3b's second arm, newly reachable.
+
+        A record-bearing manager normally resolves at hop 3 through its spawner and
+        never reaches hop 3b -- but one whose `parent_session` never resolved has no
+        spawner and does. Its own gate must drop as `peer-manager-own`, exactly as a
+        record-less manager's does.
+        """
+        ledger = {
+            "mgr-nospawner": {
+                "session_id": "mgr-nospawner",
+                "parent_session": None,
+                "role": "manager",
+            }
+        }
+        self.assertEqual(
+            self.call("mgr-nospawner", None, ledger=ledger, live={"mgr-nospawner"}),
+            (gf.DROP, "peer-manager-own"),
+        )
+
     def test_unknown_liveness_fails_open(self):
         """An unreadable registry is UNKNOWN -- fail open, never drop the fleet."""
         self.assertEqual(
