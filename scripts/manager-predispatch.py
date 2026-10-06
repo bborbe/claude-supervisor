@@ -70,10 +70,12 @@ home.
 
 Exit codes (same three the loop gate uses)
   0   digest equal to the stored one AND no moved bucket set AND no actionable row in the
-      stored classification — nothing changed, dispatch no agent
+      stored classification AND the stored parked set still matches the tracked rows —
+      nothing changed, dispatch no agent
   10  digest differs, OR a staged bucket set differs from the stored one, OR the stored
-      classification places a row in an actionable bucket, OR any fail-open case fired —
-      run the full sweep
+      classification places a row in an actionable bucket, OR a row's owner moved
+      `live` <-> `parked` since the stored table was rendered, OR the record cannot say
+      what that set was, OR any fail-open case fired — run the full sweep
 
       ⚠️ The actionable-row clause is not a passenger on the digest, and it cannot be one.
       Ready-to-start is a STEADY state: `digest_of()` hashes status, phase, the Progress
@@ -96,6 +98,18 @@ Exit codes (same three the loop gate uses)
       `Manager Layer`: 23 `waiting-approval` rows, `--check` answering CHANGE with this
       clause's reason on a tree whose digest had not moved — the clause permanently true,
       not intermittently. `ACTIONABLE_BUCKETS` therefore holds `ready-to-start` alone.
+
+      ⚠️ The parked-set clause is a THIRD reason of the same shape, and it is the one that
+      keeps the replay honest. `digest_of` hashes a DEATH-only liveness term, so a worker
+      opening or closing a gate moves no digest input — while its row's Status cell really
+      does move (`⌛ waiting-on-human` for a parked row, its ordinary bucket for a live
+      one). Without this clause the exit-0 branch would print a stored table containing a
+      cell that is no longer true. It is deliberately NOT a digest term, for the reason the
+      sibling clause is not one: hashing the raw liveness word again would also refuse the
+      replay, at the ~150k-token act-leg cost the collapse exists to remove. See
+      `parked_names` and `parked_replay_reason` — and note that a record written before the
+      field existed cannot say what the set was, which is a CHANGE rather than a replay,
+      self-healed by the next `--save`.
 
       The per-bucket half is a save input in its own right, not a passenger on the digest:
       `digest_of()` covers the tracked set only, so a corrected re-stage against an
@@ -1090,8 +1104,15 @@ def parked_replay_reason(stored: object, now: list[str]) -> str | None:
     gate that reports "no change" when it cannot tell is the one failure worth spending a
     dispatch to avoid. Bounded and self-healing: the next `--save` writes the field.
     """
-    if not isinstance(stored, list):
+    if stored is None:
         return "record predates the parked set — this replay cannot be trusted"
+    if not isinstance(stored, list):
+        # ⚠️ Distinct from the branch above on purpose. A `parked` key holding a dict or a
+        # string is not a record that predates the field — it is one that cannot say either,
+        # but for a different reason, and naming the wrong one sends a reader hunting for an
+        # upgrade that already happened. Unreachable from `save_stored` (0600, always a
+        # list); it takes a hand-edited store, and the verdict is the safe one regardless.
+        return "record's parked set is malformed — this replay cannot be trusted"
     if sorted(str(n) for n in stored) != now:
         return "a row's owner moved live <-> parked since the stored table"
     return None

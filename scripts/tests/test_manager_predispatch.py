@@ -623,6 +623,27 @@ class TestLiveness(Base):
         self.assertEqual(rc, self.m.EXIT_CHANGE, out)
         self.assertIn("predates the parked set", out)
 
+    def test_a_malformed_parked_set_is_not_replayed_as_an_upgrade(self):
+        """A `parked` value that is not a list is malformed, not pre-field.
+
+        Both refuse the replay, so the verdict is identical — but the reason line is what a
+        reader acts on, and "this record predates the field" sends them looking for an
+        upgrade that already happened. Pinned because the two cases share a predicate shape
+        and only the message separates them.
+        """
+        self.registry("s-malformed", status="idle")
+        self.task("ATask", sid="s-malformed")
+        self.prime("ATopic")
+
+        state = json.loads(self.read_state("ATopic"))
+        state["parked"] = "ATask"  # a bare string where a list belongs
+        with open(self.m.state_path("ATopic"), "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("malformed", out)
+
     def test_the_parked_set_compares_across_rows_not_just_one(self):
         """Two rows, one parking — the set comparison, not the degenerate one-row case.
 
