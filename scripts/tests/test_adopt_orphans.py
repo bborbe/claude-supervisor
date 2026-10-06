@@ -251,6 +251,29 @@ class AdopterResolution(Base):
 class Refusal(Base):
     """Unknown is not empty. Never move ownership on evidence nobody has."""
 
+    def test_unreadable_ledger_directory_refuses(self):
+        """The third exit-1 arm, and the one whose mechanism is least obvious.
+
+        `os.path.isdir` is False for a permission-denied directory and for a broken mount
+        as well as for a missing one, so an unreadable ledger takes the same refusal as an
+        absent one -- while a ledger that is PRESENT and empty exits 0 as a real answer.
+        The rendering contract says only the registry/heartbeat arm is a liveness-unknown
+        reading; without this case that distinction is enforced by prose alone, and a
+        regression swapping the two arms would pass a green suite.
+        """
+        self.spawn(WORKER, parent=EXITED)
+        self.live(WORKER)
+        proc = self.run_script("--ledger-dir", os.path.join(self.tmp, "no-such-ledger"))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("spawn ledger directory unreadable", proc.stderr)
+        self.assertEqual(self.holders(), {})
+
+    def test_empty_ledger_is_a_clean_round_not_a_refusal(self):
+        """The control for the arm above: present-and-empty exits 0, and says so."""
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("exited managers with live workers: 0", proc.stderr)
+
     def test_unreadable_registry_refuses(self):
         self.spawn(WORKER, parent=EXITED)
         self.live(WORKER)

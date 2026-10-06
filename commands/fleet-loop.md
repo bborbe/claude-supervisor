@@ -149,6 +149,12 @@ same gates independently.
 python3 $P/adopt-orphans.py --self "$CLAUDE_CODE_SESSION_ID"
 ```
 
+**Read its exit code.** A refusal writes only to stderr and prints no stdout rows, so a
+round that never checks the code falls through to `(none stranded)` and reports a clean
+round for a read that never happened — the substitution the paragraph below forbids. The
+file already names the check where it matters (`orphan-candidates.py … exit code checked`,
+§ Steps 0–3).
+
 It prints, per exited manager, `manager <sid8> exited` and `<n> workers adopted from
 exited manager <sid8>`, and records each adoption through `ownership-claim.py` — the claim
 store `gate-owner-filter.py` already reads, so no second routing path is introduced.
