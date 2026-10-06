@@ -518,6 +518,160 @@ class TestLiveness(Base):
         parked = self.digest_with("s-churn")
         self.assertEqual(live, parked, "liveness churn alone moved the digest")
 
+    def test_a_parked_flip_does_not_replay_a_stale_table(self):
+        """The Status cell moves on `live` <-> `parked`, so exit 0 must not be claimed.
+
+        The churn test above is why this one is needed, not a contradiction of it: the
+        digest is deliberately death-only, so a worker opening a gate moves NO digest
+        input — and the exit-0 branch then replays the stored table verbatim. One cell in
+        that table is no longer true: the Status cell, which reads `⌛ waiting-on-human`
+        for a parked row and `🔄 progressing` for a live one
+        (`agents/manager-sweep-reader.md:136`). The stale cell is the *Status* cell and
+        NOT the Session cell, which is `[<sid8>]` for both — `parked` is ALIVE, so it
+        takes the live-shaped delimiter (step 7).
+
+        So the digest stays pure and a SEPARATE clause carries this, exactly as
+        `actionable_names` does: a replay is only free when the table it would print is
+        still true.
+        """
+        self.registry("s-park", status="idle")
+        self.task("ATask", sid="s-park")
+        self.prime("ATopic")
+
+        self.registry("s-park", status="waiting")  # same row, same sid, now parked
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(
+            rc,
+            self.m.EXIT_CHANGE,
+            "a parked flip replayed a stale table instead of forcing a re-render:\n" + out,
+        )
+
+    def test_a_still_live_owner_still_replays(self):
+        """The negative control: the clause must not make the replay unreachable.
+
+        Without this, a build that forces CHANGE on every liveness word — or on every
+        run at all — satisfies the test above while destroying the saving the whole gate
+        exists for.
+        """
+        self.registry("s-quiet", status="idle")
+        self.task("ATask", sid="s-quiet")
+        self.prime("ATopic")
+
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(
+            rc,
+            self.m.EXIT_NOCHANGE,
+            "an unchanged tree stopped replaying:\n" + out,
+        )
+
+    def test_the_parked_clause_does_not_move_the_digest(self):
+        """`digest_of`'s contract survives: the reason is a SEPARATE clause.
+
+        This is what separates the fix from reverting PR #154. Hashing the raw liveness
+        word again would also stop the stale replay, and would put session churn back
+        into the digest — the ~150k-token act legs #154 removed. The digest must be
+        byte-identical across the flip while the gate still refuses to replay.
+        """
+        self.registry("s-sep", status="idle")
+        self.task("ATask", sid="s-sep")
+        self.prime("ATopic")
+        live = json.loads(self.read_state("ATopic"))["digest"]
+
+        self.registry("s-sep", status="waiting")
+        _, _, payload, _ = self.m.evaluate(self.vault, "ATopic")
+        self.assertEqual(
+            self.m.digest_of(payload["tracked"]),
+            live,
+            "the parked clause moved the digest instead of riding beside it",
+        )
+
+    def _registry_file(self, fname, sid, status):
+        """A second registry record. `Base.registry` always writes `1.json`, so a test
+        needing TWO live sessions has no helper — this is that, kept local to the two
+        multi-session tests rather than widening the shared fixture."""
+        with open(os.path.join(self.m.REGISTRY_DIR, fname), "w") as fh:
+            json.dump(
+                {
+                    "sessionId": sid,
+                    "pid": os.getpid(),
+                    "procStart": live_proc_start(os.getpid()),
+                    "status": status,
+                },
+                fh,
+            )
+
+    def test_a_record_predating_the_parked_set_is_not_replayed(self):
+        """The branch EVERY existing vault hits once, on its first run after upgrade.
+
+        `save_stored` only began writing `parked` with this change, so every record already
+        on disk carries no key. `parked_replay_reason` reads that as "cannot say" — a
+        CHANGE — because a gate that reports "no change" when it cannot tell is the one
+        failure worth spending a dispatch to avoid. Untested, a refactor flipping that
+        branch to `None` would pass the whole suite and serve stale replays to every vault
+        on upgrade.
+        """
+        self.registry("s-upgrade", status="idle")
+        self.task("ATask", sid="s-upgrade")
+        self.prime("ATopic")
+
+        state = json.loads(self.read_state("ATopic"))
+        del state["parked"]  # a record written before the field existed
+        with open(self.m.state_path("ATopic"), "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("predates the parked set", out)
+
+    def test_a_malformed_parked_set_is_not_replayed_as_an_upgrade(self):
+        """A `parked` value that is not a list is malformed, not pre-field.
+
+        Both refuse the replay, so the verdict is identical — but the reason line is what a
+        reader acts on, and "this record predates the field" sends them looking for an
+        upgrade that already happened. Pinned because the two cases share a predicate shape
+        and only the message separates them.
+        """
+        self.registry("s-malformed", status="idle")
+        self.task("ATask", sid="s-malformed")
+        self.prime("ATopic")
+
+        state = json.loads(self.read_state("ATopic"))
+        state["parked"] = "ATask"  # a bare string where a list belongs
+        with open(self.m.state_path("ATopic"), "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(rc, self.m.EXIT_CHANGE, out)
+        self.assertIn("malformed", out)
+
+    def test_the_parked_set_compares_across_rows_not_just_one(self):
+        """Two rows, one parking — the set comparison, not the degenerate one-row case.
+
+        With a single tracked row the comparison is `[] != [name]` on either side, so a
+        build that compared only the first row, or that read the set as a scalar, passes
+        every other test in this class.
+        """
+        self.task("AGoalTask", sid="s-two-a")
+        self.task("ATask", sid="s-two-b")
+        self._registry_file("1.json", "s-two-a", "idle")
+        self._registry_file("2.json", "s-two-b", "idle")
+        # Both rows must actually be tracked, or the test silently degenerates into the
+        # one-element case it exists to get away from.
+        _, _, payload, _ = self.m.evaluate(self.vault, "ATopic")
+        self.assertEqual(
+            len(payload["tracked"]), 2, "fixture must track both rows for this to be a set"
+        )
+        self.prime("ATopic")
+
+        # Park ONE of the two; the other stays live, so the sets differ by one name.
+        self._registry_file("2.json", "s-two-b", "waiting")
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(
+            rc,
+            self.m.EXIT_CHANGE,
+            "one row parking was not seen across a two-row set:\n" + out,
+        )
+
     def test_a_worker_dying_still_moves_the_digest(self):
         """Task-SC2(b) — the guard against the cheap fix.
 

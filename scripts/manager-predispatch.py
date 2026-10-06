@@ -70,10 +70,12 @@ home.
 
 Exit codes (same three the loop gate uses)
   0   digest equal to the stored one AND no moved bucket set AND no actionable row in the
-      stored classification — nothing changed, dispatch no agent
+      stored classification AND the stored parked set still matches the tracked rows —
+      nothing changed, dispatch no agent
   10  digest differs, OR a staged bucket set differs from the stored one, OR the stored
-      classification places a row in an actionable bucket, OR any fail-open case fired —
-      run the full sweep
+      classification places a row in an actionable bucket, OR a row's owner moved
+      `live` <-> `parked` since the stored table was rendered, OR the record cannot say
+      what that set was, OR any fail-open case fired — run the full sweep
 
       ⚠️ The actionable-row clause is not a passenger on the digest, and it cannot be one.
       Ready-to-start is a STEADY state: `digest_of()` hashes status, phase, the Progress
@@ -96,6 +98,18 @@ Exit codes (same three the loop gate uses)
       `Manager Layer`: 23 `waiting-approval` rows, `--check` answering CHANGE with this
       clause's reason on a tree whose digest had not moved — the clause permanently true,
       not intermittently. `ACTIONABLE_BUCKETS` therefore holds `ready-to-start` alone.
+
+      ⚠️ The parked-set clause is a THIRD reason of the same shape, and it is the one that
+      keeps the replay honest. `digest_of` hashes a DEATH-only liveness term, so a worker
+      opening or closing a gate moves no digest input — while its row's Status cell really
+      does move (`⌛ waiting-on-human` for a parked row, its ordinary bucket for a live
+      one). Without this clause the exit-0 branch would print a stored table containing a
+      cell that is no longer true. It is deliberately NOT a digest term, for the reason the
+      sibling clause is not one: hashing the raw liveness word again would also refuse the
+      replay, at the ~150k-token act-leg cost the collapse exists to remove. See
+      `parked_names` and `parked_replay_reason` — and note that a record written before the
+      field existed cannot say what the set was, which is a CHANGE rather than a replay,
+      self-healed by the next `--save`.
 
       The per-bucket half is a save input in its own right, not a passenger on the digest:
       `digest_of()` covers the tracked set only, so a corrected re-stage against an
@@ -1049,6 +1063,61 @@ def liveness_change_term(t: dict) -> int:
     return int(t.get("liveness", LIVENESS_NONE) == LIVENESS_NONE)
 
 
+def parked_names(tracked: list[dict]) -> list[str]:
+    """The rows whose rendered Status cell reads `⌛ waiting-on-human`, sorted.
+
+    ⚠️ **This is the Status cell, not the Session cell, and the difference is the whole
+    reason this function exists.** `agents/manager-sweep-reader.md:136` makes a *parked*
+    row render `⌛ waiting-on-human` whatever its bucket, while a live one keeps its
+    ordinary bucket — so a `live` <-> `parked` flip moves the Status cell. The Session
+    cell does NOT move with it: step 7 is explicit that `parked` is ALIVE and therefore
+    takes the live-shaped `[<sid8>]` delimiter, and `session-liveness.py` never reads the
+    registry's `status` field, so a parked session probes LIVE.
+
+    Read from `liveness`, which `enrich_liveness` has already populated on every row.
+
+    ⚠️ **This reads THIS script's `liveness_of`, while the cell it protects is rendered by
+    the caller's sweep reader from a different input** — `session-liveness.py --check` over
+    the row's id set (`agents/manager-sweep-reader.md` input 10). The repo's two-renderer
+    rule keeps those two verdicts independent on purpose, and this clause does not close
+    that gap: a row the reader renders `⌛ waiting-on-human` while the gate reads `live`
+    moves the cell with the parked set unchanged, and the replay is still served. Named
+    here rather than left for rediscovery — it is the same class of residual as the
+    Session cell's own route, and like that one it is deliberately NOT covered.
+    """
+    return sorted(t["name"] for t in tracked if t.get("liveness") == LIVENESS_PARKED)
+
+
+def parked_replay_reason(stored: object, now: list[str]) -> str | None:
+    """`None` when the stored table's parked set is still the set that would render.
+
+    Otherwise the reason the replay is refused. ⚠️ **It returns WHICH of the two situations
+    it hit, rather than a bare bool**, because "the tree moved" and "this record cannot
+    say" are different facts about the store and a reader who cannot tell them apart cannot
+    tell a real change from a first run after an upgrade. Evaluating the predicate once is
+    also what keeps the reason line from drifting from the verdict: a caller that
+    re-derived `isinstance(stored, list)` alongside this would name the wrong situation the
+    moment either half was edited alone.
+
+    `stored` not being a list means the record predates the field — the same fail-open rule
+    `load_stored` applies to a missing or unreadable state file, and for the same reason: a
+    gate that reports "no change" when it cannot tell is the one failure worth spending a
+    dispatch to avoid. Bounded and self-healing: the next `--save` writes the field.
+    """
+    if stored is None:
+        return "record predates the parked set — this replay cannot be trusted"
+    if not isinstance(stored, list):
+        # ⚠️ Distinct from the branch above on purpose. A `parked` key holding a dict or a
+        # string is not a record that predates the field — it is one that cannot say either,
+        # but for a different reason, and naming the wrong one sends a reader hunting for an
+        # upgrade that already happened. Unreachable from `save_stored` (0600, always a
+        # list); it takes a hand-edited store, and the verdict is the safe one regardless.
+        return "record's parked set is malformed — this replay cannot be trusted"
+    if sorted(str(n) for n in stored) != now:
+        return "a row's owner moved live <-> parked since the stored table"
+    return None
+
+
 def digest_of(tracked: list[dict]) -> str:
     """What the sweep would render, plus the Progress signal it reports.
 
@@ -1067,21 +1136,34 @@ def digest_of(tracked: list[dict]) -> str:
     ⚠️ **That split NARROWS THIS DOCSTRING'S OWN CONTRACT, and the narrowing is named
     here rather than left to be rediscovered.** "What the sweep would render" no longer
     holds for one cell: `parked` is what makes a row render `⌛ waiting-on-human`
-    (`agents/manager-sweep-reader.md` step 7), so a worker newly opening a gate no longer
-    moves the digest -- and the exit-0 replay path (`commands/manager-status.md` step 1)
-    reproduces the stored table with whatever cell the row last had.
+    (`agents/manager-sweep-reader.md:136`), so a worker newly opening a gate no longer
+    moves the digest.
 
-    ⚠️ **That stale cell is REAL and UNCOVERED on the two surfaces that replay** --
-    `/manager-status` step 1 and `/manager-drive` step 2 -- because both STOP on exit 0
-    before reading anything else. ⚠️ **`/manager-loop` is NOT one of them and is NOT a
-    mitigation:** it never calls `--print` or `--check`, so it never consults this digest
-    at all, and its attention-feed read is step 4's first bullet
-    (`commands/manager-loop.md:186`), which runs before any verdict. The independent
-    surfacing that does hold is step 7's `manager-attention-watch.py` / feed-Monitor
-    arms, which fire `NEW GATE` off the registry and the feed rather than off this
-    digest. Accepted because the gate's question is "is this run worth a dispatch at
-    all" and a gate opening changes no row's *eligibility*. Every other narrowing in
-    this file is named; this one is named too.
+    ⚠️ **The narrowing is REAL and is covered ONE LEVEL UP, not here.** The exit-0 replay
+    path (`commands/manager-status.md` step 1, `commands/manager-drive.md` step 2) would
+    otherwise reproduce the stored table with whatever cell the row last had, so
+    `evaluate` carries a separate `parked_set_moved` clause that refuses the replay on
+    exactly that transition. ⚠️ **It is deliberately NOT a term in this function**:
+    hashing the raw liveness word again would also refuse the replay, and would put
+    session churn back into the digest — the ~150k-token act-leg cost
+    `liveness_change_term` exists to remove. The clause rides BESIDE the digest, the same
+    way `actionable_names` does, so this function stays a pure function of the tracked
+    set.
+
+    ⚠️ **The cell that goes stale is the STATUS cell, never the Session cell** — named
+    because the two were conflated in the caveats that clause replaced. `agents/manager-sweep-reader.md`
+    step 7 makes a parked session take the LIVE-shaped `[<sid8>]` delimiter, and
+    `session-liveness.py` never reads the registry's `status` field, so a `live` <-> `parked`
+    flip renders the SAME Session cell on both sides. The Session cell's own stale routes
+    — a row whose ids live only in `metrics_sessions`, gaining its first id without moving
+    any digest input — are NOT covered by this clause and remain open.
+
+    ⚠️ **`/manager-loop` is NOT one of the replaying surfaces and is NOT a mitigation:**
+    it never calls `--print` or `--check`, so it never consults this digest at all, and
+    its attention-feed read is step 4's first bullet (`commands/manager-loop.md:186`),
+    which runs before any verdict. The independent surfacing that does hold is step 7's
+    `manager-attention-watch.py` / feed-Monitor arms, which fire `NEW GATE` off the
+    registry and the feed rather than off this digest.
 
     ⚠️ **The churn suppression is NOT absolute, and the second route is named here rather
     than left to be inferred from the term alone.** `stuck` is a SEPARATE digest input
@@ -1464,6 +1546,24 @@ def save_stored(
         "table": strip_links(table),
         "members": len(tracked),
         "busy_since": busy,
+        # The rows whose Status cell reads `⌛ waiting-on-human`. The digest is deliberately
+        # DEATH-ONLY (see `liveness_change_term`), so a `live` <-> `parked` flip moves no
+        # digest input -- and the exit-0 branch would then replay a table whose Status cell
+        # is no longer true. This is the field that makes that replay refusable, and it is
+        # read by a SEPARATE clause in `evaluate` rather than hashed here, so `digest_of`
+        # stays a pure function of the tracked set. A record written before this field
+        # existed carries no key, which `parked_replay_reason` reads as "cannot say" -- a
+        # CHANGE, self-healed by the next `--save`, on the same fail-open rule `load_stored`
+        # applies.
+        #
+        # ⚠️ It is computed from the tracked set `evaluate` has just enriched, while the
+        # `table` beside it is read back from the payload file an EARLIER `--write-payload`
+        # wrote. A flip landing between those two moments bakes a stale cell into a record
+        # whose parked set matches, and the next run then replays it at exit 0. That is the
+        # same T1/T2 window the digest already has -- pre-existing in kind rather than
+        # introduced here, and named because the obvious reading of this field is stronger
+        # than the code delivers.
+        "parked": parked_names(tracked),
         # Dated from the payload's own mtime whenever the caller read the table back from
         # `payload_path`, so a record can never postdate the render it stores — the
         # invariant that turns a stale payload into a visible old date instead of a
@@ -1552,13 +1652,20 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
     busy = apply_stuck(tracked, registry, prev_busy, now_ts)
     digest = digest_of(tracked)
 
-    # Three independent reasons to sweep. The third is not derivable from the other two and
-    # is deliberately NOT folded into `digest_of`: that function's contract is "what the
-    # sweep would render", a pure function of the tracked set, and a caller-supplied
-    # classification has no business moving it. See the module docstring's exit-code note.
+    # Four independent reasons to sweep, and the last two are deliberately NOT folded into
+    # `digest_of`: that function's contract is "what the sweep would render", a pure
+    # function of the tracked set, and neither a caller-supplied classification nor a
+    # render-truth check about a single cell has any business moving it. See the module
+    # docstring's exit-code note.
     digest_moved = stored != digest
     actionable = actionable_names(stored_bucket_sets)
-    changed = fail_reason is not None or digest_moved or bool(actionable)
+    parked_reason = parked_replay_reason(prev.get("parked"), parked_names(tracked))
+    changed = (
+        fail_reason is not None
+        or digest_moved
+        or bool(actionable)
+        or parked_reason is not None
+    )
     if fail_reason:
         reason = fail_reason
     elif digest_moved:
@@ -1568,6 +1675,8 @@ def evaluate(vault: str, subject: str) -> tuple[bool, str, dict, str]:
         if len(actionable) > 3:
             shown += f" +{len(actionable) - 3} more"
         reason = f"{len(actionable)} actionable row(s) waiting: {shown}"
+    elif parked_reason:
+        reason = parked_reason
     else:
         reason = "digest equal"
     payload = {
