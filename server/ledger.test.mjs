@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MODES, buildRecord, listRecords, parentSessionId, readRecord, recordPath, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
@@ -50,6 +50,36 @@ test('buildRecord records which policy the worker ran under', () => {
   // use, so the three cannot disagree about what "no policy" means.
   assert.equal(spawnRecord().policy, null, 'no per-spawn policy reads as the server policy, not as unknown')
   assert.equal(spawnRecord({ policy: '/etc/strict.json' }).policy, '/etc/strict.json')
+})
+
+test('buildRecord records the role the spawn declared', () => {
+  // The spawn edge alone cannot say whether a spawned session is a worker or a manager,
+  // and `gate-owner-filter.py` used to read any record as proof of "worker" — so a manager
+  // opened with `spawn_agent(role="manager")` was read as a worker by every peer manager
+  // and its workers' gates were escalated twice. `spawn_agent` defaults the role to `agent`
+  // before this point, so a null here is a pre-field record, not an undeclared role.
+  assert.equal(spawnRecord().role, null, 'a spawn that declared no role records none')
+  assert.equal(spawnRecord({ role: 'manager' }).role, 'manager')
+  assert.equal(spawnRecord({ role: 'agent' }).role, 'agent')
+})
+
+test('writeLedger actually passes the agent role into the record', () => {
+  // The WIRING is the fix. Every other test here reaches `buildRecord` directly, so deleting
+  // `role: agent.role` from `writeLedger` would leave this whole suite green while silently
+  // reinstating the reported defect — a manager opened through the worker path filed as a
+  // worker, its workers' gates re-escalated by every peer. Pinned by reading supervisor.mjs's
+  // text, the remedy this repo already uses for the same reason in cluster-spawn.test.mjs and
+  // attention-poll.test.mjs: that module starts an MCP server at import, so it cannot be
+  // imported behaviourally.
+  //
+  // ⚠️ Anchored to a whole non-comment LINE, deliberately. An unanchored
+  // `/role: agent\.role \?\? null,/` is satisfied by a commented-out
+  // `// role: agent.role ?? null,` — a guard that stays green through exactly the
+  // edit it exists to catch, which is the failure mode this whole test is about.
+  // `^[ \t]*role` cannot match a line whose first non-blank characters are `//`.
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(src, /^[ \t]*role: agent\.role \?\? null,[ \t]*$/m)
+  assert.match(src, /^[ \t]*const record = buildRecord\(\{$/m)
 })
 
 test('buildRecord refuses a record it could not file', () => {

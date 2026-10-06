@@ -22,13 +22,18 @@ Ownership is resolvable without guessing, through four hops:
   2. SESSION -> SPAWNER  `parent_session` in the spawn ledger
      (`~/.local/state/claude-supervisor/sessions/<sid>.json`).
 
-  3. SPAWNER IS A MANAGER  when it has NO ledger record of its own. Managers
-     are operator-started, so unlike a worker-spawner they were never themselves
-     spawned. Measured 2026-09-25: 600 records, 15 distinct parents, 11 with no
-     own record (managers) against 4 with one (worker-spawned workers). This is
-     a property of the spawn edge, not a session-name convention -- and it is
-     NOT `manager-liveness.py`, which tracks a loop's cadence by topic slug and
-     never answers whether a session is a manager.
+  3. SPAWNER IS A MANAGER  when it has NO ledger record of its own, OR when its
+     record declares `role: "manager"`. The first arm is the common one -- a
+     manager started by `/supervisor:open` runs in a plain wezterm tab and is
+     never itself spawned. The second arm exists because that is not the only
+     way to start one: `spawn_agent(role="manager")` DOES write a record, so
+     reading any record as proof of "worker" filed such a manager as a worker
+     and every peer re-escalated its workers' gates. Measured 2026-09-25: 600
+     records, 15 distinct parents, 11 with no own record (managers) against 4
+     with one (worker-spawned workers). This is a property of the spawn edge,
+     not a session-name convention -- and it is NOT `manager-liveness.py`, which
+     tracks a loop's cadence by topic slug and never answers whether a session
+     is a manager.
 
   4. SPAWNER IS LIVE  the session registry (`~/.claude/sessions/<pid>.json`,
      `sessionId` + `status`). A dead manager's panes are nobody's to route, so
@@ -61,16 +66,20 @@ carries `parent_session: null` too (see `CLAUDE.md` § The spawn ledger), but it
 has a ledger record of its OWN, so it is not a manager and must keep emitting.
 Keying 3b on the empty spawner would drop every such worker.
 
-⚠️ **HOP 3b DROPS ON "NO LEDGER RECORD AND LIVE", AND THAT CLASS IS WIDER THAN
+⚠️ **HOP 3b DROPS ON "NOT A WORKER, AND LIVE", AND THAT CLASS IS WIDER THAN
 "MANAGER".** What makes the drop correct is NOT the shape hop 4 protects — hop 4
 *keeps* a gate nobody can act on, this *drops* one — but that the gated session is
 live and is therefore **its own reporter**: a live session raises its own gate and
 sees its own closer, so a second watcher surfacing it buys nothing. That is what
 the liveness guard encodes, and it is why a DEAD peer manager's gate still emits.
 
-The class that test admits is any live session with **no ledger record**, and an
-operator-started manager is only its most common member. Two others are named here
-rather than left to be discovered:
+`is_manager` admits two arms, and both are read here: a session with **no ledger
+record at all**, and — since 2026-10-06 — a session whose record declares
+`role: "manager"`. The second arm is what lets a manager opened through the worker
+path (`spawn_agent(role="manager")`, which writes a record) be recognised at all;
+before it, only the record's *presence* was read, so such a manager was filed as a
+worker. An operator-started manager is only the most common member of the first
+arm. Two others are named here rather than left to be discovered:
 
   * a worker whose session id never resolved — `CLAUDE.md` § The spawn ledger:
     *"A worker whose session id never resolved gets no record rather than one
@@ -245,10 +254,34 @@ def load_claims(path=CLAIMS):
 
 
 def is_manager(session_id, ledger):
-    """A spawner is a manager when it was never itself spawned."""
+    """A spawner is a manager when it was never itself spawned, or was spawned AS one.
+
+    The spawn edge alone cannot answer this. `/supervisor:open` starts a topic
+    manager in a plain wezterm tab, which writes no ledger record, so absence is the
+    common case -- but `spawn_agent(role="manager")` is a documented call that DOES
+    write one, and reading any record as proof of "worker" made such a manager
+    indistinguishable from the workers it spawns. Measured 2026-10-06: the CDB in
+    Weldall Manager (`1d379d23`, spawned by the Fleet Manager) had a record, so every
+    peer resolved its workers `worker-spawner` and re-escalated gates it had already
+    handled -- the same gates escalated twice.
+
+    ONLY an explicit `manager` counts, and a record with no `role` reads as a
+    worker. That default is NOT "no pre-field manager has a record" -- the very
+    manager this fixes had one. It is that a pre-field record cannot be told
+    apart: the field is absent on every worker AND every manager spawned before
+    it existed alike. Defaulting the other way would flip every pre-field record
+    to manager, and workers outnumber managers by orders of magnitude, so it
+    would drop the whole fleet's gates -- the fleet-wide silence every other hop
+    here fails open to avoid. The residue is a known gap, not a claim that no
+    such manager exists: a pre-change `spawn_agent(role="manager")` manager still
+    reads as a worker until it is re-spawned or its record gains the field.
+    """
     if not session_id:
         return False
-    return session_id not in ledger
+    record = ledger.get(session_id)
+    if record is None:
+        return True
+    return record.get("role") == "manager"
 
 
 def live_ids(registry_dir=REGISTRY):
