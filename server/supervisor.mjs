@@ -1442,7 +1442,7 @@ const TOOLS = [
         task: {
           type: 'string',
           description:
-            'The vault task this worker is opened for. Honoured on BOTH targets, and it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`). REQUIRED with `target: "cluster"`. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+            'The vault task this worker is opened for. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with `target: "cluster"`. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
         },
         vault: {
           type: 'string',

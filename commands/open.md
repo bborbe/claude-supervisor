@@ -643,14 +643,15 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 
 **`-n` sets the session record's `name` but writes NO `custom-title` line into the transcript.** Verified 2026-09-15: a session spawned with `-n "Complete Kafka Restore"` had `name=Complete Kafka Restore nameSource=user` in `~/.claude/sessions/<pid>.json` and **zero** `"type":"custom-title"` lines in its `.jsonl`. Since `work-on-task`'s session-connect resolves by scanning transcripts for `customTitle`, it finds nothing, reports `not connected — 0 matching session(s)`, and the task stays unlinked.
 
-⚠️ **The server already wrote it — verify the `bind` field, and do NOT write it yourself.** Because the spawn above passes `task`, `spawn_agent` binds the session through `task-binding.mjs`'s ownership rule and reports the outcome as `bind` on its response:
+⚠️ **On the tab path the server already wrote it — verify the `bind` field, and do NOT write it yourself.** Because the spawn above passes `task`, `spawn_agent` binds the session through `task-binding.mjs`'s ownership rule and reports the outcome as `bind` on its response:
 
 - `bind.action == "stamped"` — the task's `claude_session_id` was EMPTY and now names this session.
 - `bind.action == "appended"` — the task was already owned; this session was appended to `metrics_sessions` and the owner was left intact.
 - `bind.error` — the session is live but the vault record failed. Reconcile by hand; see below.
 - `bind == null` — no `task` was passed, so nothing was bound. On this path that means the spawn was malformed.
+- **the key is ABSENT entirely** — the spawn took the local **headless** path, which does not bind. Step 3 sends `interactive=false` for every row whose `mode:` reads `headless`, so this is the ordinary case for those rows, not an error: nothing was written, and the worker is not resolvable from the vault. Bind it by hand if the row needs to be resolvable — that is the one case the fallback below is for.
 
-⚠️ **A manual `vault-cli task set "<task>" claude_session_id "<uuid>"` here would be a SECOND writer with no ownership rule** — the exact displacement `task-binding.mjs` exists to prevent (measured 2026-10-05: a spawn displaced a live owner's id, and the row survived only because `metrics_sessions` still carried it). Reach for it **only** when `bind.error` is set, and then reconcile rather than overwrite: read the current owner first, and prefer `vault-cli task append-metrics-session "<task>" "<uuid>"` when the field is already populated.
+⚠️ **A manual `vault-cli task set "<task>" claude_session_id "<uuid>"` is a SECOND writer with no ownership rule** — the exact displacement `task-binding.mjs` exists to prevent (measured 2026-10-05: a spawn displaced a live owner's id, and the row survived only because `metrics_sessions` still carried it). Reach for it **only** when `bind.error` is set or the headless path was taken, and then reconcile rather than overwrite: read the current owner first, and prefer `vault-cli task append-metrics-session "<task>" "<uuid>"` when the field is already populated.
 
 ⚠️ **Never reconstruct a uuid from a prefix.** Session listings are often truncated to 8 chars; the remaining 28 are not guessable and a fabricated uuid writes a link to a session that does not exist. Read the full value from the record every time.
 
