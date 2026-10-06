@@ -10,10 +10,20 @@ Covers the three decisions that make a posted question answerable:
   * the option rules -- at most one recommendation, and `--recommend` must name
     one of the `--option` labels. The store enforces both too; checking here is
     what lets the failure name the fix instead of quoting a store payload.
-  * the omitted-vs-empty body rule -- `context`, `options` and `expires_at` are
-    omitted when empty, never sent as "". The schema reads an absent value as
+  * the omitted-vs-empty body rule -- `context` and `options` are omitted when
+    empty, never sent as "". The schema reads an absent value as
     optional/pre-change and a present "" as a value, so sending blank would
-    store a field holding nothing rather than no field at all.
+    store a field holding nothing rather than no field at all. ⚠️ `expires_at`
+    is deliberately NOT in that set any more: it defaults to a real bound, and
+    an absent one reads as "no bound at all" — the opposite of what this file
+    now needs to assert.
+
+  * the two posting defaults -- `--liveness-ref` defaults to `owner:<producer-id>`
+    rather than `session:<producer-id>`, because a `session:` ref ties the card
+    to the life of the session that posted it and the store prunes a dead
+    asker's item, history row included; and `--expires-at` defaults to
+    now + `DEFAULT_ASK_TTL_HOURS`, which is the only bound left on a card that
+    is no longer pruned by liveness.
 
   * the poll shapes -- OPEN while unanswered; the stored `answer` rendered as
     `kind: value`; and a `skip` rendered as the bare word, since `skip ` with
@@ -35,6 +45,7 @@ import shutil
 import tempfile
 import unittest
 import urllib.error
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +77,19 @@ class FakeResponse:
 
     def __exit__(self, *exc):
         return False
+
+
+# Mirrors `attention-controller` `pkg/liveness-ref.go`'s `AvailableLivenessModels`
+# — the same record `test_pod_attention.py` keeps, asserted here so a posted
+# `liveness_ref` model is checked against the store's enum and not merely against
+# this script's own self-consistency.
+#
+# ⚠️ It was missing `owner` until 2026-10-06: the store gained that model in
+# `feat/owner-liveness` (PR #94) and this record, taken on 2026-10-01, was never
+# updated — so for five days the repo's own contract called a legal model
+# invented. Duplicated rather than imported because the two suites pin different
+# callers; both name the source file so a drift is greppable from either.
+STORE_LIVENESS_MODELS = ("session", "heartbeat", "owner")
 
 
 def post_args(**overrides):
@@ -143,6 +167,15 @@ class PostBatchTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         body = captured["body"]
         self.assertEqual(body["answer_mechanism"], "message")
+        # ⚠️ Both new defaults are pinned HERE as well as on `post`, and the
+        # duplication is the point: the batch arm has its own `add_parser` block,
+        # so `--liveness-ref` and `--expires-at` are declared twice and the two
+        # blocks can drift independently. This is the arm that posts the
+        # operator's approval card — the exact card whose silent loss this change
+        # fixes — so leaving it unpinned would guard the demo path and not the
+        # one that failed.
+        self.assertEqual(body["liveness_ref"], "owner:session-a")
+        self.assertIn("expires_at", body)
         self.assertIn("1. Alpha", body["payload"])
         self.assertIn("3. Gamma", body["payload"])
         self.assertIn("ITEM_ID: batch1", out.getvalue())
@@ -274,12 +307,224 @@ class PostTest(unittest.TestCase):
         self.assertTrue(captured["url"].endswith("/api/1.0/attention"))
         body = captured["body"]
         self.assertEqual(body["producer_id"], "session-a")
-        # The liveness ref is derived from the producer, so a manager posting
-        # from its own session needs to declare nothing.
-        self.assertEqual(body["liveness_ref"], "session:session-a")
+        # ⚠️ `owner:`, not `session:` — and this assertion is load-bearing rather
+        # than cosmetic. A `session:` ref ties the card to the life of the
+        # session that posted it, and the store prunes an open asked item whose
+        # liveness subject is gone, removing its history row with it — so a
+        # manager's card was deleted the moment the manager's session ended,
+        # after a `201` and with nothing reported to the producer. Measured
+        # 2026-10-06: a fleet restart killed the poster and the operator's
+        # approval question vanished silently.
+        self.assertEqual(body["liveness_ref"], "owner:session-a")
         self.assertEqual(body["answer_mechanism"], "message")
         self.assertEqual(body["options"][0], {"label": "the board", "recommended": True})
         self.assertIn(f"ITEM_ID: {STORE_ITEM_ID}", out.getvalue())
+
+    def test_expires_at_defaults_to_a_bound_so_an_owner_card_cannot_live_forever(self):
+        """The other half of the `owner:` default, and it has to ship with it.
+
+        ⚠️ An `owner:` item is never pruned by liveness — `OwnerLivenessModel`
+        returns true unconditionally, because a human owner's absence cannot be
+        read from the session registry. So the producer's life stopped being the
+        bound at exactly the moment the card stopped dying with it, and this
+        field is what replaced it. Without a default the board would only grow.
+        """
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        # ⚠️ Pin the documented default, not just the arithmetic. Reading the TTL
+        # from the same source the code reads makes the window assertion below
+        # pass for ANY value of it, so without this line a drift in the default
+        # would be invisible to the suite. Asserting the literal is safe only
+        # because `DEFAULT_ASK_TTL_HOURS` is now itself a literal — the
+        # environment is read on the posting path (`_ask_ttl_hours`), not at
+        # import, so a host with `ATTENTION_ASK_TTL_HOURS` set does not fail here.
+        self.assertEqual(ask.DEFAULT_ASK_TTL_HOURS, 24)
+
+        before = datetime.now(timezone.utc)
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(post_args(), out=io.StringIO())
+        after = datetime.now(timezone.utc)
+
+        sent = datetime.fromisoformat(captured["body"]["expires_at"])
+        ttl = timedelta(hours=ask._ask_ttl_hours())
+        self.assertGreaterEqual(sent, before + ttl)
+        self.assertLessEqual(sent, after + ttl)
+
+    def test_an_explicit_expires_at_wins_over_the_default(self):
+        """The default must not swallow a caller who knows its own bound."""
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(
+                post_args(expires_at="2030-01-01T00:00:00+00:00"),
+                out=io.StringIO(),
+            )
+
+        self.assertEqual(captured["body"]["expires_at"], "2030-01-01T00:00:00+00:00")
+
+    def test_an_explicit_liveness_ref_still_wins_over_the_owner_default(self):
+        """The escape hatch back to the old behaviour, and it must stay open.
+
+        ⚠️ A caller that genuinely wants a card to die with its producer has to
+        be able to ask for that — the `session:` default was not merely wrong,
+        it was wrong as a DEFAULT. Pinning the override is what keeps the change
+        a default rather than a removal.
+        """
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(
+                post_args(liveness_ref="session:session-a"),
+                out=io.StringIO(),
+            )
+
+        self.assertEqual(captured["body"]["liveness_ref"], "session:session-a")
+
+    def test_the_posted_liveness_model_is_in_the_recorded_store_enum(self):
+        """The wire contract, asserted rather than assumed.
+
+        ⚠️ A mocked `urlopen` runs no store validation, so a string equality on
+        `liveness_ref` proves only that this script is self-consistent — it cannot
+        see an invented model. `pod-attention.py` shipped `pod:<id>` and the store
+        rejected **every** push with a 400 naming the field; the suite could not
+        have caught it and an e2e did. This is the cheap local check that would
+        have: the posted model must be one the store actually accepts.
+
+        ⚠️ It is only as good as the recorded tuple, which itself drifted — see
+        `STORE_LIVENESS_MODELS`. It is still worth having: it turns the record's
+        next staleness into a local failure instead of a silent one.
+        """
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(post_args(), out=io.StringIO())
+
+        model, _, value = captured["body"]["liveness_ref"].partition(":")
+        self.assertIn(model, STORE_LIVENESS_MODELS)
+        self.assertEqual(value, captured["body"]["producer_id"])
+
+    def test_an_empty_ttl_env_var_is_unset_not_a_parse_error(self):
+        """`VAR=` is what an unset shell variable expands to, and it must not throw.
+
+        ⚠️ The regression this pins is not cosmetic: a bare `ATTENTION_ASK_TTL_HOURS=`
+        used to raise ValueError before any subcommand dispatched — breaking
+        `poll`, which never reads the TTL.
+
+        ⚠️ The assertion is on the helper because that is where the read now
+        lives: the environment is resolved on the POSTING path (`_ask_ttl_hours`),
+        not at import, so there is no import-time failure left to reproduce from a
+        subprocess. An earlier revision of this docstring said the opposite.
+        """
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": ""}):
+            self.assertEqual(ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "6"}):
+            self.assertEqual(ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24), 6)
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "   "}):
+            self.assertEqual(ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
+        # And the env→constant wiring, through the accessor the posting path
+        # actually calls. `DEFAULT_ASK_TTL_HOURS` is a literal by design, so the
+        # override has to be proven here rather than on the constant.
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "6"}):
+            self.assertEqual(ask._ask_ttl_hours(), 6)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ATTENTION_ASK_TTL_HOURS", None)
+            self.assertEqual(ask._ask_ttl_hours(), 24)
+
+    def test_a_nan_inf_or_non_positive_ttl_is_refused_by_name(self):
+        """The values that PARSE but cannot be a TTL, each refused loudly.
+
+        ⚠️ A bare `except ValueError` is not enough, and the failures differ in
+        kind. `nan` and `inf` sail past the parse and blow up later inside
+        `timedelta` — `ValueError` for nan, `OverflowError` for inf — neither
+        caught on the post path, so the operator gets a bare traceback from the
+        helper whose entire job is to prevent one. A non-positive TTL is worse
+        than a crash: it yields an `expires_at` of *now*, the store removes the
+        item on the first read, and the card vanishes after a `201` — the exact
+        defect this change exists to fix, reachable from one env var.
+        """
+        for bad in ("nan", "inf", "-inf", "0", "-1", "abc"):
+            with self.subTest(value=bad):
+                with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": bad}):
+                    with self.assertRaises(ask._ConfigRefused) as caught:
+                        ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24)
+                    # Names the variable AND the offending value — a bare "bad
+                    # value" would not say which knob to go and fix.
+                    self.assertIn("ATTENTION_ASK_TTL_HOURS", str(caught.exception))
+                    self.assertIn(bad, str(caught.exception))
+
+    def test_an_unusable_explicit_expires_at_is_refused(self):
+        """The flag path needs the env path's guard, and for the same reason.
+
+        ⚠️ A deadline already in the past is removed by the store on the first
+        read, so the card vanishes after a `201` — this change's own defect,
+        reachable here with no clock skew and no env var at all. A timestamp with
+        no offset is refused too: it cannot be compared against the store's
+        clock. `urlopen` is deliberately unmocked, so a refusal that reached the
+        store fails loudly instead of passing.
+        """
+        for bad in ("not-a-date", "2020-01-01T00:00:00+00:00", "2030-01-01T00:00:00"):
+            with self.subTest(value=bad):
+                out = io.StringIO()
+                rc = ask.cmd_post(post_args(expires_at=bad), out=out)
+                self.assertEqual(rc, 2)
+                self.assertIn("REFUSED:", out.getvalue())
+                self.assertIn("--expires-at", out.getvalue())
+
+    def test_a_bad_ttl_env_is_refused_on_stdout_with_exit_two(self):
+        """The refusal CONTRACT, driven through the command a caller actually runs.
+
+        ⚠️ Asserting `_ConfigRefused` on the helper is not this test, and the
+        difference is the regression. An earlier revision put the message on
+        stderr and exited 1 — this script's *store failed* code — and the
+        try/except that fixes it lives in `_post_and_report`, which a later edit
+        could drop with the suite staying green. Both halves are pinned: the
+        token on `out`, and the code. `urlopen` is deliberately NOT mocked, so a
+        refusal that reached the store fails loudly here instead of passing.
+        """
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "0"}):
+            rc = ask.cmd_post(post_args(), out=out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out.getvalue())
+        self.assertIn("ATTENTION_ASK_TTL_HOURS", out.getvalue())
+
+    def test_a_bad_ttl_env_is_refused_on_the_batch_arm_too(self):
+        """Both posting arms, because each has its own refusal path to `out`."""
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "1e30"}):
+            rc = ask.cmd_post_batch(batch_args(), out=out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out.getvalue())
+
+    def test_a_large_finite_ttl_is_refused_rather_than_overflowing(self):
+        """The upper bound, which `isfinite` alone does not provide.
+
+        ⚠️ `1e30` is finite and positive, so it passes every guard but the upper
+        one and then raises `OverflowError` inside `timedelta(hours=...)` —
+        uncaught, a bare traceback and exit 1. Same failure the helper exists to
+        prevent, one bound short.
+        """
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "1e30"}):
+            rc = ask.cmd_post(post_args(), out=out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED:", out.getvalue())
 
     def test_empty_optionals_are_omitted_not_sent_blank(self):
         captured = {}
@@ -292,8 +537,14 @@ class PostTest(unittest.TestCase):
             ask.cmd_post(post_args(), out=io.StringIO())
 
         body = captured["body"]
-        for key in ("context", "options", "expires_at"):
+        # ⚠️ `expires_at` is deliberately NOT in this list any more. Omitting it
+        # left every card unbounded, which was harmless only while the store
+        # pruned a dead producer's ask on the next read. The `owner:` liveness
+        # default stops that prune, so the bound moved from "the producer's
+        # life" to this field and the poster now always declares one.
+        for key in ("context", "options"):
             self.assertNotIn(key, body, f"{key} must be omitted when empty, not sent as ''")
+        self.assertIn("expires_at", body)
 
     def test_present_optionals_are_sent(self):
         captured = {}
@@ -304,13 +555,19 @@ class PostTest(unittest.TestCase):
 
         with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
             ask.cmd_post(
-                post_args(context="why", option=["a"], expires_at="2026-10-01T00:00:00Z"),
+                post_args(context="why", option=["a"], expires_at="2030-01-01T00:00:00Z"),
                 out=io.StringIO(),
             )
 
         body = captured["body"]
         self.assertEqual(body["context"], "why")
-        self.assertEqual(body["expires_at"], "2026-10-01T00:00:00Z")
+        # ⚠️ A FUTURE date, deliberately. This fixture read `2026-10-01` until the
+        # flag path gained the same past-deadline guard the env path has — at
+        # which point it stopped being a valid input and this test started
+        # failing, which is the guard working. A fixture with a date that rots is
+        # a fixture that will fail again; 2030 is far enough out to be a
+        # statement rather than a countdown.
+        self.assertEqual(body["expires_at"], "2030-01-01T00:00:00Z")
         self.assertEqual(len(body["options"]), 1)
 
     def test_store_rejection_is_reported_with_its_detail(self):
