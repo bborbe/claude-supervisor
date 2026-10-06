@@ -1,6 +1,6 @@
 # Subject resolution
 
-The rule four commands share: `/supervisor:manager-loop`, `/supervisor:manager-status`, `/supervisor:manager-drive` and `/supervisor:manager-verify`. Each carries **a pointer to this file**, its own STOP line, and — where it can — its own recording form. Nothing else of the rule is restated there.
+The rule four commands share: `/supervisor:manager-loop`, `/supervisor:manager-status`, `/supervisor:manager-drive` and `/supervisor:manager-verify`. Each carries **a pointer to this file**, its own STOP line, and — where it can — its own recording form and its own subject-status reconcile. Nothing else of the rule is restated there.
 
 **Why this is one file now.** The block was copied into all four, with a keep-in-sync sentence in each naming the others. Three commands that resolve a subject differently will disagree about which tree is being reported, and the disagreement is silent — so the copy was the liability, not the guarantee. Written out 2026-09-25, when `manager-verify` was extracted into a command+agent pair and the fourth copy would otherwise have been rewritten for the third time.
 
@@ -62,6 +62,34 @@ The first output line is `Subject: <name> (from <explicit|session|name|conversat
 ⚠️ **Why the source and the branch are printed — and what this guard no longer claims.** The guard used to read *"**This command mutates**: steps 2, 4, 6 and 7 prune, author, plan and spawn … A wrong subject here does not misreport, it **acts on the wrong tree**"*. **That is no longer true.** The 2026-09-20 re-scope made `manager-verify` read-only and turned those steps into **suggestions**. A wrong subject now **misreports**, exactly as in the read-only siblings — so the guard is the same one they carry, and it is **`print the source`**. Kept as a correction rather than deleted: the retracted claim is the one a reader would otherwise re-derive from the block's absence.
 
 The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<the page it came from>)`.
+
+## Reconcile the subject's status
+
+**Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, when it reads `todo`/`next` **or is absent**, set it to `in_progress`:
+
+```bash
+vault-cli goal  set "<subject>" status in_progress    # goal branch — 24 Goals/<Goal>.md
+vault-cli topic set "<subject>" status in_progress    # topic branch — 23 Topics/<Topic>.md
+```
+
+⚠️ **Why, measured 2026-10-06.** A manager tick resolved the goal `Attention Controller Ultra-Fast Reads`, swept its declared set and printed a table every tick — while the goal page itself read `status: todo` (the legacy alias for `next`) and a task under it sat at `phase: execution` with a live worker. Every reader — the operator, the sweep table, the model-free gate — saw queued work where there was running work, and the operator flipped the page by hand. **The manager is the one party that already knows the difference**, because it is the party that resolved the subject; leaving the page at `todo` makes its own report read as a tree it has not started.
+
+⚠️ **Once at resolution, never per wakeup.** This rides the rule the subject-and-branch *detection* already carries: resolution happens once at manager start, so the reconcile fires once. A per-tick reconcile would fight the operator — a page deliberately set back to `next` would be re-flipped on the next firing, with nothing saying so.
+
+⚠️ **It writes `in_progress` over `todo`/`next`/absent, and nothing else.** An already-`in_progress` subject is left alone (the ordinary case), and so are `hold`, `backlog` and the terminal `completed`/`aborted` — a status someone chose deliberately is not this clause's to overrule. ⚠️ **`hold` especially:** it marks a block with no scheduled resume date, so overwriting it would erase the only record that the subject is parked.
+
+⚠️ **`# Success Criteria` are untouched, and this is not the closure path.** The clause flips `status` only. The subject's `# Success Criteria` stay its closure contract and still close **mechanically** through `/vault-cli:complete-goal`. ⚠️ **This is the sentence `/manager-loop` § Resolution step G's *"never tick SC or flip the goal's status yourself"* must be read against** — that rule governs **closure**, and a resolution-time `status` write is not closure. Where the two are read as one rule, the closure half is what is lost: a manager that cannot set `in_progress` leaves the defect above standing.
+
+⚠️ **Who runs this — and it is not all four resolvers.** The write needs `Bash(vault-cli:*)`, which two of them do not hold, for two different reasons:
+
+| Command | Resolves a subject | Reconciles `status` |
+|---|---|---|
+| `/manager-loop` | yes | **yes** |
+| `/manager-drive` | yes | **yes** |
+| `/manager-status` | yes | **no** — read-only by its own contract (*"No vault writes"*) |
+| `/manager-verify` | yes | **no** — holds no `Bash(vault-cli:*)` |
+
+⚠️ **This is a write-scope carve-out, never a resolution one** — both non-writers still resolve, and neither is a *"does not resolve a subject"* case to fall back on. They report the page's status as they find it, exactly as before. `manager-status` states the read-only contract in its own frontmatter, and `docs/fleet-surface.md` § Session end calls the status/drive split *"the look from the act"*; `manager-verify`'s trim is the same one § Resolve the vault first and § Recording already record. Each non-writer's body states its own divergence.
 
 ## Recording
 
