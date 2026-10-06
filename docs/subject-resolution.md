@@ -72,7 +72,9 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 # Goal branch — 24 Goals/<Goal>.md:
 [ -z "$STATUS" ] || [ "$STATUS" = todo ] || [ "$STATUS" = next ] \
   && vault-cli goal set "<subject>" status in_progress
-# Topic branch — 23 Topics/<Topic>.md: the same condition, via `vault-cli topic set`.
+# Topic branch — 23 Topics/<Topic>.md:
+[ -z "$STATUS" ] || [ "$STATUS" = todo ] || [ "$STATUS" = next ] \
+  && vault-cli topic set "<subject>" status in_progress
 ```
 
 ⚠️ **Why, measured 2026-10-06.** A manager tick resolved the goal `Attention Controller Ultra-Fast Reads`, swept its declared set and printed a table every tick — while the goal page itself read `status: todo` (the legacy alias for `next`) and a task under it sat at `phase: execution` with a live worker. Every reader — the operator, the sweep table, the model-free gate — saw queued work where there was running work, and the operator flipped the page by hand. **The manager is the one party that already knows the difference**, because it is the party that resolved the subject; leaving the page at `todo` makes its own report read as a tree it has not started.
@@ -81,9 +83,9 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 
 ⚠️ **It writes `in_progress` over `todo`/`next`/absent, and nothing else.** An already-`in_progress` subject is left alone (the ordinary case), and so are `hold`, `backlog` and the terminal `completed`/`aborted` — a status someone chose deliberately is not this clause's to overrule. ⚠️ **`hold` especially:** it marks a block with no scheduled resume date, so overwriting it would erase the only record that the subject is parked.
 
-⚠️ **`# Success Criteria` are untouched, and this is not the closure path.** The clause flips `status` only. The subject's `# Success Criteria` stay its closure contract and still close **mechanically** through `/vault-cli:complete-goal`. ⚠️ **This is the sentence `/manager-loop` § Resolution step G's *"never tick SC or flip the goal's status yourself"* must be read against** — that rule governs **closure**, and a resolution-time `status` write is not closure. Where the two are read as one rule, the closure half is what is lost: a manager that cannot set `in_progress` leaves the defect above standing.
+⚠️ **`# Success Criteria` are untouched, and this is not the closure path.** The clause flips `status` only. The subject's `# Success Criteria` stay its closure contract and still close **mechanically** through `/vault-cli:complete-goal`. ⚠️ **This is the sentence `/manager-loop` § Resolution step G's *"never tick SC yourself, and never flip the goal's status in order to close it"* must be read against** — that rule governs **closure**, and a resolution-time `status` write is not closure. Where the two are read as one rule, the closure half is what is lost: a manager that cannot set `in_progress` leaves the defect above standing.
 
-⚠️ **Who runs this — and it is not all four resolvers.** The write needs `Bash(vault-cli:*)`, which two of them do not hold, for two different reasons:
+⚠️ **Who runs this — and it is not all four resolvers.** The write needs `Bash(vault-cli:*)`; **`manager-verify` does not hold that grant, and `manager-status` holds it but is barred by its own read-only contract** — two different reasons, and only one of them a missing capability:
 
 | Command | Resolves a subject | Reconciles `status` |
 |---|---|---|
