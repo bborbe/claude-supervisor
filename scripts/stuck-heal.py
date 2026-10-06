@@ -166,11 +166,15 @@ def main(argv=None):
     ap.add_argument("--task", required=True, help="its task name")
     # Required, not defaulted: a default of `stream-closed` would turn every
     # caller that forgot it into a headless resume — the one rung that acts.
+    # Constrained, so a mistyped or un-split value (`stuck:stream-closed`) is an
+    # error rather than a silent report-only that reads like a real verdict.
     ap.add_argument("--kind", required=True,
-                    help="the stuck cause from the gate reason, e.g. stream-closed")
+                    choices=(KIND_STREAM_CLOSED, "blocked-closer", "permission-failures"),
+                    help="the stuck cause: the reason after `stuck:`")
     ap.add_argument("--ledger-dir", default=LEDGER_DIR)
     args = ap.parse_args(argv)
-    if len(args.session.strip()) < 8:
+    args.session = args.session.strip()
+    if len(args.session) < 8:
         # A short or empty id prefix-matches every ledger record.
         ap.error("--session must be at least 8 characters of the session id")
 

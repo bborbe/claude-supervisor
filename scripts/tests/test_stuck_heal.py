@@ -219,6 +219,18 @@ class MainTest(unittest.TestCase):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             heal.main(["--session", SID8, "--task", TASK])
 
+    def test_an_unknown_or_unsplit_kind_is_an_error(self):
+        import contextlib, io
+        for bad in ("stuck:stream-closed", "stream_closed", "parked-gate"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                heal.main(["--session", SID8, "--task", TASK, "--kind", bad])
+
+    def test_a_padded_session_is_stripped_before_the_ledger_join(self):
+        with open(os.path.join(self.dir, SID + ".json"), "w") as fh:
+            json.dump({"session_id": SID, "resumed_from": SID}, fh)
+        _, line = self.run_main("--session", f"  {SID8} ", "--task", TASK, "--kind", "stream-closed")
+        self.assertTrue(line.endswith("resumes=1 -> reopen-interactive"), line)
+
     def test_a_short_session_is_refused(self):
         import contextlib, io
         for bad in ("", "abc"):
