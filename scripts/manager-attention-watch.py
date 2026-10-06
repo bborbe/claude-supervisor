@@ -86,6 +86,42 @@ was never answered; a false `NEW GATE` costs one pane read. The asymmetry is the
 argument — and a closer-text heuristic or a longer debounce is not an alternative
 to it, because the distinction was never in that input (see THE DISCRIMINATOR).
 
+THE THIRD LIMB — A PARKED MODAL, WHICH `held:` CANNOT RAISE
+-----------------------------------------------------------
+⚠️ **HELD is the right answer for a session already in the set, and no answer at all
+for one that never entered it.** Membership unchanged means a worker that was never
+gated stays ungated — and the incident's shape is exactly that: an `AskUserQuestion`
+park whose assistant message ALSO carries prose reads `busy` in the registry AND has
+its closer displaced by that prose, so from the FIRST poll it matches neither half of
+the union. Measured 2026-10-05: such a worker sat unnoticed for 30+ minutes and the
+manager noticed only because the operator asked.
+
+A CLEAN park is unaffected: with no prose the registry reads `waiting` and the first
+half catches it (`test_a_prompt_alone_does_not_displace_the_closer`, measured live
+2026-10-04). The defect is the CONJUNCTION, which is why neither a registry-only nor
+a transcript-only repair closes it.
+
+    gated += status == "busy" and pending == "AskUserQuestion" and frozen
+
+`pending` is the last `tool_use` with no matching `tool_result`; `frozen` is no
+transcript write for `LIVE_WINDOW`. ⚠️ The NAME is load-bearing: a pending `Bash`
+call is frozen too and is not a park — only a modal cannot proceed without the
+operator.
+
+⚠️ **This is not the registry-only predicate the section above says cannot exist.**
+That argument is sound and stands: both cases read `busy` with the closer displaced,
+so the REGISTRY cannot separate them. This limb does not read the registry for the
+distinction — it reads the transcript's pending call, which is a different input, and
+the pair is exactly what `CLAUDE.md` § Reading a worker prescribes: *"the transcript
+answers which call, the registry answers is it moving."* `AskUserQuestion` is the one
+call that collapses the two, because a pending one is not-moving **by construction**,
+not by inference.
+
+⚠️ **Consequence for the `held:` direction, stated so the two are not read as
+contradicting.** This limb fires ONLY on the positive case, so it narrows the
+over-report the section above accepts without weakening it: a mid-turn worker with no
+pending modal is still HELD, exactly as before.
+
 UNREGISTERED IS NOT CLEAR
 -------------------------
 A session the registry does not list yields `None`, which means *unregistered* —
@@ -163,6 +199,15 @@ PARKED_VERBS = ("later (on ",)
 # A closer whose text could not be read at all — distinct from "read it, and it
 # carries no closer". Collapsing those two is a false-`CLEARED` route; see `probe`.
 _CLOSER_UNKNOWN = object()
+
+# How long a transcript may go unwritten before the session counts as not moving
+# (5 min). Copied from `who-needs-me.py`'s `LIVE_WINDOW` rather than imported, for
+# the same reason `_ENTITY` is: this script ships as a plugin artifact that must run
+# with no sibling on the path. `fleet-board.py` mirrors it and `restart-precheck.py`
+# imports it; ⚠️ `agents/manager-drive.md:132` reads *"Reuse that shipped reading; do
+# not add a fourth definition of 'idle'."* — so if that value changes, change it here
+# in the same commit rather than letting the two drift.
+LIVE_WINDOW = 5 * 60
 
 
 def tracked_ids(tracked_path, tasks_dir):
@@ -392,6 +437,67 @@ def last_assistant_text(path):
     return None if tail is None else assistant_text_from_tail(tail)
 
 
+def transcript_frozen(path):
+    """Whether the transcript has gone unwritten for at least `LIVE_WINDOW`.
+
+    ⚠️ An unreadable mtime REFUSES the freeze rather than assuming it. A freeze is
+    what raises the third limb's gate, so a failed `stat` must not manufacture one —
+    the same fail-closed direction `_CLOSER_UNKNOWN` takes in the other half, and the
+    opposite of a silent fire.
+    """
+    try:
+        return (time.time() - os.path.getmtime(path)) >= LIVE_WINDOW
+    except OSError:
+        return False
+
+
+def pending_tool_call(path):
+    """The name of the last `tool_use` with no matching `tool_result`, or None.
+
+    ⚠️ **A pending call does NOT mean parked, and this function does not claim it
+    does.** `CLAUDE.md` § Reading a worker measures the trap: across 25 live sessions
+    a pending call read identically whether the worker was executing a tool or parked
+    on a prompt — *"the transcript answers which call, the registry answers is it
+    moving."* The call NAME is the half this adds: a `Bash` call may legitimately run
+    for minutes, but an `AskUserQuestion` cannot proceed without the operator, so a
+    pending one is a wait by construction. The caller supplies the "is it moving"
+    half from `transcript_frozen`.
+
+    Shares `read_tail`'s one window with the other readers rather than paying for a
+    second read on every poll. A `tool_use` whose `tool_result` fell outside the
+    window therefore reads as pending — the false-positive direction, which is the
+    louder failure here. It is bounded by the caller's freeze requirement rather than
+    by this read: a session that answered and kept working writes its transcript, so
+    it is not frozen and never reaches the branch.
+    """
+    tail = read_tail(path)
+    if tail is None:
+        return None
+    pending = None
+    for line in tail.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        content = (rec.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for blk in content:
+            if not isinstance(blk, dict):
+                continue
+            if blk.get("type") == "tool_use":
+                pending = (blk.get("id"), blk.get("name"))
+            elif blk.get("type") == "tool_result":
+                # Only the call this result belongs to is answered; a result for an
+                # older call must not clear a newer pending one.
+                if pending and blk.get("tool_use_id") == pending[0]:
+                    pending = None
+    return pending[1] if pending else None
+
+
 def closer_body(text):
     """The body of the LAST `👤 You:` line in `text`, or None when there is none.
 
@@ -514,11 +620,13 @@ def stuck_reason(text, tail):
     return None
 
 
-def is_gated(status, body, headless_live=False, stuck=None):
+def is_gated(status, body, headless_live=False, stuck=None, pending=None,
+             frozen=False):
     """The composite predicate. Returns (gated, reason).
 
-    See the module docstring for why it is a union rather than either half, and
-    its A MID-TURN SESSION IS HELD section for the `held:<status>` third answer.
+    See the module docstring for why it is a union rather than either half, its
+    A MID-TURN SESSION IS HELD section for the `held:<status>` third answer, and
+    its THE THIRD LIMB section for `pending` / `frozen`.
 
     Three answers, and the caller must keep all three apart: `True` gated,
     `False` NOT gated, `None` HELD — the watcher cannot justify a clear. `None`
@@ -554,6 +662,19 @@ def is_gated(status, body, headless_live=False, stuck=None):
         return False, "headless:no-ask"
     if status == "waiting":
         return True, "registry:waiting"
+    if status == "busy" and pending == "AskUserQuestion" and frozen:
+        # ⚠️ THE THIRD LIMB, and it is a POSITIVE answer where the fallthrough HOLDs.
+        # HELD keeps membership unchanged, so a worker that was never in the gated
+        # set — the incident's shape: `busy` with its closer already displaced on the
+        # first poll — stays ungated for as long as it is parked. A pending
+        # `AskUserQuestion` on a frozen transcript is the fact the registry cannot
+        # supply: the worker is waiting on the operator, not mid-tool. See the module
+        # docstring § THE THIRD LIMB.
+        #
+        # ⚠️ Deliberately AHEAD of the `_CLOSER_UNKNOWN` hold below. This limb does
+        # not read the closer at all — that is its whole point — so an unreadable
+        # tail must not demote a park it can see directly to HELD.
+        return True, "busy+parked-modal"
     if body is _CLOSER_UNKNOWN:
         # The transcript read reached no text block at all, so "no closer" is
         # unknown rather than observed. HELD, never cleared: this is a failed read,
@@ -624,7 +745,13 @@ def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
         stuck = stuck_reason(text, tail)
         verdict, reason = is_gated(
             registry_status(sid8, sessions_dir, warned), body,
-            headless_live=heartbeat_live(sid8, live_dir), stuck=stuck)
+            headless_live=heartbeat_live(sid8, live_dir), stuck=stuck,
+            # The third limb's two halves, read from the transcript. Taken
+            # unconditionally rather than only for `busy` rows: the read is cheap and
+            # shares `read_tail`'s window, and gating it on the registry word would
+            # put one decision in two places.
+            pending=pending_tool_call(cands[0]),
+            frozen=transcript_frozen(cands[0]))
         if stuck:
             # The reason is the signal; the closer body is context for whoever
             # reads the card, so it is appended rather than replacing it.
