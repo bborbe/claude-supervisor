@@ -518,6 +518,73 @@ class TestLiveness(Base):
         parked = self.digest_with("s-churn")
         self.assertEqual(live, parked, "liveness churn alone moved the digest")
 
+    def test_a_parked_flip_does_not_replay_a_stale_table(self):
+        """The Status cell moves on `live` <-> `parked`, so exit 0 must not be claimed.
+
+        The churn test above is why this one is needed, not a contradiction of it: the
+        digest is deliberately death-only, so a worker opening a gate moves NO digest
+        input — and the exit-0 branch then replays the stored table verbatim. One cell in
+        that table is no longer true: the Status cell, which reads `⌛ waiting-on-human`
+        for a parked row and `🔄 progressing` for a live one
+        (`agents/manager-sweep-reader.md:136`). The stale cell is the *Status* cell and
+        NOT the Session cell, which is `[<sid8>]` for both — `parked` is ALIVE, so it
+        takes the live-shaped delimiter (step 7).
+
+        So the digest stays pure and a SEPARATE clause carries this, exactly as
+        `actionable_names` does: a replay is only free when the table it would print is
+        still true.
+        """
+        self.registry("s-park", status="idle")
+        self.task("ATask", sid="s-park")
+        self.prime("ATopic")
+
+        self.registry("s-park", status="waiting")  # same row, same sid, now parked
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(
+            rc,
+            self.m.EXIT_CHANGE,
+            "a parked flip replayed a stale table instead of forcing a re-render:\n" + out,
+        )
+
+    def test_a_still_live_owner_still_replays(self):
+        """The negative control: the clause must not make the replay unreachable.
+
+        Without this, a build that forces CHANGE on every liveness word — or on every
+        run at all — satisfies the test above while destroying the saving the whole gate
+        exists for.
+        """
+        self.registry("s-quiet", status="idle")
+        self.task("ATask", sid="s-quiet")
+        self.prime("ATopic")
+
+        rc, out = self.run_gate("--subject", "ATopic", "--print")
+        self.assertEqual(
+            rc,
+            self.m.EXIT_NOCHANGE,
+            "an unchanged tree stopped replaying:\n" + out,
+        )
+
+    def test_the_parked_clause_does_not_move_the_digest(self):
+        """`digest_of`'s contract survives: the reason is a SEPARATE clause.
+
+        This is what separates the fix from reverting PR #154. Hashing the raw liveness
+        word again would also stop the stale replay, and would put session churn back
+        into the digest — the ~150k-token act legs #154 removed. The digest must be
+        byte-identical across the flip while the gate still refuses to replay.
+        """
+        self.registry("s-sep", status="idle")
+        self.task("ATask", sid="s-sep")
+        self.prime("ATopic")
+        live = json.loads(self.read_state("ATopic"))["digest"]
+
+        self.registry("s-sep", status="waiting")
+        _, _, payload, _ = self.m.evaluate(self.vault, "ATopic")
+        self.assertEqual(
+            self.m.digest_of(payload["tracked"]),
+            live,
+            "the parked clause moved the digest instead of riding beside it",
+        )
+
     def test_a_worker_dying_still_moves_the_digest(self):
         """Task-SC2(b) — the guard against the cheap fix.
 
