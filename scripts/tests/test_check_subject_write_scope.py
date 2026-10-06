@@ -228,7 +228,8 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
             "commands/manager-drive.md",
             "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.** "
             "Having resolved a subject, run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` "
-            "§ *Reconcile the subject's status* **now**, before the gate.",
+            "§ *Reconcile the subject's status* **now** — once the page and the branch are "
+            "known, and before the gate.",
             "**⚠️ Reconcile the subject's status.** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` "
             "§ *Reconcile the subject's status* names this command as a non-writer.",
         )
