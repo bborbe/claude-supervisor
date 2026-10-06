@@ -137,7 +137,10 @@ def heal(session_id, task, kind, deaths, *, spawn_headless, spawn_interactive,
         # `interactive` is a tab the next reader will treat as headless.
         set_task_mode(task, "interactive")
         try:
-            pane = spawn_interactive(session_id)
+            # A fresh tab for the TASK, never a resume of the session id: the server
+            # refuses `resume` with `interactive:true` (server/tab.mjs
+            # resumeSupportError) — the tab launcher is never handed the flag.
+            pane = spawn_interactive(task)
         except Exception:
             # Never leave the task saying `interactive` with no tab behind it: put
             # the mode back and tell the operator, then let the failure surface.
@@ -176,7 +179,8 @@ def main(argv=None):
     # The decision only. The manager holds the tools that perform it; printing the
     # action is how the two halves meet, and it keeps this script runnable on a
     # host with no supervisor at all.
-    print(f"HEAL {args.session} [{args.kind}] resumes={deaths} -> {action}")
+    # The task is echoed so a mistyped name is visible on the line itself.
+    print(f"HEAL {args.session} [{args.kind}] task={args.task!r} resumes={deaths} -> {action}")
     return 0
 
 

@@ -92,7 +92,8 @@ class HealTest(unittest.TestCase):
         self.assertEqual(self.named("spawn_headless"), [],
                          "no third headless resume occurs")
         self.assertEqual(self.named("set_task_mode"), [(TASK, "interactive")])
-        self.assertEqual(len(self.named("spawn_interactive")), 1)
+        self.assertEqual(self.named("spawn_interactive"), [(TASK,)],
+                         "a fresh tab for the task, never a resume of the session id")
         cards = self.named("post_card")
         self.assertEqual(len(cards), 1)
         self.assertEqual(self.named("jump_link"), [("222",)],
@@ -201,7 +202,7 @@ class MainTest(unittest.TestCase):
     def test_line_shape_for_a_first_stream_closed_death(self):
         rc, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")
         self.assertEqual(rc, 0)
-        self.assertEqual(line, f"HEAL {SID8} [stream-closed] resumes=0 -> resume-headless")
+        self.assertEqual(line, f"HEAL {SID8} [stream-closed] task={TASK!r} resumes=0 -> resume-headless")
 
     def test_kind_is_passed_through_and_non_stream_closed_only_reports(self):
         _, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "permission-failures")
@@ -211,7 +212,7 @@ class MainTest(unittest.TestCase):
         with open(os.path.join(self.dir, SID + ".json"), "w") as fh:
             json.dump({"session_id": SID, "resumed_from": SID}, fh)
         _, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")
-        self.assertEqual(line, f"HEAL {SID8} [stream-closed] resumes=1 -> reopen-interactive")
+        self.assertEqual(line, f"HEAL {SID8} [stream-closed] task={TASK!r} resumes=1 -> reopen-interactive")
 
     def test_kind_is_required(self):
         import contextlib, io
