@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.109.0
 - feat: **`scripts/stuck-heal.py` decides the heal for a `stuck:` gate — resume headless once, then reopen as an interactive tab — and never performs it.** `spawn_agent` is an MCP tool only a Claude session holds and `scripts/restart-worker.py` refuses a headless target, so the script prints the action and `commands/manager-loop.md` step 7 has the manager execute it. Prior resumes are read from the spawn ledger (`SUPERVISOR_LEDGER_DIR` / `XDG_STATE_HOME`, as the server resolves it); the ledger is keyed by session id and a resume overwrites its record, so it records "resumed at least once" — the bound holds because the reopened worker is a tab (`stuck-tab:`, never fed back) and the dead headless session raises no further gate. Causes other than `stream-closed` are report-only; a parked judgement gate is never resumed or answered.
 - docs: `commands/manager-loop.md` step 7 runs the heal on a `stuck:` gate (never `stuck-tab:`): the full task name is resolved from the session's task file (the gate label is truncated), `--kind` comes from the gate's first `::` field and is now required (a `stream-closed` default would turn a forgotten argument into a resume), and a failed interactive reopen sets the mode back to headless and posts a card, without retrying. `--session` must be at least 8 characters.
 
