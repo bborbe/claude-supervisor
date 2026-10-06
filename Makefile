@@ -38,6 +38,15 @@ test: check
 # `test`, not `check`: `check` only parses, `test` runs the suites — and `test: check`, so
 # the parse checks stay implied. CI runs this target, so depending on `check` alone is what
 # let a red suite report green: `node --test` and `unittest discover` had never run in CI.
+#
+# ⚠️ Requires `npm install --no-audit --no-fund` at the repo root BEFORE the first run; CI
+# does exactly that at `.github/workflows/ci.yml:24`. A fresh worktree carries no
+# `server/node_modules`, so `node --test` dies with `ERR_MODULE_NOT_FOUND: Cannot find
+# package '@anthropic-ai/claude-agent-sdk'` — while every `check-*` guard above still passes,
+# which reads as a broken test rather than a missing install, and the error names neither the
+# step nor the directory. ⚠️ Note the split the error cannot resolve: CI uses `npm install`,
+# while `server/package.json`'s own `start` script uses `bun install` — either populates
+# `server/node_modules`, and the install runs at the repo root, not inside `server/`.
 precommit: check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope test
 
 .PHONY: default check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check test precommit
