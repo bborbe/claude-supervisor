@@ -636,7 +636,14 @@ def declared_members(topic_path: str) -> list[str]:
     """
     with open(topic_path, encoding="utf-8") as fh:
         text = fh.read()
-    m = re.search(r"^## Goals\s*\n(.*?)(?=\n#{2,3} |\n# |\Z)", text, re.S | re.M)
+    # The section ends at the next `##` or `#` — NOT at a `###`. A topic page may
+    # carry `###` prose notes or phase sub-headings INSIDE `## Goals` (measured
+    # 2026-10-06: `23 Topics/Unattended Execution.md` splits its membership into
+    # `### Phase 1` / `### Phase 2`), and terminating on `###` silently truncated
+    # the member list — 52 of 59 entries on `Manager Layer`, and 0 of 4 on
+    # `Unattended Execution`. Mirrored in `sweep-gate.py` and `reset.py`; all three
+    # must change together.
+    m = re.search(r"^## Goals\s*\n(.*?)(?=\n## |\n# |\Z)", text, re.S | re.M)
     if not m:
         raise ValueError(f"no `## Goals` section in {topic_path}")
     members = []
