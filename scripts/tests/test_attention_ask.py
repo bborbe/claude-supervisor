@@ -79,6 +79,19 @@ class FakeResponse:
         return False
 
 
+# Mirrors `attention-controller` `pkg/liveness-ref.go`'s `AvailableLivenessModels`
+# — the same record `test_pod_attention.py` keeps, asserted here so a posted
+# `liveness_ref` model is checked against the store's enum and not merely against
+# this script's own self-consistency.
+#
+# ⚠️ It was missing `owner` until 2026-10-06: the store gained that model in
+# `feat/owner-liveness` (PR #94) and this record, taken on 2026-10-01, was never
+# updated — so for five days the repo's own contract called a legal model
+# invented. Duplicated rather than imported because the two suites pin different
+# callers; both name the source file so a drift is greppable from either.
+STORE_LIVENESS_MODELS = ("session", "heartbeat", "owner")
+
+
 def post_args(**overrides):
     defaults = dict(
         dedup_key="q1",
@@ -154,6 +167,15 @@ class PostBatchTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         body = captured["body"]
         self.assertEqual(body["answer_mechanism"], "message")
+        # ⚠️ Both new defaults are pinned HERE as well as on `post`, and the
+        # duplication is the point: the batch arm has its own `add_parser` block,
+        # so `--liveness-ref` and `--expires-at` are declared twice and the two
+        # blocks can drift independently. This is the arm that posts the
+        # operator's approval card — the exact card whose silent loss this change
+        # fixes — so leaving it unpinned would guard the demo path and not the
+        # one that failed.
+        self.assertEqual(body["liveness_ref"], "owner:session-a")
+        self.assertIn("expires_at", body)
         self.assertIn("1. Alpha", body["payload"])
         self.assertIn("3. Gamma", body["payload"])
         self.assertIn("ITEM_ID: batch1", out.getvalue())
@@ -367,6 +389,33 @@ class PostTest(unittest.TestCase):
             )
 
         self.assertEqual(captured["body"]["liveness_ref"], "session:session-a")
+
+    def test_the_posted_liveness_model_is_in_the_recorded_store_enum(self):
+        """The wire contract, asserted rather than assumed.
+
+        ⚠️ A mocked `urlopen` runs no store validation, so a string equality on
+        `liveness_ref` proves only that this script is self-consistent — it cannot
+        see an invented model. `pod-attention.py` shipped `pod:<id>` and the store
+        rejected **every** push with a 400 naming the field; the suite could not
+        have caught it and an e2e did. This is the cheap local check that would
+        have: the posted model must be one the store actually accepts.
+
+        ⚠️ It is only as good as the recorded tuple, which itself drifted — see
+        `STORE_LIVENESS_MODELS`. It is still worth having: it turns the record's
+        next staleness into a local failure instead of a silent one.
+        """
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(post_args(), out=io.StringIO())
+
+        model, _, value = captured["body"]["liveness_ref"].partition(":")
+        self.assertIn(model, STORE_LIVENESS_MODELS)
+        self.assertEqual(value, captured["body"]["producer_id"])
 
     def test_an_empty_ttl_env_var_is_unset_not_a_parse_error(self):
         """`VAR=` is what an unset shell variable expands to, and it must not throw.

@@ -103,6 +103,8 @@ def _load(name, filename):
 attribution = _load("answered_attribution", "answered-attribution.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
+
+
 def _positive_float_env(name, default):
     """Read a POSITIVE, FINITE float from the env; unset OR empty means `default`.
 
@@ -146,7 +148,13 @@ def _positive_float_env(name, default):
 
 
 # Local store; a hung one must cost a clear failure, never a stalled loop tick.
-STORE_TIMEOUT = _positive_float_env("ATTENTION_STORE_TIMEOUT", 3)
+# ⚠️ Deliberately left as the bare `float(...)` form rather than routed through
+# `_positive_float_env`, and that is a scope decision, not an oversight: the same
+# variable is read the same bare way by `pod-attention.py` and `answered-watch.py`,
+# so hardening one of the three would leave the repo reading one env var two
+# different ways with nothing saying which was intended. Hardening all three
+# belongs in its own change.
+STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 
 # How long a posted ask stays on the board before it expires. ⚠️ This exists
 # because the `owner:` liveness default makes a card outlive the session that
@@ -464,6 +472,16 @@ def _expires_at_or_default(args):
     omitting it is the thing that had to change; `""` would be a *present* field
     holding nothing, which is the distinction `post_question` already draws for
     `context`.
+
+    ⚠️ The deadline is computed from THIS host's clock and compared by the store
+    against its own, so the bound assumes the two are within the TTL of each
+    other. A producer whose clock runs more than `DEFAULT_ASK_TTL_HOURS` ahead
+    posts a card that is born already expired — the store removes it on the first
+    read, and the producer still sees its `201`. That is this change's own defect
+    reachable from one misconfigured host rather than one env var, and it is
+    stated rather than fixed here because the clamp belongs on the store side,
+    where the authoritative clock is. NTP-synced hosts are the assumption; a
+    `TZ`-only mistake is not one, since the value is absolute UTC.
     """
     if args.expires_at:
         return args.expires_at
