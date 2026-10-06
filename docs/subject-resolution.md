@@ -1,6 +1,6 @@
 # Subject resolution
 
-The rule four commands share: `/supervisor:manager-loop`, `/supervisor:manager-status`, `/supervisor:manager-drive` and `/supervisor:manager-verify`. Each carries **a pointer to this file**, its own STOP line, and — where it can — its own recording form and its own subject-status reconcile. Nothing else of the rule is restated there.
+The rule four commands share: `/supervisor:manager-loop`, `/supervisor:manager-status`, `/supervisor:manager-drive` and `/supervisor:manager-verify`. Each carries **a pointer to this file**, its own STOP line, and — where it can — its own recording form and its own subject-status reconcile. Nothing else of the rule is restated there. ⚠️ **"Where it can" is doing real work in that sentence, and § *Reconcile the subject's status* is where both carve-outs are named:** `/manager-status` is withheld by its own **no-vault-write contract** rather than by a missing capability, and `/manager-verify` by a **missing permission grant**.
 
 **Why this is one file now.** The block was copied into all four, with a keep-in-sync sentence in each naming the others. Three commands that resolve a subject differently will disagree about which tree is being reported, and the disagreement is silent — so the copy was the liability, not the guarantee. Written out 2026-09-25, when `manager-verify` was extracted into a command+agent pair and the fourth copy would otherwise have been rewritten for the third time.
 
@@ -65,11 +65,14 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 
 ## Reconcile the subject's status
 
-**Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, when it reads `todo`/`next` **or is absent**, set it to `in_progress`:
+**Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **The condition is the guard, not decoration** — the block below is illustrative, and a literal copy of it *without* the condition writes `in_progress` over a `hold`:
 
 ```bash
-vault-cli goal  set "<subject>" status in_progress    # goal branch — 24 Goals/<Goal>.md
-vault-cli topic set "<subject>" status in_progress    # topic branch — 23 Topics/<Topic>.md
+# STATUS is the subject page's own frontmatter `status`, read as part of resolution.
+# Goal branch — 24 Goals/<Goal>.md:
+[ -z "$STATUS" ] || [ "$STATUS" = todo ] || [ "$STATUS" = next ] \
+  && vault-cli goal set "<subject>" status in_progress
+# Topic branch — 23 Topics/<Topic>.md: the same condition, via `vault-cli topic set`.
 ```
 
 ⚠️ **Why, measured 2026-10-06.** A manager tick resolved the goal `Attention Controller Ultra-Fast Reads`, swept its declared set and printed a table every tick — while the goal page itself read `status: todo` (the legacy alias for `next`) and a task under it sat at `phase: execution` with a live worker. Every reader — the operator, the sweep table, the model-free gate — saw queued work where there was running work, and the operator flipped the page by hand. **The manager is the one party that already knows the difference**, because it is the party that resolved the subject; leaving the page at `todo` makes its own report read as a tree it has not started.
