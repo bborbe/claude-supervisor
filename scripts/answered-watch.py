@@ -138,8 +138,8 @@ def fetch_history(store, limit=HISTORY_LIMIT):
         # an answer that arrived during an outage — the same missed wake the
         # limit exists to remove, just at a higher volume. Warn, never raise: a
         # truncated baseline still beats none, and the watch must not die on a
-        # store that merely grew. `reconcile()` carries no `err` handle, so this
-        # writes to stderr directly rather than through the caller's stream.
+        # store that merely grew. This fires on the read's *success* path, so it
+        # writes to stderr directly rather than through a caller's stream.
         print(
             f"WARN: history read returned {len(items)} items at limit={limit} — "
             "it may be truncated; raise ATTENTION_HISTORY_LIMIT",
@@ -166,7 +166,7 @@ def emit(item_id, out):
     print(f"ANSWERED {item_id}", file=out, flush=True)
 
 
-def reconcile(store, session, seen, started_at, attribution, out):
+def reconcile(store, session, seen, started_at, attribution, out, err):
     """Fold the store's full history into `seen`, emitting only post-start answers.
 
     Called on every (re)connect. On the first call `seen` is empty, so every one
@@ -175,7 +175,19 @@ def reconcile(store, session, seen, started_at, attribution, out):
     session for an answer that predates it. On a later call the same pass is the
     catch-up for anything answered while the stream was down.
     """
-    for item in fetch_history(store):
+    try:
+        items = fetch_history(store)
+    except (urllib.error.URLError, OSError) as exc:
+        # ⚠️ An unreadable history must not kill the watch. This read runs on
+        # EVERY (re)connect, and it is the widened ~22 MB one under a 10 s
+        # timeout, so a slow or remote store hits it as a routine condition
+        # rather than a fault. Dying here IS the missed wake the arm exists to
+        # prevent — and a dead watcher is indistinguishable from a quiet one.
+        # Warn and return `seen` unchanged; the next reconnect retries. Mirrors
+        # `handle_item`, which guards its own single-item read the same way.
+        print(f"WARN: could not read history: {exc}", file=err, flush=True)
+        return seen
+    for item in items:
         if not is_mine(item, session):
             continue
         item_id = item.get("item_id")
@@ -243,7 +255,7 @@ def watch(store, session, attribution, out, err):
     seen = set()
     for event in stream_item_ids(store, err):
         if event is CONNECTED:
-            seen = reconcile(store, session, seen, started_at, attribution, out)
+            seen = reconcile(store, session, seen, started_at, attribution, out, err)
             continue
         seen = handle_item(store, session, seen, event, attribution, out, err)
 
