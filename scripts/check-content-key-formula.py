@@ -76,18 +76,29 @@ CUT_IS_THE_RULE = "the fields whose value the audit does not read"
 #: meets the reason not to before they make the edit.
 PHASE_STAYS = "status:` and `phase:` are NOT excluded"
 
+#: (e) — the **block extent**. `metrics_sessions` is written as a multi-line YAML block in this
+#: vault, so a deletion that drops only the `metrics_sessions:` key line leaves its indented
+#: `- session_id: <uuid>` entries behind — and those uuids change on every worker run, so the
+#: key churns per tick and the exclusion buys nothing. Raised as a CRITICAL by the maintainer
+#: bot on PR #172, after the first version of this clause stated a line deletion and stopped
+#: there.
+BLOCK_EXTENT = "continuation block"
 
-def sentence_containing(text, token):
-    """Return the first sentence of `text` carrying `token`, or "".
 
-    Split on a period followed by whitespace. Blunt, and deliberately so: the clause is
-    written in sentences, and the point of the split is to bound how far apart two tokens
-    may sit, not to parse English.
+def sentences_containing(text, token):
+    """Return every sentence of `text` carrying `token`.
+
+    Split on a period followed by whitespace. Blunt, and deliberately so: the clause is written
+    in sentences, and the point of the split is to bound how far apart two tokens may sit, not
+    to parse English.
+
+    ⚠️ **Every sentence, not the first.** Returning the first match makes the guard fail for the
+    wrong reason as soon as an earlier sentence mentions `sha256` without its truncation — a
+    measured note, a debugging aside — and the failure message ("no single sentence states
+    both") would then name the opposite problem from the one on disk. Raised by the maintainer
+    bot on PR #172.
     """
-    for sentence in re.split(r"(?<=\.)\s+", text):
-        if token in sentence:
-            return sentence
-    return ""
+    return [s for s in re.split(r"(?<=\.)\s+", text) if token in s]
 
 
 def exclusion_sentence(text):
@@ -121,10 +132,17 @@ def check(root):
     # satisfy a check on this clause.
     start = text.index(CLAUSE_OPEN)
     nxt = re.search(r"\n\n\*\*\(\d", text[start:])
-    clause = text[start:start + nxt.start()] if nxt else text[start:]
+    if not nxt:
+        return [f"{HOME}: clause (1) has no following `**(2)` heading to bound it — this check "
+                f"is stale. Without the bound the window widens to the rest of the file, so "
+                f"every assertion below could be satisfied by a later clause and the check would "
+                f"report green against text that is not the clause it guards. Fix the bound "
+                f"before trusting a pass"]
+    clause = text[start:start + nxt.start()]
 
-    formula = sentence_containing(clause, ALGORITHM_TOKENS[0])
-    if ALGORITHM_TOKENS[1] not in formula:
+    if not any(
+        ALGORITHM_TOKENS[1] in s for s in sentences_containing(clause, ALGORITHM_TOKENS[0])
+    ):
         failures.append(
             f"{HOME} clause (1): no single sentence states both `{ALGORITHM_TOKENS[0]}` and "
             f"`{ALGORITHM_TOKENS[1]}` — a home without an algorithm, or an algorithm without "
@@ -162,6 +180,14 @@ def check(root):
             f"`✅ Ready for approval` into `🚀 Ready`"
         )
 
+    if BLOCK_EXTENT not in clause:
+        failures.append(
+            f"{HOME} clause (1): the removal no longer states a *{BLOCK_EXTENT}* — "
+            f"`metrics_sessions` is a multi-line YAML block, so dropping only its key line "
+            f"leaves the indented `- session_id:` entries in the key, and those uuids change "
+            f"on every worker run: the key churns per tick and the exclusion buys nothing"
+        )
+
     return failures
 
 
@@ -176,7 +202,8 @@ def main():
     print(
         f"  content-key-formula ok: {HOME} clause (1) states the derivation "
         f"(sha256[:16]), names all {len(EXCLUDED)} excluded fields, states the cut as a rule, "
-        f"and keeps `status:` / `phase:` in the key"
+        f"keeps `status:` / `phase:` in the key, and pins the removal to a raw-byte line "
+        f"deletion that takes each key's continuation block with it"
     )
 
 

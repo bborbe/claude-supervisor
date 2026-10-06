@@ -40,7 +40,8 @@ CLAUSE = (
     "bytes with the four tick-written fields the audit does not judge removed, truncated to the "
     "first 16 hex. The excluded fields are `mode:`, `last_auto_resume`, `claude_session_id` and "
     "`metrics_sessions`. ⚠️ **`status:` and `phase:` are NOT excluded, and the cut is *the "
-    "fields whose value the audit does not read*, never *everything a tick writes*.**"
+    "fields whose value the audit does not read*, never *everything a tick writes*.** Drop each "
+    "key line together with that key's continuation block, and leave every other byte as it is."
 )
 
 #: Clause (6)'s measured note, which also mentions `mode:` — the reason the exclusion assertion
@@ -127,6 +128,38 @@ class TestContentKeyFormulaGuard(Base):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("this check is stale", result.stderr)
+
+    def test_unbounded_clause_window_fails_closed(self):
+        """Without a following `**(2)` heading the clause window would widen to the rest of the
+        file, so every assertion below could be satisfied by a later clause while the check
+        reported green against text that is not this clause. It must fail, not widen."""
+        (pathlib.Path(self.dir) / HOME).write_text(CLAUSE + MEASURED_NOTE + "\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is stale", result.stderr)
+
+    def test_earlier_sha256_mention_does_not_fail_the_guard(self):
+        """`sha256` mentioned above the derivation *without* its truncation must not turn the
+        guard red. The assertion is that SOME sentence carries both tokens — asserting it of
+        the FIRST sentence carrying `sha256` fails here, and its message would name the
+        opposite problem from the one on disk."""
+        self.write_clause(
+            "**The cache — re-audit only what changed.** A note: `sha256[:16]` of the file is "
+            "shown below. " + CLAUSE
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_block_extent_removed_fails(self):
+        """The CRITICAL from the second review round. `metrics_sessions` is a multi-line YAML
+        block, so a deletion that drops only its key line leaves the indented `- session_id:`
+        entries in the key — and those uuids change on every worker run."""
+        self.write_clause(
+            CLAUSE.replace("together with that key's continuation block, ", "") + MEASURED_NOTE
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("continuation block", result.stderr)
 
     def test_missing_file_fails_closed(self):
         (pathlib.Path(self.dir) / HOME).unlink()
