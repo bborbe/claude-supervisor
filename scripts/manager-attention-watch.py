@@ -671,10 +671,16 @@ def transitions(prev, key, state):
     The `HELD` branch is the reason this is three-valued, and it has TWO causes,
     both of which mean "the watcher cannot justify a clear":
 
-    - the session is in `state` with a `None` verdict — it became UNREGISTERED, so
-      nothing was answered;
+    - the session is in `state` with a `None` verdict and a non-`held:` reason — it
+      became UNREGISTERED, so nothing was answered;
     - the session is absent from `state` entirely — the watcher lost sight of it,
       which is equally not an answer.
+
+    ⚠️ A `None` verdict with a `held:` reason is the THIRD case and takes NEITHER
+    branch: the worker is mid-turn, so the gate stays up and the membership is left
+    exactly as it was — no `CLEARED`, no `NEW GATE`, and no record. Recording a hold
+    on every poll would fill the event log with a state that has not changed. See
+    the module docstring's A MID-TURN SESSION IS HELD section.
 
     ⚠️ The second case is the one the earlier version got wrong: absent-from-`state`
     fell through to a bare `CLEARED`. That is the shared-state-file failure — with a
