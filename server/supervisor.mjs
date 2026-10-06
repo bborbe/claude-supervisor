@@ -1198,18 +1198,31 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // worker to report a bookkeeping failure. Reported on the response instead, and logged
     // because the response is easy to drop.
     let bind = null
-    if (task && agent.sessionId) {
+    // ⚠️ `typeof task === 'string'` is not defensive padding: the cluster branch
+    // type-checks `task` at its own entry, but the local path does not, and a
+    // non-string reaches `spawnSync('vault-cli', args)` as an argv element and throws
+    // `ERR_INVALID_ARG_TYPE` — AFTER the tab is spawned and registered. That throw
+    // would lose the response for a worker that is already live.
+    if (typeof task === 'string' && task && agent.sessionId) {
       // ⚠️ `workerTarget.vault`, never the raw `vault` argument. The argument is
       // `undefined` for a cwd-only spawn — an explicitly supported shape — and
       // `bindSessionToTask` omits `--vault` when it is falsy, so the write would land
       // in vault-cli's DEFAULT vault rather than the one this worker resolved to. The
       // agent record above already carries `workerTarget.vault` for the same reason.
-      const bound = bindSessionToTask({ task, vault: workerTarget.vault, sessionId: agent.sessionId })
-      if (bound.error) {
-        bind = { error: bound.error }
-        log(`WARNING: worker ${id} spawned but binding it to task "${task}" failed: ${bound.error}`)
-      } else {
-        bind = { action: bound.action, vault: bound.vault }
+      try {
+        const bound = bindSessionToTask({ task, vault: workerTarget.vault, sessionId: agent.sessionId })
+        if (bound.error) {
+          bind = { error: bound.error }
+          log(`WARNING: worker ${id} spawned but binding it to task failed: ${String(bound.error).replace(/[\r\n]+/g, ' ')}`)
+        } else {
+          bind = { action: bound.action, vault: bound.vault }
+        }
+      } catch (error) {
+        // Same reasoning as the non-fatal `bound.error` branch: the worker is live and
+        // reachable, so a bind that throws must be reported, never allowed to escape
+        // and discard the spawn response.
+        bind = { error: String(error && error.message ? error.message : error) }
+        log(`WARNING: worker ${id} spawned but the task bind threw: ${String(bind.error).replace(/[\r\n]+/g, ' ')}`)
       }
     }
 
@@ -1429,7 +1442,7 @@ const TOOLS = [
         task: {
           type: 'string',
           description:
-            'The vault task this worker is opened for. REQUIRED with `target: "cluster"` and ignored otherwise: the cluster path binds the created session id to this task\'s `claude_session_id`, which is what makes the worker reachable from the vault. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+            'The vault task this worker is opened for. Honoured on BOTH targets, and it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`). REQUIRED with `target: "cluster"`. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
         },
         vault: {
           type: 'string',
