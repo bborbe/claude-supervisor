@@ -115,7 +115,8 @@ class ReplayTest(unittest.TestCase):
     """SC1 — the e4fd1919 shape, replayed, and its negative control."""
 
     def test_e4fd1919_replay_is_one_stuck_entry_keyed_on_the_session(self):
-        fx = Fixture(STUCK_FIXTURE)
+        # e4fd1919 was headless: no registry row, a live heartbeat.
+        fx = Fixture(STUCK_FIXTURE, status=None, heartbeat_age_s=5)
         self.addCleanup(fx.cleanup)
         state = fx.probe()
         stuck = {s: v for s, v in state.items() if v[2].startswith("stuck:")}
@@ -264,6 +265,19 @@ class HeartbeatLiveTest(unittest.TestCase):
         self.assertFalse(watch.heartbeat_live(SID8, os.path.join(self.fx.dir, "nope")))
 
 
+class HeartbeatConstantsTest(unittest.TestCase):
+    """The watcher mirrors `server/heartbeat.mjs`; drift would silently misread liveness."""
+
+    def test_constants_match_the_server(self):
+        import re
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "server", "heartbeat.mjs"), encoding="utf-8").read()
+        ttl_ms = int(re.search(r"HEARTBEAT_TTL_MS = ([\d_]+)", src).group(1).replace("_", ""))
+        self.assertEqual(watch.HEARTBEAT_TTL_S * 1000, ttl_ms)
+        reach = re.search(r"REACHABILITY_FILE = '([^']+)\.json'", src).group(1)
+        self.assertIn(reach, watch.LIVE_SKIP)
+
+
 class HeadlessGateTest(unittest.TestCase):
     """UNREGISTERED and HEADLESS are different facts and must not collapse."""
 
@@ -299,6 +313,14 @@ class HeadlessGateTest(unittest.TestCase):
     def test_stuck_outranks_registry_waiting(self):
         gated, reason = watch.is_gated("waiting", "nothing", stuck="stream-closed")
         self.assertIs(gated, True)
+        self.assertEqual(reason, "stuck-tab:stream-closed")
+
+    def test_a_stuck_tab_worker_never_reads_as_a_headless_heal_candidate(self):
+        # A registered worker is a tab; the ladder's first rung is a headless resume.
+        for status in ("waiting", "idle", "busy"):
+            _, reason = watch.is_gated(status, "nothing", stuck="stream-closed")
+            self.assertFalse(reason.startswith("stuck:"), status)
+        _, reason = watch.is_gated(None, "nothing", stuck="stream-closed")
         self.assertEqual(reason, "stuck:stream-closed")
 
 

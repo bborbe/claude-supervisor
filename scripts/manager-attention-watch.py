@@ -488,8 +488,11 @@ def is_gated(status, body, headless_live=False, stuck=None):
     """
     # Deliberately ahead of the registry half: a dead permission channel is the
     # more specific fact, even on a worker the registry also reads as waiting.
+    # ⚠️ A registered worker is a TAB worker, and the heal ladder's first rung is a
+    # HEADLESS resume — so it gets its own `stuck-tab:` reason, which earns the card
+    # and never the ladder. Only an unregistered (headless) worker reads `stuck:`.
     if stuck:
-        return True, "stuck:" + stuck
+        return True, ("stuck:" if status is None else "stuck-tab:") + stuck
     if status is None:
         if not headless_live:
             return None, "unregistered"
