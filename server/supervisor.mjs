@@ -1140,14 +1140,17 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // The test is finished-vs-not, NOT `running` — see resume-guard.mjs. A parked
     // worker carries `blocked-on-permission` while it is blocked inside a tool call,
     // so matching only `running` let it through and left a parked worker resumable.
-    // ⚠️ Rehydrated rows are excluded, and this is load-bearing rather than tidy. The guard's
-    // premise is that a worker in THIS table is alive because it is an in-process `query()`
-    // this server is driving — which a rehydrated row is not: its worker belongs to the
-    // process that spawned it. Its status is never terminal (`rehydratedStatus` returns
-    // interactive/cluster/running), so leaving it in would let a worker that has since died
-    // assert it is still mid-turn and refuse the resume that is its only recovery, for as
-    // long as this process lives.
-    const holder = findLiveHolder([...agents.values()].filter((a) => !a.rehydrated), resume)
+    // ⚠️ PRUNE FIRST, then let the guard see every row — do NOT filter rehydrated rows out.
+    // The first cut excluded them wholesale, to stop a DEAD worker's row asserting it was
+    // still mid-turn and refusing the resume that is its only recovery. That fixed the dead
+    // case by breaking the live one: a rehydrated row whose worker is STILL RUNNING stopped
+    // blocking a resume, and resuming a live worker puts two writers on one conversation —
+    // the hazard this guard exists for. `pruneRehydratedAgents` already deletes rows whose
+    // liveness has gone false, so after it runs every rehydrated row still in the Map IS live
+    // and SHOULD hold the guard. The prune previously ran on the read paths only, which is
+    // why the resume path never saw it.
+    pruneRehydratedAgents()
+    const holder = findLiveHolder(agents.values(), resume)
     if (holder) {
       return {
         error: `session ${resume} is still running (worker ${holder.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`,

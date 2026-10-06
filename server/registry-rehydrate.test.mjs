@@ -313,8 +313,12 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // Called before both readers answer, so a worker that died after boot leaves the roster.
   assert.match(src, /case 'list_agents':\n\s+pruneRehydratedAgents\(\)/)
   assert.match(src, /case 'agent_status': \{\n\s+pruneRehydratedAgents\(\)/)
-  // Excluded from the resume guard, or a dead worker's row refuses its own recovery.
-  assert.match(src, /findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter\(\(a\) => !a\.rehydrated\), resume\)/)
+  // ⚠️ The resume path must PRUNE and then guard on EVERY row — never filter rehydrated rows
+  // out. Filtering fixed the dead-worker deadlock by breaking the live case: a rehydrated row
+  // whose worker still runs must keep blocking a resume, or two writers land on one
+  // conversation.
+  assert.match(src, /pruneRehydratedAgents\(\)\n\s+const holder = findLiveHolder\(agents\.values\(\), resume\)/)
+  assert.ok(!/findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')
   // Not stamped on shutdown — that record belongs to the server that spawned the worker.
   assert.match(src, /if \(agent\.rehydrated\) continue/)
   // ⚠️ The MINT must never land on an adopted id. `seq` restarts at 0 on every reconnect, so
