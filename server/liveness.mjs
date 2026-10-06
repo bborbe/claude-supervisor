@@ -101,7 +101,7 @@ export function readRegistry(dir = SESSIONS_DIR) {
 // `null` from either channel is "could not read", returned rather than folded into an empty
 // map: callers refuse on `null` and open on an empty one, so collapsing the two turns a
 // permissions error into permission to spawn onto live work.
-export function liveSessionIds({ registryDir, heartbeatDir: beatsDir, now, isAlive } = {}) {
+export function liveSessionIds({ registryDir: regDir, heartbeatDir: beatsDir, now, isAlive } = {}) {
   // ⚠️ `isAlive` is REQUIRED, deliberately, and it is the one thing the two callers disagree
   // about: `worker-sessions.mjs` wants presence (over-counting a *cap* fails safe — it refuses
   // a spawn), while a *roster* wants pid-checked liveness (presence would resurrect a crashed
@@ -113,12 +113,14 @@ export function liveSessionIds({ registryDir, heartbeatDir: beatsDir, now, isAli
   if (typeof isAlive !== 'function') {
     throw new Error('liveSessionIds needs an explicit isAlive — presence and pid-checked liveness are different questions')
   }
-  const registry = readRegistry(registryDir)
+  // Both directories take `??` rather than a default parameter, and for the same reason: a
+  // default fires only on `undefined`, so the `dir: null` idiom — which `checkLiveness` still
+  // uses for "use the default" — would reach `readdirSync(null)`. `readRegistry` happens to
+  // catch that and answer `null` (a permissions-shaped answer for a caller that meant
+  // "default"), and `listLive` would throw. Guarding one and not the other is the asymmetry
+  // that made this worth writing down.
+  const registry = readRegistry(regDir ?? SESSIONS_DIR)
   if (registry === null) return null
-  // `??` rather than a default parameter: a default fires only on `undefined`, so the
-  // `heartbeatDir: null` idiom — which `checkLiveness` still uses — would reach
-  // `listLive({ dir: null })`, where readdirSync throws a non-ENOENT error and the union
-  // returns null. Fail-safe, but the contract this consolidation is supposed to keep.
   const stamps = listLive({ dir: beatsDir ?? heartbeatDir, now })
   if (stamps === null) return null
 
