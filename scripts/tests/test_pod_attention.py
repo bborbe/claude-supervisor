@@ -116,7 +116,7 @@ class AuthSeamTest(unittest.TestCase):
         """The seam's whole point: absent and safe must coincide."""
         reason = pod.auth_refusal("http://attention.nuke:18080", "")
         self.assertIsNotNone(reason)
-        self.assertIn("POD_ATTENTION_TOKEN", reason)
+        self.assertIn("ATTENTION_STORE_TOKEN", reason)
 
     def test_allows_a_remote_store_once_a_token_is_injected(self):
         self.assertIsNone(pod.auth_refusal("http://attention.nuke:18080", "s3cret"))

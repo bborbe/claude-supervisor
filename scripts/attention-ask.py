@@ -101,6 +101,7 @@ def _load(name, filename):
 
 
 attribution = _load("answered_attribution", "answered-attribution.py")
+attention_store_auth = _load("attention_store_auth", "attention-store-auth.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 
@@ -423,7 +424,7 @@ def post_question(
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=attention_store_auth.headers({"Content-Type": "application/json"}),
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
@@ -431,7 +432,10 @@ def post_question(
 
 
 def fetch_item(item_id):
-    with urllib.request.urlopen(f"{STORE}/api/1.0/attention/{item_id}", timeout=STORE_TIMEOUT) as resp:
+    with urllib.request.urlopen(
+        attention_store_auth.request(f"{STORE}/api/1.0/attention/{item_id}"),
+        timeout=STORE_TIMEOUT,
+    ) as resp:
         return json.load(resp)
 
 

@@ -53,12 +53,26 @@ Exit codes: 0 ok · 3 no cards / none answered / no created_at · 2 refused
 (ambiguous or bad input) · 1 store unreadable (`FAILED:`).
 """
 import argparse
+import importlib.util
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(_HERE, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+attention_store_auth = _load("attention_store_auth", "attention-store-auth.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "10"))
@@ -101,7 +115,8 @@ def items_of(payload):
 
 def fetch_history(store, timeout, limit=HISTORY_LIMIT):
     with urllib.request.urlopen(
-        f"{store}/api/1.0/attention/history?limit={limit}", timeout=timeout
+        attention_store_auth.request(f"{store}/api/1.0/attention/history?limit={limit}"),
+        timeout=timeout,
     ) as resp:
         return items_of(json.loads(resp.read().decode("utf-8")))
 

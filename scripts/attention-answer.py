@@ -53,11 +53,25 @@ Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision al
 
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(_HERE, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+attention_store_auth = _load("attention_store_auth", "attention-store-auth.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 # Local store; a hung one must cost a clear failure, never a stalled session.
@@ -103,14 +117,19 @@ def target_line(producer_id, registry):
 
 
 def fetch_open():
-    with urllib.request.urlopen(f"{STORE}/api/1.0/attention", timeout=STORE_TIMEOUT) as resp:
+    with urllib.request.urlopen(
+        attention_store_auth.request(f"{STORE}/api/1.0/attention"), timeout=STORE_TIMEOUT
+    ) as resp:
         items = json.load(resp)
     items = [i for i in items if i.get("state") == "open"]
     return sorted(items, key=lambda i: i.get("created_at", ""))
 
 
 def fetch_item(item_id):
-    with urllib.request.urlopen(f"{STORE}/api/1.0/attention/{item_id}", timeout=STORE_TIMEOUT) as resp:
+    with urllib.request.urlopen(
+        attention_store_auth.request(f"{STORE}/api/1.0/attention/{item_id}"),
+        timeout=STORE_TIMEOUT,
+    ) as resp:
         return json.load(resp)
 
 
@@ -140,7 +159,7 @@ def post_answer(item_id, answered_by, resolved_by="", decision=""):
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention/{item_id}/answer",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=attention_store_auth.headers({"Content-Type": "application/json"}),
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
@@ -245,7 +264,7 @@ def post_attempt(item_id, carrier, outcome):
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention/{item_id}/attempt",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=attention_store_auth.headers({"Content-Type": "application/json"}),
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:

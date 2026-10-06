@@ -34,6 +34,19 @@ its item open on a pane that outlives it, which is how orphans reached this feed
 import argparse, glob, importlib.util, json, math, os, re, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(_HERE, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+attention_store_auth = _load("attention_store_auth", "attention-store-auth.py")
+
 STATE = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser("~/.claude/state/attention")
 OBSIDIAN = os.path.expanduser("~/Documents/Obsidian")
 # The session registry: one `<pid>.json` per live session, deleted on exit, so its
@@ -210,7 +223,7 @@ def store_items():
     """
     try:
         with urllib.request.urlopen(
-            STORE + "/api/1.0/attention", timeout=STORE_TIMEOUT
+            attention_store_auth.request(STORE + "/api/1.0/attention"), timeout=STORE_TIMEOUT
         ) as resp:
             return json.loads(resp.read().decode("utf-8") or "[]")
     except (urllib.error.URLError, OSError, ValueError) as e:

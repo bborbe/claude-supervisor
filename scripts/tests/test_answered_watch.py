@@ -105,7 +105,7 @@ class HelpersTest(unittest.TestCase):
                 return False
 
         def urlopen(url, timeout=None):
-            seen.append(url)
+            seen.append(url.full_url)
             return Response()
 
         with mock.patch("urllib.request.urlopen", urlopen):

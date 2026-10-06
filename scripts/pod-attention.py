@@ -48,7 +48,7 @@ token, injected at runtime and never baked into an image or manifest. Both are r
 the environment here, so the mechanism drops in behind this seam unchanged:
 
   POD_ATTENTION_STORE_URL / ATTENTION_STORE_URL   base URL
-  POD_ATTENTION_TOKEN                             bearer token, sent as Authorization
+  ATTENTION_STORE_TOKEN                           bearer token, sent as Authorization
 
 A **non-local** base URL with no token is REFUSED rather than attempted: an
 unauthenticated remote store lets anything that can reach the port read every card and
@@ -90,7 +90,7 @@ STORE = (
 ).rstrip("/")
 
 # The injected half of the seam. Absent is the legitimate local case; present is sent.
-TOKEN = os.environ.get("POD_ATTENTION_TOKEN", "")
+TOKEN = os.environ.get("ATTENTION_STORE_TOKEN", "")
 
 # Local store; a hung one must cost a clear failure, never a stalled pod.
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
@@ -138,7 +138,7 @@ def auth_refusal(store, token):
     if token or is_local(store):
         return None
     return (
-        f"REFUSED: store {store} is not loopback and no POD_ATTENTION_TOKEN is set. "
+        f"REFUSED: store {store} is not loopback and no ATTENTION_STORE_TOKEN is set. "
         "An unauthenticated remote store lets anything that can reach the port read every "
         "card and release every gate. Inject the token as a runtime-only secret."
     )

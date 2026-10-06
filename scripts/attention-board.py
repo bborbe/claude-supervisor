@@ -39,11 +39,25 @@ any of them.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(_HERE, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+attention_store_auth = _load("attention_store_auth", "attention-store-auth.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 
@@ -59,7 +73,7 @@ EXIT_UNAVAILABLE = 3
 
 def fetch_board(store: str, timeout: float) -> str:
     """Return the board page, or raise. Every failure is the caller's one branch."""
-    with urllib.request.urlopen(store + "/", timeout=timeout) as resp:
+    with urllib.request.urlopen(attention_store_auth.request(store + "/"), timeout=timeout) as resp:
         if resp.status != 200:
             raise OSError(f"HTTP {resp.status}")
         return resp.read().decode("utf-8", "replace")

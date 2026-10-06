@@ -91,6 +91,9 @@ def _load(name, filename):
     return module
 
 
+attention_store_auth = _load("attention_store_auth", "attention-store-auth.py")
+
+
 def resolved_session_id(environ=None):
     """The session id of whoever is running this arm, or "".
 
@@ -124,7 +127,7 @@ def items_of(payload):
 
 
 def fetch_json(url, timeout):
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+    with urllib.request.urlopen(attention_store_auth.request(url), timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -243,7 +246,9 @@ def stream_item_ids(store, err):
     url = f"{store}/api/1.0/attention/stream"
     while True:
         try:
-            with urllib.request.urlopen(url, timeout=STREAM_TIMEOUT) as resp:
+            with urllib.request.urlopen(
+                attention_store_auth.request(url), timeout=STREAM_TIMEOUT
+            ) as resp:
                 yield CONNECTED
                 for raw in resp:
                     line = raw.decode("utf-8", "replace").strip()

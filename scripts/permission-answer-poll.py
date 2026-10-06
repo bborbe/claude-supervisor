@@ -43,12 +43,26 @@ As a hook it takes no arguments and reads the hook JSON from stdin.
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(_HERE, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+attention_store_auth = _load("attention_store_auth", "attention-store-auth.py")
 
 DECISIONS = ("allow", "deny")
 DEFAULT_TIMEOUT = 540.0   # under the harness's 600 s command-hook default
@@ -68,7 +82,9 @@ def store_url() -> str:
 def get_json(url: str):
     """(ok, data_or_reason). Never raises — a transport failure must not become a decision."""
     try:
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        req = urllib.request.Request(
+            url, headers=attention_store_auth.headers({"Accept": "application/json"})
+        )
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
             body = r.read().decode("utf-8", errors="replace")
         return True, json.loads(body)
