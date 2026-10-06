@@ -366,11 +366,14 @@ class TestProgressHashContract(Base):
     """Pins `progress_hash`'s derivation, which its docstring now publishes.
 
     A reader outside this module is expected to reimplement the derivation from that
-    prose, so each property is pinned against a **fixed literal** rather than by
-    recomputing it the way the implementation does — a test that re-derives the value
-    with the same expression drifts with the code and would have passed against both
-    revisions of the docstring. Every expectation below is the sha256 of a hand-written
-    byte string, so a change to `_PROGRESS` or to the truncation fails here.
+    prose, so each property is pinned against a **fixed byte string** — a hand-written
+    literal such as `b"foo\\n"` — rather than by re-deriving the value the way the
+    implementation does; a test that recomputes with the same expression drifts with the
+    code and would have passed against both revisions of the docstring. ⚠️ **What is
+    pinned is the byte string, not the hex.** `_sha()` still calls `hashlib.sha256` at run
+    time, so a change to the *hashing algorithm* would move both sides together and pass;
+    what fails here is a change to `_PROGRESS` or to the `[:16]` truncation, because group
+    1 would stop matching the asserted bytes.
     """
 
     @staticmethod
