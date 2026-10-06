@@ -39,8 +39,8 @@ item. Nothing here waits for the operator.
 
 Every field the producer owns is a declaration, so they are all flags: this
 script never infers a dedup key, an interrupt class, or a liveness model from
-the prose. The two that would be silently wrong if guessed are defaulted from
-the environment instead, and both defaults are visible in `--help`:
+the prose. The ones that would be silently wrong if guessed are defaulted rather
+than inferred, and every default is visible in `--help`:
 
   --producer-id    defaults to $CLAUDE_CODE_SESSION_ID
   --liveness-ref   defaults to owner:<producer-id>
