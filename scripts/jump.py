@@ -228,7 +228,17 @@ def attention_queue(wnm, pmap):
     # The reader owns the rule; this surface borrows it.
     records = wnm.load("needs")
     quiet = wnm.quiet_session_ids(records, wnm.live_session_ids())
+    # ⚠️ `jump` is pane-keyed and the feed is not, so the borrowed predicate is
+    # narrowed HERE rather than in `is_live()`. A store-vouched row with no pane now
+    # renders in the feed, where it carries the `answer:` handover instead of a jump
+    # — but there is nothing on this surface to jump TO: `main()` resolves
+    # `pmap[pane]["tab_id"]`, and for `pane: ""` that is None, so a bare `jump` would
+    # print `attention row has pane , not in the live pane list` and exit 1. The row
+    # that would fire it is a fresh headless gate — exactly the row the feed change
+    # adds. Before that change the pane clause dropped these rows one filter earlier,
+    # so this surface never saw one.
     live = lambda r: (wnm.is_live(r, pmap, quiet)
+                      and bool(r.get("pane"))
                       and str(r.get("pane")) != str(me))
     needs = [wnm.reclassify_idle(r) for r in records if live(r)]
 

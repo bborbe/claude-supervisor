@@ -497,6 +497,74 @@ class OrphanLiveness(unittest.TestCase):
         q = self.quiet([rec], [self.LIVE], {self.LIVE: 0})
         self.assertFalse(wnm.is_live(rec, {}, q))
 
+    # --- the pane-less class: a headless worker's open gate -------------------
+
+    def test_pane_less_store_vouched_gate_is_rendered(self):
+        """SC1: a headless worker owns no pane, and its open gate must still render.
+
+        The pane clause is `str(rec["pane"]) not in pmap`, and `""` is never a pane
+        key -- so a headless worker's open, answerable gate was dropped one filter
+        before `row()`, which ALREADY renders the actionable handover
+        (`answer_handover`, `:1412-1424`). Measured 2026-10-06: three reader runs
+        inside the item's open window rendered no row for it in any section.
+
+        ⚠️ Pre-fix this fails ON THE ASSERTION, not by failing to import and not on a
+        symbol-existence check -- that distinction is the criterion, because a
+        vacuous pre-fix failure would certify nothing.
+        """
+        rec = self.rec(self.HEADLESS, pane="")
+        rec.update({"ts": 0, "store_vouched": True, "kind": "permission",
+                    "store_item_id": "2f13c7ba2755d73553333eb6611069b8"})
+        q = self.quiet([rec], [], {self.HEADLESS: 30})
+        self.assertTrue(wnm.is_live(rec, {"7": {}}, q),
+                        "a pane-less store-vouched gate must render")
+        line = wnm.row(rec, {"7": {}}, "permission", None)
+        self.assertIn("answer:", line, "the handover must name the answering command")
+        self.assertIn("2f13c7ba2755d73553333eb6611069b8", line,
+                      "the handover must name the STORE's item id, not the log's")
+
+    def test_pane_less_unvouched_row_is_still_dropped(self):
+        """The protection the exemption must NOT break -- same shape, no voucher.
+
+        A pane-less log-fallback row was never liveness-filtered by the store, so
+        absence from the registry plus staleness is still the best signal available
+        and the orphan must still be dropped. Widening the exemption to "a pane-less
+        open gate is never dropped" fails this test.
+        """
+        rec = self.rec(self.DEAD, pane="")
+        q = self.quiet([rec], [], {self.DEAD: 10 * 3600})
+        self.assertFalse(wnm.is_live(rec, {"7": {}}, q))
+
+    def test_pane_backed_row_still_carries_its_own_jump(self):
+        """SC3: the pane-backed control -- the exemption must not touch it.
+
+        A tab worker's row keeps its own pane id and a working jump, so the fix
+        cannot have been "render everything".
+        """
+        rec = self.rec(self.LIVE)
+        rec["ts"] = 0
+        q = self.quiet([rec], [self.LIVE], {self.LIVE: 0})
+        self.assertTrue(wnm.is_live(rec, {"7": {}}, q))
+        self.assertIn("activate-pane --pane-id 7",
+                      wnm.row(rec, {"7": {}}, "question", None))
+
+    def test_store_vouched_row_with_a_dead_pane_is_still_dropped(self):
+        """The exemption's pane half, pinned on the shape that can actually occur.
+
+        `test_pane_backed_row_still_carries_its_own_jump` uses `self.rec(self.LIVE)`,
+        which carries no `store_vouched`, and its pane `"7"` IS a key of `{"7": {}}` --
+        so the pane clause is never reached in the failing direction. Without this
+        case, rewriting the exemption as `if not rec.get("store_vouched"): return False`
+        would pass every other test while admitting pane-backed store-vouched rows
+        whose pane is gone, which is the widening the fix deliberately avoids.
+        """
+        rec = self.rec(self.LIVE, pane="479")
+        rec.update({"ts": 0, "store_vouched": True, "kind": "permission",
+                    "store_item_id": "75264206"})
+        q = self.quiet([rec], [self.LIVE], {self.LIVE: 0})
+        self.assertFalse(wnm.is_live(rec, {"7": {}}, q),
+                         "a pane the map does not hold still drops a vouched row")
+
     # --- the two halves of `quiet`, each of which alone is wrong --------------
 
     def test_live_headless_worker_is_not_quiet_despite_no_registry_entry(self):
@@ -665,17 +733,25 @@ class PaneResolutionWithoutALogLine(unittest.TestCase):
 
     # --- the defect: no pane -> dropped --------------------------------------
 
-    def test_store_row_without_a_pane_is_dropped_today(self):
-        """The control: this is the current, wrong behaviour the fix must change.
+    def test_store_row_without_a_pane_renders_pane_less(self):
+        """The fix: an unresolvable pane no longer drops a store-vouched gate.
 
-        The row is live by every other signal -- the session is registered, its
-        transcript is fresh, and the pane its name resolves to is on screen. Only the
-        absent pane drops it.
+        This test previously pinned the opposite, and its own docstring named it "the
+        current, wrong behaviour the fix must change". The row is live by every other
+        signal -- the session is registered, its transcript is fresh, and the pane its
+        name resolves to is on screen -- and only the absent pane dropped it.
+        `resolve_missing_panes()` closes the case where the name DOES match a pane
+        title. A headless worker's name matches none, because it owns no pane at all,
+        so its row reached the pane clause with `pane: ""` and was dropped one filter
+        before `row()` -- which already renders the actionable handover for exactly
+        this shape. Measured 2026-10-06: a parked headless worker's `open`,
+        `permission`-class item rendered no row in any section, across three reader
+        runs inside its open window.
         """
         rec = self.store_row()
         self.assertIsNone(rec["pane"], "the fixture must carry NO pane to be the case")
-        self.assertFalse(wnm.is_live(rec, self.pane_map(), set()),
-                         "an absent pane drops the row before the fix")
+        self.assertTrue(wnm.is_live(rec, self.pane_map(), set()),
+                        "a store-vouched pane-less gate must reach the feed")
 
     def test_resolving_the_pane_by_name_makes_the_row_live(self):
         """SC2: the resolved pane survives `is_live()`, so the row reaches the feed."""
@@ -726,7 +802,12 @@ class PaneResolutionWithoutALogLine(unittest.TestCase):
         rec = wnm.resolve_missing_panes([self.store_row()], self.pane_map(),
                                         self.registry(name="", sid=""))[0]
         self.assertIsNone(rec["pane"])
-        self.assertFalse(wnm.is_live(rec, self.pane_map(), set()))
+        # The row still claims no pane -- that safety property is untouched, and the
+        # exemption is keyed on the STORE's voucher rather than on this join, so no
+        # pane is ever guessed here. What changed is only that such a row now RENDERS
+        # instead of being dropped: `row()`'s pane-less branch hands over the answering
+        # command where it has no jump to give.
+        self.assertTrue(wnm.is_live(rec, self.pane_map(), set()))
 
     def test_no_matching_pane_claims_nothing(self):
         """A named session whose pane is not on screen resolves to nothing."""

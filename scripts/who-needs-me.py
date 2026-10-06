@@ -809,9 +809,25 @@ def is_live(rec, pmap, quiet):
     convention: `None` is an unreadable `wezterm cli list`, which cannot prove a
     pane is gone, so the row is kept. Only a *readable* map that lacks the pane
     drops it — `{}` is a real "no panes exist" answer and still drops everything.
+
+    ⚠️ **One class is exempt from the pane clause: a STORE-VOUCHED row with no pane.**
+    A headless worker owns no pane by construction — `owned_pane()` refuses an
+    unprovable pane, so the hook records `pane: ""` — and `""` is never a pane key, so
+    this clause dropped every gate such a worker raised, one filter before `row()`,
+    which already renders the actionable handover for a pane-less row
+    (`answer_handover`, measured 2026-09-25). The store decides this row's liveness
+    server-side and drops dead askers as a side effect of the same read
+    (`store_items()`), so re-judging it here is the same worse-opinion defect
+    `store_vouched` already corrects for transcript staleness — see
+    `quiet_session_ids()`. Measured 2026-10-06: a parked headless worker's item sat
+    `open`, `permission`-class, `pane: ""`, and the feed rendered no row in any
+    section. The exemption is deliberately narrow — it needs BOTH an empty pane AND
+    the store's own voucher, so an unvouched pane-less log row still follows the
+    orphan rule.
     """
     if pmap is not None and str(rec.get("pane")) not in pmap:
-        return False
+        if rec.get("pane") or not rec.get("store_vouched"):
+            return False
     return not quiet or rec.get("session_id") not in quiet
 
 
