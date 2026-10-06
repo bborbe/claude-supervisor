@@ -163,7 +163,26 @@ STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 # only grow. The store enforces the field: `attention-controller` PR #95
 # (`feat/expires-at-enforcement`, merged 2026-10-06) removes an item past its
 # deadline on the read path, so this default is what that enforcement acts on.
-DEFAULT_ASK_TTL_HOURS = _positive_float_env("ATTENTION_ASK_TTL_HOURS", 24)
+#
+# ⚠️ A LITERAL, and deliberately NOT read from the environment here. Resolving
+# `$ATTENTION_ASK_TTL_HOURS` at import meant a set-but-invalid value raised
+# SystemExit before any subcommand dispatched — including `poll`, which never
+# reads the TTL at all. That is the very failure `_positive_float_env` exists to
+# prevent, and closing only the empty case left the other half open. The env is
+# read where it is used (`_ask_ttl_hours`), so a refusal lands on the two arms
+# that actually post. It also makes this constant env-independent, which is what
+# lets a test pin the documented 24 without failing on the very host the knob
+# exists for.
+DEFAULT_ASK_TTL_HOURS = 24
+
+
+def _ask_ttl_hours():
+    """The TTL to apply: `$ATTENTION_ASK_TTL_HOURS` when set, else the default.
+
+    Kept a function so the environment is read on the posting path rather than at
+    import — see `DEFAULT_ASK_TTL_HOURS`.
+    """
+    return _positive_float_env("ATTENTION_ASK_TTL_HOURS", DEFAULT_ASK_TTL_HOURS)
 
 # A store item id is the store's own: 32 lowercase hex characters, hex over 16
 # random bytes (`attention-controller`, `pkg/item-id-generator.go`). `post`
@@ -485,7 +504,7 @@ def _expires_at_or_default(args):
     """
     if args.expires_at:
         return args.expires_at
-    return (datetime.now(timezone.utc) + timedelta(hours=DEFAULT_ASK_TTL_HOURS)).isoformat()
+    return (datetime.now(timezone.utc) + timedelta(hours=_ask_ttl_hours())).isoformat()
 
 
 def _post_and_report(args, producer_id, liveness_ref, payload, options, out):

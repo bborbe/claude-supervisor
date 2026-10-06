@@ -335,11 +335,13 @@ class PostTest(unittest.TestCase):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
-        # ⚠️ Pin the documented default, not just the arithmetic. Reading `ttl`
-        # from the same constant the code reads makes the window assertion below
-        # pass for ANY value of it, so without this line a change to the default
-        # would be invisible to the suite — the assertion would keep passing
-        # while the number the docstring promises drifted.
+        # ⚠️ Pin the documented default, not just the arithmetic. Reading the TTL
+        # from the same source the code reads makes the window assertion below
+        # pass for ANY value of it, so without this line a drift in the default
+        # would be invisible to the suite. Asserting the literal is safe only
+        # because `DEFAULT_ASK_TTL_HOURS` is now itself a literal — the
+        # environment is read on the posting path (`_ask_ttl_hours`), not at
+        # import, so a host with `ATTENTION_ASK_TTL_HOURS` set does not fail here.
         self.assertEqual(ask.DEFAULT_ASK_TTL_HOURS, 24)
 
         before = datetime.now(timezone.utc)
@@ -348,7 +350,7 @@ class PostTest(unittest.TestCase):
         after = datetime.now(timezone.utc)
 
         sent = datetime.fromisoformat(captured["body"]["expires_at"])
-        ttl = timedelta(hours=ask.DEFAULT_ASK_TTL_HOURS)
+        ttl = timedelta(hours=ask._ask_ttl_hours())
         self.assertGreaterEqual(sent, before + ttl)
         self.assertLessEqual(sent, after + ttl)
 
@@ -432,6 +434,14 @@ class PostTest(unittest.TestCase):
             self.assertEqual(ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24), 6)
         with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "   "}):
             self.assertEqual(ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
+        # And the env→constant wiring, through the accessor the posting path
+        # actually calls. `DEFAULT_ASK_TTL_HOURS` is a literal by design, so the
+        # override has to be proven here rather than on the constant.
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "6"}):
+            self.assertEqual(ask._ask_ttl_hours(), 6)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ATTENTION_ASK_TTL_HOURS", None)
+            self.assertEqual(ask._ask_ttl_hours(), 24)
 
     def test_a_nan_inf_or_non_positive_ttl_is_refused_by_name(self):
         """The values that PARSE but cannot be a TTL, each refused loudly.

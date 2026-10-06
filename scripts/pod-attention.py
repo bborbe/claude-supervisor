@@ -105,7 +105,7 @@ DECISIONS = ("allow", "deny")
 # session, so it is `session` for both — there is no `pod` member, and inventing one
 # fails every push, which is exactly what the first e2e run found.
 #   producer_kind: session | agent | cron | dark-factory
-#   liveness_ref:  <session|heartbeat>:<value>
+#   liveness_ref:  <session|heartbeat|owner>:<value>
 # Read from `attention-controller` `pkg/producer-kind.go` and `pkg/liveness-ref.go`, and
 # confirmed against the running store.
 PRODUCER_KIND = "session"
@@ -435,6 +435,15 @@ def main(argv=None):
     # which is right for anything the local session registry can resolve. A pod that
     # cannot be resolved that way must declare its own — `heartbeat:<path>` — or its card
     # is pruned on the first read.
+    #
+    # ⚠️ `session:` is kept HERE while `attention-ask.py` moved its default to `owner:`,
+    # and the difference is the producer rather than an oversight — do not "fix" the
+    # inconsistency without reading this. A pod's `gate` blocks on its own item, so the
+    # pod is alive for as long as the gate matters and its exit makes the gate moot: that
+    # is exactly what `session:` expresses, and it is why a pod needs no `owner:` model.
+    # `attention-ask.py` posts cards the OPERATOR answers after the asking session has
+    # ended its turn, which is what `owner:` expresses. Swapping this default would make
+    # a dead pod's gate outlive the pod for no one's benefit.
     ask.add_argument("--liveness-ref", default="")
 
     gate = sub.add_parser("gate")
