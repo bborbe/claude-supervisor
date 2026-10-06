@@ -1142,18 +1142,30 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // so matching only `running` let it through and left a parked worker resumable.
     // ⚠️ PRUNE FIRST, then let the guard see every row — do NOT filter rehydrated rows out.
     // The first cut excluded them wholesale, to stop a DEAD worker's row asserting it was
-    // still mid-turn and refusing the resume that is its only recovery. That fixed the dead
-    // case by breaking the live one: a rehydrated row whose worker is STILL RUNNING stopped
-    // blocking a resume, and resuming a live worker puts two writers on one conversation —
-    // the hazard this guard exists for. `pruneRehydratedAgents` already deletes rows whose
-    // liveness has gone false, so after it runs every rehydrated row still in the Map IS live
-    // and SHOULD hold the guard. The prune previously ran on the read paths only, which is
-    // why the resume path never saw it.
+    // still mid-turn and refusing the resume that is its only recovery. `pruneRehydratedAgents`
+    // deletes rows whose liveness has gone false, so a row still in the Map after it runs
+    // SHOULD hold the guard. The prune previously ran on the read paths only, which is why the
+    // resume path never saw it — and this guard's contract, which this comment states, had
+    // drifted to the opposite of its own code.
+    //
+    // ⚠️ This is defence in depth, NOT the line that stops a live resume: `checkLiveness(resume)`
+    // above already refuses one, over the same channels and the same TTL. What this guard is
+    // the only line for is a worker in THIS process's `agents` that the registry cannot see.
+    //
+    // ⚠️ "Still in the Map" is an AGE PROXY, not proof of liveness — `liveSessionIds()` reads a
+    // heartbeat stamp against HEARTBEAT_TTL_MS (60s) or a pid-checked registry entry. So a dead
+    // worker's row can hold the guard for up to 60s after its owner dies: the deadlock the
+    // deleted filter existed to prevent, now bounded and self-healing on retry rather than
+    // immediate. And when `liveSessionIds()` answers `null`, every row is kept — the fail-closed
+    // direction, but a weaker property than "live by construction".
     pruneRehydratedAgents()
     const holder = findLiveHolder(agents.values(), resume)
     if (holder) {
       return {
-        error: `session ${resume} is still running (worker ${holder.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`,
+        // ⚠️ A rehydrated row's worker lives in the supervisor process that SPAWNED it, not
+        // in this one (`registry-rehydrate.mjs` — adoption crosses processes), so naming
+        // "this server" sends the operator to close the wrong thing.
+        error: `session ${resume} is still running (worker ${holder.id} is mid-turn ${holder.rehydrated ? 'in the supervisor process that spawned it' : 'in this server'}) — close it before resuming, or you will have two writers on one conversation`,
       }
     }
     // Neither probe could be read. Fail CLOSED: "could not tell" and "confirmed

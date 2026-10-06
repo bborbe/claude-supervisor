@@ -292,10 +292,11 @@ test('status maps from the ledger mode, so a rehydrated row reads like a spawned
   assert.equal(rehydratedStatus({ mode: 'headless' }), 'running')
 })
 
-test('none of the three rehydrated statuses is terminal — which is why the guard needs the marker', () => {
-  // `resume-guard.mjs` treats every non-terminal status as a live in-process holder, so a
-  // rehydrated row for a dead worker would refuse its own resume. The exclusion is by the
-  // `rehydrated` marker, and this pins the premise that makes it necessary.
+test('none of the three rehydrated statuses is terminal — which is why liveness, not the status, decides', () => {
+  // `resume-guard.mjs` treats every non-terminal status as a live in-process holder, and this
+  // pins the premise that makes liveness the ONLY thing that may decide a rehydrated row's
+  // fate: a dead worker's row would refuse its own resume, so such rows are pruned rather than
+  // excluded by the `rehydrated` marker — and a row that survives the prune holds the guard.
   for (const mode of ['interactive', 'cluster', 'headless']) {
     assert.equal(isFinished(rehydratedStatus({ mode })), false, `${mode} must not read as finished`)
   }
