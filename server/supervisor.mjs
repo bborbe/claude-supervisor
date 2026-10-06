@@ -1176,6 +1176,38 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     agent.launcher = res.launcher ?? null
     agent.transcriptDir = transcriptDirFor(agent.cwd)
     writeLedger(agent)
+
+    // ⚠️ **The bind is the tab path's missing half, and it is not bookkeeping.** A tab
+    // worker's session id is learned only by polling the registry (above), and until it
+    // is written to the task's `claude_session_id` the vault cannot resolve the worker
+    // at all. That is what left a parked worker invisible to
+    // `manager-attention-watch.py`: its `parked-on-unregistered-gate` cell fires only
+    // when a LIVE session owns the row, and with no stamp the row falls to the orphan
+    // path instead — measured 2026-10-05, a worker parked on a question sat unnoticed
+    // for 30+ minutes.
+    //
+    // Reuses `bindSessionToTask` rather than writing the field directly: it already
+    // implements the ownership rule (stamp only when the field is EMPTY, else append to
+    // `metrics_sessions`), and a second writer here would be a second definition of who
+    // owns a task — which is exactly the displacement that module's own docstring
+    // records.
+    //
+    // ⚠️ **NOT fatal, unlike the cluster path's bind.** A cluster worker has no pane, so
+    // a failed bind there leaves a session nothing points at and the caller is told. This
+    // worker is reachable by pane and by ledger, so failing the spawn would destroy a live
+    // worker to report a bookkeeping failure. Reported on the response instead, and logged
+    // because the response is easy to drop.
+    let bind = null
+    if (task && agent.sessionId) {
+      const bound = bindSessionToTask({ task, vault, sessionId: agent.sessionId })
+      if (bound.error) {
+        bind = { error: bound.error }
+        log(`WARNING: worker ${id} spawned but binding it to task "${task}" failed: ${bound.error}`)
+      } else {
+        bind = { action: bound.action, vault: bound.vault }
+      }
+    }
+
     return {
       agent_id: id,
       label: agent.label,
@@ -1204,6 +1236,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // checked only that the send had not errored — which is how a spawn reported
       // `applied: true` for a colour that never applied (3 of 6 spawns, 2026-09-20).
       color: res.color ? (res.color.error ? { error: res.color.error } : { applied: true }) : null,
+      // The task this worker was opened for, and whether the vault's record of it was
+      // written. `null` when the caller named no task (the stamp is optional for a tab
+      // worker, unlike the cluster path). Reported rather than swallowed for the same
+      // reason the cluster path reports it: a spawn whose owner was never recorded is a
+      // worker the fleet cannot find, and it otherwise reads exactly like a clean one.
+      bind,
     }
   }
 
