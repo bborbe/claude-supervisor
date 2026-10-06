@@ -321,4 +321,7 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // without this loop the first spawn_agent after a reconnect overwrites a live worker's
   // rehydrated row — reproducing the exact `unknown agent` symptom this PR closes.
   assert.match(src, /do \{\n\s+id = `agent_\$\{\+\+seq\}`\n\s+\} while \(agents\.has\(id\)\)/)
+  // And the marker must REACH a caller: `agentView` is the only surface an MCP client sees,
+  // and without this field a boot-time row is indistinguishable from a live one.
+  assert.match(src, /rehydrated: a\.rehydrated === true,/)
 })

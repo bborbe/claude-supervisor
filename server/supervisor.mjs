@@ -1455,6 +1455,13 @@ const agentView = (a) => {
     // the ledger record uses, so the two cannot disagree about what "no policy" reads as.
     policy: a.policyPath ?? null,
     shipping: a.shipping === true,
+    // ⚠️ The discriminating signal for a row adopted from the ledger rather than spawned by
+    // this process. Without it three fields a caller DOES see are boot-time or false readings
+    // that read as measurements: `status` is never terminal, `shipping` is unrecoverable
+    // (`buildRecord` never persisted the flag), and `pending_permissions: []` is
+    // indistinguishable from "no gate outstanding" — the exact reading that cost a manager a
+    // misdirected worker in the v0.110.4 incident. See registry-rehydrate.mjs.
+    rehydrated: a.rehydrated === true,
     // Which source decided interactive-vs-headless: argument, env, config or default. A
     // worker that opened the wrong way is otherwise diagnosed by guessing which of four
     // places was consulted.
