@@ -2898,9 +2898,14 @@ class DeclaredMembersBoundary(unittest.TestCase):
     `###` was invisible to the tracked set: measured 2026-10-06 at **52 of 59** on
     `Manager Layer` and **0 of 4** on `Unattended Execution`.
 
-    ⚠️ Both halves are asserted. A "fix" that widened the capture to the end of the
-    document would satisfy the first test and silently make every later section a
-    membership list — the second test is what makes the first one mean anything.
+    ⚠️ Both halves are asserted, and they enforce different things. The first is the
+    discriminating one: it asserts the *whole ordered list*, so a capture widened to
+    the end of the document returns a third member and fails it. The second states
+    the boundary positively and is weaker in isolation — `assertNotIn` would also
+    pass against an empty list — but it is what names the invariant a "just read to
+    the end" edit would break. (Reviewer's correction, 2026-10-06: an earlier draft
+    of this paragraph claimed the first test would pass under such a widening. It
+    would not.)
     ⚠️ `reset.py:members_of` carries the same lookahead and has no other coverage.
     """
 
