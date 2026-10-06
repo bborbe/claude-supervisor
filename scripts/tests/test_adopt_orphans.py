@@ -334,22 +334,38 @@ class Claiming(Base):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout, "")
 
-    def test_claim_held_by_a_gone_manager_is_re_adopted(self):
-        """A dead holder is not ownership -- the filter fails open on one, and so does this."""
+    def test_claim_held_by_a_gone_manager_is_not_settled(self):
+        """A dead holder is not ownership -- the filter fails open on one, and so does this.
+
+        ⚠️ **Asserts that the row is REPORTED, never that the claim was taken over.** The
+        takeover is `ownership-claim.py`'s decision, and it resolves the holder's liveness
+        against the REAL registry, which it offers no override for. In an environment
+        without one it correctly refuses (`registry unreadable -- liveness unknown, not
+        taking over`) and answers HELD, so a takeover assertion passes on a laptop and
+        fails in CI. Measured 2026-10-06: exactly that, one failure out of 1682.
+
+        The pair with `test_settled_worker_is_not_re_reported_on_a_later_tick` is what
+        discriminates: that one holds the claim with a LIVE holder and asserts silence,
+        this one holds it with a dead holder and asserts the row still prints. An
+        implementation that settled on any claim at all fails this one; one that settled
+        on none fails that one.
+        """
         with open(self.claims_file, "w", encoding="utf-8") as fh:
             json.dump(
                 {
                     "version": 1,
                     "claims": {
-                        WORKER: {"session": WORKER, "manager": "00000000-0000-4000-8000-000000000000"}
+                        WORKER: {
+                            "session": WORKER,
+                            "manager": "00000000-0000-4000-8000-000000000000",
+                        }
                     },
                 },
                 fh,
             )
         proc = self.run_script()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("1 workers adopted from exited manager", proc.stdout)
-        self.assertEqual(self.holders().get(WORKER), ME)
+        self.assertIn("manager %s exited" % EXITED[:8], proc.stdout)
 
     def test_dry_run_claims_nothing(self):
         proc = self.run_script("--dry-run")
