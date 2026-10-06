@@ -181,6 +181,13 @@ CLAIMS = os.environ.get("SUPERVISOR_OWNERSHIP_CLAIMS") or os.path.expanduser(
 EMIT = "emit"
 DROP = "drop"
 
+# The token `who-needs-me.py` writes to its STDOUT when it refuses a read, so the
+# refusal survives the pipe that carries its output here. Kept as a literal rather
+# than imported: the two scripts are shipped side by side and may be updated
+# independently, and a filter that could not recognise a NEWER writer's refusal would
+# silently re-collapse it into the empty feed it is meant to be told apart from.
+REFUSAL_MARKER = "WHO-NEEDS-ME-REFUSED"
+
 # The mark `who-needs-me.py` stamps on a row it returned from the event-log
 # fallback, matched literally against the feed line. It is the feed's own
 # spelling -- keep the two in lockstep, or the filter carries a signal the feed
@@ -422,6 +429,35 @@ def evaluate(pane, ledger, live, items, self_id, claims=None):
     return call, reason, session_id, spawner
 
 
+def feed_refusal(lines):
+    """The upstream refusal line, or `None` when the feed was actually read.
+
+    ⚠️ **This is the third state, and the reason it is a marker and not "no rows".**
+    An empty stdin means one of two different things, and the two demand opposite
+    responses:
+
+      * the feed was read and held no gates — a REAL answer, which must keep exiting 0
+        with `gates: 0`. Collapsing it into an error is the false refusal
+        `docs/pane-reads.md` names, and it has already been shipped once here: a
+        `Monitor` armed on this pipeline died with `script failed (exit 2)` on every
+        quiet tick (measured 2026-10-05, manager loop tick 154).
+      * the feed was never read — `who-needs-me.py` refused, and its stdout is empty
+        because the refusal went to stderr, which a pipe does not carry. Measured
+        2026-10-06 against v0.106.0 with the mux socket unreachable: this filter read
+        zero gates and printed `gates: 0  emit: 0 …`, exit 0 — a healthy empty queue
+        certified by the success code, for a transport that never answered.
+
+    The marker is what separates them. `who-needs-me.py` writes `REFUSAL_MARKER` to
+    stdout precisely so it reaches this reader through the pipe; an unmarked empty
+    stdin stays the first case. Matching is on the line's first token, so the message
+    that follows it may change without breaking the contract.
+    """
+    for line in lines:
+        if line.lstrip().startswith(REFUSAL_MARKER):
+            return line.strip()
+    return None
+
+
 def feed_rows(stream):
     """(pane, replayed) pairs in a `who-needs-me.py` render, first-appearance order.
 
@@ -506,7 +542,24 @@ def main():
     # correct extractor whose empty result the caller misreads as a bad call.
     panes = [(pane, False) for pane in args.pane]
     if args.feed:
-        panes += feed_rows(sys.stdin)
+        # Read stdin ONCE and answer both questions from the same lines: whether the
+        # upstream refused, and which panes it emitted. Two reads of a pipe cannot
+        # both see the data, and a refusal is a verdict about the whole read.
+        lines = sys.stdin.readlines()
+        refusal = feed_refusal(lines)
+        if refusal:
+            # ⚠️ **No `gates:` line on this path, deliberately.** A marker printed
+            # beside the false claim is not a fix — `gates: 0` still reads as a
+            # measurement, and a manager parsing it cannot tell it from a quiet fleet.
+            # The line that lies is the line that must not be printed.
+            sys.stderr.write(f"gate-owner-filter: upstream refused — {refusal}\n")
+            sys.stderr.write(
+                "gate-owner-filter: refusing to report a gate count from a feed that "
+                "was never read. This exit is non-zero on purpose — do not arm a "
+                "watcher on this pipeline's output.\n"
+            )
+            return 1
+        panes += feed_rows(lines)
     if not args.pane and not args.feed:
         parser.error("pass --pane, --feed, or both")
 
