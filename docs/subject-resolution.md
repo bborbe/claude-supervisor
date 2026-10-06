@@ -65,22 +65,19 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 
 ## Reconcile the subject's status
 
-**Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **The condition is the guard, not decoration** — a copy of the block below *without* it writes `in_progress` over a `hold`. The block is runnable as written: it **reads** `STATUS` off the page rather than assuming a caller set it, runs **exactly one** branch rather than firing both on one subject, and uses `case` so a declined guard exits `0` instead of tripping `set -e`:
+**Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject, read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **The condition is the guard, not decoration** — a copy of the block below *without* it writes `in_progress` over a `hold`. The block is runnable as written: it takes `PAGE` and `BRANCH` from § The page test rather than re-deriving them, **refuses on an unreadable page instead of defaulting**, runs **exactly one** branch rather than firing both on one subject, and uses `case` so a declined guard exits `0` instead of tripping `set -e`. ⚠️ **The refusal is load-bearing, and it is the part that is easy to omit.** Every path that leaves `STATUS` empty for a reason *other* than a genuinely absent field lands on the `""` arm — which writes. A wrong `PAGE` is the likeliest such path, so it must fail closed before the read rather than being folded into the same empty value:
 
 ```bash
-# BRANCH, SUBJECT and TOPICS_DIR come from the resolution chain above; PAGE is the page
-# § The page test found. Exactly one branch runs.
-if [ "$BRANCH" = topic ]; then
-  PAGE="$TOPICS_DIR/$SUBJECT.md"
-else
-  PAGE="24 Goals/$SUBJECT.md"
-fi
-# Read the page's own status, normalised — a trailing space or a CRLF page would otherwise
-# leave "todo " / "todo\r", fall through the guard below, and reinstate the exact defect
-# this section fixes: a page reading todo while its manager sweeps it.
-STATUS=$(awk '/^---$/{n++; next} n==1' "$PAGE" \
+# PAGE is the path § The page test's find returned, and BRANCH is the branch it detected.
+# ⚠️ Never re-derive PAGE from $SUBJECT: that test matches with -iname, so a plain join
+# would miss a subject typed in a different case than its filename.
+[ -n "$PAGE" ] && [ -f "$PAGE" ] || { echo "❌ subject page not readable at ${PAGE:-<unset>}"; exit 1; }
+# Read the page's own status, normalised. The file is de-CRLF'd *before* awk, because
+# '/^---$/' never matches a CRLF '---\r': on a fully-CRLF page the frontmatter counter never
+# reaches 1, no status is read at all, and the resulting empty STATUS would take the "" arm.
+STATUS=$(tr -d '\r' < "$PAGE" | awk '/^---$/{n++; next} n==1' \
   | sed -n 's/^status:[[:space:]]*//p' \
-  | tr -d '\r' | tr '[:upper:]' '[:lower:]' | sed -e 's/[[:space:]]*$//')
+  | tr '[:upper:]' '[:lower:]' | sed -e 's/[[:space:]]*$//')
 case "$STATUS" in
   ""|todo|next)
     if [ "$BRANCH" = topic ]; then

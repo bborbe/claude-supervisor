@@ -35,7 +35,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 DOC = "docs/subject-resolution.md"
 TABLE_ROW = re.compile(r"^\|\s*`/(manager-[a-z]+)`\s*\|\s*yes\s*\|\s*\*\*(yes|no)\*\*(.*)$", re.M)
-FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---", re.S)
 
 # The imperative the writers carry. Deliberately the full phrase: a bare mention of the
 # section is what the non-writers carry, so it cannot be the discriminator.
@@ -60,10 +60,14 @@ def main() -> int:
     table = TABLE_ROW.findall(doc)
     rows = {name: verdict for name, verdict, _ in table}
 
-    if len(rows) != 4:
+    # Compare the parsed *rows*, not the name-keyed dict: a duplicated row collapses in the
+    # dict, so a table naming one command twice would pass a dict-length check. Both halves
+    # are needed — the row count catches an added row, the distinct-name count a swapped one.
+    if len(table) != 4 or len(rows) != len(table):
         failures.append(
-            f"{DOC}: the write-scope table names {len(rows)} command(s), expected 4 — "
-            f"a table that does not enumerate every resolving command cannot be checked"
+            f"{DOC}: the write-scope table has {len(table)} row(s) naming {len(rows)} distinct "
+            f"command(s), expected 4 of each — a table that does not enumerate every resolving "
+            f"command exactly once cannot be checked"
         )
 
     writers: dict[str, str] = {}
@@ -111,8 +115,15 @@ def main() -> int:
         path = REPO / rel
         if not path.is_file():
             continue
+        # Fail closed: a frontmatter block this regex cannot read is a block whose grants were
+        # never checked, and a skipped assertion reports green against text it does not cover.
         front = FRONTMATTER.match(path.read_text(encoding="utf-8"))
-        if front and "Bash(vault-cli:*)" in front.group(1):
+        if front is None:
+            failures.append(
+                f"{rel}: its frontmatter could not be read, so the table's `Bash(vault-cli:*)` "
+                f"claim was never checked — failing closed rather than passing vacuously"
+            )
+        elif "Bash(vault-cli:*)" in front.group(1):
             failures.append(
                 f"{rel}: the table says it holds no `Bash(vault-cli:*)`, but its allowed-tools "
                 f"grants it — the stated reason is stale"

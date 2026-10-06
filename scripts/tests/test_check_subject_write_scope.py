@@ -91,6 +91,57 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("manager-drive.md", result.stderr)
 
+    def test_non_writer_that_never_names_the_section_fails(self):
+        # Assertion (b): a non-writer that says nothing at all reads as a missing step rather
+        # than a stated carve-out.
+        # Both of this file's mentions must go — the divergence list's entry and the carve-out
+        # sentence that names the section. Removing only one leaves the assertion satisfied.
+        self.mutate(
+            "commands/manager-verify.md",
+            "the recording block, and § *Reconcile the subject's status*.",
+            "the recording block.",
+        )
+        self.mutate(
+            "commands/manager-verify.md",
+            "§ *Reconcile the subject's status*, which names this command and `/manager-status`",
+            "the write-scope carve-out, which names this command and `/manager-status`",
+        )
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("manager-verify.md", result.stderr)
+
+    def test_table_row_removed_fails(self):
+        self.mutate(
+            DOC,
+            "| `/manager-verify` | yes | **no** — holds no `Bash(vault-cli:*)` |\n",
+            "",
+        )
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("3 row(s)", result.stderr)
+
+    def test_table_row_duplicated_fails(self):
+        self.mutate(
+            DOC,
+            "| `/manager-drive` | yes | **yes** |",
+            "| `/manager-loop` | yes | **yes** |",
+        )
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("distinct", result.stderr)
+
+    def test_missing_command_file_fails(self):
+        (self.root / "commands/manager-drive.md").unlink()
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("named in the table but missing", result.stderr)
+
+    def test_unreadable_frontmatter_fails_closed(self):
+        self.mutate("commands/manager-verify.md", "---\n", "--- \n")
+        result = self.run_guard()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not be read", result.stderr)
+
     def test_non_writer_regaining_the_grant_fails(self):
         self.mutate(
             "commands/manager-verify.md",
