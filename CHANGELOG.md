@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.109.2
 - fix: **`scripts/manager-attention-watch.py` holds a gate when the worker starts a NEW TURN, instead of emitting an unearned `CLEARED`.** A gated worker that began new work without answering read `busy`, which matched neither half of the predicate, so the watcher emitted a bare `CLEARED` at the mid-turn point — nothing answered, the worker still mid-turn. `is_gated()` now returns HELD (`held:<status>`) for any status that is neither `waiting` nor `idle`, and `transitions` keeps a held-mid-turn session's **membership** — no `CLEARED` (nothing was answered) and no `NEW GATE` (it was already in the set) — so the eventual settle at `idle` still emits the one `CLEARED` a genuine answer earns. ⚠️ Accepted cost, and the decision the limb exists to make: a worker that stays busy indefinitely stays listed as gated, because the registry cannot separate "resumed BECAUSE the gate was answered" from "moved on WITHOUT answering" — both read `busy` with the closer displaced. A false `CLEARED` suppresses the manager's escalation on an unanswered gate; a false `NEW GATE` costs one pane read.
 
 ## v0.109.1
