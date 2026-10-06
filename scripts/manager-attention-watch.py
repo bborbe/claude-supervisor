@@ -88,7 +88,11 @@ DEFAULT_PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
 # in-process SDK `query()` with no pid, so `SESSIONS_DIR` can never list it and
 # every such worker reads UNREGISTERED forever without this. Constants mirror
 # `server/heartbeat.mjs:47-48`; keep the two in step.
-LIVE_DIR = os.path.expanduser("~/.local/state/claude-supervisor/live")
+# Resolved exactly as `server/config.mjs:175` does — a hardcoded path silently reads
+# every headless worker as UNREGISTERED on a host that sets either variable.
+LIVE_DIR = os.environ.get("SUPERVISOR_HEARTBEAT_DIR") or os.path.join(
+    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+    "claude-supervisor", "live")
 HEARTBEAT_TTL_S = 60
 
 # Stamps that are not session ids. `heartbeat.mjs:125` skips the reachability file

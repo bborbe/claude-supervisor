@@ -39,11 +39,24 @@ item. Nothing here waits for the operator.
 
 Every field the producer owns is a declaration, so they are all flags: this
 script never infers a dedup key, an interrupt class, or a liveness model from
-the prose. The two that would be silently wrong if guessed are defaulted from
-the environment instead, and both defaults are visible in `--help`:
+the prose. The ones that would be silently wrong if guessed are defaulted rather
+than inferred, and every default is visible in `--help`:
 
   --producer-id    defaults to $CLAUDE_CODE_SESSION_ID
-  --liveness-ref   defaults to session:<producer-id>
+  --liveness-ref   defaults to owner:<producer-id>
+  --expires-at     defaults to now + $ATTENTION_ASK_TTL_HOURS (24)
+
+⚠️ The `--liveness-ref` default is `owner:` and NOT `session:`, and the
+difference decides whether the card survives at all rather than merely how it is
+tagged: the store prunes an open item that asked (any mechanism but `ack`) whose
+liveness subject is not live, and removes it from the history index too. A
+`session:` default tied every card to the life of the session that posted it, so
+a manager's card died with the manager — silently, after a `201`. See
+`_producer_or_refuse` for the full account.
+
+⚠️ Because the card now outlives its producer, it is bounded instead by
+`--expires-at`, which is why that default exists: without it an `owner:` card
+would stay on the board until something else closed it.
 
 A spawned child is stripped of CLAUDE_CODE_SESSION_ID, so a missing producer id
 is a real case rather than a bug, and it is refused rather than posted: an item
@@ -68,11 +81,13 @@ Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L].
 import argparse
 import importlib.util
 import json
+import math
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -88,8 +103,138 @@ def _load(name, filename):
 attribution = _load("answered_attribution", "answered-attribution.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
+
+
+# The largest TTL this script will accept.
+#
+# ⚠️ An UPPER bound, and it is not belt-and-braces on the `isfinite` check below:
+# `nan` and `inf` are caught there, but a large *finite* value is not. `1e30`
+# passes every other guard and then raises `OverflowError` inside
+# `timedelta(hours=...)` — uncaught, so the caller gets a bare traceback and exit
+# `1`, which is this script's *store failed* code. That is the same failure the
+# helper exists to prevent, one bound short. A year is far past any ask's useful
+# life and sits well inside `timedelta`'s range.
+MAX_ASK_TTL_HOURS = 24 * 365
+
+
+class _ConfigRefused(Exception):
+    """A malformed environment value, refused where a caller can report it.
+
+    ⚠️ An exception rather than a `SystemExit`, and the distinction is the whole
+    point: a refusal has to reach the arm that owns `out` so it can print
+    `REFUSED:` and return `2` like every other refusal in this file. Exiting from
+    the helper instead would put the message on stderr and the code at `1` —
+    which is this script's *store failed* code, so a bad argument would read as a
+    dead store to anything branching on the documented tokens.
+    """
+
+
+def _positive_float_env(name, default):
+    """Read a POSITIVE, FINITE float from the env; unset OR empty means `default`.
+
+    ⚠️ Empty is the case this exists for, and it is not hypothetical. `VAR= cmd`
+    is exactly what an unset shell variable expands to, and a bare
+    `ATTENTION_ASK_TTL_HOURS=` used to raise ValueError before any subcommand
+    dispatched, taking down `poll`, which never reads the TTL at all. The script
+    already treats an empty value as absent one layer down
+    (`_expires_at_or_default` guards with `if args.expires_at`); this is the same
+    rule at the layer that reads the environment.
+
+    ⚠️ A value that is present but unusable is REFUSED by name rather than
+    silently defaulted: a typo'd bound is a real misconfiguration, and this is the
+    place it can be named.
+
+    ⚠️ It raises `_ConfigRefused`, which `_post_and_report` reports — it is NOT a
+    `SystemExit` from here, which is what an earlier revision of this helper did.
+    That shape wrote the message to stderr and exited 1, breaking the file's own
+    convention: every other refusal prints `REFUSED:` to `out` and returns 2, and
+    `1` is this script's store-failed code. A caller branching on the stdout token
+    the docs teach saw nothing and read a bad argument as a dead store.
+
+    ⚠️ And the environment is read on the POSTING path, not at import — see
+    `DEFAULT_ASK_TTL_HOURS`. Only `post` and `post-batch` reach this, so a bad
+    value cannot take down `poll`.
+
+    ⚠️ `nan`, `inf` and `<= 0` are refused alongside the unparseable, and each is
+    a distinct defect rather than a tidiness check. `float("nan")` and
+    `float("inf")` PARSE, so a bare `except ValueError` lets them through to fail
+    in a different function: `timedelta(hours=nan)` raises ValueError and
+    `timedelta(hours=inf)` raises OverflowError, neither caught on the post path —
+    exactly the bare traceback this helper exists to prevent. And a non-positive
+    TTL is worse than a crash: `ATTENTION_ASK_TTL_HOURS=0` yields an `expires_at`
+    of *now*, which the store removes on the first read, recreating this change's
+    own defect — a `201` on the producer's side and nothing on the board — from
+    one env-var misconfiguration.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = None
+    if value is None or not math.isfinite(value) or value <= 0 or value > MAX_ASK_TTL_HOURS:
+        raise _ConfigRefused(
+            f"{name}={raw!r} is not a number in (0, {MAX_ASK_TTL_HOURS}]. Unset it "
+            f"to use the default ({default}), or give a value in that range."
+        )
+    return value
+
+
 # Local store; a hung one must cost a clear failure, never a stalled loop tick.
+# ⚠️ Deliberately left as the bare `float(...)` form rather than routed through
+# `_positive_float_env`, and that is a scope decision, not an oversight: the same
+# variable is read the same bare way by `pod-attention.py` and `answered-watch.py`,
+# so hardening one of the three would leave the repo reading one env var two
+# different ways with nothing saying which was intended. Hardening all three
+# belongs in its own change.
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+
+# How long a posted ask stays on the board before it expires. ⚠️ This exists
+# because the `owner:` liveness default makes a card outlive the session that
+# posted it, and `OwnerLivenessModel` probes NOTHING — so without a bound an
+# unanswered card would stay until something else closed it and the board would
+# only grow. The store enforces the field: `attention-controller` PR #95
+# (`feat/expires-at-enforcement`, merged 2026-10-06) removes an item past its
+# deadline on the read path, so this default is what that enforcement acts on.
+#
+# ⚠️ **Requires attention-controller ≥ `v0.42.0`**, which carries both features
+# this default depends on — `owner:` (`feat/owner-liveness`, PR #94) and the
+# `expires_at` enforcement (PR #95). Against an older store `owner` is absent
+# from `AvailableLivenessModels` and the push is rejected with a 400 naming the
+# field, so the default `post` path fails outright rather than degrading; that is
+# a version mismatch, not a bad declaration.
+#
+# ⚠️ It is NOT reported as one, and this says so rather than claiming otherwise:
+# the 400 surfaces through the generic `except urllib.error.HTTPError` as
+# `FAILED: store returned 400 for the push -- <detail>` with exit 1, which is
+# byte-identical to a dead store, a 500, or any other rejection. The store's own
+# detail names the offending field, so the cause is readable — but a caller
+# branching on exit codes cannot tell a version mismatch from an outage, and a
+# retry loop keyed on 1 would retry a request that can never succeed. Giving it a
+# distinct token is a real improvement and belongs with whoever owns the retry
+# policy, not folded in here. Same floor convention as
+# `commands/attention-next.md`'s attempt-endpoint note.
+#
+# ⚠️ A LITERAL, and deliberately NOT read from the environment here. Resolving
+# `$ATTENTION_ASK_TTL_HOURS` at import meant a set-but-invalid value raised
+# SystemExit before any subcommand dispatched — including `poll`, which never
+# reads the TTL at all. That is the very failure `_positive_float_env` exists to
+# prevent, and closing only the empty case left the other half open. The env is
+# read where it is used (`_ask_ttl_hours`), so a refusal lands on the two arms
+# that actually post. It also makes this constant env-independent, which is what
+# lets a test pin the documented 24 without failing on the very host the knob
+# exists for.
+DEFAULT_ASK_TTL_HOURS = 24
+
+
+def _ask_ttl_hours():
+    """The TTL to apply: `$ATTENTION_ASK_TTL_HOURS` when set, else the default.
+
+    Kept a function so the environment is read on the posting path rather than at
+    import — see `DEFAULT_ASK_TTL_HOURS`.
+    """
+    return _positive_float_env("ATTENTION_ASK_TTL_HOURS", DEFAULT_ASK_TTL_HOURS)
 
 # A store item id is the store's own: 32 lowercase hex characters, hex over 16
 # random bytes (`attention-controller`, `pkg/item-id-generator.go`). `post`
@@ -358,11 +503,112 @@ def _producer_or_refuse(args, out):
             file=out,
         )
         return None
-    return producer_id, (args.liveness_ref or f"session:{producer_id}")
+    # ⚠️ `owner:`, not `session:` — and the difference decides whether the card
+    # SURVIVES at all, not merely how it is tagged. The store prunes an open item
+    # that *asked* (any mechanism but `ack`) whose liveness subject is not live
+    # (`attention-controller` `pkg/attention-store-impl.go` `classifyForRead`:
+    # `isAsked` + `!live` → `remove`), and `removeItem` clears the item from the
+    # items bucket and every index — so the card leaves no history row either.
+    # A `session:<producer-id>` default therefore tied every card this script
+    # posts to the life of the session that posted it, and a session ends on
+    # every turn boundary, every fleet restart and every crash: the card was
+    # created with a `201` and deleted on the first read after the poster
+    # exited. Measured 2026-10-06 — a fleet restart killed the posting session
+    # and the operator's approval question vanished silently, with a `201` on
+    # the producer's side and no history row on the store's.
+    #
+    # The `owner:` model is the one built for this: `isProducerLiveWith` returns
+    # true for it unconditionally and deliberately, because a human owner's
+    # absence cannot be read from the session registry (a never-registered owner
+    # and an exited one produce the same signal, so reading either as gone
+    # prunes a gate the operator can still answer). Every card this script posts
+    # is an ask the OPERATOR answers on the board — the asking session only
+    # polls the answer back — so the operator's liveness is the honest subject
+    # and the poster's is not. An explicit `--liveness-ref` still wins.
+    #
+    # ⚠️ This makes the card outlive its producer, so it must also be BOUNDED —
+    # which is why `_expires_at_or_default` moves with it and why the store's
+    # own `expires_at` enforcement is the other half of this change.
+    return producer_id, (args.liveness_ref or f"owner:{producer_id}")
+
+
+def _validated_expires_at(raw):
+    """The caller's `--expires-at`, refused when it cannot be a usable deadline.
+
+    ⚠️ The FLAG path needs the same guard as the environment path, and for the
+    same reason — the two differ only in where the value comes from, so bounding
+    one and not the other is the asymmetry rather than a scoping decision. A
+    deadline already in the past is removed by the store on the first read, so
+    the card vanishes after a `201`: this change's own defect, reachable here
+    with no clock skew and no env var at all. Unparseable input is refused here
+    too rather than left to the store's 400, so the failure names the argument a
+    caller actually typed.
+    """
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise _ConfigRefused(
+            f"--expires-at {raw!r} is not an RFC3339 timestamp."
+        ) from None
+    if parsed.tzinfo is None:
+        raise _ConfigRefused(
+            f"--expires-at {raw!r} carries no timezone offset, so it cannot be "
+            f"compared against the store's clock."
+        )
+    if parsed <= datetime.now(timezone.utc):
+        raise _ConfigRefused(
+            f"--expires-at {raw!r} is already in the past, so the store would "
+            f"remove the card on its first read."
+        )
+    return raw
+
+
+def _expires_at_or_default(args):
+    """The `expires_at` to send: the caller's, or now + `_ask_ttl_hours()`.
+
+    ⚠️ Name the ACCESSOR, not the constant: `_ask_ttl_hours()` honours
+    `$ATTENTION_ASK_TTL_HOURS` first and falls back to `DEFAULT_ASK_TTL_HOURS`,
+    so the two differ exactly when the env knob is set — the case a reader
+    checking this is most likely to be in.
+
+    ⚠️ A DEFAULT rather than leaving the field absent, and that is the point of
+    the change it ships with. `--expires-at` used to default to `""`, so every
+    card went out unbounded — harmless while the store pruned a dead producer's
+    ask on the next read, and a leak the moment the `owner:` default stopped
+    that prune. The schema reads an absent `expires_at` as "no bound", so
+    omitting it is the thing that had to change; `""` would be a *present* field
+    holding nothing, which is the distinction `post_question` already draws for
+    `context`.
+
+    ⚠️ The deadline is computed from THIS host's clock and compared by the store
+    against its own, so the bound assumes the two are within the TTL of each
+    other. A producer whose clock runs more than `DEFAULT_ASK_TTL_HOURS` ahead
+    posts a card that is born already expired — the store removes it on the first
+    read, and the producer still sees its `201`. That is this change's own defect
+    reachable from one misconfigured host rather than one env var, and it is
+    stated rather than fixed here because the clamp belongs on the store side,
+    where the authoritative clock is. NTP-synced hosts are the assumption; a
+    `TZ`-only mistake is not one, since the value is absolute UTC.
+    """
+    if args.expires_at:
+        return _validated_expires_at(args.expires_at)
+    return (datetime.now(timezone.utc) + timedelta(hours=_ask_ttl_hours())).isoformat()
 
 
 def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
     """POST one item and print its id and poll line. Returns the exit code."""
+    # ⚠️ Resolved BEFORE the store call, and reported HERE rather than raised out
+    # of the helper, so a bad `$ATTENTION_ASK_TTL_HOURS` follows the file's own
+    # refusal convention: `REFUSED:` on stdout and exit 2, like every other
+    # refusal. Exiting from deep in the parse instead put the message on stderr
+    # and the code at 1 — this script's *store failed* code — so a caller
+    # branching on the documented token read a bad argument as a dead store.
+    # Nothing is posted and no closer is recorded on this path.
+    try:
+        expires_at = _expires_at_or_default(args)
+    except _ConfigRefused as err:
+        print(f"REFUSED: {err}", file=out)
+        return 2
     try:
         item = post_question(
             producer_id=producer_id,
@@ -373,7 +619,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             payload=payload,
             context=args.context,
             options=options,
-            expires_at=args.expires_at,
+            expires_at=expires_at,
         )
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
@@ -497,11 +743,23 @@ def main(argv=None):
     post.add_argument("--context", default="")
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
-    post.add_argument("--producer-id", default="")
+    post.add_argument(
+        "--producer-id",
+        default="",
+        help="the session that owns this item and polls it back; default $CLAUDE_CODE_SESSION_ID",
+    )
     post.add_argument("--producer-kind", default="session", choices=PRODUCER_KINDS)
-    post.add_argument("--liveness-ref", default="")
+    post.add_argument(
+        "--liveness-ref",
+        default="",
+        help="<model>:<value> deciding whether the store prunes this item; default owner:<producer-id>",
+    )
     post.add_argument("--interrupt-class", default="pick")
-    post.add_argument("--expires-at", default="")
+    post.add_argument(
+        "--expires-at",
+        default="",
+        help="RFC3339 deadline; default now + $ATTENTION_ASK_TTL_HOURS (24 h)",
+    )
     # The `👤 You:` line this card answers, when the poster knows it. Optional:
     # omitted, nothing is recorded and the hook behaves exactly as it did before.
     post.add_argument("--closer", default="")
@@ -512,11 +770,23 @@ def main(argv=None):
     # is the shape the batch needs: a batch of zero rows is not a question.
     batch.add_argument("--task", action="append", default=[], required=True)
     batch.add_argument("--context", default="")
-    batch.add_argument("--producer-id", default="")
+    batch.add_argument(
+        "--producer-id",
+        default="",
+        help="the session that owns this item and polls it back; default $CLAUDE_CODE_SESSION_ID",
+    )
     batch.add_argument("--producer-kind", default="session", choices=PRODUCER_KINDS)
-    batch.add_argument("--liveness-ref", default="")
+    batch.add_argument(
+        "--liveness-ref",
+        default="",
+        help="<model>:<value> deciding whether the store prunes this item; default owner:<producer-id>",
+    )
     batch.add_argument("--interrupt-class", default="pick")
-    batch.add_argument("--expires-at", default="")
+    batch.add_argument(
+        "--expires-at",
+        default="",
+        help="RFC3339 deadline; default now + $ATTENTION_ASK_TTL_HOURS (24 h)",
+    )
 
     poll = sub.add_parser("poll")
     poll.add_argument("item_id")

@@ -320,8 +320,18 @@ class WireContractTest(unittest.TestCase):
 
     # Mirrors `attention-controller` pkg/producer-kind.go and pkg/liveness-ref.go,
     # and confirmed against the running store.
+    #
+    # ⚠️ `owner` was MISSING here until 2026-10-06, and the omission was this
+    # constant's own failure mode pointing the wrong way. The store gained the
+    # model in `feat/owner-liveness` (PR #94); this tuple was recorded from
+    # `pkg/liveness-ref.go` on 2026-10-01, BEFORE it, and never updated. So the
+    # record called a legal model invented, and a reader trusting it would have
+    # reverted a working default — the drift is worse than no record, because it
+    # is quotable. Verified against the source on 2026-10-06:
+    # `OwnerLivenessModel LivenessModel = "owner"` (`pkg/liveness-ref.go:39`),
+    # carried by `AvailableLivenessModels` (`:46-49`).
     STORE_PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
-    STORE_LIVENESS_MODELS = ("session", "heartbeat")
+    STORE_LIVENESS_MODELS = ("session", "heartbeat", "owner")
 
     def _posted(self, command="ask"):
         captured = {}
