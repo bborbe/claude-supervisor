@@ -103,7 +103,35 @@ attribution = _load("answered_attribution", "answered-attribution.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 # Local store; a hung one must cost a clear failure, never a stalled loop tick.
-STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+def _float_env(name, default):
+    """Read a float from the environment; unset OR empty means `default`.
+
+    ⚠️ Empty is the case this exists for, and it is not hypothetical. `VAR= cmd`
+    is exactly what an unset shell variable expands to, and these are evaluated at
+    import — so a bare `ATTENTION_ASK_TTL_HOURS=` raised ValueError before any
+    subcommand dispatched, taking down `poll`, which never reads the TTL at all.
+    The script already treats an empty value as absent one layer down
+    (`_expires_at_or_default` guards with `if args.expires_at`); this is the same
+    rule at the layer that reads the environment.
+
+    A value that is present but unparseable is REFUSED by name rather than
+    silently defaulted: a typo'd bound is a real misconfiguration, and import is
+    the last place it can be named. Refusing is loud, which is the point — the
+    failure being fixed was a bare traceback from a command that never uses it.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise SystemExit(
+            f"REFUSED: {name}={raw!r} is not a number. Unset it to use the "
+            f"default ({default}), or give a number."
+        ) from None
+
+
+STORE_TIMEOUT = _float_env("ATTENTION_STORE_TIMEOUT", 3)
 
 # How long a posted ask stays on the board before it expires. ⚠️ This exists
 # because the `owner:` liveness default makes a card outlive the session that
@@ -112,7 +140,7 @@ STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 # only grow. The store is what enforces the field (`attention-controller`); this
 # is the value a producer declares, which is the half the schema gives the
 # producer.
-DEFAULT_ASK_TTL_HOURS = float(os.environ.get("ATTENTION_ASK_TTL_HOURS", "24"))
+DEFAULT_ASK_TTL_HOURS = _float_env("ATTENTION_ASK_TTL_HOURS", 24)
 
 # A store item id is the store's own: 32 lowercase hex characters, hex over 16
 # random bytes (`attention-controller`, `pkg/item-id-generator.go`). `post`

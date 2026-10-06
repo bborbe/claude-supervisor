@@ -10,10 +10,20 @@ Covers the three decisions that make a posted question answerable:
   * the option rules -- at most one recommendation, and `--recommend` must name
     one of the `--option` labels. The store enforces both too; checking here is
     what lets the failure name the fix instead of quoting a store payload.
-  * the omitted-vs-empty body rule -- `context`, `options` and `expires_at` are
-    omitted when empty, never sent as "". The schema reads an absent value as
+  * the omitted-vs-empty body rule -- `context` and `options` are omitted when
+    empty, never sent as "". The schema reads an absent value as
     optional/pre-change and a present "" as a value, so sending blank would
-    store a field holding nothing rather than no field at all.
+    store a field holding nothing rather than no field at all. ⚠️ `expires_at`
+    is deliberately NOT in that set any more: it defaults to a real bound, and
+    an absent one reads as "no bound at all" — the opposite of what this file
+    now needs to assert.
+
+  * the two posting defaults -- `--liveness-ref` defaults to `owner:<producer-id>`
+    rather than `session:<producer-id>`, because a `session:` ref ties the card
+    to the life of the session that posted it and the store prunes a dead
+    asker's item, history row included; and `--expires-at` defaults to
+    now + `DEFAULT_ASK_TTL_HOURS`, which is the only bound left on a card that
+    is no longer pruned by liveness.
 
   * the poll shapes -- OPEN while unanswered; the stored `answer` rendered as
     `kind: value`; and a `skip` rendered as the bare word, since `skip ` with
@@ -303,6 +313,13 @@ class PostTest(unittest.TestCase):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
+        # ⚠️ Pin the documented default, not just the arithmetic. Reading `ttl`
+        # from the same constant the code reads makes the window assertion below
+        # pass for ANY value of it, so without this line a change to the default
+        # would be invisible to the suite — the assertion would keep passing
+        # while the number the docstring promises drifted.
+        self.assertEqual(ask.DEFAULT_ASK_TTL_HOURS, 24)
+
         before = datetime.now(timezone.utc)
         with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
             ask.cmd_post(post_args(), out=io.StringIO())
@@ -328,6 +345,44 @@ class PostTest(unittest.TestCase):
             )
 
         self.assertEqual(captured["body"]["expires_at"], "2030-01-01T00:00:00+00:00")
+
+    def test_an_explicit_liveness_ref_still_wins_over_the_owner_default(self):
+        """The escape hatch back to the old behaviour, and it must stay open.
+
+        ⚠️ A caller that genuinely wants a card to die with its producer has to
+        be able to ask for that — the `session:` default was not merely wrong,
+        it was wrong as a DEFAULT. Pinning the override is what keeps the change
+        a default rather than a removal.
+        """
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            ask.cmd_post(
+                post_args(liveness_ref="session:session-a"),
+                out=io.StringIO(),
+            )
+
+        self.assertEqual(captured["body"]["liveness_ref"], "session:session-a")
+
+    def test_an_empty_ttl_env_var_is_unset_not_a_parse_error(self):
+        """`VAR=` is what an unset shell variable expands to, and it must not throw.
+
+        ⚠️ The regression this pins is not cosmetic: the constant is evaluated at
+        import, so a bare `ATTENTION_ASK_TTL_HOURS=` used to raise ValueError
+        before any subcommand dispatched — breaking `poll`, which never reads the
+        TTL. The assertion is on the helper rather than on a subprocess because
+        the import is what fails.
+        """
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": ""}):
+            self.assertEqual(ask._float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "6"}):
+            self.assertEqual(ask._float_env("ATTENTION_ASK_TTL_HOURS", 24), 6)
+        with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "   "}):
+            self.assertEqual(ask._float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
 
     def test_empty_optionals_are_omitted_not_sent_blank(self):
         captured = {}
