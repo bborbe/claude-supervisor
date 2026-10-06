@@ -519,6 +519,25 @@ def progress_hash(text: str) -> str:
     Hashing the section is what lets the digest move on a Progress write that leaves
     status and phase alone, and what lets the stuck verdict honestly assert "no Progress
     entry" rather than "no frontmatter change".
+
+    ⚠️ **The derivation is stated here so a reader outside this module can reproduce a
+    stored value instead of guessing at one** — the value is persisted in every snapshot
+    and is meaningless to a reader who cannot recompute it. It is `sha256` over the **raw
+    bytes of the section body**, truncated to the **first 16 hex characters**:
+
+    - the body is `_PROGRESS`'s group 1 — everything after the `# Progress` heading line
+      and before the next top-level `# ` heading, or EOF
+    - **the heading line itself is not hashed**, and nothing is normalised: the newline
+      before the next heading is kept, and the text is read from the file rather than
+      from a YAML or markdown re-render
+    - an absent or empty section hashes the empty string, so every Progress-less task
+      shares one value rather than raising
+
+    ⚠️ **The boundary is the half a reader gets wrong, and the error is silent in the
+    expensive direction.** Measured 2026-10-01: a reader that hashed the section
+    *including* its `# Progress` heading reported a mismatch against the stored value for
+    **37 of 38** tracked rows — a near-total false-positive rate that reads as movement
+    on every row rather than as one wrong boundary.
     """
     m = _PROGRESS.search(text)
     return hashlib.sha256((m.group(1) if m else "").encode()).hexdigest()[:16]
