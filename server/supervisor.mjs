@@ -40,6 +40,7 @@ import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
 import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
+import { rehydratableAgents } from './registry-rehydrate.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -102,6 +103,26 @@ const log = (...a) => {
   try {
     appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}`)
   } catch {}
+}
+
+// ── roster rehydration ──────────────────────────────────────────────────────
+// A reconnected MCP client (`/mcp`) gets a NEW server process, so the `agents` Map above
+// comes up empty and `list_agents` answers `[]` while `agent_status` answers
+// `unknown agent <id>` — even though the worker sessions are still running. The ledger
+// already carries the identity of everything this supervisor spawned; this is the read side
+// that was missing. See registry-rehydrate.mjs for why identity and liveness are separate
+// channels, and why the ledger's own `status` must never be trusted as liveness.
+//
+// Best-effort by design: a store that cannot be read leaves the roster as it was before this
+// fix — empty — rather than taking the server down. The warning is the observable.
+{
+  const rehydrated = rehydratableAgents()
+  if (rehydrated === null) {
+    log('WARNING: a store could not be read — the roster starts empty and will not show workers spawned before this process')
+  } else {
+    for (const agent of rehydrated) agents.set(agent.id, agent)
+    log(`rehydrated ${rehydrated.length} agent(s) from the ledger`)
+  }
 }
 
 // ── attention-store delivery ────────────────────────────────────────────────
