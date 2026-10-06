@@ -1584,6 +1584,60 @@ class SupersededCloserPanel(unittest.TestCase):
         self.assertEqual(wnm.busy_session_ids("/nonexistent/registry"), set())
 
 
+def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None):
+    """Run `main()` against a stubbed transport; return (rc, stdout, stderr).
+
+    `argv` appends flags after the program name, so a caller can exercise an option
+    (e.g. `--section`) without restating the stubs.
+
+    `full_registry` / `pid_ttys` feed the plausibility check. Both default to inert:
+    `registry_records()` returns `None`, which that check reads as "cannot tell" and
+    fails open on — so every transport case stays a case about the transport, and
+    only the plausibility cases supply them.
+
+    Module-level rather than a method because two test classes drive `main()` this
+    way, and a second copy would be a second definition of what "stubbed transport"
+    means.
+    """
+    registry = {r["session_id"]: "Session %s" % r["pane"] for r in records}
+    patches = [
+        mock.patch.object(wnm, "wezterm_panes", lambda: panes),
+        mock.patch.object(wnm, "registry_records", lambda *_a, **_k: full_registry),
+        # Takes the optional dir the real `read_registry(sessions_dir=None)` takes:
+        # `busy_session_ids()` passes one through, as `live_session_ids()` already
+        # did -- so a zero-arg stub would fail on a caller that mirrors the real
+        # signature rather than on the code under test.
+        mock.patch.object(wnm, "read_registry", lambda *_a, **_k: dict(registry)),
+        mock.patch.object(
+            wnm, "load",
+            lambda suffix: list(records) if suffix == "needs" else []),
+        mock.patch.object(wnm, "reclassify_idle", lambda rec: rec),
+        mock.patch.object(wnm, "task_status_from_closer", lambda _rec: None),
+        mock.patch.object(wnm.sys, "argv", ["who-needs-me.py", *argv]),
+    ]
+    if pid_ttys is not None:
+        # The one pid->tty reader, stubbed at its loader so no `ps` runs and the
+        # fixture's ttys are the ones the check sees.
+        patches.append(
+            mock.patch.object(wnm, "_fleet_colours",
+                              lambda: mock.Mock(pid_ttys=lambda: pid_ttys))
+        )
+    out, err = io.StringIO(), io.StringIO()
+    for patch in patches:
+        patch.start()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                wnm.main()
+                rc = 0
+            except SystemExit as exc:
+                rc = exc.code if isinstance(exc.code, int) else 1
+    finally:
+        for patch in patches:
+            patch.stop()
+    return rc, out.getvalue(), err.getvalue()
+
+
 class FeedTransportTest(unittest.TestCase):
     """The feed's three transport states, end to end through `main()`.
 
@@ -1606,41 +1660,9 @@ class FeedTransportTest(unittest.TestCase):
              if c["class"] == "genuine" and c["provenance"] == "live"
              and c["expect"]["in_feed"]]
 
-    def run_feed(self, panes, records, argv=()):
-        """Run `main()` against a stubbed transport; return (rc, stdout, stderr).
-
-        `argv` appends flags after the program name, so a caller can exercise an
-        option (e.g. `--section`) without restating the stubs.
-        """
-        registry = {r["session_id"]: "Session %s" % r["pane"] for r in records}
-        patches = [
-            mock.patch.object(wnm, "wezterm_panes", lambda: panes),
-            # Takes the optional dir the real `read_registry(sessions_dir=None)` takes:
-            # `busy_session_ids()` passes one through, as `live_session_ids()` already
-            # did -- so a zero-arg stub would fail on a caller that mirrors the real
-            # signature rather than on the code under test.
-            mock.patch.object(wnm, "read_registry", lambda *_a, **_k: dict(registry)),
-            mock.patch.object(
-                wnm, "load",
-                lambda suffix: list(records) if suffix == "needs" else []),
-            mock.patch.object(wnm, "reclassify_idle", lambda rec: rec),
-            mock.patch.object(wnm, "task_status_from_closer", lambda _rec: None),
-            mock.patch.object(wnm.sys, "argv", ["who-needs-me.py", *argv]),
-        ]
-        out, err = io.StringIO(), io.StringIO()
-        for patch in patches:
-            patch.start()
-        try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                try:
-                    wnm.main()
-                    rc = 0
-                except SystemExit as exc:
-                    rc = exc.code if isinstance(exc.code, int) else 1
-        finally:
-            for patch in patches:
-                patch.stop()
-        return rc, out.getvalue(), err.getvalue()
+    def run_feed(self, panes, records, argv=(), full_registry=None, pid_ttys=None):
+        return run_feed(panes, records, argv=argv,
+                        full_registry=full_registry, pid_ttys=pid_ttys)
 
     def test_unreadable_transport_refuses_instead_of_reporting_zero(self):
         """`None` from the transport must never render as an empty queue."""
@@ -1673,6 +1695,166 @@ class FeedTransportTest(unittest.TestCase):
         self.assertEqual("", err)
         self.assertIn("Needs you (0)", out)
         self.assertIn("Nothing needs you.", out)
+
+    # --- SC(a): the refusal must survive the PIPE -----------------------------
+
+    def test_unreadable_transport_writes_the_refusal_marker_to_stdout(self):
+        """The documented arm is a pipe, and a pipe carries stdout only.
+
+        Measured 2026-10-06 against v0.106.0: the refusal was stderr-only, so
+        `gate-owner-filter.py` read an empty feed, printed `gates: 0` and exited
+        0 — a healthy empty queue certified by the success code, for a transport
+        that never answered.
+        """
+        rc, out, err = self.run_feed(None, self.GATES)
+        self.assertNotEqual(0, rc)
+        self.assertIn(wnm.REFUSAL_MARKER, out)
+        self.assertIn("pane list unreadable", out)
+
+    def test_the_marker_is_the_only_thing_stdout_carries_when_refusing(self):
+        """Nothing else may reach stdout in that state, or the marker is ambiguous."""
+        _, out, _ = self.run_feed(None, self.GATES)
+        self.assertEqual(1, len(out.strip().splitlines()), out)
+
+    def test_healthy_transport_writes_no_refusal_marker(self):
+        """The control: the marker means refusal and nothing else."""
+        panes = {str(r["pane"]): {"pane_id": int(r["pane"]), "title": "Session"}
+                 for r in self.GATES}
+        rc, out, err = self.run_feed(panes, self.GATES)
+        self.assertEqual(0, rc, err)
+        self.assertNotIn(wnm.REFUSAL_MARKER, out)
+        self.assertNotIn(wnm.REFUSAL_MARKER, err)
+
+
+class PaneTablePlausibilityTest(unittest.TestCase):
+    """SC(d) — a READABLE socket whose pane table is not this machine's.
+
+    The transport guard tests the socket's readability, and a stray
+    `wezterm-mux-server` passes it: its socket answers, and its pane table holds one
+    bare default pane. Measured live 2026-10-06 ~08:10 — a confident
+    `Needs you (0)` returned against 26 live claude processes. The original trigger
+    (pid 27401) no longer exists, so the fixture stubs it.
+
+    The matching key is the tty, resolved from each live registered session's `pid`
+    through `fleet-colours.py:pid_ttys()` — the repo's one pid->tty reader, which
+    already drops `??` and returns `None` on a failed `ps`.
+
+    ⚠️ The control is not decoration. A check that refused on "fewer than half" over
+    EVERY live session would fire on a healthy headless-heavy fleet, because a
+    headless session reports `??` and can never appear in a pane table — the false
+    refusal `docs/pane-reads.md` names as this defect class's mirror. The all-panes
+    control and the headless case below pin both directions.
+    """
+
+    TTYS = ("/dev/ttys001", "/dev/ttys002", "/dev/ttys003")
+    PIDS = (101, 102, 103)
+
+    def setUp(self):
+        self._fc = wnm._fleet_colours
+        self.addCleanup(lambda: setattr(wnm, "_fleet_colours", self._fc))
+
+    def ttys(self):
+        return dict(zip(self.PIDS, self.TTYS))
+
+    def live(self, n=3, alive=True):
+        return {
+            "%d" % i: {"pid": pid, "alive": alive, "name": "s%d" % i}
+            for i, pid in enumerate(self.PIDS[:n], start=1)
+        }
+
+    def panes(self, *ttys):
+        return {str(i): {"pane_id": i, "tty_name": t, "title": "t"}
+                for i, t in enumerate(ttys)}
+
+    _UNSET = object()
+
+    def stub_ttys(self, mapping=_UNSET):
+        """Stub the one pid->tty reader. `None` is a VALUE here (a failed `ps`),
+        so "not passed" needs a sentinel rather than the usual `None` default."""
+        value = self.ttys() if mapping is self._UNSET else mapping
+        wnm._fleet_colours = lambda: mock.Mock(pid_ttys=lambda: value)
+
+    # --- the defect ----------------------------------------------------------
+
+    def test_one_bare_pane_cannot_account_for_the_fleet(self):
+        self.stub_ttys()
+        self.assertTrue(
+            wnm.pane_table_implausible(self.panes("/dev/ttys099"), self.live()))
+
+    def test_a_pane_table_missing_one_tty_is_still_plausible(self):
+        """One unmatched tty is ordinary — a session may sit in another terminal."""
+        self.stub_ttys()
+        self.assertFalse(wnm.pane_table_implausible(
+            self.panes(*self.TTYS[:2]), self.live()))
+
+    # --- the control ---------------------------------------------------------
+
+    def test_all_ttys_present_is_plausible(self):
+        self.stub_ttys()
+        self.assertFalse(
+            wnm.pane_table_implausible(self.panes(*self.TTYS), self.live()))
+
+    def test_headless_sessions_do_not_count_against_the_pane_table(self):
+        """`??`-tty sessions are excluded from the denominator, not unmatched.
+
+        A headless-heavy fleet on a perfectly healthy socket: only one of the three
+        registered sessions has a resolvable tty, and the pane table holds it.
+        Counting the other two as unaccounted-for would refuse here.
+        """
+        self.stub_ttys({self.PIDS[0]: self.TTYS[0]})  # 2 and 3 are headless
+        self.assertFalse(
+            wnm.pane_table_implausible(self.panes(self.TTYS[0]), self.live()))
+
+    # --- fail-open on every unreadable input ---------------------------------
+
+    def test_unreadable_registry_fails_open(self):
+        self.stub_ttys()
+        self.assertFalse(
+            wnm.pane_table_implausible(self.panes("/dev/ttys099"), None))
+
+    def test_failed_ps_fails_open(self):
+        """`None` from `pid_ttys()` is 'cannot tell', never 'nothing is attached'."""
+        self.stub_ttys(None)
+        self.assertFalse(
+            wnm.pane_table_implausible(self.panes("/dev/ttys099"), self.live()))
+
+    def test_a_pane_table_carrying_no_tty_name_fails_open(self):
+        """Not the shape `wezterm cli list --format json` emits — cannot be compared."""
+        self.stub_ttys()
+        self.assertFalse(wnm.pane_table_implausible(
+            {"0": {"pane_id": 0, "title": "Session"}}, self.live()))
+
+    def test_no_live_sessions_fails_open(self):
+        self.stub_ttys()
+        self.assertFalse(wnm.pane_table_implausible(
+            self.panes("/dev/ttys099"), self.live(alive=False)))
+
+    def test_no_resolvable_tty_fails_open(self):
+        self.stub_ttys({})
+        self.assertFalse(wnm.pane_table_implausible(
+            self.panes("/dev/ttys099"), self.live()))
+
+    # --- through main(), the shape SC(d) states ------------------------------
+
+    def run_feed(self, panes, **kwargs):
+        return run_feed(panes, [], **kwargs)
+
+    def test_the_stubbed_one_pane_fixture_refuses(self):
+        rc, out, err = self.run_feed(
+            self.panes("/dev/ttys099"),
+            full_registry=self.live(), pid_ttys=self.ttys())
+        self.assertNotEqual(0, rc)
+        self.assertIn(wnm.REFUSAL_MARKER, out)
+        self.assertIn("pane table does not account", out)
+        self.assertNotIn("Needs you (0)", out)
+
+    def test_the_all_panes_control_renders(self):
+        rc, out, err = self.run_feed(
+            self.panes(*self.TTYS),
+            full_registry=self.live(), pid_ttys=self.ttys())
+        self.assertEqual(0, rc, err)
+        self.assertNotIn(wnm.REFUSAL_MARKER, out)
+        self.assertIn("Needs you (0)", out)
 
 
 class SectionScoping(unittest.TestCase):
