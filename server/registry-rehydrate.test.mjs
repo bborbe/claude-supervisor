@@ -13,18 +13,35 @@
 // that must read `unknown agent`, breaking the discriminating pair the fix is required to
 // keep. So a ledger record with no liveness in either channel must be ABSENT from the result.
 //
+// ⚠️ **And a registry entry whose pid is dead must be absent too**, which is a deliberate
+// divergence from `workerSessions()`: that reader takes registry presence as liveness because
+// over-counting a cap fails safe, while adopting a row into a roster is the opposite
+// direction — a file left behind by a crashed session would otherwise resurrect the very
+// worker this module exists to exclude.
+//
 // The resumed-worker case pins the one deliberate difference from `workerSessions()`: that
 // function drops `resumed_from` records for the cap counter's sake, and a roster that
 // inherited the filter would silently hide exactly the workers a manager most needs to see.
+//
+// The wiring case at the bottom exists because `supervisor.mjs` starts an MCP server at
+// import and so cannot be exercised behaviourally — the remedy this repo already uses in
+// `cluster-spawn.test.mjs` and `attention-poll.test.mjs`. Without it, deleting the adoption
+// block would leave this whole suite green while the fix silently did nothing.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { stampRecord } from './heartbeat.mjs'
-import { rehydratableAgents, rehydratedStatus, toAgentRecord } from './registry-rehydrate.mjs'
+import { isFinished } from './resume-guard.mjs'
+import {
+  liveSessionIds,
+  rehydratableAgents,
+  rehydratedStatus,
+  toAgentRecord,
+} from './registry-rehydrate.mjs'
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'registry-rehydrate-'))
@@ -38,12 +55,16 @@ function fixture() {
   return dirs
 }
 
+// A pid that cannot be running. macOS caps pids well below this, so `pidIsAlive` answers
+// false rather than throwing — the same reading a crashed session's left-behind file gets.
+const DEAD_PID = 999999
+
 // The registry's own shape, written the way Claude Code writes it: keyed by pid, deleted on
-// exit. The pid is this process's, so an entry here is unambiguously live.
-function register(dir, sessionId, status = 'busy') {
+// exit. The default pid is this process's, so an entry here is unambiguously live.
+function register(dir, sessionId, { pid = process.pid, status = 'busy' } = {}) {
   writeFileSync(
     join(dir.registryDir, `${sessionId}.json`),
-    JSON.stringify({ sessionId, pid: process.pid, status }),
+    JSON.stringify({ sessionId, pid, status }),
   )
 }
 
@@ -89,9 +110,19 @@ test('a ledger record with no liveness in either channel is NOT adopted — dead
   // went away, so this row is exactly the one a naive rehydrate would resurrect.
   ledger(dir, 's-dead', { agentId: 'agent_dead' })
 
-  const agents = rehydratableAgents(dir)
+  assert.deepEqual(rehydratableAgents(dir), [])
+})
 
-  assert.deepEqual(agents, [])
+test('a registry entry whose pid is DEAD is not adopted — presence is not liveness', (t) => {
+  const dir = fixture()
+  t.after(() => rmSync(dir.root, { recursive: true, force: true }))
+  // The file is still on disk because the session crashed rather than exited, which is
+  // precisely the case `workerSessions()` tolerates (over-counting a cap fails safe) and a
+  // roster must not.
+  register(dir, 's-crashed', { pid: DEAD_PID })
+  ledger(dir, 's-crashed', { agentId: 'agent_crashed' })
+
+  assert.deepEqual(rehydratableAgents(dir), [])
 })
 
 test('the heartbeat store alone is enough — a headless worker has no registry entry', (t) => {
@@ -127,7 +158,26 @@ test('a registry session with no ledger record is not a worker — the operator 
   assert.deepEqual(rehydratableAgents(dir), [])
 })
 
-test('an unreadable store answers null, never an empty roster', (t) => {
+test('a duplicate agent_id is resolved first-wins and logged, never silently', (t) => {
+  const dir = fixture()
+  t.after(() => rmSync(dir.root, { recursive: true, force: true }))
+  // `supervisor.mjs` mints ids from a per-process counter, so a reconnect restarts it and two
+  // live records can share one id. Adopting both would put one Map key on two workers.
+  register(dir, 's-aaa')
+  register(dir, 's-bbb')
+  ledger(dir, 's-aaa', { agentId: 'agent_1' })
+  ledger(dir, 's-bbb', { agentId: 'agent_1' })
+  const logged = []
+
+  const agents = rehydratableAgents({ ...dir, log: (line) => logged.push(line) })
+
+  assert.equal(agents.length, 1)
+  assert.equal(agents[0].sessionId, 's-aaa', 'sorted order makes first-wins decidable')
+  assert.equal(logged.length, 1)
+  assert.match(logged[0], /share agent id agent_1/)
+})
+
+test('an unreadable ledger answers null, never an empty roster', (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-tab')
@@ -137,6 +187,25 @@ test('an unreadable store answers null, never an empty roster', (t) => {
   writeFileSync(join(dir.root, 'not-a-dir'), 'x')
 
   assert.equal(rehydratableAgents({ ...dir, ledgerDir: join(dir.root, 'not-a-dir') }), null)
+})
+
+test('an unreadable registry answers null — the other store a permissions error takes', (t) => {
+  const dir = fixture()
+  t.after(() => rmSync(dir.root, { recursive: true, force: true }))
+  ledger(dir, 's-tab')
+  writeFileSync(join(dir.root, 'registry-file'), 'x')
+
+  assert.equal(rehydratableAgents({ ...dir, registryDir: join(dir.root, 'registry-file') }), null)
+})
+
+test('an unreadable heartbeat store answers null — the third store, and the one headless needs', (t) => {
+  const dir = fixture()
+  t.after(() => rmSync(dir.root, { recursive: true, force: true }))
+  register(dir, 's-tab')
+  ledger(dir, 's-tab')
+  writeFileSync(join(dir.root, 'beat-file'), 'x')
+
+  assert.equal(rehydratableAgents({ ...dir, heartbeatDir: join(dir.root, 'beat-file') }), null)
 })
 
 test('a rehydrated record carries the arrays agentView dereferences unconditionally', (t) => {
@@ -163,6 +232,20 @@ test('a record with no agent_id is skipped rather than adopted under a synthesis
   )
 
   assert.deepEqual(rehydratableAgents(dir), [])
+})
+
+test('liveSessionIds pid-checks the registry half, and unions in the heartbeat store', (t) => {
+  const dir = fixture()
+  t.after(() => rmSync(dir.root, { recursive: true, force: true }))
+  register(dir, 's-alive')
+  register(dir, 's-crashed', { pid: DEAD_PID })
+  beat(dir, 's-headless')
+
+  const live = liveSessionIds(dir)
+
+  assert.ok(live.has('s-alive'))
+  assert.ok(!live.has('s-crashed'))
+  assert.ok(live.has('s-headless'), 'the union must keep the channel with no registry entry')
 })
 
 test('the ledger maps onto the agent shape without inventing data', () => {
@@ -202,4 +285,31 @@ test('status maps from the ledger mode, so a rehydrated row reads like a spawned
   assert.equal(rehydratedStatus({ mode: 'interactive' }), 'interactive')
   assert.equal(rehydratedStatus({ mode: 'cluster' }), 'cluster')
   assert.equal(rehydratedStatus({ mode: 'headless' }), 'running')
+})
+
+test('none of the three rehydrated statuses is terminal — which is why the guard needs the marker', () => {
+  // `resume-guard.mjs` treats every non-terminal status as a live in-process holder, so a
+  // rehydrated row for a dead worker would refuse its own resume. The exclusion is by the
+  // `rehydrated` marker, and this pins the premise that makes it necessary.
+  for (const mode of ['interactive', 'cluster', 'headless']) {
+    assert.equal(isFinished(rehydratedStatus({ mode })), false, `${mode} must not read as finished`)
+  }
+})
+
+test('supervisor.mjs actually adopts the roster and guards the rehydrated rows', () => {
+  // The WIRING is the feature. Every other test here calls the module directly, so reverting
+  // the call site would leave the whole suite green with the fix dead. Pinned by reading
+  // supervisor.mjs's text — the remedy this repo already uses in cluster-spawn.test.mjs and
+  // attention-poll.test.mjs, because supervisor.mjs starts an MCP server at import.
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(src, /rehydratableAgents\(\{ log \}\)/)
+  assert.match(src, /for \(const agent of rehydrated\) agents\.set\(agent\.id, agent\)/)
+  assert.match(src, /function pruneRehydratedAgents\(\)/)
+  // Called before both readers answer, so a worker that died after boot leaves the roster.
+  assert.match(src, /case 'list_agents':\n\s+pruneRehydratedAgents\(\)/)
+  assert.match(src, /case 'agent_status': \{\n\s+pruneRehydratedAgents\(\)/)
+  // Excluded from the resume guard, or a dead worker's row refuses its own recovery.
+  assert.match(src, /findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter\(\(a\) => !a\.rehydrated\), resume\)/)
+  // Not stamped on shutdown — that record belongs to the server that spawned the worker.
+  assert.match(src, /if \(agent\.rehydrated\) continue/)
 })

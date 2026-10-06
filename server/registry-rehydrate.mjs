@@ -24,10 +24,46 @@
 // auto-resume answers to the resume gate's own crash-loop cap, not to that one — and wrong
 // for a roster, where a resumed worker is still a worker the manager has to see and drive.
 // Reusing it here would silently hide exactly those rows.
+//
+// ⚠️ **A rehydrated row is a BOOT-TIME reading, and its caller must not treat it as more.**
+// Nothing here refreshes a row once adopted, and the ledger cannot supply the refresh. A
+// worker that dies after this process starts therefore keeps its adoption-time status, which
+// is why `supervisor.mjs` prunes rehydrated rows at read time and why it must never let one
+// count as an in-process live holder — see the two call sites there.
 import { config } from './config.mjs'
 import { heartbeatDir as defaultHeartbeatDir, listLive } from './heartbeat.mjs'
-import { readRegistry } from './liveness.mjs'
+import { pidIsAlive, readRegistry } from './liveness.mjs'
 import { readLedger } from './worker-sessions.mjs'
+
+// The live session ids, as a Set — or `null` when a channel could not be read.
+//
+// `null` rather than an empty Set, mirroring `workerSessions`: a caller must be able to tell
+// "nothing is live" from "the store is unreadable", and collapsing the two answers a
+// permissions error with a confident empty fleet.
+//
+// ⚠️ **The registry half is PID-CHECKED here, and that is a deliberate divergence from
+// `workerSessions()`.** That function reads presence alone, because over-counting a *cap*
+// fails safe — it refuses a spawn rather than permitting one. Adopting a row into a
+// *roster* is the opposite direction: the registry is keyed by pid and its file is deleted
+// on exit, so a file left behind by a crashed session reads as live forever, and presence
+// alone would resurrect precisely the dead worker this module exists to exclude. The
+// heartbeat store needs no equivalent check — a stamp is aged out by `listLive`.
+export function liveSessionIds({ registryDir, heartbeatDir = defaultHeartbeatDir, now } = {}) {
+  const registry = readRegistry(registryDir)
+  if (registry === null) return null
+  const stamps = listLive({ dir: heartbeatDir, now })
+  if (stamps === null) return null
+
+  // The union, not the intersection: the registry sees every session holding a socket, and
+  // the heartbeat store covers the ones with no pid of their own. Either channel alone
+  // loses a population — see worker-sessions.mjs's header.
+  const live = new Set()
+  for (const entry of registry) {
+    if (pidIsAlive(entry.pid)) live.add(entry.sessionId)
+  }
+  for (const stamp of stamps) live.add(stamp.sessionId)
+  return live
+}
 
 // The agent-record shape `agentView` needs, built from a ledger record.
 //
@@ -41,12 +77,18 @@ import { readLedger } from './worker-sessions.mjs'
 // Everything else `agentView` reads is either carried by the ledger or derived from
 // `sessionId` at read time (`current_tool_call`, `session_status`, `last_message`), so a
 // rehydrated record answers the full record shape without inventing data.
-export function toAgentRecord(record, { status } = {}) {
+//
+// ⚠️ **`shipping` is hardcoded `false`, and it is unrecoverable rather than merely
+// unmapped**: `buildRecord` never persisted the flag, so no ledger record carries it. A
+// rehydrated row for a worker that was spawned under `SHIPPING_PERMISSION_MODE` therefore
+// reports `shipping: false` while that worker really is running in shipping mode. Nothing
+// here can fix that; it is named so a reader does not take the `false` for a measurement.
+export function toAgentRecord(record) {
   return {
     id: record.agent_id,
     label: record.label ?? record.agent_id,
     cwd: record.cwd ?? null,
-    status: status ?? rehydratedStatus(record),
+    status: rehydratedStatus(record),
     sessionId: record.session_id,
     resumedFrom: record.resumed_from ?? null,
     policyPath: record.policy ?? null,
@@ -61,9 +103,11 @@ export function toAgentRecord(record, { status } = {}) {
     shipping: false,
     result: record.result ?? null,
     error: null,
-    // Observable rather than inferred. The acceptance evidence is that a row was resolved
-    // FROM THE LEDGER, and without a marker a reader cannot tell a rehydrated row from one
-    // this process spawned itself.
+    // Observable rather than inferred, and load-bearing at two call sites in
+    // `supervisor.mjs`: a rehydrated row must not count as an in-process live holder
+    // (`findLiveHolder`) and must not be stamped on shutdown (`stampUnobservedWorkers`).
+    // The acceptance evidence also rests on it — without a marker a reader cannot tell a
+    // rehydrated row from one this process spawned itself.
     rehydrated: true,
   }
 }
@@ -74,6 +118,11 @@ export function toAgentRecord(record, { status } = {}) {
 // keeps a rehydrated row reading the way a freshly spawned one does: `interactive` and
 // `cluster` verbatim, and `headless` as `running`, which is the state its agent loop leaves
 // it in while it works.
+//
+// ⚠️ **None of these three is terminal** (`resume-guard.mjs` owns `TERMINAL_STATUSES`), which
+// is exactly why a rehydrated row must be excluded from the resume guard by its `rehydrated`
+// marker rather than by its status: a dead worker's row would otherwise assert it is still
+// mid-turn and refuse the resume that is that worker's only recovery.
 export function rehydratedStatus(record) {
   if (record.mode === 'interactive') return 'interactive'
   if (record.mode === 'cluster') return 'cluster'
@@ -83,38 +132,44 @@ export function rehydratedStatus(record) {
 // Every live worker the ledger knows, as agent records — or `null` when a store could not be
 // read.
 //
-// `null` rather than `[]` on an unreadable channel, mirroring `workerSessions`: a caller must
-// be able to tell "no worker has ever been spawned" from "the ledger is unreadable", and
-// collapsing the two answers a permissions error with a confident empty roster.
-//
 // A record with no `agent_id` is skipped rather than adopted under a synthesised id — the id
 // is what `agent_status` and `send_agent_message` are keyed on, so an invented one would be
 // addressable but meaningless. Every record measured 2026-10-06 carried one.
+//
+// `log` is injected rather than imported, matching `agent-loop.mjs`: `supervisor.mjs` owns
+// the real logger and importing it back would be a cycle.
 export function rehydratableAgents({
   registryDir,
   ledgerDir = config.ledgerDir,
   heartbeatDir = defaultHeartbeatDir,
   now,
+  log = () => {},
 } = {}) {
   const ledger = readLedger(ledgerDir)
   if (ledger === null) return null
+  const live = liveSessionIds({ registryDir, heartbeatDir, now })
+  if (live === null) return null
 
-  const registry = readRegistry(registryDir)
-  if (registry === null) return null
-  const stamps = listLive({ dir: heartbeatDir, now })
-  if (stamps === null) return null
-
-  // The union, not the intersection: the registry sees every session holding a socket, and
-  // the heartbeat store is what covers the ones with no pid of their own. Either channel
-  // alone loses a population — see worker-sessions.mjs's header.
-  const live = new Set()
-  for (const entry of registry) live.add(entry.sessionId)
-  for (const stamp of stamps) live.add(stamp.sessionId)
-
+  // Sorted, so the adoption order is a property of the data rather than of `readdirSync`.
+  // It matters only for the collision branch below, but an order that varies run to run
+  // would make that branch's "first wins" undecidable after the fact.
   const agents = []
-  for (const [sessionId, record] of Object.entries(ledger)) {
+  const claimed = new Map() // agent_id -> session_id
+  for (const sessionId of Object.keys(ledger).sort()) {
+    const record = ledger[sessionId]
     if (!record?.agent_id) continue
     if (!live.has(sessionId)) continue
+    const prior = claimed.get(record.agent_id)
+    if (prior !== undefined) {
+      // ⚠️ `supervisor.mjs` mints ids from a per-process counter (`agent_${++seq}`), so a
+      // reconnect restarts that counter and two LIVE records can share one id. Adopting
+      // both would put one Map key on two workers — silently hiding one from the roster and
+      // pointing `send_agent_message` at whichever won. First-wins keeps it deterministic
+      // and the warning keeps it observable.
+      log(`WARNING: two live ledger records share agent id ${record.agent_id} (${prior} and ${sessionId}) — adopting ${prior}, skipping ${sessionId}`)
+      continue
+    }
+    claimed.set(record.agent_id, sessionId)
     agents.push(toAgentRecord(record))
   }
   return agents

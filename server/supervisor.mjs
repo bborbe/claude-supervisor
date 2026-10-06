@@ -40,7 +40,7 @@ import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
 import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
-import { rehydratableAgents } from './registry-rehydrate.mjs'
+import { liveSessionIds, rehydratableAgents } from './registry-rehydrate.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -116,12 +116,32 @@ const log = (...a) => {
 // Best-effort by design: a store that cannot be read leaves the roster as it was before this
 // fix — empty — rather than taking the server down. The warning is the observable.
 {
-  const rehydrated = rehydratableAgents()
+  const rehydrated = rehydratableAgents({ log })
   if (rehydrated === null) {
     log('WARNING: a store could not be read — the roster starts empty and will not show workers spawned before this process')
   } else {
     for (const agent of rehydrated) agents.set(agent.id, agent)
     log(`rehydrated ${rehydrated.length} agent(s) from the ledger`)
+  }
+}
+
+// A rehydrated row carries a BOOT-TIME liveness reading and nothing here can refresh it — the
+// ledger is the durable half, never the live one. So a worker that dies after this process
+// starts would otherwise sit in the roster forever under a status that reads as fine, which
+// is the mirror of the hazard the module above names. Re-checking at READ time is where the
+// answer can be fresh, and it is cheap: the liveness channels are a readdir and a handful of
+// files, not the ~1400-record ledger.
+//
+// ⚠️ `null` from the channels means "could not tell", NOT "nothing is live" — the rows are
+// kept, because dropping a live worker on an unreadable store is the failure this whole
+// change exists to remove, one direction over.
+function pruneRehydratedAgents() {
+  const adopted = [...agents.values()].filter((a) => a.rehydrated)
+  if (adopted.length === 0) return
+  const live = liveSessionIds()
+  if (live === null) return
+  for (const agent of adopted) {
+    if (!live.has(agent.sessionId)) agents.delete(agent.id)
   }
 }
 
@@ -567,6 +587,12 @@ function writeLedger(agent, patch) {
 function stampUnobservedWorkers() {
   let stamped = 0
   for (const agent of agents.values()) {
+    // ⚠️ A rehydrated row is not this process's to stamp. Its ledger record belongs to the
+    // server that spawned the worker — which may still be running and driving it — so
+    // writing `unknown` here would assert an outcome this process never watched about a
+    // worker it never had. It would also mis-derive `mode` for a rehydrated cluster row,
+    // which the ternary below folds into `headless`.
+    if (agent.rehydrated) continue
     // `done` and `error` are real observed outcomes. Never overwrite one with an unknown.
     if (agent.status === 'done' || agent.status === 'error') continue
     const mode = agent.status === 'interactive' ? 'interactive' : 'headless'
@@ -1104,7 +1130,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // The test is finished-vs-not, NOT `running` — see resume-guard.mjs. A parked
     // worker carries `blocked-on-permission` while it is blocked inside a tool call,
     // so matching only `running` let it through and left a parked worker resumable.
-    const holder = findLiveHolder(agents.values(), resume)
+    // ⚠️ Rehydrated rows are excluded, and this is load-bearing rather than tidy. The guard's
+    // premise is that a worker in THIS table is alive because it is an in-process `query()`
+    // this server is driving — which a rehydrated row is not: its worker belongs to the
+    // process that spawned it. Its status is never terminal (`rehydratedStatus` returns
+    // interactive/cluster/running), so leaving it in would let a worker that has since died
+    // assert it is still mid-turn and refuse the resume that is its only recovery, for as
+    // long as this process lives.
+    const holder = findLiveHolder([...agents.values()].filter((a) => !a.rehydrated), resume)
     if (holder) {
       return {
         error: `session ${resume} is still running (worker ${holder.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`,
@@ -1691,9 +1724,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'list_agents':
+      pruneRehydratedAgents()
       return reply([...agents.values()].map(agentView))
 
     case 'agent_status': {
+      pruneRehydratedAgents()
       const agent = agents.get(args.agent_id)
       if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
       // A tab worker's permission prompt never enters the park queue, so

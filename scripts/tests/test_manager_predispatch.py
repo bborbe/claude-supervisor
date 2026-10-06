@@ -19,6 +19,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 """
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -359,6 +360,70 @@ class TestVerdict(Base):
         rc, out = self.check("No Such Subject")
         self.assertEqual(rc, self.m.EXIT_CHANGE)
         self.assertIn("fail-open", out)
+
+
+class TestProgressHashContract(Base):
+    """Pins `progress_hash`'s derivation, which its docstring now publishes.
+
+    A reader outside this module is expected to reimplement the derivation from that
+    prose, so each property is pinned against a **fixed byte string** — a hand-written
+    literal such as `b"foo\\n"` — rather than by re-deriving the value the way the
+    implementation does; a test that recomputes with the same expression drifts with the
+    code and would have passed against both revisions of the docstring. ⚠️ **What is
+    pinned is the byte string, not the hex.** `_sha()` still calls `hashlib.sha256` at run
+    time, so a change to the *hashing algorithm* would move both sides together and pass;
+    what fails here is a change to `_PROGRESS` or to the `[:16]` truncation, because group
+    1 would stop matching the asserted bytes.
+    """
+
+    @staticmethod
+    def _sha(raw):
+        return hashlib.sha256(raw).hexdigest()[:16]
+
+    def test_heading_line_is_excluded(self):
+        self.assertEqual(
+            self.m.progress_hash("# Progress\nfoo\n"), self._sha(b"foo\n")
+        )
+
+    def test_delimiter_newline_is_not_part_of_the_body(self):
+        """The boundary is one byte off the obvious reading, in both directions."""
+        # A blank line before the next heading is dropped; the delimiter `\n` is excluded.
+        self.assertEqual(
+            self.m.progress_hash("# Progress\nfoo\n\n# Other\nbar\n"),
+            self._sha(b"foo\n"),
+        )
+        # No blank line: the content line's own trailing newline goes with the delimiter.
+        self.assertEqual(
+            self.m.progress_hash("# Progress\nfoo\n# Other\nbar\n"),
+            self._sha(b"foo"),
+        )
+
+    def test_absent_section_hashes_the_empty_string(self):
+        self.assertEqual(
+            self.m.progress_hash("# Impact\nhello\n"), self._sha(b"")
+        )
+
+    def test_empty_section_at_eof_hashes_the_empty_string(self):
+        self.assertEqual(self.m.progress_hash("# Progress\n"), self._sha(b""))
+
+    def test_empty_section_followed_by_a_heading_does_NOT_hash_the_empty_string(self):
+        """The surprising half, and the one the docstring spells out.
+
+        `\\s*` backtracks to leave one newline for the literal `\\n`, so group 1 starts
+        at the *next* heading and hashes the following section's body.
+        """
+        self.assertEqual(
+            self.m.progress_hash("# Progress\n\n# Other\nbar\n"),
+            self._sha(b"# Other\nbar\n"),
+        )
+        self.assertNotEqual(
+            self.m.progress_hash("# Progress\n\n# Other\nbar\n"), self._sha(b"")
+        )
+
+    def test_truncation_is_the_first_sixteen_hex(self):
+        h = self.m.progress_hash("# Progress\nfoo\n")
+        self.assertEqual(len(h), 16)
+        self.assertEqual(h, self._sha(b"foo\n"))
 
 
 class TestActionablePassThrough(Base):
