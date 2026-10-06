@@ -565,6 +565,51 @@ class UnknownCloserTest(unittest.TestCase):
         finally:
             shutil.rmtree(fx.dir, ignore_errors=True)
 
+    def test_is_hold_admits_both_holds_and_refuses_unregistered(self):
+        # The membership-preserving set, pinned as a table. `unregistered` is the
+        # one that must NOT be here: it is also a `None` verdict, and collapsing
+        # it into the preserving set would swallow its HELD record.
+        for reason in ("held:busy", "held:shell", "closer-unknown"):
+            self.assertTrue(watch.is_hold(reason), reason)
+        for reason in ("unregistered", "idle:no-ask", "registry:waiting"):
+            self.assertFalse(watch.is_hold(reason), reason)
+
+    def test_a_closer_unknown_session_keeps_its_membership(self):
+        """THE DEFECT, at `transitions()`.
+
+        A failed read is not an answer, so it must not take the UNREGISTERED
+        branch. Dropping the membership here forgets the gate, and the genuine
+        answer that arrives later is then not a transition at all — it emits no
+        `CLEARED`, replacing a false clear with no clear.
+        """
+        state = {SID8: ("A", "closer-unknown", "closer-unknown", None)}
+        self.assertEqual(watch.transitions([SID8], [], state), [],
+                         "a failed read keeps the membership; no record")
+
+    def test_the_unknown_closer_pair_clears_once_the_worker_settles(self):
+        """SC2's positive half: the membership kept above still earns its one
+        `CLEARED` when the worker genuinely settles at `idle` with no ask."""
+        unknown = {SID8: ("A", "closer-unknown", "closer-unknown", None)}
+        settled = {SID8: ("A", "idle:no-ask", "idle:no-ask", False)}
+        self.assertEqual(watch.transitions([SID8], [], unknown), [])
+        self.assertEqual(
+            [k for k, *_ in watch.transitions([SID8], [], settled)],
+            ["CLEARED"], "the settle after a failed read must still clear")
+
+    def test_probe_keeps_the_membership_of_a_session_whose_tail_holds_no_text(self):
+        """End to end from the real probe: a tail with no assistant text leaves
+        the session HELD, and HELD keeps its membership."""
+        fx = Fixture([assistant(tool="Bash")], "idle")
+        try:
+            with redirect_stderr(io.StringIO()):
+                state = fx.probe()
+            self.assertIsNone(state[SID8][3], "the verdict is HELD")
+            self.assertEqual(
+                watch.transitions([SID8], watch.gated_keys(state), state), [],
+                "closer-unknown keeps its membership — no HELD record")
+        finally:
+            shutil.rmtree(fx.dir, ignore_errors=True)
+
 
 class StabilityGateTest(unittest.TestCase):
     """The gate is per SESSION, never per key-set.
@@ -666,6 +711,23 @@ class CommitLoopTest(unittest.TestCase):
         self.assertEqual(out.count("NEW GATE"), 1, out)
         self.assertNotIn("CLEARED", out,
                          "an unregistered session is HELD, never cleared")
+
+    def test_a_closer_unknown_read_does_not_drop_the_gate(self):
+        """THE DEFECT, at the commit loop — where the lost `CLEARED` is decided.
+
+        The predicate test pins the membership; this pins the consequence: a
+        failed closer read must not cost the worker the one `CLEARED` its later
+        settle earns. Before the fix this emitted zero — the gate was dropped on
+        the unknown read, so the settle was not a transition at all.
+        """
+        unknown = {"aaaa1111": ("A", "closer-unknown", "closer-unknown", None)}
+        settled = {"aaaa1111": ("A", "idle:no-ask", "idle:no-ask", False)}
+        out = self._drive([{}, self.GATED, self.GATED, unknown, unknown,
+                           settled, settled])
+        self.assertEqual(out.count("NEW GATE"), 1, out)
+        self.assertEqual(out.count("CLEARED"), 1,
+                         "the settle after a failed read must still clear once: "
+                         + out)
 
     def test_a_churning_set_does_not_withhold_a_settled_clear(self):
         # A is gated throughout; B flips on every poll. Under the whole-set gate
