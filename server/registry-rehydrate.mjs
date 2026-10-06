@@ -38,6 +38,21 @@
 // holds and overwrite a live worker's row — `list_agents` dropping it and `agent_status`
 // answering `unknown agent`, which is the exact symptom this module exists to close. The mint
 // side advances past anything already held; see the `do … while (agents.has(id))` there.
+//
+// ⚠️ **What adoption does NOT reach — named, rather than left to be discovered.** A worker is
+// adopted only if it is in the ledger AND in a liveness channel at the instant this process
+// starts. Two classes fall outside that instant:
+//
+//   * **A live cluster worker.** It has no registry entry, and its only liveness channel is
+//     the heartbeat stamp this server's own `pollCluster()` writes — which first fires ~30s
+//     after boot, long after the adoption block has run. Adoption is once, at import, and
+//     `pruneRehydratedAgents` can only remove, so it stays invisible for the process's life.
+//   * **A headless worker whose stamp has aged out.** Stamps expire at `HEARTBEAT_TTL_MS`
+//     (60s), so a `/mcp` run more than ~60s after the old server exited adopts nothing.
+//
+// ⚠️ Neither is a regression — before this module nothing was adopted at all, so both are the
+// pre-existing state rather than a new one. They are named because a reader who takes the
+// roster for complete would be wrong about exactly these two rows.
 import { config } from './config.mjs'
 import { liveSessionIds as liveSessionIdsFromLiveness, pidIsAlive } from './liveness.mjs'
 import { readLedger } from './worker-sessions.mjs'

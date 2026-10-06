@@ -97,7 +97,7 @@ export function workerSessions({ registryDir, ledgerDir, heartbeatDir, now } = {
   // Both channels are read once, not once per ledger entry: `checkLiveness` answers for a
   // single id and re-reads the registry on every call, which over a ~1000-record ledger is a
   // directory listing per record.
-  const live = liveSessionIds({ registryDir, heartbeatDir, now })
+  const live = liveSessionIds({ registryDir, heartbeatDir, now, isAlive: () => true })
   if (live === null) return null
 
   const workers = []

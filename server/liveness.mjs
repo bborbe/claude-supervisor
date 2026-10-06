@@ -101,15 +101,25 @@ export function readRegistry(dir = SESSIONS_DIR) {
 // `null` from either channel is "could not read", returned rather than folded into an empty
 // map: callers refuse on `null` and open on an empty one, so collapsing the two turns a
 // permissions error into permission to spawn onto live work.
-export function liveSessionIds({
-  registryDir,
-  heartbeatDir: beatsDir = heartbeatDir,
-  now,
-  isAlive = () => true,
-} = {}) {
+export function liveSessionIds({ registryDir, heartbeatDir: beatsDir, now, isAlive } = {}) {
+  // ⚠️ `isAlive` is REQUIRED, deliberately, and it is the one thing the two callers disagree
+  // about: `worker-sessions.mjs` wants presence (over-counting a *cap* fails safe — it refuses
+  // a spawn), while a *roster* wants pid-checked liveness (presence would resurrect a crashed
+  // session's left-behind file). A default would silently pick one of those for a caller that
+  // forgot, and this module's own header calls presence "the most persuasive kind of wrong".
+  // It also keeps this signature honest beside `registeredAsLive` below, whose `isAlive`
+  // defaults to `pidIsAlive` — two functions, one parameter name, opposite defaults, is a trap
+  // for a reader scanning top-down.
+  if (typeof isAlive !== 'function') {
+    throw new Error('liveSessionIds needs an explicit isAlive — presence and pid-checked liveness are different questions')
+  }
   const registry = readRegistry(registryDir)
   if (registry === null) return null
-  const stamps = listLive({ dir: beatsDir, now })
+  // `??` rather than a default parameter: a default fires only on `undefined`, so the
+  // `heartbeatDir: null` idiom — which `checkLiveness` still uses — would reach
+  // `listLive({ dir: null })`, where readdirSync throws a non-ENOENT error and the union
+  // returns null. Fail-safe, but the contract this consolidation is supposed to keep.
+  const stamps = listLive({ dir: beatsDir ?? heartbeatDir, now })
   if (stamps === null) return null
 
   const live = new Map()
