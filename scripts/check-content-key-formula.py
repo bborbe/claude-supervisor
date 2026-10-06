@@ -84,6 +84,15 @@ PHASE_STAYS = "status:` and `phase:` are NOT excluded"
 #: there.
 BLOCK_EXTENT = "continuation block"
 
+#: (f) — the **removal mechanism**. The clause states which fields go and how far the deletion
+#: reaches; this is *which route performs it*. Raw byte deletion and YAML parse-and-re-serialise
+#: disagree on CRLF, on the blank line a deleted entry leaves behind, on quoted and multi-line
+#: values, and on a trailing newline — so a later edit swapping one for the other leaves every
+#: other assertion green while reintroducing exactly the per-leg drift this clause exists to
+#: close. Raised as a Should-Fix by the maintainer bot on PR #172, third round: the clause and
+#: the CHANGELOG both called the mechanism pinned while nothing asserted it.
+MECHANISM = "no YAML parse, no re-serialisation, no newline normalisation"
+
 
 def sentences_containing(text, token):
     """Return every sentence of `text` carrying `token`.
@@ -101,17 +110,21 @@ def sentences_containing(text, token):
     return [s for s in re.split(r"(?<=\.)\s+", text) if token in s]
 
 
-def exclusion_sentence(text):
-    """Return the sentence that lists the excluded fields, or None.
+def exclusion_sentences(text):
+    """Return every sentence that opens with the exclusion anchor.
 
-    Scoped to that one sentence because the clause also *mentions* `mode:` elsewhere — its
-    own measured note quotes `mode: interactive` — so a whole-clause substring test passes
+    Scoped to those sentences because the clause also *mentions* `mode:` elsewhere — its own
+    measured note quotes `mode: interactive` — so a whole-clause substring test stays green
     after `mode:` is deleted from the list it is supposed to be in.
+
+    ⚠️ **Every match, not the first**, which is the policy `sentences_containing` already
+    follows, and for the same reason: returning the first match means a decoy sentence carrying
+    the anchor turns the guard red with a message naming the wrong problem — the diagnosis-
+    quality defect the `sentences_containing` fix was made to remove. Two helpers disagreeing
+    about matching policy for no stated reason is how that asymmetry comes back. Raised by the
+    maintainer bot on PR #172, third round.
     """
-    for sentence in re.split(r"(?<=\.)\s+", text):
-        if EXCLUSION_OPENS in sentence:
-            return sentence
-    return None
+    return [s for s in re.split(r"(?<=\.)\s+", text) if EXCLUSION_OPENS in s]
 
 
 def check(root):
@@ -150,8 +163,8 @@ def check(root):
             f"(three truncation lengths were measured on disk 2026-10-06)"
         )
 
-    exclusion = exclusion_sentence(clause)
-    if exclusion is None:
+    exclusions = exclusion_sentences(clause)
+    if not exclusions:
         failures.append(
             f"{HOME} clause (1): no sentence opens with {EXCLUSION_OPENS!r}, so the "
             f"excluded-field list has been reworded or removed — this check is stale, fix it "
@@ -159,7 +172,7 @@ def check(root):
         )
     else:
         for field in EXCLUDED:
-            if field not in exclusion:
+            if not any(field in s for s in exclusions):
                 failures.append(
                     f"{HOME} clause (1): the exclusion sentence omits `{field}` — an excluded "
                     f"field the clause does not name is a field the next leg hashes anyway"
@@ -188,6 +201,15 @@ def check(root):
             f"on every worker run: the key churns per tick and the exclusion buys nothing"
         )
 
+    if MECHANISM not in clause:
+        failures.append(
+            f"{HOME} clause (1): the removal no longer pins its *mechanism* — without "
+            f"`{MECHANISM}` a later edit can swap raw byte deletion for a YAML "
+            f"parse-and-re-serialise, which disagrees on CRLF, on the blank line a deleted "
+            f"entry leaves behind, on quoted and multi-line values, and on a trailing newline, "
+            f"while every other assertion here stays green"
+        )
+
     return failures
 
 
@@ -203,7 +225,7 @@ def main():
         f"  content-key-formula ok: {HOME} clause (1) states the derivation "
         f"(sha256[:16]), names all {len(EXCLUDED)} excluded fields, states the cut as a rule, "
         f"keeps `status:` / `phase:` in the key, and pins the removal to a raw-byte line "
-        f"deletion that takes each key's continuation block with it"
+        f"deletion that takes each key's continuation block with it and parses no YAML"
     )
 
 

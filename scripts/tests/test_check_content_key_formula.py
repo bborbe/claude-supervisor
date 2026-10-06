@@ -41,7 +41,8 @@ CLAUSE = (
     "first 16 hex. The excluded fields are `mode:`, `last_auto_resume`, `claude_session_id` and "
     "`metrics_sessions`. ⚠️ **`status:` and `phase:` are NOT excluded, and the cut is *the "
     "fields whose value the audit does not read*, never *everything a tick writes*.** Drop each "
-    "key line together with that key's continuation block, and leave every other byte as it is."
+    "key line together with that key's continuation block — no YAML parse, no re-serialisation, "
+    "no newline normalisation."
 )
 
 #: Clause (6)'s measured note, which also mentions `mode:` — the reason the exclusion assertion
@@ -102,7 +103,21 @@ class TestContentKeyFormulaGuard(Base):
 
     def test_truncation_removed_fails(self):
         self.write_clause(CLAUSE.replace(", truncated to the first 16 hex", "") + MEASURED_NOTE)
-        self.assertEqual(self.run_check().returncode, 1)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no single sentence states both", result.stderr)
+
+    def test_mechanism_removed_fails(self):
+        """The third review round's Should-Fix: the clause and the CHANGELOG both called the
+        removal mechanism pinned while nothing asserted it, so a swap to YAML
+        parse-and-re-serialise would have left every other assertion green."""
+        self.write_clause(
+            CLAUSE.replace(" — no YAML parse, no re-serialisation, no newline normalisation", "")
+            + MEASURED_NOTE
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("mechanism", result.stderr)
 
     def test_cut_rule_removed_fails(self):
         self.write_clause(
@@ -155,7 +170,7 @@ class TestContentKeyFormulaGuard(Base):
         block, so a deletion that drops only its key line leaves the indented `- session_id:`
         entries in the key — and those uuids change on every worker run."""
         self.write_clause(
-            CLAUSE.replace("together with that key's continuation block, ", "") + MEASURED_NOTE
+            CLAUSE.replace("together with that key's continuation block", "") + MEASURED_NOTE
         )
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
