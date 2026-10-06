@@ -514,11 +514,49 @@ def blocked_by_verdict(
 
 
 def progress_hash(text: str) -> str:
-    """A hash of the task's `# Progress` section — the sweep's change signal.
+    r"""A hash of the task's `# Progress` section — the sweep's change signal.
 
     Hashing the section is what lets the digest move on a Progress write that leaves
     status and phase alone, and what lets the stuck verdict honestly assert "no Progress
     entry" rather than "no frontmatter change".
+
+    ⚠️ **The derivation is stated here so a reader outside this module can reproduce a
+    stored value instead of guessing at one** — the value is persisted in every snapshot
+    and is meaningless to a reader who cannot recompute it. It is `sha256` over the **raw
+    bytes of the section body**, truncated to the **first 16 hex characters**. The body is
+    `_PROGRESS`'s group 1, and each of its two boundaries sits one byte off the obvious
+    reading — which is why they are spelled out here rather than described:
+
+    - **Start — after the `# Progress` heading line**, which is itself not hashed. ⚠️ What
+      decides this is `\s*` **greed, not heading-ness**: `\s*` is greedy and gives back
+      exactly one newline for the literal `\n` that follows it, swallowing all remaining
+      whitespace before the body. One root cause, three consequences: a section that is
+      empty and followed by anything — a heading, **or plain prose** — does NOT start empty
+      but starts at that content; `# Progress` alone at EOF *does* start empty; and a `#`
+      with no space after it (`#Other`) does not end a section at all, because the
+      lookahead requires a literal `\n# `. Only an absent section, or one that runs to EOF,
+      hashes the empty string.
+    - **End — immediately BEFORE the newline that precedes the next top-level `# `
+      heading.** That delimiter newline is not part of the body, so `foo\n\n# Other`
+      hashes `foo\n` (the blank line is dropped) and `foo\n# Other` hashes `foo` (the
+      content line's own trailing newline goes with it).
+    - **Nothing else is normalised** — no YAML parse, no re-serialisation — and the text is
+      read from the file rather than from a markdown re-render.
+
+    ⚠️ **The empty-section backtrack is not a curiosity — it is a false "progress" signal,
+    and that is the cost the start boundary carries.** This function gates the `busy_since`
+    reset (`prev.get("progress") == t["progress_hash"]`) and is itself a digest input, so a
+    task whose `# Progress` is empty and followed by another section reports *Progress
+    activity* whenever that **following** section is edited — resetting the stuck clock on
+    a worker that did nothing, and moving the gate's digest. Surfaced 2026-10-06 by
+    `ben-s-pull-request-reviewer`; pre-existing rather than introduced by this docstring,
+    and left alone here because fixing it is a behaviour change, not a documentation one.
+
+    ⚠️ **The boundaries are the half a reader gets wrong, and the error is silent in the
+    expensive direction.** Measured 2026-10-01: a reader that hashed the section
+    *including* its `# Progress` heading reported a mismatch against the stored value for
+    **37 of 38** tracked rows — a near-total false-positive rate that reads as movement
+    on every row rather than as one wrong boundary.
     """
     m = _PROGRESS.search(text)
     return hashlib.sha256((m.group(1) if m else "").encode()).hexdigest()[:16]
