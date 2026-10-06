@@ -378,11 +378,33 @@ class PostTest(unittest.TestCase):
         the import is what fails.
         """
         with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": ""}):
-            self.assertEqual(ask._float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
+            self.assertEqual(ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
         with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "6"}):
-            self.assertEqual(ask._float_env("ATTENTION_ASK_TTL_HOURS", 24), 6)
+            self.assertEqual(ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24), 6)
         with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": "   "}):
-            self.assertEqual(ask._float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
+            self.assertEqual(ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24), 24)
+
+    def test_a_nan_inf_or_non_positive_ttl_is_refused_by_name(self):
+        """The values that PARSE but cannot be a TTL, each refused loudly.
+
+        ⚠️ A bare `except ValueError` is not enough, and the failures differ in
+        kind. `nan` and `inf` sail past the parse and blow up later inside
+        `timedelta` — `ValueError` for nan, `OverflowError` for inf — neither
+        caught on the post path, so the operator gets a bare traceback from the
+        helper whose entire job is to prevent one. A non-positive TTL is worse
+        than a crash: it yields an `expires_at` of *now*, the store removes the
+        item on the first read, and the card vanishes after a `201` — the exact
+        defect this change exists to fix, reachable from one env var.
+        """
+        for bad in ("nan", "inf", "-inf", "0", "-1", "abc"):
+            with self.subTest(value=bad):
+                with mock.patch.dict(os.environ, {"ATTENTION_ASK_TTL_HOURS": bad}):
+                    with self.assertRaises(SystemExit) as caught:
+                        ask._positive_float_env("ATTENTION_ASK_TTL_HOURS", 24)
+                    # Names the variable AND the offending value — a bare "bad
+                    # value" would not say which knob to go and fix.
+                    self.assertIn("ATTENTION_ASK_TTL_HOURS", str(caught.exception))
+                    self.assertIn(bad, str(caught.exception))
 
     def test_empty_optionals_are_omitted_not_sent_blank(self):
         captured = {}

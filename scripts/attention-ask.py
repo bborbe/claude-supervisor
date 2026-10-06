@@ -81,6 +81,7 @@ Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L].
 import argparse
 import importlib.util
 import json
+import math
 import os
 import sys
 import time
@@ -102,9 +103,8 @@ def _load(name, filename):
 attribution = _load("answered_attribution", "answered-attribution.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
-# Local store; a hung one must cost a clear failure, never a stalled loop tick.
-def _float_env(name, default):
-    """Read a float from the environment; unset OR empty means `default`.
+def _positive_float_env(name, default):
+    """Read a POSITIVE, FINITE float from the env; unset OR empty means `default`.
 
     ⚠️ Empty is the case this exists for, and it is not hypothetical. `VAR= cmd`
     is exactly what an unset shell variable expands to, and these are evaluated at
@@ -114,33 +114,48 @@ def _float_env(name, default):
     (`_expires_at_or_default` guards with `if args.expires_at`); this is the same
     rule at the layer that reads the environment.
 
-    A value that is present but unparseable is REFUSED by name rather than
+    ⚠️ A value that is present but unusable is REFUSED by name rather than
     silently defaulted: a typo'd bound is a real misconfiguration, and import is
     the last place it can be named. Refusing is loud, which is the point — the
     failure being fixed was a bare traceback from a command that never uses it.
+
+    ⚠️ `nan`, `inf` and `<= 0` are refused alongside the unparseable, and each is
+    a distinct defect rather than a tidiness check. `float("nan")` and
+    `float("inf")` PARSE, so a bare `except ValueError` lets them through to fail
+    in a different function: `timedelta(hours=nan)` raises ValueError and
+    `timedelta(hours=inf)` raises OverflowError, neither caught on the post path —
+    exactly the bare traceback this helper exists to prevent. And a non-positive
+    TTL is worse than a crash: `ATTENTION_ASK_TTL_HOURS=0` yields an `expires_at`
+    of *now*, which the store removes on the first read, recreating this change's
+    own defect — a `201` on the producer's side and nothing on the board — from
+    one env-var misconfiguration.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
+        value = None
+    if value is None or not math.isfinite(value) or value <= 0:
         raise SystemExit(
-            f"REFUSED: {name}={raw!r} is not a number. Unset it to use the "
-            f"default ({default}), or give a number."
-        ) from None
+            f"REFUSED: {name}={raw!r} is not a positive finite number. Unset it "
+            f"to use the default ({default}), or give a number greater than 0."
+        )
+    return value
 
 
-STORE_TIMEOUT = _float_env("ATTENTION_STORE_TIMEOUT", 3)
+# Local store; a hung one must cost a clear failure, never a stalled loop tick.
+STORE_TIMEOUT = _positive_float_env("ATTENTION_STORE_TIMEOUT", 3)
 
 # How long a posted ask stays on the board before it expires. ⚠️ This exists
 # because the `owner:` liveness default makes a card outlive the session that
 # posted it, and `OwnerLivenessModel` probes NOTHING — so without a bound an
 # unanswered card would stay until something else closed it and the board would
-# only grow. The store is what enforces the field (`attention-controller`); this
-# is the value a producer declares, which is the half the schema gives the
-# producer.
-DEFAULT_ASK_TTL_HOURS = _float_env("ATTENTION_ASK_TTL_HOURS", 24)
+# only grow. The store enforces the field: `attention-controller` PR #95
+# (`feat/expires-at-enforcement`, merged 2026-10-06) removes an item past its
+# deadline on the read path, so this default is what that enforcement acts on.
+DEFAULT_ASK_TTL_HOURS = _positive_float_env("ATTENTION_ASK_TTL_HOURS", 24)
 
 # A store item id is the store's own: 32 lowercase hex characters, hex over 16
 # random bytes (`attention-controller`, `pkg/item-id-generator.go`). `post`
@@ -591,11 +606,23 @@ def main(argv=None):
     post.add_argument("--context", default="")
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
-    post.add_argument("--producer-id", default="")
+    post.add_argument(
+        "--producer-id",
+        default="",
+        help="the session that owns this item and polls it back; default $CLAUDE_CODE_SESSION_ID",
+    )
     post.add_argument("--producer-kind", default="session", choices=PRODUCER_KINDS)
-    post.add_argument("--liveness-ref", default="")
+    post.add_argument(
+        "--liveness-ref",
+        default="",
+        help="<model>:<value> deciding whether the store prunes this item; default owner:<producer-id>",
+    )
     post.add_argument("--interrupt-class", default="pick")
-    post.add_argument("--expires-at", default="")
+    post.add_argument(
+        "--expires-at",
+        default="",
+        help="RFC3339 deadline; default now + $ATTENTION_ASK_TTL_HOURS (24 h)",
+    )
     # The `👤 You:` line this card answers, when the poster knows it. Optional:
     # omitted, nothing is recorded and the hook behaves exactly as it did before.
     post.add_argument("--closer", default="")
@@ -606,11 +633,23 @@ def main(argv=None):
     # is the shape the batch needs: a batch of zero rows is not a question.
     batch.add_argument("--task", action="append", default=[], required=True)
     batch.add_argument("--context", default="")
-    batch.add_argument("--producer-id", default="")
+    batch.add_argument(
+        "--producer-id",
+        default="",
+        help="the session that owns this item and polls it back; default $CLAUDE_CODE_SESSION_ID",
+    )
     batch.add_argument("--producer-kind", default="session", choices=PRODUCER_KINDS)
-    batch.add_argument("--liveness-ref", default="")
+    batch.add_argument(
+        "--liveness-ref",
+        default="",
+        help="<model>:<value> deciding whether the store prunes this item; default owner:<producer-id>",
+    )
     batch.add_argument("--interrupt-class", default="pick")
-    batch.add_argument("--expires-at", default="")
+    batch.add_argument(
+        "--expires-at",
+        default="",
+        help="RFC3339 deadline; default now + $ATTENTION_ASK_TTL_HOURS (24 h)",
+    )
 
     poll = sub.add_parser("poll")
     poll.add_argument("item_id")
