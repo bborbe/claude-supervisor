@@ -799,6 +799,38 @@ def stable_sessions(prev, pending, key):
             if (s in key_set) == (s in pending_set)}
 
 
+def is_hold(reason):
+    """Whether a `None` verdict's reason means the membership must be PRESERVED.
+
+    Two shapes, one meaning — nothing was answered, so the gate stays up and
+    `transitions` emits no record for the session.
+
+    - `held:<status>` — the worker is mid-turn. It will settle, and that settle
+      is what earns the one `CLEARED` a genuine answer is owed.
+    - `closer-unknown` — the transcript tail held no text block at all, so "no
+      closer" is unknown rather than observed. `is_gated` already returns HELD
+      for this ("a failed read must not be representable as an empty result");
+      this predicate is what makes `transitions` agree with it. Without it the
+      reason failed the `held:` prefix test, took the UNREGISTERED branch, and
+      DROPPED a gate that was still up — so the genuine answer that arrived
+      later was not a transition at all and emitted no `CLEARED`. A false clear
+      was replaced by no clear.
+
+    ⚠️ `unregistered` is deliberately NOT here, and that is why this is a named
+    predicate rather than a `verdict is None` test. A dead worker answered
+    nothing either, but there is nothing left to hold — its membership is
+    dropped and its HELD record IS emitted. Collapsing every `None` reason into
+    the preserving set would swallow that record: a different defect from the
+    one this closes. See `test_unregistered_is_held_never_cleared`.
+
+    ⚠️ The two qualifying reasons are the same fact — a read that carried no
+    answer — and NOT a unified code path. Each producer keeps its own return
+    site in `is_gated` and its own reason string, so a later divergence stays
+    possible without unpicking a shared branch.
+    """
+    return reason.startswith("held:") or reason == "closer-unknown"
+
+
 def transitions(prev, key, state):
     """The transitions one poll emits — `(kind, sid8, label, detail)` records.
 
@@ -809,16 +841,19 @@ def transitions(prev, key, state):
     The `HELD` branch is the reason this is three-valued, and it has TWO causes,
     both of which mean "the watcher cannot justify a clear":
 
-    - the session is in `state` with a `None` verdict and a non-`held:` reason — it
-      became UNREGISTERED, so nothing was answered;
+    - the session is in `state` with a `None` verdict and a reason `is_hold`
+      REJECTS — it became UNREGISTERED, so nothing was answered;
     - the session is absent from `state` entirely — the watcher lost sight of it,
       which is equally not an answer.
 
-    ⚠️ A `None` verdict with a `held:` reason is the THIRD case and takes NEITHER
-    branch: the worker is mid-turn, so the gate stays up and the membership is left
-    exactly as it was — no `CLEARED`, no `NEW GATE`, and no record. Recording a hold
-    on every poll would fill the event log with a state that has not changed. See
-    the module docstring's A MID-TURN SESSION IS HELD section.
+    ⚠️ A `None` verdict whose reason `is_hold` ACCEPTS is the THIRD case and takes
+    NEITHER branch: nothing was answered, so the gate stays up and the membership
+    is left exactly as it was — no `CLEARED`, no `NEW GATE`, and no record.
+    Recording a hold on every poll would fill the event log with a state that has
+    not changed. Two reasons qualify — `held:<status>` (mid-turn) and
+    `closer-unknown` (a failed transcript read); see `is_hold` for why they share
+    a direction, and why `unregistered` is not among them. See also the module
+    docstring's A MID-TURN SESSION IS HELD section.
 
     ⚠️ The second case is the one the earlier version got wrong: absent-from-`state`
     fell through to a bare `CLEARED`. That is the shared-state-file failure — with a
@@ -848,14 +883,19 @@ def transitions(prev, key, state):
         if state[sid8][3] is None:
             # Two causes, and they need OPPOSITE handling.
             reason = state[sid8][2]
-            if reason.startswith("held:"):
-                # MID-TURN. The worker has not answered, so the gate stays up.
-                # Membership is left EXACTLY as it was — no `CLEARED` (nothing was
-                # answered) and no `NEW GATE` (it is already in the set).
+            if is_hold(reason):
+                # NOT AN ANSWER — mid-turn (`held:<status>`) or a failed closer
+                # read (`closer-unknown`). The worker has not answered, so the
+                # gate stays up. Membership is left EXACTLY as it was — no
+                # `CLEARED` (nothing was answered) and no `NEW GATE` (it is
+                # already in the set).
                 # ⚠️ Keeping it in `prev` is what lets the eventual settle at
                 # `idle` emit the one `CLEARED` a genuine answer earns; discarding
                 # here would forget the gate, and the answer would then clear
                 # SILENTLY — a fix for one false clear that produces no true one.
+                # That was `closer-unknown`'s own defect: a failed read failed the
+                # `held:` prefix test, took the UNREGISTERED branch below, and
+                # dropped a gate that was still up.
                 continue
             # UNREGISTERED: a dead or never-spawned worker. Nothing was answered
             # here either, but there is nothing left to hold, so the membership is
