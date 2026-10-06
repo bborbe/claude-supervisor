@@ -43,9 +43,25 @@ HOME = "agents/manager-drive.md"
 #: a reason unrelated to what it guards.
 CLAUSE_OPEN = "**The cache — re-audit only what changed.**"
 
-#: (a) and (b) — the algorithm and the truncation, stated together. A formula without a
-#: truncation is a formula each leg finishes itself, which is the drift this guards.
-ALGORITHM = re.compile(r"sha256.*?16 hex", re.S)
+#: (a) and (b) — the algorithm and the truncation, stated **in one sentence**. A formula
+#: without a truncation is a formula each leg finishes itself, which is the drift this
+#: guards.
+#:
+#: ⚠️ **Scoped to a sentence, not matched with a regex over the whole clause.** The first
+#: version was `re.compile(r"sha256.*?16 hex", re.S)`, whose lazy span is unbounded under
+#: DOTALL: it is satisfied by the word `sha256` anywhere in the clause and the words
+#: `16 hex` anywhere later, with no adjacency required. It passed for the right reason on
+#: the day it shipped — `16 hex` occurred exactly once — but a later sentence mentioning
+#: another length ("one leg wrote 16 hex, another 12") would satisfy it from anywhere.
+#: Requiring both tokens in the *same sentence* is what makes the assertion mean what its
+#: failure message says. Raised by the maintainer bot on PR #172.
+ALGORITHM_TOKENS = ("sha256", "16 hex")
+
+#: (c) — the sentence that lists the excluded fields. Scoping matters: the clause's own
+#: measured note contains `` `mode: interactive` ``, so a bare `"mode:" in clause` substring
+#: test stays green after `mode:` is deleted from the exclusion sentence — for the one field
+#: the whole fix depends on. Raised by the maintainer bot on PR #172.
+EXCLUSION_OPENS = "The excluded fields are"
 
 #: (c) — every excluded field, by name. `mode:` is the one clause (6) writes and the defect
 #: this clause was written for; the other three are the rest of the tick-written metadata
@@ -59,6 +75,32 @@ CUT_IS_THE_RULE = "the fields whose value the audit does not read"
 #: (d), the consequence, so a reader who is about to add `phase:` to the exclusion set
 #: meets the reason not to before they make the edit.
 PHASE_STAYS = "status:` and `phase:` are NOT excluded"
+
+
+def sentence_containing(text, token):
+    """Return the first sentence of `text` carrying `token`, or "".
+
+    Split on a period followed by whitespace. Blunt, and deliberately so: the clause is
+    written in sentences, and the point of the split is to bound how far apart two tokens
+    may sit, not to parse English.
+    """
+    for sentence in re.split(r"(?<=\.)\s+", text):
+        if token in sentence:
+            return sentence
+    return ""
+
+
+def exclusion_sentence(text):
+    """Return the sentence that lists the excluded fields, or None.
+
+    Scoped to that one sentence because the clause also *mentions* `mode:` elsewhere — its
+    own measured note quotes `mode: interactive` — so a whole-clause substring test passes
+    after `mode:` is deleted from the list it is supposed to be in.
+    """
+    for sentence in re.split(r"(?<=\.)\s+", text):
+        if EXCLUSION_OPENS in sentence:
+            return sentence
+    return None
 
 
 def check(root):
@@ -81,19 +123,29 @@ def check(root):
     nxt = re.search(r"\n\n\*\*\(\d", text[start:])
     clause = text[start:start + nxt.start()] if nxt else text[start:]
 
-    if not ALGORITHM.search(clause):
+    formula = sentence_containing(clause, ALGORITHM_TOKENS[0])
+    if ALGORITHM_TOKENS[1] not in formula:
         failures.append(
-            f"{HOME} clause (1): the derivation states no `sha256 … 16 hex` formula — a home "
-            f"without an algorithm is one each leg finishes itself, which is the drift this "
-            f"guards (three truncation lengths were measured on disk 2026-10-06)"
+            f"{HOME} clause (1): no single sentence states both `{ALGORITHM_TOKENS[0]}` and "
+            f"`{ALGORITHM_TOKENS[1]}` — a home without an algorithm, or an algorithm without "
+            f"its truncation, is one each leg finishes itself, which is the drift this guards "
+            f"(three truncation lengths were measured on disk 2026-10-06)"
         )
 
-    for field in EXCLUDED:
-        if field not in clause:
-            failures.append(
-                f"{HOME} clause (1): the excluded-field list omits `{field}` — an excluded "
-                f"field the clause does not name is a field the next leg hashes anyway"
-            )
+    exclusion = exclusion_sentence(clause)
+    if exclusion is None:
+        failures.append(
+            f"{HOME} clause (1): no sentence opens with {EXCLUSION_OPENS!r}, so the "
+            f"excluded-field list has been reworded or removed — this check is stale, fix it "
+            f"before trusting a pass"
+        )
+    else:
+        for field in EXCLUDED:
+            if field not in exclusion:
+                failures.append(
+                    f"{HOME} clause (1): the exclusion sentence omits `{field}` — an excluded "
+                    f"field the clause does not name is a field the next leg hashes anyway"
+                )
 
     if CUT_IS_THE_RULE not in clause:
         failures.append(
