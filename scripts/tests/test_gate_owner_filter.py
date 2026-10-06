@@ -788,5 +788,102 @@ class EmptyFeedIsNotAUsageError(unittest.TestCase):
         self.assertIn("gates: 1", result.stderr, result.stderr)
 
 
+class UpstreamRefusalFailsLoudly(unittest.TestCase):
+    """A REFUSED upstream must not read as an empty feed.
+
+    The sibling class above pins the other half of the same distinction: an empty
+    feed is a real answer and must keep exiting 0. Both halves are needed, because
+    the two states leave an identical row set and only the source tells them apart.
+
+    `who-needs-me.py` refuses a read when the WezTerm mux socket is unreadable, and
+    writes `REFUSAL_MARKER` to its STDOUT so the refusal survives the pipe. Measured
+    2026-10-06 against v0.106.0, with the socket unreachable:
+
+        who-needs-me.py --section needs-you | gate-owner-filter.py --feed --self <sid>
+
+    printed `gates: 0  emit: 0  dropped(peer-manager): 0  dropped(peer-manager-own):
+    0  dropped(claimed): 0` and exited 0. A manager arming that as a `Monitor` got a
+    watcher that never fired and looked alive — a healthy empty queue, certified by
+    the success code, for a transport that never answered. The refusal text reached
+    only stderr, which the pipe does not carry.
+
+    ⚠️ **No `gates:` line is printed on this path, and that is the point.** A marker
+    printed BESIDE the false claim is not a fix — `gates: 0` still reads as a
+    measurement, and a consumer parsing it cannot tell it from a quiet fleet. The
+    line that lies is the line that must not be printed.
+    """
+
+    REFUSAL = f"{gf.REFUSAL_MARKER}: WezTerm pane list unreadable — mux socket silent"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.ledger = os.path.join(self.dir, "ledger")
+        for path in (self.state, self.registry, self.ledger):
+            os.makedirs(path)
+
+    def invoke(self, *argv, feed=None):
+        return subprocess.run(
+            [sys.executable, _SCRIPT,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", self.ledger,
+             "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
+            input=feed, capture_output=True, text=True,
+        )
+
+    # --- SC(b): the pipeline fails loudly ------------------------------------
+
+    def test_a_refused_upstream_exits_non_zero(self):
+        result = self.invoke("--feed", "--self", ME, feed=self.REFUSAL + "\n")
+        self.assertNotEqual(0, result.returncode, result.stdout)
+
+    def test_a_refused_upstream_prints_no_gate_count(self):
+        """The line that lies is the line that must not be printed."""
+        result = self.invoke("--feed", "--self", ME, feed=self.REFUSAL + "\n")
+        self.assertNotIn("gates:", result.stderr, result.stderr)
+
+    def test_a_refused_upstream_surfaces_the_refusal_text(self):
+        """Discarding the message was half the defect; the reader must see it."""
+        result = self.invoke("--feed", "--self", ME, feed=self.REFUSAL + "\n")
+        self.assertIn("upstream refused", result.stderr)
+        self.assertIn("mux socket silent", result.stderr)
+
+    # --- SC(c): the control, pinned beside it --------------------------------
+
+    def test_an_unmarked_empty_feed_still_exits_zero(self):
+        """The only difference from the case above is the marker."""
+        result = self.invoke("--feed", "--self", ME, feed="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gates: 0", result.stderr)
+
+    def test_a_healthy_feed_is_unaffected(self):
+        result = self.invoke("--feed", "--self", ME,
+                             feed="Needs you (0)\nNothing needs you.\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gates: 0", result.stderr)
+
+    # --- the extractor, in isolation -----------------------------------------
+
+    def test_feed_refusal_is_none_without_the_marker(self):
+        self.assertIsNone(gf.feed_refusal(["Needs you (0)\n", "Nothing needs you.\n"]))
+
+    def test_feed_refusal_returns_the_line_it_matched(self):
+        self.assertIn("mux socket silent", gf.feed_refusal([self.REFUSAL + "\n"]))
+
+    def test_feed_refusal_tolerates_leading_whitespace(self):
+        self.assertIsNotNone(gf.feed_refusal(["   " + self.REFUSAL + "\n"]))
+
+    def test_feed_refusal_ignores_a_marker_that_is_not_leading(self):
+        """Matching is on the line's first token, so prose quoting it is not a refusal."""
+        self.assertIsNone(gf.feed_refusal([f"see {gf.REFUSAL_MARKER}: for details\n"]))
+
+    def test_a_refusal_line_is_not_parsed_as_a_pane_row(self):
+        """`feed_rows` matches `[<pane>]`; the marker must never look like one."""
+        self.assertEqual(gf.feed_rows([self.REFUSAL + "\n"]), [])
+
+
 if __name__ == "__main__":
     unittest.main()
