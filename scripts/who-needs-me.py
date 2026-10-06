@@ -122,6 +122,12 @@ _REGISTRY_CACHE = {}
 # reads the registry zero extra times. Two reads of this directory could disagree
 # about which entries exist, which is why `read_registry()` shares one pass.
 _REGISTRY_STATUS_CACHE = {}
+# The same pass's FULL records (`pid`, `alive`, …), kept for `registry_records()`.
+# `read_registry()` narrows each entry to its name because that is all the ownership
+# check needs; the plausibility check needs the pid and the liveness verdict, and
+# re-reading the directory for them would be the second instrument this module's
+# header warns against — one glob, one read, three views.
+_REGISTRY_RECORDS_CACHE = {}
 
 # Closer verbs describing a parked wait rather than an open gate. `later (on
 # <trigger>):` names the event that resumes the work; until it fires there is
@@ -464,6 +470,28 @@ def _session_liveness():
     return _LIVENESS
 
 
+_FLEET_COLOURS = None
+
+
+def _fleet_colours():
+    """Import fleet-colours.py (hyphenated filename -> importlib) — the one pid->tty reader.
+
+    `pid_ttys()` there is the repo's only resolver from a registry pid to its tty, and
+    it already carries the two rules this check needs: `None` on a failed `ps`, and
+    `??` dropped rather than returned as a tty. A second `ps` parser here would be a
+    second instrument over one transport — the drift `read_registry()` above exists to
+    prevent, one transport over.
+    """
+    global _FLEET_COLOURS
+    if _FLEET_COLOURS is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleet-colours.py")
+        spec = importlib.util.spec_from_file_location("fleet_colours", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _FLEET_COLOURS = mod
+    return _FLEET_COLOURS
+
+
 def read_registry(sessions_dir=None):
     """The session registry as `session id -> the name it holds now`; `None` if unreadable.
 
@@ -506,7 +534,26 @@ def read_registry(sessions_dir=None):
         status = {sid: rec.get("status") or "" for sid, rec in records.items()}
     _REGISTRY_CACHE[d] = out
     _REGISTRY_STATUS_CACHE[d] = status
+    _REGISTRY_RECORDS_CACHE[d] = records
     return out
+
+
+def registry_records(sessions_dir=None):
+    """The full `session-liveness` records, or `None` when the registry is unreadable.
+
+    The unnarrowed view of the same single read `read_registry()` performs, for
+    callers that need a field the name/status maps drop — here `pid` (for the
+    tty lookup) and `alive` (the three-state liveness verdict).
+
+    ⚠️ `None` on an unreadable registry, and `None` again when the read never ran.
+    Both are "cannot tell", never "nothing is there": the plausibility check fails
+    OPEN on either, because refusing a feed on an unreadable registry would make a
+    probe failure indistinguishable from the defect it looks for.
+    """
+    d = sessions_dir if sessions_dir is not None else SESSIONS_DIR
+    if d not in _REGISTRY_RECORDS_CACHE:
+        read_registry(d)  # one read populates all three caches
+    return _REGISTRY_RECORDS_CACHE.get(d)
 
 
 def live_session_ids(sessions_dir=None):
@@ -1523,6 +1570,98 @@ def section_filter(names):
     return wanted
 
 
+# The one token `gate-owner-filter.py` keys on. It is written to STDOUT, not stderr,
+# because the documented arm is a PIPE:
+#
+#   who-needs-me.py --section needs-you | gate-owner-filter.py --feed --self <sid>
+#
+# and a pipe carries stdout only. The refusal was stderr-only, so the filter read an
+# empty feed, reported `gates: 0`, and exited 0 — a confident clear queue certified by
+# the success code, for a transport that never answered. Measured 2026-10-06 against
+# v0.106.0: with the mux socket unreachable the pipeline printed `gates: 0  emit: 0 …`
+# and exited 0 (1 under `set -o pipefail`, from this script), while the refusal text
+# reached only the terminal.
+#
+# ⚠️ A MARKER, not a second copy of the message. The filter must be able to tell a
+# REFUSAL from a genuinely empty feed, because an empty feed is a real answer that must
+# keep exiting 0: the two were once collapsed and a `Monitor` armed on this pipeline
+# died with `script failed (exit 2)` on every quiet tick (measured 2026-10-05). The
+# marker is the third state that makes the two distinguishable downstream.
+REFUSAL_MARKER = "WHO-NEEDS-ME-REFUSED"
+
+
+def refuse(reason):
+    """Refuse the read on BOTH streams, then exit non-zero. Never returns.
+
+    stdout carries the machine-readable marker, so the refusal survives the pipe;
+    stderr carries the same text for a human reading the terminal. `docs/pane-reads.md`
+    § The three responses puts this site in its third row — *"already exits non-zero on
+    failure → refuse non-zero, naming the transport"* — and the missing half was never
+    the exit code, it was that nothing reached the consumer.
+    """
+    sys.stdout.write(f"{REFUSAL_MARKER}: {reason}\n")
+    sys.stdout.flush()
+    sys.stderr.write(f"who-needs-me: {reason}\n")
+    sys.stderr.flush()
+    sys.exit(1)
+
+
+def pane_table_implausible(pmap, registry):
+    """True when a READABLE socket's pane table cannot be this machine's.
+
+    The caller's `pmap is None` guard tests the socket's READABILITY; this tests the
+    pane table's PLAUSIBILITY, and the two fail independently. Pointed at a
+    different-but-live socket — a stray `wezterm-mux-server` whose pane table held ONE
+    bare default pane — the readability guard passes and the feed returns a confident
+    "Needs you (0)" against 26 live claude processes. Measured 2026-10-06 ~08:10.
+
+    Rule: take the live registered sessions (from the same single `session-liveness`
+    read the rest of the feed uses), resolve each one's tty through
+    `fleet-colours.py:pid_ttys()`, and ask how many of those ttys the pane table
+    carries as `tty_name`. Refuse when at least one is missing AND fewer than half are
+    accounted for.
+
+    ⚠️ **The denominator is the sessions whose tty is RESOLVABLE, not every live
+    registered session.** A headless session reports `??` and can never appear in any
+    pane table, so counting it as unaccounted-for would fire this check on fleet
+    composition rather than on transport health — the FALSE REFUSAL `docs/pane-reads.md`
+    names as this defect class's mirror, and the one a naive "always warn" fix produces.
+    Dropping them keeps the broken-socket case firing (3 tab sessions, 0 matched) while
+    a healthy headless-heavy fleet stays quiet. Measured 2026-10-06 on this machine:
+    28 live registered sessions, 26 matched, 2 unmatched — well clear of the threshold.
+
+    Fails OPEN — returns False — on every input that cannot be read: an unreadable
+    registry, a failed `ps`, or a pane table carrying no `tty_name` at all. Each is
+    "cannot tell", and refusing a feed on a failed probe would make the probe's own
+    failure indistinguishable from the defect it looks for.
+    """
+    if registry is None:
+        return False
+    # Cheapest test first: a pane table carrying no `tty_name` anywhere is not the
+    # shape `wezterm cli list --format json` emits, so the comparison cannot be made
+    # and the `ps` below would be spent to learn nothing.
+    pane_ttys = {p.get("tty_name") for p in pmap.values() if p.get("tty_name")}
+    if not pane_ttys:
+        return False
+    live = [rec for rec in registry.values() if rec.get("alive") is True]
+    if not live:
+        return False
+    ttys = _fleet_colours().pid_ttys()
+    if ttys is None:
+        return False
+    resolvable = matched = 0
+    for rec in live:
+        tty = ttys.get(rec.get("pid"))
+        if not tty:
+            continue
+        resolvable += 1
+        if tty in pane_ttys:
+            matched += 1
+    if not resolvable:
+        return False
+    return resolvable - matched >= 1 and matched < resolvable / 2
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stuck-min", type=int, default=20)
@@ -1565,16 +1704,28 @@ def main():
     # same distinction `wezterm_panes()` documents.
     pmap = wezterm_panes()
     if pmap is None:
-        sys.stderr.write(
-            "who-needs-me: WezTerm pane list unreadable — the mux socket is not "
-            "answering, so no record can be proven live. Refusing to print a feed "
-            "that would read as an empty queue.\n"
+        refuse(
+            "WezTerm pane list unreadable — the mux socket is not answering, so no "
+            "record can be proven live. Refusing to print a feed that would read as "
+            "an empty queue."
         )
-        sys.exit(1)
     # One registry read serves both questions: which sessions are live (the `quiet`
     # pass) and what each is called now (the ownership check). Reading it twice would
     # let the two disagree about which entries exist.
     registry = read_registry()
+    # The socket answered — but a live socket is not proof it is THIS machine's. The
+    # readability guard above cannot see the difference: a stray mux server's one-pane
+    # table passes it while every real record is filtered out one line below. Checked
+    # here, before the store read, so a refusal costs one `ps` rather than a full feed
+    # build. `registry_records()` is the same read `read_registry()` just performed —
+    # no second glob, no second instrument.
+    if pane_table_implausible(pmap, registry_records()):
+        refuse(
+            "WezTerm pane table does not account for the live registered sessions — "
+            "the socket answered, but its pane table is not this machine's, so no "
+            "record can be proven live. Refusing to print a feed that would read as "
+            "an empty queue."
+        )
     live_ids = None if registry is None else set(registry)
     # Read the store once: load("needs") folds every event log, so a second call for
     # the quiet pass would double that cost.
