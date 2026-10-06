@@ -29,7 +29,15 @@
 // Nothing here refreshes a row once adopted, and the ledger cannot supply the refresh. A
 // worker that dies after this process starts therefore keeps its adoption-time status, which
 // is why `supervisor.mjs` prunes rehydrated rows at read time and why it must never let one
-// count as an in-process live holder — see the two call sites there.
+// count as an in-process live holder — see the THREE call sites there (`pruneRehydratedAgents`,
+// the `findLiveHolder` filter, and `stampUnobservedWorkers`).
+//
+// ⚠️ **And an adopted id shares a namespace with this process's own mints.** `supervisor.mjs`
+// numbers workers from a per-process counter that restarts at 0 on every reconnect, so the
+// first `spawn_agent` after a reconnect would otherwise mint an id a rehydrated row already
+// holds and overwrite a live worker's row — `list_agents` dropping it and `agent_status`
+// answering `unknown agent`, which is the exact symptom this module exists to close. The mint
+// side advances past anything already held; see the `do … while (agents.has(id))` there.
 import { config } from './config.mjs'
 import { heartbeatDir as defaultHeartbeatDir, listLive } from './heartbeat.mjs'
 import { pidIsAlive, readRegistry } from './liveness.mjs'
@@ -83,9 +91,9 @@ export function liveSessionIds({ registryDir, heartbeatDir = defaultHeartbeatDir
 // rehydrated row for a worker that was spawned under `SHIPPING_PERMISSION_MODE` therefore
 // reports `shipping: false` while that worker really is running in shipping mode. Nothing
 // here can fix that; it is named so a reader does not take the `false` for a measurement.
-export function toAgentRecord(record) {
+export function toAgentRecord(record, id = record.agent_id) {
   return {
-    id: record.agent_id,
+    id,
     label: record.label ?? record.agent_id,
     cwd: record.cwd ?? null,
     status: rehydratedStatus(record),
@@ -103,11 +111,12 @@ export function toAgentRecord(record) {
     shipping: false,
     result: record.result ?? null,
     error: null,
-    // Observable rather than inferred, and load-bearing at two call sites in
+    // Observable rather than inferred, and load-bearing at three call sites in
     // `supervisor.mjs`: a rehydrated row must not count as an in-process live holder
-    // (`findLiveHolder`) and must not be stamped on shutdown (`stampUnobservedWorkers`).
-    // The acceptance evidence also rests on it — without a marker a reader cannot tell a
-    // rehydrated row from one this process spawned itself.
+    // (`findLiveHolder`), must not be stamped on shutdown (`stampUnobservedWorkers`), and is
+    // pruned at read time (`pruneRehydratedAgents`). The acceptance evidence also rests on
+    // it — without a marker a reader cannot tell a rehydrated row from one this process
+    // spawned itself.
     rehydrated: true,
   }
 }
@@ -163,10 +172,15 @@ export function rehydratableAgents({
     if (prior !== undefined) {
       // ⚠️ `supervisor.mjs` mints ids from a per-process counter (`agent_${++seq}`), so a
       // reconnect restarts that counter and two LIVE records can share one id. Adopting
-      // both would put one Map key on two workers — silently hiding one from the roster and
-      // pointing `send_agent_message` at whichever won. First-wins keeps it deterministic
-      // and the warning keeps it observable.
-      log(`WARNING: two live ledger records share agent id ${record.agent_id} (${prior} and ${sessionId}) — adopting ${prior}, skipping ${sessionId}`)
+      // both would put one Map key on two workers, so the loser is disambiguated instead —
+      // ⚠️ **not dropped.** Dropping it would leave a genuinely live worker invisible to
+      // `list_agents`, `agent_status` and `send_agent_message` for this process's whole
+      // life: the same availability outcome this module exists to remove, only
+      // deterministic and logged. The suffix is short because it is for addressing, not
+      // for reading — the session id is the identity, and the roster carries it in full.
+      const disambiguated = `${record.agent_id}~${sessionId.slice(0, 8)}`
+      log(`WARNING: two live ledger records share agent id ${record.agent_id} (${prior} and ${sessionId}) — adopting ${prior} under that id, and ${sessionId} as ${disambiguated}`)
+      agents.push(toAgentRecord(record, disambiguated))
       continue
     }
     claimed.set(record.agent_id, sessionId)

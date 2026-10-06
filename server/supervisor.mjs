@@ -971,7 +971,17 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 // module's header for why displacing an existing owner is the defect it exists to prevent.
 
 async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed, shipping }) {
-  const id = `agent_${++seq}`
+  // ⚠️ `seq` is per-process and restarts at 0 on every reconnect, while `agents` may already
+  // hold rows adopted from the ledger whose ids a PREVIOUS process minted from this same
+  // counter. Minting straight to `agent_${++seq}` would then land on an adopted id, and the
+  // `agents.set` below would silently overwrite a live worker's row — `list_agents` dropping
+  // it and `agent_status` answering `unknown agent`, which is the exact symptom rehydration
+  // exists to remove. Advancing past anything already held makes the mint collision-free
+  // whatever populated the Map, rather than only for the two-ledger-records case.
+  let id
+  do {
+    id = `agent_${++seq}`
+  } while (agents.has(id))
 
   // The target is resolved before the mode, and it SHORT-CIRCUITS. A cluster worker is not
   // opened on this machine at all, so every guard below — the role/window resolution, the

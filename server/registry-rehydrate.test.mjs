@@ -158,21 +158,26 @@ test('a registry session with no ledger record is not a worker — the operator 
   assert.deepEqual(rehydratableAgents(dir), [])
 })
 
-test('a duplicate agent_id is resolved first-wins and logged, never silently', (t) => {
+test('a duplicate agent_id keeps BOTH workers addressable — the loser is disambiguated, not dropped', (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   // `supervisor.mjs` mints ids from a per-process counter, so a reconnect restarts it and two
-  // live records can share one id. Adopting both would put one Map key on two workers.
-  register(dir, 's-aaa')
-  register(dir, 's-bbb')
-  ledger(dir, 's-aaa', { agentId: 'agent_1' })
-  ledger(dir, 's-bbb', { agentId: 'agent_1' })
+  // live records can share one id. Dropping the loser would leave a genuinely live worker
+  // invisible to list_agents / agent_status / send_agent_message for this process's whole
+  // life — the availability outcome this module exists to remove, only deterministic.
+  register(dir, 'aaaaaaaa-1111-4111-8111-111111111111')
+  register(dir, 'bbbbbbbb-2222-4222-8222-222222222222')
+  ledger(dir, 'aaaaaaaa-1111-4111-8111-111111111111', { agentId: 'agent_1' })
+  ledger(dir, 'bbbbbbbb-2222-4222-8222-222222222222', { agentId: 'agent_1' })
   const logged = []
 
   const agents = rehydratableAgents({ ...dir, log: (line) => logged.push(line) })
 
-  assert.equal(agents.length, 1)
-  assert.equal(agents[0].sessionId, 's-aaa', 'sorted order makes first-wins decidable')
+  assert.equal(agents.length, 2, 'a live worker must not become unaddressable')
+  assert.equal(agents[0].id, 'agent_1')
+  assert.equal(agents[0].sessionId, 'aaaaaaaa-1111-4111-8111-111111111111', 'sorted order makes first-wins decidable')
+  assert.equal(agents[1].id, 'agent_1~bbbbbbbb')
+  assert.equal(agents[1].sessionId, 'bbbbbbbb-2222-4222-8222-222222222222')
   assert.equal(logged.length, 1)
   assert.match(logged[0], /share agent id agent_1/)
 })
@@ -312,4 +317,8 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   assert.match(src, /findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter\(\(a\) => !a\.rehydrated\), resume\)/)
   // Not stamped on shutdown — that record belongs to the server that spawned the worker.
   assert.match(src, /if \(agent\.rehydrated\) continue/)
+  // ⚠️ The MINT must never land on an adopted id. `seq` restarts at 0 on every reconnect, so
+  // without this loop the first spawn_agent after a reconnect overwrites a live worker's
+  // rehydrated row — reproducing the exact `unknown agent` symptom this PR closes.
+  assert.match(src, /do \{\n\s+id = `agent_\$\{\+\+seq\}`\n\s+\} while \(agents\.has\(id\)\)/)
 })
