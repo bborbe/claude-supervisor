@@ -295,7 +295,7 @@ colour is a role signal, so a hardcoded one is the defect it replaced.
 `prompt` argument and **no pre-minted `session_id`**:
 
 ```
-mcp__supervisor__spawn_agent(prompt='/vault-cli:work-on-task "<task>"', vault="<vault>", label="<task>")
+mcp__supervisor__spawn_agent(prompt='/vault-cli:work-on-task "<task>"', vault="<vault>", task="<task>", label="<task>")
 ```
 
 The worker runs its own planning turn, in its own pane. **Never mint the session first:**
