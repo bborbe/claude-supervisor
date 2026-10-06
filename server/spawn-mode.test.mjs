@@ -458,6 +458,22 @@ test('a tab worker gets the owner as a quoted shell export, or nothing', () => {
   assert.equal(ownerShellExport('manager-1'), "export SUPERVISOR_OWNER_SESSION_ID='manager-1'; ")
   assert.equal(ownerShellExport("a'b"), "export SUPERVISOR_OWNER_SESSION_ID='a'\\''b'; ")
   for (const owner of [undefined, null, '', '   ']) {
-    assert.equal(ownerShellExport(owner), '')
+    assert.equal(ownerShellExport(owner), 'unset SUPERVISOR_OWNER_SESSION_ID; ',
+      'an absent owner must clear an inherited one, not leave it in place')
   }
+})
+
+test('an owner inherited from a grandparent never reaches the worker', () => {
+  // A supervisor server started inside a worker carries that worker's spawner as
+  // SUPERVISOR_OWNER_SESSION_ID. When this spawn resolves no parent of its own, spreading
+  // the inherited env would hand the GRANDPARENT's id to the new worker, minting an owner
+  // ref that names the wrong session and that the store never liveness-prunes.
+  const inherited = { PATH: '/usr/bin', SUPERVISOR_OWNER_SESSION_ID: 'grandparent' }
+  for (const owner of [undefined, null, '', '   ']) {
+    const env = workerEnvFor({ mode: 'headless', source: 'argument', env: inherited, owner })
+    assert.equal(env.SUPERVISOR_OWNER_SESSION_ID, undefined, `owner ${JSON.stringify(owner)}`)
+    assert.equal(env.PATH, '/usr/bin', 'the rest of the inherited env survives')
+  }
+  const own = workerEnvFor({ mode: 'headless', source: 'argument', env: inherited, owner: 'parent' })
+  assert.equal(own.SUPERVISOR_OWNER_SESSION_ID, 'parent', "this spawn's own owner wins")
 })

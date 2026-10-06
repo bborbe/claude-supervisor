@@ -430,7 +430,12 @@ export const WORKER_MODE_SOURCE_ENV = 'SUPERVISOR_WORKER_MODE_SOURCE'
 // "undefined". The caller checks `resolveSpawnMode`'s error first, so this guards a
 // future caller that forgets to, not a reachable state today.
 export function workerEnvFor({ mode, source, env, owner } = {}) {
-  const base = { ...(env ?? {}), ...ownerEnv(owner) }
+  // ⚠️ The inherited owner is dropped BEFORE this spawn's own is applied. `env` is the
+  // spawning server's process env, and a server started inside a worker already carries
+  // ITS spawner's id — so with no owner resolved here, spreading `env` alone would hand
+  // the grandparent's id to this worker and mint an owner ref the store never prunes.
+  const { [OWNER_SESSION_ENV]: _inherited, ...inherited } = env ?? {}
+  const base = { ...inherited, ...ownerEnv(owner) }
   if (!mode) return base
   return {
     ...base,
@@ -470,6 +475,8 @@ function ownerEnv(owner) {
 // shell line.
 export function ownerShellExport(owner) {
   const id = cleanOwner(owner)
-  if (!id) return ''
+  // ⚠️ `unset`, never '' — the tab shell inherits the server's env, so an absent owner
+  // must actively clear an inherited one rather than leave the grandparent's in place.
+  if (!id) return `unset ${OWNER_SESSION_ENV}; `
   return `export ${OWNER_SESSION_ENV}='${id.replaceAll("'", "'\\''")}'; `
 }
