@@ -88,6 +88,42 @@ class Verdict(unittest.TestCase):
             self.call("w", "worker-1"), (gf.EMIT, "worker-spawner")
         )
 
+    def test_worker_of_a_manager_opened_through_the_worker_path_is_dropped(self):
+        """The measured 2026-10-06 incident, at the hop it actually travels.
+
+        The CDB in Weldall Manager was spawned by the Fleet Manager, so it HAS a
+        ledger record -- hop 3b's `not spawner` guard never fires for it, and the
+        gates that re-escalated are its WORKERS', resolved here at hop 3. The
+        record's `role` is the whole difference: without it this returns
+        `worker-spawner`, which is the reported bug.
+        """
+        ledger = {
+            "mgr-spawned": {
+                "session_id": "mgr-spawned",
+                "parent_session": "fleet",
+                "role": "manager",
+            },
+            "w": {"session_id": "w", "parent_session": "mgr-spawned", "role": "agent"},
+        }
+        live = {"mgr-spawned", "w", "fleet"}
+        self.assertEqual(
+            self.call("w", "mgr-spawned", ledger=ledger, live=live),
+            (gf.DROP, "peer-manager"),
+        )
+
+    def test_worker_of_a_role_agent_spawner_still_emits(self):
+        """The inverse control at the same hop: a fix that dropped every gate
+        would satisfy the case above and destroy the filter."""
+        ledger = {
+            "w2": {"session_id": "w2", "parent_session": "w", "role": "agent"},
+            "w": {"session_id": "w", "parent_session": "mgr", "role": "agent"},
+        }
+        live = {"w2", "w", "mgr"}
+        self.assertEqual(
+            self.call("w2", "w", ledger=ledger, live=live),
+            (gf.EMIT, "worker-spawner"),
+        )
+
     def test_unowned_pane_is_kept(self):
         self.assertEqual(self.call("w", None), (gf.EMIT, "unowned"))
 
