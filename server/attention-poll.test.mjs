@@ -183,14 +183,26 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
   const pending = pendingOf(...pendingEntries)
   const ticks = []
   const posts = []
+  const gets = []
+  // The DELAY each reschedule asked for, kept beside the callback. Without it the
+  // `parked ? intervalMs : idleCheckMs` choice is unasserted — a spec driving ticks by
+  // hand reads whatever it likes regardless of the delay, so replacing that expression
+  // with a constant would leave every cadence spec green.
+  const delays = []
+  // A clock the spec owns, so the idle cadence is DRIVEN rather than waited on. It starts
+  // at 0 on purpose: `lastReadAtMs` is NEGATIVE_INFINITY precisely so the first read does
+  // not depend on the clock having advanced past `idleIntervalMs`.
+  const clock = { ms: 0 }
   const stop = startAttentionPoll({
     storeUrl: 'http://store',
     agents,
     pending,
     log,
     onSettled,
-    setTimeoutImpl: (fn) => {
+    nowImpl: () => clock.ms,
+    setTimeoutImpl: (fn, delay) => {
       ticks.push(fn)
+      delays.push(delay)
       return ticks.length
     },
     clearTimeoutImpl: () => {},
@@ -203,12 +215,13 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
         posts.push({ path, body: JSON.parse(options.body) })
         return { ok: true, status: 200, json: async () => ({}) }
       }
+      gets.push(path)
       const body = path === '/api/1.0/attention' ? open : items[path.split('/').pop()]
       if (body === undefined) return { ok: false, status: 404, json: async () => ({}) }
       return { ok: true, status: 200, json: async () => body }
     },
   })
-  return { ticks, stop, pending, posts }
+  return { ticks, stop, pending, posts, gets, clock, delays }
 }
 
 test('an answered allow settles the parked promise', async () => {
@@ -552,4 +565,161 @@ test('the manager-settled path keeps its own decider, distinct from the store ar
     'the store value must be written at the poll site only, never by a second site',
   )
   assert.notEqual(STORE_DECIDER, 'manager')
+})
+
+// --- the idle cadence ------------------------------------------------------------------
+//
+// Measured 2026-10-07 on the live board (host `burn`, pid 96646): 46 `supervisor.mjs`
+// instances issued ~46 req/s against `/api/1.0/attention` while the store held ZERO
+// permission-class items open. The three cases below pin the cadence that replaces that,
+// and each one is a way the change could have been written wrong.
+
+test('a server holding no park reads once, then stops reading until the trail is due', async () => {
+  const { ticks, gets, clock } = harness({ open: [], pendingEntries: [] })
+  await ticks[0]()
+  assert.deepEqual(gets, ['/api/1.0/attention'], 'the first read must happen')
+
+  clock.ms += 250
+  await ticks[1]()
+  assert.equal(gets.length, 1, 'nothing parked, trail not due — no request at all')
+
+  clock.ms += 250
+  await ticks[2]()
+  assert.equal(gets.length, 1, 'still nothing parked, so still no request')
+
+  // ⚠️ Not zero: `recordAttempt(…, 'failed')` needs the item in `watching`, and only a
+  // read populates that. A loop that stopped reading entirely would delete that record
+  // silently — which is why the assertion below is 2 and not 1.
+  clock.ms += 30000
+  await ticks[3]()
+  assert.equal(gets.length, 2, 'the idle cadence elapses, so the trail read happens')
+})
+
+test('a park that appears is read on the next idle check, not on the idle interval', async () => {
+  // The hazard the cadence must not create: `GET /api/1.0/attention` returns OPEN items
+  // only, so an item that opens and is answered between two reads is never watched and
+  // never settled — its park then auto-denies. A park can appear at any moment, so the
+  // loop re-checks `pending` every `idleCheckMs` and reads IMMEDIATELY, which is what
+  // bounds that window at 250 ms rather than at the idle interval.
+  const { ticks, gets, clock, pending } = harness({ open: [], pendingEntries: [] })
+  await ticks[0]()
+  assert.equal(gets.length, 1)
+
+  clock.ms += 250
+  pending.set('perm_9', { requestId: 'perm_9', agentId: 'a1', settled: [], settle() {} })
+  await ticks[1]()
+  assert.equal(gets.length, 2, 'a park must be read at once, not one idle interval later')
+})
+
+test('a parked prompt keeps the fast cadence', async () => {
+  const { ticks, gets, clock, delays } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'open', answer_mechanism: 'permission' } },
+  })
+  await ticks[0]()
+  clock.ms += 2000
+  await ticks[1]()
+  clock.ms += 2000
+  await ticks[2]()
+  const listReads = gets.filter((p) => p === '/api/1.0/attention').length
+  assert.equal(listReads, 3, 'a held park reads on every fast tick, as it always did')
+  // ⚠️ The DELAY is the assertion, not just the read count. Without this the
+  // `parked ? intervalMs : idleCheckMs` expression is unasserted: a constant would
+  // leave the read counts above unchanged, because these specs drive ticks by hand.
+  assert.deepEqual(
+    delays.slice(0, 3),
+    [2000, 2000, 2000],
+    'a held park must reschedule at the fast interval, never at the idle one',
+  )
+})
+
+test('a store that throws while idle is retried on the idle cadence, not every idle check', async () => {
+  // The one state the placement of `lastReadAtMs` exists for, and the only spec that
+  // reaches it: the existing store-error spec (`a store error is logged and swallowed`)
+  // runs with a NON-empty `pending`, so it exercises the parked branch and would stay
+  // green if `lastReadAtMs` were assigned after the await. Here nothing is parked and
+  // the read throws, so a hot retry loop would show up as one read per idle check.
+  const logged = []
+  const ticks = []
+  const gets = []
+  const delays = []
+  const clock = { ms: 0 }
+  startAttentionPoll({
+    storeUrl: 'http://store',
+    agents: agentsOf(['a1', 'sess-1']),
+    pending: pendingOf(),
+    log: (m) => logged.push(m),
+    nowImpl: () => clock.ms,
+    setTimeoutImpl: (fn, delay) => {
+      ticks.push(fn)
+      delays.push(delay)
+      return ticks.length
+    },
+    clearTimeoutImpl: () => {},
+    fetchImpl: async (url) => {
+      gets.push(url.replace('http://store', ''))
+      throw new Error('boom')
+    },
+  })
+  await ticks[0]()
+  assert.equal(gets.length, 1, 'the first read happens and throws')
+  assert.match(logged.join('\n'), /attention poll failed/)
+
+  // Four idle checks elapse with nothing parked — a hot retry would read on every one.
+  for (let i = 0; i < 4; i += 1) {
+    clock.ms += 250
+    await ticks[ticks.length - 1]()
+  }
+  assert.equal(gets.length, 1, 'a throwing store must not be re-read on every idle check')
+  // `delays[0]` is the INITIAL schedule (`setTimeoutImpl(tick, intervalMs)` at start-up);
+  // the first reschedule the tick itself chose is `delays[1]`.
+  assert.equal(delays[1], 250, 'and the loop keeps re-checking cheaply while it backs off')
+
+  // Once the idle cadence elapses the read is attempted again.
+  clock.ms += 30000
+  await ticks[ticks.length - 1]()
+  assert.equal(gets.length, 2, 'the idle cadence still retries the read')
+})
+
+test('an unreadable watched item is dropped, and does not wedge the rest of the tick', async () => {
+  // The guard `message-delivery.mjs` already carried on the byte-identical read and this
+  // arm did not. Unguarded, the throw escapes to the outer catch, every LATER item in the
+  // tick is skipped, and the id stays in `watching` because `watching.delete` is only
+  // reached after a successful read — so the same throw repeats on every tick and delivery
+  // for this process is wedged permanently and silently. The store 404s a pruned item,
+  // which is exactly how it happens in the field.
+  const logged = []
+  const { ticks, pending, posts } = harness({
+    open: [
+      { item_id: 'gone', answer_mechanism: 'permission' },
+      { item_id: 'i2', answer_mechanism: 'permission' },
+    ],
+    items: {
+      i2: {
+        item_id: 'i2',
+        state: 'answered',
+        decision: 'allow',
+        resolved_by: 'sess-abc',
+        answer_mechanism: 'permission',
+        producer_id: 'sess-1',
+      },
+    },
+    log: (m) => logged.push(m),
+  })
+  await ticks[0]()
+  assert.match(logged.join('\n'), /gone could not be read/)
+  // 'i2' is inserted AFTER 'gone', so a wedged tick would never reach it.
+  assert.equal(pending.get('perm_7').settled.length, 1, 'the later item must still be settled')
+  assert.equal(posts.length, 1, 'and its delivery must still be recorded')
+
+  // ⚠️ The id is dropped from `watching` each tick and re-added by the next LIST read,
+  // because the store still lists it as open — so it is retried once per tick, and that
+  // is correct. The property the guard buys is that the failure is bounded to ONE drop
+  // per tick and never blocks the items after it. Unguarded, the throw would abort the
+  // tick at 'gone' on every pass, so 'i2' would never be reached again.
+  const drops = () => (logged.join('\n').match(/gone could not be read/g) || []).length
+  const before = drops()
+  await ticks[1]()
+  assert.equal(drops() - before, 1, 'exactly one drop per tick — never a wedge that aborts the tick')
+  assert.equal(pending.get('perm_7').settled.length, 2, 'and the later item is still reached on the next tick')
 })

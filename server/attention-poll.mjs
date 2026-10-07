@@ -189,15 +189,29 @@ export function startAttentionPoll({
   // (tool, input, requestedAt) are reachable, and a log record without them is not minable.
   onSettled = () => {},
   intervalMs = 2000,
+  // How often a server holding NO park still reads, so the delivery trail keeps its
+  // `failed` record. See the two-speed note on `tick` below for why this is not zero.
+  idleIntervalMs = 30000,
+  // How often a server holding no park re-evaluates `pending` — a Map lookup, never a
+  // request. This is what bounds the window between a park appearing and the read that
+  // can settle it, so it is deliberately far below `intervalMs`.
+  idleCheckMs = 250,
   fetchImpl = globalThis.fetch,
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
+  nowImpl = Date.now,
 }) {
   // Items already seen and still awaiting an answer. Bounded by the parks themselves: an
   // entry leaves when the park settles, and every park settles within the timeout.
   const watching = new Set()
   let stopped = false
   let timer = null
+  // ⚠️ NEGATIVE_INFINITY, not `nowImpl()` and not `0`. The first tick must always read —
+  // a loop that skipped its own first read would never populate `watching` and could never
+  // settle anything — and `0` does not guarantee that: a caller-supplied clock that starts
+  // at 0 (a test's) makes `now - 0` less than `idleIntervalMs`, so the first read would be
+  // skipped and every spec would pass for the wrong reason.
+  let lastReadAtMs = Number.NEGATIVE_INFINITY
 
   async function getJson(path) {
     const res = await fetchImpl(`${storeUrl}${path}`)
@@ -238,7 +252,59 @@ export function startAttentionPoll({
     }
   }
 
+  // ⚠️ This loop reads at TWO speeds, and both halves are load-bearing.
+  //
+  // Measured 2026-10-07 on the live board (host `burn`, pid 96646): 46 `supervisor.mjs`
+  // instances held ~94 connections and issued ~46 req/s against `/api/1.0/attention`
+  // while the store had **zero** permission-class items open, and the board spent
+  // 53.8 % of its CPU under `net/http.(*conn).serve`. Two marginal-cost A/B runs against
+  // the board's own `process_cpu_seconds_total` — +48.4 req/s → 18.86 %→22.16 % (+3.30 pp)
+  // and +59.8 req/s → 21.20 %→23.86 % (+2.66 pp) — price the pollers at **0.044–0.068 pp
+  // of CPU per req/s**, i.e. ~2–3 pp of the board's ~19 %.
+  //
+  // ⚠️ That bound is the honest one, and it is why this change does NOT claim the board's
+  // 5 % target: cutting every poller read lands it at ~16 %, still 3× the target. The
+  // remainder is per-connection HTTP serving, the netpoll/scheduler and the board's own
+  // baseline — see the sibling task that owns the threshold argument.
+  //
+  // The read is what costs the board, so it is skipped while nothing is parked — but
+  // only while nothing is parked AND the trail read is not yet due. Two things must not
+  // break, and neither is obvious from the tick body:
+  //
+  //  1. An answer that lands between two reads is LOST, not delayed. `GET
+  //     /api/1.0/attention` returns OPEN items only (see `answered-watch.py`'s header,
+  //     which measured this), so an item that opens and is answered between two reads is
+  //     never watched, never settled, and its park auto-denies at PERMISSION_TIMEOUT_MS.
+  //     A park can appear at any moment, so widening the interval is not available: the
+  //     loop re-checks `pending` every `idleCheckMs` — a Map lookup, no HTTP — and reads
+  //     IMMEDIATELY once anything is parked. That bounds the window at 250 ms, narrower
+  //     than the 2 s it was before this change.
+  //
+  //  2. The delivery trail must keep its `failed` record. `recordAttempt(itemId,
+  //     'failed')` fires for an item this server saw open, was answered, and whose park
+  //     is gone — the one record that says an answer reached nobody. It needs the item in
+  //     `watching`, and only a read populates that, so a server holding no park still
+  //     reads every `idleIntervalMs`. That is 1 read / 15 s per server rather than 1 / s,
+  //     not zero: the cut is ~93 %, and dropping to zero would silently delete the record
+  //     this file's own test suite pins.
   async function tick() {
+    const parked = pending.size > 0
+    const now = nowImpl()
+    const elapsedMs = now - lastReadAtMs
+    // ⚠️ `elapsedMs >= 0` is not redundant. `nowImpl` defaults to `Date.now` — a wall
+    // clock — so a backward NTP step makes the difference negative, which reads as
+    // "not due yet" and would suppress the trail read until the clock caught up. A
+    // negative elapsed is treated as due: reading once too often is the safe direction,
+    // and the `!parked` half already keeps a held park on the fast path regardless.
+    if (!parked && elapsedMs >= 0 && elapsedMs < idleIntervalMs) {
+      // Nothing to settle and the trail read is not due. No HTTP on this pass.
+      if (!stopped) timer = setTimeoutImpl(tick, idleCheckMs)
+      return
+    }
+    // Set BEFORE the read, so a store that throws is retried on the idle cadence rather
+    // than hammered every `idleCheckMs` — the existing posture is that a store outage
+    // degrades to the park's own timeout, not to a hot retry loop.
+    lastReadAtMs = now
     try {
       const open = await getJson('/api/1.0/attention')
       for (const item of Array.isArray(open) ? open : []) {
@@ -247,7 +313,23 @@ export function startAttentionPoll({
       for (const itemId of [...watching]) {
         // Read by id, not from the list: the list is the render path and carries open
         // items only, while this read is the post-transition one and works on any state.
-        const item = await getJson(`/api/1.0/attention/${itemId}`)
+        //
+        // ⚠️ The read is guarded PER ITEM, and that guard is load-bearing rather than
+        // defensive — it is the same guard `message-delivery.mjs` already carries on the
+        // byte-identical read, and it was missing here. An unguarded throw escapes to the
+        // outer catch, so every LATER item in the tick is skipped; and because
+        // `watching.delete` is only reached after a successful read, that id stays in the
+        // set and throws again on every subsequent tick. One pruned item — the store
+        // returns 404 for it — would wedge attention delivery for this process
+        // permanently and silently, which is the failure class this arm exists to close.
+        let item
+        try {
+          item = await getJson(`/api/1.0/attention/${itemId}`)
+        } catch (error) {
+          watching.delete(itemId)
+          log(`attention item ${itemId} could not be read (${error.message}) — dropped from the watch set`)
+          continue
+        }
         if (item?.state !== 'answered') continue
         watching.delete(itemId)
         const verdict = decisionOf(item)
@@ -297,7 +379,9 @@ export function startAttentionPoll({
     } catch (error) {
       log(`attention poll failed (${error.message}) — parks still auto-deny at the timeout`)
     }
-    if (!stopped) timer = setTimeoutImpl(tick, intervalMs)
+    // A parked prompt is being waited on, so the next read is due at the fast cadence;
+    // with nothing parked the only reason to read again is the trail, on the idle one.
+    if (!stopped) timer = setTimeoutImpl(tick, parked ? intervalMs : idleCheckMs)
   }
 
   timer = setTimeoutImpl(tick, intervalMs)
