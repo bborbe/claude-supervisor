@@ -184,6 +184,11 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
   const ticks = []
   const posts = []
   const gets = []
+  // The DELAY each reschedule asked for, kept beside the callback. Without it the
+  // `parked ? intervalMs : idleCheckMs` choice is unasserted — a spec driving ticks by
+  // hand reads whatever it likes regardless of the delay, so replacing that expression
+  // with a constant would leave every cadence spec green.
+  const delays = []
   // A clock the spec owns, so the idle cadence is DRIVEN rather than waited on. It starts
   // at 0 on purpose: `lastReadAtMs` is NEGATIVE_INFINITY precisely so the first read does
   // not depend on the clock having advanced past `idleIntervalMs`.
@@ -195,8 +200,9 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
     log,
     onSettled,
     nowImpl: () => clock.ms,
-    setTimeoutImpl: (fn) => {
+    setTimeoutImpl: (fn, delay) => {
       ticks.push(fn)
+      delays.push(delay)
       return ticks.length
     },
     clearTimeoutImpl: () => {},
@@ -215,7 +221,7 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
       return { ok: true, status: 200, json: async () => body }
     },
   })
-  return { ticks, stop, pending, posts, gets, clock }
+  return { ticks, stop, pending, posts, gets, clock, delays }
 }
 
 test('an answered allow settles the parked promise', async () => {
@@ -606,7 +612,7 @@ test('a park that appears is read on the next idle check, not on the idle interv
 })
 
 test('a parked prompt keeps the fast cadence', async () => {
-  const { ticks, gets, clock } = harness({
+  const { ticks, gets, clock, delays } = harness({
     open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
     items: { i1: { item_id: 'i1', state: 'open', answer_mechanism: 'permission' } },
   })
@@ -617,4 +623,60 @@ test('a parked prompt keeps the fast cadence', async () => {
   await ticks[2]()
   const listReads = gets.filter((p) => p === '/api/1.0/attention').length
   assert.equal(listReads, 3, 'a held park reads on every fast tick, as it always did')
+  // ⚠️ The DELAY is the assertion, not just the read count. Without this the
+  // `parked ? intervalMs : idleCheckMs` expression is unasserted: a constant would
+  // leave the read counts above unchanged, because these specs drive ticks by hand.
+  assert.deepEqual(
+    delays.slice(0, 3),
+    [2000, 2000, 2000],
+    'a held park must reschedule at the fast interval, never at the idle one',
+  )
+})
+
+test('a store that throws while idle is retried on the idle cadence, not every idle check', async () => {
+  // The one state the placement of `lastReadAtMs` exists for, and the only spec that
+  // reaches it: the existing store-error spec (`a store error is logged and swallowed`)
+  // runs with a NON-empty `pending`, so it exercises the parked branch and would stay
+  // green if `lastReadAtMs` were assigned after the await. Here nothing is parked and
+  // the read throws, so a hot retry loop would show up as one read per idle check.
+  const logged = []
+  const ticks = []
+  const gets = []
+  const delays = []
+  const clock = { ms: 0 }
+  startAttentionPoll({
+    storeUrl: 'http://store',
+    agents: agentsOf(['a1', 'sess-1']),
+    pending: pendingOf(),
+    log: (m) => logged.push(m),
+    nowImpl: () => clock.ms,
+    setTimeoutImpl: (fn, delay) => {
+      ticks.push(fn)
+      delays.push(delay)
+      return ticks.length
+    },
+    clearTimeoutImpl: () => {},
+    fetchImpl: async (url) => {
+      gets.push(url.replace('http://store', ''))
+      throw new Error('boom')
+    },
+  })
+  await ticks[0]()
+  assert.equal(gets.length, 1, 'the first read happens and throws')
+  assert.match(logged.join('\n'), /attention poll failed/)
+
+  // Four idle checks elapse with nothing parked — a hot retry would read on every one.
+  for (let i = 0; i < 4; i += 1) {
+    clock.ms += 250
+    await ticks[ticks.length - 1]()
+  }
+  assert.equal(gets.length, 1, 'a throwing store must not be re-read on every idle check')
+  // `delays[0]` is the INITIAL schedule (`setTimeoutImpl(tick, intervalMs)` at start-up);
+  // the first reschedule the tick itself chose is `delays[1]`.
+  assert.equal(delays[1], 250, 'and the loop keeps re-checking cheaply while it backs off')
+
+  // Once the idle cadence elapses the read is attempted again.
+  clock.ms += 30000
+  await ticks[ticks.length - 1]()
+  assert.equal(gets.length, 2, 'the idle cadence still retries the read')
 })

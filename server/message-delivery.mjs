@@ -270,7 +270,10 @@ export function startMessageDelivery({
   async function tick() {
     const parked = pending.size > 0
     const now = nowImpl()
-    if (!parked && now - lastReadAtMs < idleIntervalMs) {
+    // ⚠️ `elapsedMs >= 0` is not redundant — see `attention-poll.mjs` for why a backward
+    // wall-clock step would otherwise suppress the trail read until the clock caught up.
+    const elapsedMs = now - lastReadAtMs
+    if (!parked && elapsedMs >= 0 && elapsedMs < idleIntervalMs) {
       if (!stopped) timer = setTimeoutImpl(tick, idleCheckMs)
       return
     }

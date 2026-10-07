@@ -55,14 +55,19 @@ function harness({ open = [], items = {}, agents, pending, log, posts }) {
   // NEGATIVE_INFINITY precisely so the first read does not depend on it having advanced.
   ticks.gets = []
   ticks.clock = { ms: 0 }
+  // The DELAY each reschedule asked for, beside the callback — without it the
+  // `parked ? intervalMs : idleCheckMs` choice is unasserted, because a spec driving
+  // ticks by hand reads whenever it likes regardless of the delay passed.
+  ticks.delays = []
   startMessageDelivery({
     storeUrl: 'http://store',
     agents,
     pending,
     log,
     nowImpl: () => ticks.clock.ms,
-    setTimeoutImpl: (fn) => {
+    setTimeoutImpl: (fn, delay) => {
       ticks.push(fn)
+      ticks.delays.push(delay)
       return ticks.length
     },
     clearTimeoutImpl: () => {},
@@ -550,6 +555,9 @@ test('a server holding no park reads once, then stops reading until the trail is
   ticks.clock.ms += 30000
   await ticks[2]()
   assert.equal(ticks.gets.length, 2, 'the idle cadence elapses, so the trail read happens')
+  // The delay is asserted, not just the read count: `delays[0]` is the initial schedule,
+  // so `delays[1]` is what the first (idle) tick chose for itself.
+  assert.equal(ticks.delays[1], 250, 'an idle tick must re-check cheaply, not sleep the idle interval')
 })
 
 test('a park that appears is read on the next idle check, not on the idle interval', async () => {
@@ -564,5 +572,6 @@ test('a park that appears is read on the next idle check, not on the idle interv
   pending.set('req-9', { requestId: 'req-9', agentId: 'a1', settled: [], settle() {} })
   await ticks[1]()
   assert.equal(ticks.gets.length, 2, 'a park must be read at once, not one idle interval later')
+  assert.equal(ticks.delays[2], 2000, 'and a held park must drop back to the fast cadence')
 })
 

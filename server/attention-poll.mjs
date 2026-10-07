@@ -290,7 +290,13 @@ export function startAttentionPoll({
   async function tick() {
     const parked = pending.size > 0
     const now = nowImpl()
-    if (!parked && now - lastReadAtMs < idleIntervalMs) {
+    const elapsedMs = now - lastReadAtMs
+    // ⚠️ `elapsedMs >= 0` is not redundant. `nowImpl` defaults to `Date.now` — a wall
+    // clock — so a backward NTP step makes the difference negative, which reads as
+    // "not due yet" and would suppress the trail read until the clock caught up. A
+    // negative elapsed is treated as due: reading once too often is the safe direction,
+    // and the `!parked` half already keeps a held park on the fast path regardless.
+    if (!parked && elapsedMs >= 0 && elapsedMs < idleIntervalMs) {
       // Nothing to settle and the trail read is not due. No HTTP on this pass.
       if (!stopped) timer = setTimeoutImpl(tick, idleCheckMs)
       return
