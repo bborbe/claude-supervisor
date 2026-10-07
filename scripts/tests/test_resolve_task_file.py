@@ -83,6 +83,48 @@ class ResolveTaskFileTest(unittest.TestCase):
                 return p
         self.fail(f"no output line for {name!r}; stdout={r.stdout!r} stderr={r.stderr!r}")
 
+    # --- the truncation tier -------------------------------------------------
+
+    def test_a_truncated_registry_name_resolves_to_its_full_title(self):
+        """⚠️ The measured case. A session registry name is a *truncated* task title —
+        46 characters held against 108, measured 2026-10-07 — so an exact-only reader
+        resolves nothing for it and the session reads unowned."""
+        full = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry "
+                "Name Is Write-Once and the Title Is Not")
+        v = self.vault("private-personal", files=(f"{full}.md",))
+        name = "⚙ A Renamed Task's Session Becomes Unaddressable"
+        r = self.run_script([name], [v])
+        self.assertEqual(0, r.returncode)
+        self.assertEqual(str(self.root / "private-personal" / "25 Tasks" / f"{full}.md"),
+                         self.path_for(r, name))
+
+    def test_a_short_name_that_opens_a_title_is_not_read_as_a_truncation(self):
+        """The length floor — a role name is not a truncation, and resolving it would
+        hand the caller a task the session never owned."""
+        v = self.vault("private-personal", files=("boss of nothing in particular.md",))
+        r = self.run_script(["boss"], [v])
+        self.assertEqual("", self.path_for(r, "boss"))
+
+    def test_an_ambiguous_truncation_resolves_nothing_and_names_both(self):
+        """⚠️ **"Never guesses" survives the new tier.** Two titles under one prefix is a
+        guess with no single answer, so the name resolves to nothing — the same
+        discipline the exact tier already applies to a two-vault collision."""
+        v = self.vault("private-personal",
+                       files=("Shared Prefix That Is Long Enough One.md",
+                              "Shared Prefix That Is Long Enough Two.md"))
+        name = "Shared Prefix That Is Long Enough"
+        r = self.run_script([name], [v])
+        self.assertEqual("", self.path_for(r, name))
+        self.assertIn("AMBIGUOUS", r.stderr)
+
+    def test_the_exact_tier_still_wins_over_a_truncation(self):
+        """An exact hit is never displaced by the prefix tier."""
+        v = self.vault("private-personal",
+                       files=("Some Task.md", "Some Task And A Much Longer Suffix.md"))
+        r = self.run_script(["Some Task"], [v])
+        self.assertEqual(str(self.root / "private-personal" / "25 Tasks" / "Some Task.md"),
+                         self.path_for(r, "Some Task"))
+
     # --- the resolution rule -------------------------------------------------
 
     def test_task_beats_goal_in_the_same_vault(self):

@@ -63,8 +63,10 @@ invocations and ~46 interpreter starts per sweep.
 """
 import json
 import os
+import re
 import subprocess
 import sys
+import unicodedata
 
 
 def vault_dirs():
@@ -119,7 +121,43 @@ def vault_dirs():
         return [], f"vault-cli config list failed: {type(exc).__name__}"
 
 
-def hits(vaults, key, stem):
+# A registry name is a *truncated* title, and the truncation is long — measured 46
+# characters on 2026-10-07 (`⚙ A Renamed Task's Session Becomes Unaddressable` against a
+# 108-character title). ⚠️ **`fleet-board.py` and `manager-predispatch.py` carry the same
+# constant for the same rule and the three values must agree** — a test pins them
+# together, because a drift would make the board, the pre-dispatch gate and this reader
+# disagree about whether a name resolves.
+_TRUNCATION_MIN_PREFIX = 20
+
+
+def _norm_session_name(name):
+    """Casefolded, decoration-stripped session label.
+
+    A registry name carries a `⚙ ` marker a task title does not, so a raw comparison
+    never matches. Mirrors `manager-predispatch.py`'s helper of the same name and job, so
+    the readers agree about what a name *is*.
+    """
+    text = unicodedata.normalize("NFKC", name or "").strip()
+    text = re.sub(r"^[^\w(]+", "", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _matches(basename, stem, prefix):
+    """Does a directory entry's basename name this stem?
+
+    Exact by default. ⚠️ **`prefix` is the truncation tier and is reached only when the
+    exact tier found nothing** — the registry holds a *truncated* title, so an
+    exact-only reader resolves nothing for a long-titled task. The test is a **prefix on
+    the stem**, not a substring glob, and it is length-gated so a short role name that
+    happens to open a title is not read as a truncation.
+    """
+    if not prefix:
+        return basename == stem
+    bare = stem[:-3] if stem.endswith(".md") else stem
+    return len(bare) >= _TRUNCATION_MIN_PREFIX and basename.startswith(bare)
+
+
+def hits(vaults, key, stem, prefix=False):
     """Every regular file `<stem>` under `<vault>/<key>`, across all vaults.
 
     Exact basename, case-insensitive — never a substring glob, and the folder is the
@@ -141,7 +179,7 @@ def hits(vaults, key, stem):
         except OSError:
             continue
         found += [os.path.join(full, e) for e in entries
-                  if e.casefold() == stem and os.path.isfile(os.path.join(full, e))]
+                  if _matches(e.casefold(), stem, prefix) and os.path.isfile(os.path.join(full, e))]
     return found
 
 
@@ -149,14 +187,18 @@ def resolve(name, vaults):
     """The rule. Returns `(path, ambiguous)`; `path` is `""` when nothing resolves."""
     # A caller may pass the roster name or the filename; both mean the same task, and the
     # suffixed form would otherwise search for `<name>.md.md` and silently resolve nothing.
-    stem = name.casefold()
+    stem = _norm_session_name(name)
     if stem.endswith(".md"):
         stem = stem[:-3]
     stem += ".md"
     tasks = hits(vaults, "tasks_dir", stem)
+    if not tasks:
+        tasks = hits(vaults, "tasks_dir", stem, prefix=True)
     if len(tasks) == 1:
         return tasks[0], []                # a task beats a same-named goal, in any vault
     goals = hits(vaults, "goals_dir", stem)   # only reached when tasks is empty or ambiguous
+    if not goals:
+        goals = hits(vaults, "goals_dir", stem, prefix=True)
     if not tasks:
         if len(goals) == 1:
             return goals[0], []

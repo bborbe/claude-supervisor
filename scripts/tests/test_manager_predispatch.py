@@ -3021,16 +3021,20 @@ class TestRosterOwnerTruncation(Base):
                        alive=False),
             self.m.LIVENESS_NONE)
 
-    def test_the_truncation_floor_agrees_with_fleet_board(self):
-        """⚠️ `_TRUNCATION_MIN_PREFIX` is duplicated in `fleet-board.py` on purpose —
-        neither script imports the other — so the two values are pinned together here.
-        Drift would make the board and this gate disagree about whether a row has an
-        owner, which is the one thing both exist to answer the same way."""
-        path = os.path.join(os.path.dirname(_SCRIPT), "fleet-board.py")
-        spec = importlib.util.spec_from_file_location("fleet_board_floor_probe", path)
-        fb = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(fb)
-        self.assertEqual(self.m._TRUNCATION_MIN_PREFIX, fb._TRUNCATION_MIN_PREFIX)
+    def test_the_truncation_floor_agrees_across_the_three_readers(self):
+        """⚠️ `_TRUNCATION_MIN_PREFIX` is duplicated in `fleet-board.py` and
+        `resolve-task-file.py` on purpose — none of the three imports another — so the
+        values are pinned together here. Drift would make the board, this gate and the
+        sweep reader disagree about whether a name resolves, which is the one thing all
+        three exist to answer the same way."""
+        base = os.path.dirname(_SCRIPT)
+        for filename, alias in (("fleet-board.py", "fleet_board_floor_probe"),
+                                ("resolve-task-file.py", "resolve_task_file_floor_probe")):
+            with self.subTest(sibling=filename):
+                spec = importlib.util.spec_from_file_location(alias, os.path.join(base, filename))
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                self.assertEqual(self.m._TRUNCATION_MIN_PREFIX, mod._TRUNCATION_MIN_PREFIX)
 
 
 if __name__ == "__main__":
