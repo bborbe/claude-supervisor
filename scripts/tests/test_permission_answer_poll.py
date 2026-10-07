@@ -216,6 +216,86 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(len(ports), 3)
         self.assertEqual(len(set(ports)), 1, "the whole poll must ride one client socket")
 
+    def test_a_socket_dropped_between_passes_recovers(self):
+        """The one failure mode pooling introduces: the store drops the idle socket.
+
+        A lost *pass* is acceptable and is what this pins; a lost *verdict* is not.
+        The drop is deliberately **unsignalled** — no `Connection: close` header —
+        because a signalled close is visible to `http.client`, which then closes its
+        own side and reconnects transparently (pinned separately below). The
+        unsignalled case is a keep-alive timeout: the one the client cannot see
+        coming, and the one the loop has to survive.
+        """
+        served = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                served.append(1)
+                body = b"{}"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                if len(served) == 1:
+                    self.close_connection = True   # drop it, without saying so
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            store = f"http://127.0.0.1:{srv.server_address[1]}"
+            url = f"{store}/api/1.0/attention"
+            with self.m.store_connection(store) as conn:
+                first, _ = self.m.get_json(conn, url)     # lands
+                stale, _ = self.m.get_json(conn, url)     # socket gone: reported, not raised
+                again, _ = self.m.get_json(conn, url)     # reconnected on its own
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+        self.assertTrue(first, "the first pass must land")
+        self.assertFalse(stale, "a dropped socket is a lost pass, never a raised error")
+        self.assertTrue(again, "the next pass must reconnect and land")
+
+    def test_a_signalled_close_is_handled_by_the_client(self):
+        """A `Connection: close` is not a lost pass — `http.client` reconnects itself."""
+        served = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                served.append(1)
+                body = b"{}"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                if len(served) == 1:
+                    self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            store = f"http://127.0.0.1:{srv.server_address[1]}"
+            url = f"{store}/api/1.0/attention"
+            with self.m.store_connection(store) as conn:
+                first, _ = self.m.get_json(conn, url)
+                second, _ = self.m.get_json(conn, url)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+        self.assertTrue(first)
+        self.assertTrue(second, "a signalled close must cost nothing — the client reconnects")
+
 
 class ResolverTest(unittest.TestCase):
     def setUp(self):
