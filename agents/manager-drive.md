@@ -355,7 +355,8 @@ Plain markdown, one line per action, in the order you performed them. Omit empty
 ```text
 Drive: <subject> — audited <n> · cap re-dispatched <n> · reaped <n> · closed clean <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · card <n> · stale <n> · held <n> · blocked <n>
 Provenance: recorded_at=<the store's recorded_at> · own sets: <bucket>{<task>, …} · <bucket>{…}
-Batch held — no store provenance (missing: <which half>) | value disagrees with its named source — no per-row clause ran   ← clause (0); ONE line for the whole batch, never one per row
+Batch held — no store provenance (missing: <which half>) — no per-row clause ran   ← clause (0)(a); ONE line for the whole batch, never one per row
+Batch held — that value is NOT the named source's — no per-row clause ran   ← clause (0)(b); same rule, and name which file disagreed
 
 Cap failure (<n>):     ← clause (1): rows refused at the dispatcher's concurrency cap that got no slot before this tick ended.
   <task> — refused at the dispatcher's concurrency cap, never audited   ← a FAILURE, not a `Held`: the retry is unbounded and the tick ended first. It is the one row shape `<success_criteria>`'s "every row left with exactly one verdict" admits as an exception, and only because it is named here.
