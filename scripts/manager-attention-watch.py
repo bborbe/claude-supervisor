@@ -148,13 +148,19 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
+import urllib.request
 
 POLL_SECONDS = 60
 SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
 DEFAULT_STATE = os.path.expanduser("~/.claude/state/manager-attention-watch")
 DEFAULT_PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
+# The attention store. The same two variables `who-needs-me.py:82,86` and
+# `attention-ask.py:105,191` resolve, so one deployment moves all three together.
+STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
+STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 
 # The supervisor's heartbeat store — the second liveness source, and the only
 # world-readable one that covers a HEADLESS worker. A headless worker is an
@@ -211,9 +217,38 @@ _CLOSER_UNKNOWN = object()
 # commit rather than letting the copies drift.
 LIVE_WINDOW = 5 * 60
 
+# The park-age escalation thresholds, in minutes. Each fires ONCE per continuous
+# park, at the first poll whose age has crossed it.
+PARK_AGE_THRESHOLDS = (15, 60)
+
+# ⚠️ The two `is_gated` reasons that mean *parked on the operator* — and
+# deliberately not a third. `idle+closer` is a park too, but it is the shape the
+# ownership-filtered FEED already carries (`who-needs-me.py --section needs-you`),
+# so it is not the class this arm exists to rescue: this watcher reads the
+# registry and the transcript for the parks the store cannot carry. Keeping the
+# set at exactly the two the row names also keeps the park-age clock and the
+# re-post firing on ONE definition rather than two that drift apart.
+PARKED_REASONS = ("registry:waiting", "busy+parked-modal")
+
 
 def tracked_ids(tracked_path, tasks_dir):
     """{sid8: task name} for every tracked task carrying an id, read fresh each poll.
+
+    A projection of `tracked_entries`, which holds the parse and its warnings —
+    one implementation, two shapes, so the field-scoping rules pinned below
+    cannot drift between the two callers.
+    """
+    return {sid8: name for sid8, (name, _) in
+            tracked_entries(tracked_path, tasks_dir).items()}
+
+
+def tracked_entries(tracked_path, tasks_dir):
+    """{sid8: (task name, FULL session id)} for every tracked task carrying an id.
+
+    The full id is what the re-post needs and `tracked_ids` cannot supply: the
+    store's join key is `producer_id`, which `who-needs-me.py:268` reads as the
+    row's session — a full UUID — while `sid8` is only its first eight
+    characters. Read fresh each poll for the same reason `tracked_ids` is.
 
     Field-scoped, not file-wide: an unanchored `session_id:` regex over the whole
     file also matches ids quoted in a task's own Progress prose — measured
@@ -270,7 +305,7 @@ def tracked_ids(tracked_path, tasks_dir):
         for i in ids:
             i = i.strip().strip('"\'')
             if len(i) >= 8:
-                out[i[:8]] = name
+                out[i[:8]] = (name, i)
     if unresolved:
         print(f"WATCH WARN: {len(unresolved)} tracked name(s) resolve to no file "
               f"under {tasks_dir} ({', '.join(sorted(unresolved)[:5])}"
@@ -704,7 +739,7 @@ def is_gated(status, body, headless_live=False, stuck=None, pending=None,
 
 
 def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
-          warned=None, live_dir=LIVE_DIR):
+          warned=None, live_dir=LIVE_DIR, tracked=None):
     """{sid8: (task name, detail, reason, verdict)} for every tracked worker
     that has a transcript.
 
@@ -723,8 +758,14 @@ def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
     """
     if warned is None:
         warned = set()
+    if tracked is None:
+        # The poll loop parses the tracked set once per poll anyway, because the
+        # re-post needs the FULL session ids for its `producer_id` join and
+        # `tracked_ids` projects those away. Taking the projection as an argument
+        # keeps that to one parse — and one set of WATCH WARN lines — per poll.
+        tracked = tracked_ids(tracked_path, tasks_dir)
     state = {}
-    for sid8, label in tracked_ids(tracked_path, tasks_dir).items():
+    for sid8, label in tracked.items():
         cands = sorted(glob.glob(os.path.join(projects_root, "*",
                                               sid8 + "*.jsonl")))
         if not cands:
@@ -925,6 +966,193 @@ def state_path_for(state_dir, tracked_path):
     return os.path.join(state_dir, f"state-{scope}.json")
 
 
+def park_path_for(state_dir, tracked_path):
+    """The park-age state file for one manager's scope.
+
+    ⚠️ **A SIBLING of `state_path_for`'s file, never a wider record inside it.**
+    The gated-set file is a plain JSON list of session ids and is read back with
+    `set(json.load(fh))`; widening it to a dict would make every existing state
+    file unreadable, and this file's own read path answers an unreadable state
+    with a `NEW GATE` burst for the whole tracked set. Same scope key, same
+    directory, same tmp + `os.replace` convention.
+    """
+    scope = hashlib.sha1(os.path.abspath(tracked_path).encode()).hexdigest()[:8]
+    return os.path.join(state_dir, f"park-{scope}.json")
+
+
+def open_store_items(store=STORE, timeout=STORE_TIMEOUT):
+    """`({producer_id}, {dedup_key})` over the store's OPEN items, or `None`.
+
+    `GET /api/1.0/attention` is the store's open-items read — the same one
+    `who-needs-me.py:213` uses — and it returns open items ONLY, which is exactly
+    the question the re-post asks: *is there already a card for this park?*
+
+    ⚠️ **`None` on failure, never two empty sets.** An empty result is a positive
+    claim — "the store holds nothing for anyone" — and the re-post acts on it, so
+    a store that is merely unreachable would re-post a card for every parked
+    worker on every poll. Same direction the rest of this file closes: a failed
+    read must not be representable as an empty one.
+    """
+    try:
+        with urllib.request.urlopen(store + "/api/1.0/attention",
+                                    timeout=timeout) as resp:
+            items = json.loads(resp.read().decode("utf-8") or "[]")
+    except Exception as exc:
+        print(f"WATCH WARN: store read failed ({exc}) — re-post suppressed this "
+              f"poll; this is NOT a reading that the store holds nothing",
+              file=sys.stderr, flush=True)
+        return None
+    return ({i.get("producer_id") or "" for i in items},
+            {i.get("dedup_key") or "" for i in items})
+
+
+def parked_keys(state):
+    """The session ids PARKED on the operator right now, from a `probe()` result.
+
+    Distinct from `gated_keys`: that is the set the watcher HOLDS, whose
+    membership survives a mid-turn `busy` by design, while this is the set that
+    is parked *this poll*. The two answer different questions, and the park-age
+    clock needs this one — see `advance_park_ages`.
+    """
+    return sorted(sid8 for sid8, (_, _, reason, v) in state.items()
+                  if v is True and reason in PARKED_REASONS)
+
+
+def advance_park_ages(ages, parked, now):
+    """Advance `{sid8: {"since": epoch, "aged": [thresholds]}}` by one poll.
+
+    ⚠️ **Keyed on CONTINUOUS PARK per registry status, never on the gated-set
+    transition.** A worker that answers one question and asks the next stays in
+    the watcher's gated set the whole time — `is_gated` holds it through the
+    `busy` interval — so a clock keyed on set membership would run once from the
+    first park and never restart, and the SECOND park would never surface. That
+    is the measured gap this limb closes: 2026-10-07, two tracked sessions parked
+    on fresh `AskUserQuestion`s inside a 30-minute window and the arm delivered 0
+    events, because neither park was a set transition.
+
+    So a non-parked poll ENDS the park and the next parked poll STARTS a new one.
+
+    ⚠️ **The clock starts at first observation, so restarting this arm resets
+    every age.** The registry carries no timestamp for when a session entered
+    `waiting`, so a park already an hour old when the arm starts reads as age 0
+    and earns its `AGED` late. Stated rather than hidden — the alternative is
+    inventing an entry time, and an invented age is worse than a late one.
+
+    Mutates `ages` in place and returns it.
+    """
+    parked = set(parked)
+    for sid8 in list(ages):
+        if sid8 not in parked:
+            del ages[sid8]
+    for sid8 in parked:
+        ages.setdefault(sid8, {"since": now, "aged": []})
+    return ages
+
+
+def aged_events(ages, now, thresholds=PARK_AGE_THRESHOLDS):
+    """`[(sid8, minutes)]` for thresholds crossed since the last call, ONCE each.
+
+    Pure apart from the `aged` marker it appends to, so the once-each contract is
+    testable directly rather than only by driving the poll loop — the same reason
+    `transitions` and `stable_sessions` are extracted.
+    """
+    out = []
+    for sid8, rec in ages.items():
+        minutes = int((now - rec["since"]) // 60)
+        for t in thresholds:
+            if minutes >= t and t not in rec["aged"]:
+                rec["aged"].append(t)
+                out.append((sid8, t))
+    return out
+
+
+def post_repost(sid8, full, label, script_dir=None, timeout=30):
+    """Post one re-registered card via `attention-ask.py post`. True on success.
+
+    Shelled out rather than re-implemented: that script owns the dedup key, the
+    `owner:` liveness default and the TTL bound, and a second POST site here
+    would be a second place for all three to drift — with the store's pruning
+    rule turning a wrong `liveness_ref` into a silently deleted card rather than
+    an error anyone would see.
+    """
+    script = os.path.join(
+        script_dir or os.path.dirname(os.path.abspath(__file__)),
+        "attention-ask.py")
+    cmd = [sys.executable, script, "post",
+           "--producer-id", full,
+           "--dedup-key", f"park:{sid8}",
+           "--payload",
+           f"{label}: this session is parked on the operator and the attention "
+           f"store holds no open item for it. Re-registered by the tracked-set "
+           f"watcher — answer it and the session can continue."]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        print(f"WATCH WARN: re-post for {sid8} could not run ({exc})",
+              file=sys.stderr, flush=True)
+        return False
+    if proc.returncode != 0:
+        print(f"WATCH WARN: re-post for {sid8} refused (exit {proc.returncode}): "
+              f"{proc.stdout.strip()} {proc.stderr.strip()}",
+              file=sys.stderr, flush=True)
+        return False
+    return True
+
+
+def repost_empty_parks(parked, entries, log_path, post=None):
+    """Re-post a card for every parked session the store no longer holds.
+
+    Returns the `sid8`s re-posted. `post(sid8, full, label)` is injectable, so
+    the tests assert the call without a live store.
+
+    ⚠️ **The producer is the WORKER, not this watcher's manager.** A store item's
+    session is its `producer_id` (`who-needs-me.py:268`), so posting as the
+    worker is what makes the re-posted row attribute to the session that is
+    actually parked — and what routes the operator's answer back to it. It also
+    collapses "is there already a card?" to one field: an open item whose
+    `producer_id` is this worker, or whose `dedup_key` is our own stable
+    `park:<sid8>`, IS the card this call would have posted.
+
+    ⚠️ **`liveness_ref` must stay the `owner:` default.**
+    `attention-ask.py:506-532` records that the store PRUNES an open asked item
+    whose liveness subject is not live, so a `session:<id>` subject deletes the
+    card on the first read after the poster exits. `owner:` is unconditionally
+    live, which is what lets a re-posted card outlive the turn that posted it —
+    and a re-post is by construction posted by something other than the parked
+    worker.
+
+    ⚠️ A store read that FAILS re-posts nothing — `open_store_items` returns
+    `None` — rather than reading as "the store holds nothing".
+    """
+    if post is None:
+        post = post_repost
+    if not parked:
+        # ⚠️ The store is not read at all when nothing is parked. Two reasons, and
+        # the second is the load-bearing one: a poll with no parked session has no
+        # card to re-post, and — more importantly — an idle arm must not depend on
+        # the store being up. Reading it anyway would make this arm's own liveness
+        # a function of the store's, which is the coupling the LIVENESS record
+        # exists to break.
+        return []
+    items = open_store_items()
+    if items is None:
+        return []
+    producers, dedup_keys = items
+    out = []
+    for sid8 in parked:
+        if f"park:{sid8}" in dedup_keys:
+            continue
+        name, full = entries.get(sid8, ("", ""))
+        if not full or full in producers:
+            continue
+        if not post(sid8, full, name or sid8):
+            continue
+        out.append(sid8)
+        log_event(log_path, "REPOST", sid8, name,
+                  f"store held no open item for {sid8}; re-posted as park:{sid8}")
+    return out
+
+
 def log_event(log_path, kind, sid8, label, detail):
     """Append one transition to the durable event log.
 
@@ -981,6 +1209,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     state_path = state_path_for(args.state, args.tracked)
+    park_path = park_path_for(args.state, args.tracked)
     log_path = os.path.join(args.state, "events.jsonl")
     # The tracked set's own name, for the liveness record's subject slot — the
     # same `<topic>` the runbook's tick marker carries (§ Sweep output). Derived
@@ -1014,13 +1243,33 @@ def main(argv=None):
     # The last COMMITTED gated set, held as a set because it now advances PER
     # SESSION rather than by whole-set replacement — see the stability gate below.
     prev = set(prev or [])
+
+    # PARK AGES — a sibling file, read the same way and failing in the same
+    # direction. ⚠️ The consequence differs from the gated-set read and is worth
+    # naming: a park-age file that cannot be read restarts every clock, which
+    # makes an escalation LATE rather than suppressing it. Late is the safe
+    # direction here, so this warns and continues rather than refusing.
+    park_ages = {}
+    try:
+        with open(park_path) as fh:
+            park_ages = json.load(fh)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"WATCH WARN: park-age state unreadable ({exc}) — every park-age "
+              f"clock restarts this run; escalations are LATE, not lost",
+              file=sys.stderr, flush=True)
+        park_ages = {}
+
     pending = None          # the previous poll's gated set
     warned = set()
     polls = 0
     while True:
         try:
+            entries = tracked_entries(args.tracked, args.tasks_dir)
             state = probe(args.tracked, args.tasks_dir, args.projects_root,
-                          args.sessions_dir, warned, args.live_dir)
+                          args.sessions_dir, warned, args.live_dir,
+                          tracked={s: n for s, (n, _) in entries.items()})
             key = gated_keys(state)
             # Counted every poll, not only under `--once`: the liveness record
             # reports both halves, and a HELD session is exactly what makes a
@@ -1113,6 +1362,40 @@ def main(argv=None):
             log_event(log_path, "LIVENESS", "", tracked_name,
                       f"{len(key)} gated · {len(held)} held · "
                       f"{'change' if committed else 'no change'}")
+
+            # PARK AGE + RE-POST — this row's two limbs. Both read the same
+            # `parked` set, so the age clock and the re-post can never disagree
+            # about which sessions are parked.
+            #
+            # ⚠️ Deliberately NOT gated on the stability gate or on `committed`.
+            # That gate withholds a set TRANSITION for a poll; a park is a park
+            # whether or not its transition has been committed, and gating either
+            # limb on it would delay both by a poll for no reason. It is also why
+            # neither limb touches `committed`: the LIVENESS line reports whether
+            # the GATED SET changed, and a re-post does not change it.
+            parked = parked_keys(state)
+            now = time.time()
+            advance_park_ages(park_ages, parked, now)
+            for sid8, minutes in aged_events(park_ages, now):
+                label, reason = "", ""
+                if sid8 in state:
+                    label, _, reason, _ = state[sid8]
+                print(f"AGED  {sid8}  {minutes}m", flush=True)
+                log_event(log_path, "AGED", sid8, label,
+                          f"{minutes}m parked [{reason}]")
+            repost_empty_parks(parked, entries, log_path)
+            # tmp + os.replace, same convention and same reason as the gated-set
+            # write above: a truncated park file restarts every clock, and the
+            # read path cannot tell that from a first run.
+            try:
+                os.makedirs(os.path.dirname(park_path), exist_ok=True)
+                tmp_path = park_path + ".tmp"
+                with open(tmp_path, "w") as fh:
+                    json.dump(park_ages, fh)
+                os.replace(tmp_path, park_path)
+            except OSError as exc:
+                print(f"WATCH WARN: could not write park-age state: {exc}",
+                      file=sys.stderr, flush=True)
             pending = key
         except Exception as exc:  # never let one bad poll kill the watch
             # stderr, never stdout: stdout is the event stream the `Monitor`

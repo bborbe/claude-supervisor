@@ -958,5 +958,219 @@ class LivenessRecordTest(unittest.TestCase):
             all("poll failed: RuntimeError" in r["detail"] for r in recs), recs)
 
 
+class ParkAgeTest(unittest.TestCase):
+    """The park-age clock — continuous park per REGISTRY STATUS, once each.
+
+    ⚠️ The keyed-on-status half is the load-bearing one. A clock keyed on the
+    watcher's gated SET would run once from the first park and never restart,
+    because `is_gated` holds a session's membership through a mid-turn `busy` by
+    design — so the SECOND park would never surface. Measured 2026-10-07: two
+    tracked sessions parked on fresh `AskUserQuestion`s inside a 30-minute window
+    and the arm delivered **0 events**, because neither park was a set transition.
+    """
+
+    T0 = 1_700_000_000.0
+    SID8 = "aaaa1111"
+
+    def test_aged_fires_once_at_each_threshold(self):
+        ages = {}
+        watch.advance_park_ages(ages, [self.SID8], self.T0)
+        self.assertEqual(watch.aged_events(ages, self.T0), [])
+        self.assertEqual(watch.aged_events(ages, self.T0 + 15 * 60),
+                         [(self.SID8, 15)])
+        self.assertEqual(watch.aged_events(ages, self.T0 + 16 * 60), [],
+                         "the 15-minute mark fires ONCE, not every poll after it")
+        self.assertEqual(watch.aged_events(ages, self.T0 + 60 * 60),
+                         [(self.SID8, 60)])
+        self.assertEqual(watch.aged_events(ages, self.T0 + 61 * 60), [])
+
+    def test_no_aged_for_a_park_that_clears_before_fifteen(self):
+        ages = {}
+        watch.advance_park_ages(ages, [self.SID8], self.T0)
+        watch.advance_park_ages(ages, [], self.T0 + 14 * 60)
+        self.assertEqual(watch.aged_events(ages, self.T0 + 14 * 60), [])
+        self.assertEqual(ages, {}, "a cleared park is dropped, not merely aged")
+
+    def test_a_continuing_park_keeps_its_start(self):
+        ages = {}
+        watch.advance_park_ages(ages, [self.SID8], self.T0)
+        watch.advance_park_ages(ages, [self.SID8], self.T0 + 60)
+        self.assertEqual(ages[self.SID8]["since"], self.T0,
+                         "a continuing park keeps its start, it does not restart")
+
+    def test_a_busy_interval_starts_a_new_park(self):
+        """THE SECOND-PARK CASE, and the reason the clock is not keyed on the set."""
+        ages = {}
+        watch.advance_park_ages(ages, [self.SID8], self.T0)
+        # Mid-turn: not parked. ⚠️ The gated SET still holds this session — that
+        # is the whole difference between the two keys.
+        watch.advance_park_ages(ages, [], self.T0 + 5 * 60)
+        # The worker asks a NEW question ten minutes after the first park began.
+        watch.advance_park_ages(ages, [self.SID8], self.T0 + 10 * 60)
+        self.assertEqual(watch.aged_events(ages, self.T0 + 15 * 60), [],
+                         "the second park is 5 minutes old, not 15 — a clock keyed "
+                         "on set membership would already have fired and would "
+                         "then stay silent for this park forever")
+        self.assertEqual(watch.aged_events(ages, self.T0 + 25 * 60),
+                         [(self.SID8, 15)],
+                         "the second park must surface its own escalation")
+
+
+class AgedEmissionTest(unittest.TestCase):
+    """`AGED` as the manager actually sees it — a STDOUT line, once each.
+
+    ⚠️ Unlike the `LIVENESS` record, `AGED` must go to stdout. Every stdout line
+    is a `Monitor` notification and therefore a full model turn — which is why the
+    liveness record is `events.jsonl`-only — but `AGED` is the opposite case: the
+    manager's instruction is to VOICE it, and a line written only to the log is
+    durable and useless, because nothing is woken by it.
+    """
+
+    PARKED = {"aaaa1111": ("A", "pick — 1. alpha", "registry:waiting", True)}
+
+    def _drive(self, scripted, clock):
+        seq, ticks = list(scripted), list(clock)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "probe",
+                                   lambda *a, **kw: seq.pop(0) if seq else {}), \
+                 mock.patch.object(watch, "repost_empty_parks",
+                                   lambda *a, **kw: []), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 mock.patch.object(watch.time, "time", lambda: ticks.pop(0)), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", str(len(scripted))])
+        return out.getvalue()
+
+    def test_the_aged_line_is_printed_once_at_fifteen_minutes(self):
+        t0 = 1_700_000_000.0
+        out = self._drive([self.PARKED] * 4,
+                          [t0, t0, t0 + 16 * 60, t0 + 17 * 60])
+        self.assertEqual(out.count("AGED"), 1, out)
+        self.assertIn("AGED  aaaa1111  15m", out,
+                      "two spaces after the kind, matching NEW GATE — " + out)
+
+
+class RepostTest(unittest.TestCase):
+    """The re-post — a parked session the store no longer holds gets a card back.
+
+    ⚠️ The producer is the WORKER, not the manager. A store item's session is its
+    `producer_id` (`who-needs-me.py:268`), so posting as the worker is what makes
+    the re-posted row attribute to the session that is actually parked — and what
+    routes the operator's answer back to it.
+    """
+
+    SID = "aaaa1111-0000-0000-0000-000000000000"
+    SID8 = "aaaa1111"
+    ENTRIES = {SID8: ("A", SID)}
+
+    def _run(self, open_items, parked=(SID8,)):
+        posted = []
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: open_items):
+                watch.repost_empty_parks(
+                    list(parked), self.ENTRIES,
+                    os.path.join(d, "events.jsonl"),
+                    post=lambda sid8, full, label: (
+                        posted.append((sid8, full)) or True))
+        return posted
+
+    def test_a_park_the_store_lost_is_re_posted(self):
+        self.assertEqual(self._run((set(), set())), [(self.SID8, self.SID)])
+
+    def test_an_open_item_for_the_worker_suppresses_the_re_post(self):
+        self.assertEqual(self._run(({self.SID}, set())), [],
+                         "the worker's own card is already open")
+
+    def test_our_own_re_post_suppresses_a_second_one(self):
+        self.assertEqual(self._run((set(), {"park:" + self.SID8})), [],
+                         "the stable dedup key is what makes this idempotent")
+
+    def test_a_failed_store_read_re_posts_nothing(self):
+        """The direction that matters: a dead store is not 'the store holds nothing'."""
+        self.assertEqual(self._run(None), [])
+
+    def test_nothing_parked_does_not_touch_the_store(self):
+        with mock.patch.object(
+                watch, "open_store_items",
+                side_effect=AssertionError("store read on an idle poll")):
+            self.assertEqual(
+                watch.repost_empty_parks([], self.ENTRIES, "/dev/null"), [])
+
+    def test_a_refused_post_is_not_recorded_as_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: (set(), set())):
+                out = watch.repost_empty_parks(
+                    [self.SID8], self.ENTRIES, os.path.join(d, "events.jsonl"),
+                    post=lambda *a: False)
+        self.assertEqual(out, [], "a refused post is not a re-post")
+
+
+class IncidentReplayTest(unittest.TestCase):
+    """SC4 — the 2026-10-07 incident, replayed to a catch.
+
+    Session `15fce333` raised an `AskUserQuestion` at 12:28:45 and the registry
+    read `waiting` from then on; the store held its item and then dropped it while
+    the worker stayed parked. Nothing surfaced the park: the watcher's one
+    `NEW GATE` had fired at 14:30:30, and it emits on a transition, never again on
+    age. This drives the same shapes against the same clock and asserts both
+    limbs fire — an `AGED 15m` by 12:44, and a re-post once the store loses the
+    card.
+    """
+
+    SID = "15fce333-01cd-403e-82b8-5593f01cfb61"
+    SID8 = "15fce333"
+    TASK = "Widen the Dev mdm-contact-v1 Read Allowlist"
+
+    @staticmethod
+    def _at(hh, mm, ss=0):
+        return time.mktime((2026, 10, 7, hh, mm, ss, 0, 0, -1))
+
+    def test_the_incident_replays_to_a_re_post_and_an_aged_15m(self):
+        parked = {self.SID8: (self.TASK, "pick — 1. alpha",
+                              "registry:waiting", True)}
+        clock = [self._at(12, 28, 45), self._at(12, 29), self._at(12, 43, 45),
+                 self._at(12, 44), self._at(15, 29), self._at(15, 30)]
+        # The store holds the worker's item for the first four polls, loses it on
+        # the fifth, and holds OUR re-post from the sixth — which is what makes
+        # the re-post idempotent rather than once-per-poll.
+        items = [({self.SID}, set())] * 4 + [(set(), set()),
+                                             (set(), {"park:" + self.SID8})]
+        ticks, seq_items, posted = list(clock), list(items), []
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            tasks = os.path.join(d, "tasks")
+            os.makedirs(tasks)
+            with open(os.path.join(d, "t.txt"), "w") as fh:
+                fh.write(self.TASK + "\n")
+            with open(os.path.join(tasks, self.TASK + ".md"), "w") as fh:
+                fh.write(f"---\nclaude_session_id: {self.SID}\n---\n")
+            with mock.patch.object(watch, "probe",
+                                   lambda *a, **kw: parked), \
+                 mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: seq_items.pop(0)), \
+                 mock.patch.object(watch, "post_repost",
+                                   lambda sid8, full, label, **kw: (
+                                       posted.append((sid8, full)) or True)), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 mock.patch.object(watch.time, "time",
+                                   lambda: ticks.pop(0)), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", tasks,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", str(len(clock))])
+        self.assertIn(f"AGED  {self.SID8}  15m", out.getvalue(),
+                      "the park must be escalated by 12:44: " + out.getvalue())
+        self.assertEqual(posted, [(self.SID8, self.SID)],
+                         "the store losing the card must produce exactly one "
+                         "re-post, not one per poll")
+
+
 if __name__ == "__main__":
     unittest.main()
