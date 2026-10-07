@@ -2975,5 +2975,63 @@ page_type: topic
         self.assertEqual(mod.members_of(path), ["BeforeTheNote", "AfterTheNote"])
 
 
+class TestRosterOwnerTruncation(Base):
+    """The roster fallback's name match — a truncated registry name still resolves.
+
+    ⚠️ **The measured failure this pins.** `roster_owner` fires only for a row whose id
+    set is EMPTY, and it compared the registry name to the task title with an equality
+    test. The registry holds a *truncated* title — 46 characters against 108, measured
+    2026-10-07 — so the test missed and the row read `none`, i.e. unowned, which is the
+    reading that opens the duplicate spawn this fallback exists to prevent.
+
+    The guard is asserted from both sides: the prefix must be long enough to be a
+    truncation, and a short title must still match exactly.
+    """
+
+    LONG = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry Name "
+            "Is Write-Once and the Title Is Not")
+
+    def owner(self, title, *names, alive=True):
+        registry = {f"s{i}": {"name": n, "alive": alive} for i, n in enumerate(names)}
+        return self.m.roster_owner(title, registry, {})
+
+    def test_a_truncated_name_still_resolves(self):
+        """The measured case: the registry holds the title cut short."""
+        self.assertEqual(
+            self.owner(self.LONG, "⚙ A Renamed Task's Session Becomes Unaddressable"),
+            self.m.LIVENESS_LIVE)
+
+    def test_an_exact_short_title_still_resolves(self):
+        """The length floor must not break a genuinely short title — equality is
+        accepted at any length, only the PREFIX branch is gated."""
+        self.assertEqual(self.owner("Some Task", "⚙ Some Task"), self.m.LIVENESS_LIVE)
+
+    def test_a_short_role_name_is_not_read_as_a_truncation(self):
+        """A false match here withholds a legitimate spawn, so it is the worse error."""
+        self.assertEqual(
+            self.owner("boss of nothing in particular", "boss"), self.m.LIVENESS_NONE)
+
+    def test_an_unrelated_name_does_not_resolve(self):
+        self.assertEqual(self.owner(self.LONG, "Fleet Manager"), self.m.LIVENESS_NONE)
+
+    def test_a_dead_entry_never_owns_the_row(self):
+        """Pre-existing rule, re-pinned because the match now admits more names."""
+        self.assertEqual(
+            self.owner(self.LONG, "⚙ A Renamed Task's Session Becomes Unaddressable",
+                       alive=False),
+            self.m.LIVENESS_NONE)
+
+    def test_the_truncation_floor_agrees_with_fleet_board(self):
+        """⚠️ `_TRUNCATION_MIN_PREFIX` is duplicated in `fleet-board.py` on purpose —
+        neither script imports the other — so the two values are pinned together here.
+        Drift would make the board and this gate disagree about whether a row has an
+        owner, which is the one thing both exist to answer the same way."""
+        path = os.path.join(os.path.dirname(_SCRIPT), "fleet-board.py")
+        spec = importlib.util.spec_from_file_location("fleet_board_floor_probe", path)
+        fb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fb)
+        self.assertEqual(self.m._TRUNCATION_MIN_PREFIX, fb._TRUNCATION_MIN_PREFIX)
+
+
 if __name__ == "__main__":
     unittest.main()
