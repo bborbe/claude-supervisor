@@ -495,22 +495,20 @@ Headline only: what changed and what stopped you.
 # ⚠️ A spoken entry is tagged with the RESOLVED SESSION NAME, not the UUID, so the
 # gate must grep the name — grepping $CLAUDE_CODE_SESSION_ID matched nothing in ANY
 # session, and the gate silently read "voice off" in exactly the sessions voice was
-# on for. Measured 2026-10-07: an explicit `sender: "<uuid>"` was stored as the
-# session title, and of the 9 distinct senders in the buffer not one was a UUID.
-# ⚠️ The UUID is still matched too: the HTTP fallback below sends no
+# on for. Measured 2026-10-07: a call passing `sender: "<uuid>"` was stored under
+# the session title, and of the 9 distinct senders in the buffer not one was a UUID.
+# ⚠️ The UUID is matched too: the HTTP fallback below carries no
 # X-Claude-Code-Session-Id header, and the server resolves a name ONLY from that
-# header, so a verdict spoken through the fallback lands under the raw UUID.
-# The registry name carries a leading "⚙ " that /state carries only sometimes, so
-# strip it from both sides; match literally (-F) — names carry regex metacharacters.
+# header — so a verdict spoken through the fallback lands under the raw UUID.
+# The name is matched verbatim: /state carries the registry name byte-for-byte,
+# a leading "⚙ " included. Match literally (-F) — names carry regex metacharacters.
 SESSFILE="${HOME}/.claude/sessions/${CLAUDE_PID}.json"
 NAME="$( [ -n "$CLAUDE_PID" ] && [ -f "$SESSFILE" ] \
-  && python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("name") or "")' "$SESSFILE" 2>/dev/null \
-  | sed 's/^⚙ *//' )"
+  && python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("name") or "")' "$SESSFILE" 2>/dev/null )"
 if [ -z "$NAME" ]; then
   echo "🔇 voice unknown — no session name for CLAUDE_PID=${CLAUDE_PID:-unset} ($SESSFILE); treat as off"
 else
   curl -s --max-time 5 http://127.0.0.1:12000/state \
-    | sed 's/"sender":"⚙ /"sender":"/g' \
     | grep -cF -e "\"sender\":\"$NAME\"" -e "\"sender\":\"$CLAUDE_CODE_SESSION_ID\""
 fi
 ```
@@ -540,7 +538,7 @@ Never speak in a session that has never spoken — that is the exact noise the s
 - Terse, one idea per sentence. No markdown, URLs, paths, code, or hashes — describe them in words.
 - Lead with the recommendation and say the word "recommended".
 - Fire-and-forget: one `mcp__tts__say` call. Never poll `get_status`, never block on it.
-- **Always pass `sender`** — `$CLAUDE_CODE_SESSION_ID`. The server normally resolves it to this session's **name**, which is what the detection step above greps for, and uses the literal value only when it cannot resolve a name itself. A spoken verdict with no sender at all may not be attributable, so pass it on every call.
+- **Always pass `sender`** — `$CLAUDE_CODE_SESSION_ID`. Which value the next run's gate actually finds depends on the path, and it matches **either**: the `mcp__tts__say` tool replaces the value with this session's **name** (resolved from the session-id header the tool carries), while the HTTP fallback below sends no such header and so stores the raw UUID. A spoken verdict with no `sender` at all may not be attributable, so pass it on every call.
 
 **If `mcp__tts__say` errors with `No such tool available`**, the session's MCP binding dropped — the server is fine and restarting it will not help. Fall through to HTTP so the verdict is still heard:
 
