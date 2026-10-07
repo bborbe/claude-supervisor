@@ -115,3 +115,8 @@ output — the fleet table.
   `docs/fleet-surface.md` § Session roles is the canonical statement.
 - **A manager does not execute a worker's task.** It spawns, drives, answers and reaps
   workers; the task's work happens in the worker's own session.
+- **A manager starts or resumes a worker with `/supervisor:open`.** For a worker on a vault
+  task, that is `/supervisor:open --task` — the path that reads the task's recorded session
+  and writes it back. Reach for a bare manager-spawn (a direct `spawn_agent` call) **only**
+  when the brief has no task file; outside that case, never call `spawn_agent` directly.
+  `commands/manager-spawn.md` is the canonical statement of that split.
