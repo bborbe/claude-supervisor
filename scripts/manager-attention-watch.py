@@ -982,6 +982,15 @@ def main(argv=None):
 
     state_path = state_path_for(args.state, args.tracked)
     log_path = os.path.join(args.state, "events.jsonl")
+    # The tracked set's own name, for the liveness record's subject slot — the
+    # same `<topic>` the runbook's tick marker carries (§ Sweep output). Derived
+    # from `--tracked`, so two managers sharing a `--state` still write
+    # attributable lines.
+    tracked_name = os.path.basename(args.tracked)
+    for suffix in (".tracked.txt", ".tracked.new", ".txt"):
+        if tracked_name.endswith(suffix):
+            tracked_name = tracked_name[: -len(suffix)]
+            break
 
     try:
         with open(state_path) as fh:
@@ -1013,11 +1022,14 @@ def main(argv=None):
             state = probe(args.tracked, args.tasks_dir, args.projects_root,
                           args.sessions_dir, warned, args.live_dir)
             key = gated_keys(state)
+            # Counted every poll, not only under `--once`: the liveness record
+            # reports both halves, and a HELD session is exactly what makes a
+            # quiet poll correct rather than suspicious.
+            held = sorted(s for s, v in state.items() if v[3] is None)
             if args.once:
                 for sid8 in key:
                     label, detail, reason, _ = state[sid8]
                     print(f"GATED {sid8} [{reason}] {label}: {detail}")
-                held = sorted(s for s, v in state.items() if v[3] is None)
                 print(f"gated: {len(key)}  held: {len(held)}")
                 return 0
             # STABILITY GATE — PER SESSION. A worker mid-turn flips between "has
@@ -1040,9 +1052,9 @@ def main(argv=None):
             # set re-fires an unchanged gate whenever any OTHER session leaves it
             # — measured 2026-10-01, one session dropped out and another,
             # untouched, was re-printed as NEW GATE.
+            committed = False
             if pending is not None:
                 stable = stable_sessions(prev, pending, key)
-                committed = False
                 for kind, sid8, label, detail in transitions(sorted(prev), key, state):
                     if sid8 not in stable:
                         continue
@@ -1072,6 +1084,35 @@ def main(argv=None):
                     with open(tmp_path, "w") as fh:
                         json.dump(sorted(prev), fh)
                     os.replace(tmp_path, state_path)
+            # LIVENESS — one record per poll, written whether or not a gate was
+            # found, and whether or not anything was committed.
+            #
+            # ⚠️ **This is the fix for a silence that was CORRECT and still read as
+            # death.** Measured 2026-10-06: an arm emitted nothing for 82 minutes
+            # across a live window and the filing could not tell an inert arm from
+            # an over-suppressing gate from a genuinely quiet one. It was the third
+            # — `busy`/`shell` are HELD, so no `CLEARED` was owed, and the one
+            # transition that WAS owed (a genuine clear) was emitted on time. The
+            # commit path was never wrong; the arm simply had no way to say "I
+            # polled and nothing happened", so the log's newest line was the last
+            # transition and its AGE was unreadable as anything but a fault.
+            #
+            # ⚠️ **`events.jsonl`, never stdout.** Every stdout line is a `Monitor`
+            # notification and therefore a full model turn — a per-poll line there
+            # would cost 30 turns per 30-minute arm. The event log is the surface
+            # the manager is already told to read (`commands/manager-loop.md`
+            # step 7), and nothing consumes it programmatically, so a fourth `kind`
+            # is additive rather than a schema change. `HELD` is recorded but never
+            # announced for the same reason; this is its counterpart on the
+            # liveness axis.
+            #
+            # Read it as the runbook reads the loop's own marker (§ Sweep output):
+            # the line's PRESENCE answers *alive or stuck?* and its AGE is what
+            # answers it after the arm has died — a dead arm stops writing here,
+            # so the newest record's timestamp is the arm's last heartbeat.
+            log_event(log_path, "LIVENESS", "", tracked_name,
+                      f"{len(key)} gated · {len(held)} held · "
+                      f"{'change' if committed else 'no change'}")
             pending = key
         except Exception as exc:  # never let one bad poll kill the watch
             # stderr, never stdout: stdout is the event stream the `Monitor`
@@ -1080,6 +1121,16 @@ def main(argv=None):
             # WARN lines on stderr.
             print(f"WATCH ERROR: {type(exc).__name__}: {exc}",
                   file=sys.stderr, flush=True)
+            # ⚠️ **A FAILED poll is the one case where staying quiet is MOST
+            # misleading, so it gets a liveness record too.** The record above
+            # exists so a quiet arm is distinguishable from a dead one; an arm
+            # that raises on every poll writes no record at all, which is the
+            # same blank surface — and this is the path where the reader is most
+            # likely to conclude "dead" about a process that is very much alive.
+            # stderr is not durable for a `Monitor`-captured arm, so without this
+            # the failure survives only in a stream nobody persists.
+            log_event(log_path, "LIVENESS", "", tracked_name,
+                      f"poll failed: {type(exc).__name__}")
         polls += 1
         if args.max_polls is not None and polls >= args.max_polls:
             return 0
