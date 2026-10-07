@@ -185,6 +185,18 @@ class MainTest(unittest.TestCase):
         self.assertEqual(payload["installed"], "0.114.1")
         self.assertEqual(payload["rows"][0]["state"], "stale")
 
+    def test_reload_carries_its_results_beside_the_fresh_rows(self):
+        """`census` rebuilds every row, so the lever's outcome cannot live on the old ones."""
+        with mock.patch.object(census_mod, "panes_for_pids", return_value={11: "203"}), \
+                mock.patch.object(census_mod, "reload_pane", return_value={"pane": "203", "ok": True,
+                                                                           "why": "marker advanced"}):
+            code, out = self.run_main("--json", "--reload", "--sessions-json", str(self.sessions),
+                                      "--cache-dir", str(self.cache), "--installed-json", str(self.installed))
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["lever"]["reached"], 1)
+        self.assertTrue(payload["lever"]["results"]["bbbb2222"]["ok"])
+
     def test_unreadable_sessions_file_is_an_error_not_an_empty_fleet(self):
         code, _ = self.run_main("--sessions-json", str(pathlib.Path(self.dir) / "nope.json"),
                                 "--cache-dir", str(self.cache), "--installed-json", str(self.installed))

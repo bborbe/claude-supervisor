@@ -315,31 +315,39 @@ def main(argv=None):
             row["pane"] = panes.get(row["pid"])
             row["jump"] = f"/supervisor:jump {row['pane']}" if row["pane"] else None
 
+    lever = None
     if args.reload:
+        results = {}
         reached = 0
         for row in stale:
             pane = row.get("pane")
             if not pane:
-                row["reload"] = {"ok": False, "why": "no resolvable pane"}
+                results[row["session_id"]] = {"ok": False, "why": "no resolvable pane"}
                 continue
             marker = os.path.join(args.cache_dir, args.marketplace, args.plugin,
                                   row["loaded"], ".in_use", str(row["pid"]))
-            row["reload"] = reload_pane(pane, marker)
-            reached += 1 if row["reload"]["ok"] else 0
+            results[row["session_id"]] = reload_pane(pane, marker)
+            reached += 1 if results[row["session_id"]]["ok"] else 0
         if not args.json:
             for row in stale:
-                result = row.get("reload") or {}
+                result = results[row["session_id"]]
                 verdict = "reloaded" if result.get("ok") else "not reloaded"
                 print(f"  {row['sid8']}  pane {row.get('pane') or '—'}  {verdict}  ({result.get('why')})")
-        # Re-read after the lever so the delta is measured, not inferred.
+        # Re-read after the lever so the delta is measured, not inferred. The results are
+        # carried beside the fresh rows rather than onto them — `census` rebuilds every row,
+        # so attaching `reload` to the pre-lever ones would drop it from `--json` entirely.
         rows = census(sessions, installed, args.cache_dir, args.marketplace, args.plugin)
-        if not args.json:
-            print(f"lever: reached {reached} pane(s)")
+        lever = {"reached": reached, "results": results}
 
     if args.json:
-        print(json.dumps({"installed": installed, "rows": rows}, indent=2))
+        payload = {"installed": installed, "rows": rows}
+        if lever is not None:
+            payload["lever"] = lever
+        print(json.dumps(payload, indent=2))
         return 0
     print(render(rows, installed))
+    if lever is not None:
+        print(f"lever: reached {lever['reached']} pane(s)")
     return 0
 
 
