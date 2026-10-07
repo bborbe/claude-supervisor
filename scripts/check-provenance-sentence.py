@@ -24,9 +24,15 @@ Two assertions, both required:
      present exactly once in each carrier and byte-identical between them — indentation
      stripped, because the two files nest at different depths and the paragraph is
      carried at each one's own.
-  2. **Neither carrier names the snapshot as the leg's provenance.** This is the half (1)
+  2. **No carrier names the snapshot as the leg's provenance.** This is the half (1)
      cannot cover: both carriers could agree on the *wrong* sentence, and a lockstep edit
-     is exactly what a rename produces.
+     is exactly what a rename produces. It runs over **every** file that states the
+     contract — the two paragraph carriers plus `agents/manager-drive.md`,
+     `commands/manager-status.md` and `docs/fleet-surface.md` — because the contract is
+     carried at four dispatch sites and the drift this guard exists to stop was found by
+     eye at one of them. The paragraph comparison stays on the two verbatim carriers;
+     the others state the contract in their own wording, so there is no span to compare,
+     and the negative half is what catches a rename there.
 
 **What this proves, and what it does not.** It proves the two carriers cannot silently
 diverge and cannot jointly assert the old producer. It cannot prove the paragraph is
@@ -46,9 +52,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # The paragraph's own opening words, and the end of the span this guard compares. The
-# span is bounded rather than line-wide because the two carriers legitimately differ
-# after it ("this sweep's own" vs "this run's own classification") — a divergence that
-# pre-dates the guard and is outside the shared contract.
+# span is bounded rather than line-wide because each carrier continues into its own
+# prose after it — the loop's sentence runs on into the dispatch's remaining inputs,
+# which the drive command states differently. Bounding it keeps the comparison on the
+# shared contract rather than on each command's own text.
 START = "**Both halves come from the store, which is their single producer**"
 END = "(single home: `docs/fleet-surface.md` § Session end)."
 
@@ -57,9 +64,24 @@ OLD_PRODUCER = re.compile(
     r"`recorded_at` from the snapshot|snapshot provenance:"
 )
 
-COMMANDS = (
+# The two commands carry the paragraph *verbatim*, which is what makes a byte comparison
+# meaningful — and why they are the only two here. `agents/manager-drive.md` states the
+# same contract in its own wording at five sites (`<constraints>`, clause (0), the
+# failure-mode bullet, the report template, the closing summary), so there is no shared
+# span to compare there; `commands/manager-status.md` and `docs/fleet-surface.md` likewise
+# carry it in their own words. All three are covered by the negative assertion below,
+# which is the half that catches a rename — the paragraph comparison catches a *partial*
+# rename, the negative one catches a rename that reached every carrier.
+PARAGRAPH_CARRIERS = (
     "commands/manager-loop.md",
     "commands/manager-drive.md",
+)
+
+# Every file that states this contract; the negative assertion runs over all of them.
+ALL_CARRIERS = PARAGRAPH_CARRIERS + (
+    "agents/manager-drive.md",
+    "commands/manager-status.md",
+    "docs/fleet-surface.md",
 )
 
 
@@ -83,7 +105,7 @@ def paragraph(path: Path) -> tuple[str | None, str | None]:
 
 def main() -> int:
     found: dict[str, str] = {}
-    for rel in COMMANDS:
+    for rel in PARAGRAPH_CARRIERS:
         span, err = paragraph(REPO / rel)
         if err or span is None:
             print(f"provenance-sentence FAILED: {err or 'paragraph() returned no span'}", file=sys.stderr)
@@ -100,8 +122,12 @@ def main() -> int:
             )
             return 1
 
-    for rel in COMMANDS:
-        for lineno, line in enumerate((REPO / rel).read_text(encoding="utf-8").splitlines(), 1):
+    for rel in ALL_CARRIERS:
+        path = REPO / rel
+        if not path.exists():
+            print(f"provenance-sentence FAILED: {rel} does not exist", file=sys.stderr)
+            return 1
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if OLD_PRODUCER.search(line):
                 print(
                     f"provenance-sentence FAILED: {rel}:{lineno} still names the snapshot "
@@ -112,8 +138,8 @@ def main() -> int:
                 return 1
 
     print(
-        f"provenance-sentence ok: {len(COMMANDS)} command(s) carry the paragraph, "
-        f"byte-identical; neither names the snapshot as the leg's provenance"
+        f"provenance-sentence ok: {len(PARAGRAPH_CARRIERS)} command(s) carry the paragraph "
+        f"byte-identical; {len(ALL_CARRIERS)} carrier(s) checked for the old provenance"
     )
     return 0
 

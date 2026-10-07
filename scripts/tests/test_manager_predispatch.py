@@ -1159,9 +1159,20 @@ class TestStorage(Base):
         self.save("ATopic")
         rc, out = self.save("ATopic")
         self.assertEqual(rc, self.m.EXIT_NOCHANGE)
-        self.assertIn("store:    %s" % self.m.state_path("ATopic"), out)
+        # Pinned as whole lines, exactly as the sibling does — asserting only the two path
+        # prefixes passes under *any* labelling, including a swap, which is the defect
+        # (2026-10-05: the snapshot named as the `recorded_at` source while the store's
+        # value was passed). The labels are the deliverable on this branch too, and this
+        # is the common tick.
         self.assertIn(
-            "snapshot: %s" % self.m.loop_snapshot_path(self.vault, "ATopic"), out
+            "store:    %s  (recorded_at source, no bucket sets staged this tick)"
+            % self.m.state_path("ATopic"),
+            out,
+        )
+        self.assertIn(
+            "snapshot: %s  (row source)"
+            % self.m.loop_snapshot_path(self.vault, "ATopic"),
+            out,
         )
 
 
