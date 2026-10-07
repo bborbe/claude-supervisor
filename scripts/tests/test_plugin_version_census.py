@@ -276,6 +276,19 @@ class ComposerTest(unittest.TestCase):
         text = '❯ \x1b[0;2mold\n❯ draft ok'
         self.assertFalse(census_mod.pane_is_ready(text))
 
+    def test_truecolor_is_not_faint(self):
+        """`38;2;r;g;b` carries a bare `2` as a colour sub-parameter, not the attribute."""
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[38;2;255;0;0mdraft ok"))
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[38;5;2mdraft ok"))
+
+    def test_a_dim_span_does_not_excuse_typed_text_after_the_reset(self):
+        """The whole visible remainder must be dim, not merely contain a dim span."""
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[0;2mghost\x1b[0mdraft ok"))
+        self.assertTrue(census_mod.pane_is_ready("❯ \x1b[0;2mTry \"x\"\x1b[0m"))
+
+    def test_faint_is_cancelled_by_22(self):
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[2mghost\x1b[22mdraft ok"))
+
 
 class ReloadPaneTest(unittest.TestCase):
     """The lever's confirmation is the NEWEST marker for the pid moving — never the
@@ -296,8 +309,21 @@ class ReloadPaneTest(unittest.TestCase):
 
     def ready_pane(self, cmd, **kwargs):
         if cmd[2] == "get-text":
+            # The flag is the discriminator: without it the placeholder is indistinguishable
+            # from typed text, the gate is always false, and the whole suite would still pass.
+            self.assertIn("--escapes", cmd, "readiness must read the styled pane text")
             return mock.Mock(returncode=0, stdout="❯ ", stderr="")
         return mock.Mock(returncode=0, stdout="", stderr="")
+
+    def test_a_failed_get_text_is_reported_as_a_read_failure(self):
+        """Never `composer not empty` — that would re-enter the fleet-wide misdiagnosis."""
+        def run(cmd, **kwargs):
+            if cmd[2] == "get-text":
+                return mock.Mock(returncode=1, stdout="", stderr="unknown flag --escapes")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        result = self.reload(run)
+        self.assertFalse(result["ok"])
+        self.assertIn("get-text exited 1", result["why"])
 
     def test_success_is_a_new_marker_in_the_new_version_directory(self):
         """The realistic reload: a NEW entry appears and the OLD one is untouched."""

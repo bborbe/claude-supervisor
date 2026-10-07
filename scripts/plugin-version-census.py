@@ -77,13 +77,62 @@ def _plain(line):
     return _SGR.sub("", line)
 
 
-def _is_dim(segment):
-    """True when any SGR sequence in `segment` carries attribute 2 (faint).
+def _sgr_attrs(escape):
+    """The parameter list of an SGR (`…m`) escape, as ints. `[]` for anything else."""
+    if not escape.endswith("m"):
+        return []
+    body = escape[2:-1]
+    return [int(p) for p in body.split(";") if p.isdigit()]
 
-    Read as a parameter list rather than a substring: `2` must be one whole attribute, so
-    `[0;2m` is dim and `[0;24m` (underline off) is not.
+
+def _visible_is_dim(segment):
+    """True when every visible character in `segment` is drawn faint (SGR 2), and some is.
+
+    ⚠️ **Parsed positionally, never by membership.** A bare `2` is a *parameter* in
+    `38;2;r;g;b` (truecolor) and in `38;5;2` (256-colour index 2) as well as the faint
+    attribute, so a `2 in params` test reads **every truecolor escape as faint** — and a
+    composer holding the operator's colourised text would then read as empty, which is the
+    one thing this gate exists to refuse. `38`/`48` introduce a colour whose sub-parameters
+    are skipped; `2` sets faint and `22` cancels it.
+
+    ⚠️ **Scoped to the visible text, not the whole segment.** `❯ \\x1b[0;2mghost\\x1b[0mdraft ok`
+    carries a dim span *and* real typed text; an any-dim-span test calls that empty. Dim must
+    hold for every visible character, so a reset followed by typed text fails it.
     """
-    return any("2" in attrs.split(";") for attrs in _SGR_ATTRS.findall(segment))
+    dim = False
+    saw_visible = False
+    pos = 0
+    for match in _SGR.finditer(segment):
+        for ch in segment[pos:match.start()]:
+            if not ch.isspace():
+                saw_visible = True
+                if not dim:
+                    return False
+        params = _sgr_attrs(match.group(0))
+        index = 0
+        while index < len(params):
+            param = params[index]
+            if param in (38, 48):          # colour: skip its sub-parameters
+                index += 1
+                if index < len(params) and params[index] == 5:
+                    index += 2             # 38;5;n
+                elif index < len(params) and params[index] == 2:
+                    index += 4             # 38;2;r;g;b
+                continue
+            if param == 0:              # reset: clears faint along with every other attribute
+                dim = False
+            elif param == 2:
+                dim = True
+            elif param == 22:
+                dim = False
+            index += 1
+        pos = match.end()
+    for ch in segment[pos:]:
+        if not ch.isspace():
+            saw_visible = True
+            if not dim:
+                return False
+    return saw_visible
 
 
 def installed_version(path=DEFAULT_INSTALLED, plugin=DEFAULT_PLUGIN, marketplace=DEFAULT_MARKETPLACE):
@@ -292,7 +341,7 @@ def pane_is_ready(text):
     plain = _plain(line)
     if plain[len(COMPOSER):].strip() == "":
         return True
-    return _is_dim(line[line.index(COMPOSER) + len(COMPOSER):])
+    return _visible_is_dim(line[line.index(COMPOSER) + len(COMPOSER):])
 
 
 def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
@@ -326,11 +375,19 @@ def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
     deadline = time.time() + RELOAD_READY_TIMEOUT
     while time.time() < deadline:
         try:
-            text = subprocess.run(["wezterm", "cli", "get-text", "--pane-id", str(pane_id), "--escapes"],
-                                  capture_output=True, text=True, timeout=20).stdout
-        except (OSError, subprocess.SubprocessError):
-            text = ""
-        if pane_is_ready(text):
+            probe = subprocess.run(["wezterm", "cli", "get-text", "--pane-id", str(pane_id), "--escapes"],
+                                   capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"pane": pane_id, "ok": False, "why": f"get-text failed: {exc}"}
+        # ⚠️ A non-zero exit is a READ failure, not a busy pane. Discarding the code would
+        # make `stdout` empty, `pane_is_ready("")` false, and the loop report `composer not
+        # empty` for every stale row — the same collapse-into-empty `_pid_ttys` was fixed
+        # for, re-entered under a new cause. An older `wezterm` rejecting `--escapes` lands
+        # exactly here.
+        if probe.returncode != 0:
+            return {"pane": pane_id, "ok": False,
+                    "why": f"get-text exited {probe.returncode}: {probe.stderr.strip()}"}
+        if pane_is_ready(probe.stdout):
             break
         time.sleep(1)
     else:
