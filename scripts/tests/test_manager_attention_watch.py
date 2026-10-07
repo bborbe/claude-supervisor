@@ -851,5 +851,67 @@ class ParkedModalProbeTest(unittest.TestCase):
             fx.cleanup()
 
 
+class LivenessRecordTest(unittest.TestCase):
+    """A poll that finds nothing still says so.
+
+    The defect this closes is not a wrong event but a MISSING one. Measured
+    2026-10-06: an arm emitted nothing for 82 minutes, and the filing could not
+    separate an inert arm from an over-suppressing gate from a correctly quiet
+    one. It was the third — `busy`/`shell` are HELD, so no `CLEARED` was owed,
+    and the one transition that WAS owed was emitted on time. The commit path was
+    never wrong. But with no per-poll line, the log's newest record was the last
+    TRANSITION, and its age was unreadable as anything but a fault.
+
+    So the assertion is the honest one: **N quiet polls produce N records**, which
+    is what makes "alive and quiet" a readable state instead of an inference.
+    """
+
+    GATED = {"aaaa1111": ("A", "pick — 1. alpha", "idle+closer", True)}
+
+    def _drive(self, scripted):
+        """Run main() over a scripted probe sequence; return events.jsonl records."""
+        seq = list(scripted)
+        with tempfile.TemporaryDirectory() as d:
+            state = os.path.join(d, "state")
+            with mock.patch.object(watch, "probe",
+                                   lambda *a, **kw: seq.pop(0) if seq else {}), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "my-topic.tracked.txt"),
+                            "--tasks-dir", d,
+                            "--state", state,
+                            "--max-polls", str(len(scripted))])
+            with open(os.path.join(state, "events.jsonl"), encoding="utf-8") as fh:
+                return [json.loads(line) for line in fh if line.strip()]
+
+    def test_every_quiet_poll_still_writes_a_liveness_record(self):
+        """The whole point: three quiet polls are three lines, not silence."""
+        recs = self._drive([{}, {}, {}])
+        live = [r for r in recs if r["kind"] == "LIVENESS"]
+        self.assertEqual(len(live), 3, recs)
+        self.assertTrue(all(r["detail"].endswith("· no change") for r in live), live)
+
+    def test_the_liveness_record_names_the_tracked_set(self):
+        """Two managers sharing a --state must still write attributable lines."""
+        recs = self._drive([{}])
+        self.assertEqual(recs[0]["task"], "my-topic", recs[0])
+
+    def test_a_committing_poll_says_change(self):
+        """The pair that makes the quiet line meaningful — a change is not
+        reported as `no change`, so the field discriminates rather than
+        decorating every record identically."""
+        recs = self._drive([{}, self.GATED, self.GATED])
+        live = [r["detail"] for r in recs if r["kind"] == "LIVENESS"]
+        self.assertTrue(any(d.endswith("· change") for d in live), live)
+        self.assertTrue(any(d.endswith("· no change") for d in live), live)
+
+    def test_a_held_session_is_counted_not_hidden(self):
+        """A HELD session is exactly what makes a quiet poll CORRECT rather than
+        suspicious, so it is reported rather than folded into the gated count."""
+        busy = {"aaaa1111": ("A", "held:busy", "held:busy", None)}
+        recs = self._drive([busy])
+        self.assertIn("0 gated · 1 held", recs[0]["detail"], recs[0])
+
+
 if __name__ == "__main__":
     unittest.main()
