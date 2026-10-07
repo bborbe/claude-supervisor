@@ -56,6 +56,18 @@ SITE_LIST = {
     # only globbed the registry and called `os.kill`, neither of which shells out.
     ("session-liveness.py", "_ps_starts"),
     ("stop-probe.py", "gate_processes"),
+    # added 2026-10-07 — `plugin-version-census.py`, the fleet reading of which plugin
+    # version each live session serves. Its two READS keep the three-state contract and are
+    # driven below: `wezterm_panes` (the pane map the jump target is joined through) and
+    # `_pid_ttys` (the `ps` half of that join). ⚠️ `_pid_ttys` shipped returning `{}` for a
+    # failed query, which is the collapse this check exists to catch — caught here, on the
+    # first run, in a script whose whole output is a count.
+    # ⚠️ `reload_pane` is enumerated because it IS a transport call site (activate-pane /
+    # get-text / send-text) and the mechanism derives it, but it is an ACTION, not a read:
+    # it returns `{ok, why}` and names every failure, so it is deliberately not driven into
+    # the three states below. It is listed here so the mechanism and this enumeration agree.
+    ("plugin-version-census.py", "wezterm_panes"), ("plugin-version-census.py", "_pid_ttys"),
+    ("plugin-version-census.py", "reload_pane"),
     ("who-needs-me.py", "main"), ("who-needs-me.py", "wezterm_panes"),
     # in-repo callers that hold no transport call of their own
     ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change
@@ -117,6 +129,8 @@ POPULATED = {
     ("fs", "live_processes"): "claude --settings {} --model m",
     ("sp", "gate_processes"): "101 00:01 sweep-gate",
     ("oi", "live_panes"): '[{"pane_id": "204", "title": "t"}]',
+    ("pvc", "wezterm_panes"): '[{"pane_id": "204", "tty_name": "/dev/ttys001"}]',
+    ("pvc", "_pid_ttys"): "101 ttys001",
 }
 
 
@@ -187,6 +201,7 @@ def main():
             ("fs", "fleet-sessions.py"),
             ("sp", "stop-probe.py"),
             ("oi", "open-items.py"),
+            ("pvc", "plugin-version-census.py"),
         )
     }
 
@@ -211,6 +226,7 @@ def main():
         ("jmp", "wezterm_panes", ()), ("jmp", "pane_sessions", ({},)),
         ("fs", "live_processes", ()), ("sp", "gate_processes", ()),
         ("oi", "live_panes", ()),
+        ("pvc", "wezterm_panes", ()), ("pvc", "_pid_ttys", ([1],)),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")

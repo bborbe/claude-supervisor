@@ -118,6 +118,39 @@ only if, after `/reload-plugins`, the served body still cites the old version pa
 *a Claude Code guide* owns the per-artifact-class lever table; this section
 names the lever and points at that table rather than copying it.
 
+**The fleet reading is `scripts/plugin-version-census.py` — the probe above answers "am I
+stale", this answers "who is".** It takes the live sessions from `session-liveness.py --list
+--json` (never from the cache — see the trap below), resolves each pid's **newest** `.in_use`
+marker, and prints one header plus one line per stale session, each carrying the jump target
+resolved through the tty join:
+
+```
+installed: 0.114.1 · live: 44 · stale: 21
+  65d26b6c  loaded 0.114.0  Attention Manager  /supervisor:jump 3
+```
+
+`--json` emits the same rows for a caller that renders its own table. **`--reload` is the
+lever**: it activates each stale session's pane, types `/reload-plugins`, and confirms the
+reload by the marker's mtime advancing — never by the pane's echo, which is identical whether
+the session was idle at its prompt or mid-turn.
+
+⚠️ **The marker count is not the session count.** A reload writes a new `.in_use/<pid>` entry
+and never removes the old one, so counting markers over the cache reads **17 versions / 81
+markers** against a fleet of **44 sessions / 8 versions** (measured 2026-10-07) — a five-fold
+overstatement, in the direction that looks like more evidence. The reading is the newest
+marker per live pid, which is the same `-t` rule the per-session probe uses.
+
+⚠️ **The lever reaches TAB sessions only.** A headless worker is an in-process `query()` and a
+cluster worker runs in a pod, so neither necessarily holds a local marker or a pane; a session
+with no resolvable pane is reported as such per row rather than skipped. Measured 2026-10-07:
+`boss` runs on a tty no wezterm pane owns and is the standing example.
+
+⚠️ **A peer message is not a lever — measured 2026-10-07.** A cross-session `SendMessage`
+asking a session to reload is delivered and **cannot be acted on**: `/reload-plugins` is a
+built-in CLI command, not a Skill, so the recipient has no tool for it and says so; the marker
+did not move. `wezterm cli send-text` into the pane is the mechanism that works, and it is what
+`--reload` uses.
+
 ⚠️ **Two probes that do not discriminate — both measured 2026-09-27.** The **skill listing**
 cannot tell a stale session from a current one: command frontmatter descriptions are routinely
 unchanged between releases, and all 21 of this plugin's commands were byte-identical across
