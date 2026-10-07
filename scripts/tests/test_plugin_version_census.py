@@ -244,18 +244,25 @@ class MainTest(unittest.TestCase):
 
 
 class ComposerTest(unittest.TestCase):
-    """Readiness is an EMPTY composer, not a drawn one — the rule `server/tab.mjs` measured."""
+    """An EMPTY composer is ready — including one showing the TUI's DIM placeholder hint.
 
-    def test_a_placeholder_composer_is_not_ready(self):
-        text = "❯ Try \"create a util logging.py that...\""
-        self.assertFalse(census_mod.pane_is_ready(text))
+    The placeholder is drawn with SGR attribute 2 (faint), which is the only thing that
+    separates it from text somebody typed; the real pane read is measured in the docstring of
+    `pane_is_ready`. Typed text is never dim, so the concatenation hazard is still refused.
+    """
+
+    PLACEHOLDER = '\x1b[39m❯\xa0\x1b(B\x1b[0;2mTry "how does X work?"'
+
+    def test_the_real_placeholder_line_is_ready(self):
+        self.assertTrue(census_mod.pane_is_ready(self.PLACEHOLDER))
 
     def test_an_empty_composer_is_ready(self):
         self.assertTrue(census_mod.pane_is_ready("❯ "))
 
-    def test_a_composer_holding_text_is_not_ready(self):
-        """Enter would submit a line this script did not write."""
+    def test_a_composer_holding_typed_text_is_not_ready(self):
+        """Enter would submit a line this script did not write — the 2026-10-05 hazard."""
         self.assertFalse(census_mod.pane_is_ready("❯ draft ok"))
+        self.assertFalse(census_mod.pane_is_ready("\x1b[39m❯\xa0draft ok"))
 
     def test_the_last_glyph_line_is_the_composer_not_an_echoed_prompt(self):
         text = "❯ /reload-plugins\n  ⎿  Reloaded: 13 plugins\n❯ "
@@ -264,6 +271,36 @@ class ComposerTest(unittest.TestCase):
     def test_scrollback_alone_is_not_a_composer(self):
         """A glyph left above a busy pane must not read as 'at a prompt'."""
         self.assertFalse(census_mod.pane_is_ready("❯ /reload-plugins\n✻ Improvising... (5s)"))
+
+    def test_a_dim_echoed_prompt_above_a_typed_composer_does_not_excuse_it(self):
+        text = '❯ \x1b[0;2mold\n❯ draft ok'
+        self.assertFalse(census_mod.pane_is_ready(text))
+
+    def test_truecolor_is_not_faint(self):
+        """`38;2;r;g;b` carries a bare `2` as a colour sub-parameter, not the attribute."""
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[38;2;255;0;0mdraft ok"))
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[38;5;2mdraft ok"))
+
+    def test_a_dim_span_does_not_excuse_typed_text_after_the_reset(self):
+        """The whole visible remainder must be dim, not merely contain a dim span."""
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[0;2mghost\x1b[0mdraft ok"))
+        self.assertTrue(census_mod.pane_is_ready("❯ \x1b[0;2mTry \"x\"\x1b[0m"))
+
+    def test_faint_is_cancelled_by_22(self):
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[2mghost\x1b[22mdraft ok"))
+
+    def test_a_bare_reset_clears_faint(self):
+        """`\\x1b[m` is the reset form; an omitted parameter reads as 0, not as nothing."""
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[0;2mghost\x1b[mdraft ok"))
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[1;;2mghost\x1b[0mdraft ok"))
+
+    def test_cursor_visibility_and_other_escapes_do_not_leak_into_the_visible_text(self):
+        """`\\x1b[?25h` and friends are not characters — they must not read as non-faint."""
+        self.assertTrue(census_mod.pane_is_ready("\x1b[?25l❯\xa0\x1b(B\x1b[0;2mTry \"x\"\x1b[?25h"))
+        self.assertTrue(census_mod.pane_is_ready("❯ \x1b[?25h\x1b[?25l"))
+
+    def test_an_osc_sequence_does_not_leak_either(self):
+        self.assertTrue(census_mod.pane_is_ready("❯ \x1b]0;title\x07\x1b[0;2mTry \"x\""))
 
 
 class ReloadPaneTest(unittest.TestCase):
@@ -285,8 +322,21 @@ class ReloadPaneTest(unittest.TestCase):
 
     def ready_pane(self, cmd, **kwargs):
         if cmd[2] == "get-text":
+            # The flag is the discriminator: without it the placeholder is indistinguishable
+            # from typed text, the gate is always false, and the whole suite would still pass.
+            self.assertIn("--escapes", cmd, "readiness must read the styled pane text")
             return mock.Mock(returncode=0, stdout="❯ ", stderr="")
         return mock.Mock(returncode=0, stdout="", stderr="")
+
+    def test_a_failed_get_text_is_reported_as_a_read_failure(self):
+        """Never `composer not empty` — that would re-enter the fleet-wide misdiagnosis."""
+        def run(cmd, **kwargs):
+            if cmd[2] == "get-text":
+                return mock.Mock(returncode=1, stdout="", stderr="unknown flag --escapes")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        result = self.reload(run)
+        self.assertFalse(result["ok"])
+        self.assertIn("get-text exited 1", result["why"])
 
     def test_success_is_a_new_marker_in_the_new_version_directory(self):
         """The realistic reload: a NEW entry appears and the OLD one is untouched."""
