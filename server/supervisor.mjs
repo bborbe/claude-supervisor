@@ -25,7 +25,7 @@ import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
@@ -513,7 +513,7 @@ function waitForPermission(timeoutMs) {
   })
 }
 
-const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+// `shellQuote` moved to spawn-mode.mjs — one definition, and one a test can import.
 
 // Where Claude Code writes a session's transcript, so it can be tailed live.
 // Claude Code escapes the RESOLVED cwd by replacing "/" with "-", which is why
@@ -680,7 +680,7 @@ function resolveMcpServers(claudeCmd) {
   }
 }
 
-async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowId, chip }) {
+async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowId, chip, env }) {
   // Handed in rather than resolved here. The target is resolved once, in spawnAgent, so a
   // bad path costs no tab — and so the tab path and the headless path cannot disagree about
   // which launcher this spawn uses, which is how a worker's `launcher` field came to mean
@@ -709,7 +709,11 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   // resolved and wrote one.
   const tabName = uniqueTabName(`⚙ ${label}`)
   const preexisting = new Set(sessionIdsNamed(tabName) ?? [])
-  const inner = `cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
+  // The caller's per-call `env` is EXPORTED into this command line — the tab path's half of
+  // the parameter, and the half a headless-only implementation leaves unexercised. It goes
+  // before the `cd` so it survives the login shell's profile files; see `shellEnvExports`
+  // for why it must be an `export` rather than a `VAR=value` prefix on the `cd`.
+  const inner = `${shellEnvExports(env)}cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
   // `--window-id` is what puts the tab in a ROLE's window. Omitted, the tab inherits
   // WEZTERM_PANE from the calling session and lands in whatever window the caller is
   // in — which is how a human-only task came up in the Agents window (2026-09-20).
@@ -844,11 +848,19 @@ function concurrentLimitError({ operatorNamed = false } = {}) {
 // down is a worker the fleet cannot find. It is written only AFTER the call succeeds —
 // stamping a task with an id the service refused would point it at a conversation that does
 // not exist, which is worse than an empty field.
-async function spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed }) {
+async function spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed, env }) {
   // Arguments the cluster path cannot honour are REFUSED, never accepted and quietly ignored —
   // the same rule the tab path already carries for `resume` and `policy`. Silently dropping
   // them is how a caller ends up believing a worker was resumed when a fresh session was
   // opened, or that it runs under a policy nothing consults.
+  if (env && Object.keys(env).length > 0) {
+    return {
+      error:
+        `env is not supported with target "cluster": this path creates no local process, so there is no ` +
+        `environment here to set — the session is created by the claude-interactive service and this server ` +
+        `never runs it. Omit \`env\`, or spawn locally.`,
+    }
+  }
   if (resume) {
     return {
       error:
@@ -970,7 +982,7 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 // session in `metrics_sessions`) is the kind of thing that needs a test beside it. See that
 // module's header for why displacing an existing owner is the defect it exists to prevent.
 
-async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed, shipping }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed, shipping, env }) {
   // ⚠️ `seq` is per-process and restarts at 0 on every reconnect, while `agents` may already
   // hold rows adopted from the ledger whose ids a PREVIOUS process minted from this same
   // counter. Minting straight to `agent_${++seq}` would then land on an adopted id, and the
@@ -982,6 +994,28 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   do {
     id = `agent_${++seq}`
   } while (agents.has(id))
+
+  // The caller's per-call environment, validated HERE with the other guards — before the
+  // target short-circuits, because the cluster path has to be able to refuse it and a
+  // refusal it cannot see is no refusal. Pure and cheap, so a malformed `env` costs a
+  // rejected call and nothing else: no worker, no tab and no ledger record exists yet.
+  //
+  // REFUSED rather than filtered, matching `resolveWorkerTarget` and `resolveSpawnTarget`.
+  // A key dropped silently is a value the worker does not have, and a worker missing one
+  // value looks exactly like one that was never given it — which is the reading this
+  // parameter exists to make possible in the first place.
+  const envResolution = resolveEnvOverrides({ env })
+  if (envResolution.error) return { error: envResolution.error }
+  const envOverrides = envResolution.env
+
+  // ⚠️ KEYS ONLY, never values — computed once here so neither spawn path can report the
+  // other thing. A caller may legitimately pass a credential, and this response is quoted
+  // into ledger records, PR bodies and `# Progress` entries; printing the value would put
+  // the secret somewhere it must never appear, and a redaction filter over it is exactly
+  // the pattern the fleet has already been burned by. The names carry the whole signal —
+  // that the parameter was RECEIVED, which a caller otherwise cannot tell from a call that
+  // accepted it and dropped it.
+  const envReport = Object.keys(envOverrides).length > 0 ? { keys: Object.keys(envOverrides) } : null
 
   // The target is resolved before the mode, and it SHORT-CIRCUITS. A cluster worker is not
   // opened on this machine at all, so every guard below — the role/window resolution, the
@@ -1011,7 +1045,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   if (spawnTarget.target === 'cluster') {
     const unsupportedShipping = shippingSupportError({ shipping, cluster: true })
     if (unsupportedShipping) return { error: unsupportedShipping }
-    return spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed })
+    return spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed, env: envOverrides })
   }
 
   // Resolved first, because every guard below asks which way this worker opens and they
@@ -1269,7 +1303,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip, env: envOverrides })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -1357,6 +1391,11 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // checked only that the send had not errored — which is how a spawn reported
       // `applied: true` for a colour that never applied (3 of 6 spawns, 2026-09-20).
       color: res.color ? (res.color.error ? { error: res.color.error } : { applied: true }) : null,
+      // The names of the per-call environment this worker was given, or null. Reported on
+      // both paths for the same reason `policy` and `color` are: "accepted and then inert"
+      // is this repo's recurring failure, and a caller who passed `env` has no other way to
+      // tell it was received. Keys only — see envReport.
+      env: envReport,
       // The task this worker was opened for, and whether the vault's record of it was
       // written. `null` when the caller named no task (the stamp is optional for a tab
       // worker, unlike the cluster path). Reported rather than swallowed for the same
@@ -1382,7 +1421,10 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // loses PATH, HOME and ANTHROPIC_BASE_URL, and the last of those silently stops it
       // routing through the router. That base env comes from config.mjs rather than being
       // read here, because this module owns no environment reads at all.
-      env: workerEnvFor({ mode: spawnMode.mode, source: spawnMode.source, env: config.baseEnv }),
+      // `overrides` is the caller's per-call `env`. It sits above the inherited environment
+      // and below the mode handover — see workerEnvFor for why that order is the only
+      // correct one.
+      env: workerEnvFor({ mode: spawnMode.mode, source: spawnMode.source, env: config.baseEnv, overrides: envOverrides }),
       // Load the same settings an interactive session gets. Without this the SDK
       // starts from nothing — no plugin skills, no settings.json permissions, no
       // user MCP servers — and a worker missing its normal tooling is not a cheaper
@@ -1438,6 +1480,10 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // inferring it from the absence of an error.
     policy: agent.policyPath,
     shipping: agent.shipping === true,
+    // Same field as the tab path, and here too it is not redundant: this is the half a
+    // headless-only implementation would leave unexercised, so a caller reading it back is
+    // how "both paths carry it" stops being a claim about the diff. Keys only — see envReport.
+    env: envReport,
   }
 }
 
@@ -1585,6 +1631,11 @@ const TOOLS = [
           description:
             'Path to a JSON file of approval rules for THIS worker, evaluated ahead of the user and bundled rules — first match wins, so a rule here beats both, while the bundled set still covers whatever it does not name. Full replacement is reachable by ending the file with a {"tool":"*","match":"*","action":"escalate"} catch-all. An absolute path is used as-is; a relative one resolves against the worker\'s cwd. The file must exist and parse — a named policy that cannot be read refuses the spawn rather than silently falling back to the server default. Headless only: a tab worker answers its own prompts in its tab, so combining this with interactive:true is refused. Omit to use the server policy.',
         },
+        env: {
+          type: 'object',
+          description:
+            'Environment variables for THIS worker only — a per-call override of the ambient environment, so one session can be launched against a non-production backend without redirecting every session in a vault. Keys are shell variable names; values are strings (a number or boolean is stringified). They are layered ON TOP of the environment this server already passes through, so a key given here WINS over the inherited one and every key NOT given here is inherited unchanged — PATH, HOME and ANTHROPIC_BASE_URL among them. Honoured on BOTH local paths: a tab worker gets them exported into the tab\'s own command line, a headless worker gets them set on the SDK process. ⚠️ **On the TAB path the VALUES are visible in the host process table** (`ps`, `/proc/<pid>/cmdline`) for the life of the pane — exporting into a command line is the only mechanism a tab worker has, so a credential passed here is exposed to every local user on the machine; the headless path has no such exposure, because the SDK sets the child environment directly. Pass a credential only if you accept that. The spawn response echoes the NAMES back as `env: {keys: [...]}` — never the values, since a caller may pass a credential and this response gets quoted into ledger records and PR bodies — so a caller can tell the parameter was received rather than accepted-and-dropped. ⚠️ REFUSED with target:"cluster": that path creates no local process, so there is no environment here to set. An illegal variable name, or a value that is not a string/number/boolean, REFUSES the spawn rather than silently dropping the key.',
+        },
         operator_named: {
           type: 'boolean',
           description:
@@ -1726,6 +1777,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           policy: args.policy,
           // Only a literal `true` opts in — see shippingSettings.
           shipping: args.shipping,
+          // Passed through raw and validated in spawn-mode.mjs, which owns the legal shape
+          // and the refusal message — the same split as the mode, the target and the role
+          // above. A value that is not an object of string-ish values refuses there.
+          env: args.env,
           // Passed through raw and validated in role-map.mjs, which owns the legal values
           // and the refusal message — the same split as the spawn mode below.
           role: args.role,

@@ -213,7 +213,7 @@ The same boundary applies the other way: a tool the worker's own settings alread
 
 | Tool | Purpose |
 |---|---|
-| `spawn_agent(prompt, cwd?, label?, interactive?, resume?, policy?)` | start a worker — a real session in a tab by default, or headless with `interactive: false`. `policy` gives this one worker its own rules; headless only |
+| `spawn_agent(prompt, cwd?, label?, interactive?, resume?, policy?, env?)` | start a worker — a real session in a tab by default, or headless with `interactive: false`. `policy` gives this one worker its own rules; headless only. `env` sets environment variables for **this worker only**, on both paths — how one session is pointed at a non-production backend without redirecting every session in a vault. Refused with `target: "cluster"`, which creates no local process to set one on |
 | `send_agent_message(agent_id, message)` | type a follow-up into a running **tab** worker and submit it |
 | `list_agents()` | every worker with status and pending-permission count |
 | `agent_status(agent_id)` | one worker: status, last message, **the current tool call and how long it has been held**, result, plus `session_status` / `awaiting_input`. `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed |
