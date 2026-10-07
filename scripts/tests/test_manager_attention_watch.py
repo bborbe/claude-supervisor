@@ -912,6 +912,27 @@ class LivenessRecordTest(unittest.TestCase):
         recs = self._drive([busy])
         self.assertIn("0 gated · 1 held", recs[0]["detail"], recs[0])
 
+    def test_a_quiet_poll_writes_nothing_to_stdout(self):
+        """The load-bearing design claim, pinned.
+
+        Every stdout line is a `Monitor` notification and therefore a full model
+        turn, so moving the liveness record to stdout would cost ~30 turns per
+        30-minute arm — the exact cost this change exists to avoid. `_drive`
+        redirects stdout to a throwaway `StringIO` and asserts nothing about it,
+        so without this a refactor could make that move with the suite still
+        green.
+        """
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "probe", lambda *a, **kw: {}), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "my-topic.tracked.txt"),
+                            "--tasks-dir", d,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", "3"])
+        self.assertEqual(out.getvalue(), "", "a quiet poll must not wake the model")
+
     def test_a_failing_poll_still_writes_a_record(self):
         """The path where silence is MOST misleading.
 
