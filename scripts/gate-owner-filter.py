@@ -225,16 +225,16 @@ REPLAY_MARK = "⟳replay"
 # Resolved as a SIBLING of this file, not by name: the two scripts ship side by
 # side, and a bare `who-needs-me.py` would resolve against whatever cwd the
 # manager's pane happens to hold. `--producer` overrides it.
+# ⚠️ `realpath`, not `abspath`: `abspath` normalises `..` but does NOT resolve a
+# symlink, so a symlinked install would look for the producer beside the LINK
+# rather than beside the script and raise `FileNotFoundError` at the first poll —
+# a failure that only appears once the loop is running, which is the worst place
+# for it. The intent stated above is "the two scripts ship side by side", and only
+# `realpath` answers that for every way the script can be reached.
 PRODUCER = (
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "who-needs-me.py")
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "who-needs-me.py")
     + " --section needs-you"
 )
-
-# The floor the rule's arm is documented against, and the default when
-# `--interval` is given with no value. A `Monitor` is bounded at 30 min and
-# re-armed on expiry, so a poll slower than that only adds latency to a wake
-# that the re-arm would have delivered anyway.
-POLL_SECONDS = 60
 
 
 def load_ledger(ledger_dir=LEDGER):
@@ -588,6 +588,38 @@ def refusal_exit(refusal):
     return 1
 
 
+def producer_exit(producer, returncode):
+    """A producer that FAILED is not a quiet fleet; say so and exit non-zero.
+
+    ⚠️ **This is the `feed_refusal` distinction one layer up, and it was missing.**
+    `feed_refusal` separates "read, and empty" from "never read" by a marker on
+    stdout — but a producer that dies without printing anything (a crash, a
+    missing interpreter, a killed child) leaves stdout empty *and* writes no
+    marker, so it landed in the first case and was certified as a healthy empty
+    queue by `gates: 0` on every poll, forever. That is precisely the false
+    reading `refusal_exit` exists to prevent, re-introduced above it: a broken
+    transport made byte-identical to a quiet one. The `LIVENESS` line makes it
+    *visible* to a human reading the log, but it does not distinguish the two —
+    only the exit status does, and until now nothing consulted it.
+
+    ⚠️ **Any non-zero status ends the loop, even when rows were printed.** A
+    producer that emits a partial feed and then fails has produced a feed whose
+    completeness is unknown, and acting on a partial gate list is how a manager
+    misses the one gate it was armed for. The arm is cheap to re-establish and
+    the failure is cheap to see; a silently-partial feed is neither.
+    """
+    sys.stderr.write(
+        f"gate-owner-filter: producer exited {returncode} — {producer}\n"
+    )
+    sys.stderr.write(
+        "gate-owner-filter: refusing to report a gate count from a producer that "
+        "failed. A failed producer and a quiet fleet leave the same rows on the "
+        "wire; this exit is non-zero on purpose — re-arm once the producer "
+        "answers.\n"
+    )
+    return 1
+
+
 def evaluate_panes(panes, ledger, live, items, self_id, claims):
     """One row per `(pane, replayed)` pair."""
     rows = []
@@ -687,8 +719,32 @@ def one_shot(panes, args, ledger, live, items, claims):
     return 0
 
 
-def poll(args, ledger, live, items, claims):
+def poll(args, items):
     """Poll the producer, emitting only panes that ENTER the kept set.
+
+    ⚠️ **The ownership inputs are re-read on EVERY poll, and that is the point of
+    the loop rather than an optimisation to skip.** An arm runs for up to 30
+    minutes, and every input this filter consults is one that is *supposed* to
+    change inside that window: a peer manager records an ownership claim, a
+    manager exits so its panes stop being peer-owned, a worker is spawned and
+    gains a ledger record. A loop that read them once at arm time would judge a
+    fresh feed against a frozen world, and both failure modes are the ones this
+    filter exists to remove — a claim recorded after arming is invisible so the
+    claimed pane is emitted (the foreign wake Defect 1 is named for), and a peer
+    manager that dies mid-arm stays in the stale `live` set so its own gate is
+    still dropped and is then owned by nobody, contradicting the invariant stated
+    at `verdict()` ("a DEAD peer manager's own gate falls through and emits").
+
+    ⚠️ **`items` is the one exception, and the exception is measured rather than
+    assumed.** `log_items` globs and parses ~1 589 event-log files into ~25 000
+    items: **195.8 ms**, against 37.4 ms for the ledger, 11.7 ms for the claims
+    file and 1.3 ms for the registry (measured 2026-10-07 on the live machine).
+    Everything cheap is re-read per poll; the one genuinely expensive source is
+    read once per *arm*, not per poll. ⚠️ **The residual is named rather than
+    hidden:** a pane whose first appearance in the event log lands mid-arm does
+    not resolve its session until the next re-arm and reads `unowned` until then.
+    That is the conservative direction — it emits, so a manager may spend one
+    extra turn — and it is bounded by the `Monitor`'s 30-minute re-arm.
 
     ⚠️ **A `LIVENESS` line goes to stderr on EVERY poll, and it is the point of
     the loop rather than decoration.** A change-detector is silent when nothing
@@ -715,9 +771,20 @@ def poll(args, ledger, live, items, claims):
         refusal = feed_refusal(lines)
         if refusal:
             return refusal_exit(refusal)
+        if proc.returncode != 0:
+            return producer_exit(args.producer, proc.returncode)
 
+        # ⚠️ Re-read INSIDE the loop, never hoisted — see the docstring. The
+        # ordering matters too: the marker is checked before the status, because
+        # a refusal is the more specific verdict and `who-needs-me.py` exits
+        # non-zero on that path as well.
         rows = evaluate_panes(
-            feed_rows(lines), ledger, live, items, args.self_id, claims
+            feed_rows(lines),
+            load_ledger(args.ledger_dir),
+            live_ids(args.registry_dir),
+            items,
+            args.self_id,
+            load_claims(args.claims_file),
         )
         kept = {r["pane"] for r in rows if r["verdict"] == EMIT}
         new_panes = kept if previous is None else kept - previous
@@ -808,6 +875,33 @@ def main():
         parser.error("--interval polls the feed; it cannot be combined with --pane")
     if args.interval is not None and not args.feed:
         parser.error("--interval re-reads the feed each poll; pass --feed as well")
+    # ⚠️ The lower bound is not cosmetic. `time.sleep` rejects a negative value
+    # outright, so `--interval -1` reached the loop and died with an unhandled
+    # `ValueError` traceback — a crash rather than a usage error, on an argument
+    # that reads as a plausible typo. `0` is accepted but ONLY bounded, because
+    # unbounded it is a busy-loop that re-spawns the producer at maximum rate;
+    # the test suite uses exactly this spelling, which is why it must stay legal
+    # rather than be rejected outright.
+    if args.interval is not None and args.interval < 0:
+        parser.error(
+            "--interval is a poll period in seconds; a negative value cannot be slept"
+        )
+    if args.interval == 0 and args.max_polls is None:
+        parser.error(
+            "--interval 0 polls with no sleep; bound it with --max-polls, or pass a "
+            "real period. Never arm a Monitor with 0."
+        )
+    # ⚠️ The diagnostic shapes print EVERY row on every poll, so a `Monitor` over
+    # one would fire on each pass — the turn-budget cost this loop's change-detector
+    # exists to remove, reintroduced by the flag a reader reaches for to debug it.
+    # `new_panes` narrows only the bare `--feed` shape, so the two are refused here
+    # rather than silently ignoring the change-detector.
+    if args.interval is not None and (args.explain or args.json):
+        parser.error(
+            "--interval emits only newly-entered panes; --explain/--json print every "
+            "row on every poll and would wake a Monitor each time. Run the diagnostic "
+            "shape one-shot instead."
+        )
     if args.max_polls is not None and args.interval is None:
         parser.error("--max-polls bounds the --interval loop; pass --interval as well")
     if args.feed and args.interval is None:
@@ -826,7 +920,10 @@ def main():
         parser.error("pass --pane, --feed, or both")
 
     if args.interval is not None:
-        return poll(args, ledger, live, items, claims)
+        # `poll` re-reads everything cheap itself; only the expensive `items`
+        # glob is handed over, because it is the one source whose cost makes a
+        # per-poll read a real trade rather than a free one.
+        return poll(args, items)
     return one_shot(panes, args, ledger, live, items, claims)
 
 if __name__ == "__main__":

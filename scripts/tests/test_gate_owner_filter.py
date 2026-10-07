@@ -1034,11 +1034,18 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
             os.makedirs(path)
         self.counter = os.path.join(self.dir, "count")
 
-    def producer(self, *frames):
+    def producer(self, *frames, prelude="", exit_code=0):
         """A `--producer` command printing `frames[i]` on poll i, the last repeating.
 
         A real command string, not a fixture, because `--producer` is invoked
         exactly as the rule's arm invokes the pipeline.
+
+        `prelude` is Python source spliced in AFTER the poll counter is advanced
+        and before the frame is written, with `n` bound to the current poll. It is
+        what lets a test change the WORLD between polls — the registry, the ledger,
+        the claims file — rather than only the feed, which is the axis the
+        per-poll re-read has to be proven on. `exit_code` makes the producer fail,
+        which the loop must not read as a quiet fleet.
         """
         frames_path = os.path.join(self.dir, "frames.json")
         with open(frames_path, "w", encoding="utf-8") as handle:
@@ -1055,7 +1062,9 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
                 "    n = 0\n"
                 "n += 1\n"
                 "open(COUNTER, 'w').write(str(n))\n"
-                "sys.stdout.write(FRAMES[min(n - 1, len(FRAMES) - 1)])\n"
+                + (prelude if prelude.endswith("\n") or not prelude else prelude + "\n")
+                + "sys.stdout.write(FRAMES[min(n - 1, len(FRAMES) - 1)])\n"
+                f"sys.exit({exit_code})\n"
             )
         return f"{sys.executable} {script}"
 
@@ -1068,12 +1077,12 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
             capture_output=True, text=True,
         )
 
-    def poll(self, frames, polls=None):
+    def poll(self, frames, polls=None, **producer_kwargs):
         """A bounded poll loop over `frames` — `--interval 0` so the test never sleeps."""
         return self.invoke(
             "--feed", "--self", ME, "--interval", "0",
             "--max-polls", str(polls if polls is not None else len(frames)),
-            "--producer", self.producer(*frames),
+            "--producer", self.producer(*frames, **producer_kwargs),
         )
 
     # --- the change-detector: emit on ENTRY, never on re-poll ----------------
@@ -1146,6 +1155,97 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         result = self.invoke("--feed", "--max-polls", "3", "--self", ME)
         self.assertNotEqual(0, result.returncode)
         self.assertIn("--interval", result.stderr)
+
+    # --- ownership inputs are re-read EVERY poll -----------------------------
+
+    def test_a_session_that_becomes_live_mid_arm_stops_being_emitted(self):
+        """The per-poll re-read, proven on the axis the feed cannot show.
+
+        Local review round 2026-10-07 found this: `poll()` re-read the FEED every
+        iteration but judged it against ownership state loaded once at arm time, so
+        a peer manager appearing — or dying — inside a 30-minute arm was invisible,
+        and both failure modes are the ones this filter exists to remove. The feed
+        here is byte-identical on both polls; only the registry moves.
+        """
+        sid = "44444444-4444-4444-8444-444444444444"
+        # `item_id` and `type: "open"` are both required by `log_items` — it keys
+        # the fold on the first and only records the second as an opening line, so
+        # a fixture carrying just pane and session resolves no session at all and
+        # the test would pass for the wrong reason.
+        with open(
+            os.path.join(self.state, f"{sid}.events.jsonl"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "item_id": "test-item-1",
+                        "session_id": sid,
+                        "pane": "98765",
+                        "type": "open",
+                    }
+                )
+                + "\n"
+            )
+        record = os.path.join(self.registry, "4242.json")
+
+        result = self.poll(
+            [self.ONE, self.ONE],
+            prelude=(
+                "if n >= 2:\n"
+                f"    open({record!r}, 'w').write("
+                f"json.dumps({{'sessionId': {sid!r}, 'status': 'idle'}}))\n"
+            ),
+        )
+
+        # Poll 1 — not live and no ledger record of its own, so it is nobody's and
+        # emits. Poll 2 — live, still record-less, so hop 3b reads it as a manager
+        # and drops it. Same feed, opposite verdict.
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+        self.assertIn("dropped(peer-manager-own): 1", result.stderr)
+
+    # --- a failed producer is not a quiet fleet ------------------------------
+
+    def test_a_producer_that_fails_ends_the_loop_non_zero(self):
+        """Empty stdout from a CRASHED producer read as a healthy empty queue.
+
+        `feed_refusal` separates "read, and empty" from "never read" by a marker on
+        stdout, but a producer that dies printing nothing writes no marker — so it
+        landed in the healthy-empty case and was certified by `gates: 0` on every
+        poll forever. Only the exit status distinguishes them.
+        """
+        result = self.poll([self.ONE, self.ONE], exit_code=1)
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertEqual(result.stdout.split(), [], result.stdout)
+
+    def test_a_failed_producer_prints_no_gate_count(self):
+        result = self.poll([self.ONE, self.ONE], exit_code=1)
+        self.assertNotIn("gates:", result.stderr, result.stderr)
+        self.assertIn("producer exited 1", result.stderr)
+
+    # --- --interval bounds and combinations ----------------------------------
+
+    def test_a_negative_interval_is_a_usage_error(self):
+        """`time.sleep` rejects it outright, so it used to reach the loop and crash."""
+        result = self.invoke("--feed", "--interval", "-1", "--self", ME)
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("negative", result.stderr)
+
+    def test_interval_zero_without_a_bound_is_a_usage_error(self):
+        """`--interval 0` is legal only bounded — unbounded it is a busy-loop."""
+        result = self.invoke("--feed", "--interval", "0", "--self", ME)
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("--max-polls", result.stderr)
+
+    def test_interval_with_explain_is_a_usage_error(self):
+        """The diagnostic shapes print every row per poll and would wake a Monitor."""
+        result = self.invoke("--feed", "--interval", "60", "--explain", "--self", ME)
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("--explain", result.stderr)
+
+    def test_interval_with_json_is_a_usage_error(self):
+        result = self.invoke("--feed", "--interval", "60", "--json", "--self", ME)
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("--json", result.stderr)
 
     # --- the one-shot contract is untouched by the new flags -----------------
 
