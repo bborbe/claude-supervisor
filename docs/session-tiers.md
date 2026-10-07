@@ -123,6 +123,9 @@ output — the fleet table.
   executes the `To open` rows its sweep already decided with a direct `spawn_agent` and must
   **not** route them through `/supervisor:open` — that path is a tab by construction, cannot
   produce a headless worker, and writes no ledger row (`commands/manager-loop.md` § Procedure,
-  the `To open` bullet; the act leg it runs is `commands/manager-drive.md`). A decided-row
-  spawn is not a hand-rolled open. Outside that case, never call
-  `spawn_agent` directly.
+  the `To open` and `To resume` bullets; the act leg it runs is the `supervisor:manager-drive`
+  agent, `agents/manager-drive.md`). A decided-row spawn — open **or** resume — is not a
+  hand-rolled one. Outside that case, do not call `spawn_agent` directly. ⚠️ **That is a policy
+  the repo follows, not a gate anything enforces** — the same caveat
+  `docs/fleet-surface.md` § Session roles attaches to the worker-side prohibition, so do not
+  go hunting for an enforcement that does not exist.
