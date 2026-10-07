@@ -175,6 +175,18 @@ class ResolveTaskFileTest(unittest.TestCase):
         r = self.run_script(["Sneaky"], [v])
         self.assertEqual("", self.path_for(r, "Sneaky"))
 
+    def test_dotdot_tasks_dir_is_refused(self):
+        """A relative `..` component walks out of the vault just as an absolute path does,
+        so the guard must refuse both — otherwise its own comment overclaims."""
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "Sneaky.md").write_text("")
+        vault = self.root / "weird"
+        vault.mkdir()
+        v = {"name": "weird", "path": str(vault), "tasks_dir": "../outside"}
+        r = self.run_script(["Sneaky"], [v])
+        self.assertEqual("", self.path_for(r, "Sneaky"))
+
     # --- batch form ----------------------------------------------------------
 
     def test_stdin_batch_resolves_every_name(self):

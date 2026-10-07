@@ -128,12 +128,12 @@ def hits(vaults, key, stem):
     found = []
     for v in vaults:
         d = v[key]
-        # ⚠️ An absolute `tasks_dir` would make os.path.join discard the vault path and
-        # probe an arbitrary directory, so it is refused rather than honoured: no vault-cli
-        # config uses one, and silently searching outside the vault is the failure this
-        # guard exists to prevent. A missing dir is skipped — the assistant-* vaults carry
-        # neither key, and the vault root must never be probed.
-        if not d or os.path.isabs(d):
+        # ⚠️ Refused rather than honoured: an absolute `tasks_dir` makes os.path.join discard
+        # the vault path, and a `..` component walks out of it — both probe a directory the
+        # vault does not own. No vault-cli config uses either, and searching outside the
+        # vault is the failure this guard exists to prevent. A missing dir is skipped — the
+        # assistant-* vaults carry neither key, and the vault root must never be probed.
+        if not d or os.path.isabs(d) or ".." in d.split(os.sep):
             continue
         full = os.path.join(v["path"], d)
         try:
@@ -154,9 +154,9 @@ def resolve(name, vaults):
         stem = stem[:-3]
     stem += ".md"
     tasks = hits(vaults, "tasks_dir", stem)
-    goals = hits(vaults, "goals_dir", stem)
     if len(tasks) == 1:
         return tasks[0], []                # a task beats a same-named goal, in any vault
+    goals = hits(vaults, "goals_dir", stem)   # only reached when tasks is empty or ambiguous
     if not tasks:
         if len(goals) == 1:
             return goals[0], []
