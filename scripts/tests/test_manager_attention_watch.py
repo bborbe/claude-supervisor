@@ -958,5 +958,379 @@ class LivenessRecordTest(unittest.TestCase):
             all("poll failed: RuntimeError" in r["detail"] for r in recs), recs)
 
 
+class ParkAgeTest(unittest.TestCase):
+    """The park-age clock — continuous park per REGISTRY STATUS, once each.
+
+    ⚠️ The keyed-on-status half is the load-bearing one. A clock keyed on the
+    watcher's gated SET would run once from the first park and never restart,
+    because `is_gated` holds a session's membership through a mid-turn `busy` by
+    design — so the SECOND park would never surface. Measured 2026-10-07: two
+    tracked sessions parked on fresh `AskUserQuestion`s inside a 30-minute window
+    and the arm delivered **0 events**, because neither park was a set transition.
+    """
+
+    T0 = 1_700_000_000.0
+    SID8 = "aaaa1111"
+
+    def test_aged_fires_once_at_each_threshold(self):
+        ages = {}
+        watch.advance_park_ages(ages, [self.SID8], self.T0)
+        self.assertEqual(watch.aged_events(ages, self.T0), [])
+        self.assertEqual(watch.aged_events(ages, self.T0 + 15 * 60),
+                         [(self.SID8, 15)])
+        self.assertEqual(watch.aged_events(ages, self.T0 + 16 * 60), [],
+                         "the 15-minute mark fires ONCE, not every poll after it")
+        self.assertEqual(watch.aged_events(ages, self.T0 + 60 * 60),
+                         [(self.SID8, 60)])
+        self.assertEqual(watch.aged_events(ages, self.T0 + 61 * 60), [])
+
+    def test_no_aged_for_a_park_that_clears_before_fifteen(self):
+        ages = {}
+        watch.advance_park_ages(ages, [self.SID8], self.T0)
+        watch.advance_park_ages(ages, [], self.T0 + 14 * 60)
+        self.assertEqual(watch.aged_events(ages, self.T0 + 14 * 60), [])
+        self.assertEqual(ages, {}, "a cleared park is dropped, not merely aged")
+
+    def test_a_continuing_park_keeps_its_start(self):
+        ages = {}
+        watch.advance_park_ages(ages, [self.SID8], self.T0)
+        watch.advance_park_ages(ages, [self.SID8], self.T0 + 60)
+        self.assertEqual(ages[self.SID8]["since"], self.T0,
+                         "a continuing park keeps its start, it does not restart")
+
+    def test_a_busy_interval_starts_a_new_park(self):
+        """THE SECOND-PARK CASE, and the reason the clock is not keyed on the set."""
+        ages = {}
+        watch.advance_park_ages(ages, [self.SID8], self.T0)
+        # Mid-turn: not parked. ⚠️ The gated SET still holds this session — that
+        # is the whole difference between the two keys.
+        watch.advance_park_ages(ages, [], self.T0 + 5 * 60)
+        # The worker asks a NEW question ten minutes after the first park began.
+        watch.advance_park_ages(ages, [self.SID8], self.T0 + 10 * 60)
+        self.assertEqual(watch.aged_events(ages, self.T0 + 15 * 60), [],
+                         "the second park is 5 minutes old, not 15 — a clock keyed "
+                         "on set membership would already have fired and would "
+                         "then stay silent for this park forever")
+        self.assertEqual(watch.aged_events(ages, self.T0 + 25 * 60),
+                         [(self.SID8, 15)],
+                         "the second park must surface its own escalation")
+
+
+class AgedEmissionTest(unittest.TestCase):
+    """`AGED` as the manager actually sees it — a STDOUT line, once each.
+
+    ⚠️ Unlike the `LIVENESS` record, `AGED` must go to stdout. Every stdout line
+    is a `Monitor` notification and therefore a full model turn — which is why the
+    liveness record is `events.jsonl`-only — but `AGED` is the opposite case: the
+    manager's instruction is to VOICE it, and a line written only to the log is
+    durable and useless, because nothing is woken by it.
+    """
+
+    PARKED = {"aaaa1111": ("A", "pick — 1. alpha", "registry:waiting", True)}
+
+    def _drive(self, scripted, clock):
+        seq, ticks = list(scripted), list(clock)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "probe",
+                                   lambda *a, **kw: seq.pop(0) if seq else {}), \
+                 mock.patch.object(watch, "repost_empty_parks",
+                                   lambda *a, **kw: []), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 mock.patch.object(watch.time, "time", lambda: ticks.pop(0)), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", str(len(scripted))])
+        return out.getvalue()
+
+    def test_the_aged_line_is_printed_once_at_fifteen_minutes(self):
+        t0 = 1_700_000_000.0
+        out = self._drive([self.PARKED] * 4,
+                          [t0, t0, t0 + 16 * 60, t0 + 17 * 60])
+        self.assertEqual(out.count("AGED"), 1, out)
+        self.assertIn("AGED  aaaa1111  15m", out,
+                      "two spaces after the kind, matching NEW GATE — " + out)
+
+
+class RepostTest(unittest.TestCase):
+    """The re-post — a parked session the store no longer holds gets a card back.
+
+    ⚠️ The producer is the WORKER, not the manager. A store item's session is its
+    `producer_id` (`who-needs-me.py:268`), so posting as the worker is what makes
+    the re-posted row attribute to the session that is actually parked — and what
+    routes the operator's answer back to it.
+    """
+
+    SID = "aaaa1111-0000-0000-0000-000000000000"
+    SID8 = "aaaa1111"
+    ENTRIES = {SID8: ("A", SID)}
+
+    def _run(self, open_items, parked=(SID8,)):
+        posted = []
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: open_items):
+                watch.repost_empty_parks(
+                    list(parked), self.ENTRIES,
+                    os.path.join(d, "events.jsonl"),
+                    post=lambda sid8, full, label: (
+                        posted.append((sid8, full)) or True))
+        return posted
+
+    def test_a_park_the_store_lost_is_re_posted(self):
+        self.assertEqual(self._run((set(), set())), [(self.SID8, self.SID)])
+
+    def test_an_open_item_for_the_worker_suppresses_the_re_post(self):
+        self.assertEqual(self._run(({self.SID}, set())), [],
+                         "the worker's own card is already open")
+
+    def test_our_own_re_post_suppresses_a_second_one(self):
+        self.assertEqual(self._run((set(), {"park:" + self.SID8})), [],
+                         "the stable dedup key is what makes this idempotent")
+
+    def test_a_failed_store_read_re_posts_nothing(self):
+        """The direction that matters: a dead store is not 'the store holds nothing'."""
+        self.assertEqual(self._run(None), [])
+
+    def test_nothing_parked_does_not_touch_the_store(self):
+        with mock.patch.object(
+                watch, "open_store_items",
+                side_effect=AssertionError("store read on an idle poll")):
+            self.assertEqual(
+                watch.repost_empty_parks([], self.ENTRIES, "/dev/null"), [])
+
+    def test_a_refused_post_is_not_recorded_as_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: (set(), set())):
+                out = watch.repost_empty_parks(
+                    [self.SID8], self.ENTRIES, os.path.join(d, "events.jsonl"),
+                    post=lambda *a: False)
+        self.assertEqual(out, [], "a refused post is not a re-post")
+
+
+    def test_a_headless_park_is_parked_too(self):
+        """⚠️ The one park the registry cannot reach, and therefore the one this
+        arm must not skip. A headless worker is an in-process SDK `query()` with
+        no pid, so `registry_status` returns `None` and `is_gated` decides on the
+        `headless_live` branch — and `who-needs-me.py:822` records a measured case
+        of that class rendering no row in ANY feed section."""
+        state = {"aaaa1111": ("A", "pick — 1. alpha", "headless+closer", True)}
+        self.assertEqual(watch.parked_keys(state), ["aaaa1111"])
+
+    def test_a_parked_modal_is_parked_too(self):
+        """⚠️ The only member of `PARKED_REASONS` with no other coverage: delete it
+        from the constant and the rest of this suite stays green, silently dropping
+        the one park `is_gated`'s own comment calls the one the registry cannot
+        name (`busy` with a modal pending on a frozen transcript)."""
+        state = {"aaaa1111": ("A", "pick — 1. alpha", "busy+parked-modal", True)}
+        self.assertEqual(watch.parked_keys(state), ["aaaa1111"])
+
+    def test_a_settled_idle_park_is_not_parked(self):
+        """The deliberate exclusion, pinned so a later widening is a decision."""
+        state = {"aaaa1111": ("A", "pick — 1. alpha", "idle+closer", True)}
+        self.assertEqual(watch.parked_keys(state), [])
+
+
+class ParkAgeDurabilityTest(unittest.TestCase):
+    """The park-age file, across a RESTART of the arm.
+
+    ⚠️ Both integration tests drive a single `main()` invocation, so without this
+    nothing asserts that `park_path_for`'s output is the file actually WRITTEN,
+    that its content carries `since`/`aged`, or that a second run CONTINUES the
+    clock rather than restarting it. That is the exact durability `park_path_for`'s
+    docstring argues for as a correctness requirement, and writing to the wrong
+    path (or dropping the write) would pass every other test here while making
+    every escalation reset on each arm restart.
+    """
+
+    PARKED = {"aaaa1111": ("A", "pick — 1. alpha", "registry:waiting", True)}
+
+    def _drive(self, d, tick):
+        out = io.StringIO()
+        with mock.patch.object(watch, "probe", lambda *a, **kw: self.PARKED), \
+             mock.patch.object(watch, "repost_empty_parks", lambda *a, **kw: []), \
+             mock.patch.object(watch.time, "sleep", lambda *_: None), \
+             mock.patch.object(watch.time, "time", lambda: tick), \
+             redirect_stdout(out), redirect_stderr(io.StringIO()):
+            watch.main(["--tracked", os.path.join(d, "t.txt"),
+                        "--tasks-dir", d, "--state", d, "--max-polls", "1"])
+        return out.getvalue()
+
+    def test_the_park_file_is_written_where_park_path_for_says(self):
+        t0 = 1_700_000_000.0
+        with tempfile.TemporaryDirectory() as d:
+            self._drive(d, t0)
+            park_file = watch.park_path_for(d, os.path.join(d, "t.txt"))
+            self.assertTrue(os.path.exists(park_file),
+                            "the park state must land at park_path_for's path")
+            with open(park_file, encoding="utf-8") as fh:
+                rec = json.load(fh)
+            self.assertEqual(rec["aaaa1111"]["since"], t0, rec)
+            self.assertEqual(rec["aaaa1111"]["aged"], [], rec)
+
+    def test_a_second_run_continues_the_clock(self):
+        """The regression the file exists to prevent: a restart that RESETS."""
+        t0 = 1_700_000_000.0
+        with tempfile.TemporaryDirectory() as d:
+            self._drive(d, t0)
+            # A second invocation, one poll old, 16 minutes after the park began.
+            out = self._drive(d, t0 + 16 * 60)
+            self.assertIn("AGED  aaaa1111  15m", out,
+                          "a restart must CONTINUE the clock, not reset it: " + out)
+
+
+class OpenStoreItemsTest(unittest.TestCase):
+    """`open_store_items` — the one function the re-post rests on.
+
+    ⚠️ Every re-post test injects the `post` seam or mocks this function wholesale,
+    so without this the URL, the JSON decode, the `None`-on-failure contract and
+    the open-state filter are all uncovered.
+    """
+
+    def _fetch(self, body):
+        resp = mock.MagicMock()
+        resp.read.return_value = body.encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+        with mock.patch("urllib.request.urlopen", lambda *a, **kw: resp):
+            return watch.open_store_items()
+
+    def test_it_projects_producers_and_dedup_keys(self):
+        producers, keys = self._fetch(json.dumps(
+            [{"state": "open", "producer_id": "p1", "dedup_key": "k1"}]))
+        self.assertEqual(producers, {"p1"})
+        self.assertEqual(keys, {"k1"})
+
+    def test_an_answered_item_is_not_open(self):
+        """⚠️ The endpoint answers with items in EVERY state — `who-needs-me.py:271`
+        maps a non-`open` state to `answered`, which is only reachable if one can
+        come back. Counting an answered card as open would suppress the re-post for
+        a worker still parked on a fresh question: a MISSED escalation."""
+        producers, _ = self._fetch(json.dumps([
+            {"state": "answered", "producer_id": "p1", "dedup_key": "k1"},
+            {"state": "open", "producer_id": "p2", "dedup_key": "k2"}]))
+        self.assertEqual(producers, {"p2"})
+
+    def test_a_failed_read_is_none_never_empty(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            self.assertIsNone(watch.open_store_items())
+
+    def test_a_non_list_body_is_none_not_an_exception(self):
+        """The projection must sit inside the guard: `json.loads` succeeding does
+        not mean the body is a list."""
+        self.assertIsNone(self._fetch('{"error": "unknown agent"}'))
+
+
+class PostRepostArgvTest(unittest.TestCase):
+    """The re-post's command line, pinned.
+
+    ⚠️ **Every other re-post test injects the `post` seam**, so none of them
+    exercises the argv `post_repost` actually builds — a mistyped flag, a wrong
+    dedup-key form, or an accidentally-added `--liveness-ref` would pass green.
+    That last one is the dangerous one: `attention-ask.py:506-532` records that a
+    `session:` liveness subject makes the store **prune** the card on the first
+    read after the poster exits, which is the silent disappearance this whole
+    change exists to prevent. So the assertion is on the LIST, never on a
+    rendering of it.
+    """
+
+    FULL = "aaaa1111-0000-0000-0000-000000000000"
+
+    def _run(self, result):
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return result
+
+        with mock.patch.object(watch.subprocess, "run", fake_run):
+            ok = watch.post_repost("aaaa1111", self.FULL, "Some Task")
+        return ok, captured.get("cmd")
+
+    def test_the_argv_pins_producer_dedup_key_and_no_liveness_ref(self):
+        ok, cmd = self._run(mock.Mock(returncode=0, stdout="", stderr=""))
+        self.assertTrue(ok)
+        self.assertTrue(cmd[1].endswith("attention-ask.py"), cmd)
+        self.assertIn("post", cmd)
+        self.assertEqual(cmd[cmd.index("--producer-id") + 1], self.FULL,
+                         "the card must be attributed to the WORKER, not the "
+                         "manager — that is what routes the answer back to the "
+                         "parked session")
+        self.assertEqual(cmd[cmd.index("--dedup-key") + 1], "park:aaaa1111",
+                         "the stable key is what makes the re-post idempotent")
+        self.assertNotIn("--liveness-ref", cmd,
+                         "a session: liveness subject makes the store PRUNE the "
+                         "card on the first read after the poster exits")
+
+    def test_a_non_zero_exit_is_not_a_re_post(self):
+        ok, _ = self._run(mock.Mock(returncode=2, stdout="REFUSED: nope",
+                                    stderr=""))
+        self.assertFalse(ok)
+
+
+class IncidentReplayTest(unittest.TestCase):
+    """SC4 — the 2026-10-07 incident, replayed to a catch.
+
+    Session `15fce333` raised an `AskUserQuestion` at 12:28:45 and the registry
+    read `waiting` from then on; the store held its item and then dropped it while
+    the worker stayed parked. Nothing surfaced the park: the watcher's one
+    `NEW GATE` had fired at 14:30:30, and it emits on a transition, never again on
+    age. This drives the same shapes against the same clock and asserts both
+    limbs fire — an `AGED 15m` by 12:44, and a re-post once the store loses the
+    card.
+    """
+
+    SID = "15fce333-01cd-403e-82b8-5593f01cfb61"
+    SID8 = "15fce333"
+    TASK = "Widen the Dev mdm-contact-v1 Read Allowlist"
+
+    @staticmethod
+    def _at(hh, mm, ss=0):
+        return time.mktime((2026, 10, 7, hh, mm, ss, 0, 0, -1))
+
+    def test_the_incident_replays_to_a_re_post_and_an_aged_15m(self):
+        parked = {self.SID8: (self.TASK, "pick — 1. alpha",
+                              "registry:waiting", True)}
+        clock = [self._at(12, 28, 45), self._at(12, 29), self._at(12, 43, 45),
+                 self._at(12, 44), self._at(15, 29), self._at(15, 30)]
+        # The store holds the worker's item for the first four polls, loses it on
+        # the fifth, and holds OUR re-post from the sixth — which is what makes
+        # the re-post idempotent rather than once-per-poll.
+        items = [({self.SID}, set())] * 4 + [(set(), set()),
+                                             (set(), {"park:" + self.SID8})]
+        ticks, seq_items, posted = list(clock), list(items), []
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            tasks = os.path.join(d, "tasks")
+            os.makedirs(tasks)
+            with open(os.path.join(d, "t.txt"), "w") as fh:
+                fh.write(self.TASK + "\n")
+            with open(os.path.join(tasks, self.TASK + ".md"), "w") as fh:
+                fh.write(f"---\nclaude_session_id: {self.SID}\n---\n")
+            with mock.patch.object(watch, "probe",
+                                   lambda *a, **kw: parked), \
+                 mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: seq_items.pop(0)), \
+                 mock.patch.object(watch, "post_repost",
+                                   lambda sid8, full, label, **kw: (
+                                       posted.append((sid8, full)) or True)), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 mock.patch.object(watch.time, "time",
+                                   lambda: ticks.pop(0)), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", tasks,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", str(len(clock))])
+        self.assertIn(f"AGED  {self.SID8}  15m", out.getvalue(),
+                      "the park must be escalated by 12:44: " + out.getvalue())
+        self.assertEqual(posted, [(self.SID8, self.SID)],
+                         "the store losing the card must produce exactly one "
+                         "re-post, not one per poll")
+
+
 if __name__ == "__main__":
     unittest.main()
