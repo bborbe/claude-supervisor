@@ -313,7 +313,23 @@ export function startAttentionPoll({
       for (const itemId of [...watching]) {
         // Read by id, not from the list: the list is the render path and carries open
         // items only, while this read is the post-transition one and works on any state.
-        const item = await getJson(`/api/1.0/attention/${itemId}`)
+        //
+        // ⚠️ The read is guarded PER ITEM, and that guard is load-bearing rather than
+        // defensive — it is the same guard `message-delivery.mjs` already carries on the
+        // byte-identical read, and it was missing here. An unguarded throw escapes to the
+        // outer catch, so every LATER item in the tick is skipped; and because
+        // `watching.delete` is only reached after a successful read, that id stays in the
+        // set and throws again on every subsequent tick. One pruned item — the store
+        // returns 404 for it — would wedge attention delivery for this process
+        // permanently and silently, which is the failure class this arm exists to close.
+        let item
+        try {
+          item = await getJson(`/api/1.0/attention/${itemId}`)
+        } catch (error) {
+          watching.delete(itemId)
+          log(`attention item ${itemId} could not be read (${error.message}) — dropped from the watch set`)
+          continue
+        }
         if (item?.state !== 'answered') continue
         watching.delete(itemId)
         const verdict = decisionOf(item)

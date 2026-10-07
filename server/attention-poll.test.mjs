@@ -680,3 +680,46 @@ test('a store that throws while idle is retried on the idle cadence, not every i
   await ticks[ticks.length - 1]()
   assert.equal(gets.length, 2, 'the idle cadence still retries the read')
 })
+
+test('an unreadable watched item is dropped, and does not wedge the rest of the tick', async () => {
+  // The guard `message-delivery.mjs` already carried on the byte-identical read and this
+  // arm did not. Unguarded, the throw escapes to the outer catch, every LATER item in the
+  // tick is skipped, and the id stays in `watching` because `watching.delete` is only
+  // reached after a successful read — so the same throw repeats on every tick and delivery
+  // for this process is wedged permanently and silently. The store 404s a pruned item,
+  // which is exactly how it happens in the field.
+  const logged = []
+  const { ticks, pending, posts } = harness({
+    open: [
+      { item_id: 'gone', answer_mechanism: 'permission' },
+      { item_id: 'i2', answer_mechanism: 'permission' },
+    ],
+    items: {
+      i2: {
+        item_id: 'i2',
+        state: 'answered',
+        decision: 'allow',
+        resolved_by: 'sess-abc',
+        answer_mechanism: 'permission',
+        producer_id: 'sess-1',
+      },
+    },
+    log: (m) => logged.push(m),
+  })
+  await ticks[0]()
+  assert.match(logged.join('\n'), /gone could not be read/)
+  // 'i2' is inserted AFTER 'gone', so a wedged tick would never reach it.
+  assert.equal(pending.get('perm_7').settled.length, 1, 'the later item must still be settled')
+  assert.equal(posts.length, 1, 'and its delivery must still be recorded')
+
+  // ⚠️ The id is dropped from `watching` each tick and re-added by the next LIST read,
+  // because the store still lists it as open — so it is retried once per tick, and that
+  // is correct. The property the guard buys is that the failure is bounded to ONE drop
+  // per tick and never blocks the items after it. Unguarded, the throw would abort the
+  // tick at 'gone' on every pass, so 'i2' would never be reached again.
+  const drops = () => (logged.join('\n').match(/gone could not be read/g) || []).length
+  const before = drops()
+  await ticks[1]()
+  assert.equal(drops() - before, 1, 'exactly one drop per tick — never a wedge that aborts the tick')
+  assert.equal(pending.get('perm_7').settled.length, 2, 'and the later item is still reached on the next tick')
+})
