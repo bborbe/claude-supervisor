@@ -3,13 +3,16 @@
 The widening of 2026-10-07 introduced three row shapes and preserved two strings
 byte-identically, and the guard's whole value is that it fails when one of them goes missing.
 
-The load-bearing cases are the two counting tests, and they are why this file exists rather
-than being skipped as boilerplate. The `needed: <task> — serves` string occurs in three
-templates **and** once inside a sentence at step 8's prose. A guard that counted substring
-occurrences therefore passes with a real template deleted — the exact failure it exists to
-catch — while one that raised its threshold lets the prose mention satisfy it permanently.
-`test_deleting_a_template_site_fails` and `test_prose_mention_does_not_count_as_a_site` pin
-both halves of that, and the guard asserts on lines that *begin* with the shape.
+The counting cases are why this file exists rather than being skipped as boilerplate, and
+there are four of them because three successive guards were each too weak:
+
+- A **substring** count passes with a real template deleted, because the same string also
+  appears inside a prose sentence — `test_prose_mention_does_not_count_as_a_site`.
+- A **floor** passes when a site is duplicated to mask a deletion — `test_duplicated_site_fails`.
+- **Prefix** matching passes when a row drifts past the pinned shape —
+  `test_divergent_row_shape_fails`.
+- An **asymmetric** guard that line-anchors its rows but substring-matches its pinned strings
+  is blind to a single deleted summary line — `test_deleting_one_summary_site_fails`.
 """
 import pathlib
 import shutil
@@ -42,15 +45,22 @@ SUMMARY = (
 PROSE_MENTION = f"Emit the row in the template's shape: `{SERVES}`."
 
 
-def reader_body(sites: int = 3, prose: bool = True) -> str:
-    lines = ["## step 8", "", "```", FOUNDATION, NOT_NEEDED, UNPROVEN, PRODUCT, SUMMARY, "```"]
-    lines += [SERVES] * sites
+def reader_body(serves: int = 3, summaries: int = 3, prose: bool = True) -> str:
+    """A minimal stand-in for step 8: the block, then the two frames' copies."""
+    lines = ["## step 8", "", "```", FOUNDATION, NOT_NEEDED, UNPROVEN, PRODUCT]
+    lines += [SUMMARY] * summaries
+    lines += [SERVES] * serves
+    lines += ["```"]
     if prose:
         lines.append(PROSE_MENTION)
     return "\n".join(lines) + "\n"
 
 
-VERIFY_BODY = "Echo every failing row, plus at least one serving row when any task serves.\n"
+VERIFY_BODY = (
+    "Echo every failing row, plus at least one serving row when any task serves.\n"
+    "  1 Necessity ..... PASS | FAIL | UNKNOWN | SKIPPED — <at least one serving row when "
+    "any task serves>\n"
+)
 
 
 class Base(unittest.TestCase):
@@ -80,22 +90,46 @@ class TestNecessityTemplatesGuard(Base):
     def test_clean_tree_passes(self):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("row shape(s) pinned per site", result.stdout)
+        self.assertIn("pinned at their exact sites", result.stdout)
 
     def test_deleting_a_template_site_fails(self):
         """The reason the guard counts lines, not substrings: the prose mention would keep a
         substring count above its threshold with a real template deleted."""
-        self.write(READER, reader_body(sites=2))
+        self.write(READER, reader_body(serves=2))
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("the widened three-source `needed:` row", result.stderr)
 
     def test_prose_mention_does_not_count_as_a_site(self):
         """The converse: the sentence carrying the shape must not satisfy the count alone."""
-        self.write(READER, reader_body(sites=0))
+        self.write(READER, reader_body(serves=0))
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("want >= 3", result.stderr)
+        self.assertIn("want exactly 3", result.stderr)
+
+    def test_duplicated_site_fails(self):
+        """Why the comparison is equality and not a floor: with `found < want` a duplicated
+        site keeps the count at its threshold while a real one is deleted."""
+        self.write(READER, reader_body(serves=4))
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("want exactly 3", result.stderr)
+
+    def test_divergent_row_shape_fails(self):
+        """Prefix matching alone would pass this: the drifted row still begins with the
+        pinned shape, so only the all-sites-identical check catches it."""
+        drifted = SERVES.replace("<task line>", "<the task line>")
+        self.write(READER, reader_body().replace(SERVES + "\n", drifted + "\n", 1))
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("more than one shape", result.stderr)
+
+    def test_deleting_one_summary_site_fails(self):
+        """The asymmetric-guard case: a bare substring check is blind to one deleted copy."""
+        self.write(READER, reader_body(summaries=2))
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("summary line", result.stderr)
 
     def test_removing_the_product_row_fails(self):
         self.write(READER, reader_body().replace(PRODUCT + "\n", ""))
@@ -109,7 +143,7 @@ class TestNecessityTemplatesGuard(Base):
         self.assertEqual(result.returncode, 1)
         self.assertIn("summary line", result.stderr)
 
-    def test_removing_the_verify_rule_fails(self):
+    def test_removing_one_verify_rule_fails(self):
         self.write(VERIFY, "Echo the rows.\n")
         result = self.run_check()
         self.assertEqual(result.returncode, 1)

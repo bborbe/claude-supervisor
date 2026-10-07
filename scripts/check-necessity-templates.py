@@ -8,16 +8,25 @@ verdict now names *which* of three sources a task serves (goal sentence / `SC<n>
 line byte-identical so that a before/after comparison of this read stays valid.
 
 That "deliberately unchanged" half is a claim, and nothing asserted it. This guard pins both
-halves: every row shape the widening introduces must appear at every site that carries it,
+halves: every row shape the widening introduces must appear at **exactly** its known sites,
 and the `product:` row plus the summary line must still read exactly as they did before.
 
-Anchored on **line shape, never a substring count and never a line number.** Both alternatives
-were tried and both are wrong here. A line number moves whenever the section is edited — it
-moved several times inside the widening itself. A substring count over a string that also
-appears in prose tolerates the deletion of a real site: `needed: <task> — serves …` occurs in
-three templates *and* once inside a sentence at step 8's prose, so any threshold is either
-satisfiable by the prose or blind to one deletion. Counting only lines that *begin* with the
-shape excludes the prose and asserts each site.
+**Anchored on stripped whole lines, compared for equality — never a substring, never a floor,
+never a line number.** Each of the three alternatives was tried here and each is wrong:
+
+- A **line number** moves whenever the section is edited; it moved several times inside the
+  widening itself.
+- A **substring count** over a string that also appears in prose tolerates the deletion of a
+  real site: `needed: <task> — serves …` occurs in three templates *and* once inside a
+  sentence at step 8's prose, so any threshold is either satisfiable by the prose or blind to
+  one deletion.
+- A **floor** (`found < want`) with prefix matching is blind twice over: duplicating a site
+  keeps the count at its threshold while a real one is deleted, and a row that drifts past the
+  pinned prefix still counts as a site.
+
+Equality on the stripped line closes all three, and is what the sibling `check-bucket-clause.py`
+does. The cost is that adding a legitimate fourth site fails here until the count is updated —
+which is the point: a shape that moves should be looked at, not absorbed.
 
 Same shape as `check-bucket-clause.py` and `check-recording-step.py`.
 
@@ -35,25 +44,34 @@ REPO = Path(__file__).resolve().parent.parent
 READER = "agents/manager-sweep-reader.md"
 VERIFY = "agents/manager-verify.md"
 
-# Each is a row shape the widening introduces or preserves, with the number of template sites
-# that must begin a line with it. The three `serves` sites are the three-verdict block, then
-# the tick-mode and snapshot-mode frames; the others appear in the block alone.
+SERVES = "needed: <task> — serves"
+FOUNDATION = "needed: <task> — foundation for"
+NOT_NEEDED = "not needed: <task> — serves none of"
+UNPROVEN = "not needed: <task> — unproven:"
+
+#: Each row shape, the number of stripped lines that must BEGIN with it, and a label. The
+#: three `serves` sites are the three-verdict block, then the tick-mode and snapshot-mode
+#: frames; the others appear in the block alone. Counts are exact — see the module docstring.
 ROW_SHAPES: tuple[tuple[str, int, str], ...] = (
-    ("needed: <task> — serves", 3, "the widened three-source `needed:` row"),
-    ("needed: <task> — foundation for", 1, "the foundation row"),
-    ("not needed: <task> — serves none of", 1, "the plain `not needed` row"),
-    ("not needed: <task> — unproven:", 1, "the unproven `not needed` row"),
+    (SERVES, 3, "the widened three-source `needed:` row"),
+    (FOUNDATION, 1, "the foundation row"),
+    (NOT_NEEDED, 1, "the plain `not needed` row"),
+    (UNPROVEN, 1, "the unproven `not needed` row"),
 )
 
-# Deliberately UNCHANGED by the widening — the byte-identity claim, pinned exactly.
+# Deliberately UNCHANGED by the widening — the byte-identity claim, pinned as whole lines.
 PRODUCT_ROW = "product: <task> — output of <goal> SC<n>"
+PRODUCT_SITES = 1
 SUMMARY_LINE = (
     "Necessity: <M> needed · <K> not needed · <P> product — inverted set <M+K+P> of "
     "<N> tracked — over <topic page> (<member goals>)"
 )
+SUMMARY_SITES = 3  # the three-verdict block, then the tick-mode and snapshot-mode frames
 
-# The consumer's own rule: a serving item per task, never a bare count.
+# The consumer's own rule: a serving item per task, never a bare count. Carried inside
+# sentences rather than beginning a line, so it is matched by containment with an exact count.
 VERIFY_RULE = "at least one serving row when any task serves"
+VERIFY_SITES = 2
 
 
 def read(rel: str) -> str:
@@ -64,46 +82,68 @@ def read(rel: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def sites(text: str, shape: str) -> int:
-    """Lines that BEGIN with the shape. Excludes the prose mention of the same string."""
-    return sum(1 for line in text.splitlines() if line.strip().startswith(shape))
+def lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines()]
+
+
+def beginning(rows: list[str], shape: str) -> list[str]:
+    return [row for row in rows if row.startswith(shape)]
+
+
+def exact(rows: list[str], want: str) -> list[str]:
+    return [row for row in rows if row == want]
 
 
 def main() -> int:
-    reader = read(READER)
-    verify = read(VERIFY)
+    reader_rows = lines(read(READER))
+    verify_rows = lines(read(VERIFY))
 
     for shape, want, label in ROW_SHAPES:
-        found = sites(reader, shape)
-        if found < want:
+        found = beginning(reader_rows, shape)
+        if len(found) != want:
             print(
-                f"necessity-templates FAILED: {READER} begins {found} line(s) with {label} "
-                f"({shape!r}), want >= {want} — a row site was dropped or the shape drifted",
+                f"necessity-templates FAILED: {READER} begins {len(found)} line(s) with "
+                f"{label} ({shape!r}), want exactly {want} — a site was dropped, duplicated "
+                f"or moved",
+                file=sys.stderr,
+            )
+            return 1
+        if len(set(found)) != 1:
+            print(
+                f"necessity-templates FAILED: {READER} carries {label} in more than one shape "
+                f"— the sites are one contract and must read identically: "
+                f"{sorted(set(found))!r}",
                 file=sys.stderr,
             )
             return 1
 
-    for label, needle in (("`product:` row", PRODUCT_ROW), ("summary line", SUMMARY_LINE)):
-        if needle not in reader:
+    for label, want_line, want in (
+        ("`product:` row", PRODUCT_ROW, PRODUCT_SITES),
+        ("summary line", SUMMARY_LINE, SUMMARY_SITES),
+    ):
+        found = exact(reader_rows, want_line)
+        if len(found) != want:
             print(
-                f"necessity-templates FAILED: {READER} no longer carries the pinned {label} "
-                f"{needle!r} — it is deliberately unchanged by the widening, and the "
-                f"before/after comparison depends on it",
+                f"necessity-templates FAILED: {READER} carries the pinned {label} on "
+                f"{len(found)} line(s), want exactly {want} — it is deliberately unchanged by "
+                f"the widening, and the before/after comparison depends on it",
                 file=sys.stderr,
             )
             return 1
 
-    if VERIFY_RULE not in verify:
+    rule = [row for row in verify_rows if VERIFY_RULE in row]
+    if len(rule) != VERIFY_SITES:
         print(
-            f"necessity-templates FAILED: {VERIFY} no longer requires a serving row "
-            f"({VERIFY_RULE!r}) — without it a count passes as a finding",
+            f"necessity-templates FAILED: {VERIFY} carries the serving-row rule on "
+            f"{len(rule)} line(s), want exactly {VERIFY_SITES} — without it a count passes as "
+            f"a finding",
             file=sys.stderr,
         )
         return 1
 
     print(
-        f"necessity-templates ok: {len(ROW_SHAPES)} row shape(s) pinned per site; `product:` "
-        f"row and summary line unchanged; manager-verify requires a serving row"
+        f"necessity-templates ok: {len(ROW_SHAPES)} row shape(s) pinned at their exact sites; "
+        f"`product:` row and summary line unchanged; manager-verify requires a serving row"
     )
     return 0
 
