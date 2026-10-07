@@ -13,9 +13,12 @@ import {
   MAX_CONCURRENT_ENV,
   MAX_CONCURRENT_HARD_ENV,
   concurrentLimitRefusal,
+  resolveEnvOverrides,
   resolveMaxConcurrent,
   resolveSpawnMode,
   resolveSpawnTarget,
+  shellEnvExports,
+  shellQuote,
   unknownKeyWarnings,
   workerEnvFor,
   SPAWN_MODES,
@@ -421,4 +424,135 @@ test('an unknown target refuses rather than falling back to local', () => {
     assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
     assert.match(error, /not a spawn target/)
   }
+})
+
+// --- the per-call environment ---------------------------------------------------------
+//
+// `spawn_agent`'s `env`. TWO spawn paths consume this — a headless worker rides the SDK's
+// `env` option, a tab worker is exported into its `bash -lc` command line — so the tests
+// below pin the resolution and BOTH renderings. A call site cannot be covered here at all:
+// importing supervisor.mjs connects a stdio server at load.
+
+test('an absent env resolves to nothing rather than refusing', () => {
+  assert.deepEqual(resolveEnvOverrides({}), { env: {} })
+  assert.deepEqual(resolveEnvOverrides(), { env: {} })
+  assert.deepEqual(resolveEnvOverrides({ env: null }), { env: {} })
+})
+
+test('a per-call env keeps its names and values', () => {
+  const { env } = resolveEnvOverrides({ env: { ATTENTION_STORE_URL: 'http://localhost:18081' } })
+  assert.deepEqual(env, { ATTENTION_STORE_URL: 'http://localhost:18081' })
+})
+
+test('a number or boolean value is stringified, so both paths carry the same type', () => {
+  // The SDK's `env` wants strings and the tab path interpolates into a shell word. A number
+  // left as a number would be one value on one path and a different type on the other.
+  const { env } = resolveEnvOverrides({ env: { PORT: 8080, DRY_RUN: true } })
+  assert.deepEqual(env, { PORT: '8080', DRY_RUN: 'true' })
+})
+
+test('an env that is not an object refuses rather than iterating something else', () => {
+  // An array is the tempting mistake — `["A=1"]` reads like a pair list and is not one, and
+  // `Object.entries` over it would yield index names the caller never chose.
+  for (const bad of [[], ['A=1'], 'A=1', 7, true]) {
+    const { error } = resolveEnvOverrides({ env: bad })
+    assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
+    assert.match(error, /must be an object/)
+  }
+})
+
+test('an illegal variable name refuses, because the tab path exports it literally', () => {
+  // REFUSED, not dropped. A dropped key is a value the worker does not have, and a worker
+  // missing one value looks exactly like one that was never given it — which is the reading
+  // this parameter exists to make possible in the first place.
+  for (const bad of ['foo-bar', '2FA', 'A B', '', 'A.B']) {
+    const { error } = resolveEnvOverrides({ env: { [bad]: 'x' } })
+    assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
+    assert.match(error, /not a legal shell variable name/)
+  }
+})
+
+test('a value that is not string-ish refuses rather than being stringified into nonsense', () => {
+  for (const bad of [null, undefined, {}, [], () => {}]) {
+    const { error } = resolveEnvOverrides({ env: { OK: bad } })
+    assert.ok(error, `expected ${String(bad)} to be refused`)
+    assert.match(error, /must be a string, number or boolean/)
+  }
+})
+
+test('a per-call value wins over the inherited environment', () => {
+  // The whole point of the parameter: THIS one worker is redirected, without touching a
+  // default every other session depends on.
+  const env = workerEnvFor({
+    mode: 'headless',
+    source: 'argument',
+    env: { ATTENTION_STORE_URL: 'http://localhost:18080', PATH: '/usr/bin' },
+    overrides: { ATTENTION_STORE_URL: 'http://localhost:18081' },
+  })
+  assert.equal(env.ATTENTION_STORE_URL, 'http://localhost:18081')
+  // ...and every key NOT given is inherited unchanged, PATH among them. Dropping the spread
+  // would take PATH, HOME and ANTHROPIC_BASE_URL — the last silently stops router routing.
+  assert.equal(env.PATH, '/usr/bin')
+})
+
+test('the mode handover outranks a per-call value, so a caller cannot lie to the worker', () => {
+  // A caller able to set SUPERVISOR_WORKER_MODE could make a headless worker believe it has a
+  // tab — the exact mis-model the handover was written to end.
+  const env = workerEnvFor({
+    mode: 'headless',
+    source: 'argument',
+    env: {},
+    overrides: { [WORKER_MODE_ENV]: 'interactive', [WORKER_MODE_SOURCE_ENV]: 'config' },
+  })
+  assert.equal(env[WORKER_MODE_ENV], 'headless')
+  assert.equal(env[WORKER_MODE_SOURCE_ENV], 'argument')
+})
+
+test('overrides still apply when there is no mode, so the tab path is not a special case', () => {
+  // The tab path never sets a mode handover, so an implementation that only threaded
+  // overrides through the `mode` branch would silently drop them for every tab worker.
+  assert.deepEqual(workerEnvFor({ env: { PATH: '/usr/bin' }, overrides: { A: '1' } }), {
+    PATH: '/usr/bin',
+    A: '1',
+  })
+  assert.deepEqual(workerEnvFor({ overrides: { A: '1' } }), { A: '1' })
+})
+
+test('no overrides leaves the environment exactly as it was', () => {
+  assert.deepEqual(workerEnvFor({ env: { PATH: '/usr/bin' } }), { PATH: '/usr/bin' })
+  assert.deepEqual(workerEnvFor({ env: { PATH: '/usr/bin' }, overrides: {} }), { PATH: '/usr/bin' })
+})
+
+test('the tab path renders nothing when there is nothing to export', () => {
+  // The command line is built by interpolation, so this must be the empty string rather than
+  // `export undefined=undefined; ` or a literal `{}`.
+  assert.equal(shellEnvExports({}), '')
+  assert.equal(shellEnvExports(undefined), '')
+  assert.equal(shellEnvExports(null), '')
+})
+
+test('the tab path exports each value single-quoted, so a space or a $ survives the shell', () => {
+  // The value is interpolated into a command line a login shell parses. Unquoted, a URL with
+  // a query string, or any value carrying a space, would be split or expanded before the
+  // worker ever saw it — and the worker would report the wrong value with no error anywhere.
+  assert.equal(
+    shellEnvExports({ ATTENTION_STORE_URL: 'http://localhost:18081' }),
+    "export ATTENTION_STORE_URL='http://localhost:18081'; ",
+  )
+  assert.equal(shellEnvExports({ A: 'x y', B: '$HOME' }), "export A='x y'; export B='$HOME'; ")
+})
+
+test("a single quote inside a value is escaped, so the quoting cannot be broken out of", () => {
+  // The classic: an unescaped `'` ends the quote and everything after it is shell. `'\''` is
+  // the POSIX escape, and it is why this is a shared helper rather than string interpolation
+  // at the call site.
+  assert.equal(shellQuote("it's"), "'it'\\''s'")
+  assert.equal(shellEnvExports({ A: "it's" }), "export A='it'\\''s'; ")
+})
+
+test('an export is prefixed with `export`, never a bare assignment', () => {
+  // ⚠️ A `VAR=value` prefix applies to ONE command, so `A=1 cd /x && exec y` would set A for
+  // the `cd` and lose it before the `exec` that actually starts the worker — a silent no-op
+  // that looks exactly like a working spawn. This is the test that keeps the verb.
+  assert.match(shellEnvExports({ A: '1' }), /^export A=/)
 })
