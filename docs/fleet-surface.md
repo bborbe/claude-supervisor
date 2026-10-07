@@ -185,6 +185,8 @@ is not a check.
 
 ## Spawn a worker
 
+**This section documents `/supervisor:open`'s internals — the spawn shape it produces, and the mechanics every spawn site shares — not a parallel path to use instead of it.** The rule for when a manager dispatches through `/supervisor:open` rather than a bare spawn is stated once, in `docs/session-tiers.md` § The manager boundary; what follows is what that command does under the hood, so read it to understand or debug a spawn.
+
 **Readiness precondition — author and score the task before any spawn, or the worker's own gate parks.** A task the manager hand-writes usually ships without `# Tasks` and `# Definition of Done`, so the worker's own `plan-task` gate stops and asks the operator to supply the decomposition — inside the worker's pane, as a multi-question wizard that cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced **three 3-question wizards**, nine operator decisions, none of which needed the repo open. So, before spawning:
 
 1. **Author the task through `/vault-cli:create-task`** — the wrapper that dispatches the `task-creator` agent, which emits exactly the sections `plan-task` needs: `# Success Criteria`, `# Definition of Done`, `# Tasks`.
@@ -276,7 +278,7 @@ Three consequences, all binding:
 
 ⚠️ **This block is the one authoritative home for the rule.** Every spawn site references it rather than restating it — the fleet command, the fleet runbook, and the manager-loop command all point here. It owns **six constants**: the **readiness ladder** (item 2 above — all four of its branches, its thresholds, and the `UNFIXABLE:` handling), the **fleet-wide concurrent limit** (item 5 above), the **mode decision** (item 6 above — the classifier, the `mode:` field, and both headless constraints), the **target decision** (item 7 above — `local` vs `cluster`, why `cluster` is per-call only, and why the returned id is not evidence), the **cwd/vault/launcher decision** (item 8 above — why neither is defaulted, and what the response reports), and the **repair dispatch** (§ *The repair dispatch* below — who repairs a `🔧 Repairable` row, and the per-round cap). Each appears once, there, and is referenced everywhere else. ⚠️ **A restated copy of any of them is not a harmless comment — it is a second counter.** The cap was restated in `commands/manager-loop.md`, `commands/manager-verify.md` and the manager runbook's Guardrail 2 until 2026-09-24: four homes for one number, which is how a single cap becomes two caps the day one home is edited and the others are not, with no error and no diff to catch it. The mode rule carried the mirror-image defect until the same day: it lived in `commands/open.md` § Step 0.6 and was consumed only there, so every other spawn site silently fell through to the fleet config — measured 2026-09-23, **63 new-worker spawns in one day and 0 of them headless**, 57 sourced from `config` rather than from any decision.
 
-**A — `spawn_agent` (preferred).** The prompt is a spawn *argument*, so the task never goes
+**A — `spawn_agent` (the preferred mechanism, within `/open`).** The prompt is a spawn *argument*, so the task never goes
 over keystrokes:
 
 ```

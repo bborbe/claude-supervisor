@@ -20,7 +20,7 @@ Glob `${CLAUDE_PLUGIN_ROOT}/commands/*.md` and list filenames only — do NOT re
 ## Step 3: Summarize
 
 Report:
-- **Your tier** — point the user at `session-tiers.md`; do NOT restate the command → tier table here. It is the single source, and a restated copy is exactly what drifts.
+- **Your tier** — name the three session types (**fleet manager**, **manager** (goal/topic), **worker** — headless or interactive) and state the `/open` rule: **managers open workers with `/supervisor:open`; a worker never calls `/open`.** Then point the user at `session-tiers.md` for the authoritative wording; do NOT restate the command → tier table here. It is the single source, and a restated copy is exactly what drifts.
 - **Supervisor rules learned** — key rules from `fleet-surface.md` (addressing, session roles, disarm contract)
 - **Available commands** — filenames grouped by tier prefix (`fleet-*` / `manager-*` / `worker-*` / bare)
 - **Confirm readiness to work**
