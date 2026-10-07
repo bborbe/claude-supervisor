@@ -1415,12 +1415,15 @@ def loop_snapshot_path(vault: str, subject: str) -> str:
 def print_provenance(subject: str, vault: str, buckets_staged: bool) -> None:
     """Name the two provenance files `--save` sits between, labelled.
 
-    The drive leg's dispatch requires `recorded_at` from the *snapshot*, while the store
-    is the file `--save` reads and writes. The two paths sit one directory apart and read
-    alike, so the wrong half is plausible-looking — measured 2026-09-30, the store's value
-    was passed where the snapshot's was required. Printing both here, with the
-    `recorded_at` source named, makes that half unambiguous at the point the caller reads
-    it, rather than leaving the command's prose to disambiguate a value already in hand.
+    The drive leg's dispatch requires `recorded_at` from the *store* — the file `--save`
+    reads and writes, and the same record that carries `bucket_sets` — while the snapshot
+    is the leg's *row* source. The two paths sit one directory apart and read alike, so
+    the wrong half is plausible-looking, and both directions have been measured: on
+    2026-09-30 the store's value was passed where the snapshot's was required, and on
+    2026-10-05 the snapshot was named while the store's value was passed, which held all
+    49 rows of a batch at the leg's clause (0). Printing both here, with each half's role
+    named, makes them unambiguous at the point the caller reads it, rather than leaving
+    the command's prose to disambiguate a value already in hand.
 
     ⚠️ **The store label is conditional, because the half it names is.** `save_stored`
     omits `bucket_sets` entirely when the caller staged none — *"Omitted rather than
@@ -1430,8 +1433,8 @@ def print_provenance(subject: str, vault: str, buckets_staged: bool) -> None:
     half *lands*; neither is a promise that the file exists or is complete.
     """
     carries = "bucket_sets" if buckets_staged else "no bucket sets staged this tick"
-    print(f"  store:    {state_path(subject)}  ({carries})")
-    print(f"  snapshot: {loop_snapshot_path(vault, subject)}  (recorded_at source)")
+    print(f"  store:    {state_path(subject)}  (recorded_at source, {carries})")
+    print(f"  snapshot: {loop_snapshot_path(vault, subject)}  (row source)")
 
 
 # The shapes a caller/gate disagreement can take — and the two that are not disagreements
