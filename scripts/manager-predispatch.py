@@ -29,7 +29,7 @@ into disagreeing about what "unchanged" means.
 ⚠️ Why this store is not the loop's store — checked before building, 2026-09-26
 --------------------------------------------------------------------------------
 A live per-subject snapshot already exists: `~/.claude/state/sweep-gate-loop/<vault>/
-<subject>.snapshot.json`, written every 900 s by the vault-side launchd job
+<subject>.snapshot.json`, written on CHANGE-WAKE ticks by the vault-side launchd job (the job ticks every 900 s; the snapshot advances only when the digest changes, so `recorded_at` is an identity, not a freshness value — see `docs/fleet-surface.md` § Session end)
 `com.bborbe.sweep-gate-notify`. It was read and compared field-for-field, and the result
 is worth keeping because it cuts both ways:
 
@@ -2521,7 +2521,9 @@ def main(argv: list[str]) -> int:
         # Every reading this verdict rests on, printed rather than assumed: the two counts
         # and the two clocks. A gate snapshot that predates the caller's own scan is cause
         # (2) made visible — stated, not claimed, because a stale snapshot and a too-large
-        # scan render the same shape.
+        # scan render the same shape. ⚠️ Note a quiet subject's `recorded_at` ALWAYS predates the
+        # caller's scan — not because it is stale, but because it is an identity that froze — so
+        # the pair below reports when the digest last changed, not how old the snapshot is.
         try:
             # `.astimezone()` so both clocks on the `reading:` line carry an offset — the
             # line exists to be compared, and a naive local mtime beside a tz-aware
@@ -2535,7 +2537,7 @@ def main(argv: list[str]) -> int:
             scanned_at = "unstated"
         print(
             f"  reading: caller-only {len(only_mine)} · gate-only {len(only_gate)} · "
-            f"gate snapshot recorded_at {snap_payload.get('recorded_at') or 'unstated'} · "
+            f"gate snapshot last digest change {snap_payload.get('recorded_at') or 'unstated'} · "
             f"caller scan written {scanned_at}"
         )
 
