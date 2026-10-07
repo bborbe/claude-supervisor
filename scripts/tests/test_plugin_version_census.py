@@ -115,10 +115,12 @@ class CensusStateTest(unittest.TestCase):
         self.assertEqual(rows[0]["state"], "unknown")
         self.assertIsNone(rows[0]["loaded"])
 
-    def test_an_unknown_install_makes_nothing_stale(self):
+    def test_an_unreadable_install_makes_every_row_unknown(self):
+        """No baseline means no comparison — `current` here would print `stale: 0`."""
         self.marker("0.114.0", 10, 1)
         rows = self.run_census([session("aaaa1111", 10)], None)
-        self.assertEqual(rows[0]["state"], "current")
+        self.assertEqual(rows[0]["state"], "unknown")
+        self.assertEqual(rows[0]["loaded"], "0.114.0")
 
     def test_stale_rows_sort_first(self):
         self.marker("0.114.1", 10, 1)
@@ -133,8 +135,19 @@ class PanesForPidsTest(unittest.TestCase):
         with mock.patch.object(census_mod, "_pid_ttys", return_value={55378: "ttys000", 999: "ttys003"}):
             self.assertEqual(census_mod.panes_for_pids([55378, 999], panes), {999: "203"})
 
-    def test_unreadable_wezterm_is_not_an_empty_fleet(self):
+    def test_a_failed_wezterm_read_is_none_not_an_empty_fleet(self):
         with mock.patch.object(census_mod, "wezterm_panes", return_value=None):
+            self.assertIsNone(census_mod.panes_for_pids([1]))
+
+    def test_a_failed_ps_read_is_none_too(self):
+        """Both halves carry the three-state contract, so the join must not drop either."""
+        panes = {"203": {"tty": "/dev/ttys003"}}
+        with mock.patch.object(census_mod, "_pid_ttys", return_value=None):
+            self.assertIsNone(census_mod.panes_for_pids([1], panes))
+
+    def test_a_readable_empty_fleet_stays_empty(self):
+        with mock.patch.object(census_mod, "wezterm_panes", return_value={}), \
+                mock.patch.object(census_mod, "_pid_ttys", return_value={}):
             self.assertEqual(census_mod.panes_for_pids([1]), {})
 
 
@@ -202,48 +215,123 @@ class MainTest(unittest.TestCase):
                                 "--cache-dir", str(self.cache), "--installed-json", str(self.installed))
         self.assertEqual(code, 2)
 
+    def test_a_sessions_file_that_is_not_a_list_of_records_exits_2(self):
+        bad = pathlib.Path(self.dir) / "bad.json"
+        bad.write_text(json.dumps({"not": "a list"}))
+        code, _ = self.run_main("--sessions-json", str(bad), "--cache-dir", str(self.cache),
+                                "--installed-json", str(self.installed), "--no-panes")
+        self.assertEqual(code, 2)
+
+    def test_reload_with_no_panes_is_refused(self):
+        """The combination is a fleet-wide no-op that would read as `no resolvable pane`."""
+        code, _ = self.run_main("--reload", "--no-panes", "--sessions-json", str(self.sessions),
+                                "--cache-dir", str(self.cache), "--installed-json", str(self.installed))
+        self.assertEqual(code, 2)
+
+    def test_an_unreadable_liveness_probe_exits_2(self):
+        """Never `live: 0 · stale: 0`, which reads as a healthy fleet."""
+        with mock.patch.object(census_mod, "live_sessions", return_value=(None, "probe failed")):
+            code, _ = self.run_main("--cache-dir", str(self.cache), "--installed-json", str(self.installed),
+                                    "--no-panes")
+        self.assertEqual(code, 2)
+
+    def test_a_failed_pane_read_is_reported_rather_than_faked_per_row(self):
+        with mock.patch.object(census_mod, "panes_for_pids", return_value=None):
+            code, out = self.run_main("--sessions-json", str(self.sessions), "--cache-dir", str(self.cache),
+                                      "--installed-json", str(self.installed))
+        self.assertEqual(code, 0)
+        self.assertIn("bbbb2222  loaded 0.114.0  behind  —", out)
+
+
+class ComposerTest(unittest.TestCase):
+    """Readiness is an EMPTY composer, not a drawn one — the rule `server/tab.mjs` measured."""
+
+    def test_a_placeholder_composer_is_not_ready(self):
+        text = "❯ Try \"create a util logging.py that...\""
+        self.assertFalse(census_mod.pane_is_ready(text))
+
+    def test_an_empty_composer_is_ready(self):
+        self.assertTrue(census_mod.pane_is_ready("❯ "))
+
+    def test_a_composer_holding_text_is_not_ready(self):
+        """Enter would submit a line this script did not write."""
+        self.assertFalse(census_mod.pane_is_ready("❯ draft ok"))
+
+    def test_the_last_glyph_line_is_the_composer_not_an_echoed_prompt(self):
+        text = "❯ /reload-plugins\n  ⎿  Reloaded: 13 plugins\n❯ "
+        self.assertTrue(census_mod.pane_is_ready(text))
+
+    def test_scrollback_alone_is_not_a_composer(self):
+        """A glyph left above a busy pane must not read as 'at a prompt'."""
+        self.assertFalse(census_mod.pane_is_ready("❯ /reload-plugins\n✻ Improvising... (5s)"))
+
 
 class ReloadPaneTest(unittest.TestCase):
-    """The lever's confirmation is the marker advancing, never the pane's own echo."""
+    """The lever's confirmation is the NEWEST marker for the pid moving — never the
+    pre-reload version directory, which a reload writes into the new dir and leaves alone."""
+
+    OLD, NEW = "0.114.0", "0.114.1"
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
-        self.marker = pathlib.Path(self.dir) / ".in_use" / "11"
-        touch(self.marker, 1_000)
+        self.cache = pathlib.Path(self.dir)
+        self.old = self.cache / "claude-supervisor" / "supervisor" / self.OLD / ".in_use" / "11"
+        touch(self.old, 1_000)
 
-    def test_success_is_the_marker_advancing(self):
-        def bump(cmd, **kwargs):
+    def reload(self, side_effect):
+        with mock.patch.object(census_mod.subprocess, "run", side_effect=side_effect):
+            return census_mod.reload_pane("203", 11, self.cache, "claude-supervisor", "supervisor")
+
+    def ready_pane(self, cmd, **kwargs):
+        if cmd[2] == "get-text":
+            return mock.Mock(returncode=0, stdout="❯ ", stderr="")
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    def test_success_is_a_new_marker_in_the_new_version_directory(self):
+        """The realistic reload: a NEW entry appears and the OLD one is untouched."""
+        def run(cmd, **kwargs):
             if cmd[2] == "send-text":
-                os.utime(self.marker, (2_000, 2_000))
-            if cmd[2] == "get-text":
-                return mock.Mock(returncode=0, stdout="❯ ", stderr="")
-            return mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.object(census_mod.subprocess, "run", side_effect=bump):
-            result = census_mod.reload_pane("203", str(self.marker))
+                touch(self.cache / "claude-supervisor" / "supervisor" / self.NEW / ".in_use" / "11", 2_000)
+            return self.ready_pane(cmd, **kwargs)
+        result = self.reload(run)
         self.assertTrue(result["ok"])
+        self.assertIn(self.OLD, result["why"])
+        self.assertIn(self.NEW, result["why"])
+        # The old marker really is untouched — the case the earlier version could not see.
+        self.assertEqual(os.path.getmtime(self.old), 1_000)
 
-    def test_a_pane_with_no_composer_is_refused_before_any_send(self):
+    def test_watching_the_old_marker_alone_would_never_fire(self):
+        """Pins the defect: after a realistic reload the old marker's mtime is unchanged."""
+        def run(cmd, **kwargs):
+            if cmd[2] == "send-text":
+                touch(self.cache / "claude-supervisor" / "supervisor" / self.NEW / ".in_use" / "11", 2_000)
+            return self.ready_pane(cmd, **kwargs)
+        self.reload(run)
+        self.assertEqual(os.path.getmtime(self.old), 1_000)
+
+    def test_a_reload_with_no_marker_before_the_send_is_unverified(self):
+        self.old.unlink()
+        result = self.reload(self.ready_pane)
+        self.assertFalse(result["ok"])
+        self.assertIn("no marker before the send", result["why"])
+
+    def test_a_busy_pane_is_refused_before_any_send(self):
         sent = []
         def run(cmd, **kwargs):
             if cmd[2] == "send-text":
                 sent.append(cmd)
-            return mock.Mock(returncode=0, stdout="still starting up", stderr="")
-        with mock.patch.object(census_mod.subprocess, "run", side_effect=run), \
-                mock.patch.object(census_mod, "RELOAD_READY_TIMEOUT", 0.1):
-            result = census_mod.reload_pane("203", str(self.marker))
+            return mock.Mock(returncode=0, stdout="✻ Improvising... (5s)", stderr="")
+        with mock.patch.object(census_mod, "RELOAD_READY_TIMEOUT", 0.1):
+            result = self.reload(run)
         self.assertFalse(result["ok"])
         self.assertEqual(sent, [])
 
     def test_a_marker_that_does_not_move_is_unconfirmed(self):
-        def run(cmd, **kwargs):
-            if cmd[2] == "get-text":
-                return mock.Mock(returncode=0, stdout="❯ ", stderr="")
-            return mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.object(census_mod.subprocess, "run", side_effect=run), \
-                mock.patch.object(census_mod, "RELOAD_SETTLE_TIMEOUT", 0.1):
-            result = census_mod.reload_pane("203", str(self.marker))
+        with mock.patch.object(census_mod, "RELOAD_SETTLE_TIMEOUT", 0.1):
+            result = self.reload(self.ready_pane)
         self.assertFalse(result["ok"])
+        self.assertIn("unconfirmed", result["why"])
         self.assertIn("unconfirmed", result["why"])
 
 

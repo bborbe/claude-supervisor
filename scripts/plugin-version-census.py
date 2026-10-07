@@ -7,8 +7,9 @@ documented in `docs/fleet-surface.md` § *A plugin install does not reach a runn
 session — the probe and the lever*; what did not exist is the **fleet** reading: how
 many live sessions are behind, which ones, and how to reach each.
 
-  (default)   human report — `installed: <ver> · live: N · stale: S`, then one line per
-              stale session: `<sid8>  loaded <ver>  <name>` plus its jump target
+  (default)   human report — `installed: <ver> · live: N · stale: S` (plus `· unknown: N`
+              when any live session has no marker), then one line per stale session:
+              `<sid8>  loaded <ver>  <name>` plus its jump target
   --json      the same rows as JSON, for a caller that renders its own table
   --reload    THE LEVER — for every stale session whose pane resolves, activate the pane
               and type `/reload-plugins`, then re-read the markers and print the delta
@@ -29,14 +30,18 @@ registry deletes an entry when its session exits. A second registry reader is th
 defect `session-liveness.py`'s own header documents, so this script shells out to it and
 holds no reading of its own.
 
-⚠️ **A session with no marker is `unknown`, never `stale`.** A headless worker is an
-in-process `query()` and a cluster worker runs in a pod on another machine; neither
-necessarily holds a local `.in_use` entry. Reporting them stale would name a fix for a
-session the lever cannot even reach, and "no marker" is a fact about the probe.
+⚠️ **`unknown` is never `stale`, and it covers two different facts.** A session with no
+marker: a headless worker is an in-process `query()` and a cluster worker runs in a pod on
+another machine, so neither necessarily holds a local `.in_use` entry, and reporting them
+stale would name a fix for a session the lever cannot even reach. And an **unreadable
+installed version**: with no baseline to compare against, every session would read
+`current` and the header would print `stale: 0` — a clean fleet derived from a probe that
+could not read its own reference.
 
 ⚠️ **`--reload` types into panes, so it steals focus and only reaches a TAB session.** It
-is the one mutating mode; the census itself is read-only. A session with no resolvable
-pane is skipped and named, never guessed at.
+is the one mutating mode; the census itself is read-only. A session with no resolvable pane
+is skipped and named, never guessed at. ⚠️ **Success is the newest marker for that pid
+moving** — never the pre-reload version directory's mtime, which a reload never touches.
 """
 import argparse
 import glob
@@ -75,12 +80,23 @@ def installed_version(path=DEFAULT_INSTALLED, plugin=DEFAULT_PLUGIN, marketplace
     entries = (data.get("plugins") or {}).get(f"{plugin}@{marketplace}") or []
     if not entries:
         return None
+    # `entries[0]` is the only record this key carries in practice (one marketplace, one
+    # install). A second would mean two install paths for one plugin@marketplace, which the
+    # harness does not produce — and if it ever did, the newest `lastUpdated` would be the
+    # one a session loads. Named rather than silently first-wins.
     install = entries[0].get("installPath") or ""
     return os.path.basename(install.rstrip("/")) or None
 
 
 def newest_marker(cache_dir, marketplace, plugin, pid):
-    """(version, mtime) for the newest `.in_use/<pid>` under the plugin's cache, else None."""
+    """(version, mtime) for the newest `.in_use/<pid>` under the plugin's cache, else None.
+
+    Newest **by mtime alone**. Sorting `(mtime, version)` tuples would break an mtime tie
+    lexicographically on the version string, so under coarse filesystem mtime granularity
+    two markers written in the same tick would resolve to `0.9.0` over `0.114.1` — a wrong
+    answer that reads as a measurement. A tie on mtime is genuinely ambiguous, so the tie
+    is broken by the largest mtime and nothing else.
+    """
     pattern = os.path.join(cache_dir, marketplace, plugin, "*", ".in_use", str(pid))
     hits = []
     for path in glob.glob(pattern):
@@ -90,8 +106,8 @@ def newest_marker(cache_dir, marketplace, plugin, pid):
             continue
     if not hits:
         return None
-    hits.sort(reverse=True)
-    return hits[0][1], hits[0][0]
+    mtime, version = max(hits, key=lambda hit: hit[0])
+    return version, mtime
 
 
 def live_sessions(liveness=LIVENESS):
@@ -121,17 +137,21 @@ def census(sessions, installed, cache_dir=DEFAULT_CACHE, marketplace=DEFAULT_MAR
            plugin=DEFAULT_PLUGIN):
     """One row per live session: what it serves, and whether that is the installed version.
 
-    `state` is `current` / `stale` / `unknown`. `unknown` is a session with no marker —
-    a different fact from stale, and the one a caller must not fold into it.
+    `state` is `current` / `stale` / `unknown`. `unknown` covers two different facts a
+    caller must not fold into the others: a session with **no marker** (a headless or
+    cluster worker), and an **unreadable installed version**. The second is the collapse
+    `live_sessions()` refuses one level up — with no baseline to compare against, every
+    session would read `current` and the header would print `stale: 0`, a clean fleet
+    derived from a probe that could not read its own reference.
     """
     rows = []
     for session in sessions:
         pid = session.get("pid")
         marker = newest_marker(cache_dir, marketplace, plugin, pid) if pid else None
         loaded, mtime = marker if marker else (None, None)
-        if loaded is None:
+        if loaded is None or installed is None:
             state = "unknown"
-        elif installed is not None and loaded != installed:
+        elif loaded != installed:
             state = "stale"
         else:
             state = "current"
@@ -191,10 +211,17 @@ def _pid_ttys(pids):
 
 
 def panes_for_pids(pids, panes=None):
-    """{pid(int): pane_id(str)} — the join is the tty, which both `ps` and wezterm carry."""
+    """{pid(int): pane_id(str)} — the join is the tty, which both `ps` and wezterm carry.
+
+    Three states, and the join is where both halves' contracts are easiest to lose: `None`
+    when either read failed, `{}` when both answered and nothing joined, a map otherwise.
+    Collapsing a failed read into `{}` here would put "this fleet has no panes" on screen
+    for a `wezterm` that is simply unreachable — and the caller prints exactly that string
+    per stale row, so the collapse would be reported as a measurement.
+    """
     panes = wezterm_panes() if panes is None else panes
     if panes is None:
-        return {}
+        return None
     by_tty = {}
     for pane_id, info in panes.items():
         tty = (info.get("tty") or "").replace("/dev/", "")
@@ -202,21 +229,57 @@ def panes_for_pids(pids, panes=None):
             by_tty.setdefault(tty, pane_id)
     ttys = _pid_ttys(pids)
     if ttys is None:
-        return {}
+        return None
     return {pid: by_tty[tty] for pid, tty in ttys.items() if tty in by_tty}
 
 
-def reload_pane(pane_id, marker_path):
-    """Type `/reload-plugins` into an idle pane and confirm the marker moved.
+def composer_line(text):
+    """The LAST line drawn with the prompt glyph at its start, or None.
+
+    Mirrors `server/tab.mjs:composerLine()`. Every echoed submitted prompt above it carries
+    the same glyph, so **position** — not the glyph alone — is what identifies the composer.
+    A `COMPOSER in text` substring test matches any echoed prompt in scrollback and passes on
+    the first poll whatever the pane is doing.
+    """
+    for line in reversed(str(text).split("\n")):
+        if line.startswith(COMPOSER):
+            return line
+    return None
+
+
+def pane_is_ready(text):
+    """True only for an EMPTY composer — the same test `server/tab.mjs:isReady()` makes.
+
+    ⚠️ A drawn composer is not a ready one. The glyph appears while the TUI is still
+    painting a placeholder suggestion, and a submit sent into that phase is swallowed
+    (measured 2026-09-20 in `server/tab.mjs`: two sends stranded unsubmitted). A composer
+    already holding text is not ready either — Enter would submit a line this script did
+    not write.
+    """
+    line = composer_line(text)
+    if line is None:
+        return False
+    return line[len(COMPOSER):].strip() == ""
+
+
+def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
+    """Type `/reload-plugins` into an idle pane and confirm the reload landed.
 
     Activate first: `send-text` reaches a pane only once its tab is active (measured
-    2026-09-07 in `server/tab.mjs`, and again here). Readiness is the composer glyph, not
-    a sleep. Success is the marker's mtime advancing past the value read before the send —
-    the pane's own echo is not evidence the reload ran.
+    2026-09-20 in `server/tab.mjs`, and again here). Readiness is an empty composer, not a
+    sleep.
+
+    ⚠️ **Success is the newest marker for this pid changing — never the pre-reload version
+    directory's mtime.** A reload writes a NEW `.in_use/<pid>` entry under the *installed*
+    version and **never touches the old one**, so watching `row['loaded']`'s marker can
+    never fire: a stale session that reloads correctly would report `unconfirmed` after the
+    full settle timeout, once per pane, serially. The comparison is therefore the
+    `newest_marker()` pair — version or mtime — which is the same rule the census reads.
     """
-    before = None
-    if marker_path and os.path.exists(marker_path):
-        before = os.path.getmtime(marker_path)
+    before = newest_marker(cache_dir, marketplace, plugin, pid)
+    if before is None:
+        # No marker to compare against: the send could land, but nothing could confirm it.
+        return {"pane": pane_id, "ok": False, "why": "no marker before the send — unverified"}
 
     try:
         activated = subprocess.run(["wezterm", "cli", "activate-pane", "--pane-id", str(pane_id)],
@@ -234,11 +297,11 @@ def reload_pane(pane_id, marker_path):
                                   capture_output=True, text=True, timeout=20).stdout
         except (OSError, subprocess.SubprocessError):
             text = ""
-        if COMPOSER in text:
+        if pane_is_ready(text):
             break
         time.sleep(1)
     else:
-        return {"pane": pane_id, "ok": False, "why": "no composer glyph — pane not at a prompt"}
+        return {"pane": pane_id, "ok": False, "why": "composer not empty — pane not idle at a prompt"}
 
     try:
         sent = subprocess.run(["wezterm", "cli", "send-text", "--pane-id", str(pane_id),
@@ -250,19 +313,13 @@ def reload_pane(pane_id, marker_path):
         return {"pane": pane_id, "ok": False,
                 "why": f"send-text exited {sent.returncode}: {sent.stderr.strip()}"}
 
-    if before is None:
-        # No marker to compare against: the send landed, the reload cannot be confirmed.
-        return {"pane": pane_id, "ok": False, "why": "no marker before the send — unverified"}
-
     deadline = time.time() + RELOAD_SETTLE_TIMEOUT
     while time.time() < deadline:
-        try:
-            if os.path.getmtime(marker_path) > before:
-                return {"pane": pane_id, "ok": True, "why": "marker advanced"}
-        except OSError:
-            pass
+        after = newest_marker(cache_dir, marketplace, plugin, pid)
+        if after and (after[0] != before[0] or after[1] > before[1]):
+            return {"pane": pane_id, "ok": True, "why": f"marker moved {before[0]} → {after[0]}"}
         time.sleep(1)
-    return {"pane": pane_id, "ok": False, "why": "marker did not advance — reload unconfirmed"}
+    return {"pane": pane_id, "ok": False, "why": "marker did not move — reload unconfirmed"}
 
 
 def render(rows, installed):
@@ -292,6 +349,12 @@ def main(argv=None):
     parser.add_argument("--no-panes", action="store_true", help="skip pane resolution (no jump targets)")
     args = parser.parse_args(argv)
 
+    # A lever that cannot reach a pane is not a degraded lever, it is a no-op that would
+    # report `no resolvable pane` for the whole fleet and read as "nothing was stale enough".
+    if args.reload and args.no_panes:
+        print("--reload needs pane resolution; --no-panes disables it", file=sys.stderr)
+        return 2
+
     installed = installed_version(args.installed_json, args.plugin, args.marketplace)
     if args.sessions_json:
         try:
@@ -299,6 +362,9 @@ def main(argv=None):
                 sessions = json.load(handle)
         except (OSError, ValueError) as exc:
             print(f"could not read {args.sessions_json}: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(sessions, list) or not all(isinstance(s, dict) for s in sessions):
+            print(f"{args.sessions_json} must hold a list of session records", file=sys.stderr)
             return 2
     else:
         sessions, error = live_sessions()
@@ -309,8 +375,16 @@ def main(argv=None):
     rows = census(sessions, installed, args.cache_dir, args.marketplace, args.plugin)
 
     stale = [r for r in rows if r["state"] == "stale"]
+    panes = None
     if stale and not args.no_panes:
         panes = panes_for_pids([r["pid"] for r in stale if r["pid"]])
+        if panes is None:
+            # The pane read failed. Say so once, and do not let the per-row fallback below
+            # print `no resolvable pane` — that string would be a measurement this run did
+            # not take.
+            print("pane read failed (wezterm or ps unreachable) — no jump targets resolved",
+                  file=sys.stderr)
+            panes = {}
         for row in stale:
             row["pane"] = panes.get(row["pid"])
             row["jump"] = f"/supervisor:jump {row['pane']}" if row["pane"] else None
@@ -324,19 +398,23 @@ def main(argv=None):
             if not pane:
                 results[row["session_id"]] = {"ok": False, "why": "no resolvable pane"}
                 continue
-            marker = os.path.join(args.cache_dir, args.marketplace, args.plugin,
-                                  row["loaded"], ".in_use", str(row["pid"]))
-            results[row["session_id"]] = reload_pane(pane, marker)
+            results[row["session_id"]] = reload_pane(pane, row["pid"], args.cache_dir,
+                                                     args.marketplace, args.plugin)
             reached += 1 if results[row["session_id"]]["ok"] else 0
         if not args.json:
             for row in stale:
                 result = results[row["session_id"]]
                 verdict = "reloaded" if result.get("ok") else "not reloaded"
                 print(f"  {row['sid8']}  pane {row.get('pane') or '—'}  {verdict}  ({result.get('why')})")
-        # Re-read after the lever so the delta is measured, not inferred. The results are
-        # carried beside the fresh rows rather than onto them — `census` rebuilds every row,
-        # so attaching `reload` to the pre-lever ones would drop it from `--json` entirely.
+        # Re-read after the lever so the delta is measured, not inferred. `census` rebuilds
+        # every row, so both the results and the jump targets have to be carried back on —
+        # attaching them to the pre-lever rows would drop them from `--json` entirely, and
+        # the fresh rows would render an em-dash where the jump target belongs.
         rows = census(sessions, installed, args.cache_dir, args.marketplace, args.plugin)
+        for row in rows:
+            if row["state"] == "stale" and panes is not None:
+                row["pane"] = panes.get(row["pid"])
+                row["jump"] = f"/supervisor:jump {row['pane']}" if row["pane"] else None
         lever = {"reached": reached, "results": results}
 
     if args.json:

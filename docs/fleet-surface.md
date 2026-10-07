@@ -125,14 +125,24 @@ marker, and prints one header plus one line per stale session, each carrying the
 resolved through the tty join:
 
 ```
-installed: 0.114.1 · live: 44 · stale: 21
+installed: 0.114.1 · live: 44 · stale: 21 · unknown: 0
   65d26b6c  loaded 0.114.0  Attention Manager  /supervisor:jump 3
 ```
 
+⚠️ **The header carries a fourth segment, `· unknown: N`, whenever any live session has no
+marker** — the normal headless-worker / cluster-worker case, and the bucket a caller must not
+fold into `stale`. It is omitted only when it is zero. `installed: unknown` is a second kind of
+`unknown`: with no baseline to compare against, every row reads `unknown` rather than `current`,
+so an unreadable `installed_plugins.json` never prints as a clean `stale: 0` fleet.
+
 `--json` emits the same rows for a caller that renders its own table. **`--reload` is the
-lever**: it activates each stale session's pane, types `/reload-plugins`, and confirms the
-reload by the marker's mtime advancing — never by the pane's echo, which is identical whether
-the session was idle at its prompt or mid-turn.
+lever**: it activates each stale session's pane, types `/reload-plugins` into a pane whose
+composer is **empty** (the same readiness test `server/tab.mjs:isReady()` makes — a drawn
+composer is not a ready one), and confirms the reload by **the newest marker for that pid
+moving**. ⚠️ Never by the pre-reload version directory's mtime: a reload writes the new entry
+into the *installed* version's directory and leaves the old one alone, so watching the old
+path can never fire and would report every successful reload as unconfirmed. Never by the
+pane's echo either, which is identical whether the session was idle at its prompt or mid-turn.
 
 ⚠️ **The marker count is not the session count.** A reload writes a new `.in_use/<pid>` entry
 and never removes the old one, so counting markers over the cache reads **17 versions / 81
