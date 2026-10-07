@@ -990,5 +990,278 @@ class UpstreamRefusalFailsLoudly(unittest.TestCase):
         self.assertEqual(gf.feed_rows([self.REFUSAL + "\n"]), [])
 
 
+class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
+    """`--interval` makes the one-shot pipe an armable, change-detecting watcher.
+
+    The rule's arm is a `Monitor` over
+    `who-needs-me.py --section needs-you | gate-owner-filter.py --feed --self <sid>`.
+    `--feed` reads stdin ONCE, so that Monitor fires on the first read and the
+    process exits — the manager's push channel dies silently, with no error and no
+    marker. Measured 2026-10-07 against v0.115.5: `--help` exposed no watch flag
+    and the source had zero hits for `while True|time.sleep`.
+
+    ⚠️ **The loop must be a CHANGE-DETECTOR, not a re-emitter.** A shell
+    `while true; do … | gate-owner-filter.py --feed …; sleep N; done` around the
+    one-shot command re-emits every kept pane on every poll, turning a push
+    channel into a 1/NHz poll of the manager's entire turn budget — the cost this
+    filter exists to remove. So a pane is emitted when it ENTERS the kept set and
+    never on a re-poll, and the first two cases below pin exactly that pair.
+
+    ⚠️ **A `LIVENESS` line per poll is load-bearing, not decoration.** A
+    change-detector is silent when nothing changes, and silence is byte-identical
+    to a dead arm — the defect `manager-attention-watch.py` closed for its own arm
+    with the same record. Its presence answers *alive or stuck?* and its age is
+    the arm's last heartbeat.
+
+    ⚠️ **A refusal ends the loop rather than being retried.** The one-shot
+    contract is "do not arm a watcher on this pipeline's output"; swallowing a
+    refused read would keep a dead push channel looking alive for the `Monitor`'s
+    whole 30-minute bound.
+    """
+
+    ONE = "  [ 98765] 0m  first gate\n"
+    TWO = "  [ 98765] 0m  first gate\n  [ 98766] 0m  second gate\n"
+    EMPTY = "Needs you (0)\nNothing needs you.\n"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.ledger = os.path.join(self.dir, "ledger")
+        for path in (self.state, self.registry, self.ledger):
+            os.makedirs(path)
+        self.counter = os.path.join(self.dir, "count")
+
+    def producer(self, *frames, prelude="", exit_code=0):
+        """A `--producer` command printing `frames[i]` on poll i, the last repeating.
+
+        A real command string, not a fixture, because `--producer` is invoked
+        exactly as the rule's arm invokes the pipeline.
+
+        `prelude` is Python source spliced in AFTER the poll counter is advanced
+        and before the frame is written, with `n` bound to the current poll. It is
+        what lets a test change the WORLD between polls — the registry, the ledger,
+        the claims file — rather than only the feed, which is the axis the
+        per-poll re-read has to be proven on. `exit_code` makes the producer fail,
+        which the loop must not read as a quiet fleet.
+        """
+        frames_path = os.path.join(self.dir, "frames.json")
+        with open(frames_path, "w", encoding="utf-8") as handle:
+            json.dump(list(frames), handle)
+        script = os.path.join(self.dir, "producer.py")
+        with open(script, "w", encoding="utf-8") as handle:
+            handle.write(
+                "import json, sys\n"
+                f"COUNTER = {self.counter!r}\n"
+                f"FRAMES = json.load(open({frames_path!r}))\n"
+                "try:\n"
+                "    n = int(open(COUNTER).read())\n"
+                "except Exception:\n"
+                "    n = 0\n"
+                "n += 1\n"
+                "open(COUNTER, 'w').write(str(n))\n"
+                + (prelude if prelude.endswith("\n") or not prelude else prelude + "\n")
+                + "sys.stdout.write(FRAMES[min(n - 1, len(FRAMES) - 1)])\n"
+                f"sys.exit({exit_code})\n"
+            )
+        return f"{sys.executable} {script}"
+
+    def invoke(self, *argv):
+        return subprocess.run(
+            [sys.executable, _SCRIPT,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", self.ledger,
+             "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
+            capture_output=True, text=True,
+        )
+
+    def poll(self, frames, polls=None, **producer_kwargs):
+        """A bounded poll loop over `frames` — `--interval 0` so the test never sleeps."""
+        return self.invoke(
+            "--feed", "--self", ME, "--interval", "0",
+            "--max-polls", str(polls if polls is not None else len(frames)),
+            "--producer", self.producer(*frames, **producer_kwargs),
+        )
+
+    # --- the change-detector: emit on ENTRY, never on re-poll ----------------
+
+    def test_a_stable_kept_pane_is_emitted_once(self):
+        """The half a shell `while true; … | filter …; sleep N; done` gets wrong."""
+        result = self.poll([self.ONE, self.ONE, self.ONE])
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    def test_a_pane_entering_the_kept_set_is_emitted(self):
+        result = self.poll([self.ONE, self.TWO, self.TWO])
+        self.assertEqual(result.stdout.split(), ["98765", "98766"], result.stdout)
+
+    def test_a_pane_that_leaves_and_returns_is_news_again(self):
+        """A gate that cleared and re-opened is a new gate, not a remembered one."""
+        result = self.poll([self.ONE, self.EMPTY, self.ONE])
+        self.assertEqual(result.stdout.split(), ["98765", "98765"], result.stdout)
+
+    def test_an_empty_first_poll_emits_nothing_and_keeps_running(self):
+        result = self.poll([self.EMPTY, self.EMPTY, self.ONE])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    # --- the LIVENESS record: a quiet arm must not read as a dead one --------
+
+    def test_every_poll_writes_a_liveness_line(self):
+        result = self.poll([self.ONE, self.ONE, self.ONE])
+        self.assertEqual(result.stderr.count("LIVENESS"), 3, result.stderr)
+
+    def test_the_liveness_line_carries_the_counts_and_the_change_state(self):
+        result = self.poll([self.ONE, self.ONE])
+        self.assertIn("gates: 1", result.stderr)
+        self.assertIn("new: 1  change", result.stderr)
+        self.assertIn("new: 0  no change", result.stderr)
+
+    def test_the_bound_stops_the_loop(self):
+        """`--max-polls` is what makes the loop testable at all."""
+        result = self.poll([self.ONE, self.ONE, self.ONE, self.ONE], polls=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count("LIVENESS"), 2, result.stderr)
+
+    # --- a refusal ends the loop, loudly -------------------------------------
+
+    def test_a_refusal_ends_the_loop_non_zero(self):
+        refusal = f"{gf.REFUSAL_MARKER}: WezTerm pane list unreadable\n"
+        result = self.poll([refusal, self.ONE])
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertEqual(result.stdout.split(), [], result.stdout)
+
+    def test_a_refusal_prints_no_gate_count(self):
+        """The line that lies is the line that must not be printed."""
+        refusal = f"{gf.REFUSAL_MARKER}: WezTerm pane list unreadable\n"
+        result = self.poll([refusal, self.ONE])
+        self.assertNotIn("gates:", result.stderr, result.stderr)
+        self.assertIn("upstream refused", result.stderr)
+
+    # --- the guards: poll mode is not combinable with the other shapes -------
+
+    def test_interval_without_feed_is_a_usage_error(self):
+        result = self.invoke("--interval", "5", "--self", ME)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("--feed", result.stderr)
+
+    def test_interval_with_pane_is_a_usage_error(self):
+        result = self.invoke("--interval", "5", "--feed", "--pane", "9", "--self", ME)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("--pane", result.stderr)
+
+    def test_max_polls_without_interval_is_a_usage_error(self):
+        result = self.invoke("--feed", "--max-polls", "3", "--self", ME)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("--interval", result.stderr)
+
+    # --- ownership inputs are re-read EVERY poll -----------------------------
+
+    def test_a_session_that_becomes_live_mid_arm_stops_being_emitted(self):
+        """The per-poll re-read, proven on the axis the feed cannot show.
+
+        Local review round 2026-10-07 found this: `poll()` re-read the FEED every
+        iteration but judged it against ownership state loaded once at arm time, so
+        a peer manager appearing — or dying — inside a 30-minute arm was invisible,
+        and both failure modes are the ones this filter exists to remove. The feed
+        here is byte-identical on both polls; only the registry moves.
+        """
+        sid = "44444444-4444-4444-8444-444444444444"
+        # `item_id` and `type: "open"` are both required by `log_items` — it keys
+        # the fold on the first and only records the second as an opening line, so
+        # a fixture carrying just pane and session resolves no session at all and
+        # the test would pass for the wrong reason.
+        with open(
+            os.path.join(self.state, f"{sid}.events.jsonl"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "item_id": "test-item-1",
+                        "session_id": sid,
+                        "pane": "98765",
+                        "type": "open",
+                    }
+                )
+                + "\n"
+            )
+        record = os.path.join(self.registry, "4242.json")
+
+        result = self.poll(
+            [self.ONE, self.ONE],
+            prelude=(
+                "if n >= 2:\n"
+                f"    open({record!r}, 'w').write("
+                f"json.dumps({{'sessionId': {sid!r}, 'status': 'idle'}}))\n"
+            ),
+        )
+
+        # Poll 1 — not live and no ledger record of its own, so it is nobody's and
+        # emits. Poll 2 — live, still record-less, so hop 3b reads it as a manager
+        # and drops it. Same feed, opposite verdict.
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+        self.assertIn("dropped(peer-manager-own): 1", result.stderr)
+
+    # --- a failed producer is not a quiet fleet ------------------------------
+
+    def test_a_producer_that_fails_ends_the_loop_non_zero(self):
+        """Empty stdout from a CRASHED producer read as a healthy empty queue.
+
+        `feed_refusal` separates "read, and empty" from "never read" by a marker on
+        stdout, but a producer that dies printing nothing writes no marker — so it
+        landed in the healthy-empty case and was certified by `gates: 0` on every
+        poll forever. Only the exit status distinguishes them.
+        """
+        result = self.poll([self.ONE, self.ONE], exit_code=1)
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertEqual(result.stdout.split(), [], result.stdout)
+
+    def test_a_failed_producer_prints_no_gate_count(self):
+        result = self.poll([self.ONE, self.ONE], exit_code=1)
+        self.assertNotIn("gates:", result.stderr, result.stderr)
+        self.assertIn("producer exited 1", result.stderr)
+
+    # --- --interval bounds and combinations ----------------------------------
+
+    def test_a_negative_interval_is_a_usage_error(self):
+        """`time.sleep` rejects it outright, so it used to reach the loop and crash."""
+        result = self.invoke("--feed", "--interval", "-1", "--self", ME)
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("negative", result.stderr)
+
+    def test_interval_zero_without_a_bound_is_a_usage_error(self):
+        """`--interval 0` is legal only bounded — unbounded it is a busy-loop."""
+        result = self.invoke("--feed", "--interval", "0", "--self", ME)
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("--max-polls", result.stderr)
+
+    def test_interval_with_explain_is_a_usage_error(self):
+        """The diagnostic shapes print every row per poll and would wake a Monitor."""
+        result = self.invoke("--feed", "--interval", "60", "--explain", "--self", ME)
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("--explain", result.stderr)
+
+    def test_interval_with_json_is_a_usage_error(self):
+        result = self.invoke("--feed", "--interval", "60", "--json", "--self", ME)
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("--json", result.stderr)
+
+    # --- the one-shot contract is untouched by the new flags -----------------
+
+    def test_omitting_interval_still_reads_stdin_once(self):
+        result = subprocess.run(
+            [sys.executable, _SCRIPT,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", self.ledger,
+             "--claims-file", os.path.join(self.dir, "no-claims.json"),
+             "--feed", "--self", ME],
+            input=self.ONE, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+        self.assertNotIn("LIVENESS", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

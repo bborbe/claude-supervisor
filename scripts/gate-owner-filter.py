@@ -174,7 +174,10 @@ import argparse
 import glob
 import json
 import os
+import shlex
+import subprocess
 import sys
+import time
 
 STATE = os.path.expanduser("~/.claude/state/attention")
 LEDGER = os.path.expanduser("~/.local/state/claude-supervisor/sessions")
@@ -202,6 +205,36 @@ REFUSAL_MARKER = "WHO-NEEDS-ME-REFUSED"
 # spelling -- keep the two in lockstep, or the filter carries a signal the feed
 # no longer emits and every row reads live.
 REPLAY_MARK = "⟳replay"
+
+# ⚠️ THE PRODUCER THIS FILTER POLLS IN `--interval` MODE, AND WHY THE LOOP LIVES
+# HERE RATHER THAN IN A SHELL WRAPPER. The rule's arm is a `Monitor` over
+# `who-needs-me.py --section needs-you | gate-owner-filter.py --feed --self <sid>`,
+# and `--feed` reads stdin ONCE -- so the Monitor fires on the first read and the
+# process exits, leaving the manager's push channel dead with no error. A shell
+# `while true; do … | gate-owner-filter.py --feed …; sleep N; done` re-emits every
+# kept pane on every poll, which turns a push channel into a 1/NHz poll of the
+# manager's whole turn budget -- the cost this filter exists to remove.
+#
+# So the loop is here, and it is a CHANGE-DETECTOR: a pane wakes the manager when
+# it ENTERS the kept set, never on a re-poll. That was unsafe while hop 3 could
+# not see a peer manager's own pane -- peer churn reached the kept set and a naive
+# diff fired on it, which is the measured cause of Defect 1's three foreign wakes
+# (2026-10-01). Hop 3b drops those panes, so what remains in the kept set is the
+# manager's own gates and its workers'.
+#
+# Resolved as a SIBLING of this file, not by name: the two scripts ship side by
+# side, and a bare `who-needs-me.py` would resolve against whatever cwd the
+# manager's pane happens to hold. `--producer` overrides it.
+# ⚠️ `realpath`, not `abspath`: `abspath` normalises `..` but does NOT resolve a
+# symlink, so a symlinked install would look for the producer beside the LINK
+# rather than beside the script and raise `FileNotFoundError` at the first poll —
+# a failure that only appears once the loop is running, which is the worst place
+# for it. The intent stated above is "the two scripts ship side by side", and only
+# `realpath` answers that for every way the script can be reached.
+PRODUCER = (
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "who-needs-me.py")
+    + " --section needs-you"
+)
 
 
 def load_ledger(ledger_dir=LEDGER):
@@ -538,6 +571,248 @@ def panes_from_feed(stream):
     return [pane for pane, _ in feed_rows(stream)]
 
 
+def refusal_exit(refusal):
+    """Print the refusal and the do-not-arm warning; the caller exits non-zero.
+
+    ⚠️ **No `gates:` line on this path, deliberately.** A marker printed beside
+    the false claim is not a fix — `gates: 0` still reads as a measurement, and a
+    manager parsing it cannot tell it from a quiet fleet. The line that lies is
+    the line that must not be printed.
+    """
+    sys.stderr.write(f"gate-owner-filter: upstream refused — {refusal}\n")
+    sys.stderr.write(
+        "gate-owner-filter: refusing to report a gate count from a feed that "
+        "was never read. This exit is non-zero on purpose — do not arm a "
+        "watcher on this pipeline's output.\n"
+    )
+    return 1
+
+
+def producer_exit(producer, returncode):
+    """A producer that FAILED is not a quiet fleet; say so and exit non-zero.
+
+    ⚠️ **This is the `feed_refusal` distinction one layer up, and it was missing.**
+    `feed_refusal` separates "read, and empty" from "never read" by a marker on
+    stdout — but a producer that dies without printing anything (a crash, a
+    missing interpreter, a killed child) leaves stdout empty *and* writes no
+    marker, so it landed in the first case and was certified as a healthy empty
+    queue by `gates: 0` on every poll, forever. That is precisely the false
+    reading `refusal_exit` exists to prevent, re-introduced above it: a broken
+    transport made byte-identical to a quiet one. The `LIVENESS` line makes it
+    *visible* to a human reading the log, but it does not distinguish the two —
+    only the exit status does, and until now nothing consulted it.
+
+    ⚠️ **Any non-zero status ends the loop, even when rows were printed.** A
+    producer that emits a partial feed and then fails has produced a feed whose
+    completeness is unknown, and acting on a partial gate list is how a manager
+    misses the one gate it was armed for. The arm is cheap to re-establish and
+    the failure is cheap to see; a silently-partial feed is neither.
+    """
+    sys.stderr.write(
+        f"gate-owner-filter: producer exited {returncode} — {producer}\n"
+    )
+    sys.stderr.write(
+        "gate-owner-filter: refusing to report a gate count from a producer that "
+        "failed. A failed producer and a quiet fleet leave the same rows on the "
+        "wire; this exit is non-zero on purpose — re-arm once the producer "
+        "answers.\n"
+    )
+    return 1
+
+
+def evaluate_panes(panes, ledger, live, items, self_id, claims):
+    """One row per `(pane, replayed)` pair."""
+    rows = []
+    for pane, replayed in panes:
+        call, reason, session_id, spawner = evaluate(
+            pane, ledger, live, items, self_id, claims
+        )
+        rows.append(
+            {
+                "pane": pane,
+                "replayed": replayed,
+                "verdict": call,
+                "reason": reason,
+                "session_id": session_id,
+                "spawner": spawner,
+            }
+        )
+    return rows
+
+
+def render(rows, args, new_panes=None):
+    """Print one poll's rows in the shape the caller asked for.
+
+    `new_panes` is poll mode's change-detector: the panes that ENTERED the kept
+    set on this poll. `None` is one-shot mode, where every kept pane is news by
+    definition. It narrows only the watcher's own bare-pane shape (`--feed`
+    without `--explain`/`--json`) — a diagnostic run prints every row, because
+    watching the verdicts is what it is for.
+    """
+    if args.json:
+        json.dump(rows, sys.stdout, indent=2)
+        print()
+        return
+
+    if args.explain:
+        # ⚠️ `:16` is filled EXACTLY by `peer-manager-own` and `liveness-unknown`,
+        # and the `pane` column stays aligned only because no reason exceeds it
+        # (measured 2026-10-04: `pane` at column 23 on every row, both reasons
+        # included). A reason longer than 16 characters must widen this field, or
+        # every row's columns shift by its overrun — in a diagnostic whose whole
+        # job is legibility.
+        for r in rows:
+            print(
+                f"{r['verdict']:4} {r['reason']:16} pane {r['pane']:>5}  "
+                f"session={str(r['session_id'])[:8]:8} spawner={str(r['spawner'])[:8]:8}"
+            )
+        return
+
+    if args.feed:
+        # The watcher's own shape: the panes worth a turn, nothing else.
+        # ⚠️ A replayed row carries the feed's own mark, because this line is
+        # the watcher's entire input: it prints a pane id and nothing else, so
+        # a replayed row was byte-identical to a live one and the watcher woke
+        # on gates already answered. A LIVE row renders exactly as it always
+        # did — the no-regression requirement is that a responsive store's
+        # output is unchanged, and a mark that was always present would fail it
+        # (the same rule `who-needs-me.py`'s own render states).
+        for r in rows:
+            if r["verdict"] != EMIT:
+                continue
+            if new_panes is not None and r["pane"] not in new_panes:
+                continue
+            print(f"{r['pane']}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
+        return
+
+    for r in rows:
+        print(r["verdict"])
+
+
+def counts_line(rows):
+    """The stderr summary, split by reason.
+
+    Loud on the count, so an empty drop set reads as "nothing to filter" rather
+    than as a filter that never matched. Split by reason, not lumped: `dropped`
+    covers three rules, and a run driven entirely by claims — or by hop 3b —
+    would otherwise report panes as peer-manager drops that are not: the exact
+    misread this line exists to prevent.
+    """
+    kept = [r for r in rows if r["verdict"] == EMIT]
+    dropped = [r for r in rows if r["verdict"] == DROP]
+    dropped_peer = [r for r in dropped if r["reason"] == "peer-manager"]
+    dropped_own = [r for r in dropped if r["reason"] == "peer-manager-own"]
+    dropped_claimed = [r for r in dropped if r["reason"] == "claimed"]
+    return (
+        f"gates: {len(rows)}  emit: {len(kept)}  "
+        f"dropped(peer-manager): {len(dropped_peer)}  "
+        f"dropped(peer-manager-own): {len(dropped_own)}  "
+        f"dropped(claimed): {len(dropped_claimed)}"
+    )
+
+
+def one_shot(panes, args, ledger, live, items, claims):
+    """Read once, print, exit — the original contract, unchanged."""
+    rows = evaluate_panes(panes, ledger, live, items, args.self_id, claims)
+    render(rows, args)
+    print(counts_line(rows), file=sys.stderr)
+    return 0
+
+
+def poll(args, items):
+    """Poll the producer, emitting only panes that ENTER the kept set.
+
+    ⚠️ **The ownership inputs are re-read on EVERY poll, and that is the point of
+    the loop rather than an optimisation to skip.** An arm runs for up to 30
+    minutes, and every input this filter consults is one that is *supposed* to
+    change inside that window: a peer manager records an ownership claim, a
+    manager exits so its panes stop being peer-owned, a worker is spawned and
+    gains a ledger record. A loop that read them once at arm time would judge a
+    fresh feed against a frozen world, and both failure modes are the ones this
+    filter exists to remove — a claim recorded after arming is invisible so the
+    claimed pane is emitted (the foreign wake Defect 1 is named for), and a peer
+    manager that dies mid-arm stays in the stale `live` set so its own gate is
+    still dropped and is then owned by nobody, contradicting the invariant stated
+    at `verdict()` ("a DEAD peer manager's own gate falls through and emits").
+
+    ⚠️ **`items` is the one exception, and the exception is measured rather than
+    assumed.** `log_items` globs and parses ~1 589 event-log files into ~25 000
+    items: **195.8 ms**, against 37.4 ms for the ledger, 11.7 ms for the claims
+    file and 1.3 ms for the registry (measured 2026-10-07 on the live machine).
+    Everything cheap is re-read per poll; the one genuinely expensive source is
+    read once per *arm*, not per poll. ⚠️ **The residual is named rather than
+    hidden:** a pane whose first appearance in the event log lands mid-arm does
+    not resolve its session until the next re-arm and reads `unowned` until then.
+    That is the conservative direction — it emits, so a manager may spend one
+    extra turn — and it is bounded by the `Monitor`'s 30-minute re-arm.
+
+    ⚠️ **A `LIVENESS` line goes to stderr on EVERY poll, and it is the point of
+    the loop rather than decoration.** A change-detector is silent when nothing
+    changes, and silence is byte-identical to a dead arm — the defect
+    `manager-attention-watch.py` closed for its own arm with the same record. The
+    line carries the counts, so an arm that is up and finding nothing reads
+    differently from one that never ran.
+
+    ⚠️ **A refusal ends the loop rather than being retried.** The one-shot
+    contract is "do not arm a watcher on this pipeline's output", and a refused
+    read means the transport is broken, not that the fleet is quiet; a loop that
+    swallowed it would keep a dead push channel looking alive for as long as the
+    `Monitor`'s 30-minute bound. Exiting non-zero is what makes the manager see
+    it — and the `LIVENESS` line already written for the previous poll is what
+    keeps a genuine quiet arm distinguishable from a lapsed one.
+    """
+    previous = None
+    polls = 0
+    while True:
+        proc = subprocess.run(
+            shlex.split(args.producer), capture_output=True, text=True
+        )
+        lines = proc.stdout.splitlines(keepends=True)
+        refusal = feed_refusal(lines)
+        if refusal:
+            return refusal_exit(refusal)
+        if proc.returncode != 0:
+            return producer_exit(args.producer, proc.returncode)
+
+        # ⚠️ Re-read INSIDE the loop, never hoisted — see the docstring. The
+        # ordering matters too: the marker is checked before the status, because
+        # a refusal is the more specific verdict and `who-needs-me.py` exits
+        # non-zero on that path as well.
+        rows = evaluate_panes(
+            feed_rows(lines),
+            load_ledger(args.ledger_dir),
+            live_ids(args.registry_dir),
+            items,
+            args.self_id,
+            load_claims(args.claims_file),
+        )
+        kept = {r["pane"] for r in rows if r["verdict"] == EMIT}
+        new_panes = kept if previous is None else kept - previous
+
+        render(rows, args, new_panes=new_panes)
+
+        # ⚠️ Written BEFORE the sleep, so its age is the arm's last heartbeat and
+        # a stalled producer reads as a gap rather than as a quiet poll.
+        state = "change" if new_panes else "no change"
+        print(
+            f"LIVENESS  {counts_line(rows)}  new: {len(new_panes)}  {state}",
+            file=sys.stderr,
+        )
+        sys.stderr.flush()
+        sys.stdout.flush()
+        previous = kept
+
+        # ⚠️ The bound is checked BEFORE the sleep, so `--max-polls 1` is a real
+        # single poll rather than one poll plus an interval of dead waiting. It
+        # exists for the same reason its sibling in `manager-attention-watch.py`
+        # does: an unbounded loop is testable only by killing it, and a test that
+        # races the clock pins nothing.
+        polls += 1
+        if args.max_polls is not None and polls >= args.max_polls:
+            return 0
+        time.sleep(args.interval)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Drop gates a manager does not own.")
     parser.add_argument("--self", dest="self_id", default=None, help="this watcher's session id")
@@ -549,6 +824,28 @@ def main():
     parser.add_argument("--registry-dir", default=REGISTRY)
     parser.add_argument("--state-dir", default=STATE)
     parser.add_argument("--claims-file", default=CLAIMS)
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "poll the producer every SECONDS and emit only panes that ENTER the "
+            "kept set; omit to read the feed once and exit"
+        ),
+    )
+    parser.add_argument(
+        "--producer",
+        default=PRODUCER,
+        help="the feed command re-run on each poll (only with --interval)",
+    )
+    parser.add_argument(
+        "--max-polls",
+        type=int,
+        default=None,
+        metavar="N",
+        help="stop after N polls (only with --interval); unbounded by default",
+    )
     args = parser.parse_args()
 
     ledger = load_ledger(args.ledger_dir)
@@ -574,97 +871,60 @@ def main():
     # the same shape as the padding defect `feed_rows` documents above -- a
     # correct extractor whose empty result the caller misreads as a bad call.
     panes = [(pane, False) for pane in args.pane]
-    if args.feed:
+    if args.interval is not None and args.pane:
+        parser.error("--interval polls the feed; it cannot be combined with --pane")
+    if args.interval is not None and not args.feed:
+        parser.error("--interval re-reads the feed each poll; pass --feed as well")
+    # ⚠️ The lower bound is not cosmetic. `time.sleep` rejects a negative value
+    # outright, so `--interval -1` reached the loop and died with an unhandled
+    # `ValueError` traceback — a crash rather than a usage error, on an argument
+    # that reads as a plausible typo. `0` is accepted but ONLY bounded, because
+    # unbounded it is a busy-loop that re-spawns the producer at maximum rate;
+    # the test suite uses exactly this spelling, which is why it must stay legal
+    # rather than be rejected outright.
+    if args.interval is not None and args.interval < 0:
+        parser.error(
+            "--interval is a poll period in seconds; a negative value cannot be slept"
+        )
+    if args.interval == 0 and args.max_polls is None:
+        parser.error(
+            "--interval 0 polls with no sleep; bound it with --max-polls, or pass a "
+            "real period. Never arm a Monitor with 0."
+        )
+    # ⚠️ The diagnostic shapes print EVERY row on every poll, so a `Monitor` over
+    # one would fire on each pass — the turn-budget cost this loop's change-detector
+    # exists to remove, reintroduced by the flag a reader reaches for to debug it.
+    # `new_panes` narrows only the bare `--feed` shape, so the two are refused here
+    # rather than silently ignoring the change-detector.
+    if args.interval is not None and (args.explain or args.json):
+        parser.error(
+            "--interval emits only newly-entered panes; --explain/--json print every "
+            "row on every poll and would wake a Monitor each time. Run the diagnostic "
+            "shape one-shot instead."
+        )
+    if args.max_polls is not None and args.interval is None:
+        parser.error("--max-polls bounds the --interval loop; pass --interval as well")
+    if args.feed and args.interval is None:
         # Read stdin ONCE and answer both questions from the same lines: whether the
         # upstream refused, and which panes it emitted. Two reads of a pipe cannot
         # both see the data, and a refusal is a verdict about the whole read.
+        # ⚠️ In `--interval` mode the feed is re-produced by `--producer` on every
+        # poll instead: a pipe can be read once, and a poll needs it N times. That
+        # is the whole reason the loop lives here rather than in a shell wrapper.
         lines = sys.stdin.readlines()
         refusal = feed_refusal(lines)
         if refusal:
-            # ⚠️ **No `gates:` line on this path, deliberately.** A marker printed
-            # beside the false claim is not a fix — `gates: 0` still reads as a
-            # measurement, and a manager parsing it cannot tell it from a quiet fleet.
-            # The line that lies is the line that must not be printed.
-            sys.stderr.write(f"gate-owner-filter: upstream refused — {refusal}\n")
-            sys.stderr.write(
-                "gate-owner-filter: refusing to report a gate count from a feed that "
-                "was never read. This exit is non-zero on purpose — do not arm a "
-                "watcher on this pipeline's output.\n"
-            )
-            return 1
+            return refusal_exit(refusal)
         panes += feed_rows(lines)
     if not args.pane and not args.feed:
         parser.error("pass --pane, --feed, or both")
 
-    rows = []
-    for pane, replayed in panes:
-        call, reason, session_id, spawner = evaluate(
-            pane, ledger, live, items, args.self_id, claims
-        )
-        rows.append(
-            {
-                "pane": pane,
-                "replayed": replayed,
-                "verdict": call,
-                "reason": reason,
-                "session_id": session_id,
-                "spawner": spawner,
-            }
-        )
-
-    kept = [r for r in rows if r["verdict"] == EMIT]
-    dropped = [r for r in rows if r["verdict"] == DROP]
-
-    if args.json:
-        json.dump(rows, sys.stdout, indent=2)
-        print()
-        return 0
-
-    if args.explain:
-        # ⚠️ `:16` is filled EXACTLY by `peer-manager-own` and `liveness-unknown`,
-        # and the `pane` column stays aligned only because no reason exceeds it
-        # (measured 2026-10-04: `pane` at column 23 on every row, both reasons
-        # included). A reason longer than 16 characters must widen this field, or
-        # every row's columns shift by its overrun -- in a diagnostic whose whole
-        # job is legibility.
-        for r in rows:
-            print(
-                f"{r['verdict']:4} {r['reason']:16} pane {r['pane']:>5}  "
-                f"session={str(r['session_id'])[:8]:8} spawner={str(r['spawner'])[:8]:8}"
-            )
-    elif args.feed:
-        # The watcher's own shape: the panes worth a turn, nothing else.
-        # ⚠️ A replayed row carries the feed's own mark, because this line is
-        # the watcher's entire input: it prints a pane id and nothing else, so
-        # a replayed row was byte-identical to a live one and the watcher woke
-        # on gates already answered. A LIVE row renders exactly as it always
-        # did -- the no-regression requirement is that a responsive store's
-        # output is unchanged, and a mark that was always present would fail it
-        # (the same rule `who-needs-me.py`'s own render states).
-        for r in kept:
-            print(f"{r['pane']}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
-    else:
-        for r in rows:
-            print(r["verdict"])
-
-    # Loud on the count, so an empty drop set reads as "nothing to filter"
-    # rather than as a filter that never matched.
-    # Split by reason, not lumped: `dropped` now covers three rules, and a run
-    # driven entirely by claims -- or by hop 3b -- would otherwise report panes
-    # as peer-manager drops that are not: the exact misread this line exists to
-    # prevent.
-    dropped_peer = [r for r in dropped if r["reason"] == "peer-manager"]
-    dropped_own = [r for r in dropped if r["reason"] == "peer-manager-own"]
-    dropped_claimed = [r for r in dropped if r["reason"] == "claimed"]
-    print(
-        f"gates: {len(rows)}  emit: {len(kept)}  "
-        f"dropped(peer-manager): {len(dropped_peer)}  "
-        f"dropped(peer-manager-own): {len(dropped_own)}  "
-        f"dropped(claimed): {len(dropped_claimed)}",
-        file=sys.stderr,
-    )
-    return 0
-
+    if args.interval is not None:
+        # `poll` re-reads everything cheap itself; only the expensive `items`
+        # glob is handed over, because it is the one source whose cost makes a
+        # per-poll read a real trade rather than a free one.
+        return poll(args, items)
+    return one_shot(panes, args, ledger, live, items, claims)
 
 if __name__ == "__main__":
     sys.exit(main())
