@@ -47,13 +47,13 @@ Pure snapshot, no mutation, no messages sent. Safe to run as often as you like.
 
    A peer may appear in only one source — say so rather than dropping the row (e.g. a session that hasn't stamped a task file yet, or a vault task stamped by a session no longer running).
 
-4. **Fallback: resolve the name directly against the vault when `fleet-sessions.py` returns nothing for it.** `fleet-sessions.py` only maps sessions that wrote a `claude_session_id:` stamp into a task file — plenty of sessions are working a task they never stamped, and those come back blank. Before writing `—` for a peer, try its `ListAgents` name as a literal filename in each vault's `tasks_dir`, then `goals_dir`:
+4. **Fallback: resolve the name across every vault when `fleet-sessions.py` returns nothing for it.** `fleet-sessions.py` only maps sessions that wrote a `claude_session_id:` stamp into a task file — plenty of sessions are working a task they never stamped, and those come back blank. Before writing `—` for a peer, resolve its `ListAgents` name through the sweep reader's own resolver:
 
    ```bash
-   for d in "25 Tasks" "24 Goals"; do
-     f="$VAULT/$d/$NAME.md"; [ -f "$f" ] && echo "$f"
-   done
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/resolve-task-file.py" "$NAME" | cut -f2
    ```
+
+   `scripts/resolve-task-file.py` is the **single home** of the name-based resolution rule — read it there rather than restating it. It searches **every configured vault**, `tasks_dir` before `goals_dir`, and resolves only on exactly one hit in the tier reached; a blank value means no resolution, and the peer renders `—`. ⚠️ **A value of `UNKNOWN` is not a blank and must not render `—`** — it means the vault list itself could not be read, so say that rather than reporting a peer as unowned. It is carried on **stdout** precisely so this pipeline sees it; the same reason also goes to stderr as `DEGRADED`. ⚠️ **A single-`$VAULT` loop used to sit here and carried the same false-*unowned* defect the sweep reader had** — a peer working a task in a sibling vault rendered `—` as though it were doing nothing. That is why this step was repointed rather than left as a second copy of the rule.
 
    This is a **filename-keyword match in a known flat tree** — the documented narrow exception to "semantic search for discovery", not a discovery sweep. Do not `find`, do not fuzzy-match: exact `<name>.md` only. A near-miss is worse than a blank, because it attributes work to a peer that isn't doing it.
 
