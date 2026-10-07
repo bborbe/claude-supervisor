@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.119.0
 
 - feat: the necessity verdict now names **which** of three sources a task serves — the goal sentence, a specific Success Criterion (`SC<n>`), or a specific Definition of Done item (`DoD<n>`) — instead of testing success criteria alone. `manager-verify` step 1 echoes the serving item per task rather than a count, and `manager-sweep-reader` step 8's `needed` verdict now requires the source kind, the served line **and** the task line that advances it; a match inferred from a task title, a shared theme, or a loosely related criterion is `not needed` with `unproven` as the stated reason, never rounded up. ⚠️ **The three-verdict shape and the `product` rows are deliberately unchanged** — `unproven` is reported inside `not needed`, never as a fourth bucket, so before/after comparisons of this read stay valid. Tests: **1810 → 1820** (Python suite; the Node suite is unchanged at 463). Change set: `agents/manager-verify.md`, `agents/manager-sweep-reader.md`, `scripts/check-necessity-templates.py` (new), `scripts/tests/test_check_necessity_templates.py` (new), `Makefile`. Consumes the widened necessity output: `verify-goal` via bborbe/vault-cli#270, and `verify-topic` via its vault-local command (the primary vault's `.claude/commands/verify-topic.md`, which no plugin ships — see `agents/manager-verify.md`'s dependency-gap note).
 
