@@ -115,17 +115,16 @@ output — the fleet table.
   `docs/fleet-surface.md` § Session roles is the canonical statement.
 - **A manager does not execute a worker's task.** It spawns, drives, answers and reaps
   workers; the task's work happens in the worker's own session.
-- **A manager starts or resumes a worker with `/supervisor:open`.** For a worker on a vault
-  task, that is `/supervisor:open --task` — the path that reads the task's recorded session
-  and writes it back. Reach for a bare manager-spawn (a direct `spawn_agent` call) **only**
-  when the brief has no task file. `commands/manager-spawn.md` is the canonical statement of
-  that split. ⚠️ **One deliberate exception: a loop's own act leg.** `/supervisor:manager-loop`
-  executes the `To open` rows its sweep already decided with a direct `spawn_agent` and must
-  **not** route them through `/supervisor:open` — that path is a tab by construction, cannot
-  produce a headless worker, and writes no ledger row (`commands/manager-loop.md` § Procedure,
-  the `To open` and `To resume` bullets; the act leg it runs is the `supervisor:manager-drive`
-  agent, `agents/manager-drive.md`). A decided-row spawn — open **or** resume — is not a
-  hand-rolled one. Outside that case, do not call `spawn_agent` directly. ⚠️ **That is a policy
-  the repo follows, not a gate anything enforces** — the same caveat
-  `docs/fleet-surface.md` § Session roles attaches to the worker-side prohibition, so do not
-  go hunting for an enforcement that does not exist.
+- **A manager starts or resumes a worker on a vault task with `/supervisor:open --task`** —
+  the path that reads the task's recorded session and writes it back. Reach for a bare
+  manager-spawn (a direct `spawn_agent` call) **only** when the brief has no task file;
+  `commands/manager-spawn.md` is the canonical statement of that split. ⚠️ **This is a rule
+  about dispatching a worker onto a task — it is not a general ban on `spawn_agent`.** Two
+  documented direct-call paths sit outside it: the loops execute the rows their sweep already
+  decided directly (`commands/manager-loop.md` § Procedure, the `To open` and `To resume`
+  bullets; the act leg it runs is the `supervisor:manager-drive` agent, `agents/manager-drive.md`),
+  and continuing an exited headless worker is a direct call by design
+  (`docs/fleet-surface.md` § A headless worker exits at turn end). Neither is a hand-rolled
+  dispatch. ⚠️ And it is a **policy, not a gate** — the same caveat `docs/fleet-surface.md`
+  § Session roles attaches to the worker-side prohibition, so do not go hunting for an
+  enforcement that does not exist.
