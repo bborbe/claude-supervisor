@@ -1121,6 +1121,16 @@ def main(argv=None):
             # WARN lines on stderr.
             print(f"WATCH ERROR: {type(exc).__name__}: {exc}",
                   file=sys.stderr, flush=True)
+            # ⚠️ **A FAILED poll is the one case where staying quiet is MOST
+            # misleading, so it gets a liveness record too.** The record above
+            # exists so a quiet arm is distinguishable from a dead one; an arm
+            # that raises on every poll writes no record at all, which is the
+            # same blank surface — and this is the path where the reader is most
+            # likely to conclude "dead" about a process that is very much alive.
+            # stderr is not durable for a `Monitor`-captured arm, so without this
+            # the failure survives only in a stream nobody persists.
+            log_event(log_path, "LIVENESS", "", tracked_name,
+                      f"poll failed: {type(exc).__name__}")
         polls += 1
         if args.max_polls is not None and polls >= args.max_polls:
             return 0

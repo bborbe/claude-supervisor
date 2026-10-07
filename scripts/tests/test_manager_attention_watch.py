@@ -912,6 +912,30 @@ class LivenessRecordTest(unittest.TestCase):
         recs = self._drive([busy])
         self.assertIn("0 gated · 1 held", recs[0]["detail"], recs[0])
 
+    def test_a_failing_poll_still_writes_a_record(self):
+        """The path where silence is MOST misleading.
+
+        An arm that raises on every poll writes no record at all — the same blank
+        surface the liveness record exists to remove, on a process that is
+        demonstrably alive. stderr is not durable for a `Monitor`-captured arm, so
+        without this the failure survives only in a stream nobody persists.
+        """
+        def boom(*a, **kw):
+            raise RuntimeError("probe exploded")
+
+        with tempfile.TemporaryDirectory() as d:
+            state = os.path.join(d, "state")
+            with mock.patch.object(watch, "probe", boom), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "my-topic.tracked.txt"),
+                            "--tasks-dir", d, "--state", state, "--max-polls", "2"])
+            with open(os.path.join(state, "events.jsonl"), encoding="utf-8") as fh:
+                recs = [json.loads(line) for line in fh if line.strip()]
+        self.assertEqual([r["kind"] for r in recs], ["LIVENESS", "LIVENESS"], recs)
+        self.assertTrue(
+            all("poll failed: RuntimeError" in r["detail"] for r in recs), recs)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -47,6 +47,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -63,6 +64,95 @@ LIVENESS = os.path.join(HERE, "session-liveness.py")
 COMPOSER = "❯"  # ❯
 RELOAD_READY_TIMEOUT = 15.0
 RELOAD_SETTLE_TIMEOUT = 30.0
+
+# SGR / charset escapes, so the glyph can be matched on the visible text of a line read with
+# `get-text --escapes` — the placeholder hint is only distinguishable from typed text by its
+# styling, and that styling is not in the plain read.
+# Every escape shape a real `get-text --escapes` read carries, not just the SGR ones: CSI with
+# private/intermediate bytes (`\x1b[?25h`, cursor visibility — ink emits it around the
+# composer), OSC/DCS, charset selection (`\x1b(B`) and the remaining two-char escapes. A
+# narrower pattern leaves those bytes in the visible text, where they read as non-faint
+# characters and turn a genuinely empty composer into `not ready`.
+_SGR = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"                    # CSI, private + intermediate bytes included
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"         # OSC … BEL / ST
+    r"|\x1b[()][A-Za-z0-9]"                       # charset selection
+    r"|\x1b[@-Z\\-_]"                             # other two-char escapes
+)
+_SGR_ATTRS = re.compile(r"\x1b\[([0-?]*)[ -/]*m")
+
+
+def _plain(line):
+    """The line's visible text, with escape sequences removed."""
+    return _SGR.sub("", line)
+
+
+def _sgr_attrs(escape):
+    """The parameter list of an SGR (`…m`) escape, as ints. `[]` for anything else.
+
+    ⚠️ **An omitted parameter is `0`, not a dropped one.** `\\x1b[m` is the reset form and
+    `\\x1b[1;;2m` carries an empty middle parameter; filtering empties out leaves `[]` — no
+    state change at all — so a bare reset would **fail to clear faint** and a composer that
+    was dimmed and then reset would keep reading as empty. That is the same hazard as the
+    positional-parse defect, reached by a different route.
+    """
+    match = _SGR_ATTRS.fullmatch(escape)
+    if not match:
+        return []
+    body = match.group(1)
+    if body == "":
+        return [0]
+    return [int(p) if p.isdigit() else 0 for p in body.split(";")]
+
+
+def _visible_is_dim(segment):
+    """True when every visible character in `segment` is drawn faint (SGR 2), and some is.
+
+    ⚠️ **Parsed positionally, never by membership.** A bare `2` is a *parameter* in
+    `38;2;r;g;b` (truecolor) and in `38;5;2` (256-colour index 2) as well as the faint
+    attribute, so a `2 in params` test reads **every truecolor escape as faint** — and a
+    composer holding the operator's colourised text would then read as empty, which is the
+    one thing this gate exists to refuse. `38`/`48` introduce a colour whose sub-parameters
+    are skipped; `2` sets faint and `22` cancels it.
+
+    ⚠️ **Scoped to the visible text, not the whole segment.** `❯ \\x1b[0;2mghost\\x1b[0mdraft ok`
+    carries a dim span *and* real typed text; an any-dim-span test calls that empty. Dim must
+    hold for every visible character, so a reset followed by typed text fails it.
+    """
+    dim = False
+    saw_visible = False
+    pos = 0
+    for match in _SGR.finditer(segment):
+        for ch in segment[pos:match.start()]:
+            if not ch.isspace():
+                saw_visible = True
+                if not dim:
+                    return False
+        params = _sgr_attrs(match.group(0))
+        index = 0
+        while index < len(params):
+            param = params[index]
+            if param in (38, 48):          # colour: skip its sub-parameters
+                index += 1
+                if index < len(params) and params[index] == 5:
+                    index += 2             # 38;5;n
+                elif index < len(params) and params[index] == 2:
+                    index += 4             # 38;2;r;g;b
+                continue
+            if param == 0:              # reset: clears faint along with every other attribute
+                dim = False
+            elif param == 2:
+                dim = True
+            elif param == 22:
+                dim = False
+            index += 1
+        pos = match.end()
+    for ch in segment[pos:]:
+        if not ch.isspace():
+            saw_visible = True
+            if not dim:
+                return False
+    return saw_visible
 
 
 def installed_version(path=DEFAULT_INSTALLED, plugin=DEFAULT_PLUGIN, marketplace=DEFAULT_MARKETPLACE):
@@ -234,32 +324,44 @@ def panes_for_pids(pids, panes=None):
 
 
 def composer_line(text):
-    """The LAST line drawn with the prompt glyph at its start, or None.
+    """The LAST line whose visible text starts with the prompt glyph, or None.
 
-    Mirrors `server/tab.mjs:composerLine()`. Every echoed submitted prompt above it carries
-    the same glyph, so **position** — not the glyph alone — is what identifies the composer.
-    A `COMPOSER in text` substring test matches any echoed prompt in scrollback and passes on
-    the first poll whatever the pane is doing.
+    Mirrors `server/tab.mjs:composerLine()` for the position rule. Every echoed submitted
+    prompt above it carries the same glyph, so **position** — not the glyph alone — is what
+    identifies the composer; a `COMPOSER in text` substring test matches any echoed prompt in
+    scrollback and passes on the first poll whatever the pane is doing. Reads escape-laden
+    text (see `pane_is_ready`), so the glyph is matched after stripping SGR sequences.
     """
     for line in reversed(str(text).split("\n")):
-        if line.startswith(COMPOSER):
+        if _plain(line).startswith(COMPOSER):
             return line
     return None
 
 
 def pane_is_ready(text):
-    """True only for an EMPTY composer — the same test `server/tab.mjs:isReady()` makes.
+    """True when the composer is EMPTY — including when it holds only the TUI's placeholder.
 
-    ⚠️ A drawn composer is not a ready one. The glyph appears while the TUI is still
-    painting a placeholder suggestion, and a submit sent into that phase is swallowed
-    (measured 2026-09-20 in `server/tab.mjs`: two sends stranded unsubmitted). A composer
-    already holding text is not ready either — Enter would submit a line this script did
-    not write.
+    ⚠️ **A placeholder is not text.** Measured 2026-10-07 on an idle pane: the composer reads
+    `❯\\xa0\\x1b[0;2mTry "how does … work?"` — the hint is drawn **dim** (SGR 2) and is not
+    something anyone typed. `server/tab.mjs:isReady()` deliberately refuses it, because a
+    submit sent while the TUI is still *painting* can be swallowed (measured 2026-09-20). That
+    is the right rule for a **spawn**, where the paint is in flight; it is the wrong one for
+    this lever, whose whole job is a **long-idle** session — where the placeholder is always
+    present, and where the same send lands (measured 2026-10-07: `/reload-plugins` into a
+    placeholder composer executed and moved the marker). Mirroring it unchanged refused every
+    idle session the lever exists to reach.
+
+    What the gate is actually for is kept: **text somebody typed** is not dim, so a composer
+    holding the operator's unsent answer — the 2026-10-05 case, `❯ draft ok` parked 3h22m — is
+    still refused rather than concatenated with a reload command.
     """
     line = composer_line(text)
     if line is None:
         return False
-    return line[len(COMPOSER):].strip() == ""
+    plain = _plain(line)
+    if plain[len(COMPOSER):].strip() == "":
+        return True
+    return _visible_is_dim(line[line.index(COMPOSER) + len(COMPOSER):])
 
 
 def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
@@ -293,11 +395,24 @@ def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
     deadline = time.time() + RELOAD_READY_TIMEOUT
     while time.time() < deadline:
         try:
-            text = subprocess.run(["wezterm", "cli", "get-text", "--pane-id", str(pane_id)],
-                                  capture_output=True, text=True, timeout=20).stdout
-        except (OSError, subprocess.SubprocessError):
-            text = ""
-        if pane_is_ready(text):
+            probe = subprocess.run(["wezterm", "cli", "get-text", "--pane-id", str(pane_id), "--escapes"],
+                                   capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            # ⚠️ A slow read is retried inside the readiness deadline, never aborted on:
+            # `TimeoutExpired` is a `SubprocessError`, and a busy machine — exactly when the
+            # pane is least likely to be idle — would otherwise end the whole lever here.
+            continue
+        except OSError as exc:
+            return {"pane": pane_id, "ok": False, "why": f"get-text failed: {exc}"}
+        # ⚠️ A non-zero exit is a READ failure, not a busy pane. Discarding the code would
+        # make `stdout` empty, `pane_is_ready("")` false, and the loop report `composer not
+        # empty` for every stale row — the same collapse-into-empty `_pid_ttys` was fixed
+        # for, re-entered under a new cause. An older `wezterm` rejecting `--escapes` lands
+        # exactly here.
+        if probe.returncode != 0:
+            return {"pane": pane_id, "ok": False,
+                    "why": f"get-text exited {probe.returncode}: {probe.stderr.strip()}"}
+        if pane_is_ready(probe.stdout):
             break
         time.sleep(1)
     else:
