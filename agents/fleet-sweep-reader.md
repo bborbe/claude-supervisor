@@ -54,16 +54,21 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
    python3 - "$name" <<'PY'
    import json, os, subprocess, sys
    stem = sys.argv[1].casefold() + ".md"
-   vaults = json.loads(subprocess.run(["vault-cli", "config", "list", "--output", "json"],
-                                      capture_output=True, text=True).stdout)
+   try:
+       res = subprocess.run(["vault-cli", "--output", "json", "config", "list"],
+                            capture_output=True, text=True, timeout=10)
+       vaults = json.loads(res.stdout) if res.returncode == 0 else []
+   except Exception:
+       vaults = []                          # no vault-cli, unreadable config, or a timeout — degrade, never crash
 
    def hits(key):
        out = []
        for v in vaults:
            d = v.get(key)
-           if not d:
-               continue                     # assistant-* vaults carry neither; never probe the root
-           full = os.path.expanduser(os.path.join(v["path"], d))
+           path = os.path.expanduser(v.get("path") or "")
+           if not d or not path:
+               continue                     # assistant-* vaults carry no dirs; never probe the root
+           full = os.path.join(path, d)
            try:
                entries = os.listdir(full)
            except OSError:
@@ -77,11 +82,15 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
    elif not tasks and len(goals) == 1:
        print(goals[0])
    else:
+       for p in tasks + goals:
+           print(f"AMBIGUOUS {p}", file=sys.stderr)
        print("")                            # zero, or ambiguous — never guess
    PY
    ```
 
-   **Tier by tier, never globally.** A name that is a task in one vault and a goal in another resolves to the *task* — the precedence is a property of the name, not of the vault. So: exactly one `tasks_dir` hit across all vaults → that path; else exactly one `goals_dir` hit → that path; else no resolution. **Ambiguity inside the tier reached is no resolution too** — two vaults each holding the name as a task — and its candidates are named in NOTES: that is precisely the ambiguity `docs/subject-resolution.md` § The page test forbids guessing through. Never prefer the caller's vault, never take the first hit, and never widen to a substring glob — the basename is exact and case-insensitive, the folder is the discriminator. The `claude_session_id:` stamp leg is scoped the same way: it searches every vault's `tasks_dir`/`goals_dir`, never the caller's alone.
+   The three guards on the `vault-cli` call are deliberate and mirror `vault_dirs_from_cli()` in `scripts/fleet-sessions.py` — `returncode`, `timeout`, and an `except` that degrades to no vaults. A missing `vault-cli`, an unreadable config or a timeout must reach the no-resolution path, not raise through it: this pass is not skippable, so a traceback here loses the whole round's task mapping.
+
+   **Tier by tier, never globally.** A name that is a task in one vault and a goal in another resolves to the *task* — the precedence is a property of the name, not of the vault. So: exactly one `tasks_dir` hit across all vaults → that path; **and with no `tasks_dir` hit at all**, exactly one `goals_dir` hit → that path; else no resolution. ⚠️ **An ambiguous `tasks_dir` tier does not fall through to `goals_dir`** — `not tasks` is the condition, not "tasks had no unique hit", so two colliding tasks mean no resolution rather than a silent drop to the goal tier. **Ambiguity inside the tier reached is no resolution too** — two vaults each holding the name as a task — and its candidates go to stderr as `AMBIGUOUS <path>` lines so they can be named in NOTES: that is precisely the ambiguity `docs/subject-resolution.md` § The page test forbids guessing through, and that rule requires every candidate path to be printed. Never prefer the caller's vault, never take the first hit, and never widen to a substring glob — the basename is exact and case-insensitive, the folder is the discriminator. The `claude_session_id:` stamp leg is scoped the same way: it searches every vault's `tasks_dir`/`goals_dir`, never the caller's alone.
 
 5. **Reverse index — tasks claiming a dead session (Step 2b).**
    ```bash
