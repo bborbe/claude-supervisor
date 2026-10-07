@@ -8,6 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import {
   DEFAULT_MAX_CONCURRENT,
   DEFAULT_MAX_CONCURRENT_HARD,
@@ -572,6 +573,41 @@ test('a key named __proto__ survives, rather than being silently dropped', () =>
   assert.equal(Object.getOwnPropertyDescriptor(env, '__proto__').value, 'http://localhost:18081')
   // ...and this is a plain object, not prototype pollution: the prototype is untouched.
   assert.equal(Object.getPrototypeOf(env), Object.prototype)
+})
+
+test('a caller cannot declare a worker\'s spawn mode', () => {
+  // ⚠️ `workerEnvFor` makes the SERVER's mode win on the HEADLESS path, but the tab path has
+  // no handover to win with — `shellEnvExports` would export whatever the caller passed — so
+  // the identical override was inert on one path and live on the other. Live is not cosmetic:
+  // `scripts/permission-answer-poll.py:287` returns early on
+  // `SUPERVISOR_WORKER_MODE == "headless"`, so a caller telling a TAB worker it is headless
+  // silences that worker's attention-store relay. Refused on both paths so the rule reads the
+  // same wherever it is found. Found by the PR review (round 2).
+  for (const name of [WORKER_MODE_ENV, WORKER_MODE_SOURCE_ENV]) {
+    const { error } = resolveEnvOverrides({ env: { [name]: 'headless' } })
+    assert.ok(error, `expected ${name} to be refused`)
+    assert.match(error, /cannot set/)
+  }
+  // The refusal is about the NAME, not the value — `headless` on any other key is ordinary.
+  assert.deepEqual(resolveEnvOverrides({ env: { SUPERVISOR_WORKER_MODE_X: 'headless' } }).env, {
+    SUPERVISOR_WORKER_MODE_X: 'headless',
+  })
+})
+
+test('the tab path quoting survives a real shell for every metacharacter', () => {
+  // The claim the tab path rests on is that `shellQuote` is airtight for EVERY shell
+  // metacharacter — a single-quoted context is literal for all of them — but only the quote
+  // itself was pinned, so a refactor to a different quoting style would break newline,
+  // backtick, `$(…)` and a trailing backslash silently. Named by the PR review (round 2).
+  //
+  // Driven through a REAL shell rather than asserted as a string shape, because the string
+  // shape is the thing under test: this is the exact round trip `spawnInteractiveAgent`'s
+  // command line makes — `export …; <command>` inside `bash -lc`.
+  for (const value of ["it's", 'a\nb', '`id`', '$(id)', 'a\\', 'a;b', 'a b', '$HOME', '']) {
+    const script = `${shellEnvExports({ PROBE: value })}printf '%s' "$PROBE"`
+    const out = execSync(`bash -lc ${shellQuote(script)}`, { encoding: 'utf8' })
+    assert.equal(out, value, `round trip failed for ${JSON.stringify(value)}`)
+  }
 })
 
 test('both spawn paths are wired — the claim no pure-helper test can reach', () => {

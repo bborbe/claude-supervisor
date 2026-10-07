@@ -481,6 +481,17 @@ export function shellEnvExports(env) {
 // be exported has to be refused here rather than dropped downstream.
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+// ⚠️ The spawn mode is the SERVER's to declare, on every path, so a caller may not set it.
+// `workerEnvFor` already makes the server's values win on the headless path, but the TAB
+// path has no handover to win with — `shellEnvExports` would export whatever the caller
+// passed — so the identical override was inert on one path and live on the other. That is
+// not cosmetic: `scripts/permission-answer-poll.py:287` returns early on
+// `SUPERVISOR_WORKER_MODE == "headless"`, so a caller telling a TAB worker it is headless
+// silences that worker's attention-store relay. REFUSED on both paths rather than silently
+// outranked on one, so the rule reads the same wherever it is found. Found by the PR review
+// (round 2), which caught that the stated invariant held on only one of the two paths.
+const RESERVED_ENV_NAMES = new Set([WORKER_MODE_ENV, WORKER_MODE_SOURCE_ENV])
+
 // Validates and normalises a caller's `env` object.
 //
 // REFUSED, never dropped: a value silently missing from the worker looks exactly like a
@@ -511,6 +522,15 @@ export function resolveEnvOverrides({ env } = {}) {
           `env name "${name}" is not a legal shell variable name: the tab path exports it as a shell ` +
           `variable, so it must start with a letter or underscore and contain only letters, digits and ` +
           `underscores.`,
+      }
+    }
+    if (RESERVED_ENV_NAMES.has(name)) {
+      return {
+        error:
+          `env cannot set ${name}: the server owns a worker's spawn mode and hands it to the worker ` +
+          `itself. A caller setting it would tell a TAB worker it is headless — and ` +
+          `scripts/permission-answer-poll.py returns early on that value, so the worker's ` +
+          `attention-store relay would go silent. Omit it; the mode is not the caller's to declare.`,
       }
     }
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
