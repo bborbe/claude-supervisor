@@ -137,12 +137,22 @@ so an unreadable `installed_plugins.json` never prints as a clean `stale: 0` fle
 
 `--json` emits the same rows for a caller that renders its own table. **`--reload` is the
 lever**: it activates each stale session's pane, types `/reload-plugins` into a pane whose
-composer is **empty** (the same readiness test `server/tab.mjs:isReady()` makes — a drawn
-composer is not a ready one), and confirms the reload by **the newest marker for that pid
-moving**. ⚠️ Never by the pre-reload version directory's mtime: a reload writes the new entry
-into the *installed* version's directory and leaves the old one alone, so watching the old
-path can never fire and would report every successful reload as unconfirmed. Never by the
-pane's echo either, which is identical whether the session was idle at its prompt or mid-turn.
+composer is **empty**, and confirms the reload by **the newest marker for that pid moving**.
+⚠️ Never by the pre-reload version directory's mtime: a reload writes the new entry into the
+*installed* version's directory and leaves the old one alone, so watching the old path can
+never fire and would report every successful reload as unconfirmed. Never by the pane's echo
+either, which is identical whether the session was idle at its prompt or mid-turn.
+
+⚠️ **"Empty" includes the TUI's placeholder hint, and that is not the same test
+`server/tab.mjs:isReady()` makes.** An idle Claude Code composer reads
+`❯\xa0\x1b[0;2mTry "…"` — the hint is drawn **dim** (SGR attribute 2) and nobody typed it.
+`isReady()` refuses it, correctly for its own job: it gates a **spawn**, where the TUI may
+still be painting and a submit sent into that phase is swallowed (measured 2026-09-20).
+Applied to this lever, whose whole purpose is a **long-idle** session, that rule refuses
+every session it exists to reach — measured 2026-10-07, all 38 stale sessions returned
+`composer not empty`. The census accepts a composer whose remainder is empty **or** dim, so
+text somebody typed is still refused (2026-10-05: `❯ draft ok` parked 3h22m) while the
+placeholder is not. The readiness read is `get-text --escapes` for exactly this reason.
 
 ⚠️ **The marker count is not the session count.** A reload writes a new `.in_use/<pid>` entry
 and never removes the old one, so counting markers over the cache reads **17 versions / 81
@@ -175,7 +185,7 @@ is not a check.
 
 ## Spawn a worker
 
-**This section documents `/supervisor:open`'s internals — the spawn shape it produces — not a parallel path to use instead of it.** A manager starts or resumes a worker with `/supervisor:open --task` (`docs/session-tiers.md` § The manager boundary); what follows describes what that command does under the hood, so read it to understand or debug a spawn, not to hand-roll one.
+**This section documents `/supervisor:open`'s internals — the spawn shape it produces, and the mechanics every spawn site shares — not a parallel path to use instead of it.** A manager starts or resumes a worker with `/supervisor:open --task` (`docs/session-tiers.md` § The manager boundary); what follows is what that command does under the hood, so read it to understand or debug a spawn.
 
 **Readiness precondition — author and score the task before any spawn, or the worker's own gate parks.** A task the manager hand-writes usually ships without `# Tasks` and `# Definition of Done`, so the worker's own `plan-task` gate stops and asks the operator to supply the decomposition — inside the worker's pane, as a multi-question wizard that cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced **three 3-question wizards**, nine operator decisions, none of which needed the repo open. So, before spawning:
 

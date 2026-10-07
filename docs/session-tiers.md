@@ -118,5 +118,10 @@ output — the fleet table.
 - **A manager starts or resumes a worker with `/supervisor:open`.** For a worker on a vault
   task, that is `/supervisor:open --task` — the path that reads the task's recorded session
   and writes it back. Reach for a bare manager-spawn (a direct `spawn_agent` call) **only**
-  when the brief has no task file; outside that case, never call `spawn_agent` directly.
-  `commands/manager-spawn.md` is the canonical statement of that split.
+  when the brief has no task file. `commands/manager-spawn.md` is the canonical statement of
+  that split. ⚠️ **One deliberate exception: a loop's own act leg.** `/supervisor:manager-loop`
+  executes the `To open` rows its sweep already decided with a direct `spawn_agent` and must
+  **not** route them through `/supervisor:open` — that path is a tab by construction, cannot
+  produce a headless worker, and writes no ledger row (`commands/manager-loop.md` § the act
+  leg). A decided-row spawn is not a hand-rolled open. Outside that case, never call
+  `spawn_agent` directly.
