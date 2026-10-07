@@ -342,7 +342,7 @@ Plain markdown, in this order, omitting empty sections:
 
    ```
    needed: <task> — serves <goal sentence|SC<n>|DoD<n>>: "<served line>" ← "<task line>"
-   needed: <task> — foundation for SC<n>: "<the task's own foundation line>" ← "<task line>"
+   needed: <task> — foundation for <goal sentence|SC<n>|DoD<n>>: "<the foundation line>" ← "<task line>"
    not needed: <task> — serves none of {goal sentence, Success Criteria, Definition of Done}, checked against those three
    not needed: <task> — unproven: <which of the two lines you could not produce>, checked against {goal sentence, Success Criteria, Definition of Done}
    product: <task> — output of <goal> SC<n>
