@@ -51,10 +51,19 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
    ⚠️ **Resolve across every configured vault — the caller passes only one.** The caller supplies *the vault path and its tasks dir* (see `<inputs>`), so a session whose task lives in a sibling vault resolves to nothing under a single-vault lookup and is reported as unowned. A false *unowned* is the same class of defect as a false verdict: it reads as a finding.
 
    ```bash
-   python3 "$P/resolve-task-file.py" "$name"     # prints the path, or a blank line; AMBIGUOUS <path> on stderr
+   printf '%s\n' "<session name>" "…" | python3 "$P/resolve-task-file.py" --stdin
    ```
 
-   **The rule's single home is `scripts/resolve-task-file.py`** — read it there rather than restating it here. In brief, so a caller knows what a blank line means: resolution is **tier by tier**, `tasks_dir` across every vault before `goals_dir`, and a match is taken only when it is the sole hit in the tier reached. Zero hits, or more than one inside that tier, prints nothing and emits each colliding path as `AMBIGUOUS <path>` on stderr — name those in NOTES. ⚠️ An ambiguous `tasks_dir` tier does **not** fall through to `goals_dir`. The `claude_session_id:` stamp leg is scoped the same way: every vault's `tasks_dir`/`goals_dir`, never the caller's alone. It is a script rather than a snippet here because the rule regressed once and prose has nothing to run against it — `scripts/tests/test_resolve_task_file.py` now pins the cases, including the task-over-goal precedence and the no-fall-through rule.
+   **The rule's single home is `scripts/resolve-task-file.py`** — read it there rather than restating it here. **Call it once per round with every name on stdin**, never once per session: step 4 is a non-skippable hot path over ~46 live sessions, so a per-name call would pay a `vault-cli` round trip and an interpreter start for each. It prints one `<name>\t<path>` line per name — a blank path means no resolution — and two markers on stderr:
+
+   * `DEGRADED <reason>` — the vault list could not be read. ⚠️ **Render the whole task-file pass `UNKNOWN (pass not run)` when you see it, never blank.** A silently empty vault list renders every session unowned, which is the same false-*unowned* defect this pass exists to remove, reached from the other side.
+   * `AMBIGUOUS <name>\t<path>` — more than one hit inside the tier reached; name every candidate in NOTES.
+
+   In brief, so a caller knows what a blank path means: resolution is **tier by tier**, `tasks_dir` across every vault before `goals_dir`, and a match is taken only when it is the sole hit in the tier reached. ⚠️ An ambiguous `tasks_dir` tier does **not** fall through to `goals_dir`.
+
+   ⚠️ **This script is the NAME leg only — and the stamp leg was already cross-vault.** Step 4 tries the `claude_session_id:` stamp first, and that leg is resolved by `fleet-sessions.py`'s `_walk_task_stamps()`, which already walks every vault under the Obsidian root (`vault_dirs_from_cli()` with `PROBE_DIRS` as its fallback). Do not read this script's absence of stamp handling as a gap, and do not re-scope the stamp leg here.
+
+   It is a script rather than a snippet because the rule regressed once and prose has nothing to run against it — `scripts/tests/test_resolve_task_file.py` pins sixteen cases: the task-over-goal precedence, the no-fall-through rule, a sibling-vault task, a goal-only name, an invented name, a two-vault collision, a config entry with no dirs, an already-suffixed name, a directory named like a task, an absolute `tasks_dir`, the stdin batch form, and four degradation paths each asserting the `DEGRADED` marker. ⚠️ **The `CLASSIFICATION` arithmetic rule below has no such guard, and that asymmetry is deliberate rather than an oversight:** it constrains a line the reader *renders*, not a lookup the reader *performs*, so there is no artifact a check could parse — a guard would have to validate a fixture the guard itself defines, which pins nothing. It stays prose, with the two measured regressions cited inline in its place.
 
 5. **Reverse index — tasks claiming a dead session (Step 2b).**
    ```bash

@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Resolve a session's task file by name, across every configured vault.
+"""Resolve session task files by name, across every configured vault.
 
-One home for the fleet sweep's task-file resolution. `agents/fleet-sweep-reader.md`
-step 4 calls this; the rule is not restated there beyond what a caller needs.
+One home for the fleet sweep's **name-based** task-file resolution.
+`agents/fleet-sweep-reader.md` step 4 calls this; the rule is not restated there beyond
+what a caller needs. The other leg — the `claude_session_id:` stamp — is not here and does
+not need to be: `fleet-sessions.py`'s `_walk_task_stamps()` already walks every vault under
+the Obsidian root, using `vault_dirs_from_cli()` with `PROBE_DIRS` as its fallback.
 
 **Why this is a script and not a snippet in the agent file.** The rule regressed once
 already — a first cut treated any two hits as ambiguous, which broke the task-over-goal
 precedence for a name that is a task in one folder and a goal in the *same* vault
-(`BRO-22032 MDM Merge of Parties based on names` is exactly that shape). A rule carried
-as prose in a markdown file has nothing to run against it, so the five cases that caught
-the regression lived only in a PR body. Extracted 2026-10-07 so
+(`BRO-22032 MDM Merge of Parties based on names` is exactly that shape). A rule carried as
+prose in a markdown file has nothing to run against it, so the cases that caught the
+regression lived only in a PR body. Extracted 2026-10-07 so
 `scripts/tests/test_resolve_task_file.py` pins them.
 
 **Resolution is tier by tier, never globally:**
@@ -19,18 +22,31 @@ the regression lived only in a PR body. Extracted 2026-10-07 so
   * else -> no resolution
 
 An ambiguous `tasks_dir` tier does **not** fall through to `goals_dir`: the condition is
-`not tasks` (zero hits), not "tasks had no unique hit", so two colliding tasks mean no
-resolution rather than a silent drop to the goal tier. A name that is a task in one vault
+`not tasks` (zero hits), not "tasks had no unique hit". A name that is a task in one vault
 and a goal in another resolves to the *task* — the precedence is a property of the name,
 not of the vault.
 
-**Never guesses.** Zero hits, or more than one inside the tier reached, prints nothing on
-stdout; the colliding paths go to stderr as `AMBIGUOUS <path>` so the caller can name them
-in NOTES. That is `docs/subject-resolution.md` § The page test — exact basename, the folder
-is the discriminator, both match or neither -> STOP, and every candidate path printed.
+**Never guesses.** Zero hits, or more than one inside the tier reached, resolves nothing;
+the colliding paths go to stderr as `AMBIGUOUS <name>\\t<path>`. That is
+`docs/subject-resolution.md` § The page test — exact basename, the folder is the
+discriminator, both match or neither -> STOP, and every candidate path printed.
 
-Exits 0 even when it resolves nothing. A resolution failure degrades to "unowned", and
-step 4 is explicitly not skippable, so this must never raise through the round.
+⚠️ **A degraded read is announced, never silent.** This is the whole reason the guard below
+carries a `DEGRADED` line rather than mirroring `vault_dirs_from_cli()`'s bare `return {}`:
+that helper is safe *at its site* only because `fleet-sessions.py` falls back to
+`PROBE_DIRS`. Here there is no fallback, so an unannounced `[]` would render every session
+unowned — reintroducing, on the failure path, the exact false-*unowned* defect this whole
+change exists to remove. A caller that sees `DEGRADED` must render its task-file pass
+`UNKNOWN (pass not run)`, never a blank.
+
+**Usage**
+
+    resolve-task-file.py <name>...        # one `<name>\\t<path>` line per name
+    resolve-task-file.py --stdin          # same, names read one per line
+
+The batch form exists because step 4 is a non-skippable hot path over ~46 live sessions:
+enumerating the vaults once per round rather than once per name removes ~46 `vault-cli`
+invocations and ~46 interpreter starts per sweep.
 """
 import json
 import os
@@ -39,15 +55,15 @@ import sys
 
 
 def vault_dirs():
-    """Every configured vault as `{path, tasks_dir, goals_dir}`.
+    """Every configured vault as `{path, tasks_dir, goals_dir}`, plus a degradation reason.
 
-    Guarded the way `fleet-sessions.py`'s `vault_dirs_from_cli()` is: a non-zero exit, a
-    timeout, a missing binary or an unreadable config all degrade to no vaults rather than
-    raising. ⚠️ The loop over the payload is INSIDE the guard for the same reason, and that
-    placement is the defect this function was extracted to fix — a payload that parses to
-    something other than a list of dicts (a bare object, or a dict keyed by vault name)
-    otherwise reaches `.get()` on a string and raises `AttributeError` straight through a
-    pass the reader declares "not skippable, and not partially skippable".
+    Returns `(vaults, reason)`. `reason` is `""` on success and a one-line explanation on
+    any failure — a non-zero exit, a timeout, a missing binary, an unreadable or
+    unparseable config. ⚠️ The loop over the payload is INSIDE the guard, which is the
+    defect this function was extracted to fix: a payload that parses to something other
+    than a list of dicts (a bare object, or a dict keyed by vault name) otherwise reaches
+    `.get()` on a string and raises `AttributeError` straight through a pass the reader
+    declares "not skippable, and not partially skippable".
     """
     try:
         res = subprocess.run(
@@ -55,9 +71,12 @@ def vault_dirs():
             capture_output=True, text=True, timeout=10,
         )
         if res.returncode != 0:
-            return []
+            return [], f"vault-cli config list exited {res.returncode}"
+        payload = json.loads(res.stdout)
+        if not isinstance(payload, list):
+            return [], f"vault-cli config list returned {type(payload).__name__}, not a list"
         out = []
-        for v in json.loads(res.stdout):
+        for v in payload:
             if not isinstance(v, dict):
                 continue
             path = os.path.expanduser(v.get("path") or "")
@@ -67,13 +86,19 @@ def vault_dirs():
                     "tasks_dir": v.get("tasks_dir") or "",
                     "goals_dir": v.get("goals_dir") or "",
                 })
-        return out
-    except Exception:
-        return []
+        if not out:
+            return [], "vault-cli config list yielded no usable vault"
+        return out, ""
+    except subprocess.TimeoutExpired:
+        return [], "vault-cli config list timed out after 10s"
+    except FileNotFoundError:
+        return [], "vault-cli not found on PATH"
+    except Exception as exc:                       # noqa: BLE001 — any failure degrades, never raises
+        return [], f"vault-cli config list failed: {type(exc).__name__}"
 
 
 def hits(vaults, key, stem):
-    """Every `<stem>.md` under `<vault>/<key>`, across all vaults.
+    """Every regular file `<stem>` under `<vault>/<key>`, across all vaults.
 
     Exact basename, case-insensitive — never a substring glob, and the folder is the
     discriminator rather than a frontmatter field (`docs/subject-resolution.md`).
@@ -81,20 +106,31 @@ def hits(vaults, key, stem):
     found = []
     for v in vaults:
         d = v[key]
-        if not d:
-            continue                       # assistant-* vaults carry no dirs; never probe the root
+        # ⚠️ An absolute `tasks_dir` would make os.path.join discard the vault path and
+        # probe an arbitrary directory, so it is refused rather than honoured: no vault-cli
+        # config uses one, and silently searching outside the vault is the failure this
+        # guard exists to prevent. A missing dir is skipped — the assistant-* vaults carry
+        # neither key, and the vault root must never be probed.
+        if not d or os.path.isabs(d):
+            continue
         full = os.path.join(v["path"], d)
         try:
             entries = os.listdir(full)
         except OSError:
             continue
-        found += [os.path.join(full, e) for e in entries if e.casefold() == stem]
+        found += [os.path.join(full, e) for e in entries
+                  if e.casefold() == stem and os.path.isfile(os.path.join(full, e))]
     return found
 
 
 def resolve(name, vaults):
     """The rule. Returns `(path, ambiguous)`; `path` is `""` when nothing resolves."""
-    stem = name.casefold() + ".md"
+    # A caller may pass the roster name or the filename; both mean the same task, and the
+    # suffixed form would otherwise search for `<name>.md.md` and silently resolve nothing.
+    stem = name.casefold()
+    if stem.endswith(".md"):
+        stem = stem[:-3]
+    stem += ".md"
     tasks = hits(vaults, "tasks_dir", stem)
     goals = hits(vaults, "goals_dir", stem)
     if len(tasks) == 1:
@@ -104,16 +140,25 @@ def resolve(name, vaults):
     return "", tasks + goals               # zero, or ambiguous — never guess
 
 
-def main():
-    if len(sys.argv) != 2:
-        print("usage: resolve-task-file.py <name>", file=sys.stderr)
+def main(argv):
+    if argv == ["--stdin"]:
+        names = [ln.strip() for ln in sys.stdin if ln.strip()]
+    elif argv and not argv[0].startswith("-"):
+        names = argv
+    else:
+        print("usage: resolve-task-file.py <name>... | --stdin", file=sys.stderr)
         return 2
-    path, ambiguous = resolve(sys.argv[1], vault_dirs())
-    for p in ambiguous:
-        print(f"AMBIGUOUS {p}", file=sys.stderr)
-    print(path)
+
+    vaults, reason = vault_dirs()
+    if reason:
+        print(f"DEGRADED {reason}", file=sys.stderr)
+    for name in names:
+        path, ambiguous = resolve(name, vaults)
+        for p in ambiguous:
+            print(f"AMBIGUOUS {name}\t{p}", file=sys.stderr)
+        print(f"{name}\t{path}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
