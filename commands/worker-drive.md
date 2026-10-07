@@ -500,16 +500,25 @@ Headline only: what changed and what stopped you.
 # ⚠️ The UUID is matched too: the HTTP fallback below carries no
 # X-Claude-Code-Session-Id header, and the server resolves a name ONLY from that
 # header — so a verdict spoken through the fallback lands under the raw UUID.
+# ⚠️ That second pattern is added ONLY when the id is non-empty. A spawned child
+# is stripped of CLAUDE_CODE_SESSION_ID (`scripts/attention-ask.py:61`; `open.md`
+# unsets it before spawning a manager), and the fallback interpolates the same
+# empty variable into its body — so one child's fallback utterance lands as
+# "sender":"" and a bare second pattern would then read non-zero in EVERY child,
+# speaking in sessions that have never spoken.
 # The name is matched verbatim: /state carries the registry name byte-for-byte,
 # a leading "⚙ " included. Match literally (-F) — names carry regex metacharacters.
 SESSFILE="${HOME}/.claude/sessions/${CLAUDE_PID}.json"
 NAME="$( [ -n "$CLAUDE_PID" ] && [ -f "$SESSFILE" ] \
   && python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("name") or "")' "$SESSFILE" 2>/dev/null )"
 if [ -z "$NAME" ]; then
-  echo "🔇 voice unknown — no session name for CLAUDE_PID=${CLAUDE_PID:-unset} ($SESSFILE); treat as off"
+  echo "🔇 voice unknown — no session name for CLAUDE_PID=${CLAUDE_PID:-unset} ($SESSFILE); not speaking"
 else
-  curl -s --max-time 5 http://127.0.0.1:12000/state \
-    | grep -cF -e "\"sender\":\"$NAME\"" -e "\"sender\":\"$CLAUDE_CODE_SESSION_ID\""
+  PATTERNS=(-e "\"sender\":\"$NAME\"")
+  if [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
+    PATTERNS+=(-e "\"sender\":\"$CLAUDE_CODE_SESSION_ID\"")
+  fi
+  curl -s --max-time 5 http://127.0.0.1:12000/state | grep -cF "${PATTERNS[@]}"
 fi
 ```
 
