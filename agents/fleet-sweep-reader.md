@@ -46,7 +46,42 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 3. **Load the previous snapshot (Step 1) — before anything that could write one.** `cat ~/.claude/state/fleet-snapshot.json 2>/dev/null || echo "no previous snapshot"`. Absent → every session is first-seen, nothing is `stalled`. This read is the round's diff baseline: it must complete before any step that can persist, because a snapshot overwritten before it was diffed is a baseline lost for the round that needed it, and step 4's `task_mtime` comparison then degrades silently to first-seen for every session. Record whether the read succeeded — step 9 refuses to persist if it did not.
 
-4. **Task file + stall signal (Step 2).** For every `busy`/`shell` **and `idle`** session, resolve its task file (the `claude_session_id:` stamp, else exact `<name>.md` under `tasks_dir` then `goals_dir` — may be a goal) and count its open boxes (`grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'`). ⚠️ `idle` is not optional: step 8's `parked` and `finished` rows both read an idle session's task file, so skipping it leaves every idle row unclassifiable. For `busy`/`shell` only, also `date -r "<task_file>" -u '+%Y-%m-%dT%H:%M:%SZ'`. Compare with the previous `task_mtime`. Never a message. ⚠️ **Not skippable for budget, and not partially skippable** — this pass and the step-1 roster join are what make every other section possible. A round that skips either has nothing for the drive leg and must not return a digest that reads as complete: print `UNKNOWN (pass not run)` in each section it starved.
+4. **Task file + stall signal (Step 2).** For every `busy`/`shell` **and `idle`** session, resolve its task file (the `claude_session_id:` stamp, else an **exact** `<name>.md` — across **every configured vault**, per the block below — may be a goal) and count its open boxes (`grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'`). ⚠️ `idle` is not optional: step 8's `parked` and `finished` rows both read an idle session's task file, so skipping it leaves every idle row unclassifiable. For `busy`/`shell` only, also `date -r "<task_file>" -u '+%Y-%m-%dT%H:%M:%SZ'`. Compare with the previous `task_mtime`. Never a message. ⚠️ **Not skippable for budget, and not partially skippable** — this pass and the step-1 roster join are what make every other section possible. A round that skips either has nothing for the drive leg and must not return a digest that reads as complete: print `UNKNOWN (pass not run)` in each section it starved.
+
+   ⚠️ **Resolve across every configured vault — the caller passes only one.** The caller supplies *the vault path and its tasks dir* (see `<inputs>`), so a session whose task lives in a sibling vault resolves to nothing today and is reported as unowned. A false *unowned* is the same class of defect as a false verdict: it reads as a finding. Enumerate the vaults and resolve in one pass, **keeping the `tasks_dir`-before-`goals_dir` precedence the single-vault rule already carried**:
+
+   ```bash
+   python3 - "$name" <<'PY'
+   import json, os, subprocess, sys
+   stem = sys.argv[1].casefold() + ".md"
+   vaults = json.loads(subprocess.run(["vault-cli", "config", "list", "--output", "json"],
+                                      capture_output=True, text=True).stdout)
+
+   def hits(key):
+       out = []
+       for v in vaults:
+           d = v.get(key)
+           if not d:
+               continue                     # assistant-* vaults carry neither; never probe the root
+           full = os.path.expanduser(os.path.join(v["path"], d))
+           try:
+               entries = os.listdir(full)
+           except OSError:
+               continue
+           out += [os.path.join(full, e) for e in entries if e.casefold() == stem]
+       return out
+
+   tasks, goals = hits("tasks_dir"), hits("goals_dir")
+   if len(tasks) == 1:
+       print(tasks[0])                      # a task beats a same-named goal, in any vault
+   elif not tasks and len(goals) == 1:
+       print(goals[0])
+   else:
+       print("")                            # zero, or ambiguous — never guess
+   PY
+   ```
+
+   **Tier by tier, never globally.** A name that is a task in one vault and a goal in another resolves to the *task* — the precedence is a property of the name, not of the vault. So: exactly one `tasks_dir` hit across all vaults → that path; else exactly one `goals_dir` hit → that path; else no resolution. **Ambiguity inside the tier reached is no resolution too** — two vaults each holding the name as a task — and its candidates are named in NOTES: that is precisely the ambiguity `docs/subject-resolution.md` § The page test forbids guessing through. Never prefer the caller's vault, never take the first hit, and never widen to a substring glob — the basename is exact and case-insensitive, the folder is the discriminator. The `claude_session_id:` stamp leg is scoped the same way: it searches every vault's `tasks_dir`/`goals_dir`, never the caller's alone.
 
 5. **Reverse index — tasks claiming a dead session (Step 2b).**
    ```bash
@@ -107,7 +142,7 @@ Return **≤ 40 lines**, exactly these sections, each printed as `(none)` rather
 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
-CLASSIFICATION  <counts per class>                 — or: UNKNOWN (pass not run)
+CLASSIFICATION  <total> classified · <class>=<n> · <class>=<n> …    — or: UNKNOWN (pass not run)
   <name> [<session id 8>] · <status> · <class> · <task file basename | —> · <open boxes | —> · <link | —>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)
   <name> · pane <id> · <link> · <gate text, ≤80 chars>
@@ -129,4 +164,6 @@ NOTES   runbook/command disagreements, unreadable inputs
 ```
 
 ⚠️ **The `<link>` column is what removes the manager's per-row pane read** — it is the rendered one-line link from step 7b, and it is the field `agents/fleet-drive.md` copies onto its `ESCALATION` rows. Carry it on **every** row that has a resolvable pane: `BLOCKED`, `CLOSERS`, and a `parked` `CLASSIFICATION` row. Emit `—` only where step 7b's lookup genuinely failed, and quote that failure in NOTES. **The link is inline on an existing row, so it costs characters, not lines** — the ≤ 40-line cap still holds; keep the link and trim the row's prose if a section runs long.
+
+⚠️ **The `CLASSIFICATION` line is arithmetic, not prose — pin it, and make it reconcile with its own rows.** Render a stated total followed by one `<class>=<n>` term per class, and **the terms must sum to that total**. `progressing` is a class like every other and belongs in the sum even though it renders no row. For every class that *does* render rows beneath, `<n>` must equal **the number of rows of that class actually printed** — a header reading `parked=9` above 7 parked rows is the defect this pins, and it has been measured twice: v0.39.1's `idle=22 (21 parked, 1 finished, 2 unclassified)`, where 21+1+2 = 24 ≠ 22, and v0.46.0's `parked 9` against 7 listed rows. If the counts cannot be made to agree with the rows, print `UNKNOWN (counts do not reconcile)` in place of the numbers rather than a figure that contradicts the section below it — a header that reads as a measurement while disagreeing with its own rows is worse than one that admits the failure, and the same discipline already governs a starved pass, which prints `UNKNOWN (pass not run)` and never a count.
 </output_format>
