@@ -1120,10 +1120,66 @@ class RepostTest(unittest.TestCase):
         state = {"aaaa1111": ("A", "pick — 1. alpha", "headless+closer", True)}
         self.assertEqual(watch.parked_keys(state), ["aaaa1111"])
 
+    def test_a_parked_modal_is_parked_too(self):
+        """⚠️ The only member of `PARKED_REASONS` with no other coverage: delete it
+        from the constant and the rest of this suite stays green, silently dropping
+        the one park `is_gated`'s own comment calls the one the registry cannot
+        name (`busy` with a modal pending on a frozen transcript)."""
+        state = {"aaaa1111": ("A", "pick — 1. alpha", "busy+parked-modal", True)}
+        self.assertEqual(watch.parked_keys(state), ["aaaa1111"])
+
     def test_a_settled_idle_park_is_not_parked(self):
         """The deliberate exclusion, pinned so a later widening is a decision."""
         state = {"aaaa1111": ("A", "pick — 1. alpha", "idle+closer", True)}
         self.assertEqual(watch.parked_keys(state), [])
+
+
+class ParkAgeDurabilityTest(unittest.TestCase):
+    """The park-age file, across a RESTART of the arm.
+
+    ⚠️ Both integration tests drive a single `main()` invocation, so without this
+    nothing asserts that `park_path_for`'s output is the file actually WRITTEN,
+    that its content carries `since`/`aged`, or that a second run CONTINUES the
+    clock rather than restarting it. That is the exact durability `park_path_for`'s
+    docstring argues for as a correctness requirement, and writing to the wrong
+    path (or dropping the write) would pass every other test here while making
+    every escalation reset on each arm restart.
+    """
+
+    PARKED = {"aaaa1111": ("A", "pick — 1. alpha", "registry:waiting", True)}
+
+    def _drive(self, d, tick):
+        out = io.StringIO()
+        with mock.patch.object(watch, "probe", lambda *a, **kw: self.PARKED), \
+             mock.patch.object(watch, "repost_empty_parks", lambda *a, **kw: []), \
+             mock.patch.object(watch.time, "sleep", lambda *_: None), \
+             mock.patch.object(watch.time, "time", lambda: tick), \
+             redirect_stdout(out), redirect_stderr(io.StringIO()):
+            watch.main(["--tracked", os.path.join(d, "t.txt"),
+                        "--tasks-dir", d, "--state", d, "--max-polls", "1"])
+        return out.getvalue()
+
+    def test_the_park_file_is_written_where_park_path_for_says(self):
+        t0 = 1_700_000_000.0
+        with tempfile.TemporaryDirectory() as d:
+            self._drive(d, t0)
+            park_file = watch.park_path_for(d, os.path.join(d, "t.txt"))
+            self.assertTrue(os.path.exists(park_file),
+                            "the park state must land at park_path_for's path")
+            with open(park_file, encoding="utf-8") as fh:
+                rec = json.load(fh)
+            self.assertEqual(rec["aaaa1111"]["since"], t0, rec)
+            self.assertEqual(rec["aaaa1111"]["aged"], [], rec)
+
+    def test_a_second_run_continues_the_clock(self):
+        """The regression the file exists to prevent: a restart that RESETS."""
+        t0 = 1_700_000_000.0
+        with tempfile.TemporaryDirectory() as d:
+            self._drive(d, t0)
+            # A second invocation, one poll old, 16 minutes after the park began.
+            out = self._drive(d, t0 + 16 * 60)
+            self.assertIn("AGED  aaaa1111  15m", out,
+                          "a restart must CONTINUE the clock, not reset it: " + out)
 
 
 class PostRepostArgvTest(unittest.TestCase):
