@@ -183,12 +183,18 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
   const pending = pendingOf(...pendingEntries)
   const ticks = []
   const posts = []
+  const gets = []
+  // A clock the spec owns, so the idle cadence is DRIVEN rather than waited on. It starts
+  // at 0 on purpose: `lastReadAtMs` is NEGATIVE_INFINITY precisely so the first read does
+  // not depend on the clock having advanced past `idleIntervalMs`.
+  const clock = { ms: 0 }
   const stop = startAttentionPoll({
     storeUrl: 'http://store',
     agents,
     pending,
     log,
     onSettled,
+    nowImpl: () => clock.ms,
     setTimeoutImpl: (fn) => {
       ticks.push(fn)
       return ticks.length
@@ -203,12 +209,13 @@ function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, 
         posts.push({ path, body: JSON.parse(options.body) })
         return { ok: true, status: 200, json: async () => ({}) }
       }
+      gets.push(path)
       const body = path === '/api/1.0/attention' ? open : items[path.split('/').pop()]
       if (body === undefined) return { ok: false, status: 404, json: async () => ({}) }
       return { ok: true, status: 200, json: async () => body }
     },
   })
-  return { ticks, stop, pending, posts }
+  return { ticks, stop, pending, posts, gets, clock }
 }
 
 test('an answered allow settles the parked promise', async () => {
@@ -552,4 +559,62 @@ test('the manager-settled path keeps its own decider, distinct from the store ar
     'the store value must be written at the poll site only, never by a second site',
   )
   assert.notEqual(STORE_DECIDER, 'manager')
+})
+
+// --- the idle cadence ------------------------------------------------------------------
+//
+// Measured 2026-10-07 on the live board (host `burn`, pid 96646): 46 `supervisor.mjs`
+// instances issued ~46 req/s against `/api/1.0/attention` while the store held ZERO
+// permission-class items open. The three cases below pin the cadence that replaces that,
+// and each one is a way the change could have been written wrong.
+
+test('a server holding no park reads once, then stops reading until the trail is due', async () => {
+  const { ticks, gets, clock } = harness({ open: [], pendingEntries: [] })
+  await ticks[0]()
+  assert.deepEqual(gets, ['/api/1.0/attention'], 'the first read must happen')
+
+  clock.ms += 250
+  await ticks[1]()
+  assert.equal(gets.length, 1, 'nothing parked, trail not due — no request at all')
+
+  clock.ms += 250
+  await ticks[2]()
+  assert.equal(gets.length, 1, 'still nothing parked, so still no request')
+
+  // ⚠️ Not zero: `recordAttempt(…, 'failed')` needs the item in `watching`, and only a
+  // read populates that. A loop that stopped reading entirely would delete that record
+  // silently — which is why the assertion below is 2 and not 1.
+  clock.ms += 30000
+  await ticks[3]()
+  assert.equal(gets.length, 2, 'the idle cadence elapses, so the trail read happens')
+})
+
+test('a park that appears is read on the next idle check, not on the idle interval', async () => {
+  // The hazard the cadence must not create: `GET /api/1.0/attention` returns OPEN items
+  // only, so an item that opens and is answered between two reads is never watched and
+  // never settled — its park then auto-denies. A park can appear at any moment, so the
+  // loop re-checks `pending` every `idleCheckMs` and reads IMMEDIATELY, which is what
+  // bounds that window at 250 ms rather than at the idle interval.
+  const { ticks, gets, clock, pending } = harness({ open: [], pendingEntries: [] })
+  await ticks[0]()
+  assert.equal(gets.length, 1)
+
+  clock.ms += 250
+  pending.set('perm_9', { requestId: 'perm_9', agentId: 'a1', settled: [], settle() {} })
+  await ticks[1]()
+  assert.equal(gets.length, 2, 'a park must be read at once, not one idle interval later')
+})
+
+test('a parked prompt keeps the fast cadence', async () => {
+  const { ticks, gets, clock } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'open', answer_mechanism: 'permission' } },
+  })
+  await ticks[0]()
+  clock.ms += 2000
+  await ticks[1]()
+  clock.ms += 2000
+  await ticks[2]()
+  const listReads = gets.filter((p) => p === '/api/1.0/attention').length
+  assert.equal(listReads, 3, 'a held park reads on every fast tick, as it always did')
 })

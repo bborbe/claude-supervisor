@@ -49,11 +49,18 @@ function pendingOf(...entries) {
 // scheduling it, so a test decides when time passes.
 function harness({ open = [], items = {}, agents, pending, log, posts }) {
   const ticks = []
+  // Attached to the array rather than returned beside it, so the many specs that read
+  // `harness(…)[0]` keep working unchanged. `clock` is a spec-owned clock, so the idle
+  // cadence is DRIVEN rather than waited on; it starts at 0, and `lastReadAtMs` is
+  // NEGATIVE_INFINITY precisely so the first read does not depend on it having advanced.
+  ticks.gets = []
+  ticks.clock = { ms: 0 }
   startMessageDelivery({
     storeUrl: 'http://store',
     agents,
     pending,
     log,
+    nowImpl: () => ticks.clock.ms,
     setTimeoutImpl: (fn) => {
       ticks.push(fn)
       return ticks.length
@@ -72,6 +79,7 @@ function harness({ open = [], items = {}, agents, pending, log, posts }) {
         }
         return { ok: true, json: async () => ({}) }
       }
+      ticks.gets.push(url.replace('http://store', ''))
       return {
         ok: true,
         json: async () => (url.endsWith('/attention') ? open : items[url.split('/').pop()]),
@@ -526,5 +534,35 @@ test('an answer with no content records nothing, because no delivery was attempt
   })
   await ticks[0]()
   assert.equal(posts.length, 0)
+})
+
+// --- the idle cadence ------------------------------------------------------------------
+
+test('a server holding no park reads once, then stops reading until the trail is due', async () => {
+  const ticks = harness({ open: [], agents: agentsOf(['a1', 'sess-1']), pending: pendingOf() })
+  await ticks[0]()
+  assert.deepEqual(ticks.gets, ['/api/1.0/attention'], 'the first read must happen')
+
+  ticks.clock.ms += 250
+  await ticks[1]()
+  assert.equal(ticks.gets.length, 1, 'nothing parked, trail not due — no request at all')
+
+  ticks.clock.ms += 30000
+  await ticks[2]()
+  assert.equal(ticks.gets.length, 2, 'the idle cadence elapses, so the trail read happens')
+})
+
+test('a park that appears is read on the next idle check, not on the idle interval', async () => {
+  // Same hazard as the permission arm: the list returns OPEN cards only, so a card that
+  // opens and is answered between two reads is never watched and never delivered.
+  const pending = pendingOf()
+  const ticks = harness({ open: [], agents: agentsOf(['a1', 'sess-1']), pending })
+  await ticks[0]()
+  assert.equal(ticks.gets.length, 1)
+
+  ticks.clock.ms += 250
+  pending.set('req-9', { requestId: 'req-9', agentId: 'a1', settled: [], settle() {} })
+  await ticks[1]()
+  assert.equal(ticks.gets.length, 2, 'a park must be read at once, not one idle interval later')
 })
 
