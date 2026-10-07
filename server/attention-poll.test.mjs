@@ -11,10 +11,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { armDelivery, decisionOf, selectParked, startAttentionPoll, storeDecisionRecord, STORE_DECIDER } from './attention-poll.mjs'
+import { armDelivery, decisionOf, producingAgent, selectParked, startAttentionPoll, storeDecisionRecord, STORE_DECIDER } from './attention-poll.mjs'
 
+// An optional third element sets the agent's `mode`, which `armDelivery` reads. It is
+// omitted by default so the many specs that predate the field keep the mode-less shape a
+// rehydrated row actually has.
 function agentsOf(...entries) {
-  return new Map(entries.map(([id, sessionId]) => [id, { id, sessionId }]))
+  return new Map(
+    entries.map(([id, sessionId, mode]) => [id, mode === undefined ? { id, sessionId } : { id, sessionId, mode }]),
+  )
 }
 
 function pendingOf(...entries) {
@@ -46,19 +51,66 @@ test('decisionOf refuses a verdict outside the enum', () => {
 })
 
 test('armDelivery accepts an answer an arm delivered', () => {
-  const got = armDelivery({ resolved_by: '11111111-2222-3333-4444-555555555555' })
+  const got = armDelivery({
+    item: { resolved_by: '11111111-2222-3333-4444-555555555555' },
+    agent: { mode: 'interactive' },
+  })
   assert.equal(got.ok, true)
   assert.equal(got.resolvedBy, '11111111-2222-3333-4444-555555555555')
 })
 
+test('armDelivery accepts a board answer on a headless park', () => {
+  // ⚠️ The 2026-10-07 amendment, and the whole point of this change. The board renders
+  // Allow / Deny on a headless worker's park and its JS never sends `resolved_by`, so
+  // without this branch the one control that park has records an answer and releases
+  // nothing — while the worker auto-denies at the timeout.
+  const got = armDelivery({ item: { decision: 'allow' }, agent: { mode: 'headless' } })
+  assert.equal(got.ok, true)
+  assert.equal(got.boardAnswer, true)
+})
+
+test('armDelivery refuses a board answer on a tab worker park', () => {
+  // The 2026-10-01 narrowing: a tab worker answers in its own session's pane, so its card
+  // renders no answering control at all — a board answer for one is a defect rather than
+  // an answer, and must not release.
+  const got = armDelivery({ item: { decision: 'allow' }, agent: { mode: 'interactive' } })
+  assert.equal(got.ok, false)
+  assert.match(got.reason, /no resolved_by/)
+})
+
+test('armDelivery refuses a cluster row, which carries no mode at all', () => {
+  // ⚠️ `cluster` is a spawn TARGET, not a spawn mode: `SPAWN_MODES` is
+  // ['interactive','headless'] (server/spawn-mode.mjs) and a cluster spawn refuses the
+  // `interactive` argument outright. So the real cluster agent record carries
+  // `status: 'cluster'` and **no `mode`**, and this guard refuses it by ABSENCE rather
+  // than by recognising the word `cluster`. Pinned with the shape that actually occurs —
+  // a spec passing `{ mode: 'cluster' }` would document a state `resolveSpawnMode` cannot
+  // return, and would appear to cover a fold of `cluster` into `headless` that it never
+  // exercised.
+  const got = armDelivery({ item: { decision: 'allow' }, agent: { status: 'cluster' } })
+  assert.equal(got.ok, false)
+})
+
 test('armDelivery refuses an answer with no resolved_by', () => {
-  // ⚠️ The guard the operator's ruling turns on. A verdict alone is not enough
-  // for a permission gate: the board never sends `resolved_by`, so an answer
-  // carrying a verdict but no arm provenance is not an operator decision.
+  // ⚠️ The guard the operator's ruling of 2026-09-26 turns on. A verdict alone is not
+  // enough for a permission gate: the board never sends `resolved_by`, so an answer
+  // carrying a verdict but no arm provenance is not an operator decision — UNLESS the
+  // park is headless, where the board is the only answering surface there is.
   for (const item of [{}, { resolved_by: '' }, { resolved_by: null }, { resolved_by: 7 }, null]) {
-    const got = armDelivery(item)
+    const got = armDelivery({ item })
     assert.equal(got.ok, false, `expected refusal for ${JSON.stringify(item)}`)
     assert.match(got.reason, /no resolved_by/)
+  }
+})
+
+test('armDelivery refuses when the agent mode is absent or unrecognised — never a default', () => {
+  // ⚠️ The positive-condition rule this repo states for every guard: an agent whose `mode`
+  // is missing (a rehydrated row, or one spawned before the field existed) must REFUSE
+  // rather than be read as headless. Reading absence as headless would put a board control
+  // back on a class the 2026-10-01 narrowing deliberately took it off.
+  for (const agent of [undefined, null, {}, { mode: undefined }, { mode: null }, { mode: 'nonsense' }]) {
+    const got = armDelivery({ item: { decision: 'allow' }, agent })
+    assert.equal(got.ok, false, `expected refusal for agent ${JSON.stringify(agent)}`)
   }
 })
 
@@ -126,8 +178,8 @@ test('selectParked ignores another agent\'s parks', () => {
 
 // --- the loop -------------------------------------------------------------------------
 
-function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, pendingEntries = [['perm_7', 'a1']] } = {}) {
-  const agents = agentsOf(['a1', 'sess-1'])
+function harness({ items = {}, open = [], log = () => {}, onSettled = () => {}, pendingEntries = [['perm_7', 'a1']], agentMode } = {}) {
+  const agents = agentsOf(agentMode === undefined ? ['a1', 'sess-1'] : ['a1', 'sess-1', agentMode])
   const pending = pendingOf(...pendingEntries)
   const ticks = []
   const posts = []
@@ -205,6 +257,50 @@ test('a settled permission answer records the attempt as delivered', async () =>
       body: { carrier: 'supervisor:attention-poll', outcome: 'delivered' },
     },
   ])
+})
+
+test('a board answer on a HEADLESS park is settled — the release this change adds', async () => {
+  // ⚠️ No `resolved_by`: this is a board click, and the board's JS cannot produce one.
+  // Before the 2026-10-07 amendment the guard refused it, `selectParked` never ran, and
+  // the worker auto-denied at PERMISSION_TIMEOUT_MS — the failure this task removes.
+  const { ticks, pending } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    agentMode: 'headless',
+  })
+  await ticks[0]()
+  assert.deepEqual(pending.get('perm_7').settled, [
+    { behavior: 'allow', message: 'Attention store answer (item i1).' },
+  ])
+})
+
+test('a board answer on a TAB worker park is refused, and records no attempt', async () => {
+  // Two claims, and the second is what the guard's PLACEMENT exists for. The 2026-10-01
+  // narrowing means a tab worker's card renders no answering control at all, so a board
+  // answer for one is a defect rather than an answer — it must not settle. And because the
+  // guard runs BEFORE `selectParked`, it must not record a `failed` attempt either: this
+  // arm never tried to carry it. `pendingEntries: []` is the configuration that makes the
+  // point — with the guard placed after `selectParked`, this item reached that function's
+  // owner branch and wrote a carrier failure for a delivery nothing attempted.
+  const logged = []
+  const { ticks, posts } = harness({
+    open: [{ item_id: 'i1', answer_mechanism: 'permission' }],
+    items: { i1: { item_id: 'i1', state: 'answered', decision: 'allow', answer_mechanism: 'permission', producer_id: 'sess-1' } },
+    agentMode: 'interactive',
+    pendingEntries: [],
+    log: (m) => logged.push(m),
+  })
+  await ticks[0]()
+  assert.match(logged.join('\n'), /not arm-delivered/)
+  assert.equal(posts.length, 0)
+})
+
+test('producingAgent resolves the producer to this server own agent, or nothing', () => {
+  const agents = agentsOf(['a1', 'sess-1'])
+  assert.deepEqual(producingAgent({ item: { producer_id: 'sess-1' }, agents }), { id: 'a1', sessionId: 'sess-1' })
+  for (const item of [{ producer_id: 'sess-other' }, { producer_id: '' }, {}]) {
+    assert.equal(producingAgent({ item, agents }), undefined, `expected undefined for ${JSON.stringify(item)}`)
+  }
 })
 
 test('an owned session with no park to settle records the attempt as failed', async () => {
