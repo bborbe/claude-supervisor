@@ -44,6 +44,19 @@ change exists to remove. A caller that sees `DEGRADED` must render its task-file
     resolve-task-file.py <name>...        # one `<name>\\t<path>` line per name
     resolve-task-file.py --stdin          # same, names read one per line
 
+**Output contract** — one line per name, `<name>` TAB `<value>`, where `<value>` is:
+
+  * a path     — resolved
+  * empty      — no resolution (zero hits, or an ambiguity; the candidates are on stderr)
+  * `UNKNOWN`  — ⚠️ the vault list could not be read. This is **not** "no resolution": a
+                 caller must render its task-file pass `UNKNOWN (pass not run)`, never a
+                 blank and never an unowned row. It is carried on **stdout** deliberately,
+                 because a caller that reads stdout alone would otherwise see the empty
+                 value above and read a broken `vault-cli` as a fleet with no tasks.
+
+stderr carries `DEGRADED <reason>` (mirrored as the `UNKNOWN` values) and
+`AMBIGUOUS <name>` TAB `<path>` for every candidate of the tier that was actually reached.
+
 The batch form exists because step 4 is a non-skippable hot path over ~46 live sessions:
 enumerating the vaults once per round rather than once per name removes ~46 `vault-cli`
 invocations and ~46 interpreter starts per sweep.
@@ -76,16 +89,25 @@ def vault_dirs():
         if not isinstance(payload, list):
             return [], f"vault-cli config list returned {type(payload).__name__}, not a list"
         out = []
+        seen = set()
         for v in payload:
             if not isinstance(v, dict):
                 continue
             path = os.path.expanduser(v.get("path") or "")
-            if path:
-                out.append({
-                    "path": path,
-                    "tasks_dir": v.get("tasks_dir") or "",
-                    "goals_dir": v.get("goals_dir") or "",
-                })
+            if not path:
+                continue
+            # Dedupe on the resolved path, as fleet-sessions.py does: a config listing one
+            # vault twice — or twice through a symlink — would otherwise make hits() return
+            # the same file twice, and resolve() reads two identical hits as a collision.
+            real = os.path.realpath(path)
+            if real in seen:
+                continue
+            seen.add(real)
+            out.append({
+                "path": path,
+                "tasks_dir": v.get("tasks_dir") or "",
+                "goals_dir": v.get("goals_dir") or "",
+            })
         if not out:
             return [], "vault-cli config list yielded no usable vault"
         return out, ""
@@ -135,9 +157,12 @@ def resolve(name, vaults):
     goals = hits(vaults, "goals_dir", stem)
     if len(tasks) == 1:
         return tasks[0], []                # a task beats a same-named goal, in any vault
-    if not tasks and len(goals) == 1:
-        return goals[0], []
-    return "", tasks + goals               # zero, or ambiguous — never guess
+    if not tasks:
+        if len(goals) == 1:
+            return goals[0], []
+        return "", goals                   # zero tasks; goals is the tier that was reached
+    return "", tasks                       # an ambiguous tasks tier never consults goals_dir,
+                                           # so only its own candidates may be announced
 
 
 def main(argv):
@@ -153,6 +178,15 @@ def main(argv):
     if reason:
         print(f"DEGRADED {reason}", file=sys.stderr)
     for name in names:
+        # ⚠️ A degraded read is announced ON STDOUT, not only on stderr. A caller that reads
+        # stdout alone — a `| cut -f2` pipeline, which is how the sibling command consumes
+        # this — would otherwise see an empty path and read it as "no resolution", rendering
+        # the session unowned: the very defect this whole change removes, reached through a
+        # stream the caller was not watching. `UNKNOWN` is not a path and must never be
+        # rendered as one; it means the vault list could not be read.
+        if reason:
+            print(f"{name}\tUNKNOWN")
+            continue
         path, ambiguous = resolve(name, vaults)
         for p in ambiguous:
             print(f"AMBIGUOUS {name}\t{p}", file=sys.stderr)

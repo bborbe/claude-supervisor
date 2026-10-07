@@ -190,14 +190,16 @@ class ResolveTaskFileTest(unittest.TestCase):
 
     # --- degradation: announced, never silent --------------------------------
 
-    def test_degraded_read_is_announced(self):
+    def test_degraded_read_is_announced_on_stdout_not_only_stderr(self):
         """A silent `[]` on the failure path renders every session unowned — the same
-        false-*unowned* defect this change removes, reached from the other side. The caller
-        needs a marker to render `UNKNOWN (pass not run)` instead."""
+        false-*unowned* defect this change removes, reached from the other side. And the
+        marker must reach **stdout**, because a caller that pipes stdout alone (`| cut -f2`,
+        which is how `commands/fleet-status.md` consumes this) cannot see stderr and would
+        read the empty value as "no resolution"."""
         r = self.run_script(["Any Task"], [], exit_code="1")
         self.assertEqual(0, r.returncode)
         self.assertIn("DEGRADED", r.stderr)
-        self.assertEqual("", self.path_for(r, "Any Task"))
+        self.assertEqual("UNKNOWN", self.path_for(r, "Any Task"))
 
     def test_non_list_payload_degrades_and_is_announced(self):
         """The second review finding: a payload that is not a list of dicts must reach the
@@ -206,13 +208,14 @@ class ResolveTaskFileTest(unittest.TestCase):
         self.assertEqual(0, r.returncode, f"exited {r.returncode}; stderr={r.stderr}")
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("DEGRADED", r.stderr)
-        self.assertEqual("", self.path_for(r, "Any Task"))
+        self.assertEqual("UNKNOWN", self.path_for(r, "Any Task"))
 
     def test_malformed_json_degrades_and_is_announced(self):
         r = self.run_script(["Any Task"], "not json at all")
         self.assertEqual(0, r.returncode)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("DEGRADED", r.stderr)
+        self.assertEqual("UNKNOWN", self.path_for(r, "Any Task"))
 
     def test_list_containing_non_dicts_degrades_and_is_announced(self):
         r = self.run_script(["Any Task"], ["private-personal", 42, None])
@@ -225,6 +228,30 @@ class ResolveTaskFileTest(unittest.TestCase):
         v = self.vault("private-personal", files=("Real Task.md",))
         r = self.run_script(["Real Task"], [v])
         self.assertNotIn("DEGRADED", r.stderr)
+        self.assertEqual(str(self.root / "private-personal" / "25 Tasks" / "Real Task.md"),
+                         self.path_for(r, "Real Task"))
+
+    # --- the tier that was actually reached ----------------------------------
+
+    def test_duplicate_vault_entry_is_not_a_collision(self):
+        """A config listing one vault twice — or twice through a symlink — must not make the
+        same file count as two hits. `fleet-sessions.py` dedupes on `os.path.realpath`."""
+        v = self.vault("private-personal", files=("Real Task.md",))
+        r = self.run_script(["Real Task"], [v, dict(v)])
+        self.assertEqual(str(self.root / "private-personal" / "25 Tasks" / "Real Task.md"),
+                         self.path_for(r, "Real Task"),
+                         "a duplicated config entry must not read as an ambiguity")
+        self.assertEqual("", r.stderr)
+
+    def test_ambiguous_tasks_tier_announces_only_task_candidates(self):
+        """`goals_dir` was never consulted, so its paths must not be labelled AMBIGUOUS."""
+        a = self.vault("vault-a", files=("Collide.md",))
+        b = self.vault("vault-b", files=("Collide.md",))
+        (self.root / "vault-a" / "24 Goals" / "Collide.md").write_text("")
+        r = self.run_script(["Collide"], [a, b])
+        self.assertEqual(2, r.stderr.count("AMBIGUOUS"))
+        self.assertNotIn("24 Goals", r.stderr,
+                         "a goal-tier path must not be announced for a tier never reached")
 
 
 if __name__ == "__main__":

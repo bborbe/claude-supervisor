@@ -56,8 +56,8 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
    **The rule's single home is `scripts/resolve-task-file.py`** — read it there rather than restating it here. **Call it once per round with every name on stdin**, never once per session: step 4 is a non-skippable hot path over ~46 live sessions, so a per-name call would pay a `vault-cli` round trip and an interpreter start for each. It prints one `<name>\t<path>` line per name — a blank path means no resolution — and two markers on stderr:
 
-   * `DEGRADED <reason>` — the vault list could not be read. ⚠️ **Render the whole task-file pass `UNKNOWN (pass not run)` when you see it, never blank.** A silently empty vault list renders every session unowned, which is the same false-*unowned* defect this pass exists to remove, reached from the other side.
-   * `AMBIGUOUS <name>\t<path>` — more than one hit inside the tier reached; name every candidate in NOTES.
+   * a `<name>` line whose value is `UNKNOWN` — ⚠️ the vault list could not be read. **Render the whole task-file pass `UNKNOWN (pass not run)` when you see it — never blank, and never an unowned row.** A silently empty vault list renders every session unowned, which is the same false-*unowned* defect this pass exists to remove, reached from the other side. The reason is repeated on stderr as `DEGRADED <reason>`, but the **stdout** value is the one a caller reading a single stream sees.
+   * `AMBIGUOUS <name>` `<path>` on stderr — more than one hit inside the tier reached; name every candidate in NOTES. Only the tier actually reached is announced: an ambiguous `tasks_dir` never consults `goals_dir`, so no goal path is reported for it.
 
    In brief, so a caller knows what a blank path means: resolution is **tier by tier**, `tasks_dir` across every vault before `goals_dir`, and a match is taken only when it is the sole hit in the tier reached. ⚠️ An ambiguous `tasks_dir` tier does **not** fall through to `goals_dir`.
 
