@@ -36,7 +36,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 
 <process>
 
-1. **NECESSITY (read)** — **consume the instrument output the caller passed; never duplicate its checks here.** **Topic branch → `verify-topic`**, whose **check 5 Necessity** answers this step, already two-level: *"advances at least one criterion of the topic **or of its member goal**"*. **Goal branch → `verify-goal`**, whose **goal necessity** check (`verify-goal.md:27`) is the exact analog: *"each linked task advances ≥ 1 of the goal's success criteria"*. Flag any task advancing neither.
+1. **NECESSITY (read)** — **consume the instrument output the caller passed; never duplicate its checks here.** **Topic branch → `verify-topic`** (check 5 Necessity) and **goal branch → `verify-goal`** (its goal-necessity check) each answer this step for their own branch; call the one the branch names and take its verdicts as given. ⚠️ **Do not restate either instrument's source list here** — the sources it tests are the instrument's contract and drift independently of this file. ⚠️ **Report the serving item per task, never a bare count.** A line reading "3 not needed" without naming which task serves which source is the tally this widening exists to remove — a verdict that names no serving item is a count, not a finding. Echo **every** failing row the instrument emitted (`none` or `unproven`), plus **at least one serving row when any task serves** — an all-fail run has none, and the report shape must not force one to be invented.
 
    ⚠️ **Dependency gap:** `verify-topic` is still a vault-local command (the primary vault's `.claude/commands/verify-topic.md`), not shipped by any plugin — tracked by *a separate task*. In a vault without it the caller cannot invoke it; report step 1 as `UNKNOWN — verify-topic not installed` and continue. **Never re-implement it here.** `verify-goal` ships with the vault-cli plugin (`/vault-cli:verify-goal`).
 
@@ -91,7 +91,7 @@ Plain markdown. The frame, then the issues, then the fix list.
 ```text
 Subject: <name> (from <explicit|session|name|conversation|last>)   ← the caller prints this; echo it only if you were passed the source
 Branch: <goal|topic> (<path>)   Steps: <n>/7 checked
-  1 Necessity ..... PASS | FAIL | UNKNOWN | SKIPPED — <detail>
+  1 Necessity ..... PASS | FAIL | UNKNOWN | SKIPPED — <serving-item rows: every failing row (none / unproven), plus at least one serving row when any task serves>
   2 Prune ......... <n> to re-home · <n> to abort — 0 deleted
   3 Gap ........... PASS | FAIL — <n> criteria with no task
   4 Fill .......... <n> to author (bar: auditor >=9/10)
