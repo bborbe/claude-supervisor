@@ -74,13 +74,80 @@ class VerdictTest(unittest.TestCase):
             "hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}})
 
 
+class TransportTest(unittest.TestCase):
+    """The transport is the caller's connection, not one built per request.
+
+    Measured 2026-10-07: `urllib.request.AbstractHTTPHandler.do_open` hardcodes
+    `headers["Connection"] = "close"`, so every 2 s pass opened a TCP connection and
+    asked the server to tear it down — ~1-2 setups/s across two instances, and the
+    board's idle CPU was `syscall`/`kevent`-dominated rather than handler-dominated.
+    These pin the replacement, which the loop tests above cannot: they patch
+    `get_json` itself and so never reach a transport.
+    """
+
+    def setUp(self):
+        self.m = load()
+
+    def _conn(self, status=200, body=b"{}"):
+        seen = {}
+
+        class FakeConn:
+            def request(self, method, path, headers=None):
+                seen["method"], seen["path"], seen["headers"] = method, path, headers
+
+            def getresponse(self):
+                return mock.Mock(status=status, read=lambda: body)
+
+            def close(self):
+                seen["closed"] = True
+
+        return FakeConn(), seen
+
+    def test_no_connection_close_is_sent(self):
+        conn, seen = self._conn()
+        self.m.get_json(conn, "http://localhost:18080/api/1.0/attention")
+        self.assertEqual(seen["headers"], {"Accept": "application/json"})
+
+    def test_the_same_connection_carries_every_request(self):
+        conn, seen = self._conn()
+        self.m.get_json(conn, "http://localhost:18080/api/1.0/attention")
+        self.m.get_json(conn, "http://localhost:18080/api/1.0/attention/p1")
+        self.assertEqual(seen["path"], "/api/1.0/attention/p1")
+        # A good response must NOT tear the socket down, or the next pass pays a setup.
+        self.assertNotIn("closed", seen)
+
+    def test_a_transport_failure_drops_the_pooled_socket(self):
+        conn, seen = self._conn()
+
+        def boom(method, path, headers=None):
+            raise OSError("socket dropped by the server")
+
+        conn.request = boom
+        ok, reason = self.m.get_json(conn, "http://localhost:18080/api/1.0/attention")
+        self.assertFalse(ok)
+        self.assertIn("OSError", reason)
+        self.assertTrue(seen.get("closed"), "a dead pooled socket must not be reused")
+
+    def test_a_non_200_is_reported_not_raised(self):
+        conn, _ = self._conn(status=503, body=b"nope")
+        ok, reason = self.m.get_json(conn, "http://localhost:18080/api/1.0/attention")
+        self.assertFalse(ok)
+        self.assertIn("503", reason)
+
+    def test_store_connection_closes_on_every_path(self):
+        with mock.patch.object(self.m.http.client, "HTTPConnection") as HC:
+            with self.m.store_connection("http://localhost:18080"):
+                pass
+            HC.return_value.close.assert_called_once()
+
+
 class ResolverTest(unittest.TestCase):
     def setUp(self):
         self.m = load()
 
     def resolve(self, items, expect=None, not_before=None):
-        self.m.get_json = lambda url: (True, items)
-        return self.m.resolve_item_for_session("store", "S", expect, not_before)
+        self.m.get_json = lambda conn, url: (True, items)
+        return self.m.resolve_item_for_session(None, "store", "S", expect, not_before)
 
     def test_message_card_is_never_a_permission_answer(self):
         self.assertFalse(self.resolve([card("m1", mech="message")])[0])
@@ -126,7 +193,7 @@ class RunTest(unittest.TestCase):
             json.dump({"kind": kind}, fh)
 
     def run_main(self, argv, stdin="", store=None, sleep=None):
-        self.m.get_json = store or (lambda url: (True, []))
+        self.m.get_json = store or (lambda conn, url: (True, []))
         if sleep:
             self.m.time.sleep = sleep
         out, err = io.StringIO(), io.StringIO()
@@ -168,7 +235,7 @@ class RunTest(unittest.TestCase):
         hook = json.dumps({"session_id": "S", "tool_name": "Write", "tool_input": {"file_path": "/tmp/w.txt"}})
         live = card("p1", payload="Write: /tmp/w.txt", created=time.time() + 1)
 
-        def store(url):
+        def store(conn, url):
             if url.endswith("/attention"):
                 return True, [live]
             return True, {"state": "answered", "decision": "allow", "resolved_by": "manager"}
@@ -196,14 +263,14 @@ class RunTest(unittest.TestCase):
     def test_closed_card_ends_the_poll(self):
         self.feed("permission")
         rc, out, err = self.run_main(["--item-id", "p1", "--timeout", "30", "--interval", "0"],
-                                     store=lambda url: (True, {"state": "closed"}))
+                                     store=lambda conn, url: (True, {"state": "closed"}))
         self.assertEqual((rc, out), (0, ""))
         self.assertIn("'closed'", err)
 
     def test_store_error_is_never_a_decision(self):
         self.feed("permission")
         rc, out, _ = self.run_main(["--item-id", "p1", "--timeout", "0.2", "--interval", "0.05"],
-                                   store=lambda url: (False, "boom"))
+                                   store=lambda conn, url: (False, "boom"))
         self.assertEqual((rc, out), (0, ""))
 
 

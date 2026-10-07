@@ -43,12 +43,13 @@ As a hook it takes no arguments and reads the hook JSON from stdin.
 """
 
 import argparse
+import http.client
 import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
+from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 DECISIONS = ("allow", "deny")
 DEFAULT_TIMEOUT = 540.0   # under the harness's 600 s command-hook default
@@ -65,16 +66,47 @@ def store_url() -> str:
     ).rstrip("/")
 
 
-def get_json(url: str):
-    """(ok, data_or_reason). Never raises — a transport failure must not become a decision."""
+@contextmanager
+def store_connection(store: str):
+    """One keep-alive connection, held for the caller's whole poll loop.
+
+    `urllib.request` cannot be used for this. Its `AbstractHTTPHandler.do_open`
+    hardcodes `headers["Connection"] = "close"`, so every pass opened a TCP
+    connection and explicitly asked the server to tear it down — the store offers
+    keep-alive and never asks for a close, so the churn was entirely client-chosen.
+    Two instances at the 2 s default is ~1-2 connection setups per second, and the
+    board's idle CPU was dominated by `syscall`/`kevent` rather than by handler work.
+
+    `http.client.HTTPConnection` reuses its socket across requests and sends no
+    close signal, so the server's keep-alive takes effect. It is created here, not
+    at import: a module-level connection could never be injected by a test and would
+    never be closed.
+    """
+    parts = urlsplit(store)
+    conn = http.client.HTTPConnection(
+        parts.hostname, parts.port or 80, timeout=HTTP_TIMEOUT
+    )
     try:
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
-            body = r.read().decode("utf-8", errors="replace")
+        yield conn
+    finally:
+        conn.close()
+
+
+def get_json(conn, url: str):
+    """(ok, data_or_reason). Never raises — a transport failure must not become a decision."""
+    parts = urlsplit(url)
+    path = parts.path + (f"?{parts.query}" if parts.query else "")
+    try:
+        conn.request("GET", path, headers={"Accept": "application/json"})
+        r = conn.getresponse()
+        body = r.read().decode("utf-8", errors="replace")
+        if r.status != 200:
+            return False, f"store returned HTTP {r.status} for {url}"
         return True, json.loads(body)
-    except urllib.error.HTTPError as e:
-        return False, f"store returned HTTP {e.code} for {url}"
     except Exception as e:  # transport, DNS, timeout, malformed JSON
+        # A pooled socket the server has since dropped must not be reused on the
+        # next pass; closing makes the following `request()` open a fresh one.
+        conn.close()
         return False, f"{type(e).__name__}: {e}"
 
 
@@ -101,9 +133,9 @@ def verdict(item):
     return True, decision, f"answered by arm {resolved_by!r}"
 
 
-def resolve_item_for_session(store: str, sid: str, expect=None, not_before=None):
+def resolve_item_for_session(conn, store: str, sid: str, expect=None, not_before=None):
     """(ok, item_id_or_reason). Newest open permission-class item produced by `sid`."""
-    ok, data = get_json(f"{store}/api/1.0/attention")
+    ok, data = get_json(conn, f"{store}/api/1.0/attention")
     if not ok:
         return False, data
     items = data if isinstance(data, list) else (data.get("items") or data.get("data") or [])
@@ -168,6 +200,67 @@ def emit(decision: str) -> None:
     }))
 
 
+def poll_until_settled(conn, store, args, item_id, expect, hook_started) -> int:
+    """The poll loop. Holds `conn` for its whole life, so every pass reuses one socket."""
+    deadline = time.monotonic() + args.timeout
+    last_reason = "no poll completed"
+
+    # Hooks run in parallel, so attention-log.py may not have written the gate's feed
+    # item yet when this poll starts. "Closed" therefore means: seen open, then gone.
+    # Never seen open within GRACE seconds -> not a feed-tracked gate; stop quietly.
+    GRACE = 10.0
+    started = time.monotonic()
+    seen_open = False
+    while True:
+        if args.session_id and not args.once:
+            is_open = gate_still_open(args.session_id)
+            if is_open:
+                seen_open = True
+            elif seen_open:
+                print("[poll] gate closed locally — answered elsewhere; exiting", file=sys.stderr)
+                return 0
+            elif time.monotonic() - started > GRACE:
+                print(f"[poll] no permission gate in the feed after {GRACE:.0f}s; exiting", file=sys.stderr)
+                return 0
+        if not item_id:
+            # The watcher pushes to the store asynchronously, so the item usually does
+            # not exist yet when the hook fires. Resolve on every pass, not once.
+            ok, res = resolve_item_for_session(conn, store, args.session_id, expect, hook_started)
+            if ok and res:
+                item_id = res
+            else:
+                last_reason = res
+                ok, data = False, res
+        if item_id:
+            ok, data = get_json(conn, f"{store}/api/1.0/attention/{item_id}")
+        if ok:
+            good, decision, reason = verdict(data)
+            last_reason = reason
+            # A card that is neither open nor answered will never carry a decision.
+            # Measured 2026-09-27: a poll kept polling a `closed` card to its deadline.
+            if not good and isinstance(data, dict) and data.get("state") not in ("open", "answered", None):
+                print(f"[poll] card {item_id} is {data.get('state')!r}; exiting", file=sys.stderr)
+                return 0
+            if good:
+                if args.once:
+                    print(f"[poll] WOULD EMIT behavior={decision!r} ({reason})", file=sys.stderr)
+                    return 0
+                emit(decision)
+                return 0
+        else:
+            last_reason = data
+
+        if args.once:
+            print(f"[poll] no decision yet: {last_reason}", file=sys.stderr)
+            return 0
+
+        if time.monotonic() + args.interval >= deadline:
+            # Fail open: emit nothing, so the human gets the normal prompt.
+            print(f"[poll] deadline after {args.timeout:.0f}s — last: {last_reason}", file=sys.stderr)
+            return 0
+        time.sleep(args.interval)
+
+
 def main() -> int:
     if os.environ.get("SUPERVISOR_PERMISSION_POLL", "").lower() == "off":
         return 0
@@ -207,63 +300,8 @@ def main() -> int:
         print("[poll] need --item-id or --session-id", file=sys.stderr)
         return 0
 
-    deadline = time.monotonic() + args.timeout
-    last_reason = "no poll completed"
-
-    # Hooks run in parallel, so attention-log.py may not have written the gate's feed
-    # item yet when this poll starts. "Closed" therefore means: seen open, then gone.
-    # Never seen open within GRACE seconds -> not a feed-tracked gate; stop quietly.
-    GRACE = 10.0
-    started = time.monotonic()
-    seen_open = False
-    while True:
-        if args.session_id and not args.once:
-            is_open = gate_still_open(args.session_id)
-            if is_open:
-                seen_open = True
-            elif seen_open:
-                print("[poll] gate closed locally — answered elsewhere; exiting", file=sys.stderr)
-                return 0
-            elif time.monotonic() - started > GRACE:
-                print(f"[poll] no permission gate in the feed after {GRACE:.0f}s; exiting", file=sys.stderr)
-                return 0
-        if not item_id:
-            # The watcher pushes to the store asynchronously, so the item usually does
-            # not exist yet when the hook fires. Resolve on every pass, not once.
-            ok, res = resolve_item_for_session(store, args.session_id, expect, hook_started)
-            if ok and res:
-                item_id = res
-            else:
-                last_reason = res
-                ok, data = False, res
-        if item_id:
-            ok, data = get_json(f"{store}/api/1.0/attention/{item_id}")
-        if ok:
-            good, decision, reason = verdict(data)
-            last_reason = reason
-            # A card that is neither open nor answered will never carry a decision.
-            # Measured 2026-09-27: a poll kept polling a `closed` card to its deadline.
-            if not good and isinstance(data, dict) and data.get("state") not in ("open", "answered", None):
-                print(f"[poll] card {item_id} is {data.get('state')!r}; exiting", file=sys.stderr)
-                return 0
-            if good:
-                if args.once:
-                    print(f"[poll] WOULD EMIT behavior={decision!r} ({reason})", file=sys.stderr)
-                    return 0
-                emit(decision)
-                return 0
-        else:
-            last_reason = data
-
-        if args.once:
-            print(f"[poll] no decision yet: {last_reason}", file=sys.stderr)
-            return 0
-
-        if time.monotonic() + args.interval >= deadline:
-            # Fail open: emit nothing, so the human gets the normal prompt.
-            print(f"[poll] deadline after {args.timeout:.0f}s — last: {last_reason}", file=sys.stderr)
-            return 0
-        time.sleep(args.interval)
+    with store_connection(store) as conn:
+        return poll_until_settled(conn, store, args, item_id, expect, hook_started)
 
 
 if __name__ == "__main__":
