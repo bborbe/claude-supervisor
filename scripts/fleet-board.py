@@ -70,6 +70,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -156,6 +157,27 @@ def frontmatter_links(fm, key):
     return out
 
 
+def _norm_session_name(name):
+    """Casefolded, decoration-stripped session label, for the task-file match.
+
+    A registry label carries the `⚙ ` marker a task title does not, so a raw equality
+    test never matches. Mirrors `manager-predispatch.py`'s helper of the same name and
+    job, so the two name fallbacks agree about what a name *is*.
+    """
+    text = unicodedata.normalize("NFKC", name or "").strip()
+    text = re.sub(r"^[^\w(]+", "", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+# A registry name is a *truncated* title, and the truncation is long — measured 46
+# characters on 2026-10-07 (`⚙ A Renamed Task's Session Becomes Unaddressable` against a
+# 108-character title). A short name that happens to open a title is a coincidence, not
+# a truncation, so the prefix branch is gated on a length no role name reaches
+# (`boss`, `alerts`, `agent_7`). Managers never reach this predicate at all — rule 1
+# detects them first — so the only names that can reach it are workers' task titles.
+_TRUNCATION_MIN_PREFIX = 20
+
+
 class VaultIndex:
     """Topic and goal titles, and the links between them — read once per run.
 
@@ -171,6 +193,7 @@ class VaultIndex:
         self.task_titles = {t.lower(): t for t in task_titles}
         self.task_goals = task_goals or {}
         self.goal_topics = goal_topics or {}
+        self._norm_titles = None
 
     def subject(self, title):
         """`('topic'|'goal', title)` when `title` names a page, else `None`."""
@@ -191,8 +214,47 @@ class VaultIndex:
         """The topics whose `## Goals` lists this goal, in order."""
         return self.goal_topics.get((goal_title or "").lower(), [])
 
+    def _normalized_titles(self):
+        """`{normalized title: title}`, built once — the index is read-only.
+
+        `task_titles` is keyed by `.lower()` while the match normalizes with
+        `casefold()`, so comparing the two directly would miss a title carrying a
+        case-foldable character. Both sides go through the same normalizer here.
+        """
+        if self._norm_titles is None:
+            self._norm_titles = {_norm_session_name(t): t for t in self.task_titles.values()}
+        return self._norm_titles
+
     def has_task_file(self, name):
-        return bool(name) and name.strip().lower() in self.task_titles
+        """Does a task file correspond to this session's registry `name`?
+
+        ⚠️ **Not an equality test, and that is the point.** A registry name is a
+        **truncated** form of a long task title, so an exact match misses it. Measured
+        2026-10-07: the session working `A Renamed Task's Session Becomes Unaddressable,
+        Because the Registry Name Is Write-Once and the Title Is Not` held the registry
+        name `⚙ A Renamed Task's Session Becomes Unaddressable` — decoration *and*
+        truncation — so the exact test returned False and `build_grouping` filed a
+        session that owns a task under `UNMANAGED`, with no vault task. The name is
+        stripped of its decoration, then accepted when it is a **prefix** of a title.
+
+        ⚠️ **Two guards keep this from inventing a task.** A prefix match is a guess
+        about which title was truncated, and the failure this method removes is a
+        *silent* one, so a guess must never become a confident one:
+
+        1. the prefix must identify **exactly one** title — when two titles share it the
+           guess has no single answer, and the row stays unmanaged;
+        2. the prefix must be at least `_TRUNCATION_MIN_PREFIX` characters, so a short
+           role name that happens to open a title (`boss`) is not read as a truncation.
+        """
+        key = _norm_session_name(name)
+        if not key:
+            return False
+        titles = self._normalized_titles()
+        if key in titles:
+            return True
+        if len(key) < _TRUNCATION_MIN_PREFIX:
+            return False
+        return sum(1 for t in titles if t.startswith(key)) == 1
 
 
 def _vault_roots():

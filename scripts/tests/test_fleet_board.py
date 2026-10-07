@@ -747,5 +747,67 @@ class TestSiblingOrder(unittest.TestCase):
         self.assertEqual(self.ordered(rows), ["twenty-hours", "three-fifty-nine"])
 
 
+class TestHasTaskFile(unittest.TestCase):
+    """Rule 4's predicate — a session's registry name against the task filenames.
+
+    ⚠️ **The measured failure this pins.** A registry name carries a `⚙ ` marker and is
+    a *truncated* form of a long task title, so an exact test misses it. Measured live
+    2026-10-07: `fleet-sweep-reader Misresolves Sibling-Vault Tasks` rendered under
+    `Unmanaged` with no vault task, though it owns
+    `fleet-sweep-reader Misresolves Sibling-Vault Tasks and Its Header Counts Do Not Sum`.
+    The row was not dropped — it was classified wrong, which is the silent direction.
+
+    The two guards matter as much as the match: a prefix is a guess, and this predicate
+    feeds a classification, so a confident wrong answer is worse than the unmanaged row
+    it replaces.
+    """
+
+    LONG = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry Name "
+            "Is Write-Once and the Title Is Not")
+
+    def index(self, *titles):
+        return fb.VaultIndex(task_titles=list(titles))
+
+    def test_an_exact_title_matches(self):
+        self.assertTrue(self.index("Some Task").has_task_file("Some Task"))
+
+    def test_case_does_not_matter(self):
+        self.assertTrue(self.index("Some Task").has_task_file("some task"))
+
+    def test_the_glyph_decoration_is_stripped(self):
+        """`⚙ ` is the marker a task title never carries."""
+        self.assertTrue(self.index("Some Task").has_task_file("⚙ Some Task"))
+
+    def test_a_truncated_name_matches_its_full_title(self):
+        """The measured case: the registry holds the title cut short."""
+        self.assertTrue(self.index(self.LONG).has_task_file(
+            "⚙ A Renamed Task's Session Becomes Unaddressable"))
+
+    def test_an_ambiguous_prefix_is_not_a_match(self):
+        """Guard 1 — two titles under one prefix is a guess with no single answer,
+        so the row stays unmanaged rather than picking one."""
+        idx = self.index("Shared Prefix That Is Long Enough One",
+                         "Shared Prefix That Is Long Enough Two")
+        self.assertFalse(idx.has_task_file("Shared Prefix That Is Long Enough"))
+
+    def test_a_short_name_that_opens_a_title_is_not_a_match(self):
+        """Guard 2 — a role name is not a truncation, however the title reads."""
+        self.assertFalse(self.index("boss of nothing in particular").has_task_file("boss"))
+
+    def test_a_name_matching_no_title_is_not_a_match(self):
+        self.assertFalse(self.index("Some Task").has_task_file("Fleet Manager"))
+
+    def test_an_empty_or_missing_name_is_not_a_match(self):
+        idx = self.index("Some Task")
+        for bad in ("", "   ", None, "⚙ "):
+            with self.subTest(name=bad):
+                self.assertFalse(idx.has_task_file(bad))
+
+    def test_the_normalizer_strips_the_marker_and_collapses_space(self):
+        self.assertEqual(fb._norm_session_name("⚙ Some Task"), "some task")
+        self.assertEqual(fb._norm_session_name("⚙ "), "")
+        self.assertEqual(fb._norm_session_name(None), "")
+
+
 if __name__ == "__main__":
     unittest.main()
