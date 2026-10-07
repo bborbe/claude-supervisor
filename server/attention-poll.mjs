@@ -115,6 +115,18 @@ export function armDelivery({ item, agent }) {
   }
 }
 
+// The agent of THIS server that produced this item, or undefined.
+//
+// Extracted because two callers resolve the same join and must not disagree about who
+// produced an item: `selectParked`, and the delivery guard — which reads the agent's `mode`
+// and therefore needs the agent itself. `selectParked` runs only after the guard, so the
+// guard cannot borrow its result.
+export function producingAgent({ item, agents }) {
+  const producerId = item?.producer_id
+  if (typeof producerId !== 'string' || producerId === '') return undefined
+  return [...agents.values()].find((a) => a.sessionId === producerId)
+}
+
 // Which parked promise does this item settle?
 //
 // The join is `item.producer_id` -> the agent this server spawned with that session id ->
@@ -138,7 +150,7 @@ export function selectParked({ item, agents, pending }) {
       reason: 'the item names no producer, so it cannot be joined to a park',
     }
   }
-  const agent = [...agents.values()].find((a) => a.sessionId === producerId)
+  const agent = producingAgent({ item, agents })
   if (!agent) {
     return {
       ok: false,
@@ -157,10 +169,7 @@ export function selectParked({ item, agents, pending }) {
       reason: `agent ${agent.id} has ${parked.length} parked prompts (${parked.map((p) => p.requestId).join(', ')}), so which one this verdict answers cannot be told — answer it with answer_permission instead`,
     }
   }
-  // The agent rides along: `armDelivery` reads its `mode` to tell a headless park from a
-  // tab's, and re-deriving the same join at the call site would be a second copy of a
-  // lookup this function has already done and could disagree with it.
-  return { ok: true, requestId: parked[0].requestId, agentId: agent.id, agent }
+  return { ok: true, requestId: parked[0].requestId, agentId: agent.id }
 }
 
 // Start the poll loop, and return a stop function.
@@ -246,6 +255,19 @@ export function startAttentionPoll({
           log(`attention item ${itemId} is answered but unsettleable: ${verdict.reason}`)
           continue
         }
+        // A verdict alone does not release a permission gate, and the guard deciding
+        // whether THIS one may is now two-sided — an arm answer, or a board answer on a
+        // headless park — so it reads the producing agent's `mode` and resolves that agent
+        // itself. ⚠️ It stays BEFORE `selectParked`, where it has always been: the `failed`
+        // attempt record on that function's owner branch must fire only for an answer the
+        // guard would have let through, or it writes a carrier failure for an answer that
+        // nothing ever attempted to carry. Kept after `decisionOf` so a verdict-less item
+        // is still reported by its own, more specific reason.
+        const delivery = armDelivery({ item, agent: producingAgent({ item, agents }) })
+        if (!delivery.ok) {
+          log(`attention item ${itemId} carries ${verdict.decision} but was not arm-delivered: ${delivery.reason}`)
+          continue
+        }
         const target = selectParked({ item, agents, pending })
         if (!target.ok) {
           log(`attention item ${itemId} carries ${verdict.decision} but was not delivered: ${target.reason}`)
@@ -256,17 +278,6 @@ export function startAttentionPoll({
           // outcome in a trail that keeps one record per item. Same rule as
           // message-delivery.mjs, where it was measured live on 2026-09-30.
           if (target.owner) await recordAttempt(itemId, 'failed')
-          continue
-        }
-        // ⚠️ AFTER `selectParked`, not before it. A verdict alone still does not release a
-        // permission gate, but the guard deciding whether THIS one may is now two-sided —
-        // an arm answer, or a board answer on a headless park — so it reads the producing
-        // agent's `mode`, and `selectParked` is what resolves that agent. Kept after
-        // `decisionOf` so a verdict-less item is still reported by its own, more specific
-        // reason rather than as a delivery refusal.
-        const delivery = armDelivery({ item, agent: target.agent })
-        if (!delivery.ok) {
-          log(`attention item ${itemId} carries ${verdict.decision} but was not arm-delivered: ${delivery.reason}`)
           continue
         }
         // No re-check that the park is still present: selectParked read `pending` on this
