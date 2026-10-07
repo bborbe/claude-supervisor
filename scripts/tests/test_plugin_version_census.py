@@ -289,6 +289,19 @@ class ComposerTest(unittest.TestCase):
     def test_faint_is_cancelled_by_22(self):
         self.assertFalse(census_mod.pane_is_ready("❯ \x1b[2mghost\x1b[22mdraft ok"))
 
+    def test_a_bare_reset_clears_faint(self):
+        """`\\x1b[m` is the reset form; an omitted parameter reads as 0, not as nothing."""
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[0;2mghost\x1b[mdraft ok"))
+        self.assertFalse(census_mod.pane_is_ready("❯ \x1b[1;;2mghost\x1b[0mdraft ok"))
+
+    def test_cursor_visibility_and_other_escapes_do_not_leak_into_the_visible_text(self):
+        """`\\x1b[?25h` and friends are not characters — they must not read as non-faint."""
+        self.assertTrue(census_mod.pane_is_ready("\x1b[?25l❯\xa0\x1b(B\x1b[0;2mTry \"x\"\x1b[?25h"))
+        self.assertTrue(census_mod.pane_is_ready("❯ \x1b[?25h\x1b[?25l"))
+
+    def test_an_osc_sequence_does_not_leak_either(self):
+        self.assertTrue(census_mod.pane_is_ready("❯ \x1b]0;title\x07\x1b[0;2mTry \"x\""))
+
 
 class ReloadPaneTest(unittest.TestCase):
     """The lever's confirmation is the NEWEST marker for the pid moving — never the

@@ -68,8 +68,18 @@ RELOAD_SETTLE_TIMEOUT = 30.0
 # SGR / charset escapes, so the glyph can be matched on the visible text of a line read with
 # `get-text --escapes` — the placeholder hint is only distinguishable from typed text by its
 # styling, and that styling is not in the plain read.
-_SGR = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\([A-Za-z]")
-_SGR_ATTRS = re.compile(r"\x1b\[([0-9;]*)m")
+# Every escape shape a real `get-text --escapes` read carries, not just the SGR ones: CSI with
+# private/intermediate bytes (`\x1b[?25h`, cursor visibility — ink emits it around the
+# composer), OSC/DCS, charset selection (`\x1b(B`) and the remaining two-char escapes. A
+# narrower pattern leaves those bytes in the visible text, where they read as non-faint
+# characters and turn a genuinely empty composer into `not ready`.
+_SGR = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"                    # CSI, private + intermediate bytes included
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"         # OSC … BEL / ST
+    r"|\x1b[()][A-Za-z0-9]"                       # charset selection
+    r"|\x1b[@-Z\\-_]"                             # other two-char escapes
+)
+_SGR_ATTRS = re.compile(r"\x1b\[([0-?]*)[ -/]*m")
 
 
 def _plain(line):
@@ -78,11 +88,21 @@ def _plain(line):
 
 
 def _sgr_attrs(escape):
-    """The parameter list of an SGR (`…m`) escape, as ints. `[]` for anything else."""
-    if not escape.endswith("m"):
+    """The parameter list of an SGR (`…m`) escape, as ints. `[]` for anything else.
+
+    ⚠️ **An omitted parameter is `0`, not a dropped one.** `\\x1b[m` is the reset form and
+    `\\x1b[1;;2m` carries an empty middle parameter; filtering empties out leaves `[]` — no
+    state change at all — so a bare reset would **fail to clear faint** and a composer that
+    was dimmed and then reset would keep reading as empty. That is the same hazard as the
+    positional-parse defect, reached by a different route.
+    """
+    match = _SGR_ATTRS.fullmatch(escape)
+    if not match:
         return []
-    body = escape[2:-1]
-    return [int(p) for p in body.split(";") if p.isdigit()]
+    body = match.group(1)
+    if body == "":
+        return [0]
+    return [int(p) if p.isdigit() else 0 for p in body.split(";")]
 
 
 def _visible_is_dim(segment):
@@ -377,7 +397,12 @@ def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
         try:
             probe = subprocess.run(["wezterm", "cli", "get-text", "--pane-id", str(pane_id), "--escapes"],
                                    capture_output=True, text=True, timeout=20)
-        except (OSError, subprocess.SubprocessError) as exc:
+        except subprocess.TimeoutExpired:
+            # ⚠️ A slow read is retried inside the readiness deadline, never aborted on:
+            # `TimeoutExpired` is a `SubprocessError`, and a busy machine — exactly when the
+            # pane is least likely to be idle — would otherwise end the whole lever here.
+            continue
+        except OSError as exc:
             return {"pane": pane_id, "ok": False, "why": f"get-text failed: {exc}"}
         # ⚠️ A non-zero exit is a READ failure, not a busy pane. Discarding the code would
         # make `stdout` empty, `pane_is_ready("")` false, and the loop report `composer not
