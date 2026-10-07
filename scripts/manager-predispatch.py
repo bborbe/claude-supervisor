@@ -29,7 +29,7 @@ into disagreeing about what "unchanged" means.
 ⚠️ Why this store is not the loop's store — checked before building, 2026-09-26
 --------------------------------------------------------------------------------
 A live per-subject snapshot already exists: `~/.claude/state/sweep-gate-loop/<vault>/
-<subject>.snapshot.json`, written on CHANGE-WAKE ticks by the vault-side launchd job (the job ticks every 900 s; the snapshot advances only when the digest changes, so `recorded_at` is an identity, not a freshness value — see `docs/fleet-surface.md` § The model-free gate loop)
+<subject>.snapshot.json`, written on CHANGE-WAKE ticks by the vault-side launchd job (the job ticks every 900 s; the snapshot advances only when the digest changes, so `recorded_at` is an identity, not a freshness value — see `docs/fleet-surface.md` § Session end)
 `com.bborbe.sweep-gate-notify`. It was read and compared field-for-field, and the result
 is worth keeping because it cuts both ways:
 
