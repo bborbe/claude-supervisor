@@ -1598,7 +1598,7 @@ class TestTrackedArtifacts(Base):
         self.snapshot("ATopic", ["ATask"], recorded_at="2026-10-03T13:25:00+02:00")
         rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
         self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
-        self.assertIn("recorded_at 2026-10-03T13:25:00+02:00", out)
+        self.assertIn("gate snapshot last digest change 2026-10-03T13:25:00+02:00", out)
         self.assertIn("caller scan written", out)
 
     def test_compare_says_unclassified_when_the_declaration_cannot_be_read(self):
