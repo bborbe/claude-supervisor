@@ -7,6 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   DEFAULT_MAX_CONCURRENT,
   DEFAULT_MAX_CONCURRENT_HARD,
@@ -555,4 +556,46 @@ test('an export is prefixed with `export`, never a bare assignment', () => {
   // the `cd` and lose it before the `exec` that actually starts the worker — a silent no-op
   // that looks exactly like a working spawn. This is the test that keeps the verb.
   assert.match(shellEnvExports({ A: '1' }), /^export A=/)
+})
+
+test('a key named __proto__ survives, rather than being silently dropped', () => {
+  // ⚠️ Measured 2026-10-07: `resolved['__proto__'] = 'x'` on a plain `{}` is a SILENT NO-OP.
+  // `__proto__` is an accessor on Object.prototype whose setter ignores any value that is not
+  // an object or null — and `JSON.parse` DOES create it as an own enumerable key, so a caller
+  // reaching this path through MCP args really does produce it. Building by assignment
+  // therefore dropped the key with no error anywhere: the exact failure this function's
+  // refuse-never-drop rule exists to prevent, sitting inside the function itself. Found by
+  // the PR review; the fix is to collect pairs and let Object.fromEntries define an OWN
+  // property.
+  const { env } = resolveEnvOverrides({ env: JSON.parse('{"__proto__":"http://localhost:18081"}') })
+  assert.deepEqual(Object.keys(env), ['__proto__'])
+  assert.equal(Object.getOwnPropertyDescriptor(env, '__proto__').value, 'http://localhost:18081')
+  // ...and this is a plain object, not prototype pollution: the prototype is untouched.
+  assert.equal(Object.getPrototypeOf(env), Object.prototype)
+})
+
+test('both spawn paths are wired — the claim no pure-helper test can reach', () => {
+  // ⚠️ THE CLAIM THIS CHANGE RESTS ON, and the one every test above cannot reach: a
+  // headless-only implementation passes this entire file, and the CHANGELOG names that
+  // exact implementation as the thing the change exists to refuse. `supervisor.mjs`
+  // connects a stdio server at load and is unimportable, so this asserts over its SOURCE
+  // TEXT — the same shape `scripts/check-spawn-mode.py` uses for the mode decision, and for
+  // the same stated reason: a text scan cannot prove the wiring RUNS, but it does prove a
+  // call site cannot silently omit it. Found by the PR review.
+  const source = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(
+    source,
+    /spawnInteractiveAgent\(\{[^}]*env: envOverrides/,
+    'the tab path must be handed envOverrides',
+  )
+  assert.match(
+    source,
+    /workerEnvFor\(\{[^}]*overrides: envOverrides/,
+    'the headless path must be handed overrides',
+  )
+  assert.match(
+    source,
+    /if \(env && Object\.keys\(env\)\.length > 0\)/,
+    'the cluster path must refuse env rather than accepting and dropping it',
+  )
 })

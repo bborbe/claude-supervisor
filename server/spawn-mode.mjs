@@ -496,7 +496,14 @@ export function resolveEnvOverrides({ env } = {}) {
         `Pass {"ATTENTION_STORE_URL": "http://localhost:18081"} — not a list, and not a string.`,
     }
   }
-  const resolved = {}
+  // ⚠️ PAIRS, then `Object.fromEntries` — never `resolved[name] = …` onto a plain `{}`.
+  // `__proto__` passes ENV_NAME and arrives as an OWN enumerable key from `JSON.parse`, but
+  // it is an accessor on `Object.prototype` whose setter ignores any value that is not an
+  // object or null — so the assignment is a SILENT NO-OP and the key vanishes with no error,
+  // which is precisely the failure this function's refuse-never-drop rule exists to prevent.
+  // `Object.fromEntries` defines an own property instead. Measured 2026-10-07: `o['__proto__']
+  // = 'x'` on a plain `{}` leaves `Object.keys(o)` empty. Found by the PR review.
+  const pairs = []
   for (const [name, value] of Object.entries(env)) {
     if (!ENV_NAME.test(name)) {
       return {
@@ -510,7 +517,7 @@ export function resolveEnvOverrides({ env } = {}) {
       // Stringified here so both paths agree. The SDK's `env` wants strings and the tab path
       // interpolates into a shell word, so a number left as a number would be one value on
       // one path and a different type on the other.
-      resolved[name] = String(value)
+      pairs.push([name, String(value)])
       continue
     }
     return {
@@ -519,5 +526,5 @@ export function resolveEnvOverrides({ env } = {}) {
         `${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}.`,
     }
   }
-  return { env: resolved }
+  return { env: Object.fromEntries(pairs) }
 }
