@@ -115,3 +115,16 @@ output — the fleet table.
   `docs/fleet-surface.md` § Session roles is the canonical statement.
 - **A manager does not execute a worker's task.** It spawns, drives, answers and reaps
   workers; the task's work happens in the worker's own session.
+- **A manager starts or resumes a worker on a vault task with `/supervisor:open --task`** —
+  the path that reads the task's recorded session and writes it back. Reach for a bare
+  manager-spawn (a direct `spawn_agent` call) **only** when the brief has no task file;
+  `commands/manager-spawn.md` is the canonical statement of that split. ⚠️ **This is a rule
+  about dispatching a worker onto a task — it is not a general ban on `spawn_agent`.** Two
+  documented direct-call paths sit outside it: the loops execute the rows their sweep already
+  decided directly (`commands/manager-loop.md` § Procedure, the `To open` and `To resume`
+  bullets; the act leg it runs is the `supervisor:manager-drive` agent, `agents/manager-drive.md`),
+  and continuing an exited headless worker is a direct call by design
+  (`docs/fleet-surface.md` § A headless worker exits at turn end). Neither is a hand-rolled
+  dispatch. ⚠️ And it is a **policy, not a gate** — the same caveat `docs/fleet-surface.md`
+  § Session roles attaches to the worker-side prohibition, so do not go hunting for an
+  enforcement that does not exist.
