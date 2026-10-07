@@ -1182,6 +1182,48 @@ class ParkAgeDurabilityTest(unittest.TestCase):
                           "a restart must CONTINUE the clock, not reset it: " + out)
 
 
+class OpenStoreItemsTest(unittest.TestCase):
+    """`open_store_items` — the one function the re-post rests on.
+
+    ⚠️ Every re-post test injects the `post` seam or mocks this function wholesale,
+    so without this the URL, the JSON decode, the `None`-on-failure contract and
+    the open-state filter are all uncovered.
+    """
+
+    def _fetch(self, body):
+        resp = mock.MagicMock()
+        resp.read.return_value = body.encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+        with mock.patch("urllib.request.urlopen", lambda *a, **kw: resp):
+            return watch.open_store_items()
+
+    def test_it_projects_producers_and_dedup_keys(self):
+        producers, keys = self._fetch(json.dumps(
+            [{"state": "open", "producer_id": "p1", "dedup_key": "k1"}]))
+        self.assertEqual(producers, {"p1"})
+        self.assertEqual(keys, {"k1"})
+
+    def test_an_answered_item_is_not_open(self):
+        """⚠️ The endpoint answers with items in EVERY state — `who-needs-me.py:271`
+        maps a non-`open` state to `answered`, which is only reachable if one can
+        come back. Counting an answered card as open would suppress the re-post for
+        a worker still parked on a fresh question: a MISSED escalation."""
+        producers, _ = self._fetch(json.dumps([
+            {"state": "answered", "producer_id": "p1", "dedup_key": "k1"},
+            {"state": "open", "producer_id": "p2", "dedup_key": "k2"}]))
+        self.assertEqual(producers, {"p2"})
+
+    def test_a_failed_read_is_none_never_empty(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            self.assertIsNone(watch.open_store_items())
+
+    def test_a_non_list_body_is_none_not_an_exception(self):
+        """The projection must sit inside the guard: `json.loads` succeeding does
+        not mean the body is a list."""
+        self.assertIsNone(self._fetch('{"error": "unknown agent"}'))
+
+
 class PostRepostArgvTest(unittest.TestCase):
     """The re-post's command line, pinned.
 

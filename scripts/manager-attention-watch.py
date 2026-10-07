@@ -993,27 +993,40 @@ def park_path_for(state_dir, tracked_path):
 def open_store_items(store=STORE, timeout=STORE_TIMEOUT):
     """`({producer_id}, {dedup_key})` over the store's OPEN items, or `None`.
 
-    `GET /api/1.0/attention` is the store's open-items read — the same one
-    `who-needs-me.py:213` uses — and it returns open items ONLY, which is exactly
-    the question the re-post asks: *is there already a card for this park?*
+    `GET /api/1.0/attention` is the store's item read — the same one
+    `who-needs-me.py:213` uses — and it answers with items in **every** state, not
+    only open ones.
+
+    ⚠️ **So the `state` filter below is load-bearing, not belt-and-braces.**
+    `who-needs-me.py:271` maps a non-`open` `state` to `answered`, and that branch
+    is only reachable if the endpoint can return one — so three sibling docstrings
+    that call this endpoint "open items only" are wrong. An ANSWERED card counted
+    as open would suppress the re-post for a worker that is still parked on a
+    fresh question, which is a **missed** escalation rather than a noisy one.
 
     ⚠️ **`None` on failure, never two empty sets.** An empty result is a positive
     claim — "the store holds nothing for anyone" — and the re-post acts on it, so
     a store that is merely unreachable would re-post a card for every parked
     worker on every poll. Same direction the rest of this file closes: a failed
     read must not be representable as an empty one.
+
+    ⚠️ **The projection sits INSIDE the guard for the same reason.** `json.loads`
+    succeeding does not mean the body is a list — `agent_status`-style error
+    payloads are objects — and an `AttributeError` raised out there would escape
+    the `None` contract the caller depends on.
     """
     try:
         with urllib.request.urlopen(store + "/api/1.0/attention",
                                     timeout=timeout) as resp:
             items = json.loads(resp.read().decode("utf-8") or "[]")
+        open_items = [i for i in items if i.get("state") == "open"]
+        return ({i.get("producer_id") or "" for i in open_items},
+                {i.get("dedup_key") or "" for i in open_items})
     except Exception as exc:
         print(f"WATCH WARN: store read failed ({exc}) — re-post suppressed this "
               f"poll; this is NOT a reading that the store holds nothing",
               file=sys.stderr, flush=True)
         return None
-    return ({i.get("producer_id") or "" for i in items},
-            {i.get("dedup_key") or "" for i in items})
 
 
 def parked_keys(state):
