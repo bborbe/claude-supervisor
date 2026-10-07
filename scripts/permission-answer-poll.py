@@ -83,9 +83,19 @@ def store_connection(store: str):
     never be closed.
     """
     parts = urlsplit(store)
-    conn = http.client.HTTPConnection(
-        parts.hostname, parts.port or 80, timeout=HTTP_TIMEOUT
-    )
+    if parts.scheme == "https":
+        conn = http.client.HTTPSConnection(
+            parts.hostname, parts.port or 443, timeout=HTTP_TIMEOUT
+        )
+    elif parts.scheme == "http":
+        conn = http.client.HTTPConnection(
+            parts.hostname, parts.port or 80, timeout=HTTP_TIMEOUT
+        )
+    else:
+        # `urlopen` raised for an unknown scheme too, and the reason is the same: a
+        # scheme this cannot honour must not silently become plaintext on port 80.
+        # The caller fails open exactly as it did when urlopen raised.
+        raise ValueError(f"unsupported store scheme {parts.scheme!r} in {store!r}")
     try:
         yield conn
     finally:
@@ -103,10 +113,15 @@ def get_json(conn, url: str):
         if r.status != 200:
             return False, f"store returned HTTP {r.status} for {url}"
         return True, json.loads(body)
-    except Exception as e:  # transport, DNS, timeout, malformed JSON
+    except (OSError, http.client.HTTPException) as e:
         # A pooled socket the server has since dropped must not be reused on the
         # next pass; closing makes the following `request()` open a fresh one.
+        # Only a *transport* failure earns this — a malformed body on a healthy 200
+        # leaves the socket reusable, and closing it would pay a reconnect for a
+        # payload problem.
         conn.close()
+        return False, f"{type(e).__name__}: {e}"
+    except Exception as e:  # malformed JSON, decode errors — the socket is fine
         return False, f"{type(e).__name__}: {e}"
 
 

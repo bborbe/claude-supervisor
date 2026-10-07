@@ -14,6 +14,7 @@ Each case pins a property measured on a live gate on 2026-09-27:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import http.server
 import importlib.util
 import io
 import json
@@ -21,6 +22,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -139,6 +141,80 @@ class TransportTest(unittest.TestCase):
             with self.m.store_connection("http://localhost:18080"):
                 pass
             HC.return_value.close.assert_called_once()
+
+    def test_store_connection_closes_on_the_exception_path(self):
+        # The name claims "every path"; the normal exit alone does not pin that.
+        with mock.patch.object(self.m.http.client, "HTTPConnection") as HC:
+            with self.assertRaises(RuntimeError):
+                with self.m.store_connection("http://localhost:18080"):
+                    raise RuntimeError("boom")
+            HC.return_value.close.assert_called_once()
+
+    def test_https_gets_an_https_connection(self):
+        # `urlopen` honoured the scheme; a plain HTTPConnection would silently
+        # downgrade an https store to plaintext on port 80.
+        with mock.patch.object(self.m.http.client, "HTTPSConnection") as HS:
+            with self.m.store_connection("https://store.example:8443"):
+                pass
+            HS.assert_called_once_with("store.example", 8443, timeout=self.m.HTTP_TIMEOUT)
+
+    def test_http_defaults_to_port_80(self):
+        with mock.patch.object(self.m.http.client, "HTTPConnection") as HC:
+            with self.m.store_connection("http://store.example"):
+                pass
+            HC.assert_called_once_with("store.example", 80, timeout=self.m.HTTP_TIMEOUT)
+
+    def test_an_unknown_scheme_is_refused_not_downgraded(self):
+        with self.assertRaises(ValueError):
+            with self.m.store_connection("ftp://store.example"):
+                pass
+
+    def test_a_malformed_body_does_not_drop_the_socket(self):
+        # A payload problem on a healthy 200 leaves the connection reusable; only a
+        # transport failure should pay the reconnect.
+        conn, seen = self._conn(status=200, body=b"not json")
+        ok, _ = self.m.get_json(conn, "http://localhost:18080/api/1.0/attention")
+        self.assertFalse(ok)
+        self.assertNotIn("closed", seen)
+
+    def test_one_socket_carries_the_whole_poll(self):
+        """The PR's central claim, driven against a real server.
+
+        A hand-rolled FakeConn can only show the client does not *ask* for a close.
+        This runs a real `HTTPConnection` against an in-process HTTP/1.1 server and
+        asserts every request arrived from the same client port — which is what
+        connection reuse actually means.
+        """
+        ports = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"   # 1.0 would close after every response
+
+            def do_GET(self):
+                ports.append(self.client_address[1])
+                body = b"{}"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            store = f"http://127.0.0.1:{srv.server_address[1]}"
+            with self.m.store_connection(store) as conn:
+                for _ in range(3):
+                    ok, _ = self.m.get_json(conn, f"{store}/api/1.0/attention")
+                    self.assertTrue(ok)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+        self.assertEqual(len(ports), 3)
+        self.assertEqual(len(set(ports)), 1, "the whole poll must ride one client socket")
 
 
 class ResolverTest(unittest.TestCase):
