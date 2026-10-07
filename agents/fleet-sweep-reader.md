@@ -48,49 +48,13 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 4. **Task file + stall signal (Step 2).** For every `busy`/`shell` **and `idle`** session, resolve its task file (the `claude_session_id:` stamp, else an **exact** `<name>.md` — across **every configured vault**, per the block below — may be a goal) and count its open boxes (`grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'`). ⚠️ `idle` is not optional: step 8's `parked` and `finished` rows both read an idle session's task file, so skipping it leaves every idle row unclassifiable. For `busy`/`shell` only, also `date -r "<task_file>" -u '+%Y-%m-%dT%H:%M:%SZ'`. Compare with the previous `task_mtime`. Never a message. ⚠️ **Not skippable for budget, and not partially skippable** — this pass and the step-1 roster join are what make every other section possible. A round that skips either has nothing for the drive leg and must not return a digest that reads as complete: print `UNKNOWN (pass not run)` in each section it starved.
 
-   ⚠️ **Resolve across every configured vault — the caller passes only one.** The caller supplies *the vault path and its tasks dir* (see `<inputs>`), so a session whose task lives in a sibling vault resolves to nothing today and is reported as unowned. A false *unowned* is the same class of defect as a false verdict: it reads as a finding. Enumerate the vaults and resolve in one pass, **keeping the `tasks_dir`-before-`goals_dir` precedence the single-vault rule already carried**:
+   ⚠️ **Resolve across every configured vault — the caller passes only one.** The caller supplies *the vault path and its tasks dir* (see `<inputs>`), so a session whose task lives in a sibling vault resolves to nothing under a single-vault lookup and is reported as unowned. A false *unowned* is the same class of defect as a false verdict: it reads as a finding.
 
    ```bash
-   python3 - "$name" <<'PY'
-   import json, os, subprocess, sys
-   stem = sys.argv[1].casefold() + ".md"
-   try:
-       res = subprocess.run(["vault-cli", "--output", "json", "config", "list"],
-                            capture_output=True, text=True, timeout=10)
-       vaults = json.loads(res.stdout) if res.returncode == 0 else []
-   except Exception:
-       vaults = []                          # no vault-cli, unreadable config, or a timeout — degrade, never crash
-
-   def hits(key):
-       out = []
-       for v in vaults:
-           d = v.get(key)
-           path = os.path.expanduser(v.get("path") or "")
-           if not d or not path:
-               continue                     # assistant-* vaults carry no dirs; never probe the root
-           full = os.path.join(path, d)
-           try:
-               entries = os.listdir(full)
-           except OSError:
-               continue
-           out += [os.path.join(full, e) for e in entries if e.casefold() == stem]
-       return out
-
-   tasks, goals = hits("tasks_dir"), hits("goals_dir")
-   if len(tasks) == 1:
-       print(tasks[0])                      # a task beats a same-named goal, in any vault
-   elif not tasks and len(goals) == 1:
-       print(goals[0])
-   else:
-       for p in tasks + goals:
-           print(f"AMBIGUOUS {p}", file=sys.stderr)
-       print("")                            # zero, or ambiguous — never guess
-   PY
+   python3 "$P/resolve-task-file.py" "$name"     # prints the path, or a blank line; AMBIGUOUS <path> on stderr
    ```
 
-   The three guards on the `vault-cli` call are deliberate and mirror `vault_dirs_from_cli()` in `scripts/fleet-sessions.py` — `returncode`, `timeout`, and an `except` that degrades to no vaults. A missing `vault-cli`, an unreadable config or a timeout must reach the no-resolution path, not raise through it: this pass is not skippable, so a traceback here loses the whole round's task mapping.
-
-   **Tier by tier, never globally.** A name that is a task in one vault and a goal in another resolves to the *task* — the precedence is a property of the name, not of the vault. So: exactly one `tasks_dir` hit across all vaults → that path; **and with no `tasks_dir` hit at all**, exactly one `goals_dir` hit → that path; else no resolution. ⚠️ **An ambiguous `tasks_dir` tier does not fall through to `goals_dir`** — `not tasks` is the condition, not "tasks had no unique hit", so two colliding tasks mean no resolution rather than a silent drop to the goal tier. **Ambiguity inside the tier reached is no resolution too** — two vaults each holding the name as a task — and its candidates go to stderr as `AMBIGUOUS <path>` lines so they can be named in NOTES: that is precisely the ambiguity `docs/subject-resolution.md` § The page test forbids guessing through, and that rule requires every candidate path to be printed. Never prefer the caller's vault, never take the first hit, and never widen to a substring glob — the basename is exact and case-insensitive, the folder is the discriminator. The `claude_session_id:` stamp leg is scoped the same way: it searches every vault's `tasks_dir`/`goals_dir`, never the caller's alone.
+   **The rule's single home is `scripts/resolve-task-file.py`** — read it there rather than restating it here. In brief, so a caller knows what a blank line means: resolution is **tier by tier**, `tasks_dir` across every vault before `goals_dir`, and a match is taken only when it is the sole hit in the tier reached. Zero hits, or more than one inside that tier, prints nothing and emits each colliding path as `AMBIGUOUS <path>` on stderr — name those in NOTES. ⚠️ An ambiguous `tasks_dir` tier does **not** fall through to `goals_dir`. The `claude_session_id:` stamp leg is scoped the same way: every vault's `tasks_dir`/`goals_dir`, never the caller's alone. It is a script rather than a snippet here because the rule regressed once and prose has nothing to run against it — `scripts/tests/test_resolve_task_file.py` now pins the cases, including the task-over-goal precedence and the no-fall-through rule.
 
 5. **Reverse index — tasks claiming a dead session (Step 2b).**
    ```bash
