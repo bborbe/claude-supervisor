@@ -492,10 +492,37 @@ Headline only: what changed and what stopped you.
 **Detect the mode — do not assume it.** No tool exposes `/tts-mcp:voice`'s session state, so a command that reads "was voice invoked this session?" from memory will answer *off* and stay silent in exactly the sessions voice was turned on for. The TTS server's state endpoint carries the answer — every entry in `recent[]` is tagged with the `sender` that produced it:
 
 ```bash
-curl -s --max-time 5 http://127.0.0.1:12000/state | grep -c "\"sender\":\"$CLAUDE_CODE_SESSION_ID\""
+# ⚠️ A spoken entry is tagged with the RESOLVED SESSION NAME, not the UUID, so the
+# gate must grep the name — grepping $CLAUDE_CODE_SESSION_ID matched nothing in ANY
+# session, and the gate silently read "voice off" in exactly the sessions voice was
+# on for. Measured 2026-10-07: a call passing `sender: "<uuid>"` was stored under
+# the session title, and of the 9 distinct senders in the buffer not one was a UUID.
+# ⚠️ The UUID is matched too: the HTTP fallback below carries no
+# X-Claude-Code-Session-Id header, and the server resolves a name ONLY from that
+# header — so a verdict spoken through the fallback lands under the raw UUID.
+# ⚠️ That second pattern is added ONLY when the id is non-empty. A spawned child
+# is stripped of CLAUDE_CODE_SESSION_ID (`scripts/attention-ask.py:61`; `open.md`
+# unsets it before spawning a manager), and the fallback interpolates the same
+# empty variable into its body — so one child's fallback utterance lands as
+# "sender":"" and a bare second pattern would then read non-zero in EVERY child,
+# speaking in sessions that have never spoken.
+# The name is matched verbatim: /state carries the registry name byte-for-byte,
+# a leading "⚙ " included. Match literally (-F) — names carry regex metacharacters.
+SESSFILE="${HOME}/.claude/sessions/${CLAUDE_PID}.json"
+NAME="$( [ -n "$CLAUDE_PID" ] && [ -f "$SESSFILE" ] \
+  && python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("name") or "")' "$SESSFILE" 2>/dev/null )"
+if [ -z "$NAME" ]; then
+  echo "🔇 voice unknown — no session name for CLAUDE_PID=${CLAUDE_PID:-unset} ($SESSFILE); not speaking"
+else
+  PATTERNS=(-e "\"sender\":\"$NAME\"")
+  if [ -n "$CLAUDE_CODE_SESSION_ID" ]; then
+    PATTERNS+=(-e "\"sender\":\"$CLAUDE_CODE_SESSION_ID\"")
+  fi
+  curl -s --max-time 5 http://127.0.0.1:12000/state | grep -cF "${PATTERNS[@]}"
+fi
 ```
 
-Non-zero → this session has spoken before, so voice is on → speak. Zero or unreachable → treat as off and print the hint line. Observed 2026-09-16: the diagnose pass (then `/and`) ran twice in a session where the operator had voice on and stayed silent both times, because the gate had no way to decide; the operator had to ask for the verdict to be spoken, which is the failure the command exists to prevent.
+Non-zero → this session has spoken before, so voice is on → speak. Zero or unreachable → treat as off and print the hint line. `🔇 voice unknown` is a **third** outcome, not a flavour of zero: the session's own name could not be read, so the gate cannot decide either way and says so — an unreadable registry that still printed a bare `🔇 voice off` would be the original bug wearing a new hat. Observed 2026-09-16: the diagnose pass (then `/and`) ran twice in a session where the operator had voice on and stayed silent both times, because the gate had no way to decide; the operator had to ask for the verdict to be spoken, which is the failure the command exists to prevent.
 
 Never speak in a session that has never spoken — that is the exact noise the skill exists to prevent. The hint line makes it discoverable without being noisy.
 
@@ -520,7 +547,7 @@ Never speak in a session that has never spoken — that is the exact noise the s
 - Terse, one idea per sentence. No markdown, URLs, paths, code, or hashes — describe them in words.
 - Lead with the recommendation and say the word "recommended".
 - Fire-and-forget: one `mcp__tts__say` call. Never poll `get_status`, never block on it.
-- **Always pass `sender`** — `$CLAUDE_CODE_SESSION_ID`, the same value the detection step above greps for. It is what the next run's detection finds; a spoken verdict without it is invisible to the gate that decides whether to speak at all, so the session goes quiet after its first utterance.
+- **Always pass `sender`** — `$CLAUDE_CODE_SESSION_ID`. Which value the next run's gate actually finds depends on the path, and it matches **either**: the `mcp__tts__say` tool replaces the value with this session's **name** (resolved from the session-id header the tool carries), while the HTTP fallback below sends no such header and so stores the raw UUID. A spoken verdict with no `sender` at all may not be attributable, so pass it on every call.
 
 **If `mcp__tts__say` errors with `No such tool available`**, the session's MCP binding dropped — the server is fine and restarting it will not help. Fall through to HTTP so the verdict is still heard:
 

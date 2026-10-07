@@ -1119,25 +1119,34 @@ class TestStorage(Base):
         self.assertIn("SAVED", out)
 
     def test_save_names_both_provenance_paths_labelled(self):
-        """The two halves the drive leg's dispatch takes from *different* producers.
+        """Both provenance halves the drive leg's dispatch takes come from the *store*.
 
-        `--save` writes the store while the gate writes the snapshot, and the two paths
-        sit one directory apart and read alike — so the caller once took the wrong half
-        (measured 2026-09-30: the store's `recorded_at` passed where the snapshot's was
-        required). Each label names where its half lands, which is the whole deliverable,
-        so it is pinned here rather than left to the tolerant `assertIn("SAVED", out)` —
-        that assertion passes with both lines deleted.
+        `--save` writes the store, and the same record carries `recorded_at` and
+        `bucket_sets`; the snapshot is the leg's *row* source. The two paths sit one
+        directory apart and read alike, so the labels are the deliverable: the caller
+        once took the wrong half (measured 2026-09-30 — the store's `recorded_at` passed
+        where the snapshot's was required), and naming the snapshot while passing the
+        store's value held all 49 rows of a batch (measured 2026-10-05). Each label names
+        where its half lands, so it is pinned here rather than left to the tolerant
+        `assertIn("SAVED", out)` — that assertion passes with both lines deleted.
         """
         rc, out = self.save("ATopic")
         self.assertEqual(rc, self.m.EXIT_CHANGE)
-        self.assertIn("store:    %s" % self.m.state_path("ATopic"), out)
+        # Pinned as two whole lines, not four independent substrings: asserting only that
+        # both paths and both labels appear would pass with the labels swapped, which is
+        # the defect itself (2026-10-05 — the snapshot named as the `recorded_at` source
+        # while the store's value was passed). No `--buckets` staged here, so the store
+        # half is absent by design and its label says so.
         self.assertIn(
-            "snapshot: %s" % self.m.loop_snapshot_path(self.vault, "ATopic"), out
+            "store:    %s  (recorded_at source, no bucket sets staged this tick)"
+            % self.m.state_path("ATopic"),
+            out,
         )
-        self.assertIn("(recorded_at source)", out)
-        # No `--buckets` staged here, so the store half is absent by design and the
-        # label says so rather than asserting a half the file does not carry.
-        self.assertIn("no bucket sets staged this tick", out)
+        self.assertIn(
+            "snapshot: %s  (row source)"
+            % self.m.loop_snapshot_path(self.vault, "ATopic"),
+            out,
+        )
 
     def test_save_names_both_paths_on_the_no_change_branch_too(self):
         """The no-change branch carries the same two lines.
@@ -1150,9 +1159,20 @@ class TestStorage(Base):
         self.save("ATopic")
         rc, out = self.save("ATopic")
         self.assertEqual(rc, self.m.EXIT_NOCHANGE)
-        self.assertIn("store:    %s" % self.m.state_path("ATopic"), out)
+        # Pinned as whole lines, exactly as the sibling does — asserting only the two path
+        # prefixes passes under *any* labelling, including a swap, which is the defect
+        # (2026-10-05: the snapshot named as the `recorded_at` source while the store's
+        # value was passed). The labels are the deliverable on this branch too, and this
+        # is the common tick.
         self.assertIn(
-            "snapshot: %s" % self.m.loop_snapshot_path(self.vault, "ATopic"), out
+            "store:    %s  (recorded_at source, no bucket sets staged this tick)"
+            % self.m.state_path("ATopic"),
+            out,
+        )
+        self.assertIn(
+            "snapshot: %s  (row source)"
+            % self.m.loop_snapshot_path(self.vault, "ATopic"),
+            out,
         )
 
 
