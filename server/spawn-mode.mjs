@@ -429,11 +429,122 @@ export const WORKER_MODE_SOURCE_ENV = 'SUPERVISOR_WORKER_MODE_SOURCE'
 // A missing mode leaves the environment untouched rather than exporting the string
 // "undefined". The caller checks `resolveSpawnMode`'s error first, so this guards a
 // future caller that forgets to, not a reachable state today.
-export function workerEnvFor({ mode, source, env } = {}) {
-  if (!mode) return { ...(env ?? {}) }
+export function workerEnvFor({ mode, source, env, overrides } = {}) {
   return {
     ...(env ?? {}),
-    [WORKER_MODE_ENV]: mode,
-    [WORKER_MODE_SOURCE_ENV]: source,
+    // The caller's per-call values sit ABOVE the inherited environment and BELOW the mode
+    // handover. Above, because a per-call value exists precisely to win over the ambient
+    // one. Below, because the mode is the server telling the worker a fact about ITSELF —
+    // a caller able to overwrite it could make a headless worker believe it has a tab,
+    // which is the exact mis-model this handover was written to end.
+    ...(overrides ?? {}),
+    ...(mode ? { [WORKER_MODE_ENV]: mode, [WORKER_MODE_SOURCE_ENV]: source } : {}),
   }
+}
+
+// --- the per-call environment (`spawn_agent`'s `env`) ---------------------------------
+//
+// Values applied to ONE worker, for ONE run.
+//
+// Why this exists at all: the only run-scoped redirect reachable before it was a vault's
+// `claude_script`, and that applies to EVERY session started from that vault — so it cannot
+// express "this one session, against a fixture backend". The alternative, editing a default
+// every other session depends on, is how one run's fixture reaches the live board.
+//
+// ⚠️ Two spawn paths, two mechanisms, and both must be wired. A headless worker is an
+// in-process SDK `query()`, so its values ride the `env` option — see `workerEnvFor` above.
+// A tab worker is a separate process started by `wezterm cli spawn -- bash -lc <inner>`, so
+// its values are EXPORTED into that command line — see `shellEnvExports`. A change that
+// wired only the headless half would satisfy a schema reading while the tab half silently
+// kept the ambient value, which is the laziest passing implementation and the one the
+// criterion naming both paths exists to refuse.
+
+// Single-quote a value for POSIX sh. Lives here rather than beside the tab spawn because
+// this module is the pure, importable half — `supervisor.mjs` cannot be imported by a test
+// at all, since it connects a stdio server at load.
+export const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+
+// The `export NAME='value'; ` prefix a tab worker's command line is built with.
+//
+// ⚠️ `export`, not a `VAR=value` prefix on the `cd`, and the difference is not stylistic: a
+// command-prefix assignment applies to that ONE command, so it would be gone before the
+// `exec` that actually starts the worker. ⚠️ And it goes BEFORE the `cd`, because `bash -lc`
+// sources the profile files first — an export placed after them is the one that survives a
+// profile default, which is what "this call decides" has to mean.
+export function shellEnvExports(env) {
+  const entries = Object.entries(env ?? {})
+  if (entries.length === 0) return ''
+  return entries.map(([name, value]) => `export ${name}=${shellQuote(value)}; `).join('')
+}
+
+// A legal shell variable name — the tab path exports these literally, so a name that cannot
+// be exported has to be refused here rather than dropped downstream.
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+// ⚠️ The spawn mode is the SERVER's to declare, on every path, so a caller may not set it.
+// `workerEnvFor` already makes the server's values win on the headless path, but the TAB
+// path has no handover to win with — `shellEnvExports` would export whatever the caller
+// passed — so the identical override was inert on one path and live on the other. That is
+// not cosmetic: `scripts/permission-answer-poll.py:287` returns early on
+// `SUPERVISOR_WORKER_MODE == "headless"`, so a caller telling a TAB worker it is headless
+// silences that worker's attention-store relay. REFUSED on both paths rather than silently
+// outranked on one, so the rule reads the same wherever it is found. Found by the PR review
+// (round 2), which caught that the stated invariant held on only one of the two paths.
+const RESERVED_ENV_NAMES = new Set([WORKER_MODE_ENV, WORKER_MODE_SOURCE_ENV])
+
+// Validates and normalises a caller's `env` object.
+//
+// REFUSED, never dropped: a value silently missing from the worker looks exactly like a
+// value that was never asked for, which is the failure this parameter exists to make
+// observable. Same rule as `resolveWorkerTarget` and `resolveSpawnTarget` — every branch
+// answers rather than defaulting.
+export function resolveEnvOverrides({ env } = {}) {
+  if (env === undefined || env === null) return { env: {} }
+  if (typeof env !== 'object' || Array.isArray(env)) {
+    return {
+      error:
+        `env must be an object mapping names to values, got ${Array.isArray(env) ? 'an array' : typeof env}. ` +
+        `Pass {"ATTENTION_STORE_URL": "http://localhost:18081"} — not a list, and not a string.`,
+    }
+  }
+  // ⚠️ PAIRS, then `Object.fromEntries` — never `resolved[name] = …` onto a plain `{}`.
+  // `__proto__` passes ENV_NAME and arrives as an OWN enumerable key from `JSON.parse`, but
+  // it is an accessor on `Object.prototype` whose setter ignores any value that is not an
+  // object or null — so the assignment is a SILENT NO-OP and the key vanishes with no error,
+  // which is precisely the failure this function's refuse-never-drop rule exists to prevent.
+  // `Object.fromEntries` defines an own property instead. Measured 2026-10-07: `o['__proto__']
+  // = 'x'` on a plain `{}` leaves `Object.keys(o)` empty. Found by the PR review.
+  const pairs = []
+  for (const [name, value] of Object.entries(env)) {
+    if (!ENV_NAME.test(name)) {
+      return {
+        error:
+          `env name "${name}" is not a legal shell variable name: the tab path exports it as a shell ` +
+          `variable, so it must start with a letter or underscore and contain only letters, digits and ` +
+          `underscores.`,
+      }
+    }
+    if (RESERVED_ENV_NAMES.has(name)) {
+      return {
+        error:
+          `env cannot set ${name}: the server owns a worker's spawn mode and hands it to the worker ` +
+          `itself. A caller setting it would tell a TAB worker it is headless — and ` +
+          `scripts/permission-answer-poll.py returns early on that value, so the worker's ` +
+          `attention-store relay would go silent. Omit it; the mode is not the caller's to declare.`,
+      }
+    }
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      // Stringified here so both paths agree. The SDK's `env` wants strings and the tab path
+      // interpolates into a shell word, so a number left as a number would be one value on
+      // one path and a different type on the other.
+      pairs.push([name, String(value)])
+      continue
+    }
+    return {
+      error:
+        `env value for "${name}" must be a string, number or boolean, got ` +
+        `${value === null ? 'null' : Array.isArray(value) ? 'an array' : typeof value}.`,
+    }
+  }
+  return { env: Object.fromEntries(pairs) }
 }
