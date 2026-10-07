@@ -244,18 +244,25 @@ class MainTest(unittest.TestCase):
 
 
 class ComposerTest(unittest.TestCase):
-    """Readiness is an EMPTY composer, not a drawn one — the rule `server/tab.mjs` measured."""
+    """An EMPTY composer is ready — including one showing the TUI's DIM placeholder hint.
 
-    def test_a_placeholder_composer_is_not_ready(self):
-        text = "❯ Try \"create a util logging.py that...\""
-        self.assertFalse(census_mod.pane_is_ready(text))
+    The placeholder is drawn with SGR attribute 2 (faint), which is the only thing that
+    separates it from text somebody typed; the real pane read is measured in the docstring of
+    `pane_is_ready`. Typed text is never dim, so the concatenation hazard is still refused.
+    """
+
+    PLACEHOLDER = '\x1b[39m❯\xa0\x1b(B\x1b[0;2mTry "how does X work?"'
+
+    def test_the_real_placeholder_line_is_ready(self):
+        self.assertTrue(census_mod.pane_is_ready(self.PLACEHOLDER))
 
     def test_an_empty_composer_is_ready(self):
         self.assertTrue(census_mod.pane_is_ready("❯ "))
 
-    def test_a_composer_holding_text_is_not_ready(self):
-        """Enter would submit a line this script did not write."""
+    def test_a_composer_holding_typed_text_is_not_ready(self):
+        """Enter would submit a line this script did not write — the 2026-10-05 hazard."""
         self.assertFalse(census_mod.pane_is_ready("❯ draft ok"))
+        self.assertFalse(census_mod.pane_is_ready("\x1b[39m❯\xa0draft ok"))
 
     def test_the_last_glyph_line_is_the_composer_not_an_echoed_prompt(self):
         text = "❯ /reload-plugins\n  ⎿  Reloaded: 13 plugins\n❯ "
@@ -264,6 +271,10 @@ class ComposerTest(unittest.TestCase):
     def test_scrollback_alone_is_not_a_composer(self):
         """A glyph left above a busy pane must not read as 'at a prompt'."""
         self.assertFalse(census_mod.pane_is_ready("❯ /reload-plugins\n✻ Improvising... (5s)"))
+
+    def test_a_dim_echoed_prompt_above_a_typed_composer_does_not_excuse_it(self):
+        text = '❯ \x1b[0;2mold\n❯ draft ok'
+        self.assertFalse(census_mod.pane_is_ready(text))
 
 
 class ReloadPaneTest(unittest.TestCase):

@@ -47,6 +47,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -63,6 +64,26 @@ LIVENESS = os.path.join(HERE, "session-liveness.py")
 COMPOSER = "❯"  # ❯
 RELOAD_READY_TIMEOUT = 15.0
 RELOAD_SETTLE_TIMEOUT = 30.0
+
+# SGR / charset escapes, so the glyph can be matched on the visible text of a line read with
+# `get-text --escapes` — the placeholder hint is only distinguishable from typed text by its
+# styling, and that styling is not in the plain read.
+_SGR = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\([A-Za-z]")
+_SGR_ATTRS = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def _plain(line):
+    """The line's visible text, with escape sequences removed."""
+    return _SGR.sub("", line)
+
+
+def _is_dim(segment):
+    """True when any SGR sequence in `segment` carries attribute 2 (faint).
+
+    Read as a parameter list rather than a substring: `2` must be one whole attribute, so
+    `[0;2m` is dim and `[0;24m` (underline off) is not.
+    """
+    return any("2" in attrs.split(";") for attrs in _SGR_ATTRS.findall(segment))
 
 
 def installed_version(path=DEFAULT_INSTALLED, plugin=DEFAULT_PLUGIN, marketplace=DEFAULT_MARKETPLACE):
@@ -234,32 +255,44 @@ def panes_for_pids(pids, panes=None):
 
 
 def composer_line(text):
-    """The LAST line drawn with the prompt glyph at its start, or None.
+    """The LAST line whose visible text starts with the prompt glyph, or None.
 
-    Mirrors `server/tab.mjs:composerLine()`. Every echoed submitted prompt above it carries
-    the same glyph, so **position** — not the glyph alone — is what identifies the composer.
-    A `COMPOSER in text` substring test matches any echoed prompt in scrollback and passes on
-    the first poll whatever the pane is doing.
+    Mirrors `server/tab.mjs:composerLine()` for the position rule. Every echoed submitted
+    prompt above it carries the same glyph, so **position** — not the glyph alone — is what
+    identifies the composer; a `COMPOSER in text` substring test matches any echoed prompt in
+    scrollback and passes on the first poll whatever the pane is doing. Reads escape-laden
+    text (see `pane_is_ready`), so the glyph is matched after stripping SGR sequences.
     """
     for line in reversed(str(text).split("\n")):
-        if line.startswith(COMPOSER):
+        if _plain(line).startswith(COMPOSER):
             return line
     return None
 
 
 def pane_is_ready(text):
-    """True only for an EMPTY composer — the same test `server/tab.mjs:isReady()` makes.
+    """True when the composer is EMPTY — including when it holds only the TUI's placeholder.
 
-    ⚠️ A drawn composer is not a ready one. The glyph appears while the TUI is still
-    painting a placeholder suggestion, and a submit sent into that phase is swallowed
-    (measured 2026-09-20 in `server/tab.mjs`: two sends stranded unsubmitted). A composer
-    already holding text is not ready either — Enter would submit a line this script did
-    not write.
+    ⚠️ **A placeholder is not text.** Measured 2026-10-07 on an idle pane: the composer reads
+    `❯\\xa0\\x1b[0;2mTry "how does … work?"` — the hint is drawn **dim** (SGR 2) and is not
+    something anyone typed. `server/tab.mjs:isReady()` deliberately refuses it, because a
+    submit sent while the TUI is still *painting* can be swallowed (measured 2026-09-20). That
+    is the right rule for a **spawn**, where the paint is in flight; it is the wrong one for
+    this lever, whose whole job is a **long-idle** session — where the placeholder is always
+    present, and where the same send lands (measured 2026-10-07: `/reload-plugins` into a
+    placeholder composer executed and moved the marker). Mirroring it unchanged refused every
+    idle session the lever exists to reach.
+
+    What the gate is actually for is kept: **text somebody typed** is not dim, so a composer
+    holding the operator's unsent answer — the 2026-10-05 case, `❯ draft ok` parked 3h22m — is
+    still refused rather than concatenated with a reload command.
     """
     line = composer_line(text)
     if line is None:
         return False
-    return line[len(COMPOSER):].strip() == ""
+    plain = _plain(line)
+    if plain[len(COMPOSER):].strip() == "":
+        return True
+    return _is_dim(line[line.index(COMPOSER) + len(COMPOSER):])
 
 
 def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
@@ -293,7 +326,7 @@ def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
     deadline = time.time() + RELOAD_READY_TIMEOUT
     while time.time() < deadline:
         try:
-            text = subprocess.run(["wezterm", "cli", "get-text", "--pane-id", str(pane_id)],
+            text = subprocess.run(["wezterm", "cli", "get-text", "--pane-id", str(pane_id), "--escapes"],
                                   capture_output=True, text=True, timeout=20).stdout
         except (OSError, subprocess.SubprocessError):
             text = ""
