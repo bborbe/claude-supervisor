@@ -201,9 +201,16 @@ export function startMessageDelivery({
   log = () => {},
   onSettled = () => {},
   intervalMs = 2000,
+  // The same two-speed cadence as the permission arm, and for the same two reasons — see
+  // `attention-poll.mjs`'s note on its own `tick`. A `message` card is answered on the
+  // board, so it has the identical open-then-answered race; and this arm carries the
+  // `failed` delivery record too, which only a read can populate.
+  idleIntervalMs = 30000,
+  idleCheckMs = 250,
   fetchImpl = globalThis.fetch,
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
+  nowImpl = Date.now,
 }) {
   // Items seen open and still awaiting an answer. This is the freshness guard's first half
   // as well as a bound: only a card this process watched go open can be settled, so the
@@ -211,6 +218,9 @@ export function startMessageDelivery({
   const watching = new Set()
   let stopped = false
   let timer = null
+  // ⚠️ NEGATIVE_INFINITY, not `nowImpl()` and not `0` — see `attention-poll.mjs` for why
+  // `0` fails to guarantee the first read under a caller-supplied clock that starts at 0.
+  let lastReadAtMs = Number.NEGATIVE_INFINITY
 
   async function getJson(path) {
     const res = await fetchImpl(`${storeUrl}${path}`)
@@ -252,7 +262,24 @@ export function startMessageDelivery({
     }
   }
 
+  // Two-speed, exactly as the permission arm is — see `attention-poll.mjs` for the
+  // measurement that prices the read and for the two hazards the cadence must not break.
+  // In short: `pending` is re-checked every `idleCheckMs` with no HTTP, so a card that
+  // appears is picked up within 250 ms; a server holding no park still reads every
+  // `idleIntervalMs` so the `failed` delivery record survives.
   async function tick() {
+    const parked = pending.size > 0
+    const now = nowImpl()
+    // ⚠️ `elapsedMs >= 0` is not redundant — see `attention-poll.mjs` for why a backward
+    // wall-clock step would otherwise suppress the trail read until the clock caught up.
+    const elapsedMs = now - lastReadAtMs
+    if (!parked && elapsedMs >= 0 && elapsedMs < idleIntervalMs) {
+      if (!stopped) timer = setTimeoutImpl(tick, idleCheckMs)
+      return
+    }
+    // Before the read, so a store that throws is retried on the idle cadence rather than
+    // hammered every `idleCheckMs`.
+    lastReadAtMs = now
     try {
       const open = await getJson('/api/1.0/attention')
       for (const item of Array.isArray(open) ? open : []) {
@@ -315,7 +342,7 @@ export function startMessageDelivery({
     } catch (error) {
       log(`message delivery failed (${error.message}) — parks still auto-deny at the timeout`)
     }
-    if (!stopped) timer = setTimeoutImpl(tick, intervalMs)
+    if (!stopped) timer = setTimeoutImpl(tick, parked ? intervalMs : idleCheckMs)
   }
 
   timer = setTimeoutImpl(tick, intervalMs)
