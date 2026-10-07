@@ -122,6 +122,7 @@ output — the fleet table.
   that split. ⚠️ **One deliberate exception: a loop's own act leg.** `/supervisor:manager-loop`
   executes the `To open` rows its sweep already decided with a direct `spawn_agent` and must
   **not** route them through `/supervisor:open` — that path is a tab by construction, cannot
-  produce a headless worker, and writes no ledger row (`commands/manager-loop.md` § the act
-  leg). A decided-row spawn is not a hand-rolled open. Outside that case, never call
+  produce a headless worker, and writes no ledger row (`commands/manager-loop.md` § Procedure,
+  the `To open` bullet; the act leg it runs is `commands/manager-drive.md`). A decided-row
+  spawn is not a hand-rolled open. Outside that case, never call
   `spawn_agent` directly.

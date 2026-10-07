@@ -185,7 +185,7 @@ is not a check.
 
 ## Spawn a worker
 
-**This section documents `/supervisor:open`'s internals — the spawn shape it produces, and the mechanics every spawn site shares — not a parallel path to use instead of it.** A manager starts or resumes a worker with `/supervisor:open --task` (`docs/session-tiers.md` § The manager boundary); what follows is what that command does under the hood, so read it to understand or debug a spawn.
+**This section documents `/supervisor:open`'s internals — the spawn shape it produces, and the mechanics every spawn site shares — not a parallel path to use instead of it.** A manager starts or resumes a worker on a vault task with `/supervisor:open --task`, and reaches for a bare manager-spawn only when the brief has no task file (`docs/session-tiers.md` § The manager boundary carries that split and its one loop exception); what follows is what `/supervisor:open` does under the hood, so read it to understand or debug a spawn.
 
 **Readiness precondition — author and score the task before any spawn, or the worker's own gate parks.** A task the manager hand-writes usually ships without `# Tasks` and `# Definition of Done`, so the worker's own `plan-task` gate stops and asks the operator to supply the decomposition — inside the worker's pane, as a multi-question wizard that cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced **three 3-question wizards**, nine operator decisions, none of which needed the repo open. So, before spawning:
 
