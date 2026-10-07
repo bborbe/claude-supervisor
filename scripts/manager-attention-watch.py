@@ -221,14 +221,24 @@ LIVE_WINDOW = 5 * 60
 # park, at the first poll whose age has crossed it.
 PARK_AGE_THRESHOLDS = (15, 60)
 
-# ⚠️ The two `is_gated` reasons that mean *parked on the operator* — and
-# deliberately not a third. `idle+closer` is a park too, but it is the shape the
+# ⚠️ The three `is_gated` reasons that mean *parked on the operator* — and
+# deliberately not a fourth. `idle+closer` is a park too, but it is the shape the
 # ownership-filtered FEED already carries (`who-needs-me.py --section needs-you`),
 # so it is not the class this arm exists to rescue: this watcher reads the
-# registry and the transcript for the parks the store cannot carry. Keeping the
-# set at exactly the two the row names also keeps the park-age clock and the
-# re-post firing on ONE definition rather than two that drift apart.
-PARKED_REASONS = ("registry:waiting", "busy+parked-modal")
+# registry and the transcript for the parks the store cannot carry.
+#
+# ⚠️ **`headless+closer` IS included, and it is the one of the three the registry
+# cannot reach at all.** A headless worker is an in-process SDK `query()` with no
+# pid, so `registry_status` returns `None` and `is_gated` decides on the
+# `headless_live` branch — which is precisely why it needs this arm rather than a
+# reason to skip it. `who-needs-me.py:822` records a measured case of that class
+# (a parked headless worker's item, `pane: ""`) rendering no row in ANY feed
+# section, so leaving it out would make the one park the feed provably cannot
+# carry the one park this watcher ignores. The row's wording names two reasons
+# because it was filed from a registry-`waiting` incident; its stated guarantee —
+# *even when the store is lossy, a tracked worker's park must not go unescalated*
+# — is not limited to the reasons that incident happened to show.
+PARKED_REASONS = ("registry:waiting", "busy+parked-modal", "headless+closer")
 
 
 def tracked_ids(tracked_path, tasks_dir):
@@ -1058,7 +1068,11 @@ def aged_events(ages, now, thresholds=PARK_AGE_THRESHOLDS):
     """
     out = []
     for sid8, rec in ages.items():
-        minutes = int((now - rec["since"]) // 60)
+        # `max(0, ...)` rather than a raw subtraction: a backwards clock step
+        # (NTP, a manual set) would otherwise yield a negative age. That is benign
+        # — it simply does not fire — but the direction should be stated rather
+        # than left incidental.
+        minutes = max(0, int((now - rec["since"]) // 60))
         for t in thresholds:
             if minutes >= t and t not in rec["aged"]:
                 rec["aged"].append(t)

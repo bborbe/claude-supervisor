@@ -1111,6 +1111,68 @@ class RepostTest(unittest.TestCase):
         self.assertEqual(out, [], "a refused post is not a re-post")
 
 
+    def test_a_headless_park_is_parked_too(self):
+        """⚠️ The one park the registry cannot reach, and therefore the one this
+        arm must not skip. A headless worker is an in-process SDK `query()` with
+        no pid, so `registry_status` returns `None` and `is_gated` decides on the
+        `headless_live` branch — and `who-needs-me.py:822` records a measured case
+        of that class rendering no row in ANY feed section."""
+        state = {"aaaa1111": ("A", "pick — 1. alpha", "headless+closer", True)}
+        self.assertEqual(watch.parked_keys(state), ["aaaa1111"])
+
+    def test_a_settled_idle_park_is_not_parked(self):
+        """The deliberate exclusion, pinned so a later widening is a decision."""
+        state = {"aaaa1111": ("A", "pick — 1. alpha", "idle+closer", True)}
+        self.assertEqual(watch.parked_keys(state), [])
+
+
+class PostRepostArgvTest(unittest.TestCase):
+    """The re-post's command line, pinned.
+
+    ⚠️ **Every other re-post test injects the `post` seam**, so none of them
+    exercises the argv `post_repost` actually builds — a mistyped flag, a wrong
+    dedup-key form, or an accidentally-added `--liveness-ref` would pass green.
+    That last one is the dangerous one: `attention-ask.py:506-532` records that a
+    `session:` liveness subject makes the store **prune** the card on the first
+    read after the poster exits, which is the silent disappearance this whole
+    change exists to prevent. So the assertion is on the LIST, never on a
+    rendering of it.
+    """
+
+    FULL = "aaaa1111-0000-0000-0000-000000000000"
+
+    def _run(self, result):
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return result
+
+        with mock.patch.object(watch.subprocess, "run", fake_run):
+            ok = watch.post_repost("aaaa1111", self.FULL, "Some Task")
+        return ok, captured.get("cmd")
+
+    def test_the_argv_pins_producer_dedup_key_and_no_liveness_ref(self):
+        ok, cmd = self._run(mock.Mock(returncode=0, stdout="", stderr=""))
+        self.assertTrue(ok)
+        self.assertTrue(cmd[1].endswith("attention-ask.py"), cmd)
+        self.assertIn("post", cmd)
+        self.assertEqual(cmd[cmd.index("--producer-id") + 1], self.FULL,
+                         "the card must be attributed to the WORKER, not the "
+                         "manager — that is what routes the answer back to the "
+                         "parked session")
+        self.assertEqual(cmd[cmd.index("--dedup-key") + 1], "park:aaaa1111",
+                         "the stable key is what makes the re-post idempotent")
+        self.assertNotIn("--liveness-ref", cmd,
+                         "a session: liveness subject makes the store PRUNE the "
+                         "card on the first read after the poster exits")
+
+    def test_a_non_zero_exit_is_not_a_re_post(self):
+        ok, _ = self._run(mock.Mock(returncode=2, stdout="REFUSED: nope",
+                                    stderr=""))
+        self.assertFalse(ok)
+
+
 class IncidentReplayTest(unittest.TestCase):
     """SC4 — the 2026-10-07 incident, replayed to a catch.
 
