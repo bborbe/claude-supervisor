@@ -46,19 +46,61 @@ test('decisionOf refuses a verdict outside the enum', () => {
 })
 
 test('armDelivery accepts an answer an arm delivered', () => {
-  const got = armDelivery({ resolved_by: '11111111-2222-3333-4444-555555555555' })
+  const got = armDelivery({
+    item: { resolved_by: '11111111-2222-3333-4444-555555555555' },
+    agent: { mode: 'interactive' },
+  })
   assert.equal(got.ok, true)
   assert.equal(got.resolvedBy, '11111111-2222-3333-4444-555555555555')
 })
 
+test('armDelivery accepts a board answer on a headless park', () => {
+  // ⚠️ The 2026-10-07 amendment, and the whole point of this change. The board renders
+  // Allow / Deny on a headless worker's park and its JS never sends `resolved_by`, so
+  // without this branch the one control that park has records an answer and releases
+  // nothing — while the worker auto-denies at the timeout.
+  const got = armDelivery({ item: { decision: 'allow' }, agent: { mode: 'headless' } })
+  assert.equal(got.ok, true)
+  assert.equal(got.boardAnswer, true)
+})
+
+test('armDelivery refuses a board answer on a tab worker park', () => {
+  // The 2026-10-01 narrowing: a tab worker answers in its own session's pane, so its card
+  // renders no answering control at all — a board answer for one is a defect rather than
+  // an answer, and must not release.
+  const got = armDelivery({ item: { decision: 'allow' }, agent: { mode: 'interactive' } })
+  assert.equal(got.ok, false)
+  assert.match(got.reason, /no resolved_by/)
+})
+
+test('armDelivery refuses a board answer on a cluster park', () => {
+  // A cluster worker's park lives in another machine's server, which this one cannot
+  // settle — `selectParked` refuses it for the same reason. Named separately so folding
+  // `cluster` into `headless` cannot happen silently.
+  const got = armDelivery({ item: { decision: 'allow' }, agent: { mode: 'cluster' } })
+  assert.equal(got.ok, false)
+})
+
 test('armDelivery refuses an answer with no resolved_by', () => {
-  // ⚠️ The guard the operator's ruling turns on. A verdict alone is not enough
-  // for a permission gate: the board never sends `resolved_by`, so an answer
-  // carrying a verdict but no arm provenance is not an operator decision.
+  // ⚠️ The guard the operator's ruling of 2026-09-26 turns on. A verdict alone is not
+  // enough for a permission gate: the board never sends `resolved_by`, so an answer
+  // carrying a verdict but no arm provenance is not an operator decision — UNLESS the
+  // park is headless, where the board is the only answering surface there is.
   for (const item of [{}, { resolved_by: '' }, { resolved_by: null }, { resolved_by: 7 }, null]) {
-    const got = armDelivery(item)
+    const got = armDelivery({ item })
     assert.equal(got.ok, false, `expected refusal for ${JSON.stringify(item)}`)
     assert.match(got.reason, /no resolved_by/)
+  }
+})
+
+test('armDelivery refuses when the agent mode is absent or unrecognised — never a default', () => {
+  // ⚠️ The positive-condition rule this repo states for every guard: an agent whose `mode`
+  // is missing (a rehydrated row, or one spawned before the field existed) must REFUSE
+  // rather than be read as headless. Reading absence as headless would put a board control
+  // back on a class the 2026-10-01 narrowing deliberately took it off.
+  for (const agent of [undefined, null, {}, { mode: undefined }, { mode: null }, { mode: 'nonsense' }]) {
+    const got = armDelivery({ item: { decision: 'allow' }, agent })
+    assert.equal(got.ok, false, `expected refusal for agent ${JSON.stringify(agent)}`)
   }
 })
 
@@ -68,7 +110,10 @@ test('selectParked joins producer to the one parked prompt', () => {
     agents: agentsOf(['a1', 'sess-1']),
     pending: pendingOf(['perm_7', 'a1']),
   })
-  assert.deepEqual(got, { ok: true, requestId: 'perm_7', agentId: 'a1' })
+  // `agent` rides along deliberately: `armDelivery` reads its `mode` to tell a headless
+  // park from a tab's, and re-deriving the join at the call site would be a second copy of
+  // this lookup. Asserted here so the passthrough cannot be dropped silently.
+  assert.deepEqual(got, { ok: true, requestId: 'perm_7', agentId: 'a1', agent: { id: 'a1', sessionId: 'sess-1' } })
 })
 
 test('selectParked refuses a non-permission item', () => {

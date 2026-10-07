@@ -58,43 +58,61 @@ export function decisionOf(item) {
   return { ok: true, decision }
 }
 
-// Whether the answer was DELIVERED BY AN ARM rather than clicked on a surface.
+// Whether this answer may release the park: an arm delivered it, OR it is a BOARD answer
+// on a HEADLESS park.
 //
-// ⚠️ This is the operator's ruling of 2026-09-26, and it is deliberately narrow:
-// a `permission` gate is released only by an arm answer. The reason is asymmetry —
-// a permission approval EXECUTES a command, so it is the one class a script must
-// not be able to take, while a scripted answer to a `message` card costs little
-// and the operator keeps the board flow there. Message and question cards are
-// therefore unchanged by this guard.
+// ⚠️ The first half is the operator's ruling of 2026-09-26 and is unchanged: a `permission`
+// gate releases only on an arm answer. The reason is asymmetry — a permission approval
+// EXECUTES a command, so it is the one class a script must not be able to take, while a
+// scripted answer to a `message` card costs little and the operator keeps the board flow
+// there. The evidence is `resolved_by`, which `attention-answer.py` sources from its OWN
+// `CLAUDE_CODE_SESSION_ID` rather than from a caller argument. The board never sends it.
 //
-// The evidence is `resolved_by`, which `attention-answer.py` sources from its OWN
-// `CLAUDE_CODE_SESSION_ID` rather than from a caller argument. The board never
-// sends it, so a board click cannot produce it.
+// ⚠️ The second half AMENDS that ruling, and it does so by ANSWERING this guard's own
+// stated premise rather than by deleting it. Until 2026-10-07 this comment read: "the
+// board renders no answer controls on a `permission` card at all and its JS never sends
+// `decision`, so a board click could not release a permission gate before this guard
+// either. This hardens the path against a DIRECT API POST." ⚠️ **That premise is no longer
+// true.** The 2026-10-01 narrowing made the board render Allow / Deny on a HEADLESS
+// worker's park and send `decision` with it, so refusing a board answer no longer hardens
+// anything — it removes the only answering surface that park has. A headless worker has no
+// pane to press (its park lives only in this server's memory), so the board is the one
+// place its gate can be answered at all; #296's rule then applies verbatim — a gate the
+// product's primary flow cannot satisfy is not a fix, it is the feature deleted.
 //
-// ⚠️ What this does NOT do, stated so it is not read as broader than it is: the
-// board renders no answer controls on a `permission` card at all and its JS never
-// sends `decision`, so a board click could not release a permission gate before
-// this guard either. This hardens the path against a DIRECT API POST. It is NOT a
-// fix for the falsified-probe threat on message cards — a real Playwright click
-// stores `automation: false` and is indistinguishable from the operator's — which
-// the operator accepted as residual.
+// ⚠️ Scoped to `mode === 'headless'` — POSITIVELY, with no fallback. A TAB worker's card
+// renders no answering control at all (the 2026-10-01 narrowing), so a board answer for one
+// is a defect rather than an answer and must not release; and a cluster worker's park lives
+// in another machine's server, which this one cannot settle anyway. So an agent whose
+// `mode` is absent, unrecognised, or anything other than `headless` REFUSES exactly as it
+// did before. This is a relaxation for one named case, never a default.
 //
-// ⚠️ A missing `resolved_by` is refused, never waved through, and the refusal is
-// logged with its reason rather than swallowed. An arm run by a child stripped of
-// `CLAUDE_CODE_SESSION_ID` therefore cannot release a park through the store —
-// that is the cost of the rule, and it is a real case rather than a bug. It is
-// bounded by `answer_permission`, the MCP tool, which releases a park directly
-// and does not travel through the store at all, so no worker is stranded.
-export function armDelivery(item) {
+// ⚠️ What this still does NOT do, so it is not read as broader than it is: it is NOT a fix
+// for the falsified-probe threat — a real Playwright click stores `automation: false` and is
+// indistinguishable from the operator's, which the operator accepted as residual, and this
+// amendment accepts it for the headless case too. A scripted click on a headless park's
+// Allow now releases a gate that executes a command. That is the cost, stated rather than
+// implied, and it is the same cost the `message` class already carries.
+//
+// ⚠️ A missing `resolved_by` on a NON-headless item is refused, never waved through, and the
+// refusal is logged with its reason rather than swallowed. An arm run by a child stripped of
+// `CLAUDE_CODE_SESSION_ID` therefore cannot release such a park through the store — that is
+// the cost of the rule, and it is a real case rather than a bug. It is bounded by
+// `answer_permission`, the MCP tool, which releases a park directly and does not travel
+// through the store at all, so no worker is stranded.
+export function armDelivery({ item, agent }) {
   const resolvedBy = item?.resolved_by
-  if (typeof resolvedBy !== 'string' || resolvedBy === '') {
-    return {
-      ok: false,
-      reason:
-        'the item carries no resolved_by, so no arm delivered this answer, and a permission gate releases only on an arm answer',
-    }
+  if (typeof resolvedBy === 'string' && resolvedBy !== '') {
+    return { ok: true, resolvedBy }
   }
-  return { ok: true, resolvedBy }
+  if (agent?.mode === 'headless') {
+    return { ok: true, boardAnswer: true }
+  }
+  return {
+    ok: false,
+    reason:
+      'the item carries no resolved_by, so no arm delivered this answer, and a permission gate releases only on an arm answer — the sole exception is a board answer on a headless park, and this item\'s producing agent is not a headless worker',
+  }
 }
 
 // Which parked promise does this item settle?
@@ -139,7 +157,10 @@ export function selectParked({ item, agents, pending }) {
       reason: `agent ${agent.id} has ${parked.length} parked prompts (${parked.map((p) => p.requestId).join(', ')}), so which one this verdict answers cannot be told — answer it with answer_permission instead`,
     }
   }
-  return { ok: true, requestId: parked[0].requestId, agentId: agent.id }
+  // The agent rides along: `armDelivery` reads its `mode` to tell a headless park from a
+  // tab's, and re-deriving the same join at the call site would be a second copy of a
+  // lookup this function has already done and could disagree with it.
+  return { ok: true, requestId: parked[0].requestId, agentId: agent.id, agent }
 }
 
 // Start the poll loop, and return a stop function.
@@ -225,14 +246,6 @@ export function startAttentionPoll({
           log(`attention item ${itemId} is answered but unsettleable: ${verdict.reason}`)
           continue
         }
-        // A verdict alone does not release a permission gate — the operator's
-        // ruling is that only an ARM answer does. Checked after `decisionOf` so a
-        // verdict-less item is still reported by its own, more specific reason.
-        const delivery = armDelivery(item)
-        if (!delivery.ok) {
-          log(`attention item ${itemId} carries ${verdict.decision} but was not arm-delivered: ${delivery.reason}`)
-          continue
-        }
         const target = selectParked({ item, agents, pending })
         if (!target.ok) {
           log(`attention item ${itemId} carries ${verdict.decision} but was not delivered: ${target.reason}`)
@@ -243,6 +256,17 @@ export function startAttentionPoll({
           // outcome in a trail that keeps one record per item. Same rule as
           // message-delivery.mjs, where it was measured live on 2026-09-30.
           if (target.owner) await recordAttempt(itemId, 'failed')
+          continue
+        }
+        // ⚠️ AFTER `selectParked`, not before it. A verdict alone still does not release a
+        // permission gate, but the guard deciding whether THIS one may is now two-sided —
+        // an arm answer, or a board answer on a headless park — so it reads the producing
+        // agent's `mode`, and `selectParked` is what resolves that agent. Kept after
+        // `decisionOf` so a verdict-less item is still reported by its own, more specific
+        // reason rather than as a delivery refusal.
+        const delivery = armDelivery({ item, agent: target.agent })
+        if (!delivery.ok) {
+          log(`attention item ${itemId} carries ${verdict.decision} but was not arm-delivered: ${delivery.reason}`)
           continue
         }
         // No re-check that the park is still present: selectParked read `pending` on this

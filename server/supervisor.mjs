@@ -1238,6 +1238,13 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // so agent_status, list_agents and the ledger all answer "why is this worker
     // headless" from one value rather than three independent guesses.
     modeSource: spawnMode.source,
+    // The mode ITSELF, beside the source that decided it. `status` cannot answer this and
+    // must not be asked to: it carries liveness ('running', 'blocked-on-permission',
+    // 'done'), and a tab worker's 'interactive' is assigned a few lines below — so a reader
+    // deriving headless-ness from `status` would be inferring it from a field that means
+    // something else, and would read a not-yet-assigned tab as headless. The attention
+    // poll's release guard needs this value positively and refuses when it is absent.
+    mode: spawnMode.mode,
     // What the role resolved to, and the window actually targeted. Carried on the agent so
     // the reply, agent_status and the ledger can all answer "where did this spawn go, and
     // why" from one value — and so a role-routed spawn is OBSERVABLE rather than inferred
