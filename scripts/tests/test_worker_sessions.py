@@ -49,14 +49,16 @@ class WorkerSessionsTest(unittest.TestCase):
         os.makedirs(self.registry)
         os.makedirs(self.ledger)
         os.makedirs(self.beats)
-        # `worker-sessions.py` imports `session-liveness.py` by path from its own directory, so
-        # the temp tree needs the real script beside a copy of itself — and `session-liveness.py`
-        # in turn loads `live-workers.py`, which is where the heartbeat store is read. All three
-        # travel together; a fixture missing the third makes the counter exit 2, which the
-        # negatives below would read as "not counted" and pass on a broken instrument.
+        # `worker-sessions.py` imports its siblings by path from its own directory, so the temp
+        # tree needs the real scripts beside a copy of itself — `session-identity.py` is where
+        # the registry read lives now, `session-liveness.py` still carries the heartbeat read,
+        # and that one in turn loads `live-workers.py`, where the store itself is read. All four
+        # travel together; a fixture missing one makes the counter exit 2, which the negatives
+        # below would read as "not counted" and pass on a broken instrument.
         self.bin = os.path.join(self.dir, "scripts")
         os.makedirs(self.bin)
         shutil.copy(SCRIPT, self.bin)
+        shutil.copy(SCRIPTS / "session-identity.py", self.bin)
         shutil.copy(SCRIPTS / "session-liveness.py", self.bin)
         shutil.copy(SCRIPTS / "live-workers.py", self.bin)
 
