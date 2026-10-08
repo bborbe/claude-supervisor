@@ -122,6 +122,17 @@ class TestDeclaredWait(unittest.TestCase):
             f.write(json.dumps([1, 2, 3]) + "\n")
         self.assertTrue(dw.declared_wait(SID, state_dir=self.dir))
 
+    def test_a_sid_carrying_a_path_separator_is_refused(self):
+        """The sid is not a path, and the guard that says so is pinned here.
+
+        ⚠️ Without a case the guard could be deleted by a future refactor with nothing
+        failing — and the contract it protects is this module's own: a malformed input
+        leaves the session ABSENT from the set rather than raising or reading elsewhere.
+        No production caller passes a separator-bearing sid; this is defence-in-depth.
+        """
+        for bad in ("../x", "a/b", "a\\b"):
+            self.assertFalse(dw.declared_wait(bad, state_dir=self.dir))
+
     def test_the_set_covers_only_declaring_sessions(self):
         self.write(SID, stop("⏰ Ends: a wait"))
         self.write(OTHER, stop("👤 You: nothing"))
