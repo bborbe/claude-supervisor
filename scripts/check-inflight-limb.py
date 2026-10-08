@@ -24,9 +24,12 @@ existence would fail unconditionally on every checkout. The two halves are delib
 separate: this is the in-repo drift guard, the live report is the runtime detector.
 
 Anchored on the clause's own words, never on a line number: this file's neighbours cite
-`agents/manager-drive.md` by line range, those ranges have already drifted once, and the
-change that added this guard shifted one of them by a line — so a line-anchored read
-would report an offset as a defect.
+`agents/manager-drive.md` by line range, and one of those citations has already drifted
+(`scripts/manager-attention-watch.py` pinned `:132` for a sentence at `:134`) — so a
+line-anchored read would report an offset as a defect. ⚠️ **This guard's own change is
+*not* an instance of that drift:** its edits are net-zero at the limb-2 paragraph and a
+single `+1` insert below every live citation, so no cited range moved. The general argument
+stands on its own; claiming this change as an example of it did not.
 """
 
 import re
