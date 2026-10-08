@@ -240,6 +240,35 @@ class TheSnapshotCarriesARowBitAndCompareOwnsTheVerdict(unittest.TestCase):
         self.assertEqual(2, r.returncode)
         self.assertIn("no startability", r.stderr)
 
+    def test_a_mixed_tick_names_every_reason(self):
+        """The caller puts this line in the card's `--context`, so a second reason must survive.
+
+        A row unstartable now and a row newly startable are different facts, and returning on
+        the first match would drop the second from the only place it is ever rendered.
+        """
+        self.write({"Alpha Row": "startable", "Beta Row": "unstartable"})
+        r = self.compare({"Alpha Row": "unstartable", "Beta Row": "startable"})
+        self.assertEqual(10, r.returncode, r.stdout + r.stderr)
+        self.assertIn("'Alpha Row' cannot start this tick", r.stdout)
+        self.assertIn("'Beta Row' was unstartable in the declined snapshot", r.stdout)
+
+    def test_a_corrupt_state_file_is_refused_not_a_traceback(self):
+        """Exit 1 is not in the contract, and a caller reads "not suppressed" as "post"."""
+        for cmd, extra in (("read", []), ("compare", ["--startable", "Alpha Row"])):
+            with open(os.path.join(self.dir, "t.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"card_item_id": "abc", "row_set": ["Alpha Row"')
+            r = run(cmd, "--topic", "t", "--row", "Alpha Row", *extra, state_dir=self.dir)
+            self.assertEqual(2, r.returncode, f"{cmd} did not refuse a corrupt state")
+            self.assertIn("REFUSED", r.stderr)
+            self.assertIn("unreadable", r.stderr)
+
+    def test_a_state_that_is_not_an_object_is_refused(self):
+        with open(os.path.join(self.dir, "t.json"), "w", encoding="utf-8") as fh:
+            fh.write('["not", "an", "object"]')
+        r = self.compare({"Alpha Row": "startable"})
+        self.assertEqual(2, r.returncode)
+        self.assertIn("not an object", r.stderr)
+
 
 class SuppressionLineKeepsTheInformation(unittest.TestCase):
     """SC3 and SC5 in one place: the line names the ask, and never withholds the rest."""

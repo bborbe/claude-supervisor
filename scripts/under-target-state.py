@@ -181,6 +181,26 @@ def write_state(topic, item_id, rows, startability, now=None):
     return path
 
 
+def load_state(path):
+    """The recorded state as a dict, or `(None, reason)`. The ONE reader, for both callers.
+
+    A corrupt file is a REFUSAL with a reason, never a traceback. The write is atomic, so
+    corruption is unlikely — but `compare`'s exit code IS the branch's decision input, and an
+    uncaught `JSONDecodeError` exits **1**, a code `commands/manager-loop.md` does not
+    enumerate. A caller reading only `0` / `3` / `10` would read that `1` as "not suppressed",
+    i.e. post — the wrong direction for the one file whose job is to show that nothing CHANGED.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return None, ("the recorded state at %s is unreadable (%s); `… clear` it to start "
+                      "over" % (path, exc))
+    if not isinstance(data, dict):
+        return None, "the recorded state at %s is not an object" % path
+    return data, None
+
+
 def cmd_key(args):
     err = validate(args.topic, args.row)
     if err:
@@ -214,8 +234,9 @@ def cmd_read(args):
     if not os.path.exists(path):
         print("no state recorded for %s" % args.topic, file=sys.stderr)
         return 3
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
+    data, err = load_state(path)
+    if err:
+        return refuse(err)
     if args.json:
         print(json.dumps(data, indent=2, ensure_ascii=False))
     else:
@@ -253,7 +274,8 @@ def suppress(reason):
 def verdict(snapshot, rows, now):
     """Does this tick's candidate set re-post? The bound's ONE derivation.
 
-    Four arms, in the order that keeps each one's answer honest:
+    Four arms — the first is structural and short-circuits, the other three are collected
+    into one line so a mixed tick names every reason it re-posts:
 
     1. **Subset?** A row not in the declined batch is a different ask, whatever the rest
        of the set looks like.
@@ -277,21 +299,27 @@ def verdict(snapshot, rows, now):
     if new:
         return repost("the candidate set is not a subset of the declined set — %s was not "
                       "in the declined batch" % ", ".join(repr(r) for r in new))
+    was = snapshot.get("startability") or {}
+    # Arms 2-4 are collected rather than returned on first match: the rule tells the caller
+    # to name what changed in the card's `--context`, and a mixed tick — one row unstartable,
+    # another newly startable — is exactly when the second reason is worth the line. The exit
+    # code is `10` either way; only the attribution would have been lost.
+    reasons = []
     unknown = sorted(r for r in rows if now[r] == UNKNOWN)
     if unknown:
-        return repost("%s carries no readable startability this tick; an unknown verdict "
-                      "is asked about, never suppressed"
-                      % ", ".join(repr(r) for r in unknown))
+        reasons.append("%s carries no readable startability this tick" %
+                       ", ".join(repr(r) for r in unknown))
     unstartable = sorted(r for r in rows if now[r] == UNSTARTABLE)
     if unstartable:
-        return repost("%s cannot start this tick; a set that can no longer start is not "
-                      "the ask the operator declined"
-                      % ", ".join(repr(r) for r in unstartable))
-    was = snapshot.get("startability") or {}
-    became = sorted(r for r in rows if was.get(r) == UNSTARTABLE)
+        reasons.append("%s cannot start this tick" %
+                       ", ".join(repr(r) for r in unstartable))
+    became = sorted(r for r in rows if now[r] == STARTABLE and was.get(r) == UNSTARTABLE)
     if became:
-        return repost("%s was unstartable in the declined snapshot and can start now"
-                      % ", ".join(repr(r) for r in became))
+        reasons.append("%s was unstartable in the declined snapshot and can start now" %
+                       ", ".join(repr(r) for r in became))
+    if reasons:
+        return repost("%s — a set that is not the ask the operator declined re-posts"
+                      % "; ".join(reasons))
     return suppress("declined ask %s withheld — every row is unchanged and can start"
                     % snapshot.get("card_item_id", ""))
 
@@ -311,8 +339,9 @@ def cmd_compare(args):
     if not os.path.exists(path):
         print("no declined snapshot for %s" % args.topic, file=sys.stderr)
         return 3
-    with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
+    data, err = load_state(path)
+    if err:
+        return refuse(err)
     return verdict(data, args.row, seen)
 
 
