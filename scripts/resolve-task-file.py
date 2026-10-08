@@ -63,8 +63,10 @@ invocations and ~46 interpreter starts per sweep.
 """
 import json
 import os
+import re
 import subprocess
 import sys
+import unicodedata
 
 
 def vault_dirs():
@@ -119,11 +121,75 @@ def vault_dirs():
         return [], f"vault-cli config list failed: {type(exc).__name__}"
 
 
-def hits(vaults, key, stem):
+# A registry name is a *truncated* title, and the truncation is long — measured 46
+# characters on 2026-10-07 (`⚙ A Renamed Task's Session Becomes Unaddressable` against a
+# 108-character title). ⚠️ **`fleet-board.py` and `manager-predispatch.py` carry the same
+# constant for the same rule and the three values must agree** — a test pins them
+# together, because a drift would make the board, the pre-dispatch gate and this reader
+# disagree about whether a name resolves.
+_TRUNCATION_MIN_PREFIX = 20
+
+
+def _norm_session_name(name):
+    """Casefolded, decoration-stripped session label.
+
+    A registry name carries a `⚙ ` marker a task title does not, so a raw comparison
+    never matches. Mirrors `manager-predispatch.py`'s helper of the same name and job, so
+    the readers agree about what a name *is*.
+    """
+    text = unicodedata.normalize("NFKC", name or "").strip()
+    text = re.sub(r"^[^\w(]+", "", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _norm_basename(text):
+    """Casefolded, whitespace-collapsed filename key — **without** the decoration strip.
+
+    ⚠️ **The decoration strip is a session-label rule, not a filename rule.** Applying
+    `_norm_session_name` to an on-disk basename folds `- Notes.md` and `Notes.md` into one
+    key, so a previously unique resolution becomes a false `AMBIGUOUS` (the round-3
+    review's MAJOR, 2026-10-08). Whitespace collapsing **is** wanted on both sides — a
+    double-spaced filename should still match its single-spaced lookup — so this keeps
+    that and drops the strip.
+    """
+    text = unicodedata.normalize("NFKC", text or "").strip()
+    return re.sub(r"\s+", " ", text).casefold()
+
+
+def _matches(basename, stem, prefix):
+    """Does a directory entry's basename name this stem?
+
+    Exact by default. ⚠️ **`prefix` is the truncation tier and is reached only when the
+    exact tier found nothing** — the registry holds a *truncated* title, so an
+    exact-only reader resolves nothing for a long-titled task. The test is a **prefix on
+    the stem**, not a substring glob, and it is length-gated so a short role name that
+    happens to open a title is not read as a truncation.
+    """
+    if not prefix:
+        return basename == stem
+    bare = stem[:-3] if stem.endswith(".md") else stem
+    # ⚠️ **The prefix tier still requires a `.md` entry.** Without this the tier matches
+    # anything that merely *starts* with the stem — an Obsidian attachment (`….png`) or a
+    # sibling (`….md.gpg`) sitting in the tasks dir — and the caller then runs `grep -cE`
+    # and `date -r` against a binary. That only reaches an attachment when the `.md` is
+    # genuinely absent, which is exactly when resolving to nothing is the safer answer.
+    return (len(bare) >= _TRUNCATION_MIN_PREFIX
+            and basename.endswith(".md")
+            and basename.startswith(bare))
+
+
+def hits(vaults, key, stem, prefix=False):
     """Every regular file `<stem>` under `<vault>/<key>`, across all vaults.
 
     Exact basename, case-insensitive — never a substring glob, and the folder is the
     discriminator rather than a frontmatter field (`docs/subject-resolution.md`).
+
+    ⚠️ **`prefix=True` is the truncation tier, and it is a different contract from the
+    default.** `docs/subject-resolution.md` § The page test states that *"under exact
+    matching, two matches inside one folder are impossible by construction"* — true of the
+    default and **not** of this tier, where two titles may share a truncated prefix. The
+    `AMBIGUOUS` discipline in `resolve` is what keeps the tier honest; the doc's sentence
+    describes the exact tier alone.
     """
     found = []
     for v in vaults:
@@ -141,7 +207,8 @@ def hits(vaults, key, stem):
         except OSError:
             continue
         found += [os.path.join(full, e) for e in entries
-                  if e.casefold() == stem and os.path.isfile(os.path.join(full, e))]
+                  if _matches(_norm_basename(e), stem, prefix)
+                  and os.path.isfile(os.path.join(full, e))]
     return found
 
 
@@ -149,7 +216,7 @@ def resolve(name, vaults):
     """The rule. Returns `(path, ambiguous)`; `path` is `""` when nothing resolves."""
     # A caller may pass the roster name or the filename; both mean the same task, and the
     # suffixed form would otherwise search for `<name>.md.md` and silently resolve nothing.
-    stem = name.casefold()
+    stem = _norm_session_name(name)
     if stem.endswith(".md"):
         stem = stem[:-3]
     stem += ".md"
@@ -160,6 +227,23 @@ def resolve(name, vaults):
     if not tasks:
         if len(goals) == 1:
             return goals[0], []
+        if not goals:
+            # ⚠️ **Both EXACT tiers found nothing, and only now do the truncation tiers
+            # run — tasks still ahead of goals.** Ordering these by folder first would let
+            # a *prefix guess* displace an *exact* match in the other folder: with a goal
+            # `Some Long Goal Name Here` and a task `Some Long Goal Name Here And Then Some
+            # More`, a tasks-first prefix tier resolves the guess and never consults the
+            # goal that matches exactly. Certainty before guess, across folders as well as
+            # within one — that is the whole of "never guesses".
+            tasks = hits(vaults, "tasks_dir", stem, prefix=True)
+            if len(tasks) == 1:
+                return tasks[0], []
+            if not tasks:
+                goals = hits(vaults, "goals_dir", stem, prefix=True)
+                if len(goals) == 1:
+                    return goals[0], []
+                return "", goals
+            return "", tasks
         return "", goals                   # zero tasks; goals is the tier that was reached
     return "", tasks                       # an ambiguous tasks tier never consults goals_dir,
                                            # so only its own candidates may be announced
