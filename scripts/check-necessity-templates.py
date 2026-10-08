@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """The widened necessity contract must stay pinned in the two agents that carry it.
 
-`agents/manager-sweep-reader.md` § step 8 defines the three necessity verdicts and their row
+`agents/manager-sweep-reader.md` § step 8 defines the necessity verdicts and their row
 shapes; `agents/manager-verify.md` § step 1 consumes them. The 2026-10-07 widening — each
-verdict now names *which* of three sources a task serves (goal sentence / `SC<n>` / `DoD<n>`)
+verdict then named *which* of three sources a task serves (goal sentence / `SC<n>` / `DoD<n>`)
 — moved the `needed:` row shape, and deliberately left the `product:` row and the summary
 line byte-identical so that a before/after comparison of this read stays valid.
+
+⚠️ **Narrowed to two sources on 2026-10-08:** the goal sentence was retired
+(`SC<n>` / `DoD<n>` only), matching vault-cli. That edit changed the *text inside* the
+`needed:` and `not needed:` rows but not the **prefixes this guard matches on**, so every
+count below is unchanged and the guard passed without modification. Read that as the guard's
+declared scope, not as coverage: it pins that a site was not dropped, duplicated or moved, and
+says nothing about the wording within a site.
 
 That "deliberately unchanged" half is a claim, and nothing asserted it. This guard pins both
 halves: every row shape the widening introduces must appear at **exactly** its known sites,
@@ -53,11 +60,18 @@ UNPROVEN = "not needed: <task> — unproven:"
 #: three `serves` sites are the three-verdict block, then the tick-mode and snapshot-mode
 #: frames; the others appear in the block alone. Counts are exact — see the module docstring.
 ROW_SHAPES: tuple[tuple[str, int, str], ...] = (
-    (SERVES, 3, "the widened three-source `needed:` row"),
+    (SERVES, 3, "the two-source `needed:` row"),
     (FOUNDATION, 1, "the foundation row"),
     (NOT_NEEDED, 1, "the plain `not needed` row"),
     (UNPROVEN, 1, "the unproven `not needed` row"),
 )
+
+#: The source this change retires. Every check above matches by *prefix*, so none of them
+#: can see it: the placeholder sits **inside** a row, and a uniform re-widening at all three
+#: sites leaves every count and the one-shape assertion satisfied. This is the only
+#: assertion here that reads wording rather than shape, and it exists because the PR's own
+#: docstring concedes the prefix scope — a conceded gap is worth one line to close.
+RETIRED = "<goal sentence|SC<n>|DoD<n>>"
 
 # Deliberately UNCHANGED by the widening — the byte-identity claim, pinned as whole lines.
 PRODUCT_ROW = "product: <task> — output of <goal> SC<n>"
@@ -116,6 +130,15 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
+
+    if RETIRED in "\n".join(reader_rows):
+        print(
+            f"necessity-templates FAILED: {READER} still carries the retired goal-sentence "
+            f"source ({RETIRED!r}) — the 2026-10-08 narrowing removed it, and a prefix match "
+            f"cannot see it come back",
+            file=sys.stderr,
+        )
+        return 1
 
     for label, want_line, want in (
         ("`product:` row", PRODUCT_ROW, PRODUCT_SITES),
