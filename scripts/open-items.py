@@ -53,7 +53,23 @@ a ledger carries that same session — so the PANE is the discriminator, and it 
 here. `classify` reads the field and reports `gone` / `live` / `unknown` per entry; it
 renders nothing itself and adds no close path.
 
-Subcommands: add | set | answer | note | withdraw | close | list | classify
+The board link. An `asked-of-you` now carries the item id of the card its ask lives on
+(`card_item_id`), the option set that card was built from (`card_options`), and which label
+it recommends. That field is what closes the last hop of the answer chain:
+`answered-watch.py` emits `ANSWERED <item-id>` for a card this session posted and knows
+nothing about ledgers, and `card-answer` / `card-sync` find the entry to close by matching
+that id. Without it the watcher's signal had nowhere to land, so every `asked-of-you` still
+needed a manager to notice the answer by hand — which is the defect this removes.
+
+⚠️ The link is only ever made by a POSTED card, so an ask carrying fewer than two options can
+never have one. Measured 2026-10-08 across the store's 42 ledgers: 230 `asked-of-you`
+entries, 39 of them open, and **not one carrying a structured option set** — the options lived
+inside the free `text`, where nothing could post them. `options` is the repair path for those;
+`card-sync` reports rather than invents, because a fabricated answer space is a question the
+operator did not ask.
+
+Subcommands: add | set | options | answer | card-answer | card-sync | note | withdraw | close
+             | list | classify
 
 `--task` is resolved to a vault file on both write and read. `add` stores the path it
 found (and warns when it finds none); `list` re-resolves and marks any OPEN entry whose
@@ -123,6 +139,30 @@ MARKERS = {
     "none": " · ⚠️ NO TASK",
 }
 DETAIL_SUFFIX = {"ok": "", "unknown": " (not searched)"}
+
+# The sibling that owns the board POST. Shelled out rather than re-implemented, for the
+# reason `manager-attention-watch.py` records for its own re-post site: `attention-ask.py`
+# owns the dedup key, the `owner:` liveness default and the TTL bound, and a second POST
+# site here would be a second place for all three to drift — with the store's pruning rule
+# turning a wrong `liveness_ref` into a silently deleted card rather than an error anyone
+# would see.
+ATTENTION_ASK = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "attention-ask.py"
+)
+ATTENTION_ASK_TIMEOUT = float(os.environ.get("OPEN_ITEMS_ASK_TIMEOUT", "30"))
+
+# A card this ledger posted is keyed `open-items:<entry id>`. STABLE across re-posts, which
+# is what makes the store's open-scoped dedup collapse a second post for the same entry into
+# the first rather than asking the operator the same question twice.
+CARD_DEDUP_PREFIX = "open-items:"
+
+# The fewest options a card may carry. This is not a style preference and not a copy of a
+# rule kept elsewhere: a card with one option — or none — is a notification wearing a
+# question's shape, and the operator cannot answer it. It is the same floor
+# `prepare-compact.md` sets for a resume block's `Open decision:` entries, restated here
+# because this file is where a card is now POSTED and a post site that cannot enforce its
+# own floor would ship the defect the floor exists to prevent.
+MIN_CARD_OPTIONS = 2
 
 
 def now():
@@ -423,6 +463,18 @@ def migrate(item):
     # so a reader tells a withdrawal from an evidence-close by one field rather than by
     # testing for absence. NOT back-filled — a past close cannot be reclassified from its data.
     item.setdefault("withdrawn_at", None)
+    # The board link is forward-only, exactly like the origin record above: entries written
+    # before it existed carry no key, and healing them to an explicit None keeps the schema
+    # uniform so a reader tells "no card was ever posted" from "the key is missing" by one
+    # field rather than by testing for absence. NOT back-filled here — an item id cannot be
+    # recovered from an entry's data, which is the whole reason the field had to be added at
+    # the write site. `card-sync` fills it, by posting the card and recording the id back.
+    item.setdefault("card_item_id", None)
+    # The option set the card was built from, kept so a later re-post asks the SAME question
+    # rather than a paraphrase of it: a re-post that drifted from the original ask would be a
+    # second question, and the operator would have to answer both to close one entry.
+    item.setdefault("card_options", None)
+    item.setdefault("card_recommend", None)
     if item["kind"] != "asked-of-you":
         # Only an asked-of-you may carry `answer` / `answered_at` — on any other kind they
         # assert an operator reply that never happened. Two broken shapes exist and BOTH are
@@ -659,11 +711,31 @@ def cmd_add(args):
         "noted_at": None,
         "closed_at": None,
         "closed_evidence": None,
+        # The board link (see `migrate`): the item id of the card this entry's ask lives on,
+        # and the option set that card was built from. Set only on `asked-of-you` — the one
+        # kind whose close path is the operator's own answer, and so the only kind a board
+        # card can deliver.
+        "card_item_id": None,
+        "card_options": list(args.option) if args.kind == "asked-of-you" else None,
+        "card_recommend": args.recommend if args.kind == "asked-of-you" else None,
     }
     data["items"].append(item)
     save(data)
     print("added %s [%s] %s" % (item["id"], item["kind"], item["text"]))
     warn_unresolvable_task(args.task, item["task_path"], dirs)
+    if item["kind"] == "asked-of-you":
+        # Post AFTER the save, so an unreachable store costs the card and never the entry.
+        # The ledger's reason to exist is recording an ask before anything else about it
+        # exists; an entry that vanished because a store was down would invert exactly that.
+        # On failure the entry simply keeps `card_item_id: null`, and `card-sync` re-posts it
+        # on a later tick — which is why the dedup key is stable rather than per-attempt.
+        posted = post_card(item, sid)
+        if posted:
+            item["card_item_id"] = posted
+            save(data)
+            print("card %s posted for entry %s" % (posted, item["id"]))
+        else:
+            warn_no_card(item)
     return 0
 
 
@@ -693,6 +765,298 @@ def warn_unresolvable_task(task, path, dirs):
         % task,
         file=sys.stderr,
     )
+
+
+def post_card(item, sid, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
+    """Post this entry's ask as a board card and return its item id, or None.
+
+    Shelled out rather than re-implemented; see `ATTENTION_ASK` for why. The producer is the
+    RAISING session, never left to the store's default: `answered-watch.py` keys on
+    `Item.ProducerID`, so a card posted under any other producer would never fire that
+    watcher for the session that can act on the answer.
+
+    ⚠️ `liveness_ref` is deliberately left at `attention-ask.py`'s `owner:` default. A
+    `session:<id>` subject makes the store PRUNE the card on the first read after the poster
+    exits (`manager-attention-watch.py:1143`), which would delete precisely the asks this
+    ledger exists to keep outstanding across a session boundary.
+
+    Returns None — never raises — when the entry carries too few options or the store is
+    unreachable or refuses. A caller must treat None as "no card", not as "posted anyway".
+    """
+    options = item.get("card_options") or []
+    if len(options) < MIN_CARD_OPTIONS:
+        return None
+    cmd = [
+        sys.executable,
+        os.path.join(
+            script_dir or os.path.dirname(os.path.abspath(__file__)), "attention-ask.py"
+        ),
+        "post",
+        "--producer-id", sid,
+        "--producer-kind", "session",
+        "--dedup-key", CARD_DEDUP_PREFIX + item["id"],
+        "--payload", item["text"],
+    ]
+    if item.get("resolves_on"):
+        cmd += ["--context", "Resolves on: %s" % item["resolves_on"]]
+    for label in options:
+        cmd += ["--option", label]
+    if item.get("card_recommend"):
+        cmd += ["--recommend", item["card_recommend"]]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        print("⚠️  could not post a card for %s: %s" % (item["id"], exc), file=sys.stderr)
+        return None
+    if proc.returncode != 0:
+        print(
+            "⚠️  could not post a card for %s (exit %s): %s %s"
+            % (item["id"], proc.returncode, proc.stdout.strip(), proc.stderr.strip()),
+            file=sys.stderr,
+        )
+        return None
+    for line in proc.stdout.splitlines():
+        if line.startswith("ITEM_ID:"):
+            return line.split(":", 1)[1].strip() or None
+    return None
+
+
+def poll_card(item_id, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
+    """Read one board card's state as `(state, content)`.
+
+    `state` is one of `open`, `answered`, `not-answered`, `failed`.
+
+    ⚠️ `not-answered` is NOT `answered` and must never close an entry.
+    `attention-ask.py` renders `NOT_OPERATOR_ANSWERED:` for a card the store holds an answer
+    on that the operator did not give — a non-operator actor, or an answer to a different
+    question — and collapsing the two would forge the operator attribution that `answer`
+    exists to protect. The rule has one home (`answered-attribution.py`); this arm consumes
+    its already-rendered form rather than restating it, which is the same discipline
+    `answered-watch.py` states for its own stream arm.
+    """
+    cmd = [
+        sys.executable,
+        os.path.join(
+            script_dir or os.path.dirname(os.path.abspath(__file__)), "attention-ask.py"
+        ),
+        "poll", item_id,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        print("⚠️  could not poll card %s: %s" % (item_id, exc), file=sys.stderr)
+        return ("failed", "")
+    out = proc.stdout.strip()
+    first = out.splitlines()[0].strip() if out else ""
+    if first.startswith("ANSWERED:"):
+        return ("answered", first.split(":", 1)[1].strip())
+    if first.startswith("NOT_OPERATOR_ANSWERED:"):
+        return ("not-answered", first.split(":", 1)[1].strip())
+    if first == "OPEN":
+        return ("open", "")
+    return ("failed", out or proc.stderr.strip())
+
+
+def warn_no_card(item):
+    """Warn on stderr that an `asked-of-you` carries no board card.
+
+    WARN, never refuse — the same discipline as `warn_unresolvable_task`, and for the same
+    reason: the ledger records an ask BEFORE anything else about it exists, so a question
+    raised in a form the board cannot carry is still worth recording. Refusing would delete
+    that reason; saying nothing would let the entry read as though the operator had been
+    asked, which is the defect the link removes.
+
+    ⚠️ The two branches are not one message with a suffix. An entry with too few options is
+    not under-annotated — it is UNANSWERABLE, and no amount of retrying will post it. An
+    entry with a full option set that still has no card is a store that was down or refused,
+    and the very same command fixes it. Telling them apart is what stops a manager retrying
+    the first forever.
+    """
+    options = item.get("card_options") or []
+    if len(options) < MIN_CARD_OPTIONS:
+        print(
+            "⚠️  entry %s is an `asked-of-you` with %d option(s) — no card was posted, so "
+            "the operator cannot answer it and it can never close on an answer.\n"
+            "    A card carries at least %d options. Supply them and post:\n"
+            "      python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py options "
+            "--id %s --option \"…\" --option \"…\" [--recommend \"…\"]"
+            % (item["id"], len(options), MIN_CARD_OPTIONS, item["id"]),
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "⚠️  entry %s has an option set but no board card — the store was unreachable "
+            "or refused the post. Nothing is lost; retry when it is back:\n"
+            "      python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py card-sync"
+            % item["id"],
+            file=sys.stderr,
+        )
+
+
+def cmd_options(args):
+    """Record the option set an `asked-of-you` is answerable with, then post its card.
+
+    This is the repair path for entries that predate the board link. Measured 2026-10-08
+    across the store's 42 ledgers: 230 `asked-of-you` entries, 39 of them open, and **not one
+    carrying a structured option set** — the options lived inside the free `text`, where
+    nothing could post them. `card-sync` deliberately will not invent an answer space for
+    such an entry, so this verb is how a manager supplies the one its own ask already implies.
+    """
+    if len(args.option) < MIN_CARD_OPTIONS:
+        sys.exit(
+            "error: %d option(s) is fewer than a card may carry (%d) — nothing written.\n"
+            "  A card with one option, or none, is a notification wearing a question's\n"
+            "  shape: the operator cannot answer it, so the entry would stay open forever\n"
+            "  while looking asked. If the ask genuinely has one outcome, it is not a\n"
+            "  question for this ledger — record it as `asked-of-me` instead."
+            % (len(args.option), MIN_CARD_OPTIONS)
+        )
+    sid = session_id(args)
+    data = load(sid)
+    item = find(data, args.id)
+    if item["kind"] != "asked-of-you":
+        sys.exit(
+            "error: entry %s is `%s`, not `asked-of-you` — nothing written.\n"
+            "  Only an `asked-of-you` resolves on the operator's answer, so only it can\n"
+            "  be carried by a board card; the other kinds close on their task file."
+            % (item["id"], item["kind"])
+        )
+    item["card_options"] = list(args.option)
+    item["card_recommend"] = args.recommend
+    save(data)
+    posted = post_card(item, sid)
+    if posted:
+        item["card_item_id"] = posted
+        save(data)
+        print("options recorded on %s; card %s posted" % (item["id"], posted))
+    else:
+        print("options recorded on %s" % item["id"])
+        warn_no_card(item)
+    return 0
+
+
+def cmd_card_answer(args):
+    """Close the entry whose card is the one the operator just answered.
+
+    The last hop of `answered-watch.py` → `attention-ask.py poll` → here. The watcher emits
+    `ANSWERED <item-id>` and knows nothing about ledgers; the entry that posted that card is
+    found by `card_item_id`, which is the whole reason the field had to exist before this hop
+    could be written.
+
+    ⚠️ REFUSES when no entry carries the id, and writes nothing. A silent no-op is
+    indistinguishable from a close, and a manager draining watcher output would move on
+    believing the entry resolved — the failure mode this ledger exists to prevent, one layer
+    down. The two likely causes are named instead of guessed at.
+    """
+    sid = session_id(args)
+    data = load(sid)
+    matches = [i for i in data["items"] if i.get("card_item_id") == args.item_id]
+    if not matches:
+        sys.exit(
+            "error: no entry in session %s carries card %s — nothing written.\n"
+            "  Either the card belongs to another session's ledger (the link is per\n"
+            "  ledger), or its entry predates the link and has not been backfilled:\n"
+            "    python3 ${CLAUDE_PLUGIN_ROOT}/scripts/open-items.py card-sync\n"
+            "  If the card is genuinely not this session's, it was posted by another\n"
+            "  session and only that session can close its own entry."
+            % (sid[:8], args.item_id)
+        )
+    item = matches[0]
+    stamp = now()
+    item["answer"] = args.text
+    item["answered_at"] = stamp
+    item["state"] = "closed"
+    item["closed_at"] = stamp
+    item["closed_evidence"] = "operator answered on card %s: %s" % (
+        args.item_id,
+        args.text,
+    )
+    save(data)
+    print("answered + closed %s on card %s: %s" % (item["id"], args.item_id, args.text))
+    return 0
+
+
+def cmd_card_sync(args):
+    """Make the ledger's cards match its entries, in both directions.
+
+    Two passes:
+
+      backfill   every OPEN `asked-of-you` with no `card_item_id` gets its card posted and
+                 the id recorded. An entry with no option set is REPORTED, never posted —
+                 this verb cannot invent an answer space, and a card carrying fewer than
+                 two options is the notification-shaped non-question this work removes.
+      reconcile  every OPEN `asked-of-you` WITH an id is polled, and an `ANSWERED:` closes
+                 the entry with the operator's own words as its evidence.
+
+    ⚠️ Both passes are OPEN-only, deliberately. A closed entry's card is history: polling it
+    cannot change the entry, and re-posting for it would resurrect a question the operator
+    has already answered — the re-nag this ledger's suppression discipline forbids.
+
+    ⚠️ Idempotent and safe to run every tick. The dedup key is stable per entry, so a second
+    backfill collapses into the first card instead of asking twice; a reconcile on an
+    already-closed entry matches nothing. That is what lets a manager call this at the head
+    of a tick rather than tracking which entries still need what.
+    """
+    sid = session_id(args)
+    data = load(sid)
+    asked = [
+        i
+        for i in data["items"]
+        if i["kind"] == "asked-of-you" and i["state"] == "open"
+    ]
+    posted, reported, closed = [], [], []
+    for item in asked:
+        if not item.get("card_item_id"):
+            if len(item.get("card_options") or []) < MIN_CARD_OPTIONS:
+                reported.append(item)
+                continue
+            got = post_card(item, sid)
+            if got:
+                item["card_item_id"] = got
+                posted.append((item["id"], got))
+            else:
+                reported.append(item)
+            continue
+        state, content = poll_card(item["card_item_id"])
+        if state != "answered":
+            # `open`, `not-answered` and `failed` all leave the entry alone. Only an answer
+            # the OPERATOR gave closes it; the other two are facts about the card, not about
+            # the entry, and closing on either would forge the attribution `answer` protects.
+            continue
+        stamp = now()
+        item["answer"] = content
+        item["answered_at"] = stamp
+        item["state"] = "closed"
+        item["closed_at"] = stamp
+        item["closed_evidence"] = "operator answered on card %s: %s" % (
+            item["card_item_id"],
+            content,
+        )
+        closed.append((item["id"], item["card_item_id"], content))
+    if posted or closed:
+        save(data)
+    for entry_id, item_id in posted:
+        print("posted card %s for entry %s" % (item_id, entry_id))
+    for entry_id, item_id, content in closed:
+        print("closed %s on card %s: %s" % (entry_id, item_id, content))
+    if reported:
+        print(
+            "%d open `asked-of-you` %s carr%s no board card and no option set — each needs "
+            "its own options before it can be posted (see `options`):"
+            % (
+                len(reported),
+                "entry" if len(reported) == 1 else "entries",
+                "ies" if len(reported) == 1 else "y",
+            ),
+            file=sys.stderr,
+        )
+        for item in reported:
+            print("    %s  %s" % (item["id"], item["text"][:100]), file=sys.stderr)
+    print(
+        "card-sync: %d open asked-of-you · %d posted · %d closed · %d needing options"
+        % (len(asked), len(posted), len(closed), len(reported))
+    )
+    return 0
 
 
 def cmd_set(args):
@@ -1076,6 +1440,19 @@ def main():
         "their own keystroke there never reaches this session, so the entry could never "
         "close — hand over the pane instead. Accepted as provenance on the other kinds.",
     )
+    p_add.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        help="an option label the operator can pick, for --kind asked-of-you (repeatable). "
+        "At least %d are needed before a board card can be posted; with fewer, the entry is "
+        "recorded but warned about, because a card carrying fewer options is a notification "
+        "wearing a question's shape and the operator cannot answer it." % MIN_CARD_OPTIONS,
+    )
+    p_add.add_argument(
+        "--recommend",
+        help="the --option label this ask recommends (must be one of the labels given)",
+    )
     p_add.set_defaults(func=cmd_add)
 
     p_set = sub.add_parser(
@@ -1150,6 +1527,45 @@ def main():
     p_classify.add_argument("--include-closed", action="store_true")
     p_classify.add_argument("--format", default="text", choices=("text", "json"))
     p_classify.set_defaults(func=cmd_classify)
+
+    p_options = sub.add_parser(
+        "options",
+        help="record the option set an `asked-of-you` is answerable with, then post its "
+        "board card — the repair path for entries that predate the card link",
+    )
+    p_options.add_argument("--id", required=True)
+    p_options.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        required=True,
+        help="an option label the operator can pick (repeatable; at least %d)"
+        % MIN_CARD_OPTIONS,
+    )
+    p_options.add_argument("--recommend", help="the label this ask recommends")
+    p_options.set_defaults(func=cmd_options)
+
+    p_sync = sub.add_parser(
+        "card-sync",
+        help="post the card for every open `asked-of-you` that lacks one, and close every "
+        "entry whose card the operator has answered — idempotent, safe on every tick",
+    )
+    p_sync.set_defaults(func=cmd_card_sync)
+
+    p_card_answer = sub.add_parser(
+        "card-answer",
+        help="close the entry whose card is the one just answered — the last hop of the "
+        "answered-watch -> poll -> close chain",
+    )
+    p_card_answer.add_argument(
+        "--item-id", dest="item_id", required=True, help="the board item id that was answered"
+    )
+    p_card_answer.add_argument(
+        "--text",
+        required=True,
+        help="the operator's words, verbatim — recorded as this entry's close evidence",
+    )
+    p_card_answer.set_defaults(func=cmd_card_answer)
 
     args = parser.parse_args()
     sys.exit(args.func(args))
