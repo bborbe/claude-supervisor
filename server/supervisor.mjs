@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord } from './heartbeat.mjs'
+import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
@@ -83,6 +83,28 @@ const heartbeat = {
       // manager's verdict to "could not tell" — which is the honest answer — whereas failing
       // the spawn would turn an unwritable state directory into a broken fleet.
       log(`WARNING: cannot stamp heartbeat for ${sessionId}: ${error.message}`)
+    }
+  },
+  // The session this server runs INSIDE.
+  //
+  // ⚠️ The lifecycle itself lives in `heartbeat.mjs`, which owns the stamp and can therefore
+  // be tested — `supervisor.mjs` has no export surface (a test importing it would start an MCP
+  // server), so a self-stamp owned here could never be covered at all. See `startSelfStamp`
+  // for the design notes: the per-worker stamps cannot cover this session, the anchor is
+  // deliberately omitted, and the activity starts at `idle`.
+  startSelf(sessionId) {
+    this.stopSelf()
+    this.self = startSelfStamp(sessionId, {
+      // Same reasoning as `stamp` above: the session still runs, and a manager's verdict
+      // degrades to "could not tell" rather than the server failing to start.
+      onError: (error) => log(`WARNING: cannot stamp own heartbeat for ${sessionId}: ${error.message}`),
+    })
+    return this.self !== null
+  },
+  stopSelf() {
+    if (this.self) {
+      this.self.stop()
+      this.self = undefined
     }
   },
 }
@@ -610,6 +632,11 @@ function stampUnobservedWorkers() {
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
     const stamped = stampUnobservedWorkers()
+    // The self-stamp goes the same way. The handler already exists so a killed server does not
+    // leave records asserting a liveness nobody can vouch for; the row describing the server's
+    // OWN session is the same claim and belongs on the same path. `stopSelf` is idempotent, so
+    // a server that never had a session id simply clears nothing.
+    heartbeat.stopSelf()
     log(`received ${signal} — stamped ${stamped} unobserved worker(s) as ${UNOBSERVED_STATUS}, then exited`)
     process.exit(0)
   })
@@ -1881,6 +1908,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 await server.connect(new StdioServerTransport())
 log('supervisor ready')
+
+// Stamp the session this server runs inside, on the same interval as its workers. A server
+// started outside a session has no id, so `startSelf` is a no-op there rather than a stamp
+// under an invented key — see its comment.
+heartbeat.startSelf(config.sessionId)
 
 // The cluster half of the heartbeat store, on the same interval the headless workers use.
 //
