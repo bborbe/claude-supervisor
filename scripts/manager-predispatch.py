@@ -914,6 +914,17 @@ def _names_the_same_session(wanted: str, held: str) -> bool:
     coincidence: a short role name that happens to open a title (`boss`) does not
     qualify. An exact match is accepted at any length, so a genuinely short title still
     resolves.
+
+    ⚠️ **There is deliberately NO exactly-one-title guard here, unlike `fleet-board.py`'s
+    `has_task_file` — and it is not an omission.** `roster_owner` receives only
+    `(name, registry, feed)`: it holds no vault title set to be unique *against*, so an
+    exactly-one check is not expressible at this layer at all. The consequence is bounded
+    rather than ignored — reaching two distinct held names that both prefix-match one
+    title requires two sessions on the SAME title truncated at different lengths, and
+    `roster_owner` returns a liveness verdict (`LIVE` / `PARKED` / `NONE`), not an owner
+    identity, so in the reachable case both candidates are live and the verdict is the
+    same either way. ⚠️ **The length floor is what carries the safety here**, not
+    uniqueness.
     """
     # ⚠️ **Both sides normalized here, not just `held`.** `roster_owner` already normalizes
     # what it passes, so this is idempotent for it — but a second caller handing in a raw

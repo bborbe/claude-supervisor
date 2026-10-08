@@ -183,6 +183,26 @@ def _norm_session_name(name):
 _TRUNCATION_MIN_PREFIX = 20
 
 
+def _matches_one_title(key, titles):
+    """Does the normalized `key` name exactly one entry of `titles`?
+
+    ⚠️ **One rule, two callers — deliberately.** `has_task_file` and
+    `name_title_mismatches` both answer "does this name name this task?", and when they
+    answered it differently the mismatch report called every long-titled, correctly
+    managed session a drift (measured 2026-10-08: the bot review's one CRITICAL). A
+    truncated name is the *normal* shape after this change, not evidence of drift.
+
+    Exact first; then a **prefix**, gated on the same length floor and on identifying
+    exactly one title. A guess about which title was truncated must never displace a
+    certainty, and an ambiguous one must never become a confident one.
+    """
+    if key in titles:
+        return True
+    if len(key) < _TRUNCATION_MIN_PREFIX:
+        return False
+    return sum(1 for t in titles if t.startswith(key)) == 1
+
+
 class VaultIndex:
     """Topic and goal titles, and the links between them — read once per run.
 
@@ -254,12 +274,7 @@ class VaultIndex:
         key = _norm_session_name(name)
         if not key:
             return False
-        titles = self._normalized_titles()
-        if key in titles:
-            return True
-        if len(key) < _TRUNCATION_MIN_PREFIX:
-            return False
-        return sum(1 for t in titles if t.startswith(key)) == 1
+        return _matches_one_title(key, self._normalized_titles())
 
 
 def name_title_mismatches(registry, task_titles):
@@ -278,6 +293,12 @@ def name_title_mismatches(registry, task_titles):
     exists to surface. The stronger one also needs no vault index, so it cannot reach
     into one.
 
+    ⚠️ **"Names" means `_matches_one_title` — the same rule `has_task_file` applies**,
+    not equality. A truncated registry name is the normal healthy shape after this change;
+    testing it by equality reported every long-titled, correctly managed session as drift.
+    What this mode is for is a name that no longer names the row **under the rule the
+    board itself applies**.
+
     Returns `[(sid, held_name, [titles])]`, sorted, for **mismatches only**. A session
     whose id resolves to no task is **absent**, not a mismatch, and is not returned here —
     the board already renders that one under `Unmanaged`.
@@ -288,8 +309,15 @@ def name_title_mismatches(registry, task_titles):
         titles = task_titles.get(sid) or []
         if not name or not titles:
             continue                      # nothing held, or no row to have diverged from
-        if _norm_session_name(name) in {_norm_session_name(t) for t in titles}:
-            continue                      # the name still names a row it owns
+        # ⚠️ **The SAME rule `has_task_file` uses — `_matches_one_title`, not equality.**
+        # A truncated registry name is the normal healthy shape after this change, not
+        # drift; testing it by equality here reported every long-titled, correctly managed
+        # session as a mismatch (the bot review's one CRITICAL, 2026-10-08). What this
+        # mode is for is a name that no longer names the row *under the rule the board
+        # itself applies*.
+        if _matches_one_title(_norm_session_name(name),
+                              {_norm_session_name(t): t for t in titles}):
+            continue
         out.append((sid, name, sorted(set(titles))))
     return sorted(out)
 
@@ -1081,8 +1109,15 @@ def main():
         # Reads One Home Too` owns, so this mode lives where the join already happens
         # rather than in a script of its own.
         found = name_title_mismatches(merged, task_titles)
+        def cell(text):
+            """⚠️ This is the script's only TAB-separated output path — the board's other
+            output is box-rendered. A registry name carrying a tab or a newline would
+            corrupt the row, so both are folded to spaces here rather than left to the
+            reader."""
+            return " ".join(str(text).split())
+
         for sid, name, titles in found:
-            print(f"MISMATCH\t{sid[:8]}\t{name}\t{' | '.join(titles)}")
+            print(f"MISMATCH\t{sid[:8]}\t{cell(name)}\t{cell(' | '.join(titles))}")
         print(f"mismatches: {len(found)} of {len(merged)} sessions", file=sys.stderr)
         return 0
     ages = {sid: wnm.session_transcript_age(sid) for sid in merged}

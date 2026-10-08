@@ -829,11 +829,24 @@ class TestNameTitleMismatch(unittest.TestCase):
     def mismatch(self, registry, task_titles):
         return fb.name_title_mismatches(registry, task_titles)
 
-    def test_a_drifted_name_is_reported_with_the_row_it_resolves_to(self):
+    DRIFTED = "⚙ Sentry Dropped by Filters Not Quota"
+    DRIFTED_TITLE = "The Zero-Events Detector Reports an Outage While Sentry Still Stores Events"
+
+    def test_a_truncated_name_is_NOT_a_mismatch(self):
+        """⚠️ **The regression the bot review's CRITICAL named.** A truncated registry name
+        is the *normal healthy shape* after this change — the board classifies it as
+        managed. Reporting it as drift made `--mismatches` call every long-titled,
+        correctly managed session a mismatch. ⚠️ The earlier revision **pinned** this as a
+        mismatch, which is why CI did not surface it."""
         held = "⚙ A Renamed Task's Session Becomes Unaddressable"
+        self.assertEqual(self.mismatch({_sid(1): {"name": held}}, {_sid(1): [self.LONG]}), [])
+
+    def test_a_drifted_name_is_reported_with_the_row_it_resolves_to(self):
+        """A genuinely renamed task: the held name is not a prefix of the title, so it
+        names nothing under either tier — the case this mode exists for."""
         self.assertEqual(
-            self.mismatch({_sid(1): {"name": held}}, {_sid(1): [self.LONG]}),
-            [(_sid(1), held, [self.LONG])])
+            self.mismatch({_sid(1): {"name": self.DRIFTED}}, {_sid(1): [self.DRIFTED_TITLE]}),
+            [(_sid(1), self.DRIFTED, [self.DRIFTED_TITLE])])
 
     def test_a_matching_name_is_not_a_mismatch(self):
         self.assertEqual(
@@ -860,11 +873,11 @@ class TestNameTitleMismatch(unittest.TestCase):
             [(_sid(1), held, [self.LONG])])
 
     def test_the_report_is_sorted_and_deduplicated(self):
-        held = "⚙ A Renamed Task's Session Becomes Unaddressable"
-        got = self.mismatch({_sid(2): {"name": held}, _sid(1): {"name": held}},
-                            {_sid(2): [self.LONG], _sid(1): [self.LONG, self.LONG]})
+        got = self.mismatch({_sid(2): {"name": self.DRIFTED}, _sid(1): {"name": self.DRIFTED}},
+                            {_sid(2): [self.DRIFTED_TITLE],
+                             _sid(1): [self.DRIFTED_TITLE, self.DRIFTED_TITLE]})
         self.assertEqual([row[0] for row in got], [_sid(1), _sid(2)])
-        self.assertEqual(got[0][2], [self.LONG])
+        self.assertEqual(got[0][2], [self.DRIFTED_TITLE])
 
 
 if __name__ == "__main__":

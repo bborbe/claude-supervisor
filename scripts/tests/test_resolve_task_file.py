@@ -117,6 +117,17 @@ class ResolveTaskFileTest(unittest.TestCase):
         r = self.run_script([name], [v])
         self.assertEqual("", self.path_for(r, name))
 
+    def test_a_sibling_suffix_after_md_is_not_read_as_a_truncation(self):
+        """The other shape the `.md` requirement excludes, and it fails for a
+        different-looking reason than the `.png` case: `….md.gpg` DOES start with the stem
+        and does contain `.md`, but does not END in it."""
+        full = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry "
+                "Name Is Write-Once and the Title Is Not")
+        name = "⚙ A Renamed Task's Session Becomes Unaddressable"
+        v = self.vault("private-personal", files=(f"{full}.md.gpg",))
+        r = self.run_script([name], [v])
+        self.assertEqual("", self.path_for(r, name))
+
     def test_an_ambiguous_truncation_resolves_nothing_and_names_both(self):
         """⚠️ **"Never guesses" survives the new tier.** Two titles under one prefix is a
         guess with no single answer, so the name resolves to nothing — the same
