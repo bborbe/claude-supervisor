@@ -969,7 +969,44 @@ def cmd_card_answer(args):
             "  session and only that session can close its own entry."
             % (sid[:8], args.item_id)
         )
+    if len(matches) > 1:
+        # A card belongs to exactly one entry — the dedup key is per entry — so two matches
+        # is a ledger defect, not a caller error. Closing the first would leave the rest
+        # open against a card that is already answered, which reads afterwards exactly like
+        # an ask still outstanding.
+        sys.exit(
+            "error: %d entries in session %s carry card %s — nothing written.\n"
+            "  One card belongs to one entry, so this is a ledger defect rather than a\n"
+            "  caller error. Closing the first would leave the others open against a card\n"
+            "  that is already answered:\n    %s\n"
+            "  Inspect with `list --state all --include-closed` and repair by hand."
+            % (
+                len(matches),
+                sid[:8],
+                args.item_id,
+                "\n    ".join(sorted(i["id"] for i in matches)),
+            )
+        )
     item = matches[0]
+    if item["state"] == "closed":
+        # REFUSE, and write nothing. The four writes below are unconditional, so closing
+        # again REPLACES this entry's `closed_evidence` with a new claim — the same hazard
+        # `withdraw` refuses on an already-closed entry for, and the reason is the same:
+        # a later reader cannot tell the replacement from the original, so a resolved ask
+        # is retrospectively recorded as one resolved some other way. A replayed
+        # `ANSWERED <item-id>` is the usual cause, and the entry needs nothing.
+        sys.exit(
+            "error: entry %s is already closed — nothing written.\n"
+            "  Closing it again would replace its recorded close evidence with a new\n"
+            "  claim, which a later reader cannot distinguish from the original. A\n"
+            "  replayed `ANSWERED %s` is the usual cause; the entry is already resolved.\n"
+            "  Current evidence: %s"
+            % (
+                item["id"],
+                args.item_id,
+                item.get("closed_evidence") or "(none recorded)",
+            )
+        )
     stamp = now()
     item["answer"] = args.text
     item["answered_at"] = stamp

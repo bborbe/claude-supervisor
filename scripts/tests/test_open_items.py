@@ -1055,6 +1055,34 @@ class CardLink(Base):
         self.assertIn("no entry", code)
         self.assertEqual(self.entry()["state"], "open")
 
+    def test_card_answer_refuses_an_already_closed_entry(self):
+        """The four close writes are unconditional, so a replayed `ANSWERED <item-id>`
+        would replace the entry's recorded close evidence with a new claim — the hazard
+        `withdraw` refuses on an already-closed entry for, and for the same reason."""
+        self.ask("Which?", "A", "B")
+        item = self.entry()
+        self.run_cli(
+            ["card-answer", "--item-id", item["card_item_id"], "--text", "A"]
+        )
+        code, _, _ = self.run_cli(
+            ["card-answer", "--item-id", item["card_item_id"], "--text", "B"]
+        )
+        self.assertIsInstance(code, str, "a replayed answer was not refused")
+        self.assertIn("already closed", code)
+        closed = self.entry("closed")
+        self.assertEqual(closed["answer"], "A", "the replay overwrote the first answer")
+
+    def test_card_sync_leaves_the_entry_open_on_a_failed_poll(self):
+        """A `failed` poll is a fact about the CARD, not about the entry. Closing on it
+        would forge an answer nobody gave."""
+        self.ask("Which?", "A", "B")
+        item = self.entry()
+        self.answers[item["card_item_id"]] = ("failed", "store unreachable")
+        self.run_cli(["card-sync"])
+        still = self.entry()
+        self.assertEqual(still["state"], "open")
+        self.assertIsNone(still["answer"])
+
     def test_card_sync_backfills_an_entry_whose_post_failed(self):
         oi.post_card = lambda *a, **k: None  # store unreachable at add time
         self.ask("Which?", "A", "B")
