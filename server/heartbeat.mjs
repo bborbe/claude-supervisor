@@ -31,6 +31,20 @@
 // lapsed manager vs a deliberately stopped one — the same way: a file whose mtime marks the
 // last event that actually happened, read against a period rather than a boolean flag. A
 // flag decays silently in the dangerous direction; an age over-reports loudly.
+//
+// ⚠️ **This directory now holds MORE THAN ONE KIND of session, and the older readers predate
+// that.** It was the *headless worker* store — `live-workers.py` says so in its own header —
+// and the readers filter on `.json` plus mtime, never on `mode`. The self-stamp added for the
+// session the server runs inside is `mode: 'local'`, so it appears among what those readers
+// describe as live headless workers. **No instrument is wrong today**, because the commands
+// that must count workers go through the ledger-filtered `worker-sessions.py --count` rather
+// than the raw directory — but the distinction is carried by `mode` and nothing enforces it.
+// A reader that needs one kind must filter on `mode`; a reader that cannot tell them apart
+// should say which it is reporting.
+//
+// This is the same hazard the state directory avoids by being a sibling: everything in ONE
+// directory being read as one kind of thing. Here the directory is genuinely shared, so the
+// discriminator has to be explicit rather than structural.
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -67,7 +81,7 @@ export function stampPath(dir, sessionId) {
 //
 // Written via a temporary file and renamed, matching `writeRecord`: a reader must never see
 // a half-written stamp and read it as a worker with no id.
-export function stampRecord(dir, { sessionId, pid, mode, source, at = new Date().toISOString() }, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
+export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, location, activity, at = new Date().toISOString() }, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
   const path = stampPath(dir, sessionId)
   fs.mkdirSync(dir, { recursive: true })
   const tmp = `${path}.tmp`
@@ -77,10 +91,86 @@ export function stampRecord(dir, { sessionId, pid, mode, source, at = new Date()
   // rather than defaulted, so a headless worker's stamp keeps exactly the shape it had.
   const record = { sessionId, pid, mode, at }
   if (source !== undefined) record.source = source
+  // The session-liveness fields, added for the attention store's read path. Same rule as
+  // `source`: carried only when the writer sets them, so a stamp from a writer that knows
+  // none of them is byte-for-byte what it was before this change.
+  //
+  // ⚠️ `task` and `vault` are a PAIR and the store rejects one without the other, because a
+  // task name collides across vaults — half an anchor cannot be resolved later. They are
+  // written together or not at all, which is why the guard tests both rather than each.
+  if (task !== undefined && vault !== undefined) {
+    record.task = task
+    record.vault = vault
+  }
+  if (location !== undefined) record.location = location
+  // ⚠️ `activity`, NOT `state` — the name `state` on a stamp is reserved by the liveness
+  // verdict four readers synthesize. They gate on `stamp.get("state", "live") != "live"`
+  // (`worker-sessions.py:166`, `fleet-board.py:1096`, `adopt-orphans.py:139`,
+  // `session-liveness.py:663/693/803`), where a MISSING key must read as `live` rather than
+  // vanish.
+  //
+  // ⚠️ **No reader consumes a raw stamp's `state` today, and this comment first claimed one
+  // did** — asserting that a `busy` written here "reads as NOT-live" and frees a duplicate
+  // auto-resume. That was wrong, and it was verified wrong by running the reader rather than
+  // reading it: `live-workers.py`'s `readLive` is the single chokepoint that parses a raw
+  // stamp, and it builds a FRESH object carrying its own `state` verdict without ever reading
+  // the file's — so all four gates see the synthesized value, and a stamp carrying
+  // `state: "busy"` is counted live by `live-workers.py --list` exactly like one carrying
+  // `activity: "busy"`. The key is therefore WRITE-ONLY, and the rename is PREVENTIVE: it
+  // removes a name that collides with the verdict vocabulary before a raw-stamp reader exists
+  // to be bitten by it. See `SESSION_STATES`.
+  if (activity !== undefined) record.activity = activity
   fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`)
   fs.renameSync(tmp, path)
   return path
 }
+
+// What a session is doing, as last recorded by a state hook. `null` when no hook has fired.
+//
+// ⚠️ The AGE is what decides liveness; this only says what the live session is up to. A
+// missing or unreadable file is `null` — "no hook has fired" — never a guessed `busy`, because
+// a wrong state reads as knowledge while an absent one reads as absence.
+//
+// ⚠️ The id is shape-checked before it becomes a path component, and the check is stated
+// STANDALONE rather than as a mirror of anything: the write side of this contract
+// (`safe_session_id` in `scripts/heartbeat-state.py`) ships with the event half of this work,
+// in its own PR, so a pointer to it would land on nothing in this tree. The reader must
+// refuse an unchecked id either way — a reader that joined one would be the other half of the
+// same traversal.
+export function readState(sessionId, { dir = config.heartbeatStateDir } = {}) {
+  if (!SESSION_ID_PATTERN.test(sessionId ?? '')) return null
+  try {
+    const record = JSON.parse(readFileSync(join(dir, `${sessionId}.json`), 'utf8'))
+    return SESSION_STATES.includes(record?.state) ? record.state : null
+  } catch {
+    return null
+  }
+}
+
+// What a session id may look like before it becomes a FILENAME. See `readState` for why the
+// check is here as well as in the writer.
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/
+
+// The states a session can report, and the vocabulary the heartbeat contract names.
+//
+// ⚠️ **These ride on the stamp as `activity`, never as `state`.** `state` on a stamp is the
+// name the liveness VERDICT uses: `live-workers.py` writes `state: "live" | "unknown"`, and
+// four readers gate on `stamp.get("state", "live") != "live"`, where a MISSING key must read
+// as `live` rather than vanish.
+//
+// ⚠️ **Those four gates never see a raw stamp, and an earlier revision of this comment said
+// they did** — claiming every live self-stamp was "in fact dropped as not-live". It was not.
+// `live-workers.py`'s `readLive` parses a raw stamp and builds a fresh object carrying its own
+// verdict; nothing anywhere reads the file's `state`. The rename is PREVENTIVE, not a repair:
+// the key is write-only today, which makes this the cheapest moment to stop it sharing a name
+// with the verdict. See `stampRecord`.
+//
+// ⚠️ Membership is checked on READ, not just on write. The state hook validates its own
+// argument, but the file is in a shared state directory — a hand-edited or older record must
+// not put a value on the wire that no reader's vocabulary contains. An unrecognised state
+// returns `null`, and the CALLER turns that into the documented `idle` — this function does
+// not, so a reader can still tell "no hook has fired" from "a hook said idle".
+export const SESSION_STATES = ['busy', 'idle', 'waiting-on-operator']
 
 // null = no information (the directory could not be read), false = read, and no fresh stamp.
 //
@@ -184,4 +274,70 @@ export function sweepStale({ dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_MS, now =
     }
   }
   return removed
+}
+
+// The session this server runs INSIDE — stamped on the same interval as the workers.
+//
+// ⚠️ Lives HERE rather than in `supervisor.mjs` because this module owns the stamp, and the
+// lifecycle is only testable where the store is: `supervisor.mjs` has no export surface (a
+// test importing it would start an MCP server), so a self-stamp owned there could never be
+// covered at all. Moving it here is what makes the null no-op, the re-stamp and the clear on
+// stop assertable rather than described.
+//
+// ⚠️ The per-worker stamps cannot cover this session: they are keyed on workers this server
+// SPAWNED, and the interactive tab the server itself runs in is not one of those. Without
+// this, every interactive session reads dead to the attention store while a headless worker
+// it spawned reads live — the exact asymmetry the session-liveness work exists to remove.
+//
+// ⚠️ The anchor (`task`/`vault`) is deliberately OMITTED rather than resolved. Filling it
+// would mean reading the vault on the liveness path, and a store that exists so a dead
+// session is detectable must not depend on anything that can fail independently of the
+// session it is reporting on. The store accepts an unanchored row by design; the row still
+// answers alive, where, and what state.
+//
+// Returns `null` for a missing session id, so a server started outside a session stamps
+// nothing rather than stamping under an invented key — a row under a made-up id would be a
+// permanent phantom reading Live until its TTL, with no session able to clear it.
+export function startSelfStamp(sessionId, {
+  dir = heartbeatDir,
+  intervalMs = HEARTBEAT_INTERVAL_MS,
+  readActivity = readState,
+  onError = () => {},
+} = {}) {
+  if (!sessionId) return null
+  const write = () => {
+    try {
+      stampRecord(dir, {
+        sessionId,
+        pid: process.pid,
+        mode: 'local',
+        source: 'mcp-timer',
+        location: 'local',
+        // Read per tick rather than captured once: the hooks write this on events, and a
+        // value captured at start would report the state the session had when the server came
+        // up for the rest of its life. `idle` is the documented answer for "no hook has fired
+        // yet" — see `readState`.
+        activity: readActivity(sessionId) ?? 'idle',
+      })
+    } catch (error) {
+      // A session whose stamp cannot be written still runs. Losing the heartbeat degrades a
+      // manager's verdict to "could not tell" — which is the honest answer — whereas letting
+      // this throw would take down the server that owns the session.
+      onError(error)
+    }
+  }
+  write()
+  const timer = setInterval(write, intervalMs)
+  // Unref'd so a pending refresh never holds the process open after its work is done.
+  timer.unref?.()
+  return {
+    // ⚠️ Clears the STAMP as well as the timer, which is what `clearStamp`'s own doc asks for
+    // ("so the next reader does not have to wait out a TTL"). Without it a restarted server
+    // leaves its OWN row reading live for a full TTL — and the self-stamp is the one row an
+    // operator is most likely to be looking at.
+    stop() {
+      clearInterval(timer)
+      clearStamp(sessionId, { dir })
+    },
+  }
 }

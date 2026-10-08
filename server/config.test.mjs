@@ -72,9 +72,24 @@ test('the config object is a frozen, complete surface', () => {
     'mcpConfig',
     'workerColor',
     'heartbeatDir',
+    'heartbeatStateDir',
+    'sessionId',
   ]) {
     assert.ok(key in config, `config.${key} is missing — the surface must be enumerable`)
   }
+})
+
+test('the heartbeat state directory is a SIBLING of the store, never inside it', () => {
+  // ⚠️ Everything in `heartbeatDir` is a stamp: read for its age and listed as a session. A
+  // state file living there would be listed as a session that does not exist, so the two must
+  // not be the same directory — and a wrong default here is uncaught by the readState tests,
+  // which all pass an explicit `dir`.
+  assert.notEqual(config.heartbeatStateDir, config.heartbeatDir)
+  assert.equal(
+    config.heartbeatStateDir,
+    join(config.stateDir, 'heartbeat-state'),
+    'the state directory must hang off the same state home the store does',
+  )
 })
 
 test('the resolved paths hang off the XDG homes rather than the checkout', () => {
@@ -109,6 +124,31 @@ test('SUPERVISOR_SESSIONS_DIR overrides the registry location', async () => {
   } finally {
     if (before === undefined) delete process.env.SUPERVISOR_SESSIONS_DIR
     else process.env.SUPERVISOR_SESSIONS_DIR = before
+  }
+})
+
+test('sessionId is the env var, and null when it is absent', async () => {
+  // ⚠️ The load-bearing half is the `null`, not the value. A server started outside a session
+  // must stamp NOTHING rather than stamping under an invented key — a row under a made-up id
+  // would be a permanent phantom reading Live until its TTL, with no session able to clear it.
+  // The enumerable-surface test only proves the property EXISTS, which is the weaker claim.
+  const before = process.env.CLAUDE_CODE_SESSION_ID
+  try {
+    process.env.CLAUDE_CODE_SESSION_ID = 'fa942d7a-c190-46dd-93f3-8dfe3280046b'
+    assert.equal(
+      (await import('./config.mjs?session-id=set')).config.sessionId,
+      'fa942d7a-c190-46dd-93f3-8dfe3280046b',
+    )
+
+    delete process.env.CLAUDE_CODE_SESSION_ID
+    assert.equal(
+      (await import('./config.mjs?session-id=absent')).config.sessionId,
+      null,
+      'an absent variable must be null, never an empty string that would key a phantom row',
+    )
+  } finally {
+    if (before === undefined) delete process.env.CLAUDE_CODE_SESSION_ID
+    else process.env.CLAUDE_CODE_SESSION_ID = before
   }
 })
 
