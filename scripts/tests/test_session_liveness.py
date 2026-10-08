@@ -58,12 +58,24 @@ class SessionLiveness(unittest.TestCase):
         # reading the real one would answer for whatever process last held that number.
         self._prior_cache_env = os.environ.get("SUPERVISOR_START_CACHE")
         os.environ["SUPERVISOR_START_CACHE"] = os.path.join(self.tmp.name, "starts.json")
+        # The cluster reachability marker lives in the heartbeat store, and it decides a
+        # not-live cluster row's verdict — so it is isolated too: a suite reading the real store
+        # would answer for whatever the machine's mirror last wrote. `live-workers.py` resolves
+        # this variable, which is exactly the store the marker is read from.
+        self.heartbeat = os.path.join(self.tmp.name, "heartbeat")
+        os.makedirs(self.heartbeat)
+        self._prior_heartbeat_env = os.environ.get("SUPERVISOR_HEARTBEAT_DIR")
+        os.environ["SUPERVISOR_HEARTBEAT_DIR"] = self.heartbeat
 
     def tearDown(self):
         if self._prior_cache_env is None:
             os.environ.pop("SUPERVISOR_START_CACHE", None)
         else:
             os.environ["SUPERVISOR_START_CACHE"] = self._prior_cache_env
+        if self._prior_heartbeat_env is None:
+            os.environ.pop("SUPERVISOR_HEARTBEAT_DIR", None)
+        else:
+            os.environ["SUPERVISOR_HEARTBEAT_DIR"] = self._prior_heartbeat_env
         self.tmp.cleanup()
 
     def plant(self, session_id, pid=None, name="synth", **extra):
@@ -99,6 +111,14 @@ class SessionLiveness(unittest.TestCase):
                 ["--list", "--json", "--endpoint", endpoint, "--dir", directory or self.registry]
             )
         return rc, json.loads(out.getvalue())
+
+    def coverage(self, endpoint, directory=None):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.main(
+                ["--coverage", "--endpoint", endpoint, "--dir", directory or self.registry]
+            )
+        return rc, out.getvalue() + err.getvalue()
 
     # ---- the falsifier: prefix and full id agree -------------------------------------
 
@@ -196,6 +216,72 @@ class SessionLiveness(unittest.TestCase):
             self.assertEqual(self.check("abc12345-1111", fx.url)[0], LIVE)
             self.assertEqual(self.check("abc12345-9999", fx.url)[0], LIVE)
 
+    # ---- the cluster reachability marker (the dropped safety signal) --------------------
+
+    def test_a_not_live_cluster_row_with_a_stale_marker_is_unknown(self):
+        # The regression this guards: the row's `state` is the session's ACTIVITY, never whether
+        # the cluster was reachable, so the cluster-unreachable fact survives only in the LOCAL
+        # marker. A missing marker is stale, and a stale marker means the mirror could not read
+        # the cluster — so this row may be a worker alive behind a network fault, and ABSENT
+        # would authorise a resume onto it.
+        sid = "c1u57e00-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, live=False, source="cluster")]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_a_not_live_cluster_row_with_a_fresh_marker_is_absent(self):
+        # A fresh marker means the mirror DID read the cluster, so the staleness is the ordinary
+        # death case and ABSENT is licensed.
+        open(os.path.join(self.heartbeat, "_cluster-reachability.json"), "w").close()
+        sid = "c1u57e00-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, live=False, source="cluster")]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("ABSENT", out)
+
+    def test_a_not_live_non_cluster_row_is_absent_even_with_a_stale_marker(self):
+        # The marker is consulted ONLY for a cluster row: a local stale row keeps its ABSENT.
+        sid = "10ca1500-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, live=False, source="mcp-timer")]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("ABSENT", out)
+
+    def test_a_live_cluster_row_is_live(self):
+        # The marker governs only the not-live arm — a live cluster row is LIVE regardless.
+        sid = "11vec1u5-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, source="cluster")]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, LIVE)
+
+    # ---- the id is an argument, and the per-id URL is where it is interpolated -----------
+
+    def test_a_hostile_id_never_reaches_the_wire_raw(self):
+        # `quote(sid, safe="")` is the only thing between a hostile argument and a path traversal
+        # or a query injection on the per-id route. Pin it: none of `../`, `?`, `%2f` may survive
+        # unescaped into a URL the probe builds.
+        seen = []
+        real = self.m._get_json
+
+        def spy(url, timeout=None):
+            seen.append(url)
+            return real(url, timeout)
+
+        self.m._get_json = spy
+        try:
+            with FixtureEndpoint([]) as fx:
+                for hostile in ("../etc/passwd", "abc?live=true", "abc%2fdef"):
+                    rc, out = self.check(hostile, fx.url)
+                    self.assertEqual(rc, ABSENT, hostile)
+        finally:
+            self.m._get_json = real
+        self.assertTrue(seen)
+        for url in seen:
+            self.assertNotIn("../", url)
+            self.assertNotIn("?", url)
+            self.assertNotIn("%2f", url)
+
     # ---- --list ------------------------------------------------------------------------
 
     def test_list_shows_only_live_sessions(self):
@@ -265,6 +351,39 @@ class SessionLiveness(unittest.TestCase):
         with FixtureEndpoint([row("deadp1d0-1111-2222-3333-444455556666", live=False)]) as fx:
             _, rows = self.json_listing(fx.url)
         self.assertEqual(rows, [])
+
+    # ---- --coverage: the ABSENT precondition, measured not assumed ----------------------
+
+    def test_coverage_is_complete_when_every_registry_live_session_is_stamped(self):
+        # A planted record with this process's pid is not dead by the registry's own rule
+        # (`alive` is `None`, not `False`), so it must be stamped at the endpoint.
+        sid = "c0ve2a6e-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, line = self.coverage(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertIn("endpoint_live=1 registry_live=1 missing=0", line)
+
+    def test_coverage_is_incomplete_when_a_registry_live_session_is_unstamped(self):
+        # The state in which ABSENT is unsafe: a session the registry holds live with no live
+        # endpoint row. Non-zero exit is the whole point.
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        with FixtureEndpoint([row("bbbb2222-1111-2222-3333-444455556666")]) as fx:
+            rc, line = self.coverage(fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("missing=1", line)
+
+    def test_coverage_on_an_unreachable_endpoint_is_unknown(self):
+        # "Could not measure" is not "measured complete" — never a fabricated 0.
+        rc, line = self.coverage(dead_url())
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", line)
+
+    def test_coverage_on_an_unreadable_registry_is_unknown(self):
+        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+            rc, line = self.coverage(fx.url, directory=os.path.join(self.tmp.name, "nope"))
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", line)
 
 
 if __name__ == "__main__":

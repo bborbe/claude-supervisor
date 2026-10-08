@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 # Side effect only: points the start-time cache at an isolated per-run store, in one shared
 # home so five suites cannot each assign the same key and leave only the last standing.
 import start_cache_isolation  # noqa: E402,F401
-from endpoint_fixture import FixtureEndpoint  # noqa: E402
+from endpoint_fixture import FixtureEndpoint, row as heartbeat_row  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "approved-not-started.py")
@@ -250,16 +250,21 @@ class UnreadableRegistry(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         task_file(self.dir, "Waiting", "approved_at: 2026-10-01T21:00:00Z\nstatus: next")
-        # A readable identity registry holding one session, plus an EMPTY fixture endpoint --
-        # `session-liveness.py --list` reports a list only when BOTH the endpoint (liveness)
-        # and the registry (names) were read. The endpoint is a fixture on an ephemeral port
-        # pointed at through `$ATTENTION_STORE_URL`, so the real store on this machine cannot
-        # turn the clean-run assertion below into a failure when the store is down.
+        # A readable identity registry holding one session, plus a fixture endpoint holding one
+        # LIVE row — `session-liveness.py --list` reports a list only when BOTH the endpoint
+        # (liveness) and the registry (names) were read. ⚠️ **The endpoint row is not decoration:
+        # an EMPTY endpoint no longer requires the registry** — `session-liveness.py` decides the
+        # empty case before it reads the registry, so a readable-but-empty store returns a clean
+        # `[]` whatever the registry does. The registry-unreadable path this class probes is only
+        # reachable while the endpoint actually holds a live row, which is why the fixture carries
+        # one. The endpoint is a fixture on an ephemeral port pointed at through
+        # `$ATTENTION_STORE_URL`, so the real store on this machine cannot turn the clean-run
+        # assertion below into a failure when the store is down.
         self.registry = tempfile.mkdtemp()
         with open(os.path.join(self.registry, "%d.json" % os.getpid()), "w", encoding="utf-8") as handle:
             json.dump({"pid": os.getpid(), "sessionId": "live-session-1", "name": "Live"}, handle)
         self.heartbeat = tempfile.mkdtemp()
-        self._endpoint = FixtureEndpoint([])
+        self._endpoint = FixtureEndpoint([heartbeat_row("live-session-1")])
         self._endpoint.__enter__()
         self._prior_url = os.environ.get("ATTENTION_STORE_URL")
         os.environ["ATTENTION_STORE_URL"] = self._endpoint.url
