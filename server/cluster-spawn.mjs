@@ -12,7 +12,13 @@
 // conversation ran it. The proof is the serving pod's own log — the `turn start id=<id>` /
 // `turn end id=<id>` pair from `interactive/session-cache.go` — and that is the caller's to
 // read. This module reports the id it addressed and the status it got, and claims nothing
-// further; a caller that treats the response as the evidence has an unfalsifiable check.
+// further about the session; a caller that treats the response as the evidence has an
+// unfalsifiable check.
+//
+// ⚠️ **What the turn SAID is a separate thing from whether a session exists, and it is
+// returned too.** A 200 carries the child's own answer as `text/plain`, and dropping it is
+// the defect this module's return shape exists to prevent — see `classifyClusterAnswer` below
+// for why the answer alone is not enough to tell a failed turn from an empty one.
 //
 // ⚠️ **The id must match the service's pattern**, asserted here rather than assumed. The id
 // reaches a backend CLI as a command-line argument, so a leading `-` is parsed as a flag and
@@ -60,6 +66,48 @@ export const AUTH_SCHEME = 'Bearer '
 // to wait for. Bounded rather than unbounded so a wedged pod costs one error, not a manager
 // session stuck inside a tool call.
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
+
+// How much of the child's answer travels back to the caller. The answer is a whole turn's
+// text and its reader is a manager session whose context it lands in, so it is bounded
+// rather than pasted whole. 4000 matches `agent-loop.mjs`'s bound on the SDK result it
+// records — one number for "how much of a finished turn a caller is shown", whichever way
+// that turn ran.
+export const CLUSTER_ANSWER_MAX = 4000
+
+// What the child's answer says about the turn it just ran.
+//
+// ⚠️ **This reads a CHILD-side convention, not a service guarantee.** `POST /prompt` hands
+// back whatever the session said, as opaque text — nothing in its contract promises JSON, or
+// a `status` field. The convention observed on the deployed pod (2026-10-08, `bborbe/agent`)
+// is one JSON object: `{"status":"failed","message":"…"}` when the child could not do the
+// work, `{"status":"success"}` when it did. It is read here because the alternative is worse:
+// a failed turn and a successful one BOTH arrive as a 200 carrying text, so a caller that
+// only sees the raw answer must already know that convention to tell them apart — and the
+// caller that did not know read three failed turns as three empty ones for a day.
+//
+// The parse is deliberately NARROW, and the raw answer is always returned beside the verdict,
+// so a child that answers in prose, or in some other JSON shape, is reported `answered` and
+// nothing about its text is reinterpreted. A wider classifier would be inventing a failure
+// taxonomy over a payload it does not own.
+export function classifyClusterAnswer(answer) {
+  const text = typeof answer === 'string' ? answer.trim() : ''
+  // `empty` is its own verdict, not a flavour of failure: a turn that answered nothing and a
+  // turn that answered "I could not do this" are different facts, and the whole defect this
+  // fixes was the two being read as one.
+  if (text === '') return 'empty'
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return 'answered'
+  }
+  // An object, never an array or a scalar — `JSON.parse('42')` succeeds and carries no status.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return 'answered'
+  const status = typeof parsed.status === 'string' ? parsed.status.toLowerCase() : null
+  if (status === 'failed' || status === 'error') return 'failed'
+  if (status === 'success' || status === 'ok') return 'succeeded'
+  return 'answered'
+}
 
 // The session id a new cluster worker addresses. A UUID rather than a slug of the task name:
 // two workers on one task must not collide, and the task is bound to the id afterwards
@@ -330,5 +378,11 @@ export async function startClusterSession({
 
   // The id is returned, not discovered — see the header. `status` rides along so a caller
   // recording the spawn has the one fact the response does carry.
-  return { sessionId, status: response.status, answer: body }
+  //
+  // ⚠️ **`answer` is the child's own words and is the whole of what the turn produced.** It
+  // rides back here rather than being read by the caller from the response, because the
+  // response is gone by the time this function returns and a caller that re-derives it has
+  // nothing to re-derive it from. `outcome` is `classifyClusterAnswer`'s reading of that same
+  // text — a convenience beside the raw answer, never a replacement for it.
+  return { sessionId, status: response.status, answer: body, outcome: classifyClusterAnswer(body) }
 }

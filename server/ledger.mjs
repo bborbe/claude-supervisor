@@ -98,6 +98,7 @@ export function buildRecord({
   policy = null,
   parentSession = null,
   role = null,
+  result = null,
   spawnedAt,
 }) {
   if (!sessionId) throw new Error('buildRecord needs a sessionId — it is the key')
@@ -137,7 +138,12 @@ export function buildRecord({
     spawned_at: spawnedAt ?? new Date().toISOString(),
     ended_at: null,
     status: 'running',
-    result: null,
+    // Null at spawn for every local mode — a tab or headless worker has no result yet, and
+    // its terminal patch supplies one later. A CLUSTER worker is the exception and the reason
+    // this is a parameter rather than a constant: its turn completes inside the spawn call, so
+    // its result is final before the record is written. Hard-coding null here is what left the
+    // durable half asserting nothing about a turn that had already answered.
+    result,
   }
 }
 
