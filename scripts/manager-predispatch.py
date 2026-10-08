@@ -925,6 +925,12 @@ def _names_the_same_session(wanted: str, held: str) -> bool:
     identity, so in the reachable case both candidates are live and the verdict is the
     same either way. ⚠️ **The length floor is what carries the safety here**, not
     uniqueness.
+
+    ⚠️ **The case the paragraph above does NOT cover, named rather than argued away:** two
+    *different* titles sharing a ≥20-character prefix truncate to the same held string, so
+    one live session's name prefix-matches **both** rows and the genuinely unowned one is
+    withheld — the false-match direction this docstring calls the worse error. Unlikely at
+    the measured 46-character truncation, but reachable at the 20-character floor.
     """
     # ⚠️ **Both sides normalized here, not just `held`.** `roster_owner` already normalizes
     # what it passes, so this is idempotent for it — but a second caller handing in a raw

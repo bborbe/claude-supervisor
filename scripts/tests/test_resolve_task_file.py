@@ -105,6 +105,17 @@ class ResolveTaskFileTest(unittest.TestCase):
         r = self.run_script(["boss"], [v])
         self.assertEqual("", self.path_for(r, "boss"))
 
+    def test_a_decorated_filename_is_not_folded_into_its_plain_twin(self):
+        """⚠️ **The exact tier stays exact.** Running the *session-label* normalizer over
+        an on-disk basename folded `- Notes.md` and `Notes.md` into one key, so a
+        previously unique resolution became a false `AMBIGUOUS` — the round-3 review's
+        MAJOR. Whitespace still collapses on both sides (a filename rule too), but the
+        leading-decoration strip is a session-name rule and is not applied here."""
+        v = self.vault("private-personal", files=("Notes.md", "- Notes.md"))
+        r = self.run_script(["Notes"], [v])
+        self.assertEqual(str(self.root / "private-personal" / "25 Tasks" / "Notes.md"),
+                         self.path_for(r, "Notes"))
+
     def test_a_non_md_attachment_is_not_read_as_a_truncation(self):
         """⚠️ **The prefix tier still requires a `.md` entry.** Without that it matches
         anything merely *starting* with the stem — an Obsidian attachment (`….png`) or a

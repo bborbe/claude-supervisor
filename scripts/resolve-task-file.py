@@ -142,6 +142,20 @@ def _norm_session_name(name):
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
+def _norm_basename(text):
+    """Casefolded, whitespace-collapsed filename key — **without** the decoration strip.
+
+    ⚠️ **The decoration strip is a session-label rule, not a filename rule.** Applying
+    `_norm_session_name` to an on-disk basename folds `- Notes.md` and `Notes.md` into one
+    key, so a previously unique resolution becomes a false `AMBIGUOUS` (the round-3
+    review's MAJOR, 2026-10-08). Whitespace collapsing **is** wanted on both sides — a
+    double-spaced filename should still match its single-spaced lookup — so this keeps
+    that and drops the strip.
+    """
+    text = unicodedata.normalize("NFKC", text or "").strip()
+    return re.sub(r"\s+", " ", text).casefold()
+
+
 def _matches(basename, stem, prefix):
     """Does a directory entry's basename name this stem?
 
@@ -193,7 +207,7 @@ def hits(vaults, key, stem, prefix=False):
         except OSError:
             continue
         found += [os.path.join(full, e) for e in entries
-                  if _matches(_norm_session_name(e), stem, prefix)
+                  if _matches(_norm_basename(e), stem, prefix)
                   and os.path.isfile(os.path.join(full, e))]
     return found
 
