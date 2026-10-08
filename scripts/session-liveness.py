@@ -18,7 +18,7 @@ fix. A unique match resolves; an ambiguous one refuses rather than guesses — t
 `who-needs-me.py:pane_for()` already settled. The per-id route cannot resolve a prefix
 (measured 2026-10-08: `/session-heartbeat/30fae0ae` → 404 for a live session), so a prefix is
 resolved against the list route — and the list route is fetched FIRST, so a prefix costs ONE
-round trip rather than the old 404-then-list pair; see `check()`.
+round trip rather than the old 404-then-list pair; see `_check()`.
 
 ⚠️ **UNKNOWN is a third answer, not a flavour of ABSENT.** An unreachable endpoint, or a
 response that is not 200 and not the store's 404, means the probe could not run — and a caller
@@ -153,9 +153,20 @@ def _cluster_reachable():
     re-derived here, so the two readers cannot drift: the file that writes the marker's meaning
     is the file that reads it. A missing marker is `False` (no mirror has run) — which errs
     toward UNKNOWN for a cluster row, the safe direction.
+
+    ⚠️ **Three states, not two: `True`, `False`, and `None`.** `False` is the definite "no mirror
+    has run" (or the marker aged out); `None` is "the marker's meaning could not be resolved at
+    all" — `live-workers.py` could not be imported or executed, or its API moved. `None` is
+    returned rather than raised, because this runs ON the ABSENT-licensing path (a not-live
+    `source: cluster` row) and an exception here would otherwise escape `_check` as exit 1 =
+    ABSENT — turning "cluster reachability unknown" into "the worker is dead". `_verdict_for`
+    folds both `False` and `None` to UNKNOWN.
     """
-    lw = _live_workers()
-    return lw.cluster_reachable(lw.heartbeat_dir())
+    try:
+        lw = _live_workers()
+        return lw.cluster_reachable(lw.heartbeat_dir())
+    except Exception:  # noqa: BLE001 — an unresolvable marker is UNKNOWN, never a confident ABSENT
+        return None
 
 
 def _get_json(url, timeout=_HTTP_TIMEOUT):
@@ -202,6 +213,29 @@ def read_endpoint(endpoint=None, timeout=_HTTP_TIMEOUT):
 
 
 def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
+    """`(verdict, message, row)` for one id argument — `_check` guarded so it never crashes.
+
+    ⚠️ **An exception escaping here would exit 1, which is this file's ABSENT code, so no
+    exception may escape.** `main()` returns `_check`'s verdict to `sys.exit()`, and that call is
+    reached only if `main()` returns at all — an uncaught exception propagates past it and Python
+    exits 1, the very code every caller maps to "not live, resume is authorised". That is the
+    defect class this file's history already records for `_load_start_cache`'s `OverflowError`:
+    an unexpected failure answered as permission to start a second writer. So the WHOLE probe is
+    wrapped: a `check()` that cannot complete answers UNKNOWN (exit 2), never a crash that reads
+    as ABSENT. `_check` also returns UNKNOWN on its own terms for the two failures it can name —
+    a non-string `session_id`, and an unresolvable cluster-reachability marker.
+    """
+    try:
+        return _check(session_id, endpoint, timeout)
+    except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller
+        return UNKNOWN, "session-liveness could not complete the check for %r: %s: %s" % (
+            (session_id or "").strip(),
+            type(exc).__name__,
+            exc,
+        ), None
+
+
+def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
     """`(verdict, message, row)` for one id argument, from the endpoint alone.
 
     ⚠️ **The list route is fetched FIRST, and that is a cost fix, not a taste.** The per-id
@@ -249,11 +283,38 @@ def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
     # The list carries every session the store has ever seen, live or stale — a stale row is
     # matched too, exactly as the registry's own keys were: the argument identifies a session,
     # and whether that session is live is the verdict that follows, not part of the match.
+    # ⚠️ **A `session_id` that is not a string is UNKNOWN, never matched and never ABSENT** — the
+    # same rule `_verdict_for` applies to a non-boolean `live`: the argument is a string, so a row
+    # whose id is not a string cannot be compared to it, and "I cannot rule this row out" is not
+    # "this session is gone". Checking the type here (rather than trusting the `.lower()` below)
+    # is also what keeps an `AttributeError` from escaping `_check` as exit 1 = ABSENT.
+    malformed = [
+        r for r in rows
+        if isinstance(r, dict) and r.get("session_id") and not isinstance(r.get("session_id"), str)
+    ]
+    if malformed:
+        return UNKNOWN, (
+            "the session-heartbeat endpoint served %d row(s) whose `session_id` is not a string "
+            "— cannot match the argument against them" % len(malformed)
+        ), None
     by_id = {
         r["session_id"]: r
         for r in rows
         if isinstance(r, dict) and r.get("session_id")
     }
+    # ⚠️ **`by_id` spans STALE rows too, so a prefix shared with a long-dead session now reads
+    # AMBIGUOUS where it used to resolve.** The old per-id route was an exact lookup that only
+    # ever saw a live row; matching against the whole list means a prefix can collide with a row
+    # the store has kept since a session died. That is a trade-off, not a bug: it fails SAFE —
+    # AMBIGUOUS is a refusal, never a wrong LIVE or ABSENT — and the caller resolves it by
+    # passing a longer id, which the AMBIGUOUS message names. See the module docstring on why a
+    # prefix is legal input in the first place.
+    #
+    # ⚠️ **The full-id case now transfers the WHOLE store, not one row.** The list route is
+    # fetched first so a prefix costs one round trip instead of two, and that makes a full-id
+    # probe pay for every row the store holds — the price of resolving both input shapes on one
+    # route. The exact-match fast path below is still a single dict lookup, so the added cost is
+    # bandwidth, not CPU.
     # The exact-match fast path: a full id is one dict lookup, and the prefix scan is skipped.
     exact = next((k for k in by_id if k.lower() == sid), None)
     if exact is not None:
@@ -302,11 +363,23 @@ def _verdict_for(row, sid):
     if live is True:
         return LIVE, full, row
     if live is False:
-        if row.get("source") == "cluster" and not _cluster_reachable():
-            return UNKNOWN, (
-                "%s is a cluster session and the local reachability marker is stale — the "
-                "cluster could not be read, so this row's staleness proves nothing" % full
-            ), row
+        if row.get("source") == "cluster":
+            reachable = _cluster_reachable()
+            # `True` is the only value that licenses ABSENT here. `False` is a stale marker (no
+            # mirror has run, or it aged out); `None` is a marker whose meaning could not be
+            # resolved (the `live-workers.py` sibling unavailable). Both mean the cluster could
+            # not be read, so the row's staleness proves nothing — see `_cluster_reachable`.
+            if reachable is not True:
+                why = (
+                    "the local reachability marker could not be resolved (`live-workers.py` is "
+                    "unavailable or unreadable)"
+                    if reachable is None
+                    else "the local reachability marker is stale"
+                )
+                return UNKNOWN, (
+                    "%s is a cluster session and %s — the cluster could not be read, so this "
+                    "row's staleness proves nothing" % (full, why)
+                ), row
         return ABSENT, full, row
     return UNKNOWN, (
         "%s has a heartbeat row with no usable `live` flag — cannot decide liveness" % full
@@ -450,18 +523,39 @@ def main(argv=None):
         )
         return UNKNOWN
 
-    # ⚠️ **The empty case is decided BEFORE the registry is read, and that ordering is the
-    # fix.** Only a live row is listed — the store keeps a row for a session long after it dies,
-    # and a `--list` that echoed them would count a dead fleet as a live one. When the endpoint
-    # holds no live row the answer does not depend on the registry at all, so requiring the
-    # registry first turned a readable-but-empty store into UNKNOWN whenever the registry
-    # happened to be unreadable — over-broad, and in the direction that reads a healthy idle
-    # fleet as a failed probe.
+    # Only a live row is listed — the store keeps a row for a session long after it dies, and a
+    # `--list` that echoed them would count a dead fleet as a live one.
     live_rows = [
         row for row in rows
         if isinstance(row, dict) and row.get("session_id") and row.get("live") is True
     ]
     if not live_rows:
+        # ⚠️ **An empty list is a POSITIVE claim about the whole fleet, so it pays the coverage
+        # precondition — the same one ABSENT pays, and for the same reason.** "No live rows"
+        # reads as "no session is live anywhere", which is exactly the ABSENT shape: during a
+        # partial rollout the endpoint holds no live row while the identity registry still lists
+        # live sessions, and `commands/open.md` Step 2C reads THIS call to decide whether to open
+        # a session — so a confident empty fleet there spawns a second session onto a live topic
+        # (the 2026-09-18 failure the non-empty path's names rule already guards against).
+        # `coverage()` is the measurement: it is LIVE only when every registry-live session has a
+        # live endpoint row; anything else — an unreadable registry, or a registry-live session
+        # with no live row — is UNKNOWN, never an empty list presented as complete.
+        #
+        # ⚠️ **This is stricter than the earlier "decide empty before the registry" ordering**,
+        # which returned exit 0 whenever the registry could not be read. That direction reads an
+        # unmeasurable fleet as an empty one, and empty is the resume-authorising shape, so it is
+        # wrong even though it kept a genuinely idle fleet from looking like a failed probe — and
+        # a genuinely idle fleet still measures LIVE here (endpoint empty AND registry empty), so
+        # it keeps its empty list.
+        verdict, line = coverage(args.endpoint, args.dir)
+        if verdict != LIVE:
+            print(
+                "UNKNOWN — no live row at the session-heartbeat endpoint, but the fleet's stamp "
+                "coverage is not complete (%s), so an empty list cannot be presented as a "
+                "complete fleet" % line,
+                file=sys.stderr,
+            )
+            return UNKNOWN
         if args.json:
             json.dump([], sys.stdout, indent=2)
             sys.stdout.write("\n")

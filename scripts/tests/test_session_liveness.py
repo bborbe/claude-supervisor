@@ -46,6 +46,25 @@ def load():
     return mod
 
 
+def load_from(directory):
+    """Load a COPY of `session-liveness.py` placed alone in `directory`.
+
+    The sibling imports (`live-workers.py`, `session-identity.py`) resolve against the script's
+    OWN directory, so a copy in an otherwise empty directory is how a case makes one of them
+    unimportable without touching the real tree — the same isolation rule the fixture, registry
+    and heartbeat store follow.
+    """
+    with open(os.path.join(os.path.dirname(_HERE), "session-liveness.py"), encoding="utf-8") as src:
+        text = src.read()
+    dst = os.path.join(directory, "session-liveness.py")
+    with open(dst, "w", encoding="utf-8") as out:
+        out.write(text)
+    spec = importlib.util.spec_from_file_location("session_liveness_isolated", dst)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 class SessionLiveness(unittest.TestCase):
     def setUp(self):
         self.m = load()
@@ -189,6 +208,35 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("no usable `live` flag", out)
 
+    def test_a_row_with_a_non_string_session_id_is_unknown(self):
+        # `by_id` keys on `r["session_id"]` and then calls `.lower()` on it; a non-string id
+        # raises `AttributeError`, which without a guard escapes `check()` as exit 1 = ABSENT.
+        # The row cannot be compared against the (string) argument, so the answer is UNKNOWN —
+        # the same "a store this reader does not understand" rule the non-boolean `live` gets.
+        bad = row("12345678-1111-2222-3333-444455556666")
+        bad["session_id"] = 12345678
+        with FixtureEndpoint([bad]) as fx:
+            rc, out = self.check("12345678", fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_an_unexpected_exception_is_unknown_not_a_crash(self):
+        # The blanket guard on `check()`: an exception `_check` does not itself anticipate (a
+        # RuntimeError from the HTTP layer, say — not the `OSError`/`ValueError` it catches) must
+        # become UNKNOWN. An uncaught traceback would exit 1, this file's ABSENT code, i.e.
+        # permission to resume onto a live conversation.
+        def boom(*_a, **_k):
+            raise RuntimeError("boom")
+
+        real = self.m._get_json
+        self.m._get_json = boom
+        try:
+            rc, out = self.check("3fd529af", "http://127.0.0.1:1")
+        finally:
+            self.m._get_json = real
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
     # ---- ambiguity ---------------------------------------------------------------------
 
     def colliding_pair(self):
@@ -255,6 +303,20 @@ class SessionLiveness(unittest.TestCase):
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, LIVE)
 
+    def test_an_unimportable_live_workers_is_unknown_not_absent(self):
+        # `_live_workers()` exec_module's the sibling with no guard, and this runs ON the
+        # ABSENT-licensing path (a not-live `source: cluster` row). A missing or unparseable
+        # `live-workers.py` must therefore answer UNKNOWN: an escape here is exit 1 = ABSENT,
+        # i.e. permission to resume onto a cluster worker that may be alive behind a fault.
+        mod = load_from(self.tmp.name)  # the copy sits alone: no sibling live-workers.py
+        sid = "c1u57e00-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, live=False, source="cluster")]) as fx:
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = mod.main(["--check", sid, "--endpoint", fx.url])
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out.getvalue() + err.getvalue())
+
     # ---- the id is an argument, and the per-id URL is where it is interpolated -----------
 
     def test_a_hostile_id_never_reaches_the_wire_raw(self):
@@ -318,6 +380,24 @@ class SessionLiveness(unittest.TestCase):
             rc, out = self.listing(fx.url, directory=os.path.join(self.tmp.name, "does-not-exist"))
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
+
+    def test_empty_list_refuses_a_partial_rollout(self):
+        # A partial rollout: the endpoint holds no live row while the registry still lists a live
+        # session. An empty list here is the confident-empty-fleet shape — `commands/open.md`
+        # Step 2C reads this call to decide whether to open a session — so it must not be
+        # presented as complete. It pays the same coverage precondition ABSENT pays.
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_empty_list_is_live_when_the_fleet_is_genuinely_idle(self):
+        # Endpoint empty AND registry empty: coverage is complete, so the empty list is honest.
+        with FixtureEndpoint([]) as fx:
+            rc, rows = self.json_listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertEqual(rows, [])
 
     # ---- --list --json: the shape `/supervisor:open` reads -------------------------------
 
