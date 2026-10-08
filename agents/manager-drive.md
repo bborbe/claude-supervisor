@@ -374,7 +374,7 @@ Nudged (1):            ← the caller voices these; a subagent has no TTS
 
 Freshness / in-flight drops (2):   ← the false-nudge guard: which check dropped the candidate, and the value
   <task> — freshness: file mtime 1758730800 > sweep's 1758729600 — moved after the sweep read it
-  <task> — in flight: limb 2 (tool.json state=open 4 min ago, Bash) — working, not stuck
+  <task> — in flight: limb 2 (tool.json state=open 4 min, Bash) — working, not stuck
   <task> — freshness: no mtime on the sweep's stuck row — un-checkable, not nudged
 
 To resume (1):         ← the caller spawns these, verifies, then writes last_auto_resume
