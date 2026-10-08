@@ -32,12 +32,18 @@ is consulted, and `LIMB` then guards the other direction — that the clause sti
 the labels a reader has to write. Both must hold on the same line.
 
 Anchored on the clause's own words, never on a line number: this file's neighbours cite
-`agents/manager-drive.md` by line range, and one of those citations has already drifted
-(`scripts/manager-attention-watch.py` pinned `:132` for a sentence at `:134`) — so a
-line-anchored read would report an offset as a defect. ⚠️ **This guard's own change is
-*not* an instance of that drift:** its edits are net-zero at the limb-2 paragraph and a
-single `+1` insert below every live citation, so no cited range moved. The general argument
-stands on its own; claiming this change as an example of it did not.
+`agents/manager-drive.md` by line number, and **four in-repo sites had drifted to `:132`
+for a sentence that sits at `:134`** — `scripts/manager-attention-watch.py` plus
+`agents/manager-sweep-reader.md`, `commands/manager-loop.md` and `commands/manager-status.md`.
+All four are corrected in the change that added this guard, so the drift is now historical
+rather than live — which is the point: it was found only by a reader checking a citation
+against its target, and nothing in the repo would have caught it. A prose anchor cannot
+drift that way.
+
+⚠️ **This guard's own change is *not* an instance of that drift:** its edits are net-zero at
+the limb-2 paragraph and a single `+1` insert below every live citation, so no cited range
+moved. The general argument stands on its own; claiming this change as an example of it did
+not, and that claim was removed before it landed.
 """
 
 import re
