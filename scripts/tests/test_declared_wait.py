@@ -96,6 +96,32 @@ class TestDeclaredWait(unittest.TestCase):
     def test_an_empty_sid_is_not_declared(self):
         self.assertFalse(dw.declared_wait("", state_dir=self.dir))
 
+    def test_a_non_string_detail_declares_nothing(self):
+        """A dict or list `detail` is "no declaration", never an exception.
+
+        ⚠️ Without the type guard this raises out of `declared_wait` and takes
+        `fleet-board.py`'s whole render and every `manager-predispatch.py` row with it.
+        This module's own failed-read contract says a malformed log leaves the session
+        ABSENT from the set — it never says the read may raise.
+        """
+        self.write(SID, {"type": "open", "event": "Stop", "item_id": "i",
+                         "detail": {"nested": "⏰ Ends: inside a dict"}})
+        self.assertFalse(dw.declared_wait(SID, state_dir=self.dir))
+
+    def test_a_non_dict_line_keeps_an_earlier_declaration(self):
+        """A bare JSON string or list after a real Stop must not reset the session.
+
+        `rec.get` on a non-dict raises, and letting that reach the outer handler discards
+        the Stop record already collected — flipping the session back to "not declared",
+        which is the false-positive direction this reader exists to remove.
+        """
+        path = os.path.join(self.dir, f"{SID}.events.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(stop("⏰ Ends: the real wait")) + "\n")
+            f.write(json.dumps("a bare string line") + "\n")
+            f.write(json.dumps([1, 2, 3]) + "\n")
+        self.assertTrue(dw.declared_wait(SID, state_dir=self.dir))
+
     def test_the_set_covers_only_declaring_sessions(self):
         self.write(SID, stop("⏰ Ends: a wait"))
         self.write(OTHER, stop("👤 You: nothing"))

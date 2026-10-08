@@ -64,6 +64,14 @@ def declared_wait(sid, state_dir=None):
                     # A torn final line is expected, not exceptional: the hook
                     # appends while this reads.
                     continue
+                # ⚠️ **A line that parses to a bare string or list is SKIPPED, not fatal
+                # to the file.** `rec.get` on a non-dict raises, and letting that reach the
+                # outer handler would discard a valid Stop record already collected earlier
+                # in the same log — flipping the session back to "not declared", which is
+                # the false-positive direction this reader exists to remove.
+                # `who-needs-me.py`'s `load_events` guards the same way.
+                if not isinstance(rec, dict):
+                    continue
                 if rec.get("event") == "Stop":
                     newest = rec
     except Exception:
@@ -78,12 +86,20 @@ def _has_ends(detail):
 
     `detail` holds one rendered line, so the slot is non-empty exactly when text
     follows the marker. A bare marker with nothing after it declares no wait.
+
+    ⚠️ **A non-string `detail` is "no declaration", never an exception.** The field is
+    hook-written, but this reader's own contract is that a malformed log leaves the
+    session absent from the set rather than raising — and a truthy dict or list would
+    sail through `detail or ""` and raise on `.find`, escaping into `fleet-board.py`'s
+    `collect_signals` and into every `manager-predispatch.py` row. Guarding the type at
+    the one place the value is read is what keeps that contract true.
     """
-    text = detail or ""
-    idx = text.find(ENDS_MARKER)
+    if not isinstance(detail, str):
+        return False
+    idx = detail.find(ENDS_MARKER)
     if idx < 0:
         return False
-    return bool(text[idx + len(ENDS_MARKER):].strip())
+    return bool(detail[idx + len(ENDS_MARKER):].strip())
 
 
 def declared_wait_ids(state_dir=None):

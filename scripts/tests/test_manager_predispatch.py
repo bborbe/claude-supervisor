@@ -912,6 +912,34 @@ class TestLiveness(Base):
         self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
         self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_LIVE)
 
+    def test_a_declared_wait_parks_the_roster_name_fallback_too(self):
+        """The name-fallback path must carry BOTH park carriers, not just the gate.
+
+        ⚠️ `roster_owner` is the sibling of `liveness_of_sid`'s park test and its own
+        comment reads *"Same rule as `liveness_of`"*. A build that patched only the id
+        path leaves a declared-waiting worker reading LIVE whenever its task resolves by
+        roster name — and the LIVE half is what feeds `idle_stuck`'s
+        `!= LIVENESS_PARKED` branch, so the task is still offered for re-dispatch.
+        """
+        self.registry_named("s-roster", "Declared One")
+        self.events("s-roster", "⏰ Ends: watch.sh (background Bash, x)")
+        tracked = [{"name": "Declared One", "session": "", "sessions": []}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_PARKED)
+
+    def test_the_roster_name_fallback_stays_live_without_a_declaration(self):
+        self.registry_named("s-roster2", "Undeclared One")
+        tracked = [{"name": "Undeclared One", "session": "", "sessions": []}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_LIVE)
+
+    def registry_named(self, sid, name):
+        """A live registry record carrying a `name`, so `roster_owner` can match it."""
+        with open(os.path.join(self.m.REGISTRY_DIR, "1.json"), "w") as fh:
+            json.dump({"sessionId": sid, "pid": os.getpid(),
+                       "procStart": live_proc_start(os.getpid()),
+                       "status": "busy", "name": name}, fh)
+
     def events(self, sid, detail):
         """Append one `Stop` record to a session's log inside the file's own FEED_DIR."""
         path = os.path.join(self.m.FEED_DIR, f"{sid}.events.jsonl")

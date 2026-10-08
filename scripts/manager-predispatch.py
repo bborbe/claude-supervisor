@@ -217,7 +217,9 @@ STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_PREDISPATCH_STATE_DIR", "~/.claude/state/manager-predispatch")
 )
 REGISTRY_DIR = os.path.expanduser("~/.claude/sessions")
-FEED_DIR = os.path.expanduser("~/.claude/state/attention")
+FEED_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention"
+)
 
 # The headless-worker heartbeat store, written by this plugin's `server/heartbeat.mjs`.
 HEARTBEAT_DIR = os.environ.get("SUPERVISOR_HEARTBEAT_DIR") or os.path.join(
@@ -822,6 +824,29 @@ def _declared_wait():
     return _DECLARED_WAIT
 
 
+_DECLARED_WAIT_IDS = None
+
+
+def declared_wait_ids():
+    """The whole-store `⏰ Ends:` set, read once per process.
+
+    ⚠️ **Memoised, and that is not a micro-optimisation.** Three call sites ask this per
+    row — `liveness_of_sid`, `roster_owner` and `idle_stuck`'s feed — so a per-sid read
+    would open and parse every session's log once per tracked session. `scripts/fleet-board.py`
+    reads the same set through the same shared reader, whole store and once, and this
+    matches that shape rather than inventing a second one.
+
+    ⚠️ **`state_dir=FEED_DIR`, explicitly.** `declared-wait.py`'s module-level `STATE`
+    honours `ATTENTION_STATE_DIR`, but this file's store is `FEED_DIR`; passing it keeps
+    the two readers over one store pointed at the same place, which is what makes an
+    isolated render actually isolated.
+    """
+    global _DECLARED_WAIT_IDS
+    if _DECLARED_WAIT_IDS is None:
+        _DECLARED_WAIT_IDS = _declared_wait().declared_wait_ids(state_dir=FEED_DIR)
+    return _DECLARED_WAIT_IDS
+
+
 def read_registry() -> dict[str, dict]:
     """`~/.claude/sessions/<pid>.json` -> {sessionId: {pid, status, name, alive}}.
 
@@ -889,7 +914,7 @@ def liveness_of_sid(
     # from `scripts/fleet-board.py`'s own reading. It is applied only at the two park
     # points below and never before them: a session that is dead and once declared a
     # wait is still dead, and parking it here would resurrect it.
-    declared = _declared_wait().declared_wait(sid, state_dir=FEED_DIR)
+    declared = sid in declared_wait_ids()
     rec = registry.get(sid)
     # ⚠️ **Only a PROVEN negative is death.** `alive` is a three-state since 2026-10-01: `None`
     # means "the pid is occupied but the record cannot prove the holder is this session" (see
@@ -996,7 +1021,15 @@ def roster_owner(name: str, registry: dict, feed: dict) -> str:
             continue
         if not _names_the_same_session(wanted, rec.get("name", "")):
             continue
-        return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
+        # ⚠️ **The park test is `liveness_of`'s, and it carries BOTH carriers.** A
+        # roster-name match names the same session an id match does, so a reader that
+        # parked only on the gate would leave a declared-waiting worker reading LIVE
+        # here — and the LIVE half is what feeds `idle_stuck`'s `!= LIVENESS_PARKED`
+        # branch, so the task would still be offered for re-dispatch. That is the same
+        # false positive this change removes, reached by the name-fallback path.
+        return (LIVENESS_PARKED
+                if (is_open_gate(feed.get(sid)) or sid in declared_wait_ids())
+                else LIVENESS_LIVE)
     return LIVENESS_NONE
 
 

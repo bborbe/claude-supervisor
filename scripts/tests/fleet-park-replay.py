@@ -131,14 +131,19 @@ def materialise(root):
             fh.write(f"---\nclaude_session_id: {sid}\nstatus: in_progress\n"
                      f"phase: {row.get('phase', 'execution')}\n---\n\n# Tasks\n\n{boxes}")
 
-        mtime = row["task_mtime"].replace("Z", "").replace("T", " ")
+        # The task file's mtime is read from the fixture, not hardcoded: the `stalled`
+        # rule keys on "mtime unchanged for >=2 sweeps", so a fixture that pinned every
+        # row to one value could not express a row whose task HAD just moved. Every
+        # shipped row is hours old, which is the unchanged case the rule wants.
+        stamp = datetime.strptime(row["task_mtime"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
         os.utime(os.path.join(root, "vault", "25 Tasks", row["task_file"]),
-                 (now - 7200, now - 7200))
+                 (stamp, stamp))
 
     return {row["key"]: row["session_id"] for row in rows}
 
 
-def reader_inputs(root, keys):
+def reader_inputs(root):
     """The block a caller hands the released fleet-sweep-reader, verbatim."""
     rows = load_fixture()["rows"]
     lines = [
@@ -224,16 +229,13 @@ def main(argv):
     ap.add_argument("--materialise", action="store_true")
     ap.add_argument("--check", metavar="DIGEST")
     ap.add_argument("--root")
-    ap.add_argument("--keep", action="store_true",
-                    help="leave the materialised tree behind (default: keep too — the "
-                         "reader needs it after this process exits)")
     a = ap.parse_args(argv)
 
     root = a.root or tempfile.mkdtemp(prefix="fleet-park-replay-")
     if a.check:
         return check(a.check, root)
-    keys = materialise(root)
-    print(reader_inputs(root, keys))
+    materialise(root)
+    print(reader_inputs(root))
     print(f"\nmaterialised at: {root}")
     return 0
 
