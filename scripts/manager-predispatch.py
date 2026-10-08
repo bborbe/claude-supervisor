@@ -589,6 +589,15 @@ def checkbox_count(text: str, section: str | None = None) -> str:
     exclusion keyed on `~~` anywhere in the line dropped a ticked `- [x]` and reported
     `13/14` where the truth was **14/15** — off by one, in the direction that hides
     completed work (measured 2026-09-22).
+
+    ⚠️ **The box must be `[ ]`: a `- [/]` struck row is COUNTED**, because `/` means
+    in-progress rather than removed from the tracked set. The 33-row census above measured
+    only `[ ]` and `[x]` shapes, so this is a deliberate choice rather than a measurement.
+
+    ⚠️ **Lines are split on a newline only — never `str.splitlines()`**, which also splits
+    on the vertical-tab, form-feed, file/group/record-separator, NEL and Unicode
+    line-separator characters that `re.M`'s caret does not anchor on; a struck row carrying
+    one of those would split in two and escape the exclusion.
     """
     body = text
     if section:
@@ -598,7 +607,7 @@ def checkbox_count(text: str, section: str | None = None) -> str:
         body = m.group(1)
     boxes = [
         hit.group(1)
-        for line in body.splitlines()
+        for line in body.split("\n")
         if (hit := _CHECKBOX.match(line)) is not None and not _STRUCK_ROW.match(line)
     ]
     if not boxes:

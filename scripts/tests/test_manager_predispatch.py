@@ -3100,11 +3100,27 @@ class TestCheckboxCountStruckRows(unittest.TestCase):
         )
         self.assertEqual(self.m.checkbox_count(text), "14/15")
 
-    def test_section_of_only_struck_rows_reads_as_nothing_recorded(self):
+    def test_body_of_only_struck_rows_reads_as_nothing_recorded(self):
         # Every box struck -> an empty reading, never `0/0`, which would read as a real
         # reading of nothing.
         text = "# Tasks\n\n- [ ] ~~[[A]]~~\n- [ ] ~~[[B]]~~\n"
         self.assertEqual(self.m.checkbox_count(text), "—")
+
+    def test_section_scoping_excludes_struck_rows_within_the_section(self):
+        # The section-scoped branch shares the line filter, so a struck row inside the named
+        # section is excluded there too and the reading stays section-local.
+        text = (
+            "# Success Criteria\n\n- [x] met\n- [ ] ~~[[Dropped]]~~ — superseded\n\n"
+            "# Tasks\n\n- [x] done\n- [ ] open\n"
+        )
+        self.assertEqual(self.m.checkbox_count(text, section="Success Criteria"), "1/1")
+
+    def test_partial_box_struck_row_is_counted(self):
+        # `/` means in-progress, not removed from the tracked set, so the `[ ]` requirement
+        # leaves it in — and it is not ticked, so it moves the denominator only. Pinned so
+        # the choice cannot drift silently.
+        text = "# Tasks\n\n- [x] kept\n- [/] ~~[[InFlight]]~~ — being reworked\n"
+        self.assertEqual(self.m.checkbox_count(text), "1/2")
 
 
 if __name__ == "__main__":
