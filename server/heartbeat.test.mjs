@@ -17,7 +17,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -26,6 +26,7 @@ import {
   clearStamp,
   listLive,
   readLive,
+  readState,
   stampPath,
   stampRecord,
   sweepStale,
@@ -160,5 +161,119 @@ test('an absent directory is a real negative, not "could not tell"', () => {
   withDir((dir) => {
     assert.equal(readLive(SESSION, { dir: join(dir, 'nope') }).live, false)
     assert.deepEqual(listLive({ dir: join(dir, 'nope') }), [])
+  })
+})
+
+// The session-liveness fields, added so the attention store can answer "which session is
+// alive, doing what, on which task" without reading the supervisor's in-process state.
+//
+// ⚠️ The load-bearing property here is ADDITIVE COMPATIBILITY, not "the fields appear". The
+// store directory is shared: a reader keyed on the old shape must keep working, so a stamp
+// from a writer that knows none of these fields has to be byte-for-byte what it was before.
+// A test that only checked the new fields would pass on a writer that had started emitting
+// `"task": null` into every headless stamp.
+test('the session-liveness fields are carried when the writer sets them', () => {
+  withDir((dir) => {
+    stampRecord(dir, {
+      sessionId: SESSION,
+      pid: process.pid,
+      mode: 'local',
+      source: 'mcp-timer',
+      task: 'Session Liveness Comes From a Heartbeat Store in attention-controller',
+      vault: 'private-personal',
+      location: 'local',
+      activity: 'idle',
+    })
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.equal(row.source, 'mcp-timer')
+    assert.equal(row.task, 'Session Liveness Comes From a Heartbeat Store in attention-controller')
+    assert.equal(row.vault, 'private-personal')
+    assert.equal(row.location, 'local')
+    assert.equal(row.activity, 'idle')
+  })
+})
+
+// ⚠️ THE GUARD. `state` on a stamp is the name the liveness VERDICT uses: four readers gate on
+// `stamp.get("state", "live") != "live"`, where a MISSING key must read as `live` rather than
+// vanish.
+//
+// ⚠️ **This comment first claimed the collision was LIVE — that an activity written into that
+// key "reads as NOT-live", so a live session would draw no fleet-board row and free a duplicate
+// auto-resume. That was wrong**, and it was verified wrong by running the reader: `live-workers.py`'s
+// `readLive` is the single chokepoint that parses a raw stamp, and it builds a fresh object
+// carrying its own verdict without ever reading the file's — so NO reader consumes a raw
+// stamp's `state` at all. The key is write-only today, which is what makes the rename cheap now
+// and expensive once a raw-stamp reader exists.
+//
+// A key name is exactly the kind of thing a later refactor restores by accident, so it is
+// pinned rather than described — the assertion below is what the comment above it cannot be.
+test("a stamp never carries the activity under the readers' `state` key", () => {
+  withDir((dir) => {
+    stampRecord(dir, { sessionId: SESSION, pid: process.pid, mode: 'local', activity: 'busy' })
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.equal(row.activity, 'busy')
+    assert.equal(row.state, undefined, 'an activity under `state` collides with the verdict vocabulary')
+    // The exact key set too, so a future field cannot land on the verdict key unnoticed.
+    assert.deepEqual(Object.keys(row).sort(), ['activity', 'at', 'mode', 'pid', 'sessionId'])
+  })
+})
+
+test('a writer that knows none of the new fields emits exactly the old shape', () => {
+  withDir((dir) => {
+    stampRecord(dir, { sessionId: SESSION, pid: process.pid, mode: 'headless' })
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.deepEqual(Object.keys(row).sort(), ['at', 'mode', 'pid', 'sessionId'])
+  })
+})
+
+test('task and vault are written together or not at all', () => {
+  // ⚠️ A task name collides across vaults, so half an anchor cannot be resolved later — the
+  // attention store rejects one without the other, so the writer must not be the thing that
+  // produces an unresolvable row.
+  withDir((dir) => {
+    stampRecord(dir, { sessionId: SESSION, pid: process.pid, mode: 'local', task: 'orphan-task' })
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.equal(row.task, undefined, 'a task with no vault must not be written')
+    assert.equal(row.vault, undefined)
+  })
+})
+
+// What the session is doing — the event half of the heartbeat, recorded by a hook and read
+// by the timer on its next tick.
+//
+// ⚠️ The load-bearing property is that a MISSING record reads as `null` and never as a
+// guessed state. A wrong state reads as knowledge; an absent one reads as absence, and the
+// caller turns it into the documented `idle`.
+test('readState returns the recorded state, and null when no hook has fired', () => {
+  withDir((dir) => {
+    assert.equal(readState(SESSION, { dir }), null, 'no record must read as null, never a guess')
+    writeFileSync(join(dir, `${SESSION}.json`), JSON.stringify({ session_id: SESSION, state: 'busy' }))
+    assert.equal(readState(SESSION, { dir }), 'busy')
+  })
+})
+
+test('readState refuses a state outside the vocabulary', () => {
+  // ⚠️ The state directory is shared, so a hand-edited or older record must not put a value on
+  // the wire that no reader's vocabulary contains — the store passes enums through verbatim.
+  withDir((dir) => {
+    writeFileSync(join(dir, `${SESSION}.json`), JSON.stringify({ state: 'napping' }))
+    assert.equal(readState(SESSION, { dir }), null)
+  })
+})
+
+test('readState tolerates an unreadable record', () => {
+  withDir((dir) => {
+    writeFileSync(join(dir, `${SESSION}.json`), '{')
+    assert.equal(readState(SESSION, { dir }), null)
+  })
+})
+
+test('readState refuses an id that could escape the state directory', () => {
+  // ⚠️ The id becomes a FILENAME. The write side refuses a separator or a `..`; a reader that
+  // joined an unchecked id would be the other half of the same traversal.
+  withDir((dir) => {
+    for (const bad of ['../escaped', '..', '.', 'a/b', 'a\\b', '']) {
+      assert.equal(readState(bad, { dir }), null, `readState must refuse ${JSON.stringify(bad)}`)
+    }
   })
 })

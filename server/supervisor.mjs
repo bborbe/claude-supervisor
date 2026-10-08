@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord } from './heartbeat.mjs'
+import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, readState, stampRecord } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
@@ -83,6 +83,77 @@ const heartbeat = {
       // manager's verdict to "could not tell" — which is the honest answer — whereas failing
       // the spawn would turn an unwritable state directory into a broken fleet.
       log(`WARNING: cannot stamp heartbeat for ${sessionId}: ${error.message}`)
+    }
+  },
+  // The session this server runs INSIDE — stamped on the same interval as the workers above.
+  //
+  // ⚠️ The per-worker stamps cannot cover it: they are keyed on workers this server SPAWNED,
+  // and the interactive tab the server itself runs in is not one of those. Without this,
+  // every interactive session reads dead to the attention store while a headless worker it
+  // spawned reads live — the exact asymmetry the session-liveness work exists to remove.
+  //
+  // ⚠️ The anchor (`task`/`vault`) is deliberately OMITTED rather than resolved. Filling it
+  // would mean reading the vault on the liveness path, and a store that exists so a dead
+  // session is detectable must not depend on anything that can fail independently of the
+  // session it is reporting on. The store accepts an unanchored row by design; the row still
+  // answers alive, where, and what state.
+  //
+  // `activity` starts at `idle` — the value the mechanism names for "before any hook has
+  // fired". The hooks that move it are a separate change; until they land, every self-stamp
+  // reports idle, which is the honest answer rather than a guessed `busy`.
+  startSelf(sessionId) {
+    if (!sessionId) return false
+    this.stopSelf()
+    this.selfSessionId = sessionId
+    const write = () => {
+      try {
+        stampRecord(heartbeatDir, {
+          sessionId,
+          pid: process.pid,
+          mode: 'local',
+          source: 'mcp-timer',
+          location: 'local',
+          // Read per tick rather than captured once: the hooks write this on events, and a
+          // value captured at start would report the state the session had when the server
+          // came up for the rest of its life. `idle` is the documented answer for "no hook has
+          // fired yet" — see the mechanism note above.
+          //
+          // ⚠️ Carried as `activity`, NEVER as the stamp's `state`. That name belongs to the
+          // LIVENESS VERDICT four readers synthesize and gate on, so it is reserved even
+          // though nothing reads a raw stamp's copy of it today — see `stampRecord`, which
+          // records how an earlier revision of this comment claimed a `busy` written there
+          // "reads as NOT-live" and was wrong. The rename is preventive: it keeps the stamp's
+          // descriptive field from sharing a name with the verdict.
+          activity: readState(sessionId) ?? 'idle',
+        })
+      } catch (error) {
+        // Same reasoning as `stamp` above: the session still runs, and a manager's verdict
+        // degrades to "could not tell" rather than the server failing to start.
+        log(`WARNING: cannot stamp own heartbeat for ${sessionId}: ${error.message}`)
+      }
+    }
+    write()
+    const timer = setInterval(write, HEARTBEAT_INTERVAL_MS)
+    // Unref'd for the same reason as the worker timer: a pending refresh must never hold the
+    // process open after its work is done.
+    timer.unref?.()
+    this.selfTimer = timer
+    return true
+  },
+  // ⚠️ Clears the STAMP as well as the timer — which is what `stop` above does for a worker,
+  // and what this deliberately did not. `clearStamp`'s own doc gives the reason: the common
+  // case should "leave nothing behind", so the next reader "does not have to wait out a TTL to
+  // learn what the server already knows". Without it, a restarted server leaves its OWN row
+  // reading live for a full 60 s — and the self-stamp is the one row an operator is most
+  // likely to be looking at, which is the whole point of the change it belongs to.
+  stopSelf() {
+    if (this.selfTimer) {
+      clearInterval(this.selfTimer)
+      this.selfTimer = undefined
+    }
+    if (this.selfSessionId) {
+      clearStamp(this.selfSessionId, { dir: heartbeatDir })
+      this.selfSessionId = undefined
     }
   },
 }
@@ -610,6 +681,11 @@ function stampUnobservedWorkers() {
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
     const stamped = stampUnobservedWorkers()
+    // The self-stamp goes the same way. The handler already exists so a killed server does not
+    // leave records asserting a liveness nobody can vouch for; the row describing the server's
+    // OWN session is the same claim and belongs on the same path. `stopSelf` is idempotent, so
+    // a server that never had a session id simply clears nothing.
+    heartbeat.stopSelf()
     log(`received ${signal} — stamped ${stamped} unobserved worker(s) as ${UNOBSERVED_STATUS}, then exited`)
     process.exit(0)
   })
@@ -1881,6 +1957,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 await server.connect(new StdioServerTransport())
 log('supervisor ready')
+
+// Stamp the session this server runs inside, on the same interval as its workers. A server
+// started outside a session has no id, so `startSelf` is a no-op there rather than a stamp
+// under an invented key — see its comment.
+heartbeat.startSelf(config.sessionId)
 
 // The cluster half of the heartbeat store, on the same interval the headless workers use.
 //
