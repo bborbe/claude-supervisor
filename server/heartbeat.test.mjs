@@ -29,6 +29,7 @@ import {
   readState,
   stampPath,
   stampRecord,
+  startSelfStamp,
   sweepStale,
 } from './heartbeat.mjs'
 
@@ -276,4 +277,81 @@ test('readState refuses an id that could escape the state directory', () => {
       assert.equal(readState(bad, { dir }), null, `readState must refuse ${JSON.stringify(bad)}`)
     }
   })
+})
+
+// The self-stamp lifecycle — the session this server runs INSIDE.
+//
+// ⚠️ These are reachable ONLY because the lifecycle lives in `heartbeat.mjs`. It used to sit in
+// `supervisor.mjs`, which has no export surface (a test importing it would start an MCP
+// server), so none of this could be asserted at all — and `stop` clearing the stamp shipped
+// untested for exactly that reason.
+test('startSelfStamp stamps the local mode and the current activity', () => {
+  withDir((dir) => {
+    const self = startSelfStamp(SESSION, { dir, intervalMs: 60_000, readActivity: () => 'busy' })
+    assert.ok(self, 'a session id must produce a stamp')
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.equal(row.mode, 'local')
+    assert.equal(row.source, 'mcp-timer')
+    assert.equal(row.location, 'local')
+    assert.equal(row.activity, 'busy')
+    // ⚠️ No anchor: the store accepts an unanchored row by design, and resolving one would put
+    // a vault read on the liveness path.
+    assert.equal(row.task, undefined)
+    assert.equal(row.vault, undefined)
+    self.stop()
+  })
+})
+
+test('startSelfStamp reports idle when no hook has fired', () => {
+  // ⚠️ `idle`, never a guessed `busy`: a wrong state reads as knowledge while an absent one
+  // reads as absence.
+  withDir((dir) => {
+    const self = startSelfStamp(SESSION, { dir, intervalMs: 60_000, readActivity: () => null })
+    assert.equal(JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8')).activity, 'idle')
+    self.stop()
+  })
+})
+
+test('startSelfStamp is a no-op with no session id', () => {
+  // ⚠️ A server started outside a session must stamp NOTHING rather than stamping under an
+  // invented key — a row under a made-up id would be a permanent phantom reading Live until
+  // its TTL, with no session able to clear it.
+  withDir((dir) => {
+    assert.equal(startSelfStamp(null, { dir }), null)
+    assert.equal(startSelfStamp('', { dir }), null)
+    assert.deepEqual(listLive({ dir }), [], 'no id must write no file')
+  })
+})
+
+test('stop clears the stamp, so the next reader does not wait out a TTL', () => {
+  // ⚠️ The change this test exists for: `stopSelf` used to clear only the timer, so a restarted
+  // server left its own row reading live for a full TTL — and the self-stamp is the one row an
+  // operator is most likely to be looking at.
+  withDir((dir) => {
+    const self = startSelfStamp(SESSION, { dir, intervalMs: 60_000 })
+    assert.equal(readLive(SESSION, { dir }).live, true, 'stamped, so live')
+    self.stop()
+    assert.equal(readLive(SESSION, { dir }).live, false, 'stop must clear the stamp, not just the timer')
+  })
+})
+
+test('the self-stamp is re-written on each tick, picking up a changed activity', async () => {
+  // ⚠️ Read per tick rather than captured once: a value captured at start would report the
+  // state the session had when the server came up for the rest of its life.
+  const dir = mkdtempSync(join(tmpdir(), 'hb-test-'))
+  try {
+    let activity = 'idle'
+    const self = startSelfStamp(SESSION, { dir, intervalMs: 10, readActivity: () => activity })
+    assert.equal(JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8')).activity, 'idle')
+    activity = 'busy'
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(
+      JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8')).activity,
+      'busy',
+      'the next tick must carry the new activity',
+    )
+    self.stop()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

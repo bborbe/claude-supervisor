@@ -127,6 +127,31 @@ test('SUPERVISOR_SESSIONS_DIR overrides the registry location', async () => {
   }
 })
 
+test('sessionId is the env var, and null when it is absent', async () => {
+  // ⚠️ The load-bearing half is the `null`, not the value. A server started outside a session
+  // must stamp NOTHING rather than stamping under an invented key — a row under a made-up id
+  // would be a permanent phantom reading Live until its TTL, with no session able to clear it.
+  // The enumerable-surface test only proves the property EXISTS, which is the weaker claim.
+  const before = process.env.CLAUDE_CODE_SESSION_ID
+  try {
+    process.env.CLAUDE_CODE_SESSION_ID = 'fa942d7a-c190-46dd-93f3-8dfe3280046b'
+    assert.equal(
+      (await import('./config.mjs?session-id=set')).config.sessionId,
+      'fa942d7a-c190-46dd-93f3-8dfe3280046b',
+    )
+
+    delete process.env.CLAUDE_CODE_SESSION_ID
+    assert.equal(
+      (await import('./config.mjs?session-id=absent')).config.sessionId,
+      null,
+      'an absent variable must be null, never an empty string that would key a phantom row',
+    )
+  } finally {
+    if (before === undefined) delete process.env.CLAUDE_CODE_SESSION_ID
+    else process.env.CLAUDE_CODE_SESSION_ID = before
+  }
+})
+
 test('a cost figure is only meaningful when the traffic reaches Anthropic', async () => {
   // The SDK prices from Anthropic's list, so the figure is real only when Anthropic
   // answered. Unset means the SDK reaches Anthropic itself; any other base URL means

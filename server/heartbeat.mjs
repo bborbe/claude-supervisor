@@ -131,9 +131,12 @@ export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, lo
 // missing or unreadable file is `null` — "no hook has fired" — never a guessed `busy`, because
 // a wrong state reads as knowledge while an absent one reads as absence.
 //
-// ⚠️ The id is shape-checked before it becomes a path component, mirroring `safe_session_id`
-// in `scripts/heartbeat-state.py`. The write side already refuses a separator or a `..`; a
-// reader that joined an unchecked id would be the other half of the same traversal.
+// ⚠️ The id is shape-checked before it becomes a path component, and the check is stated
+// STANDALONE rather than as a mirror of anything: the write side of this contract
+// (`safe_session_id` in `scripts/heartbeat-state.py`) ships with the event half of this work,
+// in its own PR, so a pointer to it would land on nothing in this tree. The reader must
+// refuse an unchecked id either way — a reader that joined one would be the other half of the
+// same traversal.
 export function readState(sessionId, { dir = config.heartbeatStateDir } = {}) {
   if (!SESSION_ID_PATTERN.test(sessionId ?? '')) return null
   try {
@@ -271,4 +274,70 @@ export function sweepStale({ dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_MS, now =
     }
   }
   return removed
+}
+
+// The session this server runs INSIDE — stamped on the same interval as the workers.
+//
+// ⚠️ Lives HERE rather than in `supervisor.mjs` because this module owns the stamp, and the
+// lifecycle is only testable where the store is: `supervisor.mjs` has no export surface (a
+// test importing it would start an MCP server), so a self-stamp owned there could never be
+// covered at all. Moving it here is what makes the null no-op, the re-stamp and the clear on
+// stop assertable rather than described.
+//
+// ⚠️ The per-worker stamps cannot cover this session: they are keyed on workers this server
+// SPAWNED, and the interactive tab the server itself runs in is not one of those. Without
+// this, every interactive session reads dead to the attention store while a headless worker
+// it spawned reads live — the exact asymmetry the session-liveness work exists to remove.
+//
+// ⚠️ The anchor (`task`/`vault`) is deliberately OMITTED rather than resolved. Filling it
+// would mean reading the vault on the liveness path, and a store that exists so a dead
+// session is detectable must not depend on anything that can fail independently of the
+// session it is reporting on. The store accepts an unanchored row by design; the row still
+// answers alive, where, and what state.
+//
+// Returns `null` for a missing session id, so a server started outside a session stamps
+// nothing rather than stamping under an invented key — a row under a made-up id would be a
+// permanent phantom reading Live until its TTL, with no session able to clear it.
+export function startSelfStamp(sessionId, {
+  dir = heartbeatDir,
+  intervalMs = HEARTBEAT_INTERVAL_MS,
+  readActivity = readState,
+  onError = () => {},
+} = {}) {
+  if (!sessionId) return null
+  const write = () => {
+    try {
+      stampRecord(dir, {
+        sessionId,
+        pid: process.pid,
+        mode: 'local',
+        source: 'mcp-timer',
+        location: 'local',
+        // Read per tick rather than captured once: the hooks write this on events, and a
+        // value captured at start would report the state the session had when the server came
+        // up for the rest of its life. `idle` is the documented answer for "no hook has fired
+        // yet" — see `readState`.
+        activity: readActivity(sessionId) ?? 'idle',
+      })
+    } catch (error) {
+      // A session whose stamp cannot be written still runs. Losing the heartbeat degrades a
+      // manager's verdict to "could not tell" — which is the honest answer — whereas letting
+      // this throw would take down the server that owns the session.
+      onError(error)
+    }
+  }
+  write()
+  const timer = setInterval(write, intervalMs)
+  // Unref'd so a pending refresh never holds the process open after its work is done.
+  timer.unref?.()
+  return {
+    // ⚠️ Clears the STAMP as well as the timer, which is what `clearStamp`'s own doc asks for
+    // ("so the next reader does not have to wait out a TTL"). Without it a restarted server
+    // leaves its OWN row reading live for a full TTL — and the self-stamp is the one row an
+    // operator is most likely to be looking at.
+    stop() {
+      clearInterval(timer)
+      clearStamp(sessionId, { dir })
+    },
+  }
 }
