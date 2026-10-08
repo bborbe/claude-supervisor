@@ -162,6 +162,13 @@ def hits(vaults, key, stem, prefix=False):
 
     Exact basename, case-insensitive — never a substring glob, and the folder is the
     discriminator rather than a frontmatter field (`docs/subject-resolution.md`).
+
+    ⚠️ **`prefix=True` is the truncation tier, and it is a different contract from the
+    default.** `docs/subject-resolution.md` § The page test states that *"under exact
+    matching, two matches inside one folder are impossible by construction"* — true of the
+    default and **not** of this tier, where two titles may share a truncated prefix. The
+    `AMBIGUOUS` discipline in `resolve` is what keeps the tier honest; the doc's sentence
+    describes the exact tier alone.
     """
     found = []
     for v in vaults:
@@ -179,7 +186,8 @@ def hits(vaults, key, stem, prefix=False):
         except OSError:
             continue
         found += [os.path.join(full, e) for e in entries
-                  if _matches(e.casefold(), stem, prefix) and os.path.isfile(os.path.join(full, e))]
+                  if _matches(_norm_session_name(e), stem, prefix)
+                  and os.path.isfile(os.path.join(full, e))]
     return found
 
 
@@ -192,16 +200,29 @@ def resolve(name, vaults):
         stem = stem[:-3]
     stem += ".md"
     tasks = hits(vaults, "tasks_dir", stem)
-    if not tasks:
-        tasks = hits(vaults, "tasks_dir", stem, prefix=True)
     if len(tasks) == 1:
         return tasks[0], []                # a task beats a same-named goal, in any vault
     goals = hits(vaults, "goals_dir", stem)   # only reached when tasks is empty or ambiguous
-    if not goals:
-        goals = hits(vaults, "goals_dir", stem, prefix=True)
     if not tasks:
         if len(goals) == 1:
             return goals[0], []
+        if not goals:
+            # ⚠️ **Both EXACT tiers found nothing, and only now do the truncation tiers
+            # run — tasks still ahead of goals.** Ordering these by folder first would let
+            # a *prefix guess* displace an *exact* match in the other folder: with a goal
+            # `Some Long Goal Name Here` and a task `Some Long Goal Name Here And Then Some
+            # More`, a tasks-first prefix tier resolves the guess and never consults the
+            # goal that matches exactly. Certainty before guess, across folders as well as
+            # within one — that is the whole of "never guesses".
+            tasks = hits(vaults, "tasks_dir", stem, prefix=True)
+            if len(tasks) == 1:
+                return tasks[0], []
+            if not tasks:
+                goals = hits(vaults, "goals_dir", stem, prefix=True)
+                if len(goals) == 1:
+                    return goals[0], []
+                return "", goals
+            return "", tasks
         return "", goals                   # zero tasks; goals is the tier that was reached
     return "", tasks                       # an ambiguous tasks tier never consults goals_dir,
                                            # so only its own candidates may be announced

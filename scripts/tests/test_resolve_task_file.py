@@ -117,6 +117,19 @@ class ResolveTaskFileTest(unittest.TestCase):
         self.assertEqual("", self.path_for(r, name))
         self.assertIn("AMBIGUOUS", r.stderr)
 
+    def test_an_exact_goal_beats_a_prefix_task(self):
+        """⚠️ **Certainty before guess, across folders.** The truncation tiers must run
+        only after BOTH exact tiers are exhausted. A tasks-first prefix tier resolves the
+        guess and never consults the goal that matches exactly — the one ordering that
+        makes the new tier change behaviour where an exact match exists."""
+        v = self.vault("private-personal",
+                       files=("Some Long Goal Name Here And Then Some More.md",),
+                       goals=("Some Long Goal Name Here.md",))
+        name = "Some Long Goal Name Here"
+        r = self.run_script([name], [v])
+        self.assertEqual(str(self.root / "private-personal" / "24 Goals" / f"{name}.md"),
+                         self.path_for(r, name))
+
     def test_the_exact_tier_still_wins_over_a_truncation(self):
         """An exact hit is never displaced by the prefix tier."""
         v = self.vault("private-personal",

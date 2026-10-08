@@ -893,10 +893,10 @@ def _norm_session_name(name: str) -> str:
 
 # A registry name is a *truncated* title, and the truncation is long — measured 46
 # characters on 2026-10-07 (`⚙ A Renamed Task's Session Becomes Unaddressable` against a
-# 108-character title). ⚠️ **`fleet-board.py` carries the same constant for the same
-# rule and the two values must agree** — they are the two halves of one predicate, and
-# a drift between them would make the board and this gate disagree about whether a row
-# has an owner.
+# 108-character title). ⚠️ **`fleet-board.py` and `resolve-task-file.py` carry the same
+# constant for the same rule and all three values must agree** — they are three readers of
+# one predicate, and a drift between them would make the board, this gate and the sweep
+# disagree about whether a name resolves. `test_manager_predispatch.py` pins all three.
 _TRUNCATION_MIN_PREFIX = 20
 
 
@@ -915,8 +915,13 @@ def _names_the_same_session(wanted: str, held: str) -> bool:
     qualify. An exact match is accepted at any length, so a genuinely short title still
     resolves.
     """
+    # ⚠️ **Both sides normalized here, not just `held`.** `roster_owner` already normalizes
+    # what it passes, so this is idempotent for it — but a second caller handing in a raw
+    # title would otherwise get a silent no-match, which is the failure this whole rule
+    # exists to remove.
+    wanted = _norm_session_name(wanted)
     held = _norm_session_name(held)
-    if not held:
+    if not wanted or not held:
         return False
     if held == wanted:
         return True

@@ -3035,6 +3035,16 @@ class TestRosterOwnerTruncation(Base):
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 self.assertEqual(self.m._TRUNCATION_MIN_PREFIX, mod._TRUNCATION_MIN_PREFIX)
+                # ⚠️ **The constant is not the only shared surface — pin the normalizer
+                # too.** A drift in `_norm_session_name` alone (dropping the whitespace
+                # collapse, say) makes the three readers disagree about what a name *is*,
+                # which is the same failure the pinned constant guards against and would
+                # pass a constant-only test.
+                for probe in ("Some Task", "⚙ A Renamed Task's Session Becomes Unaddressable",
+                              "  Spaced   Out  ", "…punct-led", None, "⚙ "):
+                    with self.subTest(probe=probe):
+                        self.assertEqual(self.m._norm_session_name(probe),
+                                         mod._norm_session_name(probe))
 
 
 if __name__ == "__main__":

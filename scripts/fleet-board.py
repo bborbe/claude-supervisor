@@ -171,10 +171,15 @@ def _norm_session_name(name):
 
 # A registry name is a *truncated* title, and the truncation is long — measured 46
 # characters on 2026-10-07 (`⚙ A Renamed Task's Session Becomes Unaddressable` against a
-# 108-character title). A short name that happens to open a title is a coincidence, not
-# a truncation, so the prefix branch is gated on a length no role name reaches
-# (`boss`, `alerts`, `agent_7`). Managers never reach this predicate at all — rule 1
-# detects them first — so the only names that can reach it are workers' task titles.
+# 108-character title). A short name that happens to open a title is a coincidence, not a
+# truncation, so the prefix branch is gated on a length no role name reaches
+# (`boss`, `alerts`, `agent_7`). ⚠️ **The length floor is what excludes those, not rule
+# 1** — a role name is not manager-detected and does reach this predicate; it is refused
+# by the floor, not by the classification.
+#
+# ⚠️ **The same constant is duplicated in `manager-predispatch.py` and
+# `resolve-task-file.py`; all three values must agree**, and
+# `test_manager_predispatch.py` pins them together.
 _TRUNCATION_MIN_PREFIX = 20
 
 
