@@ -715,6 +715,8 @@ def collect_signals(stuck_min):
     # that marker as *"effectively dead today — nothing writes the marker any more"*, so
     # that bucket is inert until the writer returns. **The live route is the `nudge`
     # value**, which reads transcript age — see `unblocks_for`.
+    # ⚠️ **Untested by design:** no test asserts this subtraction, because the writer is
+    # dead and the bucket is inert. Read the absence of a test as that, not as coverage.
     wait_ids = dw.declared_wait_ids(state_dir=wnm.STATE)
     stuck_ids = {sid for sid in stuck_ids if sid not in wait_ids}
     # The Rendered-panels set, read from who-needs-me's own composition so the

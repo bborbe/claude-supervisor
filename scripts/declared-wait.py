@@ -109,6 +109,13 @@ def declared_wait_ids(state_dir=None):
     a per-session call would re-open the directory for each. Reading one session's log
     per file is still O(files), which is what `who-needs-me.py`'s own `load_events()`
     pays — this is the same shape, not a new cost.
+
+    ⚠️ **The cost is O(total log bytes), and unbounded over a session's lifetime** —
+    the logs are append-only and never truncated, so a long-lived store only grows.
+    Both production consumers call this once per process or render (`manager-predispatch.py`
+    memoises it; `fleet-board.py` calls it once in `collect_signals`), so it is paid
+    once rather than per row. A tail-read is the optimisation if that ever stops being
+    true, and this note exists so the next reader measures rather than assumes.
     """
     base = state_dir or STATE
     out = set()

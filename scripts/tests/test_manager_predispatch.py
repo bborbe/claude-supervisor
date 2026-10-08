@@ -933,13 +933,6 @@ class TestLiveness(Base):
         self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
         self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_LIVE)
 
-    def registry_named(self, sid, name):
-        """A live registry record carrying a `name`, so `roster_owner` can match it."""
-        with open(os.path.join(self.m.REGISTRY_DIR, "1.json"), "w") as fh:
-            json.dump({"sessionId": sid, "pid": os.getpid(),
-                       "procStart": live_proc_start(os.getpid()),
-                       "status": "busy", "name": name}, fh)
-
     def events(self, sid, detail):
         """Append one `Stop` record to a session's log inside the file's own FEED_DIR."""
         path = os.path.join(self.m.FEED_DIR, f"{sid}.events.jsonl")
