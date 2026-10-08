@@ -115,6 +115,20 @@ class TestNecessityTemplatesGuard(Base):
         self.assertEqual(result.returncode, 1)
         self.assertIn("want exactly 3", result.stderr)
 
+    def test_retired_source_reappearing_fails(self):
+        """The RETIRED assertion is the only check here that reads *wording* rather than
+        shape, and the reason it exists: every other assertion matches a row's **prefix**,
+        so a source deleted from **inside** a row — or restored uniformly at all three
+        sites — satisfies every count and the one-shape assertion alike. That makes it the
+        one check no other test can reach, in either direction, so it carries its own."""
+        self.write(
+            READER,
+            reader_body().replace("<SC<n>|DoD<n>>", "<goal sentence|SC<n>|DoD<n>>"),
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("still carries the retired goal-sentence source", result.stderr)
+
     def test_divergent_row_shape_fails(self):
         """Prefix matching alone would pass this: the drifted row still begins with the
         pinned shape, so only the all-sites-identical check catches it."""
