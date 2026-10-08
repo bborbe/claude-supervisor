@@ -123,11 +123,16 @@ def live_session_ids(registry_dir=None, heartbeat_dir=None):
     adopt. A missing registry would otherwise read every manager as exited and hand its
     workers to the fallback, which is a silent ownership move on no evidence.
     """
-    liveness = _load("session_liveness", "session-liveness.py")
-    registry = liveness.read_registry(registry_dir) if registry_dir else liveness.read_registry()
+    identity = _load("session_identity", "session-identity.py")
+    registry = identity.read_registry(registry_dir) if registry_dir else identity.read_registry()
     if registry is None:
         return None
-    heartbeats = liveness.read_heartbeats(heartbeat_dir)
+    # The heartbeat store is read through its own reader, `live-workers.py` — the file
+    # `session-liveness.py` used to wrap before liveness moved to the session-heartbeat
+    # endpoint. The store still holds the rows this union needs.
+    lw = _load("live_workers", "live-workers.py")
+    store = heartbeat_dir if heartbeat_dir is not None else lw.heartbeat_dir()
+    heartbeats = lw.read_live(store, ttl=lw.TTL_SECONDS)
     if heartbeats is None:
         return None
     live = set(registry)

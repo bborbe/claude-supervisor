@@ -51,10 +51,13 @@ SITE_LIST = {
     # other transport read: `None` when the query failed, `set()` for a reachable WezTerm
     # holding nothing.
     ("open-items.py", "live_panes"),
-    # added 2026-10-01 — the pid-identity probe's `ps -o lstart=` read. It is the first
-    # transport call `session-liveness.py` has ever held: before the identity fix that file
-    # only globbed the registry and called `os.kill`, neither of which shells out.
-    ("session-liveness.py", "_ps_starts"),
+    # added 2026-10-01 — the pid-identity probe's `ps -o lstart=` read. It was the first
+    # transport call `session-liveness.py` held: before the identity fix that file only globbed
+    # the registry and called `os.kill`, neither of which shells out. ⚠️ **It moved with the
+    # identity machinery** on 2026-10-08, when liveness split to the session-heartbeat endpoint
+    # and the registry read became `session-identity.py` — the walk derives the site from that
+    # file now, and `session-liveness.py` holds no `subprocess` call at all.
+    ("session-identity.py", "_ps_starts"),
     ("stop-probe.py", "gate_processes"),
     # added 2026-10-07 — `plugin-version-census.py`, the fleet reading of which plugin
     # version each live session serves. Its two READS keep the three-state contract and are

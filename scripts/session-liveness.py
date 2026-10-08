@@ -1,742 +1,256 @@
 #!/usr/bin/env python3
 """Is this session id live? One instrument, one answer, for the whole plugin.
 
-The session registry `~/.claude/sessions/<pid>.json` is the liveness authority: an entry is
-deleted when its session exits, so presence means live. It is read from `commands/` and
-`agents/` by a restated `grep -l "<id>" ~/.claude/sessions/*.json`, and on 2026-09-26 a
-manager hand-rolled a SECOND instrument over the same directory. The two disagreed about
-what an id argument means — `grep -l` is substring matching, so a prefix is legal; the
-hand-rolled reader did `reg.get(sid, [])`, an exact key lookup, so an 8-char prefix read as
-ABSENT. It published `registry ABSENT` for two live sessions as *confirmed verdicts*. The
-drive leg re-derived from disk, refused them, and spawned nothing; applied, the auto-resume
-gate would have read as HOLDING and two resumes would have landed on two live conversations.
-
-Measured 2026-09-27 on the live registry: the defect reproduces on **every** session, not the
-two that were caught — 6 of 6 sampled, full id -> LIVE, that same session's own 8-char prefix
--> ABSENT. The near-miss rate is 100%, and nothing in the system detected it.
+Liveness is answered by the attention store's **session-heartbeat endpoint** and by nothing
+else. Every session that can be asked about stamps that store — an interactive tab, a headless
+in-process worker, a cluster pod — so one channel answers for all of them, and the verdict is
+the store's own `live` boolean (its age against its window), never a recomputation here.
 
   --check <session-id>   LIVE (exit 0) / ABSENT (exit 1) / UNKNOWN (exit 2) / AMBIGUOUS (exit 3)
-  --list                 one line per live session: `<session-id>  pid <n>  <name>`
+  --list                 one line per live session: `<session-id>  <where>  <name>  [<source>]`
 
 ⚠️ **An id argument is a PREFIX, and a prefix is legal.** Callers pass prefixes: the sweep
 digest carries 8-char prefixes, `[ref]` in a roster is 6 chars, `sid8` is the display
-convention, and the near-miss was one. A contract that rejects the input its own callers
-produce is the defect, not the fix. A unique match resolves; an ambiguous one refuses rather
-than guesses — the semantics `who-needs-me.py:pane_for()` already settled.
+convention. A contract that rejects the input its own callers produce is the defect, not the
+fix. A unique match resolves; an ambiguous one refuses rather than guesses — the semantics
+`who-needs-me.py:pane_for()` already settled. The per-id route cannot resolve a prefix
+(measured 2026-10-08: `/session-heartbeat/30fae0ae` → 404 for a live session), so a prefix is
+resolved against the list route; see `check()`.
 
-⚠️ **UNKNOWN is a third answer, not a flavour of ABSENT.** An unreadable or absent registry
-means the probe could not run, and a caller that folds that into "not live" turns an I/O error
-into permission to resume — which is exactly the double-writer this file exists to prevent.
-Exit 2 is deliberately distinct from exit 1. Same rule as `live-workers.py`.
+⚠️ **UNKNOWN is a third answer, not a flavour of ABSENT.** An unreachable endpoint, or a
+response that is not 200 and not the store's 404, means the probe could not run — and a caller
+that folds that into "not live" turns an I/O error into permission to resume, which is exactly
+the double-writer this file exists to prevent. Exit 2 is deliberately distinct from exit 1.
+Same rule as `live-workers.py`.
 
-⚠️ **AMBIGUOUS is a fourth answer, and it is not a liveness verdict.** Two live sessions
-sharing an 8-char prefix means the ARGUMENT did not identify one session; answering LIVE or
-ABSENT either way would be a guess. Exit 3 names it and prints the candidates, so the caller
-can pass the full id.
+⚠️ **ABSENT is licensed only by a READABLE endpoint that positively reports the id as not
+live** — a 200 carrying `live: false`, or a 404 from the store, or a readable list with no
+matching id. Nothing else may reach it.
 
-⚠️ **Why this file and not the two readers it replaces.** Neither existing registry reader
-satisfied this contract. `who-needs-me.py:read_registry()` has the `None`-on-unreadable
-three-state rule but returns names only, with no pid, so it cannot answer the runbook's
-`ps -p <pid>` limb. `manager-predispatch.py:read_registry()` carries `pid` and `alive` but
-returns `{}` when the registry directory cannot be read — "nothing is live", the dangerous
-direction. One home has to hold both properties, so this reader does, and both of those
-become callers of it.
+⚠️ **AMBIGUOUS is a fourth answer, and it is not a liveness verdict.** Two sessions sharing an
+8-char prefix means the ARGUMENT did not identify one session; answering LIVE or ABSENT either
+way would be a guess. Exit 3 names it and prints the candidates, so the caller can pass the
+full id.
 
-⚠️ **TWO SOURCES, and the composition rule between them is asymmetric.** The registry answers
-for every session that holds a socket — every interactive one — and is structurally blind to
-a session with no process of its own: a headless worker is an in-process `query()` holding no
-pid entry, and a cluster worker runs as a pod on another machine. Those are the heartbeat
-store's half (`live-workers.py`, written by `server/heartbeat.mjs`; the store is also the
-landing point for a cluster worker's registration). This file reads both and composes them
-the way `server/liveness.mjs:checkLiveness()` does:
+⚠️ **Why the endpoint and not the registry.** Until 2026-10-08 this file composed two sources
+— the session registry and the heartbeat store — with an asymmetric rule between them (a
+positive from either was an answer; a negative needed both readable). The reason was
+structural: the registry is pid-keyed and local-only, so it sees every session holding a
+socket and is blind to a session with no process of its own, while the heartbeat store covers
+those. The session-heartbeat endpoint already holds BOTH populations in one store — it serves
+`source: cluster` and `source: mcp-timer` rows beside local ones — so the composition
+disappears into the store and this file reads one channel.
 
-  * **a positive from either source is an answer.** A fresh heartbeat is decisive on its own,
-    reported even when the registry could not be read — "could not tell" from one channel is
-    not a refutation by the other.
-  * **a negative needs BOTH sources readable.** With one unreadable, "no match" cannot rule
-    out a match in the half that could not be read, so it is UNKNOWN, never ABSENT.
-
-That asymmetry is the point. Only a readable-and-empty pair licenses ABSENT, which is the one
-answer that permits a caller to resume onto the session.
-
-⚠️ **A pid is not an identity, and `os.kill(pid, 0)` is not a liveness test.** It asks
-whether SOME process holds the number — never whether that process is *this session's*. A
-registry record that outlives its session (a `kill -9` leaves it behind) plus a pid the OS has
-since recycled reads LIVE for a session that is gone, which is the residual
-[[A Substring-Matched Liveness Probe Reports a Dead Session as Live]] left open. The record's
-own `procStart` settles it: compared against the live holder's `ps -o lstart=`, a mismatch is
-a different process wearing the same number. ⚠️ **The two are in different zones** —
-`procStart` is UTC, `ps -o lstart=` is local — so they are compared as epochs, never as
-strings; a string compare reports every live session as a mismatch, which is this rule
-inverted. A record whose `procStart` is missing or unparseable while its pid IS occupied is
-UNKNOWN: identity cannot be established, and "cannot tell" must not become death.
-
-⚠️ **One instrument per store.** The heartbeat half is delegated to `live-workers.py` rather
-than re-globbed here. Two readers over one directory is precisely the 2026-09-26 defect this
-file's opening paragraph records, and it does not become acceptable by being written twice in
-one repo instead of twice in one week.
+⚠️ **The registry read did not disappear; it moved.** The registry answers a different
+question — identity, not liveness: the name a session holds, the names it used to hold, the
+`cwd` to resume it into. That machinery now lives in `session-identity.py`, which this file
+imports to join those fields onto `--list --json` (the shape `/supervisor:open` and
+`agents/fleet-sweep-reader.md` resolve a roster row by). One reader over that store, still —
+the 2026-09-26 near-miss that this file's history records was two readers over one directory
+disagreeing about what an id argument means.
 """
 import argparse
-import glob
 import importlib.util
 import json
-import math
 import os
-import subprocess
 import sys
-import time
-from datetime import datetime, timezone
+import urllib.error
+import urllib.parse
+import urllib.request
 
 LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
 
-# `ps -o lstart=` and the registry's `procStart` carry the SAME format — and different zones.
-_CTIME_FMT = "%a %b %d %H:%M:%S %Y"
+# The attention store, resolved exactly as the rest of the plugin resolves it: the same
+# variable and default `who-needs-me.py`, `attention-board.py` and `attention-ask.py` carry,
+# so a store moved once moves everywhere and this file gains no second convention to drift.
+ENDPOINT_DEFAULT = "http://localhost:18080"
+HEARTBEAT_PATH = "/api/1.0/session-heartbeat"
 
-REGISTRY_DIR = (
-    os.environ.get("SUPERVISOR_SESSIONS_DIR")
-    or os.environ.get("SESSIONS_DIR")
-    or os.path.expanduser("~/.claude/sessions")
-)
+# Seconds any one HTTP read may take. The store is local and answers in milliseconds; this is
+# a backstop against a wedged server, never a routine path. A slow store is a store this file
+# should report as UNKNOWN, not one it should hang on.
+_HTTP_TIMEOUT = 5
 
-_LIVE_WORKERS = None
+_IDENTITY = None
 
 
-def _live_workers():
-    """Import `live-workers.py` (hyphenated filename -> importlib) — the heartbeat reader.
+def endpoint_base(override=None):
+    """The store's base URL: `--endpoint`, then `$ATTENTION_STORE_URL`, then localhost.
 
-    Lazy and cached: this module is itself imported by `who-needs-me.py` and
-    `manager-predispatch.py`, and a registry-only caller must not pay for a store it never
-    consults.
+    A trailing slash is stripped so a path appended here cannot double it.
     """
-    global _LIVE_WORKERS
-    if _LIVE_WORKERS is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live-workers.py")
-        spec = importlib.util.spec_from_file_location("live_workers", path)
+    return (override or os.environ.get("ATTENTION_STORE_URL") or ENDPOINT_DEFAULT).rstrip("/")
+
+
+def _identity():
+    """Import `session-identity.py` (hyphenated filename -> importlib) — the registry reader.
+
+    Lazy and cached: the verdict path (`--check`) never touches the registry, so a caller that
+    only asks "is this id live?" must not pay to load the `ps` identity probe. `--list` pays
+    for it, because a names-less list is the shape `/supervisor:open` cannot join.
+    """
+    global _IDENTITY
+    if _IDENTITY is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-identity.py")
+        spec = importlib.util.spec_from_file_location("session_identity", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        _LIVE_WORKERS = mod
-    return _LIVE_WORKERS
+        _IDENTITY = mod
+    return _IDENTITY
 
 
-def _record_start_epoch(proc_start):
-    """The record's `procStart` as epoch seconds, or `None` when absent/unparseable.
+def _get_json(url, timeout=_HTTP_TIMEOUT):
+    """`(status, payload)` for a GET. Raises `OSError`/`ValueError` when the read could not run.
 
-    ⚠️ **`procStart` is UTC and `ps -o lstart=` is LOCAL, so the two are never
-    string-comparable.** Measured 2026-10-01 on a CEST host: every one of six sampled live
-    entries differed from its own process's `ps -o lstart=` by exactly +02:00 —
-    `"Wed Sep 30 19:18:21 2026"` against `"Wed Sep 30 21:18:21 2026"`. A raw string compare
-    therefore reports every LIVE session as a mismatch, which is this fix inverted: it turns
-    the whole registry into false deaths.
+    ⚠️ **A structured HTTP error is returned as its status, and a transport failure raises.**
+    They are different facts and must stay so: a 404 or a 500 is the store speaking, and the
+    caller decides what it means; an unreachable socket, a timeout, or a body that is not JSON
+    is the probe failing to run, and folding either into a status is the collapse this file's
+    UNKNOWN exists to prevent.
     """
-    if not isinstance(proc_start, str) or not proc_start.strip():
-        return None
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
-        # Tag it UTC rather than letting `.timestamp()` read the string in the host's zone.
-        return int(datetime.strptime(proc_start.strip(), _CTIME_FMT).replace(tzinfo=timezone.utc).timestamp())
-    except ValueError:
-        return None
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, (json.loads(raw) if raw.strip() else None)
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read().decode("utf-8")
+        except OSError:
+            raw = ""
+        try:
+            return exc.code, (json.loads(raw) if raw.strip() else None)
+        except ValueError:
+            return exc.code, None
 
 
-# --- the start-time probe, cached and time-bounded ------------------------------------------
-#
-# ⚠️ **Measured 2026-10-04, and it inverts the batching this probe used to be built around.**
-# `ps -o pid=,lstart= -p <n>` costs **0.026 s at n=1 and 3.7–7.4 s at every n ≥ 2** (medians
-# of 5 runs, 38 registry pids, host at load ~100): macOS `ps` takes a fast single-pid path
-# for one `-p` argument and falls back to enumerating the WHOLE process table for two or
-# more. The batched call was therefore the most expensive thing this function did, on every
-# call, from every caller. Cache-first, the uncached set is normally 0–3 pids, so per-pid is
-# both far cheaper and bounded.
-#
-# ⚠️ **The cache is PERSISTENT — a file, not a per-process dict — and that is what makes it
-# work.** Every caller is a short-lived process (`session-liveness.py --check` from a manager
-# loop, `who-needs-me.py`, `fleet-board.py`), so an in-process dict starts empty on every
-# call and saves nothing at all. Measured 2026-10-04 before this change: ~3 probe processes
-# per second, each making one `ps` that lived ~45 s under load, held **~134 concurrent `ps`
-# children, 134 of them with ppid 1** — their python parent had been killed by a caller
-# timeout — and pinned the load average at ~100.
-#
-# ⚠️ **A pid's start time is immutable, but its MEANING is not: pids are recycled.** A cached
-# entry is trusted for `_START_CACHE_TTL` seconds and then re-read. That TTL is bounded by the
-# pid-reuse window, which is measurable and was measured: pids allocate at **~420/s** on this
-# host (2129 and 2091 across two 5 s windows) and the space is 99999 wide, so a given number
-# cannot come round again for **~238 s**. 60 s leaves ~4x margin. ⚠️ **The failure this
-# bounds is precisely the one the identity check exists to catch** — a stale record plus a
-# recycled pid reading LIVE — so the margin is not decoration: at a churn rate above
-# ~1667 pids/s the window closes and this TTL has to come down with it.
-#
-# ⚠️ **Every `ps` call stays inside `_ps_starts`, and that is load-bearing.**
-# `transport-read-walk.py` derives transport sites from `subprocess` calls, and
-# `transport-read-check.py` fails when the walk derives a site outside its `SITE_LIST`, which
-# names `("session-liveness.py", "_ps_starts")`. A `ps` call moved into a helper would be a
-# new site that enumeration does not carry.
-def _env_float(name, default, minimum=0.0):
-    """A tunable read from the environment, parsed tolerantly.
+def read_endpoint(endpoint=None, timeout=_HTTP_TIMEOUT):
+    """Every row the heartbeat store serves, or `None` when the endpoint could not be read.
 
-    ⚠️ **Tolerant because this module is imported by seven other scripts** —
-    `approved-not-started.py`, `who-needs-me.py`, `manager-predispatch.py`, `fleet-board.py`,
-    `cluster-heartbeat.py`, `worker-sessions.py` and `restart-worker.py` — so a `ValueError`
-    raised here at import does not disable the probe, it disables every one of them. A bare
-    `float(os.environ.get(...) or default)` turns a typo'd `SUPERVISOR_PS_TIMEOUT=5s` into a
-    whole-plugin outage, which is the same tolerant-parse rule `_start_cache_path()` below
-    already follows for its own variable.
-
-    ⚠️ **And `float()` accepts `nan` and `inf`, which for the timeout is not a bound at all.**
-    `min(nan, remaining)` is `nan`, `subprocess`'s deadline becomes `monotonic() + nan`, and
-    its `_remaining_time(...) <= 0` test is then False forever — so the child is never killed
-    and the very orphan this change removes comes back, reachable through a single typo. A
-    value that is not finite, or not above `minimum`, falls back to the default rather than
-    being trusted. Only the timeout is unsafe in this way; a non-finite budget or TTL degrades
-    in the safe direction, but the guard is uniform because a bound that can be silently
-    switched off is not a bound.
+    `None` and `[]` are different answers and must stay so: `[]` is "read it, the store holds
+    nothing", `None` is "could not read it". Collapsing them turns an unreachable store into a
+    confident empty fleet — the failure this file exists to correct. A non-200 is not a
+    liveness answer either, so it too is `None`.
     """
+    url = endpoint_base(endpoint) + HEARTBEAT_PATH
     try:
-        value = float(os.environ[name])
-    except (KeyError, ValueError):
-        return default
-    if not math.isfinite(value) or value <= minimum:
-        return default
-    return value
-
-
-_START_CACHE_DEFAULT = os.path.expanduser("~/.claude/state/session-liveness-starts.json")
-# Seconds a cached start time is trusted. Bounded by the pid-reuse window — see above.
-_START_CACHE_TTL = _env_float("SUPERVISOR_START_CACHE_TTL", 60)
-# Seconds any single `ps` may run before it is killed. A single-pid `ps` measured 0.026 s, so
-# this is a backstop against a wedged process, never a routine path.
-_PS_TIMEOUT = _env_float("SUPERVISOR_PS_TIMEOUT", 5)
-# Seconds the WHOLE probe may run. ⚠️ **A per-call bound is not a bound on the call.** The loop
-# is strictly serial, so `_PS_TIMEOUT` alone leaves a worst case of `n x 5 s` for `n` uncached
-# pids — worse than the single batched call this change replaced, in exactly the pathological
-# case it exists to fix (a wedged `ps`). This caps the probe itself; the steady state is 0-3
-# uncached pids at 0.026 s each, so it is never reached on the hot path.
-_PS_BUDGET = _env_float("SUPERVISOR_PS_BUDGET", 20)
-
-# `{pid: [start_epoch, read_epoch]}`, loaded once per process. `None` until first use.
-_START_CACHE = None
-
-
-def _start_cache_path():
-    """Where the start-time cache lives, resolved PER CALL rather than at import.
-
-    ⚠️ **Resolved per call so a test can redirect the store with one environment variable**,
-    which is not a convenience — it is the same rule the heartbeat store already carries
-    ("an isolated heartbeat store, and it is not optional"): a suite that reads the real
-    store has a result that depends on the machine's mood rather than on the code. Five test
-    modules load this one, and a pid-keyed cache is exactly the shape that goes flaky against
-    a real store — a pid recycled between runs answers for the wrong process.
-    """
-    return os.environ.get("SUPERVISOR_START_CACHE") or _START_CACHE_DEFAULT
-
-
-def _load_start_cache():
-    """The persisted `{pid: [start, read_at]}` map; `{}` when absent or unreadable.
-
-    ⚠️ **Unreadable is NOT an error here, and the contrast with the registry is the point.**
-    `read_registry()` returns `None` for an unreadable directory because the registry *is*
-    the answer — "could not tell" must never collapse into "not live". This cache only
-    shortens the path to that answer: every entry it cannot supply is simply re-read from
-    `ps`, so a missing or corrupt file costs latency and never correctness.
-    """
-    global _START_CACHE
-    if _START_CACHE is None:
-        _START_CACHE = {}
-        try:
-            with open(_start_cache_path(), encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            return _START_CACHE
-        if isinstance(data, dict):
-            for key, val in data.items():
-                if not isinstance(val, list) or len(val) != 2:
-                    continue
-                try:
-                    _START_CACHE[int(key)] = [int(val[0]), float(val[1])]
-                except (TypeError, ValueError, OverflowError):
-                    # ⚠️ **`OverflowError` is in this tuple because omitting it is not a missed
-                    # entry — it is the wrong ANSWER.** `json.load` accepts a bare `Infinity`,
-                    # so `{"123": [Infinity, 1.0]}` parses cleanly and `int(inf)` then raises
-                    # `OverflowError` — a subclass of `ArithmeticError`, not of either of the
-                    # other two. Uncaught, it escapes `_load_start_cache` → `_ps_starts` (which
-                    # documents "Never raises") → `read_registry` → `main()`, and an uncaught
-                    # exception exits **1**, which is this module's documented **ABSENT** code
-                    # (`LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3`). A corrupt cache file
-                    # would therefore report a live session as ABSENT — the one answer that
-                    # permits a resume onto a live conversation, and precisely the failure this
-                    # file exists to prevent. `who-needs-me.py` carries the same tuple for the
-                    # same reason; this loader had re-opened the gap it closed.
-                    continue
-    return _START_CACHE
-
-
-def _save_start_cache(cache):
-    """Persist the cache atomically. A write that fails is swallowed — see `_load_start_cache`.
-
-    ⚠️ **No lock, deliberately.** `os.replace` on a temp file in the same directory means no
-    reader ever sees a partial write, and the entries are immutable per pid, so the worst a
-    concurrent writer can do is drop an entry another process just learned. That costs one
-    re-read; it cannot produce a wrong start time, which is the only outcome worth locking
-    against.
-
-    ⚠️ **The writer's own view is a SNAPSHOT, frozen at first use.** `_START_CACHE` is loaded
-    once per process and never re-read, so a caller that outlives a few seconds writes back the
-    world as it looked when it started, clobbering whatever another process learned meanwhile.
-    That is acceptable only because every importer of this module is a single-shot script
-    (`approved-not-started.py`, `who-needs-me.py`, `manager-predispatch.py`, `fleet-board.py`,
-    `cluster-heartbeat.py`, `worker-sessions.py`, `restart-worker.py`) — checked, not assumed.
-    A long-lived importer would need the memo re-read before the merge.
-    """
-    path = _start_cache_path()
-    tmp = "%s.tmp.%d" % (path, os.getpid())
-    owned = False  # set once the `os.open` below succeeds — see the handler
-    try:
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        # ⚠️ **`os.open` with an explicit `0o600`, not a bare `open()`.** The repo's other
-        # `~/.claude/state/` writers do the same (`manager-predispatch.py`), for the reason its
-        # comment gives: the file is never world-readable, *not even for the instant between
-        # the write and a later chmod*. A bare `open()` lands at the umask — typically 0644 —
-        # and this file is read as an identity assertion, so a writable-by-others store is a
-        # poisoning surface for the TTL window however low the odds.
-        # ⚠️ **`O_EXCL`, because the temp name is derived from our own pid and is therefore
-        # predictable.** Without it a pre-created path — or a symlink — in a writable parent is
-        # followed and truncated rather than rejected, which matters precisely because this file
-        # is read as an identity assertion. The `EEXIST` branch is not optional: the name is
-        # predictable, so a crashed predecessor's leftovers would otherwise wedge every later
-        # write permanently, and nothing else ever clears them.
-        try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            os.unlink(tmp)
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        owned = True
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({str(k): v for k, v in cache.items()}, fh, sort_keys=True)
-        os.replace(tmp, path)
-    except (OSError, TypeError, ValueError):
-        # ⚠️ **Widened past `OSError`, and the temp file is unlinked rather than abandoned.**
-        # `_ps_starts` documents "Never raises" and calls this on its way out, so a `TypeError`
-        # out of `json.dump` — an unserialisable value — escaping here would break that
-        # contract from the one function whose entire job is to be skippable. And `tmp` is
-        # named per process and never reused, so no other path will ever clean it: without the
-        # unlink a single failed write is permanent litter in the state directory.
-        # ⚠️ **Only a file WE created is unlinked.** The name is pid-derived and therefore
-        # predictable, so between the `EEXIST` recovery's unlink and its retry another process
-        # could take the name — and an unconditional unlink here would delete *theirs*. Gating
-        # on `owned` keeps the cleanup aimed at our own leftovers. (Same-uid threat model: such
-        # a process could write the cache directly, so this is hygiene rather than escalation.)
-        if owned:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-        return
-
-
-def _ps_starts(pids, refresh=False, deadline=None):
-    """`{pid: start-epoch}` for the pids `ps` reported. Never raises, never guesses.
-
-    ⚠️ **`deadline` is threaded in by a caller that makes TWO passes over one probe.** The
-    identity pass in `read_registry` calls this once for the whole occupied set and again for
-    the pids whose identity it declined to trust; without threading, each pass derives its own
-    `_PS_BUDGET` and a single `read_registry` spends **twice** the bound the module note
-    advertises — re-entering, on the mismatch path, the unbounded-fan-out shape this change
-    exists to remove. One deadline, two passes.
-
-    Cache-first: a pid whose start time is known and younger than `_START_CACHE_TTL` is
-    returned from the cache and never re-read. A pid absent from the cache is read with **one
-    `ps` call of its own** — see the module note above on why that is per-pid, not batched.
-
-    ⚠️ **`refresh=True` bypasses the cache for every pid given, and the one caller that needs
-    it is `read_registry`'s identity pass.** A cached value is whatever process *last held*
-    that pid; inside the TTL a recycled pid therefore hands back the dead holder's start time,
-    which does not match the live holder's record — and a mismatch is a NEGATIVE, so it would
-    be published as `ABSENT` for a session that is alive. That is a regression the cache
-    introduces and the pre-cache code did not have, since `ps` then always answered for the
-    current holder. See `read_registry`: a mismatch is re-proved uncached before it is
-    believed.
-
-    ⚠️ **The per-pid retry this function's caller used to hold is gone with the batching, and
-    nothing was lost.** That retry existed because `ps` fails ALL-OR-NOTHING — measured
-    2026-10-01, `ps -o pid=,lstart= -p 1,999999` exits 1, prints `process id too large`, and
-    emits no rows at all, so one unreadable record blanked every session's identity at once.
-    One pid per call contains a failure to the pid it happened to, by construction.
-
-    ⚠️ **A pid whose read fails is simply ABSENT from the result, and that is deliberate.**
-    `_pid_identity` answers `None` for it, and `None` is UNKNOWN — never death. Inventing a
-    start time here would be the one direction that permits a caller to resume onto a live
-    session, which is the answer this whole file exists to withhold.
-    """
-    if not pids:
-        return {}
-    now = time.time()
-    cache = _load_start_cache()
-    out, learned = {}, False
-    # ⚠️ **`time.monotonic()`, not `time.time()`, for the deadline.** `subprocess` enforces its
-    # own `timeout=` against the monotonic clock, so a wall-clock deadline would leave the two
-    # halves of one bound measuring against different clocks: a backwards step inflates
-    # `remaining` past the budget, a forwards one trips the break early. `now` stays wall-clock
-    # because the cache epoch genuinely is a wall-clock fact.
-    if deadline is None:
-        deadline = time.monotonic() + _PS_BUDGET
-    for pid in sorted(set(pids)):
-        entry = cache.get(pid)
-        if not refresh and entry is not None and 0 <= now - entry[1] < _START_CACHE_TTL:
-            out[pid] = entry[0]
-            continue
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            # The probe's OWN bound, not the per-call one — see `_PS_BUDGET`. Stopping here
-            # leaves the remaining pids unanswered, which `_pid_identity` reads as `None`, i.e.
-            # UNKNOWN: the safe direction, and the same one a per-pid timeout already takes.
-            # ⚠️ **Said out loud, because a silent degraded read is this file's own
-            # prohibition** — `main()` warns on stderr for every other one, and the difference
-            # between "probed and not held" and "gave up halfway" is not visible to a caller
-            # from the return value alone. A fleet board that renders most sessions UNKNOWN
-            # with no signal is indistinguishable from a healthy fleet.
-            print(
-                "UNKNOWN — probe budget (%.0fs) exhausted; %d pid(s) unanswered"
-                % (_PS_BUDGET, sum(1 for p in set(pids) if p not in out)),
-                file=sys.stderr,
-            )
-            break
-        try:
-            proc = subprocess.run(
-                ["ps", "-o", "pid=,lstart=", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                check=False,
-                # Whichever runs out first — this call's own bound, or the probe's.
-                timeout=min(_PS_TIMEOUT, remaining),
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            # ⚠️ `subprocess.run`'s timeout kills the child AND waits for it, so the `ps` is
-            # reaped here rather than reparented to launchd still running — which is exactly
-            # how the ~134 orphans this change exists to remove were produced.
-            continue
-        for line in proc.stdout.splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) != 2 or not parts[0].isdigit():
-                continue
-            try:
-                # `ps` prints in the host's LOCAL zone; a naive datetime's `.astimezone()`
-                # reads it as local, which is exactly what is wanted on this side of the
-                # comparison.
-                start = int(
-                    datetime.strptime(parts[1], _CTIME_FMT).astimezone(timezone.utc).timestamp()
-                )
-            except ValueError:
-                continue
-            cache[pid] = [start, now]
-            out[pid] = start
-            learned = True
-            break
-    if learned:
-        # ⚠️ **Pruned on the next write, which any newly-learned pid forces within a TTL
-        # window.** An entry past the TTL is re-read on its next use regardless, so keeping it
-        # buys nothing — and it is only ever OVERWRITTEN when that re-read succeeds, which a
-        # pid that has since exited never does. Left alone the file grows monotonically, one
-        # dead pid per session the host has ever run. ⚠️ **The prune sits inside `learned`
-        # deliberately:** in a fully-warm steady state no write happens, so no prune does
-        # either — moving it out would buy a write on the hot path for no correctness gain.
-        # ⚠️ **Pruned by "not currently servable", not by age.** `now - read_at >= TTL` misses a
-        # FUTURE-dated `read_at` — clock skew, or a hand-edited file — and that is the one input
-        # that would otherwise let the map grow without bound, since the read guard's `0 <=`
-        # lower bound already refuses to serve such an entry.
-        for dead in [k for k, v in cache.items() if not 0 <= now - v[1] < _START_CACHE_TTL]:
-            cache.pop(dead, None)
-        _save_start_cache(cache)
-    return out
-
-
-def _pid_identity(pid, proc_start, live_starts):
-    """`True`/`False` when the holder's identity can be decided, `None` when it cannot.
-
-    `os.kill(pid, 0)` asks only whether SOME process holds the pid — never whether it is
-    THIS session's. A record that outlives its session (a `kill -9` leaves it behind) plus a
-    pid the OS has since recycled therefore reads LIVE for a session that is gone. The
-    record's own `procStart` is the identity: compare it against the live holder's start
-    time, and a mismatch is a different process wearing the same number.
-
-    `None` is "cannot tell" and must never be read as death — ABSENT is the one answer that
-    permits a caller to resume onto the session, so it needs evidence, not an absence of it.
-    """
-    recorded = _record_start_epoch(proc_start)
-    if recorded is None:
+        status, payload = _get_json(url, timeout)
+    except (OSError, ValueError):
         return None
-    live = live_starts.get(pid)
-    if live is None:
+    if status != 200 or not isinstance(payload, list):
         return None
-    return recorded == live
+    return payload
 
 
-def read_registry(registry_dir=None):
-    """`{sessionId: {pid, status, name, alive}}`, or `None` when the registry is unreadable.
+def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
+    """`(verdict, message, row)` for one id argument, from the endpoint alone.
 
-    `None` and `{}` are different answers and must stay so: `{}` is "read it, no session is
-    live", `None` is "could not read it". Collapsing them is how a permissions error becomes
-    a confident all-clear.
+    Two requests, and the split is the whole contract:
 
-    `glob` on a missing directory returns `[]` rather than raising, so the directory is
-    checked explicitly — otherwise an absent registry would read as "no session is live" and
-    a caller would resume onto a conversation it cannot see. Absence is not evidence of
-    death; it is evidence the probe cannot run.
+      1. the **per-id** route. HTTP 200 carries the row — LIVE when the store says `live`,
+         ABSENT when it says otherwise (the store positively reporting the id as not live).
+         HTTP 404 is the store positively reporting it holds no such session. ⚠️ **Any other
+         status, and any unreachable endpoint, is UNKNOWN — never ABSENT.**
+      2. only when step 1 answered 404, the **list** route — because the argument may be a
+         PREFIX, which the per-id route cannot resolve (measured 2026-10-08:
+         `/session-heartbeat/30fae0ae` → 404 for a live session). Zero prefix matches → ABSENT;
+         exactly one → LIVE/ABSENT by its `live`; more than one → AMBIGUOUS, and the message
+         names candidates a caller can actually tell apart.
 
-    ⚠️ **`alive` is a THREE-state — `True`, `False`, or `None` — not the bool it once was.**
-    `os.kill(pid, 0)` proves only that the pid is OCCUPIED, never that the process holding it
-    is this session. `True` means occupied **and** the record's `procStart` matches the live
-    holder's start time; `False` means the pid is gone, or is held by a process that is not
-    this record's; `None` means the pid IS occupied but the record carries no usable
-    `procStart`, so identity cannot be established. `None` is "cannot tell", and a caller
-    must read it as UNKNOWN — never as death.
-
-    `PermissionError` means the process exists but is not ours — that is life, not death, so
-    it still counts as occupied and the identity comparison runs on it.
-    """
-    d = registry_dir if registry_dir is not None else REGISTRY_DIR
-    if not os.path.isdir(d):
-        return None
-    out = {}
-    try:
-        paths = glob.glob(os.path.join(d, "*.json"))
-    except OSError:
-        return None
-    occupied = []  # (sid, pid, procStart) whose identity still has to be proven
-    for path in paths:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                rec = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        sid = rec.get("sessionId")
-        if not sid:
-            continue
-        pid = rec.get("pid")
-        held = False
-        if isinstance(pid, int):
-            try:
-                os.kill(pid, 0)
-                held = True
-            except PermissionError:  # exists, but not ours -> occupied
-                held = True
-            except OSError:
-                held = False
-        if held:
-            occupied.append((sid, pid, rec.get("procStart")))
-        out[sid] = {
-            "pid": pid,
-            "status": rec.get("status", ""),
-            "name": rec.get("name", ""),
-            # `formerNames` and `cwd` are carried for `/supervisor:open`, which was reading
-            # this registry itself — the second reader SC1 exists to collapse. It resolves a
-            # topic's manager by matching the topic against the name the session holds NOW
-            # **and** every name it has held: a long-lived manager gets renamed, and a
-            # name-only match concludes there is none and spawns a SECOND manager onto a live
-            # topic (observed 2026-09-18). It then spawns a resume into `cwd`, because the new
-            # tab otherwise inherits wezterm's working directory and Claude Code stops on the
-            # folder-trust prompt before registering a pid — so a resume that worked reads as
-            # a no-op. Neither field is used by the liveness verdict; they are here so the one
-            # reader can serve both questions and no caller has to open the directory again.
-            "formerNames": [
-                (f.get("name") if isinstance(f, dict) else f) or "" for f in (rec.get("formerNames") or [])
-            ],
-            "cwd": rec.get("cwd", ""),
-            # `/supervisor:open` Step 4 checks this to prove a spawned session owns its name:
-            # `nameSource: peer` means the `unset` prefix was ineffective and the session is
-            # named after its spawner, which the title-match session-connect cannot resolve.
-            "nameSource": rec.get("nameSource", ""),
-            "alive": held,
-        }
-    # Identity pass, after every file is read so the probe sees the whole occupied set at
-    # once and can answer each pid from the shared cache.
-    if occupied:
-        # ⚠️ **One deadline across BOTH passes** — see `_ps_starts`. Deriving a second one for
-        # the re-prove below would let a single `read_registry` spend twice the bound the
-        # module note advertises.
-        deadline = time.monotonic() + _PS_BUDGET
-        starts = _ps_starts([p for _, p, _ in occupied], deadline=deadline)
-        # ⚠️ **A mismatch is re-proved UNCACHED before it is allowed to become a negative.**
-        # Inside the TTL a cached entry is the start time of whatever process *last held* that
-        # pid, so a pid the OS recycled within the window hands back the dead holder's start,
-        # disagrees with the live holder's record, and would publish ABSENT for a session that
-        # is alive — the one answer that permits a resume onto a live conversation, and a
-        # regression this cache introduced rather than one the pre-cache code carried (there,
-        # `ps` always answered for the current holder). Only the mismatch arm pays for the
-        # re-read. ⚠️ **The entry is DROPPED first**, so a re-read that itself fails leaves the
-        # pid unanswered — UNKNOWN — rather than silently reinstating the value we just
-        # declined to trust.
-        doubtful = [p for _, p, ps in occupied if _pid_identity(p, ps, starts) is False]
-        if doubtful:
-            for pid in doubtful:
-                starts.pop(pid, None)
-            starts.update(_ps_starts(doubtful, refresh=True, deadline=deadline))
-        # ⚠️ **The hardening above is ASYMMETRIC, deliberately, and the asymmetry is the point.**
-        # A cached value is "whatever process last held that pid" for a MATCH exactly as for a
-        # mismatch, so a session that died and whose pid the OS recycled inside the TTL can
-        # still read LIVE off its own stale holder's start — where the pre-cache code answered
-        # ABSENT, since `ps` then always spoke for the current holder. That residual is accepted,
-        # not overlooked: re-proving a match uncached would mean re-reading every cached pid, and
-        # the cache would save nothing at all. It is bounded by the same measured reuse window as
-        # the other polarity (~238 s against a 60 s TTL), and it errs toward **LIVE — the
-        # direction that withholds** the resume permission, where the mismatch arm errs toward
-        # ABSENT, which grants it.
-        for sid, pid, proc_start in occupied:
-            out[sid]["alive"] = _pid_identity(pid, proc_start, starts)
-    return out
-
-
-def read_registry_entries(registry_dir=None):
-    """Every registry record as `(path, rec)`, or `None` when the directory is unreadable.
-
-    The **list** shape, alongside `read_registry()`'s dict — one file, one glob, one unreadable
-    rule, two views. They exist because they answer different questions:
-
-      * the dict answers "which sessions are there", and **collapses two files that claim one
-        session id** — which is the right answer for a liveness verdict;
-      * this answers "what is on disk", and **preserves that collision**.
-
-    The collision is not hypothetical and must stay visible. `restart-worker.py` refuses when
-    two entries claim one id, because resuming onto the wrong claimant of two is exactly the
-    double-writer this plugin guards against — so a caller that needs to see the collision
-    cannot be served by the dict, however convenient it is.
-    """
-    d = registry_dir if registry_dir is not None else REGISTRY_DIR
-    if not os.path.isdir(d):
-        return None
-    try:
-        paths = sorted(glob.glob(os.path.join(d, "*.json")))
-    except OSError:
-        return None
-    out = []
-    for path in paths:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                out.append((path, json.load(fh)))
-        except (OSError, ValueError):
-            continue  # a half-written entry is skipped, not fatal
-    return out
-
-
-def read_heartbeats(heartbeat_dir=None, ttl=None, now=None):
-    """Fresh stamps as `[{session_id, age_seconds, pid}]`, or `None` when unreadable.
-
-    Delegates to `live-workers.py`. The verdict is the stamp's AGE against the TTL, never the
-    file's existence: a store whose writer was `kill -9`'d keeps its files, so reading
-    existence reports exactly the wrong answer for the case the store exists to catch.
-    """
-    lw = _live_workers()
-    d = heartbeat_dir if heartbeat_dir is not None else lw.heartbeat_dir()
-    return lw.read_live(d, ttl=lw.TTL_SECONDS if ttl is None else ttl, now=now)
-
-
-def resolve(session_id, registry, heartbeats=()):
-    """`(verdict, payload)` for one id argument against already-read sources.
-
-    The argument is matched as a case-insensitive PREFIX against the UNION of both sources,
-    which is what makes an 8-char `sid8` resolve to the same session its full UUID does —
-    and what lets a cluster session, which holds no registry entry at all, resolve from its
-    heartbeat. Exactly one match is a verdict; zero is ABSENT *only when both sources were
-    readable*; more than one is AMBIGUOUS and carries the candidates, because a caller that
-    guesses between two live sessions is the double-writer this file prevents.
-
-    A matched registry entry is then read for its three-state `alive` (see `read_registry`):
-    `True` is a live session, `False` is a pid that is gone or belongs to some other process,
-    and `None` is "the pid is occupied but the record cannot prove the holder is this session"
-    — UNKNOWN, never death.
-
-    `heartbeats` defaults to `()`, i.e. "the store was read and holds nothing" — the honest
-    reading for a caller that never consulted it, and the one that leaves a registry-only
-    verdict unchanged. Pass `None` to mean "could not be read".
+    ⚠️ **A row whose `live` is not a boolean is UNKNOWN, never ABSENT.** The store computes
+    `live` from age against its window and always sends it; a row that carries something else
+    is a store this reader does not understand, and "I do not understand this row" must not
+    become permission to resume onto a live conversation.
     """
     sid = (session_id or "").strip().lower()
     if not sid:
-        return UNKNOWN, "no session id given"
-    if registry is None and heartbeats is None:
-        return UNKNOWN, "neither the session registry nor the heartbeat store is readable — cannot decide liveness"
+        return UNKNOWN, "no session id given", None
+    base = endpoint_base(endpoint)
 
-    registered = sorted(k for k in (registry or {}) if k.lower().startswith(sid))
-    # `state` is `live` for a fresh stamp and `unknown` for a cluster stamp whose store could
-    # not be read — see `live-workers.py`. An entry predating the field has no `state`, and a
-    # missing state must read as live rather than vanish: dropping it would silently empty the
-    # store for every stamp written before this change.
-    fresh = [h for h in (heartbeats or []) if (h.get("session_id") or "").lower().startswith(sid)]
-    beating = sorted(h["session_id"] for h in fresh if h.get("state", "live") == "live")
-    unresolved = sorted(h["session_id"] for h in fresh if h.get("state") == "unknown")
-    matches = sorted(set(registered) | set(beating) | set(unresolved))
+    try:
+        status, row = _get_json(
+            "%s%s/%s" % (base, HEARTBEAT_PATH, urllib.parse.quote(sid, safe="")), timeout
+        )
+    except (OSError, ValueError):
+        return UNKNOWN, "session-heartbeat endpoint unreachable at %s" % base, None
+    if status == 200 and isinstance(row, dict):
+        return _verdict_for(row, sid)
+    if status != 404:
+        # ⚠️ **Not ABSENT.** A 5xx, a 403, a body that is not JSON — none of them is the store
+        # saying "this session is gone", and reading one as ABSENT is the resume-onto-a-live-
+        # conversation this file exists to prevent.
+        return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s" % (status, sid), None
 
+    try:
+        status, rows = _get_json(base + HEARTBEAT_PATH, timeout)
+    except (OSError, ValueError):
+        return UNKNOWN, "session-heartbeat endpoint unreachable at %s" % base, None
+    if status != 200 or not isinstance(rows, list):
+        return UNKNOWN, "session-heartbeat list endpoint returned HTTP %s" % status, None
+
+    # The list carries every session the store has ever seen, live or stale — a stale row is
+    # matched too, exactly as the registry's own keys were: the argument identifies a session,
+    # and whether that session is live is the verdict that follows, not part of the match.
+    by_id = {
+        r["session_id"]: r
+        for r in rows
+        if isinstance(r, dict) and r.get("session_id")
+    }
+    matches = sorted(sid_ for sid_ in by_id if sid_.lower().startswith(sid))
     if not matches:
-        # A negative is licensed only by two readable sources. With either unreadable, the
-        # match we did not find may be sitting in the half we could not read.
-        if registry is None:
-            return UNKNOWN, "session registry unreadable — cannot decide liveness"
-        if heartbeats is None:
-            return UNKNOWN, "heartbeat store unreadable — cannot decide liveness"
-        return ABSENT, "no session id matches %s" % sid
-
+        return ABSENT, "no session id matches %s" % sid, None
     if len(matches) > 1:
         # 12 chars, not 8: the caller already passed a prefix long enough to collide, so
         # echoing 8 back hands them two identical strings and no way to tell them apart.
-        return AMBIGUOUS, "%d live session ids match %s — pass a longer id: %s" % (
+        return AMBIGUOUS, "%d session ids match %s — pass a longer id: %s" % (
             len(matches),
             sid,
             ", ".join(m[:12] for m in matches),
-        )
+        ), None
+    return _verdict_for(by_id[matches[0]], sid)
 
-    full = matches[0]
-    if full in unresolved:
-        # The store says this cluster worker's stamp is stale while the cluster itself could
-        # not be read. That is "cannot tell", never death — a network fault must not become
-        # permission to resume onto a worker that may be alive behind it.
-        return UNKNOWN, (
-            "%s is a cluster worker and the cluster store could not be read — cannot decide liveness" % full
-        )
-    if any(h.get("session_id") == full and h.get("state", "live") == "live" for h in (heartbeats or [])):
-        # A fresh stamp is decisive on its own — this is the half that answers for a session
-        # the registry structurally cannot see.
-        return LIVE, full
-    entry = registry[full]
-    if entry["alive"] is None:
-        # The pid is occupied but the record carries no usable `procStart`, so we cannot say
-        # whether the process holding it is this session. That is "cannot tell", and it must
-        # NOT become ABSENT — ABSENT is the one answer that permits a caller to resume onto
-        # the session, and the session may well be the one holding the pid.
-        return UNKNOWN, (
-            "%s is registered against pid %s, but the record carries no usable procStart "
-            "— cannot tell whether that process is this session" % (full, entry["pid"])
-        )
-    # A pid that is gone, or that belongs to some OTHER process, is a stale file rather than a
-    # live session — a `kill -9` leaves the record behind and the OS recycles the number. The
-    # runbook's rule is "alive if ANY id holds an entry against a RUNNING pid", so presence
-    # alone is not the verdict; presence against a pid that is demonstrably THIS session's is.
-    if not entry["alive"]:
-        # A stale record is a NEGATIVE, so it needs both sources readable — the same rule the
-        # no-match branch applies. Returning ABSENT here while the heartbeat store is
-        # unreadable would let a fresh stamp in the half we could not read be outvoted, and
-        # ABSENT is the one answer that permits a caller to resume onto the session.
-        if heartbeats is None:
-            return UNKNOWN, (
-                "%s is registered but pid %s is not this session, and the heartbeat store is "
-                "unreadable — cannot decide liveness" % (full, entry["pid"])
-            )
-        return ABSENT, "%s is registered but pid %s is not this session — stale record" % (
-            full,
-            entry["pid"],
-        )
-    return LIVE, full
+
+def _verdict_for(row, sid):
+    """`(verdict, message, row)` for a single heartbeat row. UNKNOWN when `live` is unusable."""
+    full = row.get("session_id") or sid
+    live = row.get("live")
+    if live is True:
+        return LIVE, full, row
+    if live is False:
+        return ABSENT, full, row
+    return UNKNOWN, (
+        "%s has a heartbeat row with no usable `live` flag — cannot decide liveness" % full
+    ), row
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Is this session id live? (registry + heartbeats)")
+    parser = argparse.ArgumentParser(description="Is this session id live? (session-heartbeat endpoint)")
     parser.add_argument("--check", metavar="SESSION_ID", help="full id or an 8-char prefix")
     parser.add_argument("--list", action="store_true", help="print every live session")
-    parser.add_argument("--dir", default=None, help="override the registry path")
+    parser.add_argument(
+        "--endpoint",
+        default=None,
+        help="override the attention store base URL (default $ATTENTION_STORE_URL, else "
+        "http://localhost:18080) — a test points this at a fixture server",
+    )
+    parser.add_argument(
+        "--dir",
+        default=None,
+        help="override the identity registry path — the source of the `--list` name, "
+        "formerNames and cwd fields",
+    )
     parser.add_argument(
         "--heartbeat-dir",
         default=None,
-        help="override the heartbeat store; tests pass an isolated dir so a real headless "
-        "worker on this machine cannot turn an ABSENT assertion into LIVE",
+        help="accepted for backward compatibility; the heartbeat store is no longer read here "
+        "(the session-heartbeat endpoint replaces it)",
     )
-    parser.add_argument("--ttl", type=int, default=None, help="heartbeat staleness bound in seconds")
+    parser.add_argument(
+        "--ttl",
+        type=int,
+        default=None,
+        help="accepted for backward compatibility; the endpoint computes freshness itself",
+    )
     parser.add_argument(
         "--json",
         action="store_true",
@@ -745,86 +259,92 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    registry = read_registry(args.dir)
-    heartbeats = read_heartbeats(args.heartbeat_dir, ttl=args.ttl)
+    # ⚠️ Two flags are accepted and IGNORED, and saying so out loud is not optional. Both existed
+    # because the old design read two LOCAL sources with a caller-chosen window; the endpoint
+    # replaces both and computes freshness itself, so a caller's `--ttl` can no longer be
+    # honoured here. Removing the flags would break the callers that still pass them
+    # (`approved-not-started.py` passes `--heartbeat-dir`), and accepting them in silence would
+    # let a caller believe a window is in force when it is not — a flag that resolves to nothing
+    # is the failure shape this repo treats as worse than a refusal. So: accept, warn, continue.
+    if args.heartbeat_dir is not None or args.ttl is not None:
+        print(
+            "WARNING — --heartbeat-dir and --ttl are ignored: the session-heartbeat endpoint "
+            "computes freshness itself",
+            file=sys.stderr,
+        )
 
     if args.check:
-        verdict, payload = resolve(args.check, registry, heartbeats)
+        verdict, message, row = check(args.check, args.endpoint)
         if verdict == LIVE:
-            beat = next(
-                (h for h in (heartbeats or []) if h["session_id"] == payload and h.get("state", "live") == "live"),
-                None,
+            print(
+                "LIVE — %s  heartbeat age %ss  source %s"
+                % (message, row.get("age_seconds"), row.get("source") or "heartbeat")
             )
-            if beat is not None:
-                print("LIVE — %s  heartbeat age %ss  pid %s" % (payload, beat["age_seconds"], beat["pid"]))
-            else:
-                rec = registry[payload]
-                print("LIVE — %s  pid %s  %s" % (payload, rec["pid"], rec["name"] or "(no name)"))
         elif verdict == ABSENT:
-            print("ABSENT — %s" % payload, file=sys.stderr)
+            print("ABSENT — %s" % message, file=sys.stderr)
         elif verdict == AMBIGUOUS:
-            print("AMBIGUOUS — %s" % payload, file=sys.stderr)
+            print("AMBIGUOUS — %s" % message, file=sys.stderr)
         else:
-            print("UNKNOWN — %s" % payload, file=sys.stderr)
+            print("UNKNOWN — %s" % message, file=sys.stderr)
         return verdict
 
-    # A list is only a list when BOTH halves were read. One unreadable source makes the output
-    # partial, and a partial list presented as complete is the dangerous direction — it reads
-    # as "this session is not live" for every session in the half that failed.
-    if registry is None or heartbeats is None:
-        missing = (args.dir or REGISTRY_DIR) if registry is None else (args.heartbeat_dir or "the heartbeat store")
-        print("UNKNOWN — cannot read %s" % missing, file=sys.stderr)
+    # A list needs BOTH halves readable, and for the same reason it always did: a partial list
+    # presented as complete reads as "this session is not live" for every session in the half
+    # that failed. The halves changed with the source — the endpoint is the live set, the
+    # identity registry is the names — and the names are load-bearing: a names-less list makes
+    # `/supervisor:open`'s topic→manager join match nothing and spawn a SECOND manager onto a
+    # live topic (observed 2026-09-18), which is the dangerous direction.
+    rows = read_endpoint(args.endpoint)
+    if rows is None:
+        print(
+            "UNKNOWN — cannot read the session-heartbeat endpoint at %s"
+            % endpoint_base(args.endpoint),
+            file=sys.stderr,
+        )
         return UNKNOWN
 
-    if args.json:
-        # `alive` is normalised to a bool here, and the filter keeps everything but a PROVEN
-        # negative. The dict's third state (`None` — "the pid is occupied but the record cannot
-        # prove the holder is this session") is a verdict input for `resolve()`, not something a
-        # `--list` consumer can act on; emitted raw it would read as `False` to any JSON caller
-        # doing a truthiness test, and a consumer that acts on this list declares a task unowned
-        # and spawns a duplicate onto a session that may be live.
-        payload = [
-            dict(rec, sessionId=sid, source="registry", state="live", alive=rec["alive"] is not False)
-            for sid, rec in registry.items()
-            if rec["alive"] is not False
-        ]
-        payload += [
+    identity = _identity().read_registry(args.dir)
+    if identity is None:
+        print("UNKNOWN — cannot read the identity registry (%s)" % (args.dir or "default path"), file=sys.stderr)
+        return UNKNOWN
+
+    payload = []
+    for row in rows:
+        sid = row.get("session_id")
+        # Only a live row is listed: the store keeps a row for a session long after it dies,
+        # and a `--list` that echoed them would count a dead fleet as a live one. The old
+        # registry-backed list had the same rule — presence in a pruned store meant live.
+        if not sid or row.get("live") is not True:
+            continue
+        ident = identity.get(sid) or {}
+        payload.append(
             {
-                "sessionId": beat["session_id"],
-                "source": "heartbeat",
-                "state": beat.get("state", "live"),
-                "age_seconds": beat["age_seconds"],
-                "pid": beat["pid"],
-                "status": "",
-                "name": "",
-                "formerNames": [],
-                "cwd": "",
-                "nameSource": "",
-                "alive": beat.get("state", "live") == "live",
+                "sessionId": sid,
+                "pid": ident.get("pid"),
+                "status": ident.get("status", ""),
+                "name": ident.get("name", ""),
+                "formerNames": ident.get("formerNames", []),
+                "cwd": ident.get("cwd", ""),
+                "nameSource": ident.get("nameSource", ""),
+                "alive": True,
+                "source": row.get("source") or "heartbeat",
+                "state": row.get("state") or "live",
+                "age_seconds": row.get("age_seconds"),
             }
-            for beat in heartbeats
-        ]
+        )
+
+    if args.json:
         json.dump(payload, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return LIVE
 
-    rows = []
-    for sid, rec in registry.items():
-        # Only a PROVEN negative is dropped. An unproven identity (`None`) stays listed, because
-        # the alternative is a `--list` consumer concluding the session is gone — the direction
-        # that permits a resume onto a conversation that may still be running.
-        if rec["alive"] is not False:
-            rows.append((sid, "pid %-7s %s" % (rec["pid"], rec["name"] or "(no name)")))
-    for beat in heartbeats:
-        if beat.get("state") == "unknown":
-            rows.append((beat["session_id"], "heartbeat UNKNOWN (cluster unreachable)"))
-        else:
-            rows.append((beat["session_id"], "heartbeat age %ss  pid %s" % (beat["age_seconds"], beat["pid"])))
-    rows.sort(key=lambda r: r[1])
-    for sid, desc in rows:
-        print("%s  %s" % (sid, desc))
-    if not rows:
-        print("no live sessions in %s" % (args.dir or REGISTRY_DIR))
+    if not payload:
+        print("no live sessions on the session-heartbeat endpoint")
+        return LIVE
+    for rec in sorted(payload, key=lambda r: r["sessionId"]):
+        pid = rec["pid"]
+        where = "pid %s" % pid if pid is not None else "age %ss" % rec["age_seconds"]
+        print("%s  %s  %s  [%s]" % (rec["sessionId"], where, rec["name"] or "(no name)", rec["source"]))
     return LIVE
 
 
