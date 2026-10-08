@@ -23,6 +23,14 @@ that file is not vendored here and would not be installed in CI, so a guard asse
 existence would fail unconditionally on every checkout. The two halves are deliberately
 separate: this is the in-repo drift guard, the live report is the runtime detector.
 
+⚠️ **The mandate is pinned by `RULE_ANCHOR`, not by `LIMB` — and the difference matters.**
+`LIMB` alone (`limb [123] \(`) is satisfied by a line that merely *lists* the three labels,
+so on its own it could not tell a rule that requires the naming from one that only
+illustrates it. `RULE_ANCHOR` is the mandate sentence itself (*"An `in flight:` drop names
+the LIMB that answered"*), so a softened or dropped mandate fails the anchor before `LIMB`
+is consulted, and `LIMB` then guards the other direction — that the clause still spells out
+the labels a reader has to write. Both must hold on the same line.
+
 Anchored on the clause's own words, never on a line number: this file's neighbours cite
 `agents/manager-drive.md` by line range, and one of those citations has already drifted
 (`scripts/manager-attention-watch.py` pinned `:132` for a sentence at `:134`) — so a

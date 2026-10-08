@@ -78,6 +78,20 @@ class TestGuard(Base):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("only detector", r.stderr)
 
+    def test_duplicated_rule_fails(self) -> None:
+        # The most likely real drift: the clause pasted into a second site.
+        self.write(body(rule=RULE + "\n\n" + RULE))
+        r = self.guard()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("found 2", r.stderr)
+
+    def test_duplicated_exemplar_fails(self) -> None:
+        # The other likely one: the worked exemplar copied into a second report block.
+        self.write(body(exemplar=EXEMPLAR + "\n" + EXEMPLAR))
+        r = self.guard()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("found 2", r.stderr)
+
     def test_missing_exemplar_fails(self) -> None:
         self.write(body(exemplar=None))
         self.assertNotEqual(self.guard().returncode, 0)
