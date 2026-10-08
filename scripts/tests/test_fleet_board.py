@@ -809,5 +809,56 @@ class TestHasTaskFile(unittest.TestCase):
         self.assertEqual(fb._norm_session_name(None), "")
 
 
+class TestNameTitleMismatch(unittest.TestCase):
+    """SC3's discrimination — a drifted name is a MISMATCH, never an absent worker.
+
+    ⚠️ **Both halves are measured.** A live session held the registry name
+    `⚙ A Renamed Task's Session Becomes Unaddressable` against a 108-character title, and
+    `fleet-sweep-reader Misresolves Sibling-Vault Tasks` rendered under `Unmanaged` with no
+    vault task while it owned one. Same failure: a name that no longer names the row,
+    rendered as a session that has no row at all.
+
+    The negative half is asserted as hard as the positive one — an id resolving to no task
+    is a genuinely different fact, and collapsing it into `mismatch` would rebuild the
+    defect from the other side.
+    """
+
+    LONG = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry Name "
+            "Is Write-Once and the Title Is Not")
+
+    def mismatch(self, registry, task_titles, *titles):
+        return fb.name_title_mismatches(
+            registry, task_titles, fb.VaultIndex(task_titles=list(titles)))
+
+    def test_a_drifted_name_is_reported_with_the_row_it_resolves_to(self):
+        held = "⚙ A Renamed Task's Session Becomes Unaddressable"
+        self.assertEqual(
+            self.mismatch({_sid(1): {"name": held}}, {_sid(1): [self.LONG]}, self.LONG),
+            [(_sid(1), held, [self.LONG])])
+
+    def test_a_matching_name_is_not_a_mismatch(self):
+        self.assertEqual(
+            self.mismatch({_sid(1): {"name": "Some Task"}}, {_sid(1): ["Some Task"]}, "Some Task"),
+            [])
+
+    def test_a_session_with_no_row_is_absent_not_a_mismatch(self):
+        """The other half of the discrimination — reporting this here would re-create the
+        defect, calling an unowned session a drifted one."""
+        self.assertEqual(
+            self.mismatch({_sid(1): {"name": "Fleet Manager"}}, {}, "Some Task"), [])
+
+    def test_a_nameless_row_is_not_a_mismatch(self):
+        """A heartbeat-only row carries `name: ""` — nothing is held, so nothing drifted."""
+        self.assertEqual(
+            self.mismatch({_sid(1): {"name": ""}}, {_sid(1): ["Some Task"]}, "Some Task"), [])
+
+    def test_the_report_is_sorted_and_deduplicated(self):
+        held = "⚙ A Renamed Task's Session Becomes Unaddressable"
+        got = self.mismatch({_sid(2): {"name": held}, _sid(1): {"name": held}},
+                            {_sid(2): [self.LONG], _sid(1): [self.LONG, self.LONG]}, self.LONG)
+        self.assertEqual([row[0] for row in got], [_sid(1), _sid(2)])
+        self.assertEqual(got[0][2], [self.LONG])
+
+
 if __name__ == "__main__":
     unittest.main()
