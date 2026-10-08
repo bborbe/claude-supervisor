@@ -98,12 +98,13 @@ const heartbeat = {
   // session it is reporting on. The store accepts an unanchored row by design; the row still
   // answers alive, where, and what state.
   //
-  // `state` starts at `idle` — the value the mechanism names for "before any hook has fired".
-  // The hooks that move it are a separate change; until they land, every self-stamp reports
-  // idle, which is the honest answer rather than a guessed `busy`.
+  // `activity` starts at `idle` — the value the mechanism names for "before any hook has
+  // fired". The hooks that move it are a separate change; until they land, every self-stamp
+  // reports idle, which is the honest answer rather than a guessed `busy`.
   startSelf(sessionId) {
     if (!sessionId) return false
     this.stopSelf()
+    this.selfSessionId = sessionId
     const write = () => {
       try {
         stampRecord(heartbeatDir, {
@@ -116,7 +117,14 @@ const heartbeat = {
           // value captured at start would report the state the session had when the server
           // came up for the rest of its life. `idle` is the documented answer for "no hook has
           // fired yet" — see the mechanism note above.
-          state: readState(sessionId) ?? 'idle',
+          //
+          // ⚠️ Carried as `activity`, NEVER as the stamp's `state`. That key is a LIVENESS
+          // VERDICT four readers of this same directory gate on, so a `busy` written there
+          // reads as NOT-live: the session would draw no row on the fleet board, report
+          // `"alive": false` from `session-liveness.py`, and stop counting as live for
+          // `adopt-orphans.py` — leaving the auto-resume gate free to spawn a duplicate onto
+          // a session that is alive. See `stampRecord`.
+          activity: readState(sessionId) ?? 'idle',
         })
       } catch (error) {
         // Same reasoning as `stamp` above: the session still runs, and a manager's verdict
@@ -132,10 +140,20 @@ const heartbeat = {
     this.selfTimer = timer
     return true
   },
+  // ⚠️ Clears the STAMP as well as the timer — which is what `stop` above does for a worker,
+  // and what this deliberately did not. `clearStamp`'s own doc gives the reason: the common
+  // case should "leave nothing behind", so the next reader "does not have to wait out a TTL to
+  // learn what the server already knows". Without it, a restarted server leaves its OWN row
+  // reading live for a full 60 s — and the self-stamp is the one row an operator is most
+  // likely to be looking at, which is the whole point of the change it belongs to.
   stopSelf() {
     if (this.selfTimer) {
       clearInterval(this.selfTimer)
       this.selfTimer = undefined
+    }
+    if (this.selfSessionId) {
+      clearStamp(this.selfSessionId, { dir: heartbeatDir })
+      this.selfSessionId = undefined
     }
   },
 }
@@ -663,6 +681,11 @@ function stampUnobservedWorkers() {
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
     const stamped = stampUnobservedWorkers()
+    // The self-stamp goes the same way. The handler already exists so a killed server does not
+    // leave records asserting a liveness nobody can vouch for; the row describing the server's
+    // OWN session is the same claim and belongs on the same path. `stopSelf` is idempotent, so
+    // a server that never had a session id simply clears nothing.
+    heartbeat.stopSelf()
     log(`received ${signal} — stamped ${stamped} unobserved worker(s) as ${UNOBSERVED_STATUS}, then exited`)
     process.exit(0)
   })

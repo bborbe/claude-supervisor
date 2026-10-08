@@ -152,8 +152,15 @@ def main(argv: list[str]) -> int:
         }
         tmp.write_text(json.dumps(record) + "\n", encoding="utf-8")
         tmp.replace(target)
-    except OSError:
+    except Exception:
         # An unwritable state directory must not fail the turn. See the fail-open note above.
+        #
+        # ⚠️ `Exception`, not `OSError`. The module docstring claims EVERY failure path returns
+        # 0, and a claim of *every* has to hold for exception classes nobody enumerated — the
+        # same reasoning that widened `session_id_from_stdin` below. An `OSError`-only handler
+        # let a `ValueError` (a path containing a null byte, which `pathlib` raises before any
+        # syscall) escape `main`, print a traceback and exit 1: the one outcome this contract
+        # rules out, on a hook that runs inside the operator's turn.
         return 0
     return 0
 

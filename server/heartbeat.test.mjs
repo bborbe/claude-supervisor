@@ -182,14 +182,36 @@ test('the session-liveness fields are carried when the writer sets them', () => 
       task: 'Session Liveness Comes From a Heartbeat Store in attention-controller',
       vault: 'private-personal',
       location: 'local',
-      state: 'idle',
+      activity: 'idle',
     })
     const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
     assert.equal(row.source, 'mcp-timer')
     assert.equal(row.task, 'Session Liveness Comes From a Heartbeat Store in attention-controller')
     assert.equal(row.vault, 'private-personal')
     assert.equal(row.location, 'local')
-    assert.equal(row.state, 'idle')
+    assert.equal(row.activity, 'idle')
+  })
+})
+
+// ⚠️ THE REGRESSION GUARD. `state` on a stamp is a LIVENESS VERDICT: four readers of this same
+// directory gate on `stamp.get("state", "live") != "live"`, where a MISSING key must read as
+// `live` rather than vanish. An activity written into that key therefore does not merely
+// confuse a reader — it reads as NOT-live, so a live session draws no row on the fleet board,
+// reports `"alive": false` from `session-liveness.py`, and stops counting as live for
+// `adopt-orphans.py`, which is what lets the auto-resume gate spawn a duplicate onto it.
+//
+// This shipped once. Round 1 of review caught the collision and the fix was a warning comment;
+// `startSelf` went on writing `busy` into `state`, and round 3 found it again. A key name is
+// exactly the kind of thing a later refactor restores by accident, so it is pinned rather than
+// described — the assertion below is what the comment above it cannot be.
+test("a stamp never carries the activity under the readers' `state` key", () => {
+  withDir((dir) => {
+    stampRecord(dir, { sessionId: SESSION, pid: process.pid, mode: 'local', activity: 'busy' })
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.equal(row.activity, 'busy')
+    assert.equal(row.state, undefined, 'an activity under `state` reads as NOT-live to four readers')
+    // The exact key set too, so a future field cannot land on the verdict key unnoticed.
+    assert.deepEqual(Object.keys(row).sort(), ['activity', 'at', 'mode', 'pid', 'sessionId'])
   })
 })
 

@@ -81,7 +81,7 @@ export function stampPath(dir, sessionId) {
 //
 // Written via a temporary file and renamed, matching `writeRecord`: a reader must never see
 // a half-written stamp and read it as a worker with no id.
-export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, location, state, at = new Date().toISOString() }, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
+export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, location, activity, at = new Date().toISOString() }, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
   const path = stampPath(dir, sessionId)
   fs.mkdirSync(dir, { recursive: true })
   const tmp = `${path}.tmp`
@@ -103,7 +103,17 @@ export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, lo
     record.vault = vault
   }
   if (location !== undefined) record.location = location
-  if (state !== undefined) record.state = state
+  // ⚠️ `activity`, NOT `state` — the key `state` on a stamp is already taken and means the
+  // OPPOSITE thing. Four readers of this same directory gate liveness on
+  // `stamp.get("state", "live") != "live"` (`worker-sessions.py:166`, `fleet-board.py:1096`,
+  // `adopt-orphans.py:139`, `session-liveness.py:663/693/803`), where `live` is a VERDICT and
+  // a MISSING key must read as `live` rather than vanish. Writing `busy` there does not merely
+  // confuse a reader: `session-liveness.py` would emit `"alive": false`, `fleet-board.py`
+  // would draw no row, and `adopt-orphans.py` would stop counting the session live — leaving
+  // the auto-resume gate free to spawn a duplicate onto a live session, which is the exact
+  // failure this whole change exists to remove. So the stamp says `activity` and the readers'
+  // `state` keeps its own vocabulary. See `SESSION_STATES` for the history.
+  if (activity !== undefined) record.activity = activity
   fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`)
   fs.renameSync(tmp, path)
   return path
@@ -134,14 +144,14 @@ export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/
 
 // The states a session can report, and the vocabulary the heartbeat contract names.
 //
-// ⚠️ **Two vocabularies share the key `state` in this one directory, and they mean opposite
-// things.** This one is *what the session is doing* — `busy` / `idle` / `waiting-on-operator`.
-// The other is a LIVENESS VERDICT synthesized by readers: `live-workers.py` writes
-// `state: "live" | "unknown"`, and `worker-sessions.py` and `fleet-board.py` gate on
-// `stamp.get("state", "live") != "live"`. ⚠️ **Do not apply that idiom to a raw stamp file.**
-// The readers' rule is *"a missing `state` must read as `live` rather than vanish"*, which is
-// correct for a synthesized verdict and catastrophic here — every self-stamp carrying
-// `state: "busy"` would be dropped as not-live.
+// ⚠️ **These ride on the stamp as `activity`, never as `state`.** `state` on a stamp is a
+// LIVENESS VERDICT with its own vocabulary: `live-workers.py` writes `state: "live" |
+// "unknown"`, and four readers gate on `stamp.get("state", "live") != "live"`, where a
+// MISSING key must read as `live` rather than vanish. Round 1 of review caught that collision
+// and this file answered it with a warning comment — while `startSelf` went on writing `busy`
+// into `state`, so every live self-stamp was in fact dropped as not-live by all four readers.
+// A warning cannot reach the Python scripts that hold the idiom; renaming the key can, and
+// does. The activity rides on `activity` (see `stampRecord`); `state` is left to the verdict.
 //
 // ⚠️ Membership is checked on READ, not just on write. The state hook validates its own
 // argument, but the file is in a shared state directory — a hand-edited or older record must
