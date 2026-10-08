@@ -287,6 +287,54 @@ class TheSnapshotCarriesARowBitAndCompareOwnsTheVerdict(unittest.TestCase):
         self.assertIn("not an object", r.stderr)
 
 
+class TheStateReadRefusesWhatItCannotRender(unittest.TestCase):
+    """`isinstance(data, dict)` is the top level only, and both surfaces read one level down.
+
+    A `startability` that is a list or a string raises out of `was.get(r)` / `was[r]` — a
+    traceback and exit 1, the off-contract code the guard exists to convert. A `row_set` that
+    is a string is worse than loud: `set()` iterates its characters, so every real row reads as
+    "not in the declined batch". And a bit recorded `unknown` that reads startable now is a
+    change the bound does not act on — fail-closed, but the line must not call it unchanged.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def test_a_wrongly_typed_field_is_refused(self):
+        for payload in ({"card_item_id": "x", "row_set": ["Alpha Row"], "startability": []},
+                        {"card_item_id": "x", "row_set": ["Alpha Row"], "startability": "no"},
+                        {"card_item_id": "x", "row_set": "Alpha Row", "startability": {}},
+                        {"card_item_id": "x", "row_set": [7], "startability": {}},
+                        {"card_item_id": "x", "row_set": ["Alpha Row"],
+                         "startability": {"Alpha Row": ["startable"]}}):
+            with open(os.path.join(self.dir, "t.json"), "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            for cmd, extra in (("read", []), ("compare", ["--startable", "Alpha Row"])):
+                r = run(cmd, "--topic", "t", "--row", "Alpha Row", *extra, state_dir=self.dir)
+                self.assertEqual(2, r.returncode, "%s did not refuse %r" % (cmd, payload))
+                self.assertIn("corrupt", r.stderr)
+
+    def test_a_recorded_unknown_that_now_reads_startable_says_so(self):
+        """Fail-closed is the reading; the line must not claim the row is unchanged."""
+        run("write", "--topic", "t", "--item-id", "abc", "--row", "Alpha Row",
+            "--unknown", "Alpha Row", state_dir=self.dir)
+        r = run("compare", "--topic", "t", "--row", "Alpha Row", "--startable", "Alpha Row",
+                state_dir=self.dir)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("recorded UNKNOWN in the declined snapshot", r.stdout)
+        self.assertNotIn("every row is unchanged", r.stdout)
+
+    def test_a_legacy_snapshot_still_reposts_on_an_unreadable_or_unstartable_tick(self):
+        """The measured 2026-10-08 case must not depend on the snapshot carrying bits."""
+        with open(os.path.join(self.dir, "t.json"), "w", encoding="utf-8") as fh:
+            json.dump({"card_item_id": "legacy", "row_set": ["Alpha Row"],
+                       "posted_at": "2026-10-08T00:00:00+02:00"}, fh)
+        for token in ("unknown", "unstartable"):
+            r = run("compare", "--topic", "t", "--row", "Alpha Row", "--" + token, "Alpha Row",
+                    state_dir=self.dir)
+            self.assertEqual(10, r.returncode, "%s: %s%s" % (token, r.stdout, r.stderr))
+
+
 class SuppressionLineKeepsTheInformation(unittest.TestCase):
     """SC3 and SC5 in one place: the line names the ask, and never withholds the rest."""
 

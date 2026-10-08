@@ -202,6 +202,21 @@ def load_state(path):
                       "over" % (path, exc))
     if not isinstance(data, dict):
         return None, "the recorded state at %s is not an object" % path
+    # The top-level check alone is an unfinished guard: `isinstance(data, dict)` admits any
+    # field TYPE inside, and a `startability` that is a list or a string raises out of
+    # `was.get(r)` / `was[r]` — a traceback and exit 1, the off-contract code this function
+    # exists to convert. A `row_set` that is a string is worse than loud: `set()` iterates its
+    # characters, so every real row reads as "not in the declined batch" and the key hashes the
+    # character set. Both surfaces must refuse here, not at the line that happens to trip.
+    for key, want in (("row_set", list), ("startability", dict)):
+        if key in data and not isinstance(data[key], want):
+            return None, ("the recorded state at %s has a %s `%s`; the file is corrupt"
+                          % (path, type(data[key]).__name__, key))
+    if any(not isinstance(r, str) for r in data.get("row_set") or []):
+        return None, "the recorded state at %s has a non-string row; the file is corrupt" % path
+    if any(not isinstance(v, str) for v in (data.get("startability") or {}).values()):
+        return None, ("the recorded state at %s has a non-string startability value; the file "
+                      "is corrupt" % path)
     return data, None
 
 
@@ -335,6 +350,17 @@ def verdict(snapshot, rows, now):
                         "startability, so no change can be shown"
                         % (snapshot.get("card_item_id", ""),
                            ", ".join(repr(r) for r in unrecorded)))
+    # A row recorded `unknown` and readable now is a CHANGE the bound does not act on: arm 4
+    # re-posts on a row that was UNSTARTABLE, never on one that was unreadable. The verdict
+    # fails closed either way — but this line is quotable in the branch's output, and
+    # "every row is unchanged" would be false about exactly that row.
+    moved = sorted(r for r in rows if was.get(r) == UNKNOWN)
+    if moved:
+        return suppress("declined ask %s withheld — %s was recorded UNKNOWN in the declined "
+                        "snapshot and reads startable now; the bound re-posts on a row that was "
+                        "UNSTARTABLE then, so this fails closed"
+                        % (snapshot.get("card_item_id", ""),
+                           ", ".join(repr(r) for r in moved)))
     return suppress("declined ask %s withheld — every row is unchanged and can start"
                     % snapshot.get("card_item_id", ""))
 
