@@ -33,6 +33,7 @@ state file living there would be listed as a session that does not exist.
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,31 @@ from pathlib import Path
 # The vocabulary the heartbeat contract names. An argument outside it is a caller bug, not a
 # value to repair — the same rule the attention store applies to a malformed session id.
 ALLOWED_STATES = ("busy", "idle", "waiting-on-operator")
+
+# What a session id may look like before it becomes a FILENAME.
+#
+# ⚠️ The id arrives from the hook payload, so it is untrusted input on a path-join. Without
+# this, a `../` component or a leading `/` writes outside the state directory — and the read
+# side (`readState` in `server/heartbeat.mjs`) has the same shape, so the guard is applied on
+# both. Shape-only rather than a UUID pattern, matching `validateSessionID` in
+# attention-controller: a stricter rule would reject ids the registry genuinely holds.
+#
+# Mirrors the precedent in `scripts/resolve-task-file.py`, which refuses absolute paths and
+# `..` components for the same reason.
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def safe_session_id(raw: str) -> str:
+    """The id if it can safely become a filename, else the empty string.
+
+    A bare `.` or `..` passes the character class and must be refused explicitly — it is a
+    valid path component that resolves to a directory rather than a file.
+    """
+    if not raw or raw in (".", ".."):
+        return ""
+    if not SESSION_ID_PATTERN.fullmatch(raw):
+        return ""
+    return raw
 
 
 def state_dir() -> Path:
@@ -78,10 +104,11 @@ def main(argv: list[str]) -> int:
     if state not in ALLOWED_STATES:
         return 0
 
-    session_id = session_id_from_stdin()
+    session_id = safe_session_id(session_id_from_stdin())
     if not session_id:
-        # No id means there is nothing to key the record on. Writing under a guess would put a
-        # row in the store that no session can clear.
+        # No usable id means there is nothing to key the record on — and an id carrying a path
+        # separator is the one input that could write outside this directory. Writing under a
+        # guess would put a row in the store that no session can clear.
         return 0
 
     try:

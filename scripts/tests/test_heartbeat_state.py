@@ -64,6 +64,19 @@ class HeartbeatStateTest(unittest.TestCase):
         self.run_hook("idle", {})
         self.assertEqual(self.records(), [])
 
+    def test_session_id_cannot_escape_the_state_directory(self):
+        # ⚠️ The id arrives from the hook payload — untrusted input on a path-join — so a
+        # separator or a `..` component must write nothing rather than write outside the
+        # directory. Same guard as `validateSessionID` in attention-controller and the
+        # precedent in `resolve-task-file.py`.
+        for bad in ("../escaped", "..", ".", "a/b", "a\\b"):
+            self.run_hook("busy", {"session_id": bad})
+        self.assertEqual(self.records(), [], "a traversing id must write nothing")
+        self.assertFalse(
+            os.path.exists(os.path.join(self.dir, "..", "escaped.json")),
+            "nothing may be written outside the state directory",
+        )
+
     def test_no_leftover_temp_file(self):
         # The timer reads this directory on a clock, so a half-written record must never be
         # visible — the write is a temp file plus a rename, and the temp must not survive it.

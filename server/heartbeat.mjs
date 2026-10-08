@@ -31,6 +31,20 @@
 // lapsed manager vs a deliberately stopped one — the same way: a file whose mtime marks the
 // last event that actually happened, read against a period rather than a boolean flag. A
 // flag decays silently in the dangerous direction; an age over-reports loudly.
+//
+// ⚠️ **This directory now holds MORE THAN ONE KIND of session, and the older readers predate
+// that.** It was the *headless worker* store — `live-workers.py` says so in its own header —
+// and the readers filter on `.json` plus mtime, never on `mode`. The self-stamp added for the
+// session the server runs inside is `mode: 'local'`, so it appears among what those readers
+// describe as live headless workers. **No instrument is wrong today**, because the commands
+// that must count workers go through the ledger-filtered `worker-sessions.py --count` rather
+// than the raw directory — but the distinction is carried by `mode` and nothing enforces it.
+// A reader that needs one kind must filter on `mode`; a reader that cannot tell them apart
+// should say which it is reporting.
+//
+// This is the same hazard the state directory avoids by being a sibling: everything in ONE
+// directory being read as one kind of thing. Here the directory is genuinely shared, so the
+// discriminator has to be explicit rather than structural.
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -100,7 +114,12 @@ export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, lo
 // ⚠️ The AGE is what decides liveness; this only says what the live session is up to. A
 // missing or unreadable file is `null` — "no hook has fired" — never a guessed `busy`, because
 // a wrong state reads as knowledge while an absent one reads as absence.
+//
+// ⚠️ The id is shape-checked before it becomes a path component, mirroring `safe_session_id`
+// in `scripts/heartbeat-state.py`. The write side already refuses a separator or a `..`; a
+// reader that joined an unchecked id would be the other half of the same traversal.
 export function readState(sessionId, { dir = config.heartbeatStateDir } = {}) {
+  if (!SESSION_ID_PATTERN.test(sessionId ?? '')) return null
   try {
     const record = JSON.parse(readFileSync(join(dir, `${sessionId}.json`), 'utf8'))
     return SESSION_STATES.includes(record?.state) ? record.state : null
@@ -109,12 +128,26 @@ export function readState(sessionId, { dir = config.heartbeatStateDir } = {}) {
   }
 }
 
+// What a session id may look like before it becomes a FILENAME. See `readState` for why the
+// check is here as well as in the writer.
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/
+
 // The states a session can report, and the vocabulary the heartbeat contract names.
+//
+// ⚠️ **Two vocabularies share the key `state` in this one directory, and they mean opposite
+// things.** This one is *what the session is doing* — `busy` / `idle` / `waiting-on-operator`.
+// The other is a LIVENESS VERDICT synthesized by readers: `live-workers.py` writes
+// `state: "live" | "unknown"`, and `worker-sessions.py` and `fleet-board.py` gate on
+// `stamp.get("state", "live") != "live"`. ⚠️ **Do not apply that idiom to a raw stamp file.**
+// The readers' rule is *"a missing `state` must read as `live` rather than vanish"*, which is
+// correct for a synthesized verdict and catastrophic here — every self-stamp carrying
+// `state: "busy"` would be dropped as not-live.
 //
 // ⚠️ Membership is checked on READ, not just on write. The state hook validates its own
 // argument, but the file is in a shared state directory — a hand-edited or older record must
 // not put a value on the wire that no reader's vocabulary contains. An unrecognised state
-// degrades to `idle`, which is the documented answer for "no hook has told us otherwise".
+// returns `null`, and the CALLER turns that into the documented `idle` — this function does
+// not, so a reader can still tell "no hook has fired" from "a hook said idle".
 export const SESSION_STATES = ['busy', 'idle', 'waiting-on-operator']
 
 // null = no information (the directory could not be read), false = read, and no fresh stamp.

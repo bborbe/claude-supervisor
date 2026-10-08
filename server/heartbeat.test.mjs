@@ -242,3 +242,13 @@ test('readState tolerates an unreadable record', () => {
     assert.equal(readState(SESSION, { dir }), null)
   })
 })
+
+test('readState refuses an id that could escape the state directory', () => {
+  // ⚠️ The id becomes a FILENAME. The write side refuses a separator or a `..`; a reader that
+  // joined an unchecked id would be the other half of the same traversal.
+  withDir((dir) => {
+    for (const bad of ['../escaped', '..', '.', 'a/b', 'a\\b', '']) {
+      assert.equal(readState(bad, { dir }), null, `readState must refuse ${JSON.stringify(bad)}`)
+    }
+  })
+})
