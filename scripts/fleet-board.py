@@ -682,6 +682,12 @@ def collect_signals(stuck_min):
     the same `needs`/`open_panes` pair the gate predicate above was built from,
     and re-deriving those in the row builder is exactly the second definition
     this function exists to prevent.
+
+    The sixth is the declared-wait session-id set — the ids whose newest `Stop`
+    record carries a non-empty `⏰ Ends:`, read whole-store through the shared
+    `scripts/declared-wait.py`. It is what suppresses the `Unblocks: nudge`
+    value in `unblocks_for`, and it is returned rather than re-read per row for
+    the same reason the fifth is: one read, one definition.
     """
     registry = wnm.read_registry()
     live_ids = None if registry is None else set(registry)
