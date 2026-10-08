@@ -90,13 +90,14 @@ class WriteRefusesRatherThanHalfLanding(unittest.TestCase):
     def test_refused_write_leaves_previous_state_intact(self):
         """The sibling discipline: a bad write must not truncate a good state."""
         first = run("write", "--topic", "t", "--item-id", "good-id", "--row", "Alpha Row",
-                    state_dir=self.dir)
+                    "--startable", "Alpha Row", state_dir=self.dir)
         self.assertEqual(0, first.returncode, first.stderr)
         path = os.path.join(self.dir, "t.json")
         with open(path, encoding="utf-8") as fh:
             before = fh.read()
 
-        run("write", "--topic", "t", "--item-id", "", "--row", "Alpha Row", state_dir=self.dir)
+        run("write", "--topic", "t", "--item-id", "", "--row", "Alpha Row",
+            "--startable", "Alpha Row", state_dir=self.dir)
         with open(path, encoding="utf-8") as fh:
             after = fh.read()
         self.assertEqual(before, after, "a refused write changed the recorded state")
@@ -106,7 +107,8 @@ class WriteRefusesRatherThanHalfLanding(unittest.TestCase):
         self.assertEqual(3, missing.returncode, "absent state must exit 3, not 0")
 
         run("write", "--topic", "t", "--item-id", "abc123", "--row", "Alpha Row",
-            "--row", "Beta Row", state_dir=self.dir)
+            "--row", "Beta Row", "--startable", "Alpha Row", "--startable", "Beta Row",
+            state_dir=self.dir)
         out = run("read", "--topic", "t", "--json", state_dir=self.dir)
         data = json.loads(out.stdout)
         self.assertEqual("abc123", data["card_item_id"])
@@ -115,7 +117,7 @@ class WriteRefusesRatherThanHalfLanding(unittest.TestCase):
 
     def test_clear_removes_it(self):
         run("write", "--topic", "t", "--item-id", "abc123", "--row", "Alpha Row",
-            state_dir=self.dir)
+            "--startable", "Alpha Row", state_dir=self.dir)
         run("clear", "--topic", "t", state_dir=self.dir)
         self.assertFalse(os.path.exists(os.path.join(self.dir, "t.json")))
 
@@ -125,6 +127,118 @@ class WriteRefusesRatherThanHalfLanding(unittest.TestCase):
             r = run(cmd, "--topic", "../../etc/passwd", state_dir=self.dir)
             self.assertEqual(2, r.returncode, f"{cmd} accepted a path-shaped topic")
             self.assertIn("REFUSED", r.stderr)
+
+
+class TheSnapshotCarriesARowBitAndCompareOwnsTheVerdict(unittest.TestCase):
+    """The re-post bound is a CHANGE, and only a recorded bit can show one.
+
+    Measured 2026-10-08: the branch fired and withheld its card on five unstartable rows
+    that were a subset of a declined ask. A row set alone cannot distinguish "still the
+    same ask" from "the work became startable since", so the snapshot carries a bit per
+    row and `compare` — never each manager's own set-difference over JSON — answers the
+    branch. The arms asserted here are the ones that must not drift: an unknown verdict
+    re-posts rather than suppresses, a row that became startable re-posts even though
+    every row can start now, and a set that did not change does not re-post at all.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def write(self, classification, item_id="9d179506fc62495c284d299eda235469"):
+        return run("write", "--topic", "t", "--item-id", item_id,
+                   *sum([["--row", r] for r in classification], []),
+                   *sum([["--" + tok, r] for r, tok in classification.items()], []),
+                   state_dir=self.dir)
+
+    def compare(self, classification):
+        return run("compare", "--topic", "t",
+                   *sum([["--row", r] for r in classification], []),
+                   *sum([["--" + tok, r] for r, tok in classification.items()], []),
+                   state_dir=self.dir)
+
+    def test_write_refuses_without_a_bit_for_every_row(self):
+        """A snapshot missing its bits is the fail-closed state — not a decision."""
+        r = run("write", "--topic", "t", "--item-id", "abc", "--row", "Alpha Row",
+                state_dir=self.dir)
+        self.assertEqual(2, r.returncode)
+        self.assertIn("no startability", r.stderr)
+        self.assertEqual([], os.listdir(self.dir), "a refused write left a file behind")
+
+    def test_write_refuses_a_bit_for_a_row_outside_the_set(self):
+        r = run("write", "--topic", "t", "--item-id", "abc", "--row", "Alpha Row",
+                "--startable", "Alpha Row", "--startable", "Delta Row", state_dir=self.dir)
+        self.assertEqual(2, r.returncode)
+        self.assertIn("not in the row set", r.stderr)
+
+    def test_write_refuses_a_row_classified_twice(self):
+        r = run("write", "--topic", "t", "--item-id", "abc", "--row", "Alpha Row",
+                "--startable", "Alpha Row", "--unstartable", "Alpha Row", state_dir=self.dir)
+        self.assertEqual(2, r.returncode)
+        self.assertIn("classified twice", r.stderr)
+
+    def test_the_snapshot_is_per_row_and_read_prints_it(self):
+        self.write({"Alpha Row": "startable", "Beta Row": "unstartable"})
+        data = json.loads(run("read", "--topic", "t", "--json", state_dir=self.dir).stdout)
+        self.assertEqual({"Alpha Row": "startable", "Beta Row": "unstartable"},
+                         data["startability"])
+        plain = run("read", "--topic", "t", state_dir=self.dir).stdout
+        self.assertIn("Alpha Row=startable", plain)
+        self.assertIn("Beta Row=unstartable", plain)
+
+    def test_compare_with_no_snapshot_exits_3(self):
+        """Nothing declined yet — the caller posts, and exit 3 is how it knows."""
+        r = self.compare({"Alpha Row": "startable"})
+        self.assertEqual(3, r.returncode, r.stderr)
+
+    def test_an_unchanged_declined_set_suppresses(self):
+        """The no-widening control: same rows, same startability, no re-post."""
+        self.write({"Alpha Row": "startable", "Beta Row": "startable"})
+        r = self.compare({"Alpha Row": "startable", "Beta Row": "startable"})
+        self.assertEqual(0, r.returncode, r.stderr)
+        self.assertIn("SUPPRESS", r.stdout)
+
+    def test_a_row_that_became_startable_reposts(self):
+        """SC1's arm — the one the row set alone could never answer."""
+        self.write({"Alpha Row": "unstartable"})
+        r = self.compare({"Alpha Row": "startable"})
+        self.assertEqual(10, r.returncode, r.stdout + r.stderr)
+        self.assertIn("was unstartable in the declined snapshot", r.stdout)
+
+    def test_a_row_that_cannot_start_reposts(self):
+        """Measured 2026-10-08: five unstartable rows withheld a card for hours."""
+        self.write({"Alpha Row": "startable"})
+        r = self.compare({"Alpha Row": "unstartable"})
+        self.assertEqual(10, r.returncode, r.stdout + r.stderr)
+        self.assertIn("cannot start this tick", r.stdout)
+
+    def test_an_unknown_verdict_reposts_rather_than_suppressing(self):
+        """A degraded audit read is asked about, never read as unstartable."""
+        self.write({"Alpha Row": "startable"})
+        r = self.compare({"Alpha Row": "unknown"})
+        self.assertEqual(10, r.returncode, r.stdout + r.stderr)
+        self.assertIn("no readable startability", r.stdout)
+
+    def test_a_row_outside_the_declined_batch_reposts(self):
+        self.write({"Alpha Row": "startable"})
+        r = self.compare({"Alpha Row": "startable", "Beta Row": "startable"})
+        self.assertEqual(10, r.returncode, r.stdout + r.stderr)
+        self.assertIn("not a subset", r.stdout)
+
+    def test_a_snapshot_without_bits_fails_closed(self):
+        """A state written before the field existed cannot show a change — so it suppresses."""
+        with open(os.path.join(self.dir, "t.json"), "w", encoding="utf-8") as fh:
+            json.dump({"card_item_id": "legacy", "row_set": ["Alpha Row"],
+                       "posted_at": "2026-10-08T00:00:00+02:00"}, fh)
+        r = self.compare({"Alpha Row": "startable"})
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("SUPPRESS", r.stdout)
+
+    def test_compare_refuses_a_row_it_cannot_classify(self):
+        """Silence here would mark every row unstartable and re-post every tick."""
+        self.write({"Alpha Row": "startable"})
+        r = run("compare", "--topic", "t", "--row", "Alpha Row", state_dir=self.dir)
+        self.assertEqual(2, r.returncode)
+        self.assertIn("no startability", r.stderr)
 
 
 class SuppressionLineKeepsTheInformation(unittest.TestCase):

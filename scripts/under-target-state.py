@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The under-target branch's state file, its dedup key, and its suppression line — one owner.
+"""The under-target branch's state file, its dedup key, its per-row startability
+snapshot, its re-post verdict and its suppression line — one owner.
 
 Why this exists
 ---------------
@@ -37,15 +38,41 @@ The key is over the row set's **membership**, not its order. A re-ranking that n
 same rows is not a changed ask, so the key must not move — and `set-change`, not order,
 is what the rule's re-post bound is written against.
 
+Why the snapshot exists, and why `compare` owns the verdict
+-----------------------------------------------------------
+The re-post bound is *"a row that was UNSTARTABLE in the declined snapshot and can start
+now"* — a **change**, never a state. A set whose rows were already `✅ Ready for approval`
+and unheld when the operator declined them is the same ask, and re-posting it each tick is
+the timer loop the bound exists to remove. So the bound needs the one thing a row set alone
+cannot carry: **what each row's startability was when the operator declined**.
+
+Without it, no row can be shown to have CHANGED, and the branch is fail-closed — which is
+the silence the whole bound exists to remove, arrived at deliberately. So `write` records a
+per-row bit and **refuses to write a state without one**: a snapshot missing its bits is
+indistinguishable from the fail-closed state, and only one of those is a decision.
+
+`compare` is the bound's single derivation, for the same reason the key and the line have
+one. Left to each manager, "compare this tick's set against the declined set" is a
+set-difference over JSON that every caller would spell differently — and the two arms that
+must NOT drift are exactly the subtle ones: an **unknown** startability is never read as
+unstartable (a degraded audit read must re-post, not suppress), and a row that was
+unstartable then and can start now re-posts even though every row can start now.
+
 Usage
 -----
     under-target-state.py key      --topic T --row R [--row R …]
-    under-target-state.py write    --topic T --item-id ID --row R [--row R …] [--now ISO]
+    under-target-state.py write    --topic T --item-id ID --row R [--row R …]
+                                   (--startable R | --unstartable R | --unknown R) … [--now ISO]
     under-target-state.py read     --topic T [--json]
     under-target-state.py clear    --topic T
+    under-target-state.py compare  --topic T --row R [--row R …]
+                                   (--startable R | --unstartable R | --unknown R) …
     under-target-state.py suppress --topic T --item-id ID --live N --target N --row R …
 
-Exit codes: 0 ok · 2 refused (malformed input, nothing written) · 3 no state recorded.
+Exit codes: 0 ok (suppress) · 2 refused (malformed input, nothing written) · 3 no state
+recorded · 10 re-post (compare only: this tick's set is not the ask the operator declined).
+`10` is this repo's existing "this run saw a change" code — `manager-predispatch.py --save`
+prints it for the same reason.
 """
 
 import argparse
@@ -58,6 +85,10 @@ from datetime import datetime, timezone
 
 STATE_DIR = os.path.expanduser("~/.claude/state/manager-under-target")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+STARTABLE = "startable"
+UNSTARTABLE = "unstartable"
+UNKNOWN = "unknown"
 
 
 def canonical_key(topic, rows):
@@ -96,11 +127,51 @@ def validate(topic, rows):
     return None
 
 
-def write_state(topic, item_id, rows, now=None):
+def read_classification(args):
+    """The caller's per-row classification, as ({row: token}, error).
+
+    Three tokens, not two, because the middle one is the whole of one arm: a blank or
+    degraded audit verdict is **unknown**, and the branch must read it as unknown rather
+    than as unstartable. Collapsing it into `unstartable` is what lets a degraded read
+    suppress — the defect class the re-post bound exists to remove.
+    """
+    seen = {}
+    for token, rows in ((STARTABLE, args.startable), (UNSTARTABLE, args.unstartable),
+                        (UNKNOWN, args.unknown)):
+        for r in rows:
+            if not r or not r.strip():
+                return None, "a startability is empty; it must name the row it classifies"
+            if r in seen:
+                return None, ("row %r is classified twice (%s and %s); a row carries one "
+                              "startability" % (r, seen[r], token))
+            seen[r] = token
+    return seen, None
+
+
+def validate_startability(rows, seen):
+    """The classification and the row set must be the SAME set, or the bit means nothing."""
+    missing = sorted(set(rows) - set(seen))
+    if missing:
+        return ("no startability for %s; a snapshot without a bit for every row is the "
+                "fail-closed state and cannot be told from a decision"
+                % ", ".join(repr(m) for m in missing))
+    extra = sorted(set(seen) - set(rows))
+    if extra:
+        return ("a startability for %s, which is not in the row set; the snapshot and the "
+                "row set are the same set" % ", ".join(repr(e) for e in extra))
+    return None
+
+
+def write_state(topic, item_id, rows, startability, now=None):
     """Atomic: a refused or interrupted write leaves the previous state intact."""
     os.makedirs(STATE_DIR, exist_ok=True)
     stamp = now or datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-    payload = {"card_item_id": item_id, "row_set": rows, "posted_at": stamp}
+    payload = {
+        "card_item_id": item_id,
+        "row_set": rows,
+        "startability": {r: startability[r] for r in rows},
+        "posted_at": stamp,
+    }
     path = state_path(topic)
     tmp = path + ".tmp.%d" % os.getpid()
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -124,7 +195,13 @@ def cmd_write(args):
         return refuse(err)
     if not args.item_id or not args.item_id.strip():
         return refuse("--item-id is empty; the state records which card was posted")
-    path = write_state(args.topic, args.item_id, args.row, args.now)
+    seen, err = read_classification(args)
+    if err:
+        return refuse(err)
+    err = validate_startability(args.row, seen)
+    if err:
+        return refuse(err)
+    path = write_state(args.topic, args.item_id, args.row, seen, args.now)
     print("wrote %s" % path)
     return 0
 
@@ -142,9 +219,13 @@ def cmd_read(args):
     if args.json:
         print(json.dumps(data, indent=2, ensure_ascii=False))
     else:
+        was = data.get("startability") or {}
+        rows = data.get("row_set") or []
         print("card_item_id: %s" % data.get("card_item_id", ""))
         print("posted_at:    %s" % data.get("posted_at", ""))
-        print("key:          %s" % canonical_key(args.topic, data.get("row_set", [])))
+        print("key:          %s" % canonical_key(args.topic, rows))
+        print("startability: %s" % (" | ".join("%s=%s" % (r, was.get(r, UNKNOWN))
+                                               for r in rows) or "(none)"))
     return 0
 
 
@@ -157,6 +238,82 @@ def cmd_clear(args):
         os.remove(path)
     print("cleared %s" % args.topic)
     return 0
+
+
+def repost(reason):
+    print("REPOST: %s" % reason)
+    return 10
+
+
+def suppress(reason):
+    print("SUPPRESS: %s" % reason)
+    return 0
+
+
+def verdict(snapshot, rows, now):
+    """Does this tick's candidate set re-post? The bound's ONE derivation.
+
+    Four arms, in the order that keeps each one's answer honest:
+
+    1. **Subset?** A row not in the declined batch is a different ask, whatever the rest
+       of the set looks like.
+    2. **Unknown this tick?** A blank or unreadable audit verdict is neither startable nor
+       unstartable. It is asked about, never suppressed: a degraded read is the state in
+       which the operator is most likely to be needed, and reading it as unstartable is
+       what let a degraded audit read withhold a card.
+    3. **Unstartable this tick?** The operator declined *work they could start*, so a set
+       whose rows can no longer start is not the same ask however identical its
+       membership — measured 2026-10-08, five unstartable rows withheld a card for hours.
+    4. **Unstartable in the snapshot?** The last arm, and the only one the row set alone
+       could not answer: a row that could not start when the operator declined and can
+       start now has CHANGED, and a change is what the bound re-posts on.
+
+    Everything else suppresses. A row with no recorded bit — a state written before this
+    field existed — is not unstartable, so it fails closed, which is the direction the
+    bound requires.
+    """
+    declined = snapshot.get("row_set") or []
+    new = sorted(set(rows) - set(declined))
+    if new:
+        return repost("the candidate set is not a subset of the declined set — %s was not "
+                      "in the declined batch" % ", ".join(repr(r) for r in new))
+    unknown = sorted(r for r in rows if now[r] == UNKNOWN)
+    if unknown:
+        return repost("%s carries no readable startability this tick; an unknown verdict "
+                      "is asked about, never suppressed"
+                      % ", ".join(repr(r) for r in unknown))
+    unstartable = sorted(r for r in rows if now[r] == UNSTARTABLE)
+    if unstartable:
+        return repost("%s cannot start this tick; a set that can no longer start is not "
+                      "the ask the operator declined"
+                      % ", ".join(repr(r) for r in unstartable))
+    was = snapshot.get("startability") or {}
+    became = sorted(r for r in rows if was.get(r) == UNSTARTABLE)
+    if became:
+        return repost("%s was unstartable in the declined snapshot and can start now"
+                      % ", ".join(repr(r) for r in became))
+    return suppress("declined ask %s withheld — every row is unchanged and can start"
+                    % snapshot.get("card_item_id", ""))
+
+
+def cmd_compare(args):
+    """The re-post verdict: 0 suppress · 3 nothing declined · 10 re-post."""
+    err = validate(args.topic, args.row)
+    if err:
+        return refuse(err)
+    seen, err = read_classification(args)
+    if err:
+        return refuse(err)
+    err = validate_startability(args.row, seen)
+    if err:
+        return refuse(err)
+    path = state_path(args.topic)
+    if not os.path.exists(path):
+        print("no declined snapshot for %s" % args.topic, file=sys.stderr)
+        return 3
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    return verdict(data, args.row, seen)
 
 
 def cmd_suppress(args):
@@ -184,7 +341,8 @@ def cmd_suppress(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="The under-target branch's state file, dedup key and suppression line")
+        description="The under-target branch's state file, dedup key, startability "
+                    "snapshot, re-post verdict and suppression line")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def common(p):
@@ -195,9 +353,22 @@ def main(argv=None):
         p.add_argument("--state-dir", default=None,
                        help="override the state directory (tests; defaults to the live store)")
 
+    def classified(p):
+        """The three startability tokens, declared once for the two verbs that take them."""
+        p.add_argument("--startable", action="append", default=[],
+                       help="a row that could start — its audit verdict is present and is "
+                            "`✅ Ready for approval`, it is not held, and it is not deferred")
+        p.add_argument("--unstartable", action="append", default=[],
+                       help="a row that could not start this tick")
+        p.add_argument("--unknown", action="append", default=[],
+                       help="a row whose verdict could not be read — neither startable nor "
+                            "unstartable, and never read as either")
+
     common(sub.add_parser("key", help="print the canonical dedup key"))
-    w = sub.add_parser("write", help="record the posted card (atomic, refuses malformed)")
+    w = sub.add_parser("write", help="record the posted card and its per-row startability "
+                                     "(atomic, refuses malformed)")
     common(w)
+    classified(w)
     w.add_argument("--item-id", required=True)
     w.add_argument("--now", default=None, help="ISO-8601 override, for tests")
     r = sub.add_parser("read", help="print the recorded state")
@@ -205,6 +376,10 @@ def main(argv=None):
     r.add_argument("--json", action="store_true")
     c = sub.add_parser("clear", help="remove the recorded state")
     common(c)
+    cmp = sub.add_parser("compare", help="the re-post verdict for this tick's candidate set "
+                                         "(0 suppress · 3 nothing declined · 10 re-post)")
+    common(cmp)
+    classified(cmp)
     s = sub.add_parser("suppress", help="print the suppression line (ask withheld, information kept)")
     common(s)
     s.add_argument("--item-id", required=True)
@@ -216,8 +391,8 @@ def main(argv=None):
         global STATE_DIR
         STATE_DIR = args.state_dir
     return {
-        "key": cmd_key, "write": cmd_write, "read": cmd_read,
-        "clear": cmd_clear, "suppress": cmd_suppress,
+        "key": cmd_key, "write": cmd_write, "read": cmd_read, "clear": cmd_clear,
+        "compare": cmd_compare, "suppress": cmd_suppress,
     }[args.cmd](args)
 
 
