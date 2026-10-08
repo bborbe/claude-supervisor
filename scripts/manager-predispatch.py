@@ -866,7 +866,7 @@ def liveness_of_sid(
     rec = registry.get(sid)
     # ⚠️ **Only a PROVEN negative is death.** `alive` is a three-state since 2026-10-01: `None`
     # means "the pid is occupied but the record cannot prove the holder is this session" (see
-    # `session-liveness.py:read_registry`). Reading that as dead here would fall through to the
+    # `session-identity.py:read_registry`). Reading that as dead here would fall through to the
     # heartbeat and then to `LIVENESS_NONE`, which is the value the auto-resume gate acts on —
     # so an unprovable record would permit a resume onto a conversation that may still be live.
     if rec is None or rec["alive"] is False:
