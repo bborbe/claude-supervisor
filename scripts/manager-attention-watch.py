@@ -212,7 +212,7 @@ _CLOSER_UNKNOWN = object()
 # with no sibling on the path. ⚠️ Both siblings IMPORT it rather than copying it —
 # `fleet-board.py` as `wnm.LIVE_WINDOW` and `restart-precheck.py` from
 # `who-needs-me.py` — so this literal is a THIRD copy, and
-# The limb-2 paragraph in `agents/manager-drive.md` reads *"Reuse that shipped reading; do not add a
+# the limb-2 paragraph in `agents/manager-drive.md` reads *"Reuse that shipped reading; do not add a
 # fourth definition of 'idle'."* If that value changes, change it here in the same
 # commit rather than letting the copies drift.
 LIVE_WINDOW = 5 * 60
