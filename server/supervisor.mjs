@@ -85,6 +85,55 @@ const heartbeat = {
       log(`WARNING: cannot stamp heartbeat for ${sessionId}: ${error.message}`)
     }
   },
+  // The session this server runs INSIDE — stamped on the same interval as the workers above.
+  //
+  // ⚠️ The per-worker stamps cannot cover it: they are keyed on workers this server SPAWNED,
+  // and the interactive tab the server itself runs in is not one of those. Without this,
+  // every interactive session reads dead to the attention store while a headless worker it
+  // spawned reads live — the exact asymmetry the session-liveness work exists to remove.
+  //
+  // ⚠️ The anchor (`task`/`vault`) is deliberately OMITTED rather than resolved. Filling it
+  // would mean reading the vault on the liveness path, and a store that exists so a dead
+  // session is detectable must not depend on anything that can fail independently of the
+  // session it is reporting on. The store accepts an unanchored row by design; the row still
+  // answers alive, where, and what state.
+  //
+  // `state` starts at `idle` — the value the mechanism names for "before any hook has fired".
+  // The hooks that move it are a separate change; until they land, every self-stamp reports
+  // idle, which is the honest answer rather than a guessed `busy`.
+  startSelf(sessionId) {
+    if (!sessionId) return false
+    this.stopSelf()
+    const write = () => {
+      try {
+        stampRecord(heartbeatDir, {
+          sessionId,
+          pid: process.pid,
+          mode: 'local',
+          source: 'mcp-timer',
+          location: 'local',
+          state: 'idle',
+        })
+      } catch (error) {
+        // Same reasoning as `stamp` above: the session still runs, and a manager's verdict
+        // degrades to "could not tell" rather than the server failing to start.
+        log(`WARNING: cannot stamp own heartbeat for ${sessionId}: ${error.message}`)
+      }
+    }
+    write()
+    const timer = setInterval(write, HEARTBEAT_INTERVAL_MS)
+    // Unref'd for the same reason as the worker timer: a pending refresh must never hold the
+    // process open after its work is done.
+    timer.unref?.()
+    this.selfTimer = timer
+    return true
+  },
+  stopSelf() {
+    if (this.selfTimer) {
+      clearInterval(this.selfTimer)
+      this.selfTimer = undefined
+    }
+  },
 }
 const pending = new Map() // requestId -> permission record
 const waiters = new Set() // resolvers waiting for the next permission
@@ -1881,6 +1930,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 await server.connect(new StdioServerTransport())
 log('supervisor ready')
+
+// Stamp the session this server runs inside, on the same interval as its workers. A server
+// started outside a session has no id, so `startSelf` is a no-op there rather than a stamp
+// under an invented key — see its comment.
+heartbeat.startSelf(config.sessionId)
 
 // The cluster half of the heartbeat store, on the same interval the headless workers use.
 //
