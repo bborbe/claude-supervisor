@@ -49,9 +49,9 @@ ALLOWED_STATES = ("busy", "idle", "waiting-on-operator")
 # ⚠️ The id arrives from the hook payload, so it is untrusted input on a path-join. Without
 # this, a `../` component or a leading `/` writes outside the state directory. The guard is
 # applied on the CLEAR path as well as the write path, because both build a filename from the
-# id. ⚠️ **The read side of this contract ships with the stamp half of this work, in its own
-# PR** — on this branch nothing reads the state directory yet, so the mirror is a forward
-# reference rather than a file in this tree. Shape-only rather than a UUID pattern, matching
+# id. ⚠️ **The read side of this contract is `readState` in `server/heartbeat.mjs`**, which is
+# already on this tree: it reads `<heartbeatStateDir>/<id>.json` and drops a value outside
+# `SESSION_STATES` rather than passing it on. Shape-only rather than a UUID pattern, matching
 # `validateSessionID` in attention-controller: a stricter rule would reject ids the registry
 # genuinely holds.
 #
@@ -78,10 +78,9 @@ def state_dir() -> Path:
 
     ⚠️ The XDG resolution and the override name match what the supervisor server uses, so a
     hook and the stamp timer cannot disagree about the path — a disagreement would look
-    exactly like a hook that never fired. ⚠️ **The server-side constant that mirrors this
-    ships with the stamp half of this work, in its own PR**: on this branch `server/config.mjs`
-    has no `heartbeatStateDir`, so the mirror is a forward reference. The resolution itself is
-    identical either way — that file builds `STATE_HOME`/`STATE_DIR` the same way.
+    exactly like a hook that never fired. ⚠️ **The server-side constant that mirrors this is
+    `heartbeatStateDir` in `server/config.mjs`**, which is already on this tree. The resolution
+    is identical either way — that file builds `STATE_HOME`/`STATE_DIR` the same way.
     """
     override = os.environ.get("SUPERVISOR_HEARTBEAT_STATE_DIR")
     if override:
