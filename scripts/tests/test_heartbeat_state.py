@@ -77,6 +77,21 @@ class HeartbeatStateTest(unittest.TestCase):
             "nothing may be written outside the state directory",
         )
 
+    def test_clear_removes_the_record(self):
+        # ⚠️ The SessionEnd hook. Without it the directory grows monotonically — this hook
+        # fires for every session on the machine, and a record never unlinked outlives the
+        # session it describes. The sibling heartbeat store has a sweep for the same reason.
+        self.run_hook("busy", {"session_id": SESSION})
+        self.assertEqual(len(self.records()), 1)
+        self.run_hook("clear", {"session_id": SESSION})
+        self.assertEqual(self.records(), [], "SessionEnd must leave nothing behind")
+
+    def test_clear_on_a_missing_record_is_a_no_op(self):
+        # Fail-open: clearing a record that was never written is normal, not an error.
+        result = self.run_hook("clear", {"session_id": SESSION})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.records(), [])
+
     def test_no_leftover_temp_file(self):
         # The timer reads this directory on a clock, so a half-written record must never be
         # visible — the write is a temp file plus a rename, and the temp must not survive it.

@@ -10,10 +10,12 @@ state onto the stamp.
     UserPromptSubmit -> busy                  (a turn started)
     Stop             -> idle                  (the turn ended, waiting for the next prompt)
     Notification     -> waiting-on-operator   (a permission prompt or question is open)
+    SessionEnd       -> clear                 (the session is over — unlink its record)
 
 Usage (from hooks/hooks.json):
 
     heartbeat-state.py busy
+    heartbeat-state.py clear
 
 ⚠️ **Fail-open, and silent.** This runs inside the operator's turn on every prompt and every
 stop. A hook that blocks, prompts, or exits non-zero degrades the session it is meant to
@@ -87,12 +89,18 @@ def session_id_from_stdin() -> str:
 
     ⚠️ Read only when stdin is not a TTY. Run by hand — which is how this gets tested — stdin
     is the terminal, and `json.load` would block waiting for a line that never comes.
+
+    ⚠️ Catches `Exception`, not `(ValueError, OSError)`. `json.load` raises `RecursionError`
+    on deeply-nested input, which is not a `ValueError` — so a narrower handler would let it
+    escape to the caller, print a traceback and exit 1, which is the one outcome this script's
+    fail-open contract rules out. The docstring claims EVERY failure path returns 0; that claim
+    has to hold for exception classes nobody enumerated, not just the two that were obvious.
     """
     if sys.stdin.isatty():
         return ""
     try:
         payload = json.load(sys.stdin) or {}
-    except (ValueError, OSError):
+    except Exception:
         return ""
     if not isinstance(payload, dict):
         return ""
@@ -101,6 +109,25 @@ def session_id_from_stdin() -> str:
 
 def main(argv: list[str]) -> int:
     state = argv[1] if len(argv) > 1 else ""
+
+    # `clear` is a COMMAND, not a state: the SessionEnd hook calls it so a finished session
+    # leaves nothing behind. ⚠️ Without it the directory grows monotonically — this hook fires
+    # for every session on the machine, and a record that is never unlinked outlives the
+    # session it describes. The sibling heartbeat store has a `sweepStale` for the same reason
+    # ("so a dead server's stamps do not accumulate"); this is that remedy on the write side,
+    # which is cheaper than a sweep because the session knows when it is ending.
+    if state == "clear":
+        session_id = safe_session_id(session_id_from_stdin())
+        if not session_id:
+            return 0
+        try:
+            (state_dir() / f"{session_id}.json").unlink(missing_ok=True)
+        except Exception:
+            # Fail-open, same as every other path: an unclearable record costs a stale file,
+            # which is strictly better than failing the turn that is ending.
+            return 0
+        return 0
+
     if state not in ALLOWED_STATES:
         return 0
 
