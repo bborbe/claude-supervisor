@@ -451,7 +451,7 @@ substitute for one another.
 | Resuming… | Path | Why |
 |---|---|---|
 | a session **proven dead** | **A**, `interactive=false, resume="<id>"` — or **B** where headless is not permitted (below) | A is headless, so prompts park for the manager. On A, `resume` **requires** `interactive:false` — the pair is refused there, not silently downgraded |
-| a session whose liveness **cannot be determined** | **B**, `wezterm cli spawn --resume` | A refuses an unverifiable resume by design |
+| a session whose liveness **cannot be determined** | **B** — the raw `wezterm cli spawn` recipe above, which hands `--resume` to the launcher directly | A refuses an unverifiable resume by design |
 
 ⚠️ **Where headless is not permitted, the proven-dead row moves to B.** Some phases forbid
 headless fleet-wide — the operator's standing constraint during manager-system development:
