@@ -139,6 +139,15 @@ class HeartbeatStateTest(unittest.TestCase):
         # writes a record into a freshly-made directory, and the assertion passes while
         # exercising nothing — the silent vacuity this suite exists to avoid. This is portable
         # and self-cleaning.
+        #
+        # ⚠️ **SKIPPED as root, and the guard IS the point.** `DAC_OVERRIDE` lets uid 0 write
+        # into a 0500 directory, so under root the hook SUCCEEDS, no failure path is reached,
+        # and the assertion passes while testing nothing — a vacuous assertion rather than a
+        # flaky one, so it never signals. That is the SECOND bypass found in this one test: the
+        # original path was Linux-only, its replacement is root-only, and every replacement has
+        # its own. Rather than chase a third, the guard STATES when the case cannot run.
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses directory permissions, so the failure path is unreachable")
         readonly = tempfile.mkdtemp(prefix="hb-state-readonly-")
         self.addCleanup(shutil.rmtree, readonly, ignore_errors=True)
         os.chmod(readonly, 0o500)
