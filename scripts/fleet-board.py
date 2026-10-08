@@ -70,6 +70,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -156,6 +157,52 @@ def frontmatter_links(fm, key):
     return out
 
 
+def _norm_session_name(name):
+    """Casefolded, decoration-stripped session label, for the task-file match.
+
+    A registry label carries the `⚙ ` marker a task title does not, so a raw equality
+    test never matches. Mirrors `manager-predispatch.py`'s helper of the same name and
+    job, so the two name fallbacks agree about what a name *is*.
+    """
+    text = unicodedata.normalize("NFKC", name or "").strip()
+    text = re.sub(r"^[^\w(]+", "", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+# A registry name is a *truncated* title, and the truncation is long — measured 46
+# characters on 2026-10-07 (`⚙ A Renamed Task's Session Becomes Unaddressable` against a
+# 108-character title). A short name that happens to open a title is a coincidence, not a
+# truncation, so the prefix branch is gated on a length no role name reaches
+# (`boss`, `alerts`, `agent_7`). ⚠️ **The length floor is what excludes those, not rule
+# 1** — a role name is not manager-detected and does reach this predicate; it is refused
+# by the floor, not by the classification.
+#
+# ⚠️ **The same constant is duplicated in `manager-predispatch.py` and
+# `resolve-task-file.py`; all three values must agree**, and
+# `test_manager_predispatch.py` pins them together.
+_TRUNCATION_MIN_PREFIX = 20
+
+
+def _matches_one_title(key, titles):
+    """Does the normalized `key` name exactly one entry of `titles`?
+
+    ⚠️ **One rule, two callers — deliberately.** `has_task_file` and
+    `name_title_mismatches` both answer "does this name name this task?", and when they
+    answered it differently the mismatch report called every long-titled, correctly
+    managed session a drift (measured 2026-10-08: the bot review's one CRITICAL). A
+    truncated name is the *normal* shape after this change, not evidence of drift.
+
+    Exact first; then a **prefix**, gated on the same length floor and on identifying
+    exactly one title. A guess about which title was truncated must never displace a
+    certainty, and an ambiguous one must never become a confident one.
+    """
+    if key in titles:
+        return True
+    if len(key) < _TRUNCATION_MIN_PREFIX:
+        return False
+    return sum(1 for t in titles if t.startswith(key)) == 1
+
+
 class VaultIndex:
     """Topic and goal titles, and the links between them — read once per run.
 
@@ -171,6 +218,7 @@ class VaultIndex:
         self.task_titles = {t.lower(): t for t in task_titles}
         self.task_goals = task_goals or {}
         self.goal_topics = goal_topics or {}
+        self._norm_titles = None
 
     def subject(self, title):
         """`('topic'|'goal', title)` when `title` names a page, else `None`."""
@@ -191,8 +239,87 @@ class VaultIndex:
         """The topics whose `## Goals` lists this goal, in order."""
         return self.goal_topics.get((goal_title or "").lower(), [])
 
+    def _normalized_titles(self):
+        """`{normalized title: title}`, built once — the index is read-only.
+
+        `task_titles` is keyed by `.lower()` while the match normalizes with
+        `casefold()`, so comparing the two directly would miss a title carrying a
+        case-foldable character. Both sides go through the same normalizer here.
+        """
+        if self._norm_titles is None:
+            self._norm_titles = {_norm_session_name(t): t for t in self.task_titles.values()}
+        return self._norm_titles
+
     def has_task_file(self, name):
-        return bool(name) and name.strip().lower() in self.task_titles
+        """Does a task file correspond to this session's registry `name`?
+
+        ⚠️ **Not an equality test, and that is the point.** A registry name is a
+        **truncated** form of a long task title, so an exact match misses it. Measured
+        2026-10-07: the session working `A Renamed Task's Session Becomes Unaddressable,
+        Because the Registry Name Is Write-Once and the Title Is Not` held the registry
+        name `⚙ A Renamed Task's Session Becomes Unaddressable` — decoration *and*
+        truncation — so the exact test returned False and `build_grouping` filed a
+        session that owns a task under `UNMANAGED`, with no vault task. The name is
+        stripped of its decoration, then accepted when it is a **prefix** of a title.
+
+        ⚠️ **Two guards keep this from inventing a task.** A prefix match is a guess
+        about which title was truncated, and the failure this method removes is a
+        *silent* one, so a guess must never become a confident one:
+
+        1. the prefix must identify **exactly one** title — when two titles share it the
+           guess has no single answer, and the row stays unmanaged;
+        2. the prefix must be at least `_TRUNCATION_MIN_PREFIX` characters, so a short
+           role name that happens to open a title (`boss`) is not read as a truncation.
+        """
+        key = _norm_session_name(name)
+        if not key:
+            return False
+        return _matches_one_title(key, self._normalized_titles())
+
+
+def name_title_mismatches(registry, task_titles):
+    """Sessions whose registry name no longer names the task their id resolves to.
+
+    ⚠️ **This is a two-sided test, and the second side is the whole point.** A session
+    whose name matches no task title is **not** evidence that it owns nothing: its
+    `sessionId` may still resolve to a task file's `claude_session_id`. That case is a
+    **mismatch** — the row exists, the name has drifted — and it is a different fact from
+    a session that owns no task at all. Reporting the first as the second is the defect
+    this exists to remove: an unaddressable live worker reads as an absent one.
+
+    ⚠️ **Compared against the session's OWN titles, not the vault's.** The weaker test —
+    "names no task anywhere in the vault" — silently skips a session that stamps task X
+    while holding task Y's exact title, which is the same name-drift class this mode
+    exists to surface. The stronger one also needs no vault index, so it cannot reach
+    into one.
+
+    ⚠️ **"Names" means `_matches_one_title` — the same rule `has_task_file` applies**,
+    not equality. A truncated registry name is the normal healthy shape after this change;
+    testing it by equality reported every long-titled, correctly managed session as drift.
+    What this mode is for is a name that no longer names the row **under the rule the
+    board itself applies**.
+
+    Returns `[(sid, held_name, [titles])]`, sorted, for **mismatches only**. A session
+    whose id resolves to no task is **absent**, not a mismatch, and is not returned here —
+    the board already renders that one under `Unmanaged`.
+    """
+    out = []
+    for sid, rec in registry.items():
+        name = (rec.get("name") or "").strip()
+        titles = task_titles.get(sid) or []
+        if not name or not titles:
+            continue                      # nothing held, or no row to have diverged from
+        # ⚠️ **The SAME rule `has_task_file` uses — `_matches_one_title`, not equality.**
+        # A truncated registry name is the normal healthy shape after this change, not
+        # drift; testing it by equality here reported every long-titled, correctly managed
+        # session as a mismatch (the bot review's one CRITICAL, 2026-10-08). What this
+        # mode is for is a name that no longer names the row *under the rule the board
+        # itself applies*.
+        if _matches_one_title(_norm_session_name(name),
+                              {_norm_session_name(t): t for t in titles}):
+            continue
+        out.append((sid, name, sorted(set(titles))))
+    return sorted(out)
 
 
 def _vault_roots():
@@ -930,6 +1057,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--stuck-min", type=int, default=20)
     ap.add_argument("--json", action="store_true", help="emit the document, not just the box JSON")
+    ap.add_argument("--mismatches", action="store_true",
+                    help="report sessions whose registry name no longer names the task their id resolves to")
     a = ap.parse_args()
 
     registry = registry_records()
@@ -974,6 +1103,23 @@ def main():
     # `Unblocks` classification needs — but calling them separately walked every
     # vault twice for the same data (measured 6.47s against 3.6s).
     task_titles, task_meta = fs.build_task_index()
+    if a.mismatches:
+        # ⚠️ Reported from the SAME two stores the board joins, deliberately. A fourth
+        # reader of the session registry is the defect `Give the Session Registry's Join
+        # Reads One Home Too` owns, so this mode lives where the join already happens
+        # rather than in a script of its own.
+        found = name_title_mismatches(merged, task_titles)
+        def cell(text):
+            """⚠️ This is the script's only TAB-separated output path — the board's other
+            output is box-rendered. A registry name carrying a tab or a newline would
+            corrupt the row, so both are folded to spaces here rather than left to the
+            reader."""
+            return " ".join(str(text).split())
+
+        for sid, name, titles in found:
+            print(f"MISMATCH\t{sid[:8]}\t{cell(name)}\t{cell(' | '.join(titles))}")
+        print(f"mismatches: {len(found)} of {len(merged)} sessions", file=sys.stderr)
+        return 0
     ages = {sid: wnm.session_transcript_age(sid) for sid in merged}
     grouping = build_grouping(merged, vault_index(), colour_census(), loop_slugs(), task_titles)
     rows, details = build_rows(merged, gate_ids, stuck_ids, task_titles, ages, grouping=grouping,

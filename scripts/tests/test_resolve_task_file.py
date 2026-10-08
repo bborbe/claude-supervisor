@@ -83,6 +83,95 @@ class ResolveTaskFileTest(unittest.TestCase):
                 return p
         self.fail(f"no output line for {name!r}; stdout={r.stdout!r} stderr={r.stderr!r}")
 
+    # --- the truncation tier -------------------------------------------------
+
+    def test_a_truncated_registry_name_resolves_to_its_full_title(self):
+        """⚠️ The measured case. A session registry name is a *truncated* task title —
+        46 characters held against 108, measured 2026-10-07 — so an exact-only reader
+        resolves nothing for it and the session reads unowned."""
+        full = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry "
+                "Name Is Write-Once and the Title Is Not")
+        v = self.vault("private-personal", files=(f"{full}.md",))
+        name = "⚙ A Renamed Task's Session Becomes Unaddressable"
+        r = self.run_script([name], [v])
+        self.assertEqual(0, r.returncode)
+        self.assertEqual(str(self.root / "private-personal" / "25 Tasks" / f"{full}.md"),
+                         self.path_for(r, name))
+
+    def test_a_short_name_that_opens_a_title_is_not_read_as_a_truncation(self):
+        """The length floor — a role name is not a truncation, and resolving it would
+        hand the caller a task the session never owned."""
+        v = self.vault("private-personal", files=("boss of nothing in particular.md",))
+        r = self.run_script(["boss"], [v])
+        self.assertEqual("", self.path_for(r, "boss"))
+
+    def test_a_decorated_filename_is_not_folded_into_its_plain_twin(self):
+        """⚠️ **The exact tier stays exact.** Running the *session-label* normalizer over
+        an on-disk basename folded `- Notes.md` and `Notes.md` into one key, so a
+        previously unique resolution became a false `AMBIGUOUS` — the round-3 review's
+        MAJOR. Whitespace still collapses on both sides (a filename rule too), but the
+        leading-decoration strip is a session-name rule and is not applied here."""
+        v = self.vault("private-personal", files=("Notes.md", "- Notes.md"))
+        r = self.run_script(["Notes"], [v])
+        self.assertEqual(str(self.root / "private-personal" / "25 Tasks" / "Notes.md"),
+                         self.path_for(r, "Notes"))
+
+    def test_a_non_md_attachment_is_not_read_as_a_truncation(self):
+        """⚠️ **The prefix tier still requires a `.md` entry.** Without that it matches
+        anything merely *starting* with the stem — an Obsidian attachment (`….png`) or a
+        sibling (`….md.gpg`) in the tasks dir — and the caller then runs `grep -cE` and
+        `date -r` against a binary."""
+        full = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry "
+                "Name Is Write-Once and the Title Is Not")
+        name = "⚙ A Renamed Task's Session Becomes Unaddressable"
+        v = self.vault("private-personal", files=(f"{full}.png",))
+        r = self.run_script([name], [v])
+        self.assertEqual("", self.path_for(r, name))
+
+    def test_a_sibling_suffix_after_md_is_not_read_as_a_truncation(self):
+        """The other shape the `.md` requirement excludes, and it fails for a
+        different-looking reason than the `.png` case: `….md.gpg` DOES start with the stem
+        and does contain `.md`, but does not END in it."""
+        full = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry "
+                "Name Is Write-Once and the Title Is Not")
+        name = "⚙ A Renamed Task's Session Becomes Unaddressable"
+        v = self.vault("private-personal", files=(f"{full}.md.gpg",))
+        r = self.run_script([name], [v])
+        self.assertEqual("", self.path_for(r, name))
+
+    def test_an_ambiguous_truncation_resolves_nothing_and_names_both(self):
+        """⚠️ **"Never guesses" survives the new tier.** Two titles under one prefix is a
+        guess with no single answer, so the name resolves to nothing — the same
+        discipline the exact tier already applies to a two-vault collision."""
+        v = self.vault("private-personal",
+                       files=("Shared Prefix That Is Long Enough One.md",
+                              "Shared Prefix That Is Long Enough Two.md"))
+        name = "Shared Prefix That Is Long Enough"
+        r = self.run_script([name], [v])
+        self.assertEqual("", self.path_for(r, name))
+        self.assertIn("AMBIGUOUS", r.stderr)
+
+    def test_an_exact_goal_beats_a_prefix_task(self):
+        """⚠️ **Certainty before guess, across folders.** The truncation tiers must run
+        only after BOTH exact tiers are exhausted. A tasks-first prefix tier resolves the
+        guess and never consults the goal that matches exactly — the one ordering that
+        makes the new tier change behaviour where an exact match exists."""
+        v = self.vault("private-personal",
+                       files=("Some Long Goal Name Here And Then Some More.md",),
+                       goals=("Some Long Goal Name Here.md",))
+        name = "Some Long Goal Name Here"
+        r = self.run_script([name], [v])
+        self.assertEqual(str(self.root / "private-personal" / "24 Goals" / f"{name}.md"),
+                         self.path_for(r, name))
+
+    def test_the_exact_tier_still_wins_over_a_truncation(self):
+        """An exact hit is never displaced by the prefix tier."""
+        v = self.vault("private-personal",
+                       files=("Some Task.md", "Some Task And A Much Longer Suffix.md"))
+        r = self.run_script(["Some Task"], [v])
+        self.assertEqual(str(self.root / "private-personal" / "25 Tasks" / "Some Task.md"),
+                         self.path_for(r, "Some Task"))
+
     # --- the resolution rule -------------------------------------------------
 
     def test_task_beats_goal_in_the_same_vault(self):

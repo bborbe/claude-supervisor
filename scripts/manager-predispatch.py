@@ -891,6 +891,60 @@ def _norm_session_name(name: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
+# A registry name is a *truncated* title, and the truncation is long — measured 46
+# characters on 2026-10-07 (`⚙ A Renamed Task's Session Becomes Unaddressable` against a
+# 108-character title). ⚠️ **`fleet-board.py` and `resolve-task-file.py` carry the same
+# constant for the same rule and all three values must agree** — they are three readers of
+# one predicate, and a drift between them would make the board, this gate and the sweep
+# disagree about whether a name resolves. `test_manager_predispatch.py` pins all three.
+_TRUNCATION_MIN_PREFIX = 20
+
+
+def _names_the_same_session(wanted: str, held: str) -> bool:
+    """Does a registry `name` denote the session whose task title is `wanted`?
+
+    ⚠️ **Not equality, and the difference is the point.** The registry name is a
+    *truncated* form of a long task title, so an equality test misses every long-titled
+    task and `roster_owner` returns `none` for a row that is in fact owned.
+
+    ⚠️ **The two errors are not symmetric, so the guard is on the HELD side.** A miss
+    leaves the row ready-to-start — the pre-existing behaviour, and safe. A false match
+    WITHHOLDS a legitimate spawn, which is the failure `roster_owner`'s own docstring
+    warns about. So the prefix must be long enough to be a truncation rather than a
+    coincidence: a short role name that happens to open a title (`boss`) does not
+    qualify. An exact match is accepted at any length, so a genuinely short title still
+    resolves.
+
+    ⚠️ **There is deliberately NO exactly-one-title guard here, unlike `fleet-board.py`'s
+    `has_task_file` — and it is not an omission.** `roster_owner` receives only
+    `(name, registry, feed)`: it holds no vault title set to be unique *against*, so an
+    exactly-one check is not expressible at this layer at all. The consequence is bounded
+    rather than ignored — reaching two distinct held names that both prefix-match one
+    title requires two sessions on the SAME title truncated at different lengths, and
+    `roster_owner` returns a liveness verdict (`LIVE` / `PARKED` / `NONE`), not an owner
+    identity, so in the reachable case both candidates are live and the verdict is the
+    same either way. ⚠️ **The length floor is what carries the safety here**, not
+    uniqueness.
+
+    ⚠️ **The case the paragraph above does NOT cover, named rather than argued away:** two
+    *different* titles sharing a ≥20-character prefix truncate to the same held string, so
+    one live session's name prefix-matches **both** rows and the genuinely unowned one is
+    withheld — the false-match direction this docstring calls the worse error. Unlikely at
+    the measured 46-character truncation, but reachable at the 20-character floor.
+    """
+    # ⚠️ **Both sides normalized here, not just `held`.** `roster_owner` already normalizes
+    # what it passes, so this is idempotent for it — but a second caller handing in a raw
+    # title would otherwise get a silent no-match, which is the failure this whole rule
+    # exists to remove.
+    wanted = _norm_session_name(wanted)
+    held = _norm_session_name(held)
+    if not wanted or not held:
+        return False
+    if held == wanted:
+        return True
+    return len(held) >= _TRUNCATION_MIN_PREFIX and wanted.startswith(held)
+
+
 def roster_owner(name: str, registry: dict, feed: dict) -> str:
     """The SUBORDINATE fallback for a row whose id set is EMPTY.
 
@@ -913,7 +967,7 @@ def roster_owner(name: str, registry: dict, feed: dict) -> str:
         # remove-list — leaving a task that may be owned looking spawnable.
         if rec.get("alive") is False:
             continue
-        if _norm_session_name(rec.get("name", "")) != wanted:
+        if not _names_the_same_session(wanted, rec.get("name", "")):
             continue
         return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
     return LIVENESS_NONE
