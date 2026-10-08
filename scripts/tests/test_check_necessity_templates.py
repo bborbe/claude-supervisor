@@ -26,15 +26,15 @@ SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-necessity-templ
 READER = "agents/manager-sweep-reader.md"
 VERIFY = "agents/manager-verify.md"
 
-SERVES = 'needed: <task> — serves <goal sentence|SC<n>|DoD<n>>: "<served line>" ← "<task line>"'
-FOUNDATION = 'needed: <task> — foundation for <goal sentence|SC<n>|DoD<n>>: "<the foundation line>" ← "<task line>"'
+SERVES = 'needed: <task> — serves <SC<n>|DoD<n>>: "<served line>" ← "<task line>"'
+FOUNDATION = 'needed: <task> — foundation for <SC<n>|DoD<n>>: "<the foundation line>" ← "<task line>"'
 NOT_NEEDED = (
-    "not needed: <task> — serves none of {goal sentence, Success Criteria, Definition of "
-    "Done}, checked against those three"
+    "not needed: <task> — serves none of {Success Criteria, Definition of "
+    "Done}, checked against those two"
 )
 UNPROVEN = (
     "not needed: <task> — unproven: <which of the two lines you could not produce>, checked "
-    "against {goal sentence, Success Criteria, Definition of Done}"
+    "against {Success Criteria, Definition of Done}"
 )
 PRODUCT = "product: <task> — output of <goal> SC<n>"
 SUMMARY = (
@@ -98,7 +98,7 @@ class TestNecessityTemplatesGuard(Base):
         self.write(READER, reader_body(serves=2))
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("the widened three-source `needed:` row", result.stderr)
+        self.assertIn("the two-source `needed:` row", result.stderr)
 
     def test_prose_mention_does_not_count_as_a_site(self):
         """The converse: the sentence carrying the shape must not satisfy the count alone."""
@@ -114,6 +114,20 @@ class TestNecessityTemplatesGuard(Base):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("want exactly 3", result.stderr)
+
+    def test_retired_source_reappearing_fails(self):
+        """The RETIRED assertion is the only check here that reads *wording* rather than
+        shape, and the reason it exists: every other assertion matches a row's **prefix**,
+        so a source deleted from **inside** a row — or restored uniformly at all three
+        sites — satisfies every count and the one-shape assertion alike. That makes it the
+        one check no other test can reach, in either direction, so it carries its own."""
+        self.write(
+            READER,
+            reader_body().replace("<SC<n>|DoD<n>>", "<goal sentence|SC<n>|DoD<n>>"),
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("still carries the retired goal-sentence source", result.stderr)
 
     def test_divergent_row_shape_fails(self):
         """Prefix matching alone would pass this: the drifted row still begins with the
