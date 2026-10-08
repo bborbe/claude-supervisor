@@ -26,15 +26,15 @@ SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-necessity-templ
 READER = "agents/manager-sweep-reader.md"
 VERIFY = "agents/manager-verify.md"
 
-SERVES = 'needed: <task> — serves <goal sentence|SC<n>|DoD<n>>: "<served line>" ← "<task line>"'
-FOUNDATION = 'needed: <task> — foundation for <goal sentence|SC<n>|DoD<n>>: "<the foundation line>" ← "<task line>"'
+SERVES = 'needed: <task> — serves <SC<n>|DoD<n>>: "<served line>" ← "<task line>"'
+FOUNDATION = 'needed: <task> — foundation for <SC<n>|DoD<n>>: "<the foundation line>" ← "<task line>"'
 NOT_NEEDED = (
-    "not needed: <task> — serves none of {goal sentence, Success Criteria, Definition of "
-    "Done}, checked against those three"
+    "not needed: <task> — serves none of {Success Criteria, Definition of "
+    "Done}, checked against those two"
 )
 UNPROVEN = (
     "not needed: <task> — unproven: <which of the two lines you could not produce>, checked "
-    "against {goal sentence, Success Criteria, Definition of Done}"
+    "against {Success Criteria, Definition of Done}"
 )
 PRODUCT = "product: <task> — output of <goal> SC<n>"
 SUMMARY = (

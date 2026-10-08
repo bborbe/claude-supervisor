@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """The widened necessity contract must stay pinned in the two agents that carry it.
 
-`agents/manager-sweep-reader.md` § step 8 defines the three necessity verdicts and their row
+`agents/manager-sweep-reader.md` § step 8 defines the necessity verdicts and their row
 shapes; `agents/manager-verify.md` § step 1 consumes them. The 2026-10-07 widening — each
-verdict now names *which* of three sources a task serves (goal sentence / `SC<n>` / `DoD<n>`)
+verdict then named *which* of three sources a task serves (goal sentence / `SC<n>` / `DoD<n>`)
 — moved the `needed:` row shape, and deliberately left the `product:` row and the summary
 line byte-identical so that a before/after comparison of this read stays valid.
+
+⚠️ **Narrowed to two sources on 2026-10-08:** the goal sentence was retired
+(`SC<n>` / `DoD<n>` only), matching vault-cli. That edit changed the *text inside* the
+`needed:` and `not needed:` rows but not the **prefixes this guard matches on**, so every
+count below is unchanged and the guard passed without modification. Read that as the guard's
+declared scope, not as coverage: it pins that a site was not dropped, duplicated or moved, and
+says nothing about the wording within a site.
 
 That "deliberately unchanged" half is a claim, and nothing asserted it. This guard pins both
 halves: every row shape the widening introduces must appear at **exactly** its known sites,
