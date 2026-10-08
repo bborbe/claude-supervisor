@@ -137,10 +137,13 @@ def live_workers(registry_dir=None, ledger=None, heartbeat_dir=None, now=None):
     registry = identity.read_registry(registry_dir) if registry_dir else identity.read_registry()
     if registry is None:
         return None
-    # The heartbeat half still reads through `session-liveness.py`; only the registry reader's
-    # home changed, so the union below is the same union over the same two stores.
-    liveness = _load("session_liveness", "session-liveness.py")
-    heartbeats = liveness.read_heartbeats(heartbeat_dir, now=now)
+    # The heartbeat store is read through its own reader, `live-workers.py` — the file
+    # `session-liveness.py` used to wrap. Liveness for the plugin moved to the
+    # session-heartbeat endpoint, but this counter needs the store's ROWS (a stamp's `mode`
+    # is the column it reports), and the store is where they live.
+    lw = _load("live_workers", "live-workers.py")
+    store = heartbeat_dir if heartbeat_dir is not None else lw.heartbeat_dir()
+    heartbeats = lw.read_live(store, ttl=lw.TTL_SECONDS, now=now)
     if heartbeats is None:
         return None
     if ledger is None:
