@@ -891,6 +891,34 @@ class TestLiveness(Base):
         self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
         self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_PARKED)
 
+    def test_a_declared_wait_is_parked_not_live(self):
+        """`⏰ Ends:` names a machine the worker waits on — a dependency, so parked.
+
+        The sibling below is the control: the same registry state with no declaration
+        stays `live`, so a build that parked every session fails here rather than
+        passing by accident. The declaration is read from the file's own `FEED_DIR`,
+        which is what keeps this test off the live store.
+        """
+        self.registry("s-decl")
+        self.events("s-decl", "⏰ Ends: watch.sh (background Bash, x)")
+        tracked = [{"name": "T", "session": "s-decl"}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_PARKED)
+
+    def test_a_session_without_a_declaration_stays_live(self):
+        self.registry("s-nodecl")
+        self.events("s-nodecl", "👤 You: nothing")
+        tracked = [{"name": "T", "session": "s-nodecl"}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_LIVE)
+
+    def events(self, sid, detail):
+        """Append one `Stop` record to a session's log inside the file's own FEED_DIR."""
+        path = os.path.join(self.m.FEED_DIR, f"{sid}.events.jsonl")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "open", "event": "Stop", "item_id": "i",
+                                 "detail": detail}) + "\n")
+
     # -- the id set, and the roster-name fallback ---------------------------- #
 
     def registry_named(self, sid, name, status="idle"):

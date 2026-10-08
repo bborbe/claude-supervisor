@@ -33,7 +33,7 @@ The caller passes: the sweep-reader digest verbatim · the caller's own session 
 
 <process>
 
-1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `[unresolved]` rows and rows with no task are **unverifiable**.
+1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. ⚠️ **`parked-on-watcher` and `waiting-on-human` are never candidates, and the naming is the trap.** Both were split out of the reader's `stalled` bucket by `agents/fleet-sweep-reader.md` step 8: a `parked-on-watcher` row is a session whose turn ended and which **declared a machine-watched wait**, and a `waiting-on-human` row is one held by an operator gate. ⚠️ **`parked-on-watcher` is not a near-miss for `parked`** — it shares the prefix and nothing else, so a `startswith` or substring match would sweep in exactly the rows this leg exists to leave alone. Match the class **exactly**, and treat any class you do not recognise as **not yours** rather than as `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `[unresolved]` rows and rows with no task are **unverifiable**.
 
 1b. **Reap the finished — before drafting any nudge.** This is the reap contract's canonical home: `fleet-loop` Step 3b dispatches this leg on every round and points here rather than restating it. Measured 2026-09-23 the fleet snapshot had not been written for ~14h and the ledger held two `finished` verdicts that nothing ever messaged. For each finished row, re-read the three disk facts this run:
 

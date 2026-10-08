@@ -147,6 +147,7 @@ scripts/approved-not-started.py                  the approved-but-unstarted read
 scripts/adopt-orphans.py                         adopts an exited manager's live workers into the ownership-claim store (/fleet-loop Step 3a) — successor-by-subject, else the tick session
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
+scripts/declared-wait.py                         the shared `⏰ Ends:` reader — one home for the slot `fleet-board.py`, `manager-predispatch.py` and the fleet sweep all key on (the "fourth definition of idle" guard)
 agents/manager-wrangler.md                routine approval loop over headless workers
 agents/manager-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
 agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-loop, read-only by /fleet-drive)

@@ -802,6 +802,26 @@ def _session_liveness():
     return _LIVENESS
 
 
+_DECLARED_WAIT = None
+
+
+def _declared_wait():
+    """Import declared-wait.py — the shared `⏰ Ends:` reader.
+
+    ⚠️ **Shared, not re-derived.** `agents/manager-drive.md:134` forbids *"a fourth
+    definition of 'idle'"*, and `scripts/fleet-board.py` reads the same slot through this
+    same module. A private copy here would be exactly the drift that rule names.
+    """
+    global _DECLARED_WAIT
+    if _DECLARED_WAIT is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "declared-wait.py")
+        spec = importlib.util.spec_from_file_location("declared_wait", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _DECLARED_WAIT = mod
+    return _DECLARED_WAIT
+
+
 def read_registry() -> dict[str, dict]:
     """`~/.claude/sessions/<pid>.json` -> {sessionId: {pid, status, name, alive}}.
 
@@ -863,6 +883,13 @@ def liveness_of_sid(
     """
     if not sid:
         return LIVENESS_NONE
+    # ⚠️ **A declared wait parks a LIVE row, and only a live one.** `⏰ Ends:` names a
+    # machine the worker is waiting on — a dependency, which is what this file's park
+    # rule exists to cover — read through the shared reader so this file cannot drift
+    # from `scripts/fleet-board.py`'s own reading. It is applied only at the two park
+    # points below and never before them: a session that is dead and once declared a
+    # wait is still dead, and parking it here would resurrect it.
+    declared = _declared_wait().declared_wait(sid, state_dir=FEED_DIR)
     rec = registry.get(sid)
     # ⚠️ **Only a PROVEN negative is death.** `alive` is a three-state since 2026-10-01: `None`
     # means "the pid is occupied but the record cannot prove the holder is this session" (see
@@ -873,8 +900,8 @@ def liveness_of_sid(
         beat = heartbeat_live(sid) if heartbeat is _HEARTBEAT_UNREAD else heartbeat
         if beat is not True:
             return LIVENESS_NONE
-        return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
-    if is_open_gate(feed.get(sid)) or rec["status"] == "waiting":
+        return LIVENESS_PARKED if (is_open_gate(feed.get(sid)) or declared) else LIVENESS_LIVE
+    if is_open_gate(feed.get(sid)) or declared or rec["status"] == "waiting":
         return LIVENESS_PARKED
     return LIVENESS_LIVE
 
@@ -1042,6 +1069,11 @@ def idle_stuck(t: dict, now_ts: float) -> bool:
     file-unchanged proxy cannot tell the two apart. The parked carrier is already
     computed in this file (`liveness_of` -> `LIVENESS_PARKED`), so a branch (b) that
     ignored it would flag exactly the workers the rule exists to leave alone.
+    ⚠️ **`LIVENESS_PARKED` carries two shapes now, not one:** an open gate, and a
+    session whose newest `Stop` record declares `⏰ Ends:` (read through the shared
+    `scripts/declared-wait.py`). The second is the one that regressed in practice — a
+    worker whose turn ended inside a `run_in_background` watcher is inactive *by
+    design*, and the file-unchanged proxy read that as stuck.
     """
     if t.get("liveness") == LIVENESS_PARKED:
         return False
