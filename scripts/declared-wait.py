@@ -20,6 +20,23 @@ nothing at all (measured 2026-10-04 over 21,349 `Stop` records: `⏰ Ends:` on 4
 ⚠️ **The NEWEST `Stop` record is the rule.** The log is append-only, so an older
 `⏰ Ends:` outlives the wait it declared and would pin the row forever.
 
+⚠️ **A WELL-FORMED but STALE declaration is the case that rule does NOT reach, and it
+is the expensive one.** If a declared wake never fires and the session writes no later
+`Stop` record, the newest record keeps carrying the marker and both consumers suppress
+on it **indefinitely** — `fleet-board.py` withholds `nudge`, `manager-predispatch.py`
+returns `LIVENESS_PARKED` so `idle_stuck` exempts the row, with no re-check and no drift
+back. `agents/manager-sweep-reader.md:149` names exactly this shape for the manager
+tier's own `declared_wait:` field and records it as *"the honest gap"*: nothing in a
+declaration says when the wait began, so a reader **cannot expire it**. That tier's
+defence is two-part — the WRITER clears the field when the wait ends, and the cell
+**renders the declaration's own text verbatim**, so a stale one reads as stale rather
+than as a live wait.
+⚠️ **This reader carries the first half and not the second.** It answers a boolean, so
+its consumers cannot tell a live declaration from a stale one the way the sibling cell
+can. A hard bound would need the declaration to carry its own date — a convention change
+this reader does not make on its own. Recorded here as the honest gap rather than
+papered over, which is what the sibling tier does with the same residual.
+
 ⚠️ **A `Stop` record is a rendered closer panel, never a raised gate** — the same
 discriminator `who-needs-me.py`'s `is_open_gate()` reads to reach the *opposite*
 conclusion. A session that is genuinely gated is therefore never claimed here, and
@@ -48,7 +65,12 @@ def declared_wait(sid, state_dir=None):
     Returns a bool. A log that is missing, unreadable or malformed, or that holds no
     `Stop` record at all, is **False** — see the module docstring's failed-read rule.
     """
-    if not sid:
+    if not sid or "/" in sid or "\\" in sid:
+        # ⚠️ **A sid is not a path.** `declared_wait_ids()` derives its ids from
+        # `os.path.basename`, but this per-session form takes one from its caller, and an
+        # id carrying a separator would read outside the store. No current caller supplies
+        # one, so this is defence-in-depth rather than a live traversal — it costs a line
+        # and keeps the failed-read contract total.
         return False
     path = os.path.join(state_dir or STATE, f"{sid}.events.jsonl")
     newest = None
