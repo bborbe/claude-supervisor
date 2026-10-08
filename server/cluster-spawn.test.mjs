@@ -10,10 +10,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
+  CLUSTER_ANSWER_MAX,
   CLUSTER_SESSION_ID_PATTERN,
   DEFAULT_TIMEOUT_MS,
   PROMPT_PATH,
   SESSION_HEADER,
+  classifyClusterAnswer,
   newSessionId,
   resolveAuthToken,
   resolveClusterBaseUrl,
@@ -144,7 +146,10 @@ test('the prompt is POSTed to /prompt with the session header', async () => {
     },
   })
 
-  assert.deepEqual(result, { sessionId: UUID, status: 200, answer: 'done' })
+  // `answer` AND `outcome` — the two fields the spawn path used to drop. Asserted as a whole
+  // object rather than field-by-field so a future edit that stops returning either one fails
+  // here rather than only at a live spawn against the pod.
+  assert.deepEqual(result, { sessionId: UUID, status: 200, answer: 'done', outcome: 'answered' })
   assert.equal(seen.url, `http://host:30090${PROMPT_PATH}`)
   assert.equal(seen.init.method, 'POST')
   // The header spelling is the contract: an absent one silently resolves every caller to the
@@ -372,6 +377,65 @@ test('supervisor.mjs actually resolves through resolveClusterTarget', () => {
   assert.match(src, /file: config\.configFileContents/)
   assert.match(src, /baseUrl: target\.url/)
   assert.match(src, /authToken: target\.token/)
+})
+
+test('supervisor.mjs actually carries the answer out of the spawn', () => {
+  // The same wiring-is-the-feature guard, for the defect this change closes. `startClusterSession`
+  // returned `answer` long before anything read it: the call site used `started.sessionId` alone,
+  // so every other test here could pass — and did — while three complete answers were read from
+  // the outside as three empty turns (2026-10-08). Asserting the read is the only way to pin a
+  // value whose absence is silent by construction.
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(src, /started\.answer/)
+  // And that it reaches BOTH surfaces a caller can read — the tool result and the agent record.
+  assert.match(src, /answer: result\.answer/)
+  assert.match(src, /outcome: result\.outcome/)
+  assert.match(src, /result,\n\s*error: null,/)
+})
+
+test('a structured failure and an empty turn are different verdicts, not one', () => {
+  // The load-bearing pair, and the whole point of the classification. If these two ever collapse
+  // to the same value the defect is back, whatever else this suite says.
+  assert.equal(classifyClusterAnswer('{"status":"failed","message":"vault-cli project not found"}'), 'failed')
+  assert.equal(classifyClusterAnswer(''), 'empty')
+})
+
+test('the verdicts the deployed pod actually returned are read as themselves', () => {
+  // Shapes taken verbatim from the 2026-10-08 replay against `claude-interactive`, so this suite
+  // fails if the reading drifts from the payload the pod really sends.
+  assert.equal(classifyClusterAnswer('{"status": "success"}'), 'succeeded')
+  assert.equal(classifyClusterAnswer('{"status":"failed","message":"…"}'), 'failed')
+  assert.equal(classifyClusterAnswer('OK'), 'answered')
+})
+
+test('whitespace is emptiness, and a JSON non-object is not a verdict', () => {
+  assert.equal(classifyClusterAnswer('   \n  '), 'empty')
+  // `JSON.parse` accepts every one of these; none carries a status, so none may read as one.
+  for (const body of ['42', '"failed"', '[{"status":"failed"}]', 'null', 'true']) {
+    assert.equal(classifyClusterAnswer(body), 'answered', `${body} must not read as a verdict`)
+  }
+})
+
+test('prose that merely mentions failure is not a failed turn', () => {
+  // The narrowness that keeps this honest: only a parsed OBJECT with a `status` field counts.
+  // A child writing "the build failed" is answering, not reporting a structured failure, and
+  // reinterpreting its words would be inventing a taxonomy over text this module does not own.
+  assert.equal(classifyClusterAnswer('the build failed, here is why: …'), 'answered')
+  assert.equal(classifyClusterAnswer('{"error":"boom"}'), 'answered')
+})
+
+test('a non-string answer is empty rather than a crash', () => {
+  // `answer` is typed by the caller, not by this module: a fetch double or a future transport
+  // could hand back undefined, and a classifier that threw would take the whole spawn down.
+  for (const body of [undefined, null, 42, {}]) {
+    assert.equal(classifyClusterAnswer(body), 'empty')
+  }
+})
+
+test('the answer bound is the number the spawn slices with', () => {
+  // Pinned as a value: `spawnClusterWorker` slices with THIS constant, so a silent change here
+  // is a silent change to how much of a child's answer a manager is shown.
+  assert.equal(CLUSTER_ANSWER_MAX, 4000)
 })
 
 test('url and token resolve INDEPENDENTLY — a mixed pair takes each from its own source', () => {

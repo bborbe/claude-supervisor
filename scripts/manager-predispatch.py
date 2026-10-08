@@ -787,19 +787,19 @@ def heartbeat_live(sid: str, now: float | None = None) -> bool | None:
     return age < HEARTBEAT_TTL_SECONDS
 
 
-_LIVENESS = None
+_IDENTITY = None
 
 
-def _session_liveness():
-    """Import session-liveness.py (hyphenated filename -> importlib) — the one registry reader."""
-    global _LIVENESS
-    if _LIVENESS is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-liveness.py")
-        spec = importlib.util.spec_from_file_location("session_liveness", path)
+def _session_identity():
+    """Import session-identity.py (hyphenated filename -> importlib) — the one registry reader."""
+    global _IDENTITY
+    if _IDENTITY is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-identity.py")
+        spec = importlib.util.spec_from_file_location("session_identity", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        _LIVENESS = mod
-    return _LIVENESS
+        _IDENTITY = mod
+    return _IDENTITY
 
 
 def read_registry() -> dict[str, dict]:
@@ -809,7 +809,7 @@ def read_registry() -> dict[str, dict]:
     missing record proves nothing: a headless worker has none.
 
     ⚠️ **One reader for the whole plugin.** The glob, the pid check and the `alive` rule now
-    live in `scripts/session-liveness.py`. A second instrument over the same registry is what
+    live in `scripts/session-identity.py`. A second instrument over the same registry is what
     let an 8-char prefix read as `ABSENT` on 2026-09-26 while its session was live, and this
     reader was one of the copies.
 
@@ -818,7 +818,7 @@ def read_registry() -> dict[str, dict]:
     shared reader refuses. Recorded as a residual rather than changed silently inside a
     conversion: flipping it is a rule change for this caller, not a refactor.
     """
-    return _session_liveness().read_registry(REGISTRY_DIR) or {}
+    return _session_identity().read_registry(REGISTRY_DIR) or {}
 
 
 def read_feed() -> dict[str, dict]:
@@ -866,7 +866,7 @@ def liveness_of_sid(
     rec = registry.get(sid)
     # ⚠️ **Only a PROVEN negative is death.** `alive` is a three-state since 2026-10-01: `None`
     # means "the pid is occupied but the record cannot prove the holder is this session" (see
-    # `session-liveness.py:read_registry`). Reading that as dead here would fall through to the
+    # `session-identity.py:read_registry`). Reading that as dead here would fall through to the
     # heartbeat and then to `LIVENESS_NONE`, which is the value the auto-resume gate acts on —
     # so an unprovable record would permit a resume onto a conversation that may still be live.
     if rec is None or rec["alive"] is False:
@@ -891,6 +891,60 @@ def _norm_session_name(name: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
+# A registry name is a *truncated* title, and the truncation is long — measured 46
+# characters on 2026-10-07 (`⚙ A Renamed Task's Session Becomes Unaddressable` against a
+# 108-character title). ⚠️ **`fleet-board.py` and `resolve-task-file.py` carry the same
+# constant for the same rule and all three values must agree** — they are three readers of
+# one predicate, and a drift between them would make the board, this gate and the sweep
+# disagree about whether a name resolves. `test_manager_predispatch.py` pins all three.
+_TRUNCATION_MIN_PREFIX = 20
+
+
+def _names_the_same_session(wanted: str, held: str) -> bool:
+    """Does a registry `name` denote the session whose task title is `wanted`?
+
+    ⚠️ **Not equality, and the difference is the point.** The registry name is a
+    *truncated* form of a long task title, so an equality test misses every long-titled
+    task and `roster_owner` returns `none` for a row that is in fact owned.
+
+    ⚠️ **The two errors are not symmetric, so the guard is on the HELD side.** A miss
+    leaves the row ready-to-start — the pre-existing behaviour, and safe. A false match
+    WITHHOLDS a legitimate spawn, which is the failure `roster_owner`'s own docstring
+    warns about. So the prefix must be long enough to be a truncation rather than a
+    coincidence: a short role name that happens to open a title (`boss`) does not
+    qualify. An exact match is accepted at any length, so a genuinely short title still
+    resolves.
+
+    ⚠️ **There is deliberately NO exactly-one-title guard here, unlike `fleet-board.py`'s
+    `has_task_file` — and it is not an omission.** `roster_owner` receives only
+    `(name, registry, feed)`: it holds no vault title set to be unique *against*, so an
+    exactly-one check is not expressible at this layer at all. The consequence is bounded
+    rather than ignored — reaching two distinct held names that both prefix-match one
+    title requires two sessions on the SAME title truncated at different lengths, and
+    `roster_owner` returns a liveness verdict (`LIVE` / `PARKED` / `NONE`), not an owner
+    identity, so in the reachable case both candidates are live and the verdict is the
+    same either way. ⚠️ **The length floor is what carries the safety here**, not
+    uniqueness.
+
+    ⚠️ **The case the paragraph above does NOT cover, named rather than argued away:** two
+    *different* titles sharing a ≥20-character prefix truncate to the same held string, so
+    one live session's name prefix-matches **both** rows and the genuinely unowned one is
+    withheld — the false-match direction this docstring calls the worse error. Unlikely at
+    the measured 46-character truncation, but reachable at the 20-character floor.
+    """
+    # ⚠️ **Both sides normalized here, not just `held`.** `roster_owner` already normalizes
+    # what it passes, so this is idempotent for it — but a second caller handing in a raw
+    # title would otherwise get a silent no-match, which is the failure this whole rule
+    # exists to remove.
+    wanted = _norm_session_name(wanted)
+    held = _norm_session_name(held)
+    if not wanted or not held:
+        return False
+    if held == wanted:
+        return True
+    return len(held) >= _TRUNCATION_MIN_PREFIX and wanted.startswith(held)
+
+
 def roster_owner(name: str, registry: dict, feed: dict) -> str:
     """The SUBORDINATE fallback for a row whose id set is EMPTY.
 
@@ -913,7 +967,7 @@ def roster_owner(name: str, registry: dict, feed: dict) -> str:
         # remove-list — leaving a task that may be owned looking spawnable.
         if rec.get("alive") is False:
             continue
-        if _norm_session_name(rec.get("name", "")) != wanted:
+        if not _names_the_same_session(wanted, rec.get("name", "")):
             continue
         return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
     return LIVENESS_NONE

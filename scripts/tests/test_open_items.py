@@ -952,5 +952,213 @@ class EmptyId(Base):
         self.assertEqual(code, 0)
 
 
+class CardLink(Base):
+    """Every `asked-of-you` carries its board card, and that card's answer closes it.
+
+    ⚠️ `post_card` and `poll_card` are rebound on the module for every case here. They are
+    the only two functions in this file that reach the network, and an unpatched run would
+    POST A REAL CARD TO THE OPERATOR'S LIVE BOARD — a side effect on a person, from a test
+    suite. The seam is the one `oi.ROOT` already uses: the handlers resolve both names from
+    module globals at call time, so rebinding them here is exactly what the CLI would do.
+
+    The load-bearing case is `test_card_sync_does_not_close_on_a_non_operator_answer`. A
+    card the store holds a NON-operator answer on renders `NOT_OPERATOR_ANSWERED:`, which
+    reads like a resolved gate; closing on it would forge the operator attribution `answer`
+    exists to protect. Its positive twin closes, so the pair discriminates rather than
+    merely passing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._post, self._poll = oi.post_card, oi.poll_card
+        self.posted = []
+        self.answers = {}
+
+        def fake_post(item, sid, script_dir=None, timeout=None):
+            # The floor is mirrored rather than skipped: the real `post_card` refuses to
+            # build a card from fewer than MIN_CARD_OPTIONS labels, and a stand-in that
+            # returned an id anyway would make the option-floor cases below pass for a
+            # reason the shipped code does not have.
+            options = tuple(item.get("card_options") or [])
+            if len(options) < oi.MIN_CARD_OPTIONS:
+                return None
+            card = "card%04d" % (len(self.posted) + 1)
+            self.posted.append((item["id"], card, options))
+            return card
+
+        def fake_poll(item_id, script_dir=None, timeout=None):
+            return self.answers.get(item_id, ("open", ""))
+
+        self.fake_post, self.fake_poll = fake_post, fake_poll
+        oi.post_card, oi.poll_card = fake_post, fake_poll
+
+    def tearDown(self):
+        oi.post_card, oi.poll_card = self._post, self._poll
+        super().tearDown()
+
+    def ask(self, text, *options, **kw):
+        argv = ["add", "--kind", "asked-of-you", "--text", text]
+        for label in options:
+            argv += ["--option", label]
+        if kw.get("recommend"):
+            argv += ["--recommend", kw["recommend"]]
+        return self.run_cli(argv)
+
+    def entry(self, state="open"):
+        return [i for i in self.everything() if i["state"] == state][0]
+
+    def test_an_ask_with_options_gets_a_card_and_records_it(self):
+        self.ask("Which of these two?", "A", "B", recommend="A")
+        item = self.entry()
+        self.assertEqual(item["card_item_id"], "card0001")
+        self.assertEqual(item["card_options"], ["A", "B"])
+        self.assertEqual(item["card_recommend"], "A")
+        self.assertEqual(self.posted[0][0], item["id"])
+
+    def test_an_ask_without_options_is_recorded_but_not_posted(self):
+        """WARN, never refuse: the ledger records an ask before anything else about it
+        exists, so a question in a form the board cannot carry is still worth recording —
+        but it must say the entry cannot be answered, not imply a cosmetic gap."""
+        code, _, err = self.ask("A one-way ask")
+        self.assertEqual(code, 0)
+        self.assertIsNone(self.entry()["card_item_id"])
+        self.assertEqual(self.posted, [])
+        self.assertIn("cannot answer it", err)
+
+    def test_one_option_is_not_enough_for_a_card(self):
+        """The floor's negative control: one option is a notification wearing a question's
+        shape, and it must not post."""
+        code, _, err = self.ask("Only one way?", "A")
+        self.assertEqual(code, 0)
+        self.assertIsNone(self.entry()["card_item_id"])
+        self.assertEqual(self.posted, [])
+        self.assertIn("1 option(s)", err)
+
+    def test_card_answer_closes_the_matching_entry(self):
+        self.ask("Which?", "A", "B")
+        item = self.entry()
+        code, _, _ = self.run_cli(
+            ["card-answer", "--item-id", item["card_item_id"], "--text", "A, do it"]
+        )
+        self.assertEqual(code, 0)
+        closed = self.entry("closed")
+        self.assertEqual(closed["answer"], "A, do it")
+        self.assertIn(item["card_item_id"], closed["closed_evidence"])
+
+    def test_card_answer_refuses_an_unknown_card(self):
+        """A silent no-op is indistinguishable from a close, so it must refuse loudly."""
+        self.ask("Which?", "A", "B")
+        code, _, _ = self.run_cli(
+            ["card-answer", "--item-id", "nosuchcard", "--text", "A"]
+        )
+        self.assertIsInstance(code, str, "an unknown card was not refused")
+        self.assertIn("no entry", code)
+        self.assertEqual(self.entry()["state"], "open")
+
+    def test_card_answer_refuses_an_already_closed_entry(self):
+        """The four close writes are unconditional, so a replayed `ANSWERED <item-id>`
+        would replace the entry's recorded close evidence with a new claim — the hazard
+        `withdraw` refuses on an already-closed entry for, and for the same reason."""
+        self.ask("Which?", "A", "B")
+        item = self.entry()
+        self.run_cli(
+            ["card-answer", "--item-id", item["card_item_id"], "--text", "A"]
+        )
+        code, _, _ = self.run_cli(
+            ["card-answer", "--item-id", item["card_item_id"], "--text", "B"]
+        )
+        self.assertIsInstance(code, str, "a replayed answer was not refused")
+        self.assertIn("already closed", code)
+        closed = self.entry("closed")
+        self.assertEqual(closed["answer"], "A", "the replay overwrote the first answer")
+
+    def test_card_sync_leaves_the_entry_open_on_a_failed_poll(self):
+        """A `failed` poll is a fact about the CARD, not about the entry. Closing on it
+        would forge an answer nobody gave."""
+        self.ask("Which?", "A", "B")
+        item = self.entry()
+        self.answers[item["card_item_id"]] = ("failed", "store unreachable")
+        self.run_cli(["card-sync"])
+        still = self.entry()
+        self.assertEqual(still["state"], "open")
+        self.assertIsNone(still["answer"])
+
+    def test_card_sync_backfills_an_entry_whose_post_failed(self):
+        oi.post_card = lambda *a, **k: None  # store unreachable at add time
+        self.ask("Which?", "A", "B")
+        self.assertIsNone(self.entry()["card_item_id"])
+        oi.post_card = self.fake_post  # store back
+        code, _, _ = self.run_cli(["card-sync"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.entry()["card_item_id"], "card0001")
+
+    def test_card_sync_reports_an_entry_it_cannot_post(self):
+        """It must REPORT, never invent an answer space — a fabricated option set is a
+        question the operator did not ask."""
+        self.ask("No options here")
+        code, out, err = self.run_cli(["card-sync"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.posted, [])
+        self.assertIn("needing options", out)
+        self.assertIn("no option set", err)
+
+    def test_card_sync_closes_on_an_operator_answer(self):
+        self.ask("Which?", "A", "B")
+        item = self.entry()
+        self.answers[item["card_item_id"]] = ("answered", "A please")
+        code, _, _ = self.run_cli(["card-sync"])
+        self.assertEqual(code, 0)
+        closed = self.entry("closed")
+        self.assertEqual(closed["answer"], "A please")
+        self.assertIn(item["card_item_id"], closed["closed_evidence"])
+
+    def test_card_sync_does_not_close_on_a_non_operator_answer(self):
+        """The discriminating negative control — see the class docstring."""
+        self.ask("Which?", "A", "B")
+        item = self.entry()
+        self.answers[item["card_item_id"]] = ("not-answered", "some other actor replied")
+        self.run_cli(["card-sync"])
+        still = self.entry()
+        self.assertEqual(still["state"], "open")
+        self.assertIsNone(still["answer"])
+
+    def test_card_sync_is_idempotent(self):
+        self.ask("Which?", "A", "B")
+        self.run_cli(["card-sync"])
+        self.run_cli(["card-sync"])
+        self.assertEqual(len(self.posted), 1, "a second sync re-posted the same ask")
+
+    def test_card_sync_never_posts_for_a_closed_entry(self):
+        """A closed entry's card is history; re-posting would resurrect a question the
+        operator has already answered."""
+        self.ask("Which?", "A", "B")
+        item = self.entry()
+        self.run_cli(["card-answer", "--item-id", item["card_item_id"], "--text", "A"])
+        self.run_cli(["card-sync"])
+        self.assertEqual(len(self.posted), 1)
+
+    def test_options_repairs_an_entry_that_predates_the_link(self):
+        oi.post_card = lambda *a, **k: None
+        self.ask("Which?")
+        oi.post_card = self.fake_post
+        item = self.entry()
+        code, _, _ = self.run_cli(
+            ["options", "--id", item["id"], "--option", "A", "--option", "B",
+             "--recommend", "B"]
+        )
+        self.assertEqual(code, 0)
+        after = self.entry()
+        self.assertEqual(after["card_item_id"], "card0001")
+        self.assertEqual(after["card_options"], ["A", "B"])
+        self.assertEqual(after["card_recommend"], "B")
+
+    def test_options_refuses_a_single_option(self):
+        self.ask("Which?", "A", "B")
+        item = self.entry()
+        code, _, _ = self.run_cli(["options", "--id", item["id"], "--option", "only"])
+        self.assertIsInstance(code, str, "a one-option repair was not refused")
+        self.assertIn("fewer than a card may carry", code)
+
+
 if __name__ == "__main__":
     unittest.main()

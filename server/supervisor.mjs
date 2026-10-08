@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord } from './heartbeat.mjs'
+import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
-import { newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
+import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
@@ -83,6 +83,28 @@ const heartbeat = {
       // manager's verdict to "could not tell" — which is the honest answer — whereas failing
       // the spawn would turn an unwritable state directory into a broken fleet.
       log(`WARNING: cannot stamp heartbeat for ${sessionId}: ${error.message}`)
+    }
+  },
+  // The session this server runs INSIDE.
+  //
+  // ⚠️ The lifecycle itself lives in `heartbeat.mjs`, which owns the stamp and can therefore
+  // be tested — `supervisor.mjs` has no export surface (a test importing it would start an MCP
+  // server), so a self-stamp owned here could never be covered at all. See `startSelfStamp`
+  // for the design notes: the per-worker stamps cannot cover this session, the anchor is
+  // deliberately omitted, and the activity starts at `idle`.
+  startSelf(sessionId) {
+    this.stopSelf()
+    this.self = startSelfStamp(sessionId, {
+      // Same reasoning as `stamp` above: the session still runs, and a manager's verdict
+      // degrades to "could not tell" rather than the server failing to start.
+      onError: (error) => log(`WARNING: cannot stamp own heartbeat for ${sessionId}: ${error.message}`),
+    })
+    return this.self !== null
+  },
+  stopSelf() {
+    if (this.self) {
+      this.self.stop()
+      this.self = undefined
     }
   },
 }
@@ -561,6 +583,12 @@ function writeLedger(agent, patch) {
       // reads a record as proof of "worker", so a manager spawned with
       // `role="manager"` was read as a worker by every peer manager.
       role: agent.role ?? null,
+      // The finished result, when there already is one. Null for every local mode at spawn —
+      // a tab or headless worker has not run yet, and its terminal patch supplies this later.
+      // A cluster worker is the exception: its turn ends inside the spawn call, so the record
+      // filed here is the only write its result will ever get, and hard-coding null in
+      // `buildRecord` was silently discarding it from the durable half too.
+      result: agent.result ?? null,
       spawnedAt: agent.createdAt,
     })
     writeRecord(config.ledgerDir, record)
@@ -610,6 +638,11 @@ function stampUnobservedWorkers() {
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
     const stamped = stampUnobservedWorkers()
+    // The self-stamp goes the same way. The handler already exists so a killed server does not
+    // leave records asserting a liveness nobody can vouch for; the row describing the server's
+    // OWN session is the same claim and belongs on the same path. `stopSelf` is idempotent, so
+    // a server that never had a session id simply clears nothing.
+    heartbeat.stopSelf()
     log(`received ${signal} — stamped ${stamped} unobserved worker(s) as ${UNOBSERVED_STATUS}, then exited`)
     process.exit(0)
   })
@@ -923,13 +956,44 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
   })
   if (started.error) return { error: started.error }
 
+  // ⚠️ **The cluster turn is SYNCHRONOUS and already OVER by this line.** `startClusterSession`
+  // holds the request open until the pod answers, so there is a final answer here and no later
+  // one. That is why this value is written to every surface at once rather than streamed, and
+  // why none of them may be left null: the tool result is read by the caller NOW, `agent_status`
+  // and `list_agents` by the manager later, and the ledger by a peer manager after this server
+  // has exited. They are one fact seen by three readers, so a null in any of them puts the three
+  // reads in disagreement about a turn that has already finished — which is exactly how three
+  // complete answers, one of them a success, were read from the outside as three empty turns on
+  // 2026-10-08 (sessions `9fac5053`, `38a2bdae`, `a3be5a1b`).
+  //
+  // The shape is deliberately NOT the SDK envelope `agent-loop.mjs` writes for a local worker.
+  // `subtype`, `is_error` and `num_turns` are facts about an SDK query and a cluster turn has
+  // none of them; borrowing the shape would put three invented values in a field readers
+  // already trust. The record's `mode: "cluster"` is what tells the two shapes apart.
+  const answer = typeof started.answer === 'string' ? started.answer : ''
+  const result = {
+    outcome: started.outcome ?? classifyClusterAnswer(answer),
+    answer: answer.slice(0, CLUSTER_ANSWER_MAX),
+    // Named rather than left to be inferred from the length: a caller comparing this against
+    // what the child said must know the tail was cut, or a truncated answer reads as a short one.
+    truncated: answer.length > CLUSTER_ANSWER_MAX,
+  }
+
   const bound = bindSessionToTask({ task, vault, sessionId: started.sessionId })
   if (bound.error) {
     // The session exists and is running; only the vault's record of it failed. Reported with
     // the id, because that is the one thing a human needs to reconcile it — and reported
     // rather than swallowed, so the caller decides whether to keep a session nothing points at.
+    //
+    // ⚠️ The answer rides along even here. The turn RAN, and its answer is the one thing that
+    // cannot be recovered from the id — dropping it on this path would reintroduce the exact
+    // silence this change removes, on the rarer of the two paths and therefore the one nobody
+    // would notice.
     return {
       error: `session ${started.sessionId} was created but binding it to task "${task}" failed: ${bound.error}`,
+      answer: result.answer,
+      outcome: result.outcome,
+      truncated: result.truncated,
     }
   }
 
@@ -958,7 +1022,10 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
     paneId: null,
     transcript: [],
     permissions: [],
-    result: null,
+    // Not null, and not deferred to a later write: the turn is already over (see above), so
+    // this is the finished result rather than a placeholder for one. It is what `agent_status`
+    // and `list_agents` report, and what `writeLedger` files.
+    result,
     error: null,
     task,
     createdAt: new Date().toISOString(),
@@ -974,6 +1041,13 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
     session_id: started.sessionId,
     task,
     vault: bound.vault,
+    // The three fields this call exists to stop dropping. `answer` is the child's own words,
+    // bounded and quoted rather than summarised; `outcome` separates a failed turn from a
+    // silent one; `truncated` says whether `answer` is the whole of it. A caller that wants to
+    // judge the turn itself has everything it needs here, with no second probe.
+    answer: result.answer,
+    outcome: result.outcome,
+    truncated: result.truncated,
   }
 }
 
@@ -1881,6 +1955,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 await server.connect(new StdioServerTransport())
 log('supervisor ready')
+
+// Stamp the session this server runs inside, on the same interval as its workers. A server
+// started outside a session has no id, so `startSelf` is a no-op there rather than a stamp
+// under an invented key — see its comment.
+heartbeat.startSelf(config.sessionId)
 
 // The cluster half of the heartbeat store, on the same interval the headless workers use.
 //
