@@ -98,7 +98,7 @@ class TestNecessityTemplatesGuard(Base):
         self.write(READER, reader_body(serves=2))
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("the widened three-source `needed:` row", result.stderr)
+        self.assertIn("the two-source `needed:` row", result.stderr)
 
     def test_prose_mention_does_not_count_as_a_site(self):
         """The converse: the sentence carrying the shape must not satisfy the count alone."""
