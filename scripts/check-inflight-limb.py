@@ -39,7 +39,15 @@ DRIVE = REPO / "agents/manager-drive.md"
 # The rule's own opening words. Present exactly once, in the drop-line bullet.
 RULE_ANCHOR = "An `in flight:` drop names the LIMB that answered"
 # The worked exemplar's distinguishing prefix. Present exactly once, in the report block.
-EXEMPLAR_ANCHOR = "in flight: limb 2 (tool.json state=open"
+#
+# ⚠️ **The anchor must NOT contain a limb token, and that is the whole reason it reads
+# `<task> — in flight: ` rather than the exemplar's full text.** A first version anchored
+# on `in flight: limb 2 (tool.json state=open`, which already contains `limb 2 (` — so the
+# LIMB assertion below matched by construction, its failure branch was unreachable, and the
+# guard reported success on a weaker condition than the one it named. That is the same
+# defect class this whole guard exists to catch, reproduced inside the guard; the unit test
+# beside it is what keeps the branch reachable.
+EXEMPLAR_ANCHOR = "<task> — in flight: "
 # A limb label. The rule names all three; the exemplar must carry one.
 LIMB = re.compile(r"limb [123] \(")
 
