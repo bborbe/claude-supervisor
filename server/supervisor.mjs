@@ -118,12 +118,12 @@ const heartbeat = {
           // came up for the rest of its life. `idle` is the documented answer for "no hook has
           // fired yet" — see the mechanism note above.
           //
-          // ⚠️ Carried as `activity`, NEVER as the stamp's `state`. That key is a LIVENESS
-          // VERDICT four readers of this same directory gate on, so a `busy` written there
-          // reads as NOT-live: the session would draw no row on the fleet board, report
-          // `"alive": false` from `session-liveness.py`, and stop counting as live for
-          // `adopt-orphans.py` — leaving the auto-resume gate free to spawn a duplicate onto
-          // a session that is alive. See `stampRecord`.
+          // ⚠️ Carried as `activity`, NEVER as the stamp's `state`. That name belongs to the
+          // LIVENESS VERDICT four readers synthesize and gate on, so it is reserved even
+          // though nothing reads a raw stamp's copy of it today — see `stampRecord`, which
+          // records how an earlier revision of this comment claimed a `busy` written there
+          // "reads as NOT-live" and was wrong. The rename is preventive: it keeps the stamp's
+          // descriptive field from sharing a name with the verdict.
           activity: readState(sessionId) ?? 'idle',
         })
       } catch (error) {

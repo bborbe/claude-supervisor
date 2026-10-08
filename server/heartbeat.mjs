@@ -103,16 +103,22 @@ export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, lo
     record.vault = vault
   }
   if (location !== undefined) record.location = location
-  // ⚠️ `activity`, NOT `state` — the key `state` on a stamp is already taken and means the
-  // OPPOSITE thing. Four readers of this same directory gate liveness on
-  // `stamp.get("state", "live") != "live"` (`worker-sessions.py:166`, `fleet-board.py:1096`,
-  // `adopt-orphans.py:139`, `session-liveness.py:663/693/803`), where `live` is a VERDICT and
-  // a MISSING key must read as `live` rather than vanish. Writing `busy` there does not merely
-  // confuse a reader: `session-liveness.py` would emit `"alive": false`, `fleet-board.py`
-  // would draw no row, and `adopt-orphans.py` would stop counting the session live — leaving
-  // the auto-resume gate free to spawn a duplicate onto a live session, which is the exact
-  // failure this whole change exists to remove. So the stamp says `activity` and the readers'
-  // `state` keeps its own vocabulary. See `SESSION_STATES` for the history.
+  // ⚠️ `activity`, NOT `state` — the name `state` on a stamp is reserved by the liveness
+  // verdict four readers synthesize. They gate on `stamp.get("state", "live") != "live"`
+  // (`worker-sessions.py:166`, `fleet-board.py:1096`, `adopt-orphans.py:139`,
+  // `session-liveness.py:663/693/803`), where a MISSING key must read as `live` rather than
+  // vanish.
+  //
+  // ⚠️ **No reader consumes a raw stamp's `state` today, and this comment first claimed one
+  // did** — asserting that a `busy` written here "reads as NOT-live" and frees a duplicate
+  // auto-resume. That was wrong, and it was verified wrong by running the reader rather than
+  // reading it: `live-workers.py`'s `readLive` is the single chokepoint that parses a raw
+  // stamp, and it builds a FRESH object carrying its own `state` verdict without ever reading
+  // the file's — so all four gates see the synthesized value, and a stamp carrying
+  // `state: "busy"` is counted live by `live-workers.py --list` exactly like one carrying
+  // `activity: "busy"`. The key is therefore WRITE-ONLY, and the rename is PREVENTIVE: it
+  // removes a name that collides with the verdict vocabulary before a raw-stamp reader exists
+  // to be bitten by it. See `SESSION_STATES`.
   if (activity !== undefined) record.activity = activity
   fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`)
   fs.renameSync(tmp, path)
@@ -144,14 +150,17 @@ export const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/
 
 // The states a session can report, and the vocabulary the heartbeat contract names.
 //
-// ⚠️ **These ride on the stamp as `activity`, never as `state`.** `state` on a stamp is a
-// LIVENESS VERDICT with its own vocabulary: `live-workers.py` writes `state: "live" |
-// "unknown"`, and four readers gate on `stamp.get("state", "live") != "live"`, where a
-// MISSING key must read as `live` rather than vanish. Round 1 of review caught that collision
-// and this file answered it with a warning comment — while `startSelf` went on writing `busy`
-// into `state`, so every live self-stamp was in fact dropped as not-live by all four readers.
-// A warning cannot reach the Python scripts that hold the idiom; renaming the key can, and
-// does. The activity rides on `activity` (see `stampRecord`); `state` is left to the verdict.
+// ⚠️ **These ride on the stamp as `activity`, never as `state`.** `state` on a stamp is the
+// name the liveness VERDICT uses: `live-workers.py` writes `state: "live" | "unknown"`, and
+// four readers gate on `stamp.get("state", "live") != "live"`, where a MISSING key must read
+// as `live` rather than vanish.
+//
+// ⚠️ **Those four gates never see a raw stamp, and an earlier revision of this comment said
+// they did** — claiming every live self-stamp was "in fact dropped as not-live". It was not.
+// `live-workers.py`'s `readLive` parses a raw stamp and builds a fresh object carrying its own
+// verdict; nothing anywhere reads the file's `state`. The rename is PREVENTIVE, not a repair:
+// the key is write-only today, which makes this the cheapest moment to stop it sharing a name
+// with the verdict. See `stampRecord`.
 //
 // ⚠️ Membership is checked on READ, not just on write. The state hook validates its own
 // argument, but the file is in a shared state directory — a hand-edited or older record must
