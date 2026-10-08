@@ -17,7 +17,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -160,5 +160,54 @@ test('an absent directory is a real negative, not "could not tell"', () => {
   withDir((dir) => {
     assert.equal(readLive(SESSION, { dir: join(dir, 'nope') }).live, false)
     assert.deepEqual(listLive({ dir: join(dir, 'nope') }), [])
+  })
+})
+
+// The session-liveness fields, added so the attention store can answer "which session is
+// alive, doing what, on which task" without reading the supervisor's in-process state.
+//
+// ⚠️ The load-bearing property here is ADDITIVE COMPATIBILITY, not "the fields appear". The
+// store directory is shared: a reader keyed on the old shape must keep working, so a stamp
+// from a writer that knows none of these fields has to be byte-for-byte what it was before.
+// A test that only checked the new fields would pass on a writer that had started emitting
+// `"task": null` into every headless stamp.
+test('the session-liveness fields are carried when the writer sets them', () => {
+  withDir((dir) => {
+    stampRecord(dir, {
+      sessionId: SESSION,
+      pid: process.pid,
+      mode: 'local',
+      source: 'mcp-timer',
+      task: 'Session Liveness Comes From a Heartbeat Store in attention-controller',
+      vault: 'private-personal',
+      location: 'local',
+      state: 'idle',
+    })
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.equal(row.source, 'mcp-timer')
+    assert.equal(row.task, 'Session Liveness Comes From a Heartbeat Store in attention-controller')
+    assert.equal(row.vault, 'private-personal')
+    assert.equal(row.location, 'local')
+    assert.equal(row.state, 'idle')
+  })
+})
+
+test('a writer that knows none of the new fields emits exactly the old shape', () => {
+  withDir((dir) => {
+    stampRecord(dir, { sessionId: SESSION, pid: process.pid, mode: 'headless' })
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.deepEqual(Object.keys(row).sort(), ['at', 'mode', 'pid', 'sessionId'])
+  })
+})
+
+test('task and vault are written together or not at all', () => {
+  // ⚠️ A task name collides across vaults, so half an anchor cannot be resolved later — the
+  // attention store rejects one without the other, so the writer must not be the thing that
+  // produces an unresolvable row.
+  withDir((dir) => {
+    stampRecord(dir, { sessionId: SESSION, pid: process.pid, mode: 'local', task: 'orphan-task' })
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.equal(row.task, undefined, 'a task with no vault must not be written')
+    assert.equal(row.vault, undefined)
   })
 })

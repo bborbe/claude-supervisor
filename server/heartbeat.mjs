@@ -67,7 +67,7 @@ export function stampPath(dir, sessionId) {
 //
 // Written via a temporary file and renamed, matching `writeRecord`: a reader must never see
 // a half-written stamp and read it as a worker with no id.
-export function stampRecord(dir, { sessionId, pid, mode, source, at = new Date().toISOString() }, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
+export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, location, state, at = new Date().toISOString() }, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
   const path = stampPath(dir, sessionId)
   fs.mkdirSync(dir, { recursive: true })
   const tmp = `${path}.tmp`
@@ -77,6 +77,19 @@ export function stampRecord(dir, { sessionId, pid, mode, source, at = new Date()
   // rather than defaulted, so a headless worker's stamp keeps exactly the shape it had.
   const record = { sessionId, pid, mode, at }
   if (source !== undefined) record.source = source
+  // The session-liveness fields, added for the attention store's read path. Same rule as
+  // `source`: carried only when the writer sets them, so a stamp from a writer that knows
+  // none of them is byte-for-byte what it was before this change.
+  //
+  // ⚠️ `task` and `vault` are a PAIR and the store rejects one without the other, because a
+  // task name collides across vaults — half an anchor cannot be resolved later. They are
+  // written together or not at all, which is why the guard tests both rather than each.
+  if (task !== undefined && vault !== undefined) {
+    record.task = task
+    record.vault = vault
+  }
+  if (location !== undefined) record.location = location
+  if (state !== undefined) record.state = state
   fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`)
   fs.renameSync(tmp, path)
   return path
