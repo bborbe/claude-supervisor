@@ -787,19 +787,19 @@ def heartbeat_live(sid: str, now: float | None = None) -> bool | None:
     return age < HEARTBEAT_TTL_SECONDS
 
 
-_LIVENESS = None
+_IDENTITY = None
 
 
-def _session_liveness():
-    """Import session-liveness.py (hyphenated filename -> importlib) — the one registry reader."""
-    global _LIVENESS
-    if _LIVENESS is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-liveness.py")
-        spec = importlib.util.spec_from_file_location("session_liveness", path)
+def _session_identity():
+    """Import session-identity.py (hyphenated filename -> importlib) — the one registry reader."""
+    global _IDENTITY
+    if _IDENTITY is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-identity.py")
+        spec = importlib.util.spec_from_file_location("session_identity", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        _LIVENESS = mod
-    return _LIVENESS
+        _IDENTITY = mod
+    return _IDENTITY
 
 
 def read_registry() -> dict[str, dict]:
@@ -809,7 +809,7 @@ def read_registry() -> dict[str, dict]:
     missing record proves nothing: a headless worker has none.
 
     ⚠️ **One reader for the whole plugin.** The glob, the pid check and the `alive` rule now
-    live in `scripts/session-liveness.py`. A second instrument over the same registry is what
+    live in `scripts/session-identity.py`. A second instrument over the same registry is what
     let an 8-char prefix read as `ABSENT` on 2026-09-26 while its session was live, and this
     reader was one of the copies.
 
@@ -818,7 +818,7 @@ def read_registry() -> dict[str, dict]:
     shared reader refuses. Recorded as a residual rather than changed silently inside a
     conversion: flipping it is a rule change for this caller, not a refactor.
     """
-    return _session_liveness().read_registry(REGISTRY_DIR) or {}
+    return _session_identity().read_registry(REGISTRY_DIR) or {}
 
 
 def read_feed() -> dict[str, dict]:
@@ -866,7 +866,7 @@ def liveness_of_sid(
     rec = registry.get(sid)
     # ⚠️ **Only a PROVEN negative is death.** `alive` is a three-state since 2026-10-01: `None`
     # means "the pid is occupied but the record cannot prove the holder is this session" (see
-    # `session-liveness.py:read_registry`). Reading that as dead here would fall through to the
+    # `session-identity.py:read_registry`). Reading that as dead here would fall through to the
     # heartbeat and then to `LIVENESS_NONE`, which is the value the auto-resume gate acts on —
     # so an unprovable record would permit a resume onto a conversation that may still be live.
     if rec is None or rec["alive"] is False:

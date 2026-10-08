@@ -545,7 +545,7 @@ def unblocks_for(sid, age, meta, panel_ids):
 def registry_records(sessions_dir=None):
     """`session id -> {status, name, cwd}` from the registry; `None` if unreadable.
 
-    Read through the plugin's single reader — `session-liveness.py` — rather than
+    Read through the plugin's single reader — `session-identity.py` — rather than
     globbing the directory here. This function used to open it directly, on the
     reasoning that the shared reader returned only an id -> name map and this table
     needs `status` too. That reasoning expired: the shared reader now carries
@@ -559,7 +559,7 @@ def registry_records(sessions_dir=None):
     simply failed.
     """
     d = sessions_dir or os.environ.get("SESSIONS_DIR") or wnm.SESSIONS_DIR
-    records = _load("session_liveness", "session-liveness.py").read_registry(d)
+    records = _load("session_identity", "session-identity.py").read_registry(d)
     if records is None:
         return None
     # Every entry, not only the `alive` ones: the board's row set has always been "one row per
