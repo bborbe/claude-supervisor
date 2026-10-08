@@ -38,7 +38,8 @@ comes from `~/.claude/state/worker-manager/<sid>.json`, written by the recording
 pid-keyed and cannot see a headless in-process worker; the heartbeat store covers exactly
 those. Reading either alone answers `0` or misses a population -- `worker-sessions.py`
 carries the measurement. This script builds the same union from the same primitives
-(`session-liveness.py`) rather than calling `live_workers()`, because that function also
+(`session-identity.py` and `live-workers.py`, both loaded directly) rather than calling
+`live_workers()`, because that function also
 excludes auto-resumes, and that exclusion belongs to the fleet's spawn-target count: an
 auto-resumed worker whose manager exited is stranded like any other.
 
