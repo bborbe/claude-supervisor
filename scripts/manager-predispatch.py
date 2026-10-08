@@ -1240,7 +1240,15 @@ def liveness_change_term(t: dict) -> int:
 
 
 def parked_names(tracked: list[dict]) -> list[str]:
-    """The rows whose rendered Status cell reads `⌛ waiting-on-human`, sorted.
+    """The rows whose rendered Status cell reads `⌛ waiting-on-human` or `⌛ waiting-external`, sorted.
+
+    ⚠️ **TWO carriers, two cell names, since the declared-wait change.** This function
+    keys on `LIVENESS_PARKED`, and that verdict now covers both an open gate *and* a
+    session whose newest `Stop` record declares `⏰ Ends:` — which
+    `agents/manager-sweep-reader.md:138` renders as the **`waiting-external`** cell, not
+    `waiting-on-human`. Both are parked, both move the Status cell, and both belong in
+    this set; naming only the first would state a contract that is half false, which is
+    the drift the `roster_owner` comment above warns against.
 
     ⚠️ **This is the Status cell, not the Session cell, and the difference is the whole
     reason this function exists.** `agents/manager-sweep-reader.md:136` makes a *parked*
@@ -1359,6 +1367,15 @@ def digest_of(tracked: list[dict]) -> str:
     string and `digest_moved` fires with nothing about the tree moved. Bounded and
     fail-open -- a CHANGE authorises a sweep, it never suppresses one -- and self-healing:
     the loop's own `--save` rewrites the digest in the new format on its first tick.
+
+    ⚠️ **A SECOND one-shot refusal comes from the same change, and it is a different
+    input.** `parked_replay_reason` compares `parked_names`' set against the stored
+    `"parked"` field, and that set now also carries declared-wait rows — so a record
+    written before the change refuses its replay **once per subject holding such a row**,
+    and the refusal reads as a CHANGE. Same bounds, same direction and the same
+    self-healing as the shape change above: it authorises a sweep rather than suppressing
+    one, and the first `--save` clears it. Named here rather than left to be discovered,
+    which is the discipline the rest of this file applies.
 
     ⚠️ **The hold is a digest input, and deliberately NOT a suppression here.** This gate
     decides whether the sweep runs at all, so suppressing it for a held session would
