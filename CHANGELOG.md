@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.119.3
 
 - docs: **the two prose sites that keyed an orphan candidate on a task title now say the id is the verdict.** `commands/manager-loop.md`'s candidate list read *"or whose title matches no roster name"* as an independent trigger, and `agents/manager-drive.md`'s *not on roster* clause named only the name match — so a reader could key a renamed task's ownership on a title the registry name no longer equals. Both now scope the title match to a row that carries **no id to resolve instead**, and name the reason: a registry name is a *truncated* form of a long task title, so a name-keyed match is the fallback and never the verdict. ⚠️ **Behaviour is unchanged, on both roster shapes** — on the **JSON** roster the id probe was already the verdict, and on the **rendered snapshot** (which carries no id column) the name already *was* the verdict; each clause was already subordinate to the shape that governs it, so this is the prose catching up to what ships. Change set: `commands/manager-loop.md`, `agents/manager-drive.md`, `CHANGELOG.md`. Tests: unchanged at **1869**.
 
