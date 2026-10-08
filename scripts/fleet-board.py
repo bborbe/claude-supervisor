@@ -262,7 +262,7 @@ class VaultIndex:
         return sum(1 for t in titles if t.startswith(key)) == 1
 
 
-def name_title_mismatches(registry, task_titles, index):
+def name_title_mismatches(registry, task_titles):
     """Sessions whose registry name no longer names the task their id resolves to.
 
     ⚠️ **This is a two-sided test, and the second side is the whole point.** A session
@@ -272,19 +272,24 @@ def name_title_mismatches(registry, task_titles, index):
     a session that owns no task at all. Reporting the first as the second is the defect
     this exists to remove: an unaddressable live worker reads as an absent one.
 
+    ⚠️ **Compared against the session's OWN titles, not the vault's.** The weaker test —
+    "names no task anywhere in the vault" — silently skips a session that stamps task X
+    while holding task Y's exact title, which is the same name-drift class this mode
+    exists to surface. The stronger one also needs no vault index, so it cannot reach
+    into one.
+
     Returns `[(sid, held_name, [titles])]`, sorted, for **mismatches only**. A session
     whose id resolves to no task is **absent**, not a mismatch, and is not returned here —
     the board already renders that one under `Unmanaged`.
     """
-    exact = index._normalized_titles()
     out = []
     for sid, rec in registry.items():
         name = (rec.get("name") or "").strip()
         titles = task_titles.get(sid) or []
         if not name or not titles:
             continue                      # nothing held, or no row to have diverged from
-        if _norm_session_name(name) in exact:
-            continue                      # the name still names a task: no divergence
+        if _norm_session_name(name) in {_norm_session_name(t) for t in titles}:
+            continue                      # the name still names a row it owns
         out.append((sid, name, sorted(set(titles))))
     return sorted(out)
 
@@ -1075,7 +1080,7 @@ def main():
         # reader of the session registry is the defect `Give the Session Registry's Join
         # Reads One Home Too` owns, so this mode lives where the join already happens
         # rather than in a script of its own.
-        found = name_title_mismatches(merged, task_titles, vault_index())
+        found = name_title_mismatches(merged, task_titles)
         for sid, name, titles in found:
             print(f"MISMATCH\t{sid[:8]}\t{name}\t{' | '.join(titles)}")
         print(f"mismatches: {len(found)} of {len(merged)} sessions", file=sys.stderr)

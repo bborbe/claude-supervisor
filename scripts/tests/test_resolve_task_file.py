@@ -105,6 +105,18 @@ class ResolveTaskFileTest(unittest.TestCase):
         r = self.run_script(["boss"], [v])
         self.assertEqual("", self.path_for(r, "boss"))
 
+    def test_a_non_md_attachment_is_not_read_as_a_truncation(self):
+        """⚠️ **The prefix tier still requires a `.md` entry.** Without that it matches
+        anything merely *starting* with the stem — an Obsidian attachment (`….png`) or a
+        sibling (`….md.gpg`) in the tasks dir — and the caller then runs `grep -cE` and
+        `date -r` against a binary."""
+        full = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry "
+                "Name Is Write-Once and the Title Is Not")
+        name = "⚙ A Renamed Task's Session Becomes Unaddressable"
+        v = self.vault("private-personal", files=(f"{full}.png",))
+        r = self.run_script([name], [v])
+        self.assertEqual("", self.path_for(r, name))
+
     def test_an_ambiguous_truncation_resolves_nothing_and_names_both(self):
         """⚠️ **"Never guesses" survives the new tier.** Two titles under one prefix is a
         guess with no single answer, so the name resolves to nothing — the same

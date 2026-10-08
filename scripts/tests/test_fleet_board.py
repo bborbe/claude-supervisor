@@ -826,36 +826,43 @@ class TestNameTitleMismatch(unittest.TestCase):
     LONG = ("A Renamed Task's Session Becomes Unaddressable, Because the Registry Name "
             "Is Write-Once and the Title Is Not")
 
-    def mismatch(self, registry, task_titles, *titles):
-        return fb.name_title_mismatches(
-            registry, task_titles, fb.VaultIndex(task_titles=list(titles)))
+    def mismatch(self, registry, task_titles):
+        return fb.name_title_mismatches(registry, task_titles)
 
     def test_a_drifted_name_is_reported_with_the_row_it_resolves_to(self):
         held = "⚙ A Renamed Task's Session Becomes Unaddressable"
         self.assertEqual(
-            self.mismatch({_sid(1): {"name": held}}, {_sid(1): [self.LONG]}, self.LONG),
+            self.mismatch({_sid(1): {"name": held}}, {_sid(1): [self.LONG]}),
             [(_sid(1), held, [self.LONG])])
 
     def test_a_matching_name_is_not_a_mismatch(self):
         self.assertEqual(
-            self.mismatch({_sid(1): {"name": "Some Task"}}, {_sid(1): ["Some Task"]}, "Some Task"),
-            [])
+            self.mismatch({_sid(1): {"name": "Some Task"}}, {_sid(1): ["Some Task"]}), [])
 
     def test_a_session_with_no_row_is_absent_not_a_mismatch(self):
         """The other half of the discrimination — reporting this here would re-create the
         defect, calling an unowned session a drifted one."""
-        self.assertEqual(
-            self.mismatch({_sid(1): {"name": "Fleet Manager"}}, {}, "Some Task"), [])
+        self.assertEqual(self.mismatch({_sid(1): {"name": "Fleet Manager"}}, {}), [])
 
     def test_a_nameless_row_is_not_a_mismatch(self):
         """A heartbeat-only row carries `name: ""` — nothing is held, so nothing drifted."""
+        self.assertEqual(self.mismatch({_sid(1): {"name": ""}}, {_sid(1): ["Some Task"]}), [])
+
+    def test_a_name_matching_ANOTHER_task_is_still_a_mismatch(self):
+        """⚠️ **The scoping that matters, and the bot review caught its absence.** The
+        weaker test — "names no task anywhere in the vault" — silently skips a session
+        that stamps task X while holding task Y's exact title. That is the same drift
+        class this mode exists to surface, so the comparison is against the session's own
+        titles and nothing else."""
+        held = "Some Other Task"
         self.assertEqual(
-            self.mismatch({_sid(1): {"name": ""}}, {_sid(1): ["Some Task"]}, "Some Task"), [])
+            self.mismatch({_sid(1): {"name": held}}, {_sid(1): [self.LONG]}),
+            [(_sid(1), held, [self.LONG])])
 
     def test_the_report_is_sorted_and_deduplicated(self):
         held = "⚙ A Renamed Task's Session Becomes Unaddressable"
         got = self.mismatch({_sid(2): {"name": held}, _sid(1): {"name": held}},
-                            {_sid(2): [self.LONG], _sid(1): [self.LONG, self.LONG]}, self.LONG)
+                            {_sid(2): [self.LONG], _sid(1): [self.LONG, self.LONG]})
         self.assertEqual([row[0] for row in got], [_sid(1), _sid(2)])
         self.assertEqual(got[0][2], [self.LONG])
 

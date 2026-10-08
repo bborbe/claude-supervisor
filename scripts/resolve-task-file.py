@@ -154,7 +154,14 @@ def _matches(basename, stem, prefix):
     if not prefix:
         return basename == stem
     bare = stem[:-3] if stem.endswith(".md") else stem
-    return len(bare) >= _TRUNCATION_MIN_PREFIX and basename.startswith(bare)
+    # ⚠️ **The prefix tier still requires a `.md` entry.** Without this the tier matches
+    # anything that merely *starts* with the stem — an Obsidian attachment (`….png`) or a
+    # sibling (`….md.gpg`) sitting in the tasks dir — and the caller then runs `grep -cE`
+    # and `date -r` against a binary. That only reaches an attachment when the `.md` is
+    # genuinely absent, which is exactly when resolving to nothing is the safer answer.
+    return (len(bare) >= _TRUNCATION_MIN_PREFIX
+            and basename.endswith(".md")
+            and basename.startswith(bare))
 
 
 def hits(vaults, key, stem, prefix=False):
