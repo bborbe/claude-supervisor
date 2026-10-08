@@ -908,13 +908,6 @@ def liveness_of_sid(
     """
     if not sid:
         return LIVENESS_NONE
-    # ⚠️ **A declared wait parks a LIVE row, and only a live one.** `⏰ Ends:` names a
-    # machine the worker is waiting on — a dependency, which is what this file's park
-    # rule exists to cover — read through the shared reader so this file cannot drift
-    # from `scripts/fleet-board.py`'s own reading. It is applied only at the two park
-    # points below and never before them: a session that is dead and once declared a
-    # wait is still dead, and parking it here would resurrect it.
-    declared = sid in declared_wait_ids()
     rec = registry.get(sid)
     # ⚠️ **Only a PROVEN negative is death.** `alive` is a three-state since 2026-10-01: `None`
     # means "the pid is occupied but the record cannot prove the holder is this session" (see
@@ -925,8 +918,21 @@ def liveness_of_sid(
         beat = heartbeat_live(sid) if heartbeat is _HEARTBEAT_UNREAD else heartbeat
         if beat is not True:
             return LIVENESS_NONE
-        return LIVENESS_PARKED if (is_open_gate(feed.get(sid)) or declared) else LIVENESS_LIVE
-    if is_open_gate(feed.get(sid)) or declared or rec["status"] == "waiting":
+        return (LIVENESS_PARKED
+                if (is_open_gate(feed.get(sid)) or sid in declared_wait_ids())
+                else LIVENESS_LIVE)
+    # ⚠️ **A declared wait parks a LIVE row, and only a live one.** `⏰ Ends:` names a
+    # machine the worker is waiting on — a dependency, which is what this file's park
+    # rule exists to cover — read through the shared reader so this file cannot drift
+    # from `scripts/fleet-board.py`'s own reading.
+    # ⚠️ **The read is taken HERE, below the death gate, never above it.** A session that
+    # is dead and once declared a wait is still dead, and parking it would resurrect it;
+    # hoisting the read to the top would leave that invariant resting on the position of
+    # two `or` clauses rather than on the order of the code — the kind a later edit near
+    # the top silently breaks.
+    if (is_open_gate(feed.get(sid))
+            or sid in declared_wait_ids()
+            or rec["status"] == "waiting"):
         return LIVENESS_PARKED
     return LIVENESS_LIVE
 
