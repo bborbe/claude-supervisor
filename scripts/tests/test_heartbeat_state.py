@@ -1,0 +1,98 @@
+"""heartbeat-state.py: the event half of the heartbeat, pinned.
+
+The timer answers *is this session alive* from a stamp's age; it cannot answer *what is it
+doing*, because it fires on a clock rather than on an event. This script is the event half —
+a Claude Code hook calls it and the next tick carries the state onto the stamp.
+
+Two properties are load-bearing, and both are about what the script must NOT do:
+
+`test_unknown_state_writes_nothing` — the state arrives as an argument from the manifest, and
+an argument outside the vocabulary is a caller bug. Writing it through would put a value on
+the wire that no reader's vocabulary contains, and the attention store passes enums through
+verbatim rather than validating them.
+
+`test_missing_session_id_writes_nothing` — with no id there is nothing to key the record on.
+Writing under a guess would leave a row in the shared store that no session can ever clear.
+
+`test_failure_paths_still_exit_zero` pins the fail-open contract: this runs inside the
+operator's turn on every prompt and every stop, so a hook that exits non-zero degrades the
+session it exists to observe.
+"""
+import json
+import os
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "heartbeat-state.py"
+
+SESSION = "fa942d7a-c190-46dd-93f3-8dfe3280046b"
+
+
+class HeartbeatStateTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="hb-state-test-")
+        self.env = {**os.environ, "SUPERVISOR_HEARTBEAT_STATE_DIR": self.dir}
+
+    def run_hook(self, state, payload):
+        return subprocess.run(
+            ["python3", str(SCRIPT), state],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            env=self.env,
+        )
+
+    def records(self):
+        return [n for n in os.listdir(self.dir) if n.endswith(".json")]
+
+    def test_known_state_is_recorded(self):
+        result = self.run_hook("busy", {"session_id": SESSION})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(os.path.join(self.dir, f"{SESSION}.json"), encoding="utf-8") as fh:
+            record = json.load(fh)
+        self.assertEqual(record["session_id"], SESSION)
+        self.assertEqual(record["state"], "busy")
+        self.assertIn("at", record)
+
+    def test_unknown_state_writes_nothing(self):
+        self.run_hook("napping", {"session_id": SESSION})
+        self.assertEqual(self.records(), [])
+
+    def test_missing_session_id_writes_nothing(self):
+        self.run_hook("idle", {})
+        self.assertEqual(self.records(), [])
+
+    def test_no_leftover_temp_file(self):
+        # The timer reads this directory on a clock, so a half-written record must never be
+        # visible — the write is a temp file plus a rename, and the temp must not survive it.
+        self.run_hook("waiting-on-operator", {"session_id": SESSION})
+        leftovers = [n for n in os.listdir(self.dir) if n.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+    def test_failure_paths_still_exit_zero(self):
+        # ⚠️ Fail-open: an unwritable state directory must not fail the operator's turn.
+        env = {**os.environ, "SUPERVISOR_HEARTBEAT_STATE_DIR": "/proc/definitely-not-writable"}
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "busy"],
+            input=json.dumps({"session_id": SESSION}),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, "a hook must never fail the turn it observes")
+
+    def test_malformed_stdin_still_exits_zero(self):
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "busy"],
+            input="{not json",
+            capture_output=True,
+            text=True,
+            env=self.env,
+        )
+        self.assertEqual(result.returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

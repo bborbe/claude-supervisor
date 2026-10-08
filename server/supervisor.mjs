@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord } from './heartbeat.mjs'
+import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, readState, stampRecord } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
@@ -112,7 +112,11 @@ const heartbeat = {
           mode: 'local',
           source: 'mcp-timer',
           location: 'local',
-          state: 'idle',
+          // Read per tick rather than captured once: the hooks write this on events, and a
+          // value captured at start would report the state the session had when the server
+          // came up for the rest of its life. `idle` is the documented answer for "no hook has
+          // fired yet" — see the mechanism note above.
+          state: readState(sessionId) ?? 'idle',
         })
       } catch (error) {
         // Same reasoning as `stamp` above: the session still runs, and a manager's verdict

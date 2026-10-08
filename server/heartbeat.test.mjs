@@ -26,6 +26,7 @@ import {
   clearStamp,
   listLive,
   readLive,
+  readState,
   stampPath,
   stampRecord,
   sweepStale,
@@ -209,5 +210,35 @@ test('task and vault are written together or not at all', () => {
     const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
     assert.equal(row.task, undefined, 'a task with no vault must not be written')
     assert.equal(row.vault, undefined)
+  })
+})
+
+// What the session is doing — the event half of the heartbeat, recorded by a hook and read
+// by the timer on its next tick.
+//
+// ⚠️ The load-bearing property is that a MISSING record reads as `null` and never as a
+// guessed state. A wrong state reads as knowledge; an absent one reads as absence, and the
+// caller turns it into the documented `idle`.
+test('readState returns the recorded state, and null when no hook has fired', () => {
+  withDir((dir) => {
+    assert.equal(readState(SESSION, { dir }), null, 'no record must read as null, never a guess')
+    writeFileSync(join(dir, `${SESSION}.json`), JSON.stringify({ session_id: SESSION, state: 'busy' }))
+    assert.equal(readState(SESSION, { dir }), 'busy')
+  })
+})
+
+test('readState refuses a state outside the vocabulary', () => {
+  // ⚠️ The state directory is shared, so a hand-edited or older record must not put a value on
+  // the wire that no reader's vocabulary contains — the store passes enums through verbatim.
+  withDir((dir) => {
+    writeFileSync(join(dir, `${SESSION}.json`), JSON.stringify({ state: 'napping' }))
+    assert.equal(readState(SESSION, { dir }), null)
+  })
+})
+
+test('readState tolerates an unreadable record', () => {
+  withDir((dir) => {
+    writeFileSync(join(dir, `${SESSION}.json`), '{')
+    assert.equal(readState(SESSION, { dir }), null)
   })
 })

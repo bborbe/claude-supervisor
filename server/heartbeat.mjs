@@ -95,6 +95,28 @@ export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, lo
   return path
 }
 
+// What a session is doing, as last recorded by a state hook. `null` when no hook has fired.
+//
+// ⚠️ The AGE is what decides liveness; this only says what the live session is up to. A
+// missing or unreadable file is `null` — "no hook has fired" — never a guessed `busy`, because
+// a wrong state reads as knowledge while an absent one reads as absence.
+export function readState(sessionId, { dir = config.heartbeatStateDir } = {}) {
+  try {
+    const record = JSON.parse(readFileSync(join(dir, `${sessionId}.json`), 'utf8'))
+    return SESSION_STATES.includes(record?.state) ? record.state : null
+  } catch {
+    return null
+  }
+}
+
+// The states a session can report, and the vocabulary the heartbeat contract names.
+//
+// ⚠️ Membership is checked on READ, not just on write. The state hook validates its own
+// argument, but the file is in a shared state directory — a hand-edited or older record must
+// not put a value on the wire that no reader's vocabulary contains. An unrecognised state
+// degrades to `idle`, which is the documented answer for "no hook has told us otherwise".
+export const SESSION_STATES = ['busy', 'idle', 'waiting-on-operator']
+
 // null = no information (the directory could not be read), false = read, and no fresh stamp.
 //
 // The distinction is load-bearing and matches `registeredAsLive` above it: a caller that

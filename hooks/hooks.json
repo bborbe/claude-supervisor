@@ -1,5 +1,5 @@
 {
-  "description": "Carry an attention-store answer into a live permission prompt, so a manager can relay the operator's decision without the operator opening the worker's tab. Fail-open: an unanswered prompt stays for the human. Kill switch: SUPERVISOR_PERMISSION_POLL=off.",
+  "description": "Two hooks. (1) PermissionRequest: carry an attention-store answer into a live permission prompt, so a manager can relay the operator's decision without the operator opening the worker's tab. Fail-open: an unanswered prompt stays for the human. Kill switch: SUPERVISOR_PERMISSION_POLL=off. (2) UserPromptSubmit / Stop / Notification: record what the session is doing, so the heartbeat timer can carry it onto the stamp the attention store reads. Fail-open: a missed write costs a stale state for up to one 30 s tick.",
   "hooks": {
     "PermissionRequest": [
       {
@@ -9,6 +9,42 @@
             "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/permission-answer-poll.py"],
             "timeout": 590
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/heartbeat-state.py", "busy"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/heartbeat-state.py", "idle"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/heartbeat-state.py", "waiting-on-operator"],
+            "timeout": 5
           }
         ]
       }
