@@ -47,10 +47,13 @@ ALLOWED_STATES = ("busy", "idle", "waiting-on-operator")
 # What a session id may look like before it becomes a FILENAME.
 #
 # ⚠️ The id arrives from the hook payload, so it is untrusted input on a path-join. Without
-# this, a `../` component or a leading `/` writes outside the state directory — and the read
-# side (`readState` in `server/heartbeat.mjs`) has the same shape, so the guard is applied on
-# both. Shape-only rather than a UUID pattern, matching `validateSessionID` in
-# attention-controller: a stricter rule would reject ids the registry genuinely holds.
+# this, a `../` component or a leading `/` writes outside the state directory. The guard is
+# applied on the CLEAR path as well as the write path, because both build a filename from the
+# id. ⚠️ **The read side of this contract ships with the stamp half of this work, in its own
+# PR** — on this branch nothing reads the state directory yet, so the mirror is a forward
+# reference rather than a file in this tree. Shape-only rather than a UUID pattern, matching
+# `validateSessionID` in attention-controller: a stricter rule would reject ids the registry
+# genuinely holds.
 #
 # Mirrors the precedent in `scripts/resolve-task-file.py`, which refuses absolute paths and
 # `..` components for the same reason.
@@ -73,9 +76,12 @@ def safe_session_id(raw: str) -> str:
 def state_dir() -> Path:
     """The directory the timer reads.
 
-    Mirrors `heartbeatStateDir` in `server/config.mjs` — same XDG resolution, same override
-    name — because a hook and the timer disagreeing about the path would look exactly like a
-    hook that never fired.
+    ⚠️ The XDG resolution and the override name match what the supervisor server uses, so a
+    hook and the stamp timer cannot disagree about the path — a disagreement would look
+    exactly like a hook that never fired. ⚠️ **The server-side constant that mirrors this
+    ships with the stamp half of this work, in its own PR**: on this branch `server/config.mjs`
+    has no `heartbeatStateDir`, so the mirror is a forward reference. The resolution itself is
+    identical either way — that file builds `STATE_HOME`/`STATE_DIR` the same way.
     """
     override = os.environ.get("SUPERVISOR_HEARTBEAT_STATE_DIR")
     if override:
@@ -110,6 +116,14 @@ def session_id_from_stdin() -> str:
 def main(argv: list[str]) -> int:
     state = argv[1] if len(argv) > 1 else ""
 
+    # ⚠️ The kill switch, mirroring `SUPERVISOR_PERMISSION_POLL=off` on the sibling
+    # `PermissionRequest` hook in the same manifest. Without it the only way to stop four
+    # `python3` spawns per turn — for EVERY session on the machine, `Notification` included —
+    # is to edit a plugin manifest, which is not a lever an operator can reach in the moment.
+    # Checked first, so "off" costs one `getenv` and nothing else.
+    if os.environ.get("SUPERVISOR_HEARTBEAT_STATE") == "off":
+        return 0
+
     # `clear` is a COMMAND, not a state: the SessionEnd hook calls it so a finished session
     # leaves nothing behind. ⚠️ Without it the directory grows monotonically — this hook fires
     # for every session on the machine, and a record that is never unlinked outlives the
@@ -143,24 +157,43 @@ def main(argv: list[str]) -> int:
         directory.mkdir(parents=True, exist_ok=True)
         # Written via a temporary file and renamed, matching `stampRecord`: the timer reads
         # this file on a clock, and a reader must never see a half-written record.
+        #
+        # ⚠️ The temp name carries the PID, and is built with `with_name` rather than
+        # `with_suffix`. A per-session name alone is NOT enough for the atomicity claimed
+        # above: two hooks for one session can overlap — `Stop` and `Notification` land
+        # together, and `UserPromptSubmit` fires per prompt — and `write_text` truncates before
+        # it writes, so the second writer would truncate the first's file, the first would
+        # rename it into place, and the published record would be the second's partial
+        # content. `with_suffix` is also the wrong operation for the job: it REPLACES the final
+        # suffix rather than appending, so it happens to be correct here only because the
+        # target is always `<id>.json`.
         target = directory / f"{session_id}.json"
-        tmp = target.with_suffix(".json.tmp")
+        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
         record = {
             "session_id": session_id,
             "state": state,
             "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
-        tmp.write_text(json.dumps(record) + "\n", encoding="utf-8")
-        tmp.replace(target)
+        try:
+            tmp.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            tmp.replace(target)
+        finally:
+            # A failure between the write and the rename must not leave the temp behind. The
+            # happy path is covered by `test_no_leftover_temp_file`; the crash path is exactly
+            # the case this file exists to care about.
+            tmp.unlink(missing_ok=True)
     except Exception:
         # An unwritable state directory must not fail the turn. See the fail-open note above.
         #
-        # ⚠️ `Exception`, not `OSError`. The module docstring claims EVERY failure path returns
-        # 0, and a claim of *every* has to hold for exception classes nobody enumerated — the
-        # same reasoning that widened `session_id_from_stdin` below. An `OSError`-only handler
-        # let a `ValueError` (a path containing a null byte, which `pathlib` raises before any
-        # syscall) escape `main`, print a traceback and exit 1: the one outcome this contract
-        # rules out, on a hook that runs inside the operator's turn.
+        # ⚠️ `Exception`, not `OSError` — and the reason is the CONTRACT, not a named case. The
+        # module docstring claims EVERY failure path returns 0, and a claim of *every* has to
+        # hold for exception classes nobody enumerated, which is the same reasoning that
+        # widened `session_id_from_stdin`. An `OSError`-only handler leaves any other exception
+        # escaping `main` to print a traceback and exit 1 — the one outcome this contract rules
+        # out, on a hook that runs inside the operator's turn. An earlier revision justified
+        # the widening with "a `ValueError` from a path containing a null byte"; that case is
+        # unreachable, because `safe_session_id` runs first and its character class rejects a
+        # null byte. It is named here as a rejected example rather than a motivating one.
         return 0
     return 0
 

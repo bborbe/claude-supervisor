@@ -21,6 +21,7 @@ session it exists to observe.
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -47,6 +48,15 @@ class HeartbeatStateTest(unittest.TestCase):
     def records(self):
         return [n for n in os.listdir(self.dir) if n.endswith(".json")]
 
+    def entries(self):
+        """Every entry, not just `.json` ones.
+
+        ⚠️ The no-write and traversal assertions claim NOTHING was written, and a `.json`
+        filter cannot establish that — a leaked `<id>.json.tmp` passes it silently. Those
+        assertions use this; the ones about a record specifically keep using `records()`.
+        """
+        return os.listdir(self.dir)
+
     def test_known_state_is_recorded(self):
         result = self.run_hook("busy", {"session_id": SESSION})
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -64,14 +74,36 @@ class HeartbeatStateTest(unittest.TestCase):
         self.run_hook("idle", {})
         self.assertEqual(self.records(), [])
 
+    def test_the_kill_switch_disables_every_path(self):
+        # ⚠️ `SUPERVISOR_HEARTBEAT_STATE=off` must stop the hook before anything else, on the
+        # write AND the clear path. It is the operator's only lever short of editing a plugin
+        # manifest, so it has to hold for every invocation rather than just `busy` — and an
+        # untested lever is not a lever.
+        env = {**self.env, "SUPERVISOR_HEARTBEAT_STATE": "off"}
+        for state in ("busy", "idle", "waiting-on-operator", "clear"):
+            result = subprocess.run(
+                ["python3", str(SCRIPT), state],
+                input=json.dumps({"session_id": SESSION}),
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"{state} must exit 0 when disabled")
+        self.assertEqual(self.entries(), [], "the kill switch must write nothing")
+
     def test_session_id_cannot_escape_the_state_directory(self):
         # ⚠️ The id arrives from the hook payload — untrusted input on a path-join — so a
         # separator or a `..` component must write nothing rather than write outside the
         # directory. Same guard as `validateSessionID` in attention-controller and the
         # precedent in `resolve-task-file.py`.
-        for bad in ("../escaped", "..", ".", "a/b", "a\\b"):
+        #
+        # ⚠️ `entries()`, not `records()`: the claim is that NOTHING is written, which a
+        # `.json` filter cannot establish. And the absolute case is in the tuple because a
+        # leading `/` is a different class from an embedded separator — the code comment names
+        # it explicitly, and `a/b` alone would not cover it.
+        for bad in ("../escaped", "..", ".", "a/b", "a\\b", "/abs", "/etc/passwd", ""):
             self.run_hook("busy", {"session_id": bad})
-        self.assertEqual(self.records(), [], "a traversing id must write nothing")
+        self.assertEqual(self.entries(), [], "a traversing id must write nothing")
         self.assertFalse(
             os.path.exists(os.path.join(self.dir, "..", "escaped.json")),
             "nothing may be written outside the state directory",
@@ -101,7 +133,20 @@ class HeartbeatStateTest(unittest.TestCase):
 
     def test_failure_paths_still_exit_zero(self):
         # ⚠️ Fail-open: an unwritable state directory must not fail the operator's turn.
-        env = {**os.environ, "SUPERVISOR_HEARTBEAT_STATE_DIR": "/proc/definitely-not-writable"}
+        #
+        # ⚠️ A chmod-0500 directory this test creates, NOT `/proc/definitely-not-writable`.
+        # `/proc` is Linux-specific: on a runner without it the path is CREATABLE, the hook
+        # writes a record into a freshly-made directory, and the assertion passes while
+        # exercising nothing — the silent vacuity this suite exists to avoid. This is portable
+        # and self-cleaning.
+        readonly = tempfile.mkdtemp(prefix="hb-state-readonly-")
+        self.addCleanup(shutil.rmtree, readonly, ignore_errors=True)
+        os.chmod(readonly, 0o500)
+        self.addCleanup(os.chmod, readonly, 0o700)
+        env = {
+            **os.environ,
+            "SUPERVISOR_HEARTBEAT_STATE_DIR": os.path.join(readonly, "nested"),
+        }
         result = subprocess.run(
             ["python3", str(SCRIPT), "busy"],
             input=json.dumps({"session_id": SESSION}),

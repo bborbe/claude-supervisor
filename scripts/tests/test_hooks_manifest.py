@@ -72,11 +72,20 @@ class HooksManifestTest(unittest.TestCase):
     def test_the_referenced_script_exists(self):
         # A typo in the path disables every hook silently — no error, no record, and it reads
         # exactly like a timer that never fired.
+        #
+        # ⚠️ The prefix is asserted, not merely stripped. A hardcoded absolute path to a file
+        # that happens to exist on the author's machine passes an existence check while
+        # relocating where the hook runs; `${CLAUDE_PLUGIN_ROOT}/` is what makes it resolve
+        # against the INSTALLED plugin.
         for event in EXPECTED:
             for group in self.hooks[event]:
                 for hook in group["hooks"]:
                     for arg in hook.get("args", []):
                         if STATE_SCRIPT in str(arg):
+                            self.assertTrue(
+                                str(arg).startswith("${CLAUDE_PLUGIN_ROOT}/"),
+                                f"{event} must resolve the script against the plugin root, got: {arg}",
+                            )
                             rel = str(arg).replace("${CLAUDE_PLUGIN_ROOT}/", "")
                             self.assertTrue(
                                 (REPO / rel).is_file(),
@@ -86,10 +95,15 @@ class HooksManifestTest(unittest.TestCase):
     def test_every_state_hook_carries_a_timeout(self):
         # ⚠️ These run inside the operator's turn. An unbounded hook is a hang with no
         # diagnosis, which is worse than a missed write.
+        #
+        # ⚠️ `assertIsInstance` before the comparison: `assertLessEqual` on a string raises
+        # TypeError rather than the intended message, so a JSON `"timeout": "5"` would report
+        # a crash instead of the defect.
         for event in EXPECTED:
             for group in self.hooks[event]:
                 for hook in group["hooks"]:
                     self.assertIn("timeout", hook, f"{event} has no timeout")
+                    self.assertIsInstance(hook["timeout"], int, f"{event}'s timeout is not a number")
                     self.assertLessEqual(hook["timeout"], 30, f"{event}'s timeout is too long")
 
 
