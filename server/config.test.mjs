@@ -72,24 +72,9 @@ test('the config object is a frozen, complete surface', () => {
     'mcpConfig',
     'workerColor',
     'heartbeatDir',
-    'heartbeatStateDir',
-    'sessionId',
   ]) {
     assert.ok(key in config, `config.${key} is missing — the surface must be enumerable`)
   }
-})
-
-test('the heartbeat state directory is a SIBLING of the store, never inside it', () => {
-  // ⚠️ Everything in `heartbeatDir` is a stamp: read for its age and listed as a session. A
-  // state file living there would be listed as a session that does not exist, so the two must
-  // not be the same directory — and a wrong default here is uncaught by the readState tests,
-  // which all pass an explicit `dir`.
-  assert.notEqual(config.heartbeatStateDir, config.heartbeatDir)
-  assert.equal(
-    config.heartbeatStateDir,
-    join(config.stateDir, 'heartbeat-state'),
-    'the state directory must hang off the same state home the store does',
-  )
 })
 
 test('the resolved paths hang off the XDG homes rather than the checkout', () => {

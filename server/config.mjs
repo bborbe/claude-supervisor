@@ -174,26 +174,6 @@ export const config = Object.freeze({
   // workers, and an operator moving the state dir must not have to find a second name.
   heartbeatDir: ENV.SUPERVISOR_HEARTBEAT_DIR || join(STATE_DIR, 'live'),
 
-  // Where the STATE hooks leave what the session is doing, for the heartbeat timer to read.
-  //
-  // ⚠️ A SIBLING of `heartbeatDir`, never a file inside it. Everything in that directory is a
-  // heartbeat STAMP — keyed by session id and read for its age — so a state file living there
-  // would be listed as a session, and a state file whose id matched nothing would be a phantom
-  // reading Live. The two are written by different processes at different rates: the hooks
-  // write on events, the timer stamps every 30 s.
-  heartbeatStateDir: ENV.SUPERVISOR_HEARTBEAT_STATE_DIR || join(STATE_DIR, 'heartbeat-state'),
-
-  // This server's OWN session id — the one Claude Code started it under. Used to stamp a
-  // heartbeat for the session the server is running inside, which the per-worker stamps
-  // above cannot cover: they are keyed on workers this server spawned, and an interactive
-  // tab is not one of those.
-  //
-  // ⚠️ `null` rather than a guess when the variable is absent. A server started outside a
-  // session has no id, and stamping under an invented one would put a row in the shared
-  // store that no session can ever clear — a permanent phantom reading Live until its TTL.
-  // The caller treats `null` as "no self-stamp", which is the honest answer.
-  sessionId: ENV.CLAUDE_CODE_SESSION_ID || null,
-
   // Raw and deliberately unvalidated here: the allowed-mode list and the warning that
   // names a bad value both belong to the server's own logger, not to this module.
   permissionMode: ENV.SUPERVISOR_PERMISSION_MODE || null,
