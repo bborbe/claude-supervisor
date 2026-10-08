@@ -87,7 +87,7 @@ def registry_entries(directory=None):
     d = directory or SESSIONS_DIR
     # Read through the plugin's single reader rather than globbing the directory here. This used
     # to open it directly; a second raw read of one directory is precisely the class of defect
-    # `session-liveness.py`'s own header records.
+    # `session-identity.py`'s own header records.
     #
     # ⚠️ **The RAW record, not the reader's normalised one.** This path's consumers read
     # `sessionId`, `startedAt`/`procStart`, `kind` and `name`, and the normalised shape carries
@@ -98,7 +98,7 @@ def registry_entries(directory=None):
     # files claiming one id collapse into a single entry — and the collision is what this path
     # refuses on. Resuming onto the wrong claimant of two is the double-writer the guard exists
     # to prevent, so taking the dict here would silently delete the guard.
-    return load_sibling("session-liveness.py").read_registry_entries(d)
+    return load_sibling("session-identity.py").read_registry_entries(d)
 
 
 def refuse(reason, detail):

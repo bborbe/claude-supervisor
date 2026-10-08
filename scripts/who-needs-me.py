@@ -455,19 +455,19 @@ def live_pane_ids():
     return None if p is None else set(p)
 
 
-_LIVENESS = None
+_IDENTITY = None
 
 
-def _session_liveness():
-    """Import session-liveness.py (hyphenated filename -> importlib) — the one registry reader."""
-    global _LIVENESS
-    if _LIVENESS is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-liveness.py")
-        spec = importlib.util.spec_from_file_location("session_liveness", path)
+def _session_identity():
+    """Import session-identity.py (hyphenated filename -> importlib) — the one registry reader."""
+    global _IDENTITY
+    if _IDENTITY is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session-identity.py")
+        spec = importlib.util.spec_from_file_location("session_identity", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        _LIVENESS = mod
-    return _LIVENESS
+        _IDENTITY = mod
+    return _IDENTITY
 
 
 _FLEET_COLOURS = None
@@ -516,7 +516,7 @@ def read_registry(sessions_dir=None):
     d = sessions_dir if sessions_dir is not None else SESSIONS_DIR
     if d in _REGISTRY_CACHE:
         return _REGISTRY_CACHE[d]
-    # One reader for the whole plugin: `session-liveness.py` owns the glob, the
+    # One reader for the whole plugin: `session-identity.py` owns the glob, the
     # `None`-on-unreadable rule and the pid check. Two instruments over one registry is what
     # let an 8-char prefix read as `ABSENT` on 2026-09-26 while its session was live, and
     # this reader was one of the copies.
@@ -526,7 +526,7 @@ def read_registry(sessions_dir=None):
     # (see the task's Out of Scope). The shared reader carries both signals so each caller
     # takes the one it owns; `live_session_ids()` is `set(registry)` either way, so applying
     # the pid check here would silently sweep items for a session whose entry outlived it.
-    records = _session_liveness().read_registry(d)
+    records = _session_identity().read_registry(d)
     if records is None:
         out, status = None, None
     else:

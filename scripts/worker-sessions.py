@@ -133,10 +133,13 @@ def live_workers(registry_dir=None, ledger=None, heartbeat_dir=None, now=None):
     holding a socket, the stamp's `mode` for a headless or cluster worker. Descriptive only —
     nothing decides on it.
     """
-    liveness = _load("session_liveness", "session-liveness.py")
-    registry = liveness.read_registry(registry_dir) if registry_dir else liveness.read_registry()
+    identity = _load("session_identity", "session-identity.py")
+    registry = identity.read_registry(registry_dir) if registry_dir else identity.read_registry()
     if registry is None:
         return None
+    # The heartbeat half still reads through `session-liveness.py`; only the registry reader's
+    # home changed, so the union below is the same union over the same two stores.
+    liveness = _load("session_liveness", "session-liveness.py")
     heartbeats = liveness.read_heartbeats(heartbeat_dir, now=now)
     if heartbeats is None:
         return None
