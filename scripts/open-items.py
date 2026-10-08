@@ -767,6 +767,18 @@ def warn_unresolvable_task(task, path, dirs):
     )
 
 
+def ask_script(script_dir=None):
+    """The sibling poster's path — `ATTENTION_ASK`, redirected when a caller names a dir.
+
+    One function rather than the same `os.path.join` inlined at both call sites: a second
+    copy of the path is a second place for it to drift, and the constant above would then be
+    a comment claiming a single source of truth that nothing reads.
+    """
+    if script_dir:
+        return os.path.join(script_dir, os.path.basename(ATTENTION_ASK))
+    return ATTENTION_ASK
+
+
 def post_card(item, sid, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
     """Post this entry's ask as a board card and return its item id, or None.
 
@@ -788,9 +800,7 @@ def post_card(item, sid, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
         return None
     cmd = [
         sys.executable,
-        os.path.join(
-            script_dir or os.path.dirname(os.path.abspath(__file__)), "attention-ask.py"
-        ),
+        ask_script(script_dir),
         "post",
         "--producer-id", sid,
         "--producer-kind", "session",
@@ -836,9 +846,7 @@ def poll_card(item_id, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
     """
     cmd = [
         sys.executable,
-        os.path.join(
-            script_dir or os.path.dirname(os.path.abspath(__file__)), "attention-ask.py"
-        ),
+        ask_script(script_dir),
         "poll", item_id,
     ]
     try:
