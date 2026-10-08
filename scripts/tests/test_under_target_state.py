@@ -182,8 +182,8 @@ class TheSnapshotCarriesARowBitAndCompareOwnsTheVerdict(unittest.TestCase):
         self.assertEqual({"Alpha Row": "startable", "Beta Row": "unstartable"},
                          data["startability"])
         plain = run("read", "--topic", "t", state_dir=self.dir).stdout
-        self.assertIn("Alpha Row=startable", plain)
-        self.assertIn("Beta Row=unstartable", plain)
+        self.assertIn("'Alpha Row'=startable", plain)
+        self.assertIn("'Beta Row'=unstartable", plain)
 
     def test_compare_with_no_snapshot_exits_3(self):
         """Nothing declined yet — the caller posts, and exit 3 is how it knows."""
@@ -232,6 +232,23 @@ class TheSnapshotCarriesARowBitAndCompareOwnsTheVerdict(unittest.TestCase):
         r = self.compare({"Alpha Row": "startable"})
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         self.assertIn("SUPPRESS", r.stdout)
+
+    def test_a_legacy_snapshot_reads_as_unrecorded_not_unknown(self):
+        """`read` and `compare` are two surfaces of ONE file, and they must not disagree.
+
+        An absent bit rendered as a *recorded* `unknown` would say "re-post" while `compare`
+        on the same file suppresses — and `unknown` is the token the rule reads as re-post.
+        """
+        with open(os.path.join(self.dir, "t.json"), "w", encoding="utf-8") as fh:
+            json.dump({"card_item_id": "legacy", "row_set": ["Alpha Row"],
+                       "posted_at": "2026-10-08T00:00:00+02:00"}, fh)
+        plain = run("read", "--topic", "t", state_dir=self.dir).stdout
+        self.assertIn("'Alpha Row'=(unrecorded)", plain)
+        self.assertNotIn("unknown", plain)
+        r = self.compare({"Alpha Row": "startable"})
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("no recorded startability", r.stdout)
+        self.assertNotIn("every row is unchanged and can start", r.stdout)
 
     def test_compare_refuses_a_row_it_cannot_classify(self):
         """Silence here would mark every row unstartable and re-post every tick."""

@@ -89,6 +89,10 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 STARTABLE = "startable"
 UNSTARTABLE = "unstartable"
 UNKNOWN = "unknown"
+# Rendered, never accepted: a state written before the startability field existed has no bit
+# for a row, and that absence is NOT the recorded `unknown` — `unknown` re-posts, absence
+# fails closed. Collapsing the two in the render is what makes one file read two ways.
+UNRECORDED = "(unrecorded)"
 
 
 def canonical_key(topic, rows):
@@ -245,8 +249,13 @@ def cmd_read(args):
         print("card_item_id: %s" % data.get("card_item_id", ""))
         print("posted_at:    %s" % data.get("posted_at", ""))
         print("key:          %s" % canonical_key(args.topic, rows))
-        print("startability: %s" % (" | ".join("%s=%s" % (r, was.get(r, UNKNOWN))
-                                               for r in rows) or "(none)"))
+        # `(unrecorded)`, never `unknown`: a state written before the field existed has no bit
+        # at all, and rendering that as a *recorded* `unknown` would contradict the verdict
+        # `compare` returns for the same file — `unknown` re-posts, absence fails closed. Row
+        # names are `%r` like every other message here; they are free text and a newline in one
+        # would split the line a manager parses.
+        print("startability: %s" % (" | ".join(
+            "%r=%s" % (r, was[r] if r in was else UNRECORDED) for r in rows) or "(none)"))
     return 0
 
 
@@ -320,6 +329,12 @@ def verdict(snapshot, rows, now):
     if reasons:
         return repost("%s — a set that is not the ask the operator declined re-posts"
                       % "; ".join(reasons))
+    unrecorded = sorted(r for r in rows if r not in was)
+    if unrecorded:
+        return suppress("declined ask %s withheld — no row changed, and %s carries no recorded "
+                        "startability, so no change can be shown"
+                        % (snapshot.get("card_item_id", ""),
+                           ", ".join(repr(r) for r in unrecorded)))
     return suppress("declined ask %s withheld — every row is unchanged and can start"
                     % snapshot.get("card_item_id", ""))
 
