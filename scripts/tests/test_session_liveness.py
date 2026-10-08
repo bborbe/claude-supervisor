@@ -399,6 +399,32 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(rc, LIVE)
         self.assertEqual(rows, [])
 
+    def test_non_empty_list_refuses_a_partial_rollout(self):
+        # The dangerous half of the same case, and the one that used to slip through: the
+        # endpoint holds a live row, so the list is NON-empty and was handed back as complete
+        # while a registry-live session with no live row was silently dropped. `commands/open.md`
+        # Step 2C matches `<topic> Manager` against `name`/`formerNames` from exactly this
+        # output and spawns on no match, so the omission is a SECOND manager onto a live topic.
+        # A non-empty list is a positive claim about the whole fleet, so it pays the same
+        # coverage precondition the empty one pays.
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        self.plant("bbbb2222-1111-2222-3333-444455556666")
+        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_non_empty_list_is_live_when_every_registry_session_is_stamped(self):
+        # Coverage complete — every registry-live session has a live row — so the list IS the
+        # whole live fleet and is served. Without this the refusal above could be a blanket
+        # "never list anything" and still pass.
+        sid = "aaaa1111-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, rows = self.json_listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertEqual(len(rows), 1)
+
     # ---- --list --json: the shape `/supervisor:open` reads -------------------------------
 
     def test_json_listing_carries_former_names_and_cwd(self):

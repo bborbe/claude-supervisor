@@ -491,6 +491,8 @@ The goal branch **resolves and delegates**; it reimplements nothing. A worker ta
    python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json
    ```
 
+   ⚠️ **A non-zero exit is "cannot tell", never "no manager" — do not spawn on it.** The reader pays a stamp-coverage precondition before it answers, so it exits non-zero rather than hand back a list it cannot vouch for as the whole live fleet: during a partial rollout the endpoint holds a row only for already-stamped sessions, and a list that silently omitted a live-but-unstamped manager would match nothing here and spawn a **second** manager onto a live topic — the same failure this step's `formerNames` rule prevents, reached by a different route. **Only exit 0 with no match means "none is running now".** A non-zero exit, or output that does not parse as JSON, means the question could not be answered: report it and stop, and never fall through to step 3.
+
    Then match `<topic> Manager` case-insensitively against `name` and against every entry in `formerNames`.
 
    ⚠️ **Do not re-open `~/.claude/sessions/*.json` here.** This step used to glob the registry itself, which made it a **second reader over the same directory** — exactly the defect `session-liveness.py`'s own header records, where two readers disagreed about what an id argument means and one published `ABSENT` as a confirmed verdict for two live sessions. The reader returns `formerNames` and `cwd` precisely so this call site does not need the directory, and so a cluster worker's registration (which the registry cannot hold at all) reaches this step too.

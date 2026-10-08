@@ -408,10 +408,18 @@ def coverage(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
     identity = _identity().read_registry(registry_dir)
     if identity is None:
         return UNKNOWN, "UNKNOWN — cannot read the identity registry (%s)" % (registry_dir or "default path")
+    # ⚠️ **The `isinstance(..., str)` guard is what keeps a malformed row from crashing the
+    # measurement.** A row carrying `live: true` and a non-string `session_id` (a list or a
+    # dict) is unhashable, so the set build would raise `TypeError` out of `main()` and Python
+    # would exit 1 — this file's ABSENT code. `_check` guards the identical case at the verdict
+    # path; the diagnostic path is not a place to be looser.
     endpoint_live = {
         r["session_id"]
         for r in rows
-        if isinstance(r, dict) and r.get("session_id") and r.get("live") is True
+        if isinstance(r, dict)
+        and isinstance(r.get("session_id"), str)
+        and r["session_id"]
+        and r.get("live") is True
     }
     registry_live = {sid for sid, rec in identity.items() if rec.get("alive") is not False}
     missing = registry_live - endpoint_live
@@ -421,6 +429,79 @@ def coverage(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
         len(missing),
     )
     return (ABSENT if missing else LIVE), line
+
+
+def safe_coverage(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
+    """`coverage()` guarded so no exception can escape `main()` as exit 1.
+
+    ⚠️ **Same invariant `check()` carries, and for the same reason.** `coverage()` reaches the
+    registry through `_identity()`, which `exec_module`s a sibling file with no guard — so a
+    missing or unparseable `session-identity.py` raises straight out of it, and `main()`
+    returning is the only thing between that and `sys.exit(1)`. One is this file's ABSENT code,
+    which every caller reads as "not live, resume is authorised"; a diagnostic that cannot be
+    taken is UNKNOWN (exit 2), never a crash wearing ABSENT's exit code. The suite already
+    treats an unimportable sibling as a real case (`load_from()` isolates exactly that), so
+    leaving this path unguarded while `check()` is guarded end-to-end was an oversight rather
+    than a decision.
+    """
+    try:
+        return coverage(endpoint, registry_dir, timeout)
+    except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller
+        return UNKNOWN, "UNKNOWN — the stamp-coverage measurement could not be taken: %s: %s" % (
+            type(exc).__name__,
+            exc,
+        )
+
+
+def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
+    """`(verdict, line)` — registry-live sessions the endpoint holds NO row for at all.
+
+    ⚠️ **This is NOT `coverage()`, and the difference is the whole point of it existing.**
+    `coverage()`'s `missing` is `registry_live - endpoint_live`, which folds two unlike facts
+    into one number: a session the endpoint has never heard of — a genuine ROLLOUT GAP, where
+    a list would omit a session that is really live — and a session it holds a row for that
+    reads `live: false`, which is a dead or hung session the endpoint can see and is answering
+    about. Only the first is a reason to withhold a list.
+
+    ⚠️ **Measured, not reasoned:** applying `coverage()` to the non-empty `--list` path refused
+    an ordinary steady state — a registered session whose heartbeat had lapsed, planted by
+    `test_list_shows_only_live_sessions`, which expects the live one to be listed. The
+    regression surfaced as that suite's own failure, which is why this measures row PRESENCE
+    rather than liveness.
+
+    `--coverage` keeps its own definition: it is a fleet metric about stamping, not this
+    precondition, and its `missing` column is deliberately the broader one. Exit codes match
+    `coverage()`'s: 0 complete, 1 a registry-live session has no row, 2 the measurement could
+    not be taken (never a fabricated `0`).
+    """
+    rows = read_endpoint(endpoint, timeout)
+    if rows is None:
+        return UNKNOWN, "UNKNOWN — cannot read the session-heartbeat endpoint at %s" % endpoint_base(endpoint)
+    identity = _identity().read_registry(registry_dir)
+    if identity is None:
+        return UNKNOWN, "UNKNOWN — cannot read the identity registry (%s)" % (registry_dir or "default path")
+    stamped = {
+        r["session_id"]
+        for r in rows
+        if isinstance(r, dict) and isinstance(r.get("session_id"), str) and r["session_id"]
+    }
+    registry_live = {sid for sid, rec in identity.items() if rec.get("alive") is not False}
+    unstamped_ids = registry_live - stamped
+    return (ABSENT if unstamped_ids else LIVE), "unstamped=%d registry_live=%d" % (
+        len(unstamped_ids),
+        len(registry_live),
+    )
+
+
+def safe_unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
+    """`unstamped()` guarded — see `safe_coverage` for why no exception may escape `main()`."""
+    try:
+        return unstamped(endpoint, registry_dir, timeout)
+    except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller
+        return UNKNOWN, "UNKNOWN — the stamp-coverage measurement could not be taken: %s: %s" % (
+            type(exc).__name__,
+            exc,
+        )
 
 
 def main(argv=None):
@@ -486,7 +567,7 @@ def main(argv=None):
         # the unmeasurable case keeps its message on stderr, where `$(...)` cannot capture it.
         # Exit 1 while the fleet is not fully stamped — see the module docstring on why a partial
         # rollout makes ABSENT unsafe.
-        verdict, line = coverage(args.endpoint, args.dir)
+        verdict, line = safe_coverage(args.endpoint, args.dir)
         if verdict == UNKNOWN:
             print(line, file=sys.stderr)
         else:
@@ -537,9 +618,12 @@ def main(argv=None):
         # live sessions, and `commands/open.md` Step 2C reads THIS call to decide whether to open
         # a session — so a confident empty fleet there spawns a second session onto a live topic
         # (the 2026-09-18 failure the non-empty path's names rule already guards against).
-        # `coverage()` is the measurement: it is LIVE only when every registry-live session has a
-        # live endpoint row; anything else — an unreadable registry, or a registry-live session
-        # with no live row — is UNKNOWN, never an empty list presented as complete.
+        # `unstamped()` is the measurement: it is LIVE only when every registry-live session has
+        # a ROW at the endpoint — not necessarily a live one, since a row reading `live: false`
+        # is a dead session the endpoint is answering about rather than a rollout gap (see that
+        # function's docstring). Anything else — an unreadable registry, or a registry-live
+        # session the endpoint has never heard of — is UNKNOWN, never an empty list presented
+        # as complete.
         #
         # ⚠️ **This is stricter than the earlier "decide empty before the registry" ordering**,
         # which returned exit 0 whenever the registry could not be read. That direction reads an
@@ -547,12 +631,12 @@ def main(argv=None):
         # wrong even though it kept a genuinely idle fleet from looking like a failed probe — and
         # a genuinely idle fleet still measures LIVE here (endpoint empty AND registry empty), so
         # it keeps its empty list.
-        verdict, line = coverage(args.endpoint, args.dir)
+        verdict, line = safe_unstamped(args.endpoint, args.dir)
         if verdict != LIVE:
             print(
-                "UNKNOWN — no live row at the session-heartbeat endpoint, but the fleet's stamp "
-                "coverage is not complete (%s), so an empty list cannot be presented as a "
-                "complete fleet" % line,
+                "UNKNOWN — no live row at the session-heartbeat endpoint, but it has no row at "
+                "all for some registry-live session (%s), so an empty list cannot be presented "
+                "as a complete fleet" % line,
                 file=sys.stderr,
             )
             return UNKNOWN
@@ -562,6 +646,34 @@ def main(argv=None):
             return LIVE
         print("no live sessions on the session-heartbeat endpoint")
         return LIVE
+
+    # ⚠️ **A NON-EMPTY list is a positive claim about the whole fleet too, so it pays the same
+    # coverage precondition the empty one pays — and it is the MORE dangerous of the two to
+    # skip.** The rows below are the endpoint's `live: true` rows joined to identity; during a
+    # partial rollout the endpoint holds a row only for already-stamped sessions, so every
+    # live-but-unstamped session is dropped while the command still exits 0. A caller reads
+    # that as the whole live fleet. `commands/open.md` Step 2C matches `<topic> Manager`
+    # against `name`/`formerNames` from exactly this output and spawns a manager on no match,
+    # so the omission is a duplicate manager onto a live topic — the 2026-09-18 failure the
+    # names rule above exists to prevent, reached by a different route. The base version could
+    # not produce this answer: its registry half contributed rows regardless of heartbeat
+    # state. Reading the registry is not enough to license the list — a readable registry is
+    # precisely what makes the omission silent, since it proves the omitted sessions EXIST.
+    #
+    # ⚠️ **The measurement is `unstamped()`, not `coverage()`** — see that function's docstring.
+    # `coverage()`'s `missing` also counts a registered session whose row reads `live: false`,
+    # which is a dead or hung session the endpoint is answering about rather than a rollout
+    # gap, and refusing on it broke `test_list_shows_only_live_sessions`.
+    verdict, line = safe_unstamped(args.endpoint, args.dir)
+    if verdict != LIVE:
+        print(
+            "UNKNOWN — the session-heartbeat endpoint holds live rows, but it has no row at "
+            "all for some registry-live session (%s), so this list would omit live sessions "
+            "that have not been stamped yet and cannot be presented as the whole live fleet"
+            % line,
+            file=sys.stderr,
+        )
+        return UNKNOWN
 
     identity = _identity().read_registry(args.dir)
     if identity is None:
