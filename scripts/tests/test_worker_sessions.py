@@ -6,20 +6,20 @@ answered **0 while 11 interactive worker tabs were live**. A target reading 0 on
 fleet is inert — managers always see "below target" and always propose, and the cap never
 binds — and nothing looks wrong, because 0 is a plausible count for the wrong question.
 
-The load-bearing cases are the two negatives. A session in the registry but **not** the
-ledger is a manager or one of the operator's own and must not be counted; a session in the
-ledger with **neither** liveness channel behind it has exited and must not be counted either.
+The load-bearing cases are the two negatives. A session live at the endpoint but **not** in
+the ledger is a manager or one of the operator's own and must not be counted; a session in
+the ledger that is **not** live at the endpoint has exited and must not be counted either.
 A check that only asserted the positive would pass while counting every session on the
 machine.
 
-⚠️ **The second negative was too strong, and this file was pinning the defect.** Until
-2026-10-05 a session in the ledger but not the registry read as *exited* — true for a tab
-whose process is gone, and false for every worker that never had a registry entry to begin
-with. A headless worker is an in-process SDK `query()` inside the server, and a cluster worker
-is a process on another machine; both hold a ledger record and a heartbeat stamp and no
-registry entry, so both were counted as dead. The registry is one liveness channel, not the
-liveness authority, and `test_a_ledger_record_with_a_fresh_heartbeat_is_a_worker` is the case
-that separates the two readings.
+⚠️ **The liveness source moved to the endpoint on 2026-10-09 and the join did NOT move with
+it.** Until then this file planted registry files and heartbeat stamps and pointed the counter
+at both directories. The endpoint holds both populations in one store, so the fixtures are now
+store rows — but the unit stays *ledger ∩ live*, which is what makes this a count of workers
+rather than of every session on the machine. Operator ruling 2026-10-09: keep the join, move
+only the liveness source. The old `--dir` / `--heartbeat-dir` flags are still accepted and
+ignored, so a caller that passes one is warned rather than silently obeyed; that is pinned
+below too.
 """
 import json
 import os
@@ -28,8 +28,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
+
+import endpoint_fixture  # noqa: E402
+from endpoint_fixture import FixtureEndpoint, dead_url, row  # noqa: E402
 
 # Side effect only: points the start-time cache at an isolated per-run store, in one shared
 # home so five suites cannot each assign the same key and leave only the last standing.
@@ -43,43 +45,16 @@ class WorkerSessionsTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
-        self.registry = os.path.join(self.dir, "registry")
         self.ledger = os.path.join(self.dir, "ledger")
-        self.beats = os.path.join(self.dir, "heartbeats")
-        os.makedirs(self.registry)
         os.makedirs(self.ledger)
-        os.makedirs(self.beats)
         # `worker-sessions.py` imports its siblings by path from its own directory, so the temp
-        # tree needs the real scripts beside a copy of itself — `session-identity.py` is where
-        # the registry read lives now, and `live-workers.py` is where the heartbeat store is
-        # read. All three travel together; a fixture missing one makes the counter exit 2,
-        # which the negatives below would read as "not counted" and pass on a broken instrument.
+        # tree needs the real scripts beside a copy of itself. `session-liveness.py` is where
+        # the endpoint read lives now; a fixture missing it makes the counter exit 2, which the
+        # negatives below would read as "not counted" and pass on a broken instrument.
         self.bin = os.path.join(self.dir, "scripts")
         os.makedirs(self.bin)
         shutil.copy(SCRIPT, self.bin)
-        shutil.copy(SCRIPTS / "session-identity.py", self.bin)
-        shutil.copy(SCRIPTS / "live-workers.py", self.bin)
-
-    def heartbeat_stamp(self, session_id, mode="headless", source=None, age_seconds=0.0):
-        """A heartbeat stamp, with its AGE set by mtime — the field the verdict rests on.
-
-        `source: "cluster"` is what marks a mirrored cluster session, and it is load-bearing
-        rather than descriptive: a STALE cluster stamp is `unknown` (the cluster could not be
-        read), never dead.
-        """
-        path = os.path.join(self.beats, f"{session_id}.json")
-        record = {"sessionId": session_id, "mode": mode}
-        if source is not None:
-            record["source"] = source
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(record, fh)
-        if age_seconds:
-            when = time.time() - age_seconds
-            os.utime(path, (when, when))
-
-    def register(self, session_id, status="busy"):
-        with open(os.path.join(self.registry, f"{session_id}.json"), "w", encoding="utf-8") as fh:
-            json.dump({"sessionId": session_id, "pid": os.getpid(), "status": status}, fh)
+        shutil.copy(SCRIPTS / "session-liveness.py", self.bin)
 
     def ledger_entry(self, session_id, label, **extra):
         record = {"session_id": session_id, "label": label, "mode": "interactive"}
@@ -87,49 +62,59 @@ class WorkerSessionsTest(unittest.TestCase):
         with open(os.path.join(self.ledger, f"{session_id}.json"), "w", encoding="utf-8") as fh:
             json.dump(record, fh)
 
-    def run_script(self, *args):
+    def run_script(self, *args, endpoint=None):
         return subprocess.run(
             [sys.executable, os.path.join(self.bin, "worker-sessions.py"),
-             "--dir", self.registry, "--ledger-dir", self.ledger,
-             "--heartbeat-dir", self.beats, *args],
+             "--endpoint", endpoint or self.endpoint,
+             "--ledger-dir", self.ledger, *args],
             capture_output=True, text=True,
         )
 
     def test_count_is_zero_when_nothing_is_registered(self):
-        result = self.run_script("--count")
+        with FixtureEndpoint() as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "0")
 
     def test_count_is_the_size_of_the_join(self):
-        for i in range(3):
-            sid = f"aaaaaaaa-0000-0000-0000-00000000000{i}"
-            self.register(sid)
+        ids = [f"aaaaaaaa-0000-0000-0000-00000000000{i}" for i in range(3)]
+        for i, sid in enumerate(ids):
             self.ledger_entry(sid, f"worker {i}")
-        self.assertEqual(self.run_script("--count").stdout.strip(), "3")
+        with FixtureEndpoint(rows=[row(s) for s in ids]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "3", result.stderr)
 
-    def test_a_registry_session_with_no_ledger_record_is_not_a_worker(self):
+    def test_a_live_session_with_no_ledger_record_is_not_a_worker(self):
         """THE MANAGER CASE. A manager is started by hand and holds no ledger record, so it
-        must not be counted — counting every registry session is the defect the join fixes."""
-        self.register("bbbbbbbb-0000-0000-0000-000000000001")
-        self.assertEqual(self.run_script("--count").stdout.strip(), "0")
+        must not be counted — counting every live session is the defect the join fixes."""
+        with FixtureEndpoint(rows=[row("bbbbbbbb-0000-0000-0000-000000000001")]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "0", result.stderr)
 
-    def test_a_ledger_record_with_neither_liveness_channel_has_exited(self):
-        """THE LIVENESS CASE. The ledger is the durable half and keeps a record forever; the
-        registry entry is deleted on exit and the heartbeat stamp goes stale. A worker with
-        neither behind it must not be counted."""
+    def test_a_ledger_record_with_no_endpoint_row_has_exited(self):
+        """THE LIVENESS CASE. The ledger is the durable half and keeps a record forever; a
+        session with no row at the endpoint has exited and must not be counted."""
         self.ledger_entry("cccccccc-0000-0000-0000-000000000001", "long gone")
-        self.assertEqual(self.run_script("--count").stdout.strip(), "0")
+        with FixtureEndpoint() as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "0", result.stderr)
 
-    def test_a_ledger_record_with_a_fresh_heartbeat_is_a_worker(self):
+    def test_a_ledger_record_live_at_the_endpoint_is_a_worker(self):
         """THE FIX, and the case this file used to pin wrongly. A worker with no registry entry
         is not thereby dead: a headless worker is an in-process `query()` and a cluster worker
         runs on another machine, so neither can hold a pid-keyed registry file. Their liveness
-        is the heartbeat stamp, and the count must include them or `spawn.maxConcurrent` bounds
-        a population it cannot see."""
+        is the endpoint's, and the count must include them or `spawn.maxConcurrent` bounds a
+        population it cannot see."""
         sid = "ffffffff-0000-0000-0000-000000000001"
         self.ledger_entry(sid, "cluster worker")
-        self.heartbeat_stamp(sid, mode="cluster", source="cluster")
-        self.assertEqual(self.run_script("--count").stdout.strip(), "1")
+        with FixtureEndpoint(rows=[row(sid, source="cluster")]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "1", result.stderr)
 
     def test_an_auto_resumed_worker_is_not_counted(self):
         """Auto-resumes answer to the auto-resume gate's own 30-min crash-loop cap, not this
@@ -138,72 +123,95 @@ class WorkerSessionsTest(unittest.TestCase):
         `check-spawn-ledger.py` reads."""
         sid = "ffffffff-0000-0000-0000-000000000004"
         self.ledger_entry(sid, "auto-resumed", resumed_from="aaaaaaaa-0000-0000-0000-000000000009")
-        self.heartbeat_stamp(sid)
-        self.assertEqual(self.run_script("--count").stdout.strip(), "0")
+        with FixtureEndpoint(rows=[row(sid)]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "0", result.stderr)
 
-    def test_list_names_the_mode_for_a_heartbeat_sourced_worker(self):
-        """`status` names whichever channel answered. For a worker with no registry entry that
-        is the stamp's `mode` — and `read_live` dropping the field left this column permanently
-        `None` while the mjs twin read the real value off the stamp file."""
+    def test_list_names_the_source_for_an_endpoint_sourced_worker(self):
+        """`status` is the store row's `source` — `cluster` for a mirrored cluster session. It
+        is descriptive only, but a reader that dropped it would leave the column empty."""
         sid = "ffffffff-0000-0000-0000-000000000005"
         self.ledger_entry(sid, "Some Worker")
-        self.heartbeat_stamp(sid, mode="cluster", source="cluster")
-        line = [ln for ln in self.run_script("--list").stdout.splitlines() if sid in ln][0]
+        with FixtureEndpoint(rows=[row(sid, source="cluster")]) as ep:
+            self.endpoint = ep.url
+            out = self.run_script("--list").stdout
+        line = [ln for ln in out.splitlines() if sid in ln][0]
         self.assertIn("cluster", line)
 
-    def test_a_stale_heartbeat_is_not_counted(self):
-        """The verdict is the stamp's AGE against the TTL, never the file's existence — a store
-        whose writer was killed keeps its files, so existence reports the wrong answer for the
+    def test_a_row_the_endpoint_reports_not_live_is_not_counted(self):
+        """The verdict is the store's own `live` flag, never the row's existence — a store
+        whose writer was killed keeps its rows, so existence reports the wrong answer for the
         case the store exists to catch."""
         sid = "ffffffff-0000-0000-0000-000000000002"
         self.ledger_entry(sid, "finished hours ago")
-        self.heartbeat_stamp(sid, mode="headless", age_seconds=3600)
-        self.assertEqual(self.run_script("--count").stdout.strip(), "0")
+        with FixtureEndpoint(rows=[row(sid, live=False, age_seconds=3600)]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "0", result.stderr)
 
-    def test_a_stale_cluster_stamp_with_no_reachability_marker_is_not_counted(self):
-        """'Cannot tell' is not 'live'. A stale cluster stamp with the mirror's reachability
-        marker also stale means the cluster could not be read, so this stamp's staleness proves
-        nothing about the worker — `read_live` reports it `unknown`, and counting it would put
-        a possibly-dead session on the fleet's books."""
-        sid = "ffffffff-0000-0000-0000-000000000003"
-        self.ledger_entry(sid, "cluster worker behind an outage")
-        self.heartbeat_stamp(sid, mode="cluster", source="cluster", age_seconds=3600)
-        self.assertEqual(self.run_script("--count").stdout.strip(), "0")
+    def test_a_row_missing_its_live_flag_is_not_counted(self):
+        """⚠️ A renamed or absent `live` key must never read as liveness. The endpoint is the
+        only channel now, so a row that does not positively say `true` is not an answer — and
+        a row that is not even an object must be skipped rather than crash the count."""
+        sid = "ffffffff-0000-0000-0000-000000000007"
+        self.ledger_entry(sid, "malformed row")
+        rows = [{"session_id": sid, "source": "mcp-timer"}, "not-a-row", None]
+        with FixtureEndpoint(rows=rows) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "0")
 
-    def test_an_unreadable_heartbeat_store_exits_two(self):
-        """The heartbeat store is a liveness channel now, so failing to read it is UNKNOWN for
-        the same reason the registry is: a channel that cannot be read may be hiding the very
-        session being counted, and folding that into a number under-counts the fleet.
-
-        ⚠️ **A regular file, not `chmod 0o000`.** A 0o000 directory is still readable by root
-        (`CAP_DAC_OVERRIDE`), so the chmod spelling of this test passes or fails on the euid of
-        whoever runs it — green on CI, red under root. `os.listdir` on a regular file raises
-        `NotADirectoryError`, which is an `OSError` but not a `FileNotFoundError`, so
-        `read_live` returns `None` and the case holds under both.
-        """
-        shutil.rmtree(self.beats)
-        with open(self.beats, "w", encoding="utf-8") as fh:
-            fh.write("")
-        result = self.run_script("--count")
+    def test_an_unreachable_endpoint_exits_two(self):
+        """The endpoint is the liveness source, so failing to read it is UNKNOWN for the same
+        reason the ledger is: a store that cannot be read may be hiding the very session being
+        counted, and folding that into a number under-counts the fleet."""
+        self.ledger_entry("ffffffff-0000-0000-0000-000000000008", "worker")
+        result = self.run_script("--count", endpoint=dead_url())
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertIn("UNKNOWN", result.stderr)
 
-    def test_list_shows_the_label_and_status(self):
+    def test_a_non_200_list_route_exits_two(self):
+        """A non-200 that is not a liveness answer must not be read as an empty fleet."""
+        self.ledger_entry("ffffffff-0000-0000-0000-000000000009", "worker")
+        with FixtureEndpoint(rows=[], list_status=500) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("UNKNOWN", result.stderr)
+
+    def test_the_ignored_flags_warn_instead_of_being_obeyed(self):
+        """`--dir` and `--heartbeat-dir` are kept so existing callers do not break, but a caller
+        that passes one must not believe a path or a window is in force when neither is."""
+        sid = "eeeeeeee-0000-0000-0000-000000000002"
+        self.ledger_entry(sid, "one")
+        with FixtureEndpoint(rows=[row(sid)]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count", "--dir", "/nonexistent", "--heartbeat-dir", "/nonexistent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "1")
+        self.assertIn("IGNORED", result.stderr)
+
+    def test_list_shows_the_label_and_source(self):
         sid = "dddddddd-0000-0000-0000-000000000001"
-        self.register(sid, status="idle")
         self.ledger_entry(sid, "Some Worker Task")
-        out = self.run_script("--list").stdout
+        with FixtureEndpoint(rows=[row(sid, source="mcp-timer")]) as ep:
+            self.endpoint = ep.url
+            out = self.run_script("--list").stdout
         self.assertIn(sid, out)
         self.assertIn("Some Worker Task", out)
-        self.assertIn("idle", out)
+        self.assertIn("mcp-timer", out)
 
     def test_count_writes_only_the_integer(self):
         """`$(… --count)` goes straight into a comparison against the target."""
         sid = "eeeeeeee-0000-0000-0000-000000000001"
-        self.register(sid)
         self.ledger_entry(sid, "one")
-        result = self.run_script("--count")
+        with FixtureEndpoint(rows=[row(sid)]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
         self.assertEqual(len(result.stdout.strip().splitlines()), 1)
         self.assertEqual(int(result.stdout.strip()), 1)
 
@@ -211,14 +219,17 @@ class WorkerSessionsTest(unittest.TestCase):
         """'Could not check' must never read as 'zero workers' — an idle fleet and a broken
         instrument must not render the same.
 
-        Same regular-file spelling as the heartbeat case above, and for the same reason: a
-        0o000 directory is readable by root, so the chmod form of this test is green or red
-        depending on who runs it.
+        A regular file, not `chmod 0o000`: a 0o000 directory is still readable by root
+        (`CAP_DAC_OVERRIDE`), so the chmod spelling of this test passes or fails on the euid of
+        whoever runs it — green on CI, red under root. `os.listdir` on a regular file raises
+        `NotADirectoryError`, which is an `OSError` but not a `FileNotFoundError`.
         """
         shutil.rmtree(self.ledger)
         with open(self.ledger, "w", encoding="utf-8") as fh:
             fh.write("")
-        result = self.run_script("--count")
+        with FixtureEndpoint() as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertIn("UNKNOWN", result.stderr)
@@ -227,7 +238,9 @@ class WorkerSessionsTest(unittest.TestCase):
         """A directory that was never created means nobody has been spawned — a different
         answer from 'could not read it', and it must not be reported as unknown."""
         shutil.rmtree(self.ledger)
-        result = self.run_script("--count")
+        with FixtureEndpoint() as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "0")
 

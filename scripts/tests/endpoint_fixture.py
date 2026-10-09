@@ -91,7 +91,14 @@ class FixtureEndpoint:
     def __init__(self, rows=None, list_status=200):
         self.rows = list(rows or [])
         self.list_status = list_status
-        self.by_id = {r["session_id"]: r for r in self.rows if r.get("session_id")}
+        # ⚠️ Non-dict rows are skipped, not rejected: the reader must tolerate a malformed row
+        # (a store that served one is not a reason to answer "no workers"), and a fixture that
+        # raised here could not express that case at all.
+        self.by_id = {
+            r["session_id"]: r
+            for r in self.rows
+            if isinstance(r, dict) and r.get("session_id")
+        }
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.server.store = self
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
