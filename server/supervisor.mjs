@@ -43,6 +43,20 @@ import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decisi
 import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
 import { liveSessionIds, rehydratableAgents } from './registry-rehydrate.mjs'
 
+// ⚠️ The config-dir refusal runs before anything else touches the filesystem, and it is a
+// hard exit rather than a warning. A server whose parent carried a different
+// `CLAUDE_CONFIG_DIR` resolves its session registry and transcript root from the wrong
+// place, then runs normally while reporting a `transcript_dir` no fleet reader can see and
+// registering nowhere the fleet looks — a silent failure, so refusing to start is the only
+// honest outcome. See the resolution in config.mjs for the measurement.
+//
+// Written to stderr, not the logger: stdout carries MCP frames, and this runs before the
+// transport exists.
+if (config.claudeHomeRefusal) {
+  console.error(config.claudeHomeRefusal)
+  process.exit(1)
+}
+
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
 const agents = new Map() // id -> agent record
