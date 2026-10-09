@@ -24,6 +24,14 @@ text, and that the goal branch's exemption from the absent-input rule is still s
 It cannot prove the four carriers say the *same thing* — that is a reading, not a grep,
 and the round that produced this guard is the evidence that no grep would have caught it.
 This is the drift guard, not the semantics.
+
+⚠️ **The retraction scan is deliberately scoped to `.md` under `agents/`, `commands/` and
+`docs/`, and widening it to the repo root would fail on `CHANGELOG.md` itself** — that file
+quotes `derived from its tasks' placement` as the reading this change retracts, so the entry
+documenting the retraction is the one file guaranteed to trip the scan. Stating the boundary
+here rather than leaving it to be discovered: a future widening needs an allowlist for the
+changelog, and the reason it has none today is that the changelog is history while the three
+scanned directories are the rule.
 """
 
 import sys
@@ -88,8 +96,9 @@ def main() -> int:
         )
         return 1
 
+    scanned = markdown_files()
     offenders: list[str] = []
-    for path in markdown_files():
+    for path in scanned:
         body = path.read_text(encoding="utf-8")
         for phrase in RETRACTED:
             if phrase in body:
@@ -102,7 +111,7 @@ def main() -> int:
     print(
         f"goal-row-clause ok: the clause is carried {hits}x in {CLAUSE_CARRIER}, the goal-branch "
         f"exemption is stated, and none of the {len(RETRACTED)} retracted readings appears across "
-        f"{len(markdown_files())} file(s) in {', '.join(SCAN_DIRS)}"
+        f"{len(scanned)} file(s) in {', '.join(SCAN_DIRS)}"
     )
     return 0
 
