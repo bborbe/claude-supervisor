@@ -104,10 +104,16 @@ export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, lo
   }
   if (location !== undefined) record.location = location
   // ⚠️ `activity`, NOT `state` — the name `state` on a stamp is reserved by the liveness
-  // verdict four readers synthesize. They gate on `stamp.get("state", "live") != "live"`
-  // (`worker-sessions.py:166`, `fleet-board.py:1096`, `adopt-orphans.py:139`,
-  // `session-liveness.py:663/693/803`), where a MISSING key must read as `live` rather than
-  // vanish.
+  // verdict two readers synthesize. They gate on `stamp.get("state", "live") != "live"`
+  // (`fleet-board.py:1096`, `adopt-orphans.py:145`), where a MISSING key must read as `live`
+  // rather than vanish.
+  //
+  // ⚠️ **The list was FOUR readers and is now two, corrected 2026-10-09.** It also cited
+  // `worker-sessions.py:166` and `session-liveness.py:663/693/803`; both files have since left
+  // the raw-stamp path entirely — `worker-sessions.py` reads the session-heartbeat endpoint and
+  // no longer parses a stamp at all, and `session-liveness.py`'s verdict is the endpoint's. The
+  // reservation still holds and is still worth the rename; the citations are what rotted, which
+  // is why this list is checked against the grep rather than carried forward.
   //
   // ⚠️ **No reader consumes a raw stamp's `state` today, and this comment first claimed one
   // did** — asserting that a `busy` written here "reads as NOT-live" and frees a duplicate
@@ -190,7 +196,14 @@ export function readLive(sessionId, { dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_
   }
   // `ageMs` is carried so a caller that needs the age does not have to stat the path a second
   // time. A second stat is not merely wasteful: it is unguarded, so a stamp unlinked between
-  // the two calls throws out of the caller — and `listLive` is on the spawn path now.
+  // the two calls throws out of the caller.
+  //
+  // ⚠️ **The reason is no longer "the spawn path".** Until 2026-10-09 this read "and `listLive`
+  // is on the spawn path now", because `workerSessions()` read the store; that counter now reads
+  // the session-heartbeat endpoint, so `listLive` is reached only through `liveness.mjs`'s
+  // `liveSessionIds` — `registry-rehydrate.mjs`'s startup rehydration and `supervisor.mjs`'s own
+  // roster. The guard is still right, and the note is corrected rather than left to describe a
+  // caller that no longer exists.
   if (age < ttlMs) return { live: true, ageMs: age, reason: `heartbeat stamped ${Math.round(age / 1000)}s ago` }
   return { live: false, ageMs: age, reason: `heartbeat stale by ${Math.round((age - ttlMs) / 1000)}s` }
 }
@@ -231,8 +244,11 @@ export function listLive({ dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_MS, now = D
     }
     // The age comes from the verdict `readLive` already took, never a second bare `statSync`:
     // that stat was unguarded, so a stamp unlinked between the two calls would throw ENOENT
-    // out of `listLive` — and `listLive` is on the spawn path now, via `workerSessions()` and
-    // `concurrentLimitError()`, where an uncaught throw is a failed spawn rather than a count.
+    // out of `listLive` — reached from `registry-rehydrate.mjs`'s startup rehydration and
+    // `supervisor.mjs`'s roster, where an uncaught throw is a failed rehydration rather than a
+    // count. ⚠️ It was reached from the spawn path via `workerSessions()` until 2026-10-09;
+    // that counter reads the session-heartbeat endpoint now, so the caller named here changed
+    // while the guard did not.
     live.push({ sessionId, ageMs: verdict.ageMs, ...meta })
   }
   return live
