@@ -26,7 +26,8 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
-import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
@@ -1188,7 +1189,18 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const workerCwd = workerTarget.cwd
   // `SUPERVISOR_CLAUDE_CMD` stays the top override: an explicit operator setting rather
   // than a fallback, and the documented way to force a launcher for a one-off spawn.
-  const workerLauncher = config.claudeCmd || workerTarget.launcher
+  //
+  // Below it, a task's own `launcher:` frontmatter, then its goal's, then the vault's
+  // `claude_script` — see `resolveTaskLauncher`.
+  let taskLauncher = { launcher: workerTarget.launcher, source: 'vault' }
+  if (!config.claudeCmd && typeof task === 'string' && task) {
+    const read = readTaskLaunchers({ task, vault: workerTarget.vault })
+    if (read.error) return { error: read.error }
+    taskLauncher = resolveTaskLauncher({ vaultLauncher: workerTarget.launcher, ...read })
+    for (const w of read.warnings ?? []) log(`spawn ${task}: ${w}`)
+    if (taskLauncher.error) return { error: taskLauncher.error }
+  }
+  const workerLauncher = config.claudeCmd || taskLauncher.launcher
   const workerModel = launcherModelFor(workerLauncher)
   let workerRules = null
   let resolvedPolicyPath = null
@@ -1447,6 +1459,9 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // so a batch of 27 wrong workers returned exactly what a correct one returns.
       vault: agent.vault,
       launcher: agent.launcher,
+      // Which rule picked it: `task` / `goal` frontmatter, the `vault` default, or the
+      // `SUPERVISOR_CLAUDE_CMD` override.
+      launcher_source: config.claudeCmd ? 'override' : taskLauncher.source,
       model: agent.model,
       interactive: true,
       mode_source: agent.modeSource,
@@ -1539,6 +1554,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // model a worker runs under are not observable from the arguments that produced it.
     vault: agent.vault,
     launcher: agent.launcher,
+    launcher_source: config.claudeCmd ? 'override' : taskLauncher.source,
     model: agent.model,
     interactive: false,
     mode_source: agent.modeSource,
@@ -1672,12 +1688,12 @@ const TOOLS = [
         task: {
           type: 'string',
           description:
-            'The vault task this worker is opened for. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with `target: "cluster"`. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+            'The vault task this worker is opened for. On every LOCAL path it also chooses the launcher: the task\'s `launcher:` frontmatter, else its goal\'s, else the vault\'s `claude_script` (rule: docs/fleet-surface.md § Spawn a worker item 8) — so a task that cannot be read REFUSES the spawn. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with `target: "cluster"`. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
         },
         vault: {
           type: 'string',
           description:
-            'The vault this worker belongs to. Resolves BOTH the working directory and the launcher (that vault\'s `claude_script`) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
+            'The vault this worker belongs to. Resolves BOTH the working directory and the default launcher (that vault\'s `claude_script`, which a `task`\'s `launcher:` frontmatter can override) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
         },
         resume: {
           type: 'string',
