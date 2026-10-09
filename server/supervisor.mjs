@@ -128,6 +128,22 @@ const log = (...a) => {
   } catch {}
 }
 
+// ⚠️ The config-dir refusal is a hard exit, not a warning, and it sits here because this is
+// the first point at which the logger exists: above it `log` is in its temporal dead zone, so
+// only `console` could write, and RULE node/logging/structured-not-console bars `console`
+// from service code. Nothing between the imports and this line starts a session, opens a
+// transport or writes state, so the refusal still lands before any work.
+//
+// A server whose parent carried a different `CLAUDE_CONFIG_DIR` resolves its session
+// registry and transcript root from the wrong place, then runs normally while reporting a
+// `transcript_dir` no fleet reader can see and registering nowhere the fleet looks — a silent
+// failure, so refusing to start is the only honest outcome. See the resolution in config.mjs
+// for the measurement.
+if (config.claudeHomeRefusal) {
+  log(config.claudeHomeRefusal)
+  process.exit(1)
+}
+
 // ── roster rehydration ──────────────────────────────────────────────────────
 // A reconnected MCP client (`/mcp`) gets a NEW server process, so the `agents` Map above
 // comes up empty and `list_agents` answers `[]` while `agent_status` answers

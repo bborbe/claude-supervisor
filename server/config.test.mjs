@@ -12,7 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from './config.mjs'
@@ -58,6 +58,7 @@ test('the config object is a frozen, complete surface', () => {
     'configDir',
     'stateDir',
     'claudeHome',
+    'claudeHomeRefusal',
     'userPolicy',
     'permissionLog',
     'anthropicBaseUrl',
@@ -176,6 +177,87 @@ test('a cost figure is only meaningful when the traffic reaches Anthropic', asyn
     if (before === undefined) delete process.env.ANTHROPIC_BASE_URL
     else process.env.ANTHROPIC_BASE_URL = before
   }
+})
+
+// --- the Claude config home --------------------------------------------------
+//
+// The defect these guard against is silent in both directions: a server started from a
+// parent carrying a different `CLAUDE_CONFIG_DIR` reads its session registry and transcript
+// root from the wrong place, then runs normally while reporting a `transcript_dir` no fleet
+// reader can see. Measured 2026-10-09 — `cc-private` handed `~/.claude-verify` (the openbrain
+// scenario test dir) straight to the server, and every worker it spawned was invisible.
+
+const withEnv = async (vars, tag) => {
+  const before = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]))
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
+  try {
+    return { config: (await import(`./config.mjs?${tag}`)).config }
+  } finally {
+    for (const [k, v] of Object.entries(before)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+}
+
+test('an inherited CLAUDE_CONFIG_DIR that disagrees with the home refuses the server', async () => {
+  const { config: fresh } = await withEnv(
+    { CLAUDE_CONFIG_DIR: '/tmp/not-this-servers-claude-home', SUPERVISOR_CLAUDE_CONFIG_DIR: undefined },
+    'inherited-config-dir=leaked',
+  )
+  assert.ok(fresh.claudeHomeRefusal, 'a leaked parent must refuse rather than fall back')
+  assert.match(fresh.claudeHomeRefusal, /CLAUDE_CONFIG_DIR/)
+  assert.match(fresh.claudeHomeRefusal, /SUPERVISOR_CLAUDE_CONFIG_DIR/, 'the refusal must name the opt-in')
+  assert.equal(
+    fresh.claudeHome,
+    join(homedir(), '.claude'),
+    'and the inherited path must never become the home the registry hangs off',
+  )
+})
+
+test('an inherited CLAUDE_CONFIG_DIR equal to the home is accepted', async () => {
+  // The healthy case, and the one the whole fleet is in: the `cc-*` launchers pin the
+  // variable to `$HOME/.claude` (bborbe/scripts 69d41cc), which equals the default. A guard
+  // that fired here would refuse every correctly-pinned server — an outage, not a fix.
+  const { config: fresh } = await withEnv(
+    { CLAUDE_CONFIG_DIR: join(homedir(), '.claude'), SUPERVISOR_CLAUDE_CONFIG_DIR: undefined },
+    'inherited-config-dir=pinned',
+  )
+  assert.equal(fresh.claudeHomeRefusal, null)
+  assert.equal(fresh.claudeHome, join(homedir(), '.claude'))
+})
+
+test('a trailing slash is the same home, not a refusal', async () => {
+  // Compared after resolve(): a guard that fires on spelling is one the operator learns to
+  // ignore, which is worse than having none.
+  const { config: fresh } = await withEnv(
+    { CLAUDE_CONFIG_DIR: `${join(homedir(), '.claude')}/`, SUPERVISOR_CLAUDE_CONFIG_DIR: undefined },
+    'inherited-config-dir=slash',
+  )
+  assert.equal(fresh.claudeHomeRefusal, null)
+})
+
+test('SUPERVISOR_CLAUDE_CONFIG_DIR is the deliberate opt-in and is honoured', async () => {
+  // The escape hatch, and the reason the refusal is not a dead end: an operator who wants the
+  // server on another home declares it here. Declaring the home also settles an inherited
+  // variable, because the home is then explicit rather than ambient.
+  const { config: fresh } = await withEnv(
+    {
+      SUPERVISOR_CLAUDE_CONFIG_DIR: '/tmp/supervisor-declared-home',
+      CLAUDE_CONFIG_DIR: '/tmp/not-this-servers-claude-home',
+    },
+    'own-config-dir=set',
+  )
+  assert.equal(fresh.claudeHome, '/tmp/supervisor-declared-home')
+  assert.equal(
+    fresh.sessionsDir,
+    '/tmp/supervisor-declared-home/sessions',
+    'the registry must hang off the declared home, not the inherited one',
+  )
+  assert.equal(fresh.claudeHomeRefusal, null, 'an explicitly declared home is not an inherited one')
 })
 
 // --- the config file ---------------------------------------------------------

@@ -20,13 +20,58 @@
 
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 const ENV = process.env
 
 const CONFIG_HOME = ENV.XDG_CONFIG_HOME || join(homedir(), '.config')
 const STATE_HOME = ENV.XDG_STATE_HOME || join(homedir(), '.local', 'state')
-const CLAUDE_HOME = ENV.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+// Claude Code's config home — the session registry and the transcript root the whole fleet
+// reads. Read from the SUPERVISOR's own variable, never from the ambient `CLAUDE_CONFIG_DIR`.
+//
+// ⚠️ `CLAUDE_CONFIG_DIR` belongs to the `claude` CLI. A server that honours it inherits
+// whatever its parent happened to carry, and the failure is silent in both directions.
+// Measured 2026-10-09: `cc-private` handed `CLAUDE_CONFIG_DIR=~/.claude-verify` (the
+// openbrain scenario test dir) to the server, which resolved its registry and transcript
+// root there — so `spawn_agent` reported a `transcript_dir` no fleet reader can see and
+// found no session registration, leaving every worker it spawned invisible to
+// attention-controller, `list_agents` and Vault UI. Nothing errored; the server ran and
+// reported success while the fleet saw nothing, which is the same defect class as an empty
+// attention feed — indistinguishable from a calm fleet.
+//
+// So an inherited value that DISAGREES with the resolved home is a refusal, not a fallback.
+// The healthy case is the pinned one: the `cc-*` launchers export
+// `CLAUDE_CONFIG_DIR="$HOME/.claude"` (bborbe/scripts `69d41cc`), which equals the default
+// and therefore does not refuse. `SUPERVISOR_CLAUDE_CONFIG_DIR` is the deliberate opt-in for
+// pointing the server at a different home — the inherited variable is never that signal.
+const DECLARED_CONFIG_DIR = ENV.SUPERVISOR_CLAUDE_CONFIG_DIR || null
+const CLAUDE_HOME = DECLARED_CONFIG_DIR || join(homedir(), '.claude')
+
+// Compared after `resolve`, so a trailing slash or a `..` segment is the same home rather
+// than a spurious refusal — a guard that fires on spelling is one the operator learns to
+// ignore.
+const samePath = (a, b) => resolve(a) === resolve(b)
+
+const INHERITED_CONFIG_DIR = ENV.CLAUDE_CONFIG_DIR || null
+
+// Null is the normal case and the only one the server proceeds on. The message names the
+// variable, both paths, and the opt-in: a refusal that does not say where to fix it sends
+// the operator to edit a file that is not the cause.
+// ⚠️ `!DECLARED_CONFIG_DIR` is the first clause, and it is what makes the opt-in an escape
+// hatch rather than a second way to trip the guard. Once the operator has said where this
+// server's home is, the ambient variable is simply not this server's business — refusing
+// then would block a deliberately-configured server over noise, and would answer an explicit
+// declaration by telling the operator to declare something else.
+const CLAUDE_HOME_REFUSAL =
+  !DECLARED_CONFIG_DIR && INHERITED_CONFIG_DIR && !samePath(INHERITED_CONFIG_DIR, CLAUDE_HOME)
+    ? `refusing to start: CLAUDE_CONFIG_DIR is ${INHERITED_CONFIG_DIR}, which is not this ` +
+      `server's Claude home (${CLAUDE_HOME}). This server was started from a parent whose ` +
+      `Claude config dir differs, so its session registry and transcript root would be read ` +
+      `from the wrong place — spawns would report a transcript_dir no fleet reader can see ` +
+      `and register nowhere the fleet looks. Fix the parent (the cc-* launchers pin this to ` +
+      `$HOME/.claude), or set SUPERVISOR_CLAUDE_CONFIG_DIR=${INHERITED_CONFIG_DIR} to declare ` +
+      `that home deliberately.`
+    : null
 
 const CONFIG_DIR = join(CONFIG_HOME, 'claude-supervisor')
 const STATE_DIR = join(STATE_HOME, 'claude-supervisor')
@@ -83,6 +128,11 @@ export const config = Object.freeze({
   configDir: CONFIG_DIR,
   stateDir: STATE_DIR,
   claudeHome: CLAUDE_HOME,
+
+  // Non-null means this server must NOT start — see the resolution above for the defect it
+  // prevents. Surfaced rather than thrown here so the whole surface stays enumerable and
+  // testable; `supervisor.mjs` is what acts on it, at boot.
+  claudeHomeRefusal: CLAUDE_HOME_REFUSAL,
 
   userPolicy: ENV.SUPERVISOR_POLICY || join(CONFIG_DIR, 'policy.json'),
   permissionLog: PERMISSION_LOG,
