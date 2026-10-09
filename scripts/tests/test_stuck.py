@@ -137,12 +137,50 @@ class ReplayTest(unittest.TestCase):
         self.assertNotIn(SID8, watch.gated_keys(state))
 
     def test_stuck_fixture_without_the_registry_entry_is_still_stuck(self):
-        # The defect's own shape: a headless worker is not in the registry at all.
-        # STUCK must not depend on the registry half, which cannot see it.
-        fx = Fixture(STUCK_FIXTURE, status=None)
+        # A headless worker is not in the registry at all, and STUCK must not
+        # depend on the registry half, which cannot see it.
+        #
+        # ⚠️ The heartbeat IS required, and this fixture used to omit it. A live
+        # headless worker re-stamps every `HEARTBEAT_INTERVAL_MS` (30 s) against a
+        # `HEARTBEAT_TTL_MS` (60 s) read, so one ALWAYS holds a fresh stamp:
+        # `status=None` with no stamp at all is a session that is gone, not a
+        # headless one. Pinning that shape as `stuck:` is what gated a dead
+        # session; the sibling test below is the corrected reading.
+        fx = Fixture(STUCK_FIXTURE, status=None, heartbeat_age_s=5)
         self.addCleanup(fx.cleanup)
         state = fx.probe()
         self.assertEqual(state[SID8][2], "stuck:stream-closed")
+        self.assertIs(state[SID8][3], True)
+
+    def test_a_dead_session_with_a_stuck_tail_is_unregistered_not_gated(self):
+        # THE FIX. A session with no registry entry AND no heartbeat is gone, so a
+        # `stuck` marker left in its frozen tail must not gate it — that gate is
+        # offered to the operator with a heal ladder pointed at a session that no
+        # longer exists, and nothing can answer it. Measured 2026-10-09 on a real
+        # tracked set: this shape rendered `GATED e4fd1919 [stuck:stream-closed]`
+        # against `gated: 1  held: 13`.
+        #
+        # Its positive controls are the tests either side of it: the headless shape
+        # above (status=None + fresh stamp → `stuck:`) and the registered shape
+        # below (status="idle" → `stuck-tab:`). A fix that deletes the `stuck` limb
+        # outright passes this test and fails both of those.
+        fx = Fixture(STUCK_FIXTURE, status=None)
+        self.addCleanup(fx.cleanup)
+        state = fx.probe()
+        self.assertEqual(state[SID8][2], "unregistered")
+        self.assertIsNone(state[SID8][3], "held, never cleared")
+        self.assertEqual(watch.gated_keys(state), [])
+
+    def test_a_registered_worker_with_a_stuck_tail_still_reads_stuck_tab(self):
+        # The second positive control: `stuck-tab:` is what keeps a registered (tab)
+        # worker off the heal ladder's headless-resume rung, and it must survive the
+        # reordering above. The registry decides here, not the heartbeat.
+        fx = Fixture(STUCK_FIXTURE, status="idle")
+        self.addCleanup(fx.cleanup)
+        state = fx.probe()
+        self.assertEqual(state[SID8][2], "stuck-tab:stream-closed")
+        self.assertIs(state[SID8][3], True)
+        self.assertEqual(watch.gated_keys(state), [SID8])
 
 
 class PermissionFailureRunTest(unittest.TestCase):
@@ -319,7 +357,13 @@ class HeadlessGateTest(unittest.TestCase):
         for status in ("waiting", "idle", "busy"):
             _, reason = watch.is_gated(status, "nothing", stuck="stream-closed")
             self.assertFalse(reason.startswith("stuck:"), status)
-        _, reason = watch.is_gated(None, "nothing", stuck="stream-closed")
+        # The headless contrast: status None WITH a fresh heartbeat is the one
+        # shape that legitimately reads `stuck:` — the heal ladder's own case.
+        # ⚠️ Without the heartbeat this is a DEAD session and reads `unregistered`
+        # instead; see ReplayTest.test_a_dead_session_with_a_stuck_tail_is_unregistered_not_gated
+        # for the reading, and why the heartbeat is the discriminator.
+        _, reason = watch.is_gated(None, "nothing", headless_live=True,
+                                   stuck="stream-closed")
         self.assertEqual(reason, "stuck:stream-closed")
 
 

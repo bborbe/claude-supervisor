@@ -26,8 +26,10 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
-import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
+import { resolveMessageChannel } from './message-channel.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
@@ -125,6 +127,22 @@ const log = (...a) => {
   try {
     appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}`)
   } catch {}
+}
+
+// ⚠️ The config-dir refusal is a hard exit, not a warning, and it sits here because this is
+// the first point at which the logger exists: above it `log` is in its temporal dead zone, so
+// only `console` could write, and RULE node/logging/structured-not-console bars `console`
+// from service code. Nothing between the imports and this line starts a session, opens a
+// transport or writes state, so the refusal still lands before any work.
+//
+// A server whose parent carried a different `CLAUDE_CONFIG_DIR` resolves its session
+// registry and transcript root from the wrong place, then runs normally while reporting a
+// `transcript_dir` no fleet reader can see and registering nowhere the fleet looks — a silent
+// failure, so refusing to start is the only honest outcome. See the resolution in config.mjs
+// for the measurement.
+if (config.claudeHomeRefusal) {
+  log(config.claudeHomeRefusal)
+  process.exit(1)
 }
 
 // ── roster rehydration ──────────────────────────────────────────────────────
@@ -874,6 +892,48 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
   })
 }
 
+// The cluster target EVERY cluster call resolves — one home, so a spawn and a follow-up
+// cannot disagree about which service they address or which token they present.
+//
+// Resolved here rather than in config.mjs, mirroring resolveSpawnMode: that module owns the
+// environment surface and hands over the raw file, and the module that owns the MEANING
+// decides precedence and refuses a bad value. See resolveClusterTarget for why the config
+// file is the only source that can reach an already-running server.
+//
+// The token travels inside this value and is never echoed: every refusal on the path
+// (`resolveClusterTarget`, `resolveAuthToken`, `startClusterSession`) names the variable or
+// the file to fix, never the secret.
+function clusterTarget() {
+  return resolveClusterTarget({
+    envUrl: config.clusterUrl,
+    envToken: config.clusterAuthToken,
+    file: config.configFileContents,
+    path: config.configFile,
+  })
+}
+
+// One finished cluster turn, in the shape `agent.result` and the tool result both carry.
+//
+// ⚠️ **`answer`, `outcome` and `truncated` are the three fields a caller cannot re-derive.**
+// The response is gone by the time this returns, so a caller that drops them has nothing to
+// reconstruct them from — which is exactly how three complete answers, one of them a
+// success, were read from the outside as three empty turns on 2026-10-08. `answer` is the
+// child's own words, bounded because its reader is a manager session's context; `truncated`
+// is named rather than inferred from the length, so a cut answer is never read as a short one.
+//
+// The shape is deliberately NOT the SDK envelope `agent-loop.mjs` writes for a local
+// worker. `subtype`, `is_error` and `num_turns` are facts about an SDK query and a cluster
+// turn has none of them; borrowing the shape would put three invented values in a field
+// readers already trust. The record's `mode: "cluster"` is what tells the two shapes apart.
+function clusterTurnResult(started) {
+  const answer = typeof started.answer === 'string' ? started.answer : ''
+  return {
+    outcome: started.outcome ?? classifyClusterAnswer(answer),
+    answer: answer.slice(0, CLUSTER_ANSWER_MAX),
+    truncated: answer.length > CLUSTER_ANSWER_MAX,
+  }
+}
+
 // A cluster worker: a session inside the `claude-interactive` service, not a process here.
 //
 // A different shape from both paths below, rather than a third branch of them. It has no
@@ -887,6 +947,7 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
 // down is a worker the fleet cannot find. It is written only AFTER the call succeeds —
 // stamping a task with an id the service refused would point it at a conversation that does
 // not exist, which is worse than an empty field.
+
 async function spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed, env }) {
   // Arguments the cluster path cannot honour are REFUSED, never accepted and quietly ignored —
   // the same rule the tab path already carries for `resume` and `policy`. Silently dropping
@@ -903,9 +964,10 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
   if (resume) {
     return {
       error:
-        'resume is not supported with target "cluster": a cluster worker is a session inside the ' +
-        'claude-interactive service, and this path cannot continue an existing conversation. Omit `resume`, ' +
-        'or spawn locally.',
+        'resume is not supported with target "cluster": this path mints a NEW session id, so it cannot ' +
+        'continue an existing conversation. To send a further turn to a cluster session that already ' +
+        'exists, call `send_agent_message` on that worker — the refusal names it because the old wording ' +
+        'left a caller with no route at all. Omit `resume`, or spawn locally.',
     }
   }
   if (policyPath) {
@@ -942,16 +1004,7 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
   const minted = newSessionId()
   if (minted.error) return { error: minted.error }
 
-  // Resolved here rather than in config.mjs, mirroring resolveSpawnMode: that module owns the
-  // environment surface and hands over the raw file, and the module that owns the MEANING
-  // decides precedence and refuses a bad value. See resolveClusterTarget for why the config
-  // file is the only source that can reach an already-running server.
-  const target = resolveClusterTarget({
-    envUrl: config.clusterUrl,
-    envToken: config.clusterAuthToken,
-    file: config.configFileContents,
-    path: config.configFile,
-  })
+  const target = clusterTarget()
   if (target.error) return { error: target.error }
 
   const started = await startClusterSession({
@@ -970,20 +1023,10 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
   // has exited. They are one fact seen by three readers, so a null in any of them puts the three
   // reads in disagreement about a turn that has already finished — which is exactly how three
   // complete answers, one of them a success, were read from the outside as three empty turns on
-  // 2026-10-08 (sessions `9fac5053`, `38a2bdae`, `a3be5a1b`).
-  //
-  // The shape is deliberately NOT the SDK envelope `agent-loop.mjs` writes for a local worker.
-  // `subtype`, `is_error` and `num_turns` are facts about an SDK query and a cluster turn has
-  // none of them; borrowing the shape would put three invented values in a field readers
-  // already trust. The record's `mode: "cluster"` is what tells the two shapes apart.
-  const answer = typeof started.answer === 'string' ? started.answer : ''
-  const result = {
-    outcome: started.outcome ?? classifyClusterAnswer(answer),
-    answer: answer.slice(0, CLUSTER_ANSWER_MAX),
-    // Named rather than left to be inferred from the length: a caller comparing this against
-    // what the child said must know the tail was cut, or a truncated answer reads as a short one.
-    truncated: answer.length > CLUSTER_ANSWER_MAX,
-  }
+  // 2026-10-08 (sessions `9fac5053`, `38a2bdae`, `a3be5a1b`). The shape itself, and why it is
+  // not the SDK envelope, is `clusterTurnResult`'s — one home, so a spawn and a follow-up
+  // cannot report the same turn differently.
+  const result = clusterTurnResult(started)
 
   const bound = bindSessionToTask({ task, vault, sessionId: started.sessionId })
   if (bound.error) {
@@ -1194,7 +1237,18 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const workerCwd = workerTarget.cwd
   // `SUPERVISOR_CLAUDE_CMD` stays the top override: an explicit operator setting rather
   // than a fallback, and the documented way to force a launcher for a one-off spawn.
-  const workerLauncher = config.claudeCmd || workerTarget.launcher
+  //
+  // Below it, a task's own `launcher:` frontmatter, then its goal's, then the vault's
+  // `claude_script` — see `resolveTaskLauncher`.
+  let taskLauncher = { launcher: workerTarget.launcher, source: 'vault' }
+  if (!config.claudeCmd && typeof task === 'string' && task) {
+    const read = readTaskLaunchers({ task, vault: workerTarget.vault })
+    if (read.error) return { error: read.error }
+    taskLauncher = resolveTaskLauncher({ vaultLauncher: workerTarget.launcher, ...read })
+    for (const w of read.warnings ?? []) log(`spawn ${task}: ${w}`)
+    if (taskLauncher.error) return { error: taskLauncher.error }
+  }
+  const workerLauncher = config.claudeCmd || taskLauncher.launcher
   const workerModel = launcherModelFor(workerLauncher)
   let workerRules = null
   let resolvedPolicyPath = null
@@ -1453,6 +1507,9 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // so a batch of 27 wrong workers returned exactly what a correct one returns.
       vault: agent.vault,
       launcher: agent.launcher,
+      // Which rule picked it: `task` / `goal` frontmatter, the `vault` default, or the
+      // `SUPERVISOR_CLAUDE_CMD` override.
+      launcher_source: config.claudeCmd ? 'override' : taskLauncher.source,
       model: agent.model,
       interactive: true,
       mode_source: agent.modeSource,
@@ -1545,6 +1602,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // model a worker runs under are not observable from the arguments that produced it.
     vault: agent.vault,
     launcher: agent.launcher,
+    launcher_source: config.claudeCmd ? 'override' : taskLauncher.source,
     model: agent.model,
     interactive: false,
     mode_source: agent.modeSource,
@@ -1678,12 +1736,12 @@ const TOOLS = [
         task: {
           type: 'string',
           description:
-            'The vault task this worker is opened for. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with `target: "cluster"`. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+            'The vault task this worker is opened for. On every LOCAL path it also chooses the launcher: the task\'s `launcher:` frontmatter, else its goal\'s, else the vault\'s `claude_script` (rule: docs/fleet-surface.md § Spawn a worker item 8) — so a task that cannot be read REFUSES the spawn. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with `target: "cluster"`. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
         },
         vault: {
           type: 'string',
           description:
-            'The vault this worker belongs to. Resolves BOTH the working directory and the launcher (that vault\'s `claude_script`) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
+            'The vault this worker belongs to. Resolves BOTH the working directory and the default launcher (that vault\'s `claude_script`, which a `task`\'s `launcher:` frontmatter can override) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
         },
         resume: {
           type: 'string',
@@ -1734,7 +1792,7 @@ const TOOLS = [
   {
     name: 'send_agent_message',
     description:
-      'Send a follow-up message to a running INTERACTIVE (tab) worker — the send_to_agent this server has never had. It activates the worker tab, waits for the input prompt, and types the message, so it STEALS FOCUS and only works on a tab worker: a headless worker has no pane to send into. Returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears.',
+      'Send a follow-up message to a running worker — the send_to_agent this server has never had. TWO transports, chosen from the worker\'s own record. A TAB worker: activates its tab, waits for the input prompt, and types the message, so it STEALS FOCUS; returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. A headless worker has neither a pane nor a cluster session and is refused; answer its parked prompts with `answer_permission` instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1882,18 +1940,55 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (typeof args.message !== 'string' || !args.message.trim()) {
         return reply({ error: 'message is required' })
       }
-      // Refused rather than attempted: a headless worker has no pane, and typing into
-      // one that does not exist is how a channel reports success while delivering
-      // nothing. Its prompts are answered with answer_permission instead.
-      if (agent.status !== 'interactive' || !agent.paneId) {
+      // Which transport carries this, and why it is that one — `message-channel.mjs` owns
+      // the decision, so the refusal names the right reason for each of the three worker
+      // kinds. The guard this replaces read `status !== 'interactive' || !paneId`, which is
+      // "has a pane?" wearing a general guard's clothes: true for a headless worker, and
+      // accidentally true for every cluster worker, whose record carries `paneId: null` by
+      // construction.
+      const channel = resolveMessageChannel(agent)
+      if (channel.error) return reply({ error: channel.error })
+
+      if (channel.channel === 'cluster') {
+        // Resolved per call, never cached on the agent record: the config file is the only
+        // source that reaches an already-running server, and a value cached at spawn would
+        // keep presenting a token the operator has since rotated.
+        const target = clusterTarget()
+        if (target.error) return reply({ error: target.error })
+        // No `newSessionId()` here, and that is the whole change: the id comes from the
+        // worker's own record, so the turn lands on the conversation the caller named
+        // rather than opening a fresh one that would look identical.
+        const started = await startClusterSession({
+          baseUrl: target.url,
+          authToken: target.token,
+          prompt: args.message,
+          sessionId: channel.sessionId,
+        })
+        if (started.error) return reply({ error: started.error })
+        // The turn is already over — see `clusterTurnResult`. Recorded on the agent AND in
+        // the ledger, because a cluster worker's `result` is its last finished turn: unlike
+        // a local worker, whose result is written once at turn end, this one is overwritten
+        // by each follow-up, and `agent_status`, `list_agents` and a peer manager reading
+        // the ledger must all see the same latest turn.
+        const result = clusterTurnResult(started)
+        agent.messages = [...(agent.messages ?? []), { at: new Date().toISOString(), text: args.message }]
+        agent.result = result
+        writeLedger(agent, { result })
+        log(`sent a follow-up message to cluster worker ${agent.id} (session ${channel.sessionId}, ${result.outcome})`)
         return reply({
-          error: `agent ${args.agent_id} is not a tab worker (status "${agent.status}", pane ${agent.paneId ?? 'none'}) — send_agent_message reaches a pane, so it only works on interactive workers`,
+          agent_id: agent.id,
+          sent: true,
+          session_id: channel.sessionId,
+          answer: result.answer,
+          outcome: result.outcome,
+          truncated: result.truncated,
         })
       }
-      const res = await sendToPane(agent.paneId, args.message)
+
+      const res = await sendToPane(channel.paneId, args.message)
       if (res.error) return reply({ error: res.error })
       agent.messages = [...(agent.messages ?? []), { at: new Date().toISOString(), text: args.message }]
-      log(`sent a follow-up message to ${agent.id} (pane ${agent.paneId}, tab ${res.tabId})`)
+      log(`sent a follow-up message to ${agent.id} (pane ${channel.paneId}, tab ${res.tabId})`)
       return reply({ agent_id: agent.id, sent: true, tab_id: res.tabId, pane_id: res.paneId })
     }
 

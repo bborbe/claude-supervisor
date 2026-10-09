@@ -68,5 +68,5 @@ Routine approvals are yours. Escalate to the human when the request is outside t
 
 - Cost figures the server reports are priced from Anthropic's table and mean nothing when traffic is routed elsewhere — never quote them.
 - An unanswered permission auto-denies after 15 minutes — **headless workers only**. A tab worker's prompt waits for its tab indefinitely.
-- A headless worker is single-shot: one prompt, one conversation. A tab worker takes follow-ups through `send_agent_message`.
+- A headless worker is single-shot: one prompt, one conversation. A tab worker takes follow-ups through `send_agent_message` (typed into its pane, stealing focus), and so does a **cluster** worker — there the same tool posts one more turn on the session id that worker already holds and blocks until the pod answers.
 - A headless worker is invisible to the **session roster** (`/fleet-status`, the `●` set) — it has no socket — so a roster-only sweep reads its task as unowned and may spawn a duplicate onto it. `list_agents` does show it; check there before concluding a task has no owner.
