@@ -18,12 +18,20 @@ Anchored on the clauses' own opening words, never on line numbers: this file's p
 moved twice inside one day (measured 2026-10-09), and a line-anchored read would have
 reported drift that was really an offset.
 
-**What this proves, and what it does not.** It proves the canonical clause is still
-carried, that the retracted readings have not reappeared anywhere in the rule-carrying
-text, and that the goal branch's exemption from the absent-input rule is still stated.
-It cannot prove the four carriers say the *same thing* — that is a reading, not a grep,
-and the round that produced this guard is the evidence that no grep would have caught it.
-This is the drift guard, not the semantics.
+⚠️ **The carrier count is matched by pattern, not by an exact string, and that is load-bearing.**
+The four carriers do not spell the clause identically — the input-8 contract lowercases the
+subject (*"a declared member goal renders as its own row…"*) and the optional-split paragraph
+bolds the zero (*"…even with **0** tracked tasks"*). An exact-string count therefore sees only
+**two** of the four and passes a tree that has deleted the clause from either of the others,
+which is precisely the drift this guard exists to catch. A reviewer found that gap in this
+guard's first version.
+
+**What this proves, and what it does not.** It proves all four carriers still state the rule,
+that the goal branch's exemption from the absent-input rule is still stated, and that the
+retracted readings have not reappeared anywhere in the rule-carrying text. It cannot prove the
+four carriers say the *same thing* — that is a reading, not a grep, and the round that produced
+this guard is the evidence that no grep would have caught it. This is the drift guard, not the
+semantics.
 
 ⚠️ **The retraction scan is deliberately scoped to `.md` under `agents/`, `commands/` and
 `docs/`, and widening it to the repo root would fail on `CHANGELOG.md` itself** — that file
@@ -34,19 +42,34 @@ changelog, and the reason it has none today is that the changelog is history whi
 scanned directories are the rule.
 """
 
+import re
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The one sentence every carrier of the rule is built around.
-CLAUSE = "A member goal renders as its own row even with 0 tracked tasks"
-CLAUSE_CARRIER = "agents/manager-sweep-reader.md"
+# The one sentence every carrier of the rule is built around, as a tolerant pattern. See the
+# docstring: an exact string sees two of the four carriers, which is the defect this pattern
+# replaces.
+CLAUSE_RE = re.compile(
+    r"renders as its own row even with \*{0,2}0\*{0,2} tracked tasks",
+    re.IGNORECASE,
+)
+CARRIER = "agents/manager-sweep-reader.md"
+CARRIER_MIN = 4
 
 # Readings that were deliberately withdrawn. Each one had a defensible reading on the
 # other side, which is exactly why it may not return as prose anywhere.
+#
+# ⚠️ The placement anchor is the LONGEST still-unambiguous fragment, not the shortest one
+# that reads naturally. `"derived from its tasks"` alone is broader than the reading it
+# retracts: the rule now legitimately says a goal row's **section** follows its tasks'
+# placement, so a future carrier phrasing that as "derived from" would trip a precommit
+# failure that reads as a rule regression. The full fragment stays narrow because the rule's
+# own vocabulary for the section is *follows*, and the retracted sentence is the only place
+# the derivation was ever attached to the row's EXISTENCE.
 RETRACTED = (
-    "derived from its tasks",  # the placement-derivation that dropped zero-task rows
+    "derived from its tasks' placement",
     "you never place a goal",  # the imperative the existence rule contradicts
     "you place tasks, never goals",  # the same imperative, success-criteria form
 )
@@ -72,23 +95,24 @@ def markdown_files() -> list[Path]:
 
 
 def main() -> int:
-    carrier = REPO / CLAUSE_CARRIER
+    carrier = REPO / CARRIER
     if not carrier.exists():
-        print(f"goal-row-clause FAILED: {CLAUSE_CARRIER} does not exist", file=sys.stderr)
+        print(f"goal-row-clause FAILED: {CARRIER} does not exist", file=sys.stderr)
         return 1
 
     text = carrier.read_text(encoding="utf-8")
-    hits = text.count(CLAUSE)
-    if hits < 1:
+    hits = len(CLAUSE_RE.findall(text))
+    if hits < CARRIER_MIN:
         print(
-            f"goal-row-clause FAILED: {CLAUSE_CARRIER} no longer carries the clause "
-            f"{CLAUSE!r}",
+            f"goal-row-clause FAILED: {CARRIER} states the clause {hits} time(s), want "
+            f"{CARRIER_MIN} — the four carriers are input 8's contract, step 7's frame "
+            f"paragraph, the optional-split paragraph and the success_criteria bullet",
             file=sys.stderr,
         )
         return 1
     if GOAL_BRANCH_EXEMPTION not in text:
         print(
-            f"goal-row-clause FAILED: {CLAUSE_CARRIER} dropped the goal-branch exemption "
+            f"goal-row-clause FAILED: {CARRIER} dropped the goal-branch exemption "
             f"({GOAL_BRANCH_EXEMPTION!r}) — a goal-branch sweep always has input 8 absent, "
             f"so the absent-input rule must name that branch as exempt or it deletes the "
             f"root row of every goal-branch frame",
@@ -109,7 +133,7 @@ def main() -> int:
         return 1
 
     print(
-        f"goal-row-clause ok: the clause is carried {hits}x in {CLAUSE_CARRIER}, the goal-branch "
+        f"goal-row-clause ok: the clause is stated {hits}x in {CARRIER}, the goal-branch "
         f"exemption is stated, and none of the {len(RETRACTED)} retracted readings appears across "
         f"{len(scanned)} file(s) in {', '.join(SCAN_DIRS)}"
     )
