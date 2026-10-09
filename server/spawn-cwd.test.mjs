@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 
 const VAULTS = [
   {
@@ -178,4 +178,54 @@ test('does not mistake a line merely mentioning a model for the --model argument
 
 test('an unresolved export reports no model rather than the empty string', () => {
   assert.equal(parseLauncherModel('export M=""\nclaude --model "${M}" "$@"\n'), null)
+})
+
+// Task / goal `launcher:` precedence. Each case asserts the RESOLVED path, not merely that a
+// value came back, so a resolver that echoed the field without applying precedence fails.
+const VAULT_LAUNCHER = '/scripts/cc-private'
+
+test('task launcher: a bare name resolves beside the vault launcher', () => {
+  assert.deepEqual(resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, taskLauncher: 'cc-private-claude', goalLaunchers: [] }), {
+    launcher: '/scripts/cc-private-claude',
+    source: 'task',
+  })
+})
+
+test('nothing set: the vault launcher is returned unchanged', () => {
+  assert.deepEqual(resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, taskLauncher: '', goalLaunchers: ['', ''] }), {
+    launcher: VAULT_LAUNCHER,
+    source: 'vault',
+  })
+})
+
+test('goal launcher is inherited when the task names none', () => {
+  assert.deepEqual(resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, taskLauncher: '', goalLaunchers: ['', 'cc-private-claude'] }), {
+    launcher: '/scripts/cc-private-claude',
+    source: 'goal',
+  })
+})
+
+test('task launcher overrides the goal launcher', () => {
+  assert.deepEqual(
+    resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, taskLauncher: 'cc-private', goalLaunchers: ['cc-private-claude'] }),
+    { launcher: '/scripts/cc-private', source: 'task' },
+  )
+})
+
+test('two goals agreeing on a launcher resolve to it', () => {
+  assert.equal(
+    resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, goalLaunchers: ['cc-private-claude', 'cc-private-claude'] }).launcher,
+    '/scripts/cc-private-claude',
+  )
+})
+
+test('two goals disagreeing are refused, naming both', () => {
+  const r = resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, goalLaunchers: ['cc-private-claude', 'cc-private-deepseek'] })
+  assert.ok(r.error)
+  assert.match(r.error, /cc-private-claude/)
+  assert.match(r.error, /cc-private-deepseek/)
+})
+
+test('a value with a slash is used as given', () => {
+  assert.equal(resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, taskLauncher: '/other/cc-x' }).launcher, '/other/cc-x')
 })

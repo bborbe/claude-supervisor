@@ -26,7 +26,7 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
-import { parseLauncherModel, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
@@ -687,6 +687,36 @@ function launcherModelFor(scriptPath) {
   }
 }
 
+// The `launcher:` frontmatter of a task and of each of its goals, or `{ error }`.
+//
+// Precedence lives in `resolveTaskLauncher`; this only reads. A read that FAILS (task not
+// found, vault-cli exits non-zero) is an error rather than "no field": reading it as absent
+// would open a task that asked for Claude on the vault default — the silent wrong launcher
+// this server refuses everywhere else. An EMPTY value is a real answer: the field is unset.
+function readTaskLaunchers({ task, vault }) {
+  const run = (args) => {
+    const out = spawnSync('vault-cli', [...args, '--vault', vault, '--output', 'json'], { encoding: 'utf8' })
+    if (out.status !== 0) {
+      throw new Error(`vault-cli ${args.slice(0, 2).join(' ')} failed: ${(out.stderr || out.stdout || '').trim()}`)
+    }
+    return JSON.parse(out.stdout)
+  }
+  try {
+    const taskLauncher = run(['task', 'get', task, 'launcher']).value ?? ''
+    const goals = (run(['task', 'show', task]).goals ?? [])
+      .map((g) => String(g).replace(/^\[\[|\]\]$/g, '').trim())
+      .filter(Boolean)
+    const goalLaunchers = goals.map((g) => run(['goal', 'get', g, 'launcher']).value ?? '')
+    return { taskLauncher, goalLaunchers }
+  } catch (error) {
+    return {
+      error:
+        `could not read the \`launcher:\` field of task ${JSON.stringify(task)} or its goals in vault ` +
+        `${JSON.stringify(vault)} — refusing rather than opening it on the vault default: ${error.message}`,
+    }
+  }
+}
+
 // Read the servers the launcher passes via `--mcp-config <file>`. These arrive as a
 // CLI flag, not as settings, so settingSources cannot reach them: an SDK worker with
 // settings loaded still saw 7 fewer servers than its tab twin. Handing the same file
@@ -1188,7 +1218,17 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const workerCwd = workerTarget.cwd
   // `SUPERVISOR_CLAUDE_CMD` stays the top override: an explicit operator setting rather
   // than a fallback, and the documented way to force a launcher for a one-off spawn.
-  const workerLauncher = config.claudeCmd || workerTarget.launcher
+  //
+  // Below it, a task's own `launcher:` frontmatter, then its goal's, then the vault's
+  // `claude_script` — see `resolveTaskLauncher`.
+  let taskLauncher = { launcher: workerTarget.launcher, source: 'vault' }
+  if (!config.claudeCmd && typeof task === 'string' && task) {
+    const read = readTaskLaunchers({ task, vault: workerTarget.vault })
+    if (read.error) return { error: read.error }
+    taskLauncher = resolveTaskLauncher({ vaultLauncher: workerTarget.launcher, ...read })
+    if (taskLauncher.error) return { error: taskLauncher.error }
+  }
+  const workerLauncher = config.claudeCmd || taskLauncher.launcher
   const workerModel = launcherModelFor(workerLauncher)
   let workerRules = null
   let resolvedPolicyPath = null
@@ -1447,6 +1487,9 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       // so a batch of 27 wrong workers returned exactly what a correct one returns.
       vault: agent.vault,
       launcher: agent.launcher,
+      // Which rule picked it: `task` / `goal` frontmatter, the `vault` default, or the
+      // `SUPERVISOR_CLAUDE_CMD` override.
+      launcher_source: config.claudeCmd ? 'override' : taskLauncher.source,
       model: agent.model,
       interactive: true,
       mode_source: agent.modeSource,
@@ -1539,6 +1582,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // model a worker runs under are not observable from the arguments that produced it.
     vault: agent.vault,
     launcher: agent.launcher,
+    launcher_source: config.claudeCmd ? 'override' : taskLauncher.source,
     model: agent.model,
     interactive: false,
     mode_source: agent.modeSource,

@@ -127,6 +127,51 @@ export function resolveWorkerTarget({ cwd, vault, vaults, serverCwd } = {}) {
   return { cwd, vault: match.name, launcher: match.claude_script }
 }
 
+// The launcher a task's worker opens with, or `{ error }`.
+//
+// A task or goal may carry a `launcher:` frontmatter field naming a launcher script, so that
+// e.g. trading work opens on `cc-private-claude` while the vault default stays
+// `cc-private`. Precedence is task > goal > the vault's `claude_script`; absent on both, the
+// vault launcher is returned unchanged, so a spawn without the field behaves exactly as it
+// did before the field existed.
+//
+// A bare name (`cc-private-claude`) resolves in the same directory as the vault's own
+// launcher — the cc-* scripts live side by side — and a value containing `/` is used as
+// given. The value is deliberately NOT checked against a list of known launchers (operator
+// decision 2026-10-09): a typo surfaces as an unreadable `model: null` on the spawn
+// response, which is the observable this module already reports.
+//
+// Two goals naming different launchers is REFUSED, not resolved by order. Frontmatter list
+// order is not a precedence anyone chose, so picking the first would be a silent guess —
+// the failure class this module exists to remove.
+export function resolveTaskLauncher({ vaultLauncher, taskLauncher, goalLaunchers } = {}) {
+  const clean = (v) => (typeof v === 'string' ? v.trim() : '')
+  const toPath = (name) => {
+    if (name.includes('/')) return name
+    const slash = typeof vaultLauncher === 'string' ? vaultLauncher.lastIndexOf('/') : -1
+    return slash === -1 ? name : `${vaultLauncher.slice(0, slash)}/${name}`
+  }
+
+  const own = clean(taskLauncher)
+  if (own) return { launcher: toPath(own), source: 'task' }
+
+  const fromGoals = [
+    ...new Set(
+      (Array.isArray(goalLaunchers) ? goalLaunchers : []).map(clean).filter(Boolean),
+    ),
+  ]
+  if (fromGoals.length > 1) {
+    return {
+      error:
+        `the task's goals name different launchers (${fromGoals.join(', ')}) and the task names none — ` +
+        'refusing rather than picking one by frontmatter order. Set `launcher:` on the task to choose.',
+    }
+  }
+  if (fromGoals.length === 1) return { launcher: toPath(fromGoals[0]), source: 'goal' }
+
+  return { launcher: vaultLauncher, source: 'vault' }
+}
+
 // The model a launcher script starts its session with, or `null` when it cannot be read.
 //
 // Read from the script rather than from vault-cli config, because the model is not in that
