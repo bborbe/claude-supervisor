@@ -699,7 +699,48 @@ def is_gated(status, body, headless_live=False, stuck=None, pending=None,
     session — a headless worker, which has no pid — so the registry half is
     UNAVAILABLE rather than negative, and the transcript half decides alone.
     Reading both as UNREGISTERED is what holds every headless worker forever.
+
+    ⚠️ The DEAD case is settled ahead of the `stuck` limb, and that order is
+    load-bearing: a `None` status with no fresh heartbeat is a session that is
+    gone, so it returns UNREGISTERED even when its frozen tail still carries a
+    `stuck` marker. Running `stuck` first gated a dead session — a gate nothing
+    can answer, offered to the operator with a heal ladder pointed at a session
+    that no longer exists. See the branch comment for the measurement, and for
+    why the discriminator is the heartbeat rather than the registry.
     """
+    # ⚠️ **THE DEAD SESSION IS SETTLED FIRST, and this ordering IS the fix.**
+    # The `stuck` limb below used to run ahead of this test, so a session with NO
+    # registry entry and NO fresh heartbeat — a worker that is simply gone — read
+    # `(True, "stuck:<cause>")` and entered the GATED set whenever its frozen
+    # transcript tail still carried a `stream-closed` marker. That is a gate
+    # nothing can answer: the row is offered to the operator, the heal ladder is
+    # told a headless resume is owed, and there is no session left to resume.
+    # Measured 2026-10-09 on the vault-ui-ultra-fast-reads-and-writes tracked set:
+    # session `e4fd1919` — registry entry absent, no heartbeat stamp, transcript
+    # frozen since 2026-10-05 — rendered `GATED e4fd1919 [stuck:stream-closed]`
+    # against `gated: 1  held: 13`, while the drive leg had already reported of
+    # that same session that "no session remains to receive it".
+    #
+    # ⚠️ **The discriminator is the HEARTBEAT, never the registry alone**, and that
+    # distinction is what keeps the limb below alive. A headless worker is not in
+    # the registry by construction — it is an in-process `query()` with no pid — so
+    # gating `stuck:` on registry presence would delete the very reason `stuck:`
+    # exists. `headless_live` is the fact that separates the two: a live headless
+    # worker re-stamps every `HEARTBEAT_INTERVAL_MS` (30 s) and reads live until
+    # `HEARTBEAT_TTL_MS` (60 s), so it ALWAYS holds a fresh stamp, while a session
+    # with no stamp at all is gone. Both intended readings survive unchanged —
+    # `stuck:` for a headless worker (status None + fresh stamp), `stuck-tab:` for
+    # a registered one.
+    #
+    # ⚠️ The one narrowing this accepts, stated rather than left to be discovered:
+    # on a host whose heartbeat store is absent or unreadable, `headless_live` is
+    # False for every session, so a stuck headless worker there reads
+    # `unregistered` (HELD) instead of `stuck:` (gated). That is the safe
+    # direction — such a host already cannot see a headless worker well enough to
+    # gate `headless+closer` either — and it is the same narrowing `heartbeat_live`
+    # already documents for the registry half.
+    if status is None and not headless_live:
+        return None, "unregistered"
     # Deliberately ahead of the registry half: a dead permission channel is the
     # more specific fact, even on a worker the registry also reads as waiting.
     # ⚠️ A registered worker is a TAB worker, and the heal ladder's first rung is a
@@ -708,8 +749,6 @@ def is_gated(status, body, headless_live=False, stuck=None, pending=None,
     if stuck:
         return True, ("stuck:" if status is None else "stuck-tab:") + stuck
     if status is None:
-        if not headless_live:
-            return None, "unregistered"
         if body is _CLOSER_UNKNOWN:
             return None, "closer-unknown"
         if is_ask(body):

@@ -9,6 +9,10 @@ emission and the session was gone ~10 minutes later):
   * the re-check embeds the FULL session id — a prefix is the measured trap on the
     sibling read (it returns UNREADABLE, the branch that says "act as before");
   * `absent` and `unknown` render the candidate, which carries no command;
+  * a `closed` newest closer suppresses the runnable line even on a LIVE verdict —
+    the 2026-10-09 measurement, where the line was void at BIRTH rather than
+    decaying: the session had closed clean four minutes BEFORE the line was
+    emitted, so a live verdict alone is not a sufficient condition;
   * the stamp is the emission moment, not a constant — two emissions differ, and
     `--now` pins it for a fixture.
 
@@ -78,6 +82,44 @@ class CloseLineTest(unittest.TestCase):
         # the distinction and is the one that acts on it.
         self.assertIn("🔧 CLOSE-ME CANDIDATE:", self.line(M.LIVENESS_UNKNOWN))
 
+    # --- the second input: the caller's newest-closer read ------------------
+
+    def test_a_closed_closer_suppresses_the_runnable_line(self):
+        # THE FIX. The registry answers "is the process alive"; a session that has
+        # run its own close is live for as long as its process holds the socket, so
+        # a live verdict alone cannot see that the instruction is already void.
+        # Measured 2026-10-09: the session closed clean at 07:39:39Z and the line
+        # was emitted at 07:43:21Z — void at birth, not decayed.
+        out = self.line(M.LIVENESS_LIVE, closer=M.CLOSER_CLOSED)
+        self.assertIn("🔧 CLOSE-ME CANDIDATE:", out)
+        self.assertNotIn("✅ DONE — CLOSE:", out)
+        self.assertNotIn("re-check", out)
+        self.assertNotIn(M.CLOSE_ACTION, out)
+
+    def test_the_closed_candidate_does_not_claim_liveness_is_unverified(self):
+        # The two candidate reasons must not collapse: here the liveness IS
+        # confirmed, so "UNVERIFIED" would be a false statement about the probe.
+        out = self.line(M.LIVENESS_LIVE, closer=M.CLOSER_CLOSED)
+        self.assertNotIn(M.CANDIDATE_SUFFIX, out)
+        self.assertIn(M.CLOSED_SUFFIX, out)
+
+    def test_an_open_closer_leaves_the_liveness_verdict_deciding(self):
+        # A real gate: the row still owes its close, so the line stays runnable.
+        self.assertIn("✅ DONE — CLOSE:",
+                      self.line(M.LIVENESS_LIVE, closer=M.CLOSER_OPEN))
+
+    def test_an_unreadable_closer_never_suppresses(self):
+        # `agents/manager-drive.md`: a failed read never suppresses a notice.
+        self.assertIn("✅ DONE — CLOSE:",
+                      self.line(M.LIVENESS_LIVE, closer=M.CLOSER_UNREADABLE))
+
+    def test_omitting_the_closer_behaves_exactly_as_before(self):
+        # Absent is not a silent default to `open` — it is the pre-flag contract,
+        # so a caller that has not adopted the second read is unaffected.
+        self.assertEqual(self.line(M.LIVENESS_LIVE),
+                         self.line(M.LIVENESS_LIVE, closer=None))
+        self.assertIn("✅ DONE — CLOSE:", self.line(M.LIVENESS_LIVE, closer=None))
+
     # --- the stamp ---------------------------------------------------------
 
     def test_stamp_is_the_emission_moment_not_a_constant(self):
@@ -98,11 +140,16 @@ class CloseLineTest(unittest.TestCase):
         # The defect this script exists to remove: a close instruction a reader
         # cannot settle. Every value either carries the stamp + command, or
         # carries no close verb at all.
+        #
+        # ⚠️ Over BOTH axes. The closer is a second way into the runnable branch,
+        # and an invariant checked on one axis is exactly how a new input
+        # reintroduces the defect it was written to remove.
         for word in M.LIVENESS_WORDS:
-            out = self.line(word)
-            if "✅ DONE — CLOSE:" in out:
-                self.assertIn("— verified ", out)
-                self.assertIn("· re-check: ", out)
+            for closer in (None,) + M.CLOSER_WORDS:
+                out = self.line(word, closer=closer)
+                if "✅ DONE — CLOSE:" in out:
+                    self.assertIn("— verified ", out)
+                    self.assertIn("· re-check: ", out)
 
     # --- CLI contract ------------------------------------------------------
 
@@ -111,6 +158,18 @@ class CloseLineTest(unittest.TestCase):
         self.assertEqual(M.main(["--task", TASK, "--session", SID, "--liveness", "parked"]), 0)
         self.assertEqual(M.main(["--task", TASK, "--session", SID, "--liveness", "absent"]), 1)
         self.assertEqual(M.main(["--task", TASK, "--session", SID, "--liveness", "unknown"]), 1)
+        # The closer axis: a live verdict on a closed-clean session renders the
+        # candidate, so a caller branching on 0/1 sees the same split as the reader.
+        self.assertEqual(
+            M.main(["--task", TASK, "--session", SID, "--liveness", "live",
+                    "--closer", "closed"]),
+            1,
+        )
+        self.assertEqual(
+            M.main(["--task", TASK, "--session", SID, "--liveness", "live",
+                    "--closer", "open"]),
+            0,
+        )
 
     def test_bad_now_is_a_usage_error_not_a_silent_stamp(self):
         self.assertEqual(
