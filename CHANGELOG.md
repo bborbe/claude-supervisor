@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.123.0
 
 - feat: `spawn_agent` honours a `launcher:` frontmatter field on the task, else its goal, else the vault `claude_script` (bare name resolves beside the vault launcher; conflicting goals and unreadable frontmatter are refused); response adds `launcher_source` (`task`/`goal`/`vault`/`override`); `/supervisor:open` resume path applies the same rule
 
