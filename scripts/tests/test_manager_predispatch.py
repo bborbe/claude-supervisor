@@ -3047,5 +3047,81 @@ class TestRosterOwnerTruncation(Base):
                                          mod._norm_session_name(probe))
 
 
+class TestCheckboxCountStruckRows(unittest.TestCase):
+    """`checkbox_count` excludes a struck row — and the SHAPE of that exclusion is load-bearing.
+
+    The rule carriers (`agents/manager-sweep-reader.md:457-458`) state the unit as the
+    file's total checkboxes with struck rows excluded. Both ways an implementation can get
+    the shape wrong are regressions with measurements behind them, not hypotheticals: an
+    anchor requiring the whole row to be the struck wikilink matches **nothing** in the
+    live vault (measured 2026-10-08 — 0 of 33 struck rows), and an exclusion keyed on `~~`
+    anywhere in the line drops a ticked box.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.m = load(os.path.join(self.tmp, "state"))
+
+    def test_struck_rows_are_excluded_from_both_halves(self):
+        # The 2026-09-24 fixture: 10 rows = 7 ticked + 3 struck -> 7/7, never 7/10.
+        text = (
+            "# Tasks\n\n"
+            + "".join(f"- [x] done {i}\n" for i in range(7))
+            + "".join(f"- [ ] ~~[[Struck {c}]]~~\n" for c in "ABC")
+        )
+        self.assertEqual(self.m.checkbox_count(text), "7/7")
+
+    def test_struck_row_carrying_trailing_prose_is_excluded(self):
+        # The shape the vault ACTUALLY emits (10 rows on 2026-10-08): a struck wikilink
+        # followed by its reason. An anchor requiring `\s*$` counts it and the bug lives.
+        text = (
+            "# Tasks\n\n- [x] kept\n"
+            "- [ ] ~~[[Dropped]]~~ — ABORTED 2026-09-06: superseded\n"
+        )
+        self.assertEqual(self.m.checkbox_count(text), "1/1")
+
+    def test_ticked_struck_row_is_still_counted(self):
+        # Why the anchor requires `[ ]`: a struck row that was already ticked is a met box,
+        # and dropping it hides completed work. 23 such rows exist in the vault.
+        text = (
+            "# Tasks\n\n- [x] kept\n"
+            "- [x] ~~[[Dropped]]~~ — ABORTED 2026-09-06: superseded\n"
+        )
+        self.assertEqual(self.m.checkbox_count(text), "2/2")
+
+    def test_inline_strikethrough_is_not_a_struck_row(self):
+        # The 2026-09-22 fixture: an exclusion keyed on `~~` anywhere in the line drops a
+        # ticked criterion and reports 13/14 where the truth is 14/15.
+        text = (
+            "# Tasks\n\n"
+            + "".join(f"- [x] box {i}\n" for i in range(13))
+            + "- [x] clause ~~narrowed~~ later\n"
+            + "- [ ] still open\n"
+        )
+        self.assertEqual(self.m.checkbox_count(text), "14/15")
+
+    def test_body_of_only_struck_rows_reads_as_nothing_recorded(self):
+        # Every box struck -> an empty reading, never `0/0`, which would read as a real
+        # reading of nothing.
+        text = "# Tasks\n\n- [ ] ~~[[A]]~~\n- [ ] ~~[[B]]~~\n"
+        self.assertEqual(self.m.checkbox_count(text), "—")
+
+    def test_section_scoping_excludes_struck_rows_within_the_section(self):
+        # The section-scoped branch shares the line filter, so a struck row inside the named
+        # section is excluded there too and the reading stays section-local.
+        text = (
+            "# Success Criteria\n\n- [x] met\n- [ ] ~~[[Dropped]]~~ — superseded\n\n"
+            "# Tasks\n\n- [x] done\n- [ ] open\n"
+        )
+        self.assertEqual(self.m.checkbox_count(text, section="Success Criteria"), "1/1")
+
+    def test_partial_box_struck_row_is_counted(self):
+        # `/` means in-progress, not removed from the tracked set, so the `[ ]` requirement
+        # leaves it in — and it is not ticked, so it moves the denominator only. Pinned so
+        # the choice cannot drift silently.
+        text = "# Tasks\n\n- [x] kept\n- [/] ~~[[InFlight]]~~ — being reworked\n"
+        self.assertEqual(self.m.checkbox_count(text), "1/2")
+
+
 if __name__ == "__main__":
     unittest.main()
