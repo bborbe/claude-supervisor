@@ -23,6 +23,7 @@ this script exists to remove, not an optimisation of it.
 
 Usage:
   close-line.py --task "<task name>" --session "<full session id>" --liveness <verdict>
+                [--closer <closed|open|unreadable>]
 
 `--liveness` is the caller's own verdict, taken this run — the caller owns it and
 this script never re-derives it (`session-liveness.py` is the instrument). The
