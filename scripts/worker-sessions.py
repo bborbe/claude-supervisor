@@ -45,11 +45,14 @@ headless and cluster. Two populations cannot be recovered by fixing one channel.
     entries carry `pid`, `sessionId`, `cwd`, `kind`, `entrypoint`, `status` and nothing that
     identifies a role.
 
-⚠️ **A manager ever opened through `spawn_agent` would be counted**, because it would have a
-ledger record like any worker. The one live example found, "Attention Routing", is a
-2026-09-23 ledger entry whose session is long gone, so the liveness join filters it — but the
-limit is real and is stated rather than hidden. Managers are normally started by hand, which
-is why all four measured here had zero ledger entries.
+⚠️ **A ledger record is not by itself proof of "worker".** `spawn_agent(role="manager")` writes
+a record exactly like a worker's, so presence in the ledger alone counts a manager against the
+fleet-wide cap unless the record's own `role` excludes it — which is what the exclusion in
+`live_workers` now does. ⚠️ **ONLY an explicit `manager` excludes**: a record with no `role`
+(every record written before v0.110.3) reads as a worker, because defaulting the other way
+would flip every pre-field worker into a manager and shrink the population the cap exists to
+bound. Managers started by hand — `/supervisor:open` in a plain wezterm tab — write no record
+at all.
 
 ⚠️ **An unreadable store is UNKNOWN, never 0.** Both stores are read before any verdict, and
 either failing exits 2 with its message on **stderr** — so `$(… --count)` captures nothing and
@@ -182,6 +185,16 @@ def live_workers(registry_dir=None, ledger=None, heartbeat_dir=None, now=None):
         # for the first time rather than inherited: the exclusion used to hold by accident,
         # because every auto-resume is headless and a headless worker held no registry entry.
         if record.get("resumed_from"):
+            continue
+        # A manager is not a worker. `spawn_agent(role="manager")` writes a ledger record
+        # exactly like a worker's, so presence in the ledger alone would count a manager
+        # against the cap and push the fleet toward refusing ordinary spawns. ⚠️ **ONLY an
+        # explicit `manager` excludes** — never `role != "agent"`: a record with no `role` is
+        # one written before the field existed, and those are workers and managers alike, so
+        # treating absence as "manager" would drop every pre-field worker out of the count this
+        # cap exists to enforce. The same rule, and the same reason, is in
+        # `gate-owner-filter.py`'s `is_manager`.
+        if record.get("role") == "manager":
             continue
         workers.append(
             {

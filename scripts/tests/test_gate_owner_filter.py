@@ -452,6 +452,69 @@ class LoadLedger(unittest.TestCase):
             self.assertEqual(gf.load_ledger(d), {})
 
 
+class CorruptRecordsFailOpen(unittest.TestCase):
+    """A record that parses but is not an object must be SKIPPED, never raise.
+
+    `null`, a list and a scalar are all valid JSON, so `json.load` returns them
+    happily and the next `.get` raises `AttributeError` out of `main()`. The
+    module's central contract is fail-open -- an unresolvable input keeps the
+    gate -- and a crash is the opposite of that: it takes the whole filter down
+    for every pane, not just the one record. Three readers had the shape
+    (`load_ledger`, `live_ids`, `log_items`), which is why this class tests the
+    class rather than the single surface the report named.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.ledger = os.path.join(self.dir, "ledger")
+        for path in (self.state, self.registry, self.ledger):
+            os.makedirs(path)
+        with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "open", "item_id": "1", "pane": "372", "session_id": GATED,
+            }) + "\n")
+
+    def write(self, directory, name, text):
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def run_filter(self):
+        return subprocess.run(
+            [sys.executable, _SCRIPT, "--pane", "372", "--self", ME, "--explain",
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", self.ledger],
+            capture_output=True, text=True,
+        )
+
+    def test_a_null_ledger_record_exits_zero(self):
+        """SC3's probe, end to end: pointed at a fixture ledger containing `null`, the
+        filter exits 0 and omits that record rather than raising `AttributeError`."""
+        self.write(self.ledger, "null.json", "null")
+        result = self.run_filter()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("AttributeError", result.stderr)
+
+    def test_a_null_ledger_record_is_omitted(self):
+        self.write(self.ledger, "null.json", "null")
+        self.assertEqual(gf.load_ledger(self.ledger), {})
+
+    def test_a_null_registry_entry_is_skipped(self):
+        """The registry is Claude Code's own file, not ours, so a shape this reader did
+        not anticipate is a live possibility rather than a hypothetical."""
+        self.write(self.registry, "null.json", "null")
+        self.assertEqual(gf.live_ids(self.registry), set())
+
+    def test_a_null_event_line_is_skipped(self):
+        """The event log is append-only and shared, so one such line would otherwise take
+        the whole pane->session hop down and fail the filter open for every gate."""
+        self.write(self.state, "b.events.jsonl", "null\n")
+        self.assertEqual([i["item_id"] for i in gf.log_items(self.state)], ["1"])
+
+
 class Evaluate(unittest.TestCase):
     def test_full_chain_pane_to_peer_manager(self):
         ledger = {"w1": {"session_id": "w1", "parent_session": PEER}}

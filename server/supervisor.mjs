@@ -1378,8 +1378,13 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // was named, its own overlay when one was.
     rules: workerRules ?? policy.rules,
     policyPath: resolvedPolicyPath,
-    // Recorded so a resume can see the worker was shipping; without it a resumed
-    // shipping worker silently reverts to `default` and re-arms the dead-channel failure.
+    // Carried on the LIVE agent so `list_agents` can report it. ⚠️ **Not persisted** —
+    // `buildRecord` has no `shipping` parameter, so no ledger record carries the flag and a
+    // resume cannot recover it. `registry-rehydrate.mjs` hardcodes `shipping: false` for
+    // exactly that reason. This comment previously claimed the opposite — that the flag WAS
+    // recorded so a resume could recover it — which is the contradiction `agentView` below
+    // already names. Corrected to the code's behaviour rather than the intent; making it
+    // recoverable is a separate change (persist it, then read it back in `toAgentRecord`).
     shipping: shipping === true,
     sessionId: null,
     // Which conversation this one continues, when it is an adoption rather than a
