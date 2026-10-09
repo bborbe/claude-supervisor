@@ -127,7 +127,7 @@ Three limbs, tried in this order: **the registry**, then the **marker**, then th
 - **`state: "open"` for ~20 min or more** → that is the `--stuck-min` reading `scripts/who-needs-me.py` already owns and renders as *probably stuck*. Do **not** drop on this check; the stuck path is what should fire.
 - **no marker, or a cleared one** → fall through to limb 3.
 
-⚠️ **Limb 2 is effectively dead today** — nothing writes the marker any more, so no live session carries one and this limb answers nothing. It is kept rather than deleted because it is what a restored writer needs, and because the copies below restate it. That gap is tracked on its own row; the age test above is load-bearing the moment the writer returns.
+⚠️ **This limb's writer was dead for seventeen days, and the limb answered nothing for that whole period — removed 2026-09-21, restored 2026-10-08.** The attention hook was rewritten that September as an open-close event log (`<sid>.events.jsonl`, plus `<sid>.open.json` holding the currently-open item — a permission gate among the kinds it carries) and stopped writing the marker, so no live session carried one and every candidate fell straight through to limb 3. ⚠️ **Those two are what the WRITER emits, not what the feed reads:** `scripts/who-needs-me.py`'s `load()` globs `.events.jsonl` and the legacy `.needs.json`, and `.open.json` is not among the formats it reads — the two questions are separate, and a reader who takes the reader's format list for the writer's will conclude, wrongly, that the hook stopped writing `.open.json` too. `~/.claude/hooks/attention-log.py` writes it again as of that restoration: `PreToolUse` writes `state: "open"` and `PostToolUse` removes the file, so the three branches above are live once more. ⚠️ **A limb whose writer has been deleted fails silently in exactly the direction this check exists to prevent.** The file is simply absent, and the absent branch above reads absence as *between turns* — so *"no marker because the session is between turns"* and *"no marker because the writer is gone"* are the same observation, and the check reports the first while the truth is neither. That indistinguishability is why the drop line below names the limb that answered.
 
 **Limb 3 — the transcript.** Drop the candidate when its mtime is inside `scripts/who-needs-me.py`'s `LIVE_WINDOW` (5 min) — the same reading clause 7 already takes, read in the opposite direction.
 
@@ -140,6 +140,7 @@ Only a candidate that survives **both** checks is nudged:
 - `SendMessage` it the observable that made it `stuck`, and the next move left to the worker;
 - **return a `Nudged` line naming the session, the problem and the suggested fix, for the caller to voice;**
 - **return a `Freshness / in-flight drops` line** for every candidate a check dropped, naming which check and the value that dropped it. ⚠️ **The line's leading token is the check that *dropped* the row — never the first check you happened to evaluate.** A row that passed check 1 and was dropped by check 2 leads with `in flight:`, even though the freshness reading was taken first; leading with the passing check misnames the cause and leaves the reason string unusable as a pass test. A near-miss is the most useful line in the report — and the operator reads the `Nudged` block to decide whether to trust the drive leg, so a false row costs more than a missing one.
+  ⚠️ **An `in flight:` drop names the LIMB that answered, not only the value it read** — `limb 1 (registry: shell)`, `limb 2 (tool.json state=open 4 min, Bash)`, or `limb 3 (transcript 2 min)`. The value alone cannot show that a limb has gone silent: limb 2 answers only while its writer exists, and for the seventeen days that writer was gone every drop still read `in flight: <a transcript age>`, which is indistinguishable from a check that is working. Naming the limb is what makes a *recurrence* of this defect visible in the report instead of only in the source.
 
 ⚠️ **The voice half is the caller's, not yours, and this is measured rather than assumed.** A subagent has **no TTS**: `mcp__tts__say` is not visible to a subagent in *either* the main env or the isolated one (probed 2026-09-22 — a subagent reported no tool whose name contains `tts`, under any spelling). So the split is deliberate: **you own the message, the caller owns the voice.** Do not attempt a TTS call, and never let the report read as though one happened.
 
@@ -373,7 +374,7 @@ Nudged (1):            ← the caller voices these; a subagent has no TTS
 
 Freshness / in-flight drops (2):   ← the false-nudge guard: which check dropped the candidate, and the value
   <task> — freshness: file mtime 1758730800 > sweep's 1758729600 — moved after the sweep read it
-  <task> — in flight: tool.json state=open since 4 min ago (Bash) — working, not stuck
+  <task> — in flight: limb 2 (tool.json state=open 4 min, Bash) — working, not stuck
   <task> — freshness: no mtime on the sweep's stuck row — un-checkable, not nudged
 
 To resume (1):         ← the caller spawns these, verifies, then writes last_auto_resume
