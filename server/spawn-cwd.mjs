@@ -144,8 +144,27 @@ export function resolveWorkerTarget({ cwd, vault, vaults, serverCwd } = {}) {
 // Two goals naming different launchers is REFUSED, not resolved by order. Frontmatter list
 // order is not a precedence anyone chose, so picking the first would be a silent guess —
 // the failure class this module exists to remove.
+//
+// The value IS checked for shape, though, because it is a trust-boundary change: before the
+// field existed the launcher came only from operator-controlled vault-cli config; now it comes
+// from task/goal frontmatter, which supervised workers can write, and the tab path execs it
+// inside `bash -lc`. Anything but a plain path — shell metacharacters, whitespace, a `..`
+// segment — is REFUSED rather than quoted or stripped, so a hostile or mistyped value never
+// reaches a shell at all.
+const SAFE_LAUNCHER = /^[A-Za-z0-9._/-]+$/
+
 export function resolveTaskLauncher({ vaultLauncher, taskLauncher, goalLaunchers } = {}) {
   const clean = (v) => (typeof v === 'string' ? v.trim() : '')
+  const unsafe = [clean(taskLauncher), ...(Array.isArray(goalLaunchers) ? goalLaunchers : []).map(clean)].find(
+    (v) => v && (!SAFE_LAUNCHER.test(v) || v.split('/').includes('..')),
+  )
+  if (unsafe) {
+    return {
+      error:
+        `launcher ${JSON.stringify(unsafe)} is not a plain script name or path — refusing to spawn, since the ` +
+        'value is executed by a shell and frontmatter is writable by workers. Use letters, digits, `.`, `_`, `-` and `/` only.',
+    }
+  }
   const toPath = (name) => {
     if (name.includes('/')) return name
     const slash = typeof vaultLauncher === 'string' ? vaultLauncher.lastIndexOf('/') : -1

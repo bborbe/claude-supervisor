@@ -703,6 +703,9 @@ function readTaskLaunchers({ task, vault }) {
   }
   try {
     const taskLauncher = run(['task', 'get', task, 'launcher']).value ?? ''
+    // A task naming its own launcher wins outright, so its goals are never read — a broken
+    // goal must not refuse a spawn the precedence says should open.
+    if (String(taskLauncher).trim()) return { taskLauncher, goalLaunchers: [] }
     const goals = (run(['task', 'show', task]).goals ?? [])
       .map((g) => String(g).replace(/^\[\[|\]\]$/g, '').trim())
       .filter(Boolean)
