@@ -40,12 +40,12 @@ export function readTaskLaunchers({ task, vault, run = runVaultCli }) {
     if (taskLauncher) return { taskLauncher, goalLaunchers: [], warnings: [] }
 
     const shown = call(['task', 'show', task])
-    if (!Array.isArray(shown?.goals)) {
-      // `goals` is omitted when the task has none; an error envelope carries `error`.
-      if (shown?.error || shown?.success === false) throw new Error(`task ${JSON.stringify(task)}: ${shown.error ?? 'show failed'}`)
-      return { taskLauncher: '', goalLaunchers: [], warnings: [] }
-    }
-    const goals = shown.goals.map((g) => String(g).replace(/^\[\[|\]\]$/g, '').trim()).filter(Boolean)
+    if (shown?.error || shown?.success === false) throw new Error(`task ${JSON.stringify(task)}: ${shown.error ?? 'show failed'}`)
+    // `goals` is OMITTED when the task has none — that, and only that, reads as no goals.
+    // Present but not an array is an unexpected answer, so it is an error, not "no field".
+    if (shown?.goals === undefined) return { taskLauncher: '', goalLaunchers: [], warnings: [] }
+    if (!Array.isArray(shown.goals)) throw new Error(`task ${JSON.stringify(task)}: \`goals\` is not a list`)
+    const goals = shown.goals.map((g) => String(g).trim().replace(/^\[\[|\]\]$/g, '').trim()).filter(Boolean)
     // A goal link that does not resolve is SKIPPED with a warning, never an error: stale goal
     // links are a normal vault state, and refusing on one would stop every task carrying it
     // from opening at all. Same rule as vault-cli's `ops.ResolveTaskLauncher`.

@@ -1688,12 +1688,12 @@ const TOOLS = [
         task: {
           type: 'string',
           description:
-            'The vault task this worker is opened for. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with `target: "cluster"`. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+            'The vault task this worker is opened for. On every LOCAL path it also chooses the launcher: the task\'s `launcher:` frontmatter, else its goal\'s, else the vault\'s `claude_script` (rule: docs/fleet-surface.md § Spawn a worker item 8) — so a task that cannot be read REFUSES the spawn. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with `target: "cluster"`. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
         },
         vault: {
           type: 'string',
           description:
-            'The vault this worker belongs to. Resolves BOTH the working directory and the launcher (that vault\'s `claude_script`) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
+            'The vault this worker belongs to. Resolves BOTH the working directory and the default launcher (that vault\'s `claude_script`, which a `task`\'s `launcher:` frontmatter can override) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
         },
         resume: {
           type: 'string',

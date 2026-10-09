@@ -77,3 +77,17 @@ test('a stale goal link is skipped with a warning, the others still count', () =
   assert.equal(r.warnings.length, 1)
   assert.match(r.warnings[0], /Gone/)
 })
+
+test('a goals field that is present but not a list is an error', () => {
+  const { run } = fake({ 'task get T': ok({ value: '' }), 'task show T': ok({ goals: 'G' }) })
+  assert.match(readTaskLaunchers({ task: 'T', vault: 'v', run }).error, /not a list/)
+})
+
+test('a whitespace-padded goal link still resolves', () => {
+  const { run } = fake({
+    'task get T': ok({ value: '' }),
+    'task show T': ok({ goals: [' [[G]] '] }),
+    'goal get G': ok({ value: 'cc-private-claude' }),
+  })
+  assert.deepEqual(readTaskLaunchers({ task: 'T', vault: 'v', run }).goalLaunchers, ['cc-private-claude'])
+})
