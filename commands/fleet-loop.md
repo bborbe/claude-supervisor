@@ -142,7 +142,7 @@ The plugin prefix is required — a bare `fleet-sweep-reader` resolves to a pers
 
 **When the delegation returns no usable digest** — it errored, came back empty, or resolved to something that returned no digest — run the reads yourself for this round (`/fleet-status`, then `/supervisor:open-items list`, `orphan-candidates.py` as above), compacting `fleet-sessions.py` through `grep -oE '\b[0-9a-f]{8}\b'`. Trigger on the missing digest, never on a matched error string.
 
-**Classes the digest reports** (Step 3): progressing · **stalled** (`busy`/`shell`, task mtime unchanged ≥2 sweeps) · parked (`idle`, open boxes) · **finished — reap** (`idle`, task complete) · **orphan** candidate (open work, dead session) · unclassified (insufficient data — never guess). `waiting` never counts toward `stalled` or `parked`.
+**Classes the digest reports** (Step 3): progressing · **parked-on-watcher** (a non-empty `⏰ Ends:` on the newest `Stop` record — a machine will wake it, so it is never `stalled`) · **waiting-on-human** (an open gate — the operator holds it) · **stalled** (`busy`/`shell`, task mtime unchanged ≥2 sweeps) · parked (`idle`, open boxes) · **finished — reap** (`idle`, task complete) · **orphan** candidate (open work, dead session) · unclassified (insufficient data — never guess). `waiting` never counts toward `stalled` or `parked`. ⚠️ **`finished — reap` outranks both park classes** — a complete task wants closing whatever the session declared, so a declared wait must not hide it from the drive leg's reap — and `waiting-on-human` outranks `finished`, because a gate is a blocker whatever the task says.
 
 ### Confirming the digest's candidates
 

@@ -880,5 +880,45 @@ class TestNameTitleMismatch(unittest.TestCase):
         self.assertEqual(got[0][2], [self.DRIFTED_TITLE])
 
 
+class TestDeclaredWait(unittest.TestCase):
+    """`⏰ Ends:` suppresses `nudge` — and nothing else.
+
+    The `nudge` value is the live half of the false-stall defect: a worker whose turn
+    ended inside a `run_in_background` watcher is inactive *by design*, and transcript
+    age cannot tell it apart from one that has genuinely stalled. The declaration can,
+    so the value is suppressed. The three controls below pin that the suppression is
+    narrow — an unrelated session, a finished task and an operator keystroke all keep
+    their own value, so a build that suppressed `nudge` for everyone would fail here.
+    """
+
+    IDLE = fb.NUDGE_SECONDS + 60
+    META = {"status": "in_progress", "phase": "execution", "open_boxes": 2}
+
+    def unblocks(self, declared=frozenset(), panels=frozenset(), meta=None):
+        return fb.unblocks_for(_sid(1), self.IDLE, self.META if meta is None else meta,
+                               panels, declared_wait=declared)
+
+    def test_a_stale_execution_row_is_nudged(self):
+        self.assertEqual(self.unblocks(), fb.UNBLOCKS_NUDGE)
+
+    def test_a_declared_wait_is_not_nudged(self):
+        self.assertEqual(self.unblocks(declared={_sid(1)}), fb.UNBLOCKS_WORKING)
+
+    def test_a_declaration_on_another_session_suppresses_nothing(self):
+        self.assertEqual(self.unblocks(declared={_sid(2)}), fb.UNBLOCKS_NUDGE)
+
+    def test_a_finished_task_is_still_reaped(self):
+        meta = dict(self.META, status="completed")
+        self.assertEqual(self.unblocks(declared={_sid(1)}, meta=meta), fb.UNBLOCKS_REAP)
+
+    def test_an_operator_keystroke_still_surfaces(self):
+        self.assertEqual(self.unblocks(declared={_sid(1)}, panels={_sid(1)}),
+                         fb.UNBLOCKS_OPERATOR)
+
+    def test_the_default_is_empty_so_callers_are_not_broken(self):
+        self.assertEqual(fb.unblocks_for(_sid(1), self.IDLE, self.META, frozenset()),
+                         fb.UNBLOCKS_NUDGE)
+
+
 if __name__ == "__main__":
     unittest.main()

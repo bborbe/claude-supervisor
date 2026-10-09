@@ -86,6 +86,7 @@ def _load(name, filename):
 wnm = _load("who_needs_me", "who-needs-me.py")
 fs = _load("fleet_sessions", "fleet-sessions.py")
 fc = _load("fleet_colours", "fleet-colours.py")
+dw = _load("declared_wait", "declared-wait.py")
 
 # --- the tree's inputs -------------------------------------------------------
 
@@ -505,7 +506,7 @@ UNBLOCKS_VALUES = (UNBLOCKS_OPERATOR, UNBLOCKS_NUDGE, UNBLOCKS_REAP, UNBLOCKS_WO
 NUDGE_SECONDS = 30 * 60
 
 
-def unblocks_for(sid, age, meta, panel_ids):
+def unblocks_for(sid, age, meta, panel_ids, declared_wait=frozenset()):
     """Which of the four `Unblocks` values this session carries.
 
     Order is the whole rule — first match wins, and the classes are disjoint by
@@ -521,6 +522,13 @@ def unblocks_for(sid, age, meta, panel_ids):
        so the session wants closing.
     3. `nudge` — inactive past the threshold, in `execution`, holding an open
        box: the one shape where "go on" is both allowed and useful.
+       ⚠️ **A session that DECLARED a wait is never `nudge`.** `declared_wait`
+       carries the ids from `scripts/declared-wait.py` — the `⏰ Ends:` slot — and a
+       declared wait is the one case where a session is inactive *by design*: its
+       turn ended and a machine will wake it. Nudging it is the false positive this
+       parameter exists to remove. `reap/close` and `operator-keystroke` still
+       outrank it, because a finished task wants closing whatever the session
+       declared, and a keystroke row is the operator's to press.
     4. `working` — everything else, including a session with no stamped task
        (`meta` is None). ⚠️ `working` is the DEFAULT, not a finding: a session
        with no task cannot be shown to be idle, and inventing a nudge for it
@@ -535,7 +543,8 @@ def unblocks_for(sid, age, meta, panel_ids):
     if meta:
         if meta.get("status") == "completed":
             return UNBLOCKS_REAP
-        if (age is not None and age >= NUDGE_SECONDS
+        if (sid not in declared_wait
+                and age is not None and age >= NUDGE_SECONDS
                 and meta.get("phase") == "execution"
                 and meta.get("open_boxes", 0) >= 1):
             return UNBLOCKS_NUDGE
@@ -673,6 +682,12 @@ def collect_signals(stuck_min):
     the same `needs`/`open_panes` pair the gate predicate above was built from,
     and re-deriving those in the row builder is exactly the second definition
     this function exists to prevent.
+
+    The sixth is the declared-wait session-id set — the ids whose newest `Stop`
+    record carries a non-empty `⏰ Ends:`, read whole-store through the shared
+    `scripts/declared-wait.py`. It is what suppresses the `Unblocks: nudge`
+    value in `unblocks_for`, and it is returned rather than re-read per row for
+    the same reason the fifth is: one read, one definition.
     """
     registry = wnm.read_registry()
     live_ids = None if registry is None else set(registry)
@@ -698,6 +713,18 @@ def collect_signals(stuck_min):
     gate_ids = {r["session_id"] for r in gates}
     cutoff = time.time() - stuck_min * 60
     stuck_ids = {r["session_id"] for r in wnm.load("tool") if live(r) and r["ts"] < cutoff}
+    # ⚠️ **A declared wait is not stuck, and must not be nudged.** Read once, from the
+    # shared reader (`scripts/declared-wait.py`) — the same `⏰ Ends:` slot the manager
+    # tier's input 13 reads and the fleet sweep's `parked-on-watcher` class keys on.
+    # ⚠️ **The `stuck_ids` subtraction below is forward-compat, not the live fix:**
+    # `stuck_ids` is built from `*.tool.json`, and `agents/manager-drive.md:130` records
+    # that marker as *"effectively dead today — nothing writes the marker any more"*, so
+    # that bucket is inert until the writer returns. **The live route is the `nudge`
+    # value**, which reads transcript age — see `unblocks_for`.
+    # ⚠️ **Untested by design:** no test asserts this subtraction, because the writer is
+    # dead and the bucket is inert. Read the absence of a test as that, not as coverage.
+    wait_ids = dw.declared_wait_ids(state_dir=wnm.STATE)
+    stuck_ids = {sid for sid in stuck_ids if sid not in wait_ids}
     # The Rendered-panels set, read from who-needs-me's own composition so the
     # board's `operator-keystroke` rows and the operator's `Needs you` section
     # cannot drift apart. The `busy`/`resumed` sets are left at their empty
@@ -710,7 +737,7 @@ def collect_signals(stuck_min):
                                      task_status=wnm.task_status_from_closer)
     }
     return (gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap is not None,
-            panel_ids)
+            panel_ids, wait_ids)
 
 
 def transcript_fresh_ids(window=None):
@@ -884,7 +911,8 @@ def build_grouping(registry, index, colours, slugs, task_titles):
 
 
 def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, grouping=None,
-               gate_attribution=None, task_meta=None, panel_ids=frozenset()):
+               gate_attribution=None, task_meta=None, panel_ids=frozenset(),
+               declared_wait=frozenset()):
     """One row per registry entry, sorted by bucket precedence then name.
 
     Pure: every input is passed in, so the bucket fixtures in
@@ -907,7 +935,7 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
         age = ages.get(sid)
         last = "—" if age is None or not math.isfinite(age) else fs.human_age(age)
         meta = task_meta.get(sid)
-        unblocks = unblocks_for(sid, age, meta, panel_ids)
+        unblocks = unblocks_for(sid, age, meta, panel_ids, declared_wait=declared_wait)
         titles = task_titles.get(sid) or []
         # Glyph-stripped, matching `who-needs-me.py`'s display: the registry's
         # `name` may carry a leading `⚙` the operator did not type, and a name
@@ -1066,7 +1094,7 @@ def main():
         print("fleet-board: session registry unreadable — refusing to render a table", file=sys.stderr)
         return 1
 
-    gate_ids, stuck_ids, attribution, panes_read, panel_ids = collect_signals(a.stuck_min)
+    gate_ids, stuck_ids, attribution, panes_read, panel_ids, wait_ids = collect_signals(a.stuck_min)
     if not panes_read:
         print(
             "fleet-board: ⚠️ `wezterm cli list` unreadable — pane data withheld. Every row is kept "
@@ -1124,7 +1152,7 @@ def main():
     grouping = build_grouping(merged, vault_index(), colour_census(), loop_slugs(), task_titles)
     rows, details = build_rows(merged, gate_ids, stuck_ids, task_titles, ages, grouping=grouping,
                                gate_attribution=attribution, task_meta=task_meta,
-                               panel_ids=panel_ids)
+                               panel_ids=panel_ids, declared_wait=wait_ids)
     tree, ordered, sids = build_tree(rows, grouping)
 
     fresh = transcript_fresh_ids()
