@@ -269,6 +269,7 @@ NO_CHANGE_MARKER = "NO-CHANGE"
 _FM = re.compile(r"^---\n(.*?)\n---", re.S)
 _PROGRESS = re.compile(r"^# Progress\s*\n(.*?)(?=\n# |\Z)", re.S | re.M)
 _CHECKBOX = re.compile(r"^\s*-\s*\[([ xX/])\]", re.M)
+_STRUCK_ROW = re.compile(r"^\s*-\s*\[ \]\s*~~\[\[[^\]]+\]\]~~")
 _LIST_ITEM = re.compile(r"^\s*-\s*\[\[(.+?)\]\]")
 
 
@@ -567,6 +568,36 @@ def checkbox_count(text: str, section: str | None = None) -> str:
 
     A section with no checkboxes returns `—` rather than `0/0`, which would read as a
     real reading of nothing.
+
+    ⚠️ **A struck row is excluded from every count** — a row whose content BEGINS with a
+    struck wikilink, the goal page's convention for a task deliberately removed from the
+    tracked set. It is still a checkbox item carrying a wikilink, so a literal count
+    reads it as an OUTSTANDING subtask, in the direction that reports work where there is
+    none. Measured 2026-09-24 on `24 Goals/a separate task.md`: **10 rows = 7 ticked + 3
+    struck**, so a literal count scores **7/10** where the truth is **7/7**.
+
+    ⚠️ **Trailing prose is allowed and the box must be UNTICKED — both measured, not
+    assumed** (2026-10-08, whole vault). Of **33** struck-wikilink rows, **0** are the
+    bare `- [ ] ~~[[Task]]~~` the rule's own example shows: **10** are
+    `- [ ] ~~[[Task]]~~ — <reason>` and **23** are `- [x] ~~[[Task]]~~ — <reason>`. An
+    anchor requiring `\\s*$` matches **nothing**, so the bug survives it untouched. The
+    `[ ]` requirement is what keeps those **23 ticked** struck rows counted — a struck row
+    that was already ticked is a met box, and dropping it would hide completed work.
+
+    ⚠️ **Never key on the presence of `~~`.** A TICKED criterion carrying inline
+    strikethrough over a clause that was later narrowed is still a live, met box: an
+    exclusion keyed on `~~` anywhere in the line dropped a ticked `- [x]` and reported
+    `13/14` where the truth was **14/15** — off by one, in the direction that hides
+    completed work (measured 2026-09-22).
+
+    ⚠️ **The box must be `[ ]`: a `- [/]` struck row is COUNTED**, because `/` means
+    in-progress rather than removed from the tracked set. The 33-row census above measured
+    only `[ ]` and `[x]` shapes, so this is a deliberate choice rather than a measurement.
+
+    ⚠️ **Lines are split on a newline only — never `str.splitlines()`**, which also splits
+    on the vertical-tab, form-feed, file/group/record-separator, NEL and Unicode
+    line-separator characters that `re.M`'s caret does not anchor on; a struck row carrying
+    one of those would split in two and escape the exclusion.
     """
     body = text
     if section:
@@ -574,7 +605,11 @@ def checkbox_count(text: str, section: str | None = None) -> str:
         if not m:
             return "—"
         body = m.group(1)
-    boxes = _CHECKBOX.findall(body)
+    boxes = [
+        hit.group(1)
+        for line in body.split("\n")
+        if (hit := _CHECKBOX.match(line)) is not None and not _STRUCK_ROW.match(line)
+    ]
     if not boxes:
         return "—"
     return f"{sum(1 for b in boxes if b in 'xX')}/{len(boxes)}"
