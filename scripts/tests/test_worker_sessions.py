@@ -143,6 +143,38 @@ class WorkerSessionsTest(unittest.TestCase):
         self.heartbeat_stamp(sid)
         self.assertEqual(self.run_script("--count").stdout.strip(), "0")
 
+    def test_a_manager_record_is_not_counted_against_the_worker_cap(self):
+        """`spawn_agent(role="manager")` writes a ledger record exactly like a worker's, so
+        presence in the ledger alone counted a manager against the fleet-wide
+        `spawn.maxConcurrent` cap and pushed the fleet toward refusing ordinary spawns. The
+        record's own `role` is what separates them."""
+        manager = "ffffffff-0000-0000-0000-000000000010"
+        agent = "ffffffff-0000-0000-0000-000000000011"
+        self.ledger_entry(manager, "topic manager", role="manager")
+        self.ledger_entry(agent, "worker", role="agent")
+        self.heartbeat_stamp(manager)
+        self.heartbeat_stamp(agent)
+        self.assertEqual(self.run_script("--count").stdout.strip(), "1")
+
+    def test_two_agent_records_are_both_counted(self):
+        """The control for the manager exclusion: without it the case above passes on a counter
+        that returns 0 for everything."""
+        for i, label in enumerate(("worker a", "worker b")):
+            sid = f"ffffffff-0000-0000-0000-00000000001{i + 2}"
+            self.ledger_entry(sid, label, role="agent")
+            self.heartbeat_stamp(sid)
+        self.assertEqual(self.run_script("--count").stdout.strip(), "2")
+
+    def test_a_role_less_record_still_reads_as_a_worker(self):
+        """⚠️ The exclusion is `role == "manager"`, never `role != "agent"`. A record with no
+        `role` was written before the field existed, and those are pre-field workers and
+        managers alike — so treating absence as "manager" would drop every pre-field worker out
+        of the count this cap exists to enforce."""
+        sid = "ffffffff-0000-0000-0000-000000000014"
+        self.ledger_entry(sid, "pre-field worker")
+        self.heartbeat_stamp(sid)
+        self.assertEqual(self.run_script("--count").stdout.strip(), "1")
+
     def test_list_names_the_mode_for_a_heartbeat_sourced_worker(self):
         """`status` names whichever channel answered. For a worker with no registry entry that
         is the stamp's `mode` — and `read_live` dropping the field left this column permanently

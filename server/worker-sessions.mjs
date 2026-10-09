@@ -35,10 +35,15 @@
 //     its 1075 entries read `running` against 26 live registry sessions. It is the durable
 //     half, never the live one.
 //
-// ⚠️ A manager ever opened through `spawn_agent` would be counted, because it would hold a
-// ledger record like any worker. Managers are normally started by hand, which is why all
-// four measured here had zero ledger entries — but the limit is real and stated rather than
-// hidden. `scripts/worker-sessions.py` carries the same definition for shell callers.
+// ⚠️ **A ledger record is not by itself proof of "worker".** `spawn_agent(role="manager")`
+// writes a record exactly like a worker's, so presence in the ledger alone counts a manager
+// against this cap unless the record's own `role` excludes it — which is what the exclusion
+// in `workerSessions` now does. ⚠️ **ONLY an explicit `manager` excludes**: a record with no
+// `role` (every record written before v0.110.3) reads as a worker, because defaulting the
+// other way would flip every pre-field worker into a manager and shrink the population this
+// cap exists to bound. Managers started by hand — `/supervisor:open` in a plain wezterm tab —
+// write no record at all. `scripts/worker-sessions.py` carries the same definition for shell
+// callers.
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -116,6 +121,14 @@ export function workerSessions({ registryDir, ledgerDir, heartbeatDir, now } = {
     // heartbeat store is exactly what removes that accident, so the rule has to be written
     // down for the first time or the union silently un-excludes the population item 5 names.
     if (record.resumed_from) continue
+    // A manager is not a worker. `spawn_agent(role="manager")` writes a ledger record exactly
+    // like a worker's, so presence in the ledger alone would count a manager against the cap
+    // and push the fleet toward refusing ordinary spawns. ⚠️ **ONLY an explicit `manager`
+    // excludes** — never `role !== 'agent'`: a record with no `role` is one written before the
+    // field existed, and those are workers and managers alike, so treating absence as "manager"
+    // would drop every pre-field worker out of the count this cap exists to enforce. The same
+    // rule, and the same reason, is in `scripts/gate-owner-filter.py`'s `is_manager`.
+    if (record.role === 'manager') continue
     workers.push({ sessionId, status: live.get(sessionId), label: record.label })
   }
   return workers

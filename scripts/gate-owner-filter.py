@@ -249,6 +249,13 @@ def load_ledger(ledger_dir=LEDGER):
         try:
             with open(path, encoding="utf-8") as handle:
                 rec = json.load(handle)
+            # Valid JSON is not necessarily a record: `null`, a list or a scalar parses
+            # cleanly and then has no `.get`, so the guard belongs INSIDE the `try` beside
+            # the parse that produced it. Skipping matches the corrupt-record convention
+            # the rest of this module uses -- and the docstring's fail-open rule, since a
+            # record dropped here resolves its session as unknown rather than as a worker.
+            if not isinstance(rec, dict):
+                continue
         except (OSError, ValueError):
             continue
         sid = rec.get("session_id") or os.path.basename(path)[: -len(".json")]
@@ -329,6 +336,12 @@ def live_ids(registry_dir=REGISTRY):
         try:
             with open(path, encoding="utf-8") as handle:
                 rec = json.load(handle)
+            # Same guard, same reason as `load_ledger` above: valid-but-non-object JSON
+            # parses and then has no `.get`. A registry entry is Claude Code's file, not
+            # ours, so a shape this reader did not anticipate is a live possibility rather
+            # than a hypothetical -- and crashing here takes the liveness read down with it.
+            if not isinstance(rec, dict):
+                continue
         except (OSError, ValueError):
             continue
         sid = rec.get("sessionId") or rec.get("session_id")
@@ -368,6 +381,12 @@ def log_items(state_dir=STATE):
                     try:
                         rec = json.loads(line)
                     except ValueError:
+                        continue
+                    # Third instance of the same class: a line that is valid JSON but not an
+                    # object (`null`, a bare number, an array) parses and then has no `.get`.
+                    # The log is append-only and shared, so one such line would otherwise take
+                    # the whole pane->session hop down and fail the filter open for every gate.
+                    if not isinstance(rec, dict):
                         continue
                     item_id = rec.get("item_id")
                     if not item_id:
