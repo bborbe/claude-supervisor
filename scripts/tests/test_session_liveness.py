@@ -85,6 +85,13 @@ class SessionLiveness(unittest.TestCase):
         os.makedirs(self.heartbeat)
         self._prior_heartbeat_env = os.environ.get("SUPERVISOR_HEARTBEAT_DIR")
         os.environ["SUPERVISOR_HEARTBEAT_DIR"] = self.heartbeat
+        # The spawn ledger decides WHICH sessions the `--list` guard covers (SC11), so it is
+        # isolated for the same reason as the other three stores: a suite reading the machine's
+        # real ledger would let 1600 real spawn records decide a fixture's verdict.
+        self.ledger = os.path.join(self.tmp.name, "ledger")
+        os.makedirs(self.ledger)
+        self._prior_ledger_env = os.environ.get("SUPERVISOR_LEDGER_DIR")
+        os.environ["SUPERVISOR_LEDGER_DIR"] = self.ledger
 
     def tearDown(self):
         if self._prior_cache_env is None:
@@ -95,6 +102,10 @@ class SessionLiveness(unittest.TestCase):
             os.environ.pop("SUPERVISOR_HEARTBEAT_DIR", None)
         else:
             os.environ["SUPERVISOR_HEARTBEAT_DIR"] = self._prior_heartbeat_env
+        if self._prior_ledger_env is None:
+            os.environ.pop("SUPERVISOR_LEDGER_DIR", None)
+        else:
+            os.environ["SUPERVISOR_LEDGER_DIR"] = self._prior_ledger_env
         self.tmp.cleanup()
 
     def plant(self, session_id, pid=None, name="synth", **extra):
@@ -107,6 +118,19 @@ class SessionLiveness(unittest.TestCase):
         rec = {"sessionId": session_id, "pid": pid or os.getpid(), "name": name, "status": "busy"}
         rec.update(extra)
         with open(os.path.join(self.registry, "%s.json" % session_id), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def ledger_entry(self, session_id, label="synth worker", **extra):
+        """A spawn-ledger record — what makes a session one the `--list` guard covers.
+
+        ⚠️ **A registry record alone is NOT enough since SC11 (2026-10-09).** The guard's
+        population is `registry_live ∩ spawn ledger`, so a case that wants the guard to fire
+        must plant BOTH halves; planting only the registry half is now the case that must
+        NOT fire, which is its own test below.
+        """
+        rec = {"session_id": session_id, "label": label, "mode": "interactive"}
+        rec.update(extra)
+        with open(os.path.join(self.ledger, "%s.json" % session_id), "w", encoding="utf-8") as fh:
             json.dump(rec, fh)
 
     def check(self, session_id, endpoint):
@@ -387,6 +411,7 @@ class SessionLiveness(unittest.TestCase):
         # Step 2C reads this call to decide whether to open a session — so it must not be
         # presented as complete. It pays the same coverage precondition ABSENT pays.
         self.plant("aaaa1111-1111-2222-3333-444455556666")
+        self.ledger_entry("aaaa1111-1111-2222-3333-444455556666")
         with FixtureEndpoint([]) as fx:
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, UNKNOWN)
@@ -409,10 +434,89 @@ class SessionLiveness(unittest.TestCase):
         # coverage precondition the empty one pays.
         self.plant("aaaa1111-1111-2222-3333-444455556666")
         self.plant("bbbb2222-1111-2222-3333-444455556666")
+        self.ledger_entry("aaaa1111-1111-2222-3333-444455556666")
+        self.ledger_entry("bbbb2222-1111-2222-3333-444455556666")
         with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
+
+    def test_a_registry_live_session_outside_the_ledger_does_not_withhold_the_list(self):
+        """SC11's narrowing — the reason the guard was realigned on 2026-10-09.
+
+        A manager, a bot and the operator's own sessions are registry-live and hold **no
+        ledger record**, because they were not opened by the supervisor and never load the
+        plugin that stamps. Measured live before the narrowing: `unstamped=11 registry_live=27`,
+        with 9 of the 11 in exactly this class — so the guard refused on sessions that cannot
+        stamp by construction, and `approved-not-started.py` rendered `unknown` behind it.
+        Here the registry-live session with no row and no ledger record must NOT withhold the
+        list; the live one is served.
+        """
+        sid = "aaaa1111-1111-2222-3333-444455556666"
+        self.plant("bbbb2222-1111-2222-3333-444455556666", name="Fleet Manager")
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, rows = self.json_listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertEqual([r["sessionId"] for r in rows], [sid])
+
+    def test_a_ledger_worker_that_is_registry_live_with_no_row_still_withholds_the_list(self):
+        """The residual hazard is the OTHER direction, and it is preserved deliberately.
+
+        Narrowing the guard re-opens the duplicate-spawn hazard for a live session that is
+        not a ledger worker (recorded at `commands/open.md` Step 2C). It must not also stop
+        catching a session that IS a worker: a ledger record plus a live registry entry plus
+        no endpoint row is precisely the rollout gap the guard exists for.
+        """
+        sid = "aaaa1111-1111-2222-3333-444455556666"
+        self.plant(sid, name="Stamping Worker")
+        self.ledger_entry(sid)
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_an_unreadable_ledger_is_unknown_not_a_pass(self):
+        """`{}` and None are different answers, and only one of them may satisfy the guard.
+
+        A ledger that cannot be read must not narrow the population to nothing and hand back
+        a passing precondition — that is the resume-authorising direction, and it is the same
+        collapse the endpoint and registry reads already refuse.
+        """
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        # A path that exists as a FILE: `os.listdir` raises NotADirectoryError (an OSError),
+        # which is the "could not read it" arm rather than the missing-directory `{}` arm.
+        not_a_dir = os.path.join(self.tmp.name, "ledger-is-a-file")
+        with open(not_a_dir, "w", encoding="utf-8") as fh:
+            fh.write("")
+        os.environ["SUPERVISOR_LEDGER_DIR"] = not_a_dir
+        with FixtureEndpoint([row("bbbb2222-1111-2222-3333-444455556666")]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_an_unimportable_spawn_ledger_is_unknown_not_a_crash(self):
+        """`_spawn_ledger()` exec_module's its sibling with no guard, and the guard it feeds
+        is the one that LICENSES the list. An escape here would surface as exit 1 — this
+        file's ABSENT code, which every caller reads as "not live, resume is authorised" —
+        so a missing `spawn-ledger.py` must answer UNKNOWN, the same rule `live-workers.py`
+        already carries on the cluster path.
+        """
+        alone = os.path.join(self.tmp.name, "no-ledger-module")
+        os.makedirs(alone)
+        # `session-identity.py` is present so the failure is specifically the ledger sibling,
+        # not whichever import happens to run first.
+        with open(os.path.join(os.path.dirname(_HERE), "session-identity.py"), encoding="utf-8") as src:
+            text = src.read()
+        with open(os.path.join(alone, "session-identity.py"), "w", encoding="utf-8") as out:
+            out.write(text)
+        mod = load_from(alone)
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+            out_s, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out_s), redirect_stderr(err):
+                rc = mod.main(["--list", "--endpoint", fx.url, "--dir", self.registry])
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out_s.getvalue() + err.getvalue())
 
     def test_non_empty_list_is_live_when_every_registry_session_is_stamped(self):
         # Coverage complete — every registry-live session has a live row — so the list IS the

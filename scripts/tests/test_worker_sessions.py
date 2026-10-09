@@ -49,12 +49,14 @@ class WorkerSessionsTest(unittest.TestCase):
         os.makedirs(self.ledger)
         # `worker-sessions.py` imports its siblings by path from its own directory, so the temp
         # tree needs the real scripts beside a copy of itself. `session-liveness.py` is where
-        # the endpoint read lives now; a fixture missing it makes the counter exit 2, which the
-        # negatives below would read as "not counted" and pass on a broken instrument.
+        # the endpoint read lives now; `spawn-ledger.py` is where the ledger reader lives since
+        # SC11 extracted it out of this file. A fixture missing either makes the counter exit 2,
+        # which the negatives below would read as "not counted" and pass on a broken instrument.
         self.bin = os.path.join(self.dir, "scripts")
         os.makedirs(self.bin)
         shutil.copy(SCRIPT, self.bin)
         shutil.copy(SCRIPTS / "session-liveness.py", self.bin)
+        shutil.copy(SCRIPTS / "spawn-ledger.py", self.bin)
 
     def ledger_entry(self, session_id, label, **extra):
         record = {"session_id": session_id, "label": label, "mode": "interactive"}

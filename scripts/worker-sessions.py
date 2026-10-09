@@ -64,6 +64,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+_SPAWN_LEDGER = None
+
 
 def _load(module_name, filename):
     """Import a hyphenated sibling script by path — the same idiom `session-liveness.py`
@@ -75,51 +77,19 @@ def _load(module_name, filename):
     return module
 
 
-def ledger_dir():
-    """The spawn ledger's path, resolved as `fleet-sessions.py` and `config.mjs` do.
+def _ledger():
+    """Import `spawn-ledger.py` (hyphenated filename -> importlib) — the spawn-ledger reader.
 
-    A reader that resolved a different path than the writer would report an empty fleet,
-    and the empty answer is the dangerous direction.
+    ⚠️ **Extracted, and the extraction is load-bearing rather than tidiness.** This file
+    used to hold the only copy of the reader, while `session-liveness.py`'s `unstamped()`
+    guard needs the same ledger and this file reaches `session-liveness.py` through `_load`
+    — so the guard could not import the ledger from here without closing a cycle. One
+    module both consumers point at leaves the dependency direction one-way.
     """
-    override = os.environ.get("SUPERVISOR_LEDGER_DIR")
-    if override:
-        return override
-    state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
-    return os.path.join(state, "claude-supervisor", "sessions")
-
-
-def read_ledger(directory):
-    """Every session id the ledger knows, mapped to its full record — or None when unreadable.
-
-    None and `{}` are different answers and must stay so: `{}` is "read it, nobody is
-    recorded", None is "could not read it". Collapsing them turns a permissions error into
-    a confident empty fleet.
-
-    ⚠️ **The whole record, not just its label.** The filter below needs `resumed_from`, and a
-    map that keeps only the label cannot express it — the caller would have to reopen every
-    file to answer a question the read already had in hand. The mjs twin returns the record
-    for the same reason, and the two must stay in step or the pair stops being one definition.
-    """
-    try:
-        names = os.listdir(directory)
-    except FileNotFoundError:
-        return {}
-    except OSError:
-        return None
-
-    known = {}
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(directory, name), encoding="utf-8") as handle:
-                record = json.load(handle)
-        except (OSError, ValueError):
-            continue
-        session_id = record.get("session_id")
-        if session_id:
-            known[session_id] = record
-    return known
+    global _SPAWN_LEDGER
+    if _SPAWN_LEDGER is None:
+        _SPAWN_LEDGER = _load("spawn_ledger", "spawn-ledger.py")
+    return _SPAWN_LEDGER
 
 
 def live_workers(endpoint=None, ledger=None):
@@ -205,8 +175,8 @@ def main(argv=None):
                 file=sys.stderr,
             )
 
-    directory = args.ledger_dir or ledger_dir()
-    ledger = read_ledger(directory)
+    directory = args.ledger_dir or _ledger().ledger_dir()
+    ledger = _ledger().read_ledger(directory)
     if ledger is None:
         print(f"UNKNOWN — cannot read the spawn ledger at {directory}", file=sys.stderr)
         return 2

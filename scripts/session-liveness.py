@@ -88,6 +88,7 @@ _HTTP_TIMEOUT = 5
 
 _IDENTITY = None
 _LIVE_WORKERS = None
+_SPAWN_LEDGER = None
 
 
 def endpoint_base(override=None):
@@ -131,6 +132,30 @@ def _live_workers():
         spec.loader.exec_module(mod)
         _LIVE_WORKERS = mod
     return _LIVE_WORKERS
+
+
+def _spawn_ledger():
+    """Import `spawn-ledger.py` (hyphenated filename -> importlib) — the guard's population.
+
+    Lazy and cached, and here the laziness matters for a different reason than the two
+    above: the ledger is read ONLY by `unstamped()`, which is reached only by the two
+    `--list` paths. A caller that asks `--check <id>` — the verdict path every resume
+    decision goes through — must not pay to open 1600 ledger files it will not read.
+
+    ⚠️ **Why the ledger is a separate module and not `worker-sessions.py`.** That file
+    already held this reader, but it loads *this* file through `_load` to reach
+    `read_endpoint()`, so importing it back from here closes a cycle the `_load` idiom
+    does not expect. Extracting the reader to `spawn-ledger.py` is the same move this
+    codebase made for the registry, and it keeps the dependency direction one-way.
+    """
+    global _SPAWN_LEDGER
+    if _SPAWN_LEDGER is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spawn-ledger.py")
+        spec = importlib.util.spec_from_file_location("spawn_ledger", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SPAWN_LEDGER = mod
+    return _SPAWN_LEDGER
 
 
 def _cluster_reachable():
@@ -454,14 +479,33 @@ def safe_coverage(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
 
 
 def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
-    """`(verdict, line)` — registry-live sessions the endpoint holds NO row for at all.
+    """`(verdict, line)` — sessions that SHOULD stamp and the endpoint holds NO row for.
+
+    ⚠️ **The population is `registry_live ∩ spawn ledger`, not `registry_live`.** Until
+    2026-10-09 this compared row presence against **every** registry-live session, and
+    that guard can never pass on a real fleet: measured live, `--list --json` exited 2
+    with `unstamped=11 registry_live=27`, and **9 of the 11 were managers, bots and the
+    operator's own sessions** — sessions that never load this plugin and so cannot stamp
+    by construction. A precondition that refuses forever is not a precondition; it is an
+    outage, and `approved-not-started.py` rendered `unknown` behind it.
+    **Operator ruling 2026-10-09: narrow the guard to the spawn ledger's workers — the
+    set that should stamp.** The ledger is what makes a session one the supervisor
+    opened, which is exactly the set the 30 s stamp timer runs inside.
+
+    ⚠️ **Residual, carried rather than hidden.** Narrowing re-opens the hazard this guard
+    was added for, for any live session that is **not** a ledger worker: a manager with
+    no endpoint row no longer withholds the list, so `commands/open.md` Step 2C could
+    match nothing and spawn a duplicate onto a live topic manager. That is the trade the
+    ruling accepts, and it is recorded where Step 2C is read, not only here.
 
     ⚠️ **This is NOT `coverage()`, and the difference is the whole point of it existing.**
-    `coverage()`'s `missing` is `registry_live - endpoint_live`, which folds two unlike facts
-    into one number: a session the endpoint has never heard of — a genuine ROLLOUT GAP, where
-    a list would omit a session that is really live — and a session it holds a row for that
-    reads `live: false`, which is a dead or hung session the endpoint can see and is answering
-    about. Only the first is a reason to withhold a list.
+    `coverage()`'s `missing` is `registry_live - endpoint_live`, which folds two unlike
+    facts into one number: a session the endpoint has never heard of — a genuine ROLLOUT
+    GAP, where a list would omit a session that is really live — and a session it holds a
+    row for that reads `live: false`, which is a dead or hung session the endpoint can see
+    and is answering about. Only the first is a reason to withhold a list. `--coverage`
+    keeps that broader definition deliberately: it is a fleet stamping metric, and its
+    denominator is the whole registry on purpose.
 
     ⚠️ **Measured, not reasoned:** applying `coverage()` to the non-empty `--list` path refused
     an ordinary steady state — a registered session whose heartbeat had lapsed, planted by
@@ -469,10 +513,11 @@ def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
     regression surfaced as that suite's own failure, which is why this measures row PRESENCE
     rather than liveness.
 
-    `--coverage` keeps its own definition: it is a fleet metric about stamping, not this
-    precondition, and its `missing` column is deliberately the broader one. Exit codes match
-    `coverage()`'s: 0 complete, 1 a registry-live session has no row, 2 the measurement could
-    not be taken (never a fabricated `0`).
+    Exit codes: 0 complete, 1 a ledger worker is registry-live with no row, 2 the
+    measurement could not be taken — an unreadable endpoint, registry **or ledger**, never
+    a fabricated `0`, because "could not measure" and "measured complete" are different
+    facts. The line carries `ledger_workers`, the narrowed denominator, so a reader can
+    see what the guard now covers rather than having to infer it.
     """
     rows = read_endpoint(endpoint, timeout)
     if rows is None:
@@ -480,15 +525,23 @@ def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
     identity = _identity().read_registry(registry_dir)
     if identity is None:
         return UNKNOWN, "UNKNOWN — cannot read the identity registry (%s)" % (registry_dir or "default path")
+    # ⚠️ An unreadable ledger is UNKNOWN, never a pass. `{}` (nobody recorded) and None
+    # (could not read) are different answers, and folding the second into the first would
+    # let a failed read satisfy the guard — the resume-authorising direction.
+    ledger = _spawn_ledger().read_ledger()
+    if ledger is None:
+        return UNKNOWN, "UNKNOWN — cannot read the spawn ledger (%s)" % _spawn_ledger().ledger_dir()
     stamped = {
         r["session_id"]
         for r in rows
         if isinstance(r, dict) and isinstance(r.get("session_id"), str) and r["session_id"]
     }
     registry_live = {sid for sid, rec in identity.items() if rec.get("alive") is not False}
-    unstamped_ids = registry_live - stamped
-    return (ABSENT if unstamped_ids else LIVE), "unstamped=%d registry_live=%d" % (
+    expected = registry_live & set(ledger)
+    unstamped_ids = expected - stamped
+    return (ABSENT if unstamped_ids else LIVE), "unstamped=%d ledger_workers=%d registry_live=%d" % (
         len(unstamped_ids),
+        len(expected),
         len(registry_live),
     )
 
