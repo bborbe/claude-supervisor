@@ -98,7 +98,7 @@ The mode a worker opens in is a **fleet-wide decision**, so it lives in a file y
 
 ⚠️ `cluster.token` is a **secret**, and the server only ever reads this file — it never writes it, so it sets no permissions. `chmod 600 ~/.config/claude-supervisor/config.json` is yours to do, and worth doing before you put a token in it.
 
-`cluster.url` and `cluster.token` configure the **cluster spawn target** — `docs/fleet-surface.md` § Spawn a worker item 7. They live here rather than only in the server entry's `env` block for one reason worth knowing: an MCP `env` block is cached at **session start**, so a value added to it reaches no *running* session by any in-session route, while a file the **server** reads at its own start reaches it on a Reconnect. ⚠️ The env var still **wins** when it is set, so remove it once you move to the file — otherwise the file looks inert and nothing refuses.
+`cluster.url` and `cluster.token` configure the **cluster spawn target** — and the cluster follow-up, which addresses the same service — `docs/fleet-surface.md` § Spawn a worker item 7. They live here rather than only in the server entry's `env` block for one reason worth knowing: an MCP `env` block is cached at **session start**, so a value added to it reaches no *running* session by any in-session route, while a file the **server** reads at its own start reaches it on a Reconnect. ⚠️ The env var still **wins** when it is set, so remove it once you move to the file — otherwise the file looks inert and nothing refuses.
 
 `mode` is `interactive` or `headless`. Four sources, highest first:
 
@@ -214,7 +214,7 @@ The same boundary applies the other way: a tool the worker's own settings alread
 | Tool | Purpose |
 |---|---|
 | `spawn_agent(prompt, cwd?, label?, interactive?, resume?, policy?, env?)` | start a worker — a real session in a tab by default, or headless with `interactive: false`. `policy` gives this one worker its own rules; headless only. `env` sets environment variables for **this worker only**, on both paths — how one session is pointed at a non-production backend without redirecting every session in a vault. Refused with `target: "cluster"`, which creates no local process to set one on |
-| `send_agent_message(agent_id, message)` | type a follow-up into a running **tab** worker and submit it |
+| `send_agent_message(agent_id, message)` | send a follow-up to a running worker. A **tab** worker: typed into its pane and submitted — it **steals focus**. A **cluster** worker: one more turn on its **existing session id** over HTTP, blocking until the pod answers, with the bearer token resolved inside the server so the caller passes no credential. A headless worker is refused — answer its prompts with `answer_permission` |
 | `list_agents()` | every worker with status and pending-permission count |
 | `agent_status(agent_id)` | one worker: status, last message, **the current tool call and how long it has been held**, result, plus `session_status` / `awaiting_input`. `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed |
 | `pending_permissions()` | prompts awaiting an answer, across all workers |
