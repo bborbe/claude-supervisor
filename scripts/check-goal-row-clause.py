@@ -26,12 +26,18 @@ bolds the zero (*"…even with **0** tracked tasks"*). An exact-string count the
 which is precisely the drift this guard exists to catch. A reviewer found that gap in this
 guard's first version.
 
-**What this proves, and what it does not.** It proves all four carriers still state the rule,
-that the goal branch's exemption from the absent-input rule is still stated, and that the
-retracted readings have not reappeared anywhere in the rule-carrying text. It cannot prove the
-four carriers say the *same thing* — that is a reading, not a grep, and the round that produced
-this guard is the evidence that no grep would have caught it. This is the drift guard, not the
-semantics.
+**What this proves, and what it does not.** It proves that **no fewer than four** statements
+of the clause survive in the carrier, that the goal branch's exemption from the absent-input
+rule is still stated, and that the retracted readings have not reappeared anywhere in the
+rule-carrying text. ⚠️ **It is a total hit count, not a per-carrier check** — delete the clause
+from one carrier, add one incidental mention elsewhere, and the count still reads four. So what
+it proves is a **floor, not parity**, and this sentence is deliberately the weaker claim the
+code supports rather than the stronger one it reads like. Keying it per carrier would need four
+anchors around sentences that drift faster than the clause they guard; the floor is the honest
+instrument here, and a human reads the four carriers whenever the rule changes. It cannot prove
+the four carriers say the *same thing* — that is a reading, not a grep, and the round that
+produced this guard is the evidence that no grep would have caught it. This is the drift guard,
+not the semantics.
 
 ⚠️ **The retraction scan is deliberately scoped to `.md` under `agents/`, `commands/` and
 `docs/`, and widening it to the repo root would fail on `CHANGELOG.md` itself** — that file
