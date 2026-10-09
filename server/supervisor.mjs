@@ -43,20 +43,6 @@ import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decisi
 import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
 import { liveSessionIds, rehydratableAgents } from './registry-rehydrate.mjs'
 
-// ⚠️ The config-dir refusal runs before anything else touches the filesystem, and it is a
-// hard exit rather than a warning. A server whose parent carried a different
-// `CLAUDE_CONFIG_DIR` resolves its session registry and transcript root from the wrong
-// place, then runs normally while reporting a `transcript_dir` no fleet reader can see and
-// registering nowhere the fleet looks — a silent failure, so refusing to start is the only
-// honest outcome. See the resolution in config.mjs for the measurement.
-//
-// Written to stderr, not the logger: stdout carries MCP frames, and this runs before the
-// transport exists.
-if (config.claudeHomeRefusal) {
-  console.error(config.claudeHomeRefusal)
-  process.exit(1)
-}
-
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
 const agents = new Map() // id -> agent record
@@ -140,6 +126,22 @@ const log = (...a) => {
   try {
     appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}`)
   } catch {}
+}
+
+// ⚠️ The config-dir refusal is a hard exit, not a warning, and it sits here because this is
+// the first point at which the logger exists: above it `log` is in its temporal dead zone, so
+// only `console` could write, and RULE node/logging/structured-not-console bars `console`
+// from service code. Nothing between the imports and this line starts a session, opens a
+// transport or writes state, so the refusal still lands before any work.
+//
+// A server whose parent carried a different `CLAUDE_CONFIG_DIR` resolves its session
+// registry and transcript root from the wrong place, then runs normally while reporting a
+// `transcript_dir` no fleet reader can see and registering nowhere the fleet looks — a silent
+// failure, so refusing to start is the only honest outcome. See the resolution in config.mjs
+// for the measurement.
+if (config.claudeHomeRefusal) {
+  log(config.claudeHomeRefusal)
+  process.exit(1)
 }
 
 // ── roster rehydration ──────────────────────────────────────────────────────
