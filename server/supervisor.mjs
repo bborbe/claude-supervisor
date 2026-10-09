@@ -27,6 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
@@ -687,39 +688,6 @@ function launcherModelFor(scriptPath) {
   }
 }
 
-// The `launcher:` frontmatter of a task and of each of its goals, or `{ error }`.
-//
-// Precedence lives in `resolveTaskLauncher`; this only reads. A read that FAILS (task not
-// found, vault-cli exits non-zero) is an error rather than "no field": reading it as absent
-// would open a task that asked for Claude on the vault default — the silent wrong launcher
-// this server refuses everywhere else. An EMPTY value is a real answer: the field is unset.
-function readTaskLaunchers({ task, vault }) {
-  const run = (args) => {
-    const out = spawnSync('vault-cli', [...args, '--vault', vault, '--output', 'json'], { encoding: 'utf8' })
-    if (out.status !== 0) {
-      throw new Error(`vault-cli ${args.slice(0, 2).join(' ')} failed: ${(out.stderr || out.stdout || '').trim()}`)
-    }
-    return JSON.parse(out.stdout)
-  }
-  try {
-    const taskLauncher = run(['task', 'get', task, 'launcher']).value ?? ''
-    // A task naming its own launcher wins outright, so its goals are never read — a broken
-    // goal must not refuse a spawn the precedence says should open.
-    if (String(taskLauncher).trim()) return { taskLauncher, goalLaunchers: [] }
-    const goals = (run(['task', 'show', task]).goals ?? [])
-      .map((g) => String(g).replace(/^\[\[|\]\]$/g, '').trim())
-      .filter(Boolean)
-    const goalLaunchers = goals.map((g) => run(['goal', 'get', g, 'launcher']).value ?? '')
-    return { taskLauncher, goalLaunchers }
-  } catch (error) {
-    return {
-      error:
-        `could not read the \`launcher:\` field of task ${JSON.stringify(task)} or its goals in vault ` +
-        `${JSON.stringify(vault)} — refusing rather than opening it on the vault default: ${error.message}`,
-    }
-  }
-}
-
 // Read the servers the launcher passes via `--mcp-config <file>`. These arrive as a
 // CLI flag, not as settings, so settingSources cannot reach them: an SDK worker with
 // settings loaded still saw 7 fewer servers than its tab twin. Handing the same file
@@ -1229,6 +1197,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     const read = readTaskLaunchers({ task, vault: workerTarget.vault })
     if (read.error) return { error: read.error }
     taskLauncher = resolveTaskLauncher({ vaultLauncher: workerTarget.launcher, ...read })
+    for (const w of read.warnings ?? []) log(`spawn ${task}: ${w}`)
     if (taskLauncher.error) return { error: taskLauncher.error }
   }
   const workerLauncher = config.claudeCmd || taskLauncher.launcher
