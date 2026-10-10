@@ -49,7 +49,7 @@ function stringSources({ env, file }) {
 // told them to set is ignored. A key that is read while being reported as unread is worse
 // than an unknown key, because it argues the operator out of a working configuration.
 const KNOWN_TOP_LEVEL = ['spawn', 'cluster']
-const KNOWN_SPAWN_KEYS = ['mode', 'maxConcurrent', 'maxConcurrentHard']
+const KNOWN_SPAWN_KEYS = ['mode', 'maxConcurrent', 'maxConcurrentHard', 'maxStartsPerMinute']
 const KNOWN_CLUSTER_KEYS = ['url', 'token']
 
 export function unknownKeyWarnings(file, path) {

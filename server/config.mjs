@@ -155,6 +155,11 @@ export const config = Object.freeze({
   // to DEFAULT_MAX_CONCURRENT_HARD rather than to unlimited — the ceiling is always in
   // force unless the soft key's `0` switches the pair off. See resolveMaxConcurrent.
   maxConcurrentHard: ENV.SUPERVISOR_MAX_CONCURRENT_HARD || null,
+  // How fast sessions may be OPENED — an arrival bound, not a population bound, and so a
+  // different question from the two caps above (see start-rate.mjs). Raw and unvalidated,
+  // like its siblings: the legal values and the refusal message belong to the module that
+  // owns the meaning.
+  maxStartsPerMinute: ENV.SUPERVISOR_MAX_STARTS_PER_MINUTE || null,
 
   // Where the cluster's `claude-interactive` service is reachable from THIS machine — the
   // address a cluster spawn POSTs a prompt to. Raw and unvalidated, like the two above: the

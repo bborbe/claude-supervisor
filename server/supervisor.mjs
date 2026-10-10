@@ -26,6 +26,7 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
@@ -892,6 +893,40 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
   })
 }
 
+// The session start rate — how fast sessions may be OPENED, as distinct from how many may be
+// live at once. Enforced beside the concurrency cap, and for the same reason that cap is:
+// a rate consulted after the spawn has already spent the budget it exists to protect.
+//
+// ⚠️ THIS ONE WAITS RATHER THAN ONLY REFUSING, and that is the deliberate difference from
+// `concurrentLimitError` above. The callers are automated bulk paths, and refusing a 22-row
+// batch outright fails half of it; pacing the same starts spreads the first-turn context
+// loads that took the backend down on 2026-10-10. The wait is bounded — past the ceiling
+// `startRateDecision` returns an error instead, so this cannot park a caller indefinitely.
+//
+// ⚠️ THE SEQUENCE IS `reserveSlot`'S, NOT THIS CALL SITE'S. Reading, deciding, writing and
+// waiting are one ordering, and the WRITE-BEFORE-WAIT half of it is load-bearing: a caller
+// that wrote after the wait would let a simultaneous batch read one stale stamp, compute one
+// slot, and all sleep to the same instant — the burst arriving on the far side of the check
+// meant to spread it. Stated here as well, the two copies drift, which is the defect this
+// module family exists to refuse. This function resolves the config and hands off.
+//
+// ⚠️ CALLED AS LATE AS POSSIBLE — immediately before the session is created, not beside the
+// other guards. The guards above it refuse a malformed call without creating anything, and a
+// slot consumed by a call that was never going to spawn would charge the next legitimate
+// start for a config typo.
+async function reserveStart() {
+  return reserveSlot({
+    rate: resolveMaxStarts({
+      env: config.maxStartsPerMinute,
+      file: config.configFileContents,
+      path: config.configFile,
+    }),
+    stateFile: join(config.stateDir, RATE_STATE_FILE),
+    configFile: config.configFile,
+    log: (message) => log(`${message}\n`),
+  })
+}
+
 // The cluster target EVERY cluster call resolves — one home, so a spawn and a follow-up
 // cannot disagree about which service they address or which token they present.
 //
@@ -1006,6 +1041,12 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 
   const target = clusterTarget()
   if (target.error) return { error: target.error }
+
+  // A cluster session is a session start like any other, so it answers to the same rate —
+  // and it is paced HERE, after every refusal above, so a call that never reaches the
+  // service does not spend a slot.
+  const rateError = await reserveStart()
+  if (rateError.error) return { error: rateError.error }
 
   const started = await startClusterSession({
     baseUrl: target.url,
@@ -1433,6 +1474,21 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     error: null,
     createdAt: new Date().toISOString(),
   }
+  // The last guard before anything is created, and deliberately the last: every refusal above
+  // it returns without a side effect, so a slot is only spent by a spawn that is actually
+  // going ahead. See `reserveStart` for why this waits rather than only refusing.
+  //
+  // ⚠️ IT SITS ABOVE `agents.set`, AND THAT ORDER IS LOAD-BEARING. Registration is this
+  // function's first side effect and it writes `status: 'running'` — so a guard below it
+  // leaves a REFUSED start registered as a running worker that no session backs, for the life
+  // of the process: the only reaper, `pruneRehydratedAgents`, skips every entry that is not
+  // `rehydrated`. The same ordering would also report a DELAYED start as running for up to
+  // the 5-minute ceiling, which is the entire window a paced batch spends waiting — i.e. the
+  // common case, not the edge. `agents.delete(id)` on the refusal branch would patch the
+  // first half and leave the second.
+  const rateError = await reserveStart()
+  if (rateError.error) return { error: rateError.error }
+
   agents.set(id, agent)
 
   if (opensInteractive) {
