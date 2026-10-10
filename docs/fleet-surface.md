@@ -822,10 +822,10 @@ session id of the manager that armed it — and treat it as a **lead only**, nev
 | `UNKNOWN` | 2 | start a fresh manager; an unreadable registry cannot prove a session dead |
 | `AMBIGUOUS` | 3 | start a fresh manager; a prefix matching two live sessions resumes neither |
 
-`manager_session_id` is written when a manager arms the subject
-(`commands/manager-loop.md` § *Record the manager's session on the subject's page*) and
-overwritten whenever a new manager arms it, so a value is evidence of **who**, never of
-**alive**.
+`manager_session_id` is written when a manager arms the subject — by the *Record the manager's
+session on the subject's page* step in `commands/manager-loop.md`, which is a named paragraph
+rather than a `## ` heading — and overwritten whenever a new manager arms it, so a value is
+evidence of **who**, never of **alive**.
 
 ⚠️ **Three things this is not.** It is **not** the `claude_session_id` stamp of § Session
 stamps: that one names the session working a *task*, this one names the manager serving a
