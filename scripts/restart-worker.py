@@ -259,9 +259,11 @@ def vault_configs():
 
 def _launcher_field(path):
     """The `launcher:` frontmatter value of one page, or `''`."""
+    # Read whole: a long-lived task's `metrics_sessions` can push the closing `---` past
+    # any fixed head, and a truncated read would drop `launcher:` without a word.
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            head = fh.read(4096)
+            head = fh.read()
     except OSError:
         return ""
     if not head.startswith("---"):
@@ -302,7 +304,12 @@ def resolve_launcher(sid, cwd, fb):
         # non-dict must refuse cleanly, never raise — `resolve-task-file.py` learned this.
         if not isinstance(vault, dict):
             continue
-        root = os.path.realpath(os.path.expanduser(str(vault.get("path") or "")))
+        # Guard the RAW path: `realpath("")` is the process cwd, never `""`, so an entry
+        # with no path would otherwise claim this script's own cwd as a vault root.
+        raw = str(vault.get("path") or "").strip()
+        if not raw:
+            continue
+        root = os.path.realpath(os.path.expanduser(raw))
         if root and (real_cwd == root or real_cwd.startswith(root + os.sep)):
             if best is None or len(root) > len(best[0]):
                 best = (root, vault)

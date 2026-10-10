@@ -278,6 +278,16 @@ class ResolveLauncher(unittest.TestCase):
                                 "claude_script": os.path.join(self.scripts, "cc-private")}], fh)
         self.assertEqual(rw.resolve_launcher("x", self.vault, self.fb)[1], "vault")
 
+    def test_config_entry_without_path_claims_no_cwd(self):
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump([{"name": "empty", "path": "", "claude_script": "/x/cc"}], fh)
+        self.assertIsNone(rw.resolve_launcher("s1", os.getcwd(), self.fb)[0])
+
+    def test_launcher_survives_long_frontmatter(self):
+        filler = "\n".join(f"    - session_id: f{i}\n      started_at: x" for i in range(200))
+        self.page("25 Tasks", "T", f"claude_session_id: s1\nmetrics_sessions:\n{filler}\nlauncher: cc-private-claude")
+        self.assertEqual(rw.resolve_launcher("s1", self.vault, self.fb)[1], "task")
+
     def test_override_bypasses_shape_and_file_checks(self):
         """Deliberate: the override is the drill/test lever, set by the caller itself."""
         os.environ["SUPERVISOR_LAUNCHER"] = "/no/such/launcher"
@@ -531,6 +541,25 @@ class Cli(unittest.TestCase):
         code, lines = self.run_with("noargv", argv="")
         self.assertEqual(code, 1, lines)
         self.assertEqual(lines[0], "stale-load-path", lines)
+
+    def test_unresolved_launcher_refuses_before_the_kill(self):
+        """No override, cwd under no vault: exit 1 with an error line, nothing signalled."""
+        self.write(1, entry("nolauncher", name="Some Worker"))
+        cfg = os.path.join(self.dir, "vaults.json")
+        with open(cfg, "w") as fh:
+            json.dump([{"name": "v", "path": os.path.join(self.dir, "elsewhere"),
+                        "claude_script": "/x/cc"}], fh)
+        env = dict(os.environ)
+        env.pop("SUPERVISOR_LAUNCHER", None)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_VAULT_CONFIG"] = cfg
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "nolauncher", "--sessions-dir", self.reg],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("no launcher could be resolved", out.stdout)
+        self.assertNotIn("killed pid", out.stdout)
 
     def test_happy_path_dry_run_signals_nothing(self):
         """Cleared target: the dry run reports what it WOULD do and exits 0."""
