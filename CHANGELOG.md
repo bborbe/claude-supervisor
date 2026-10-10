@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.128.2
 
 - fix: `restart-worker.py`'s post-restart hand-off line no longer garbles the changed-inputs list (an f-string implicitly concatenated into the `join` separator)
 
