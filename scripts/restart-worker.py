@@ -46,7 +46,7 @@ import glob
 import importlib.util
 import json
 import os
-import shutil
+import re
 import subprocess
 import sys
 
@@ -227,15 +227,121 @@ def mcp_config_paths(argv):
     return [os.path.expanduser(p) for p in paths if p]
 
 
-def launcher_path():
-    """The launcher the resume will run, resolved to a file, or `None`.
+# A launcher value comes from task/goal frontmatter, which supervised workers can write,
+# and it is exec'd inside `bash -lc` — so anything but a plain path is refused, never
+# quoted. Same shape `server/spawn-cwd.mjs` `SAFE_LAUNCHER` enforces on the spawn path.
+SAFE_LAUNCHER = re.compile(r"^[A-Za-z0-9._/-]+$")
 
-    Mirrors `resume_command()`: `CLAUDE_SCRIPT`, else the bare `claude` on PATH — so
-    the check compares the same script the resume will actually exec.
+
+def vault_configs():
+    """`[{name, path, claude_script}]` from vault-cli config, or `None` when unreadable.
+
+    `SUPERVISOR_VAULT_CONFIG` names a JSON file holding the same list, for the same
+    reason `SUPERVISOR_LOAD_PATH` exists: a drill or a test must not read the real config.
     """
-    script = os.environ.get("CLAUDE_SCRIPT") or "claude"
-    resolved = script if os.sep in script else shutil.which(script)
-    return resolved if resolved and os.path.isfile(resolved) else None
+    override = os.environ.get("SUPERVISOR_VAULT_CONFIG")
+    try:
+        if override:
+            with open(os.path.expanduser(override), encoding="utf-8") as fh:
+                data = json.load(fh)
+        else:
+            out = subprocess.run(
+                ["vault-cli", "config", "list", "--output", "json"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if out.returncode != 0:
+                return None
+            data = json.loads(out.stdout)
+    except Exception:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _launcher_field(path):
+    """The `launcher:` frontmatter value of one page, or `''`."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return ""
+    if not head.startswith("---"):
+        return ""
+    end = head.find("\n---", 3)
+    fm = head[3:end] if end != -1 else ""
+    match = re.search(r"^launcher:[ \t]*['\"]?([^'\"\n]*?)['\"]?[ \t]*$", fm, re.M)
+    return match.group(1).strip() if match else ""
+
+
+def resolve_launcher(sid, cwd, fb):
+    """`(launcher_path, source)` the session must resume through, or `(None, reason)`.
+
+    The resume must run the worker's OWN launcher, not the caller's. A launcher script
+    exports what the session needs before it execs `claude` — the router base URL, the
+    model, the `--mcp-config` file — so resuming through bare `claude` brings the session
+    back on a reduced MCP surface and the wrong backend. Measured 2026-10-10: a manager
+    with no `CLAUDE_SCRIPT` restarted a worker through bare `claude`, and the resumed
+    process came back without `--mcp-config` and without its `a2a` server.
+
+    Precedence mirrors the spawn path (`server/spawn-cwd.mjs` `resolveTaskLauncher`): the
+    task bound to this session (`claude_session_id`) names a `launcher:`, else its goals
+    agree on one, else the vault's `claude_script`. The vault is the one whose path holds
+    the session's cwd. A bare name resolves beside the vault launcher. Anything that cannot
+    be resolved to an existing file answers `None` — the caller refuses before the kill.
+    `SUPERVISOR_LAUNCHER` overrides the whole resolution, for drills and tests.
+    """
+    override = os.environ.get("SUPERVISOR_LAUNCHER")
+    if override:
+        return override, "override"
+    configs = vault_configs()
+    if configs is None:
+        return None, "vault-cli config could not be read"
+    real_cwd = os.path.realpath(cwd) if cwd else ""
+    best = None
+    for vault in configs:
+        root = os.path.realpath(os.path.expanduser(str(vault.get("path") or "")))
+        if root and (real_cwd == root or real_cwd.startswith(root + os.sep)):
+            if best is None or len(root) > len(best[0]):
+                best = (root, vault)
+    if best is None:
+        return None, f"cwd {cwd or '(none)'} is under no configured vault"
+    root, vault = best
+    vault_launcher = str(vault.get("claude_script") or "").strip()
+    if not vault_launcher:
+        return None, f"vault {vault.get('name')!r} has no claude_script"
+
+    own, goal_values = "", []
+    for path in fb._pages(root, fb.TASK_SUBDIRS):
+        head = fb._read(path, fb.TASK_HEAD)
+        if not re.search(rf"^claude_session_id:[ \t]*['\"]?{re.escape(sid)}", head, re.M):
+            continue
+        own = _launcher_field(path)
+        if not own:
+            for goal in fb.frontmatter_links(fb.frontmatter(head), "goals"):
+                for gpath in fb._pages(root, fb.GOAL_SUBDIRS):
+                    if os.path.basename(gpath)[:-3].lower() == goal.strip().lower():
+                        value = _launcher_field(gpath)
+                        if value:
+                            goal_values.append(value)
+        break
+
+    for value in [own, *goal_values]:
+        if value and (not SAFE_LAUNCHER.match(value) or ".." in value.split("/")):
+            return None, f"launcher {value!r} is not a plain script name or path"
+    goal_set = sorted(set(goal_values))
+    if own:
+        name, source = own, "task"
+    elif len(goal_set) > 1:
+        return None, f"the task's goals name different launchers ({', '.join(goal_set)})"
+    elif goal_set:
+        name, source = goal_set[0], "goal"
+    else:
+        name, source = vault_launcher, "vault"
+    if "/" not in name:
+        name = os.path.join(os.path.dirname(vault_launcher), name)
+    name = os.path.expanduser(name)
+    if not os.path.isfile(name):
+        return None, f"launcher {name} ({source}) does not exist"
+    return name, source
 
 
 def changed_inputs(load_path, load_mtime, argv, launcher, started):
@@ -287,7 +393,7 @@ def parse_started(rec):
         return None
 
 
-def resume_command(sid, title, chip, cwd):
+def resume_command(sid, title, chip, cwd, launcher):
     """The resume recipe, copied from `commands/open.md` Step 3.1.
 
     A markdown command is not executable, so this is a deliberate copy — see the module
@@ -315,7 +421,7 @@ def resume_command(sid, title, chip, cwd):
     restarted worker that should be pink is exactly the mis-coloured session that nearly got a
     manager relaunched as a worker on 2026-09-18. The quotes are dropped here, deliberately.
     """
-    script = os.environ.get("CLAUDE_SCRIPT") or "claude"
+    script = launcher
     inner = (
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
@@ -467,7 +573,7 @@ def main():
             "anything would load differently",
         )
     argv = worker_argv(pid)
-    launcher = launcher_path()
+    launcher, launcher_source = resolve_launcher(sid, (rec.get("cwd") or "").strip(), fb)
     changed = changed_inputs(load_path, load_mtime, argv, launcher, started)
     if not changed:
         checked = [
@@ -475,7 +581,7 @@ def main():
             else f"no load path under {LOAD_PATH_ROOT}",
             "MCP config (unreadable argv)" if argv is None
             else ", ".join(mcp_config_paths(argv)) or "no --mcp-config",
-            launcher or "launcher (CLAUDE_SCRIPT unresolved)",
+            launcher or f"launcher unresolved: {launcher_source}",
         ]
         return refuse(
             "stale-load-path",
@@ -500,6 +606,17 @@ def main():
     # this is checked BEFORE signalling, never after. An unresumable session must not
     # be killed, which is the whole reason the guard sits above `os.kill`.
     cwd = (rec.get("cwd") or "").strip()
+
+    # The launcher the session resumes THROUGH — resolved above, checked here, before the
+    # kill: a session resumed through the wrong launcher comes back on a reduced MCP
+    # surface, so an unresolvable launcher is refused exactly like a missing cwd.
+    if launcher is None:
+        print(
+            f"❌ error: no launcher could be resolved for {sid} ({launcher_source}); "
+            "resuming through bare `claude` drops its MCP config and env — refusing before the kill"
+        )
+        return 1
+    print(f"   launcher: {launcher} ({launcher_source})")
 
     if args.dry_run:
         print("   ✅ would kill the pid above and resume the same session id")
@@ -538,7 +655,7 @@ def main():
     # the caller branches on this exit code to decide whether the worker is back.
     try:
         spawned = subprocess.run(
-            resume_command(sid, title, chip, cwd),
+            resume_command(sid, title, chip, cwd, launcher),
             capture_output=True, text=True, timeout=30,
         )
     except Exception as error:
