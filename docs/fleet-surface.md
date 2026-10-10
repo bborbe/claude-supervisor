@@ -787,6 +787,62 @@ open tasks) and lists a **suspect** without failing: a stamp on one open task wh
 it. The field is read from the frontmatter block only, and an empty `claude_session_id:` is no
 stamp.
 
+## Which manager owns a subject
+
+A task's manager is resolved in one order, and **this section is the single statement of the
+rule**:
+
+1. the task's own `managed_by` field, when it carries one — a wikilink to the goal or topic
+   that owns it;
+2. otherwise the task's `goals:`, **in order** — ⚠️ **every goal is tried, not only the first.**
+   `scripts/fleet-board.py`'s `manager_on_chain` walks `goals` in order and returns the first
+   that resolves, so a task whose *second* goal has a live manager is owned by that manager
+   rather than falling through to tier 4. A rule naming only the first goal would contradict
+   the resolver this section cites, and it would bite exactly where the `managed_by` caveat
+   below matters;
+3. and for each goal, the goal itself before the **topic** whose `## Goals` section lists it —
+   ⚠️ **the relation is declared on the TOPIC page, never on the goal page.** A goal page
+   carries no `## Goals` list of its own; `scripts/fleet-board.py` builds its `goal_topics`
+   index by scanning topic pages for the goals they list (`topics_of(goal)` → *"the topics
+   whose `## Goals` lists this goal"*), and `commands/manager-loop.md` says the same of the
+   goal branch. A reader looking for a topic declaration *on the goal page* finds none and
+   falls through to tier 4, skipping the real owner;
+4. otherwise the **Fleet Manager**.
+
+⚠️ **`managed_by` has no writer yet, and saying so is part of the rule.** It is authored by
+hand — by the operator, or by a manager settling a task whose `goals:` genuinely names more
+than one owner — and nothing in this repo writes it automatically. The two resolvers that
+walk a task to its manager today (`scripts/fleet-board.py`'s goal→topic chain and
+`scripts/approved-not-started.py`'s `manager_for()`) still derive the owner from `goals:`
+alone and do not read this field, so a `managed_by` value is honoured by a reader that knows
+this section rather than by those two. Stating the tier without this caveat would describe a
+precedence step no code can currently reach.
+
+Then read the owner's `manager_session_id` off its page — a goal or topic page carries the
+session id of the manager that armed it — and treat it as a **lead only**, never as a verdict:
+
+| `session-liveness.py --check` | exit | action |
+|---|---|---|
+| `LIVE` | 0 | jump to it |
+| `ABSENT` | 1 | resume it by id — the conversation is what is durable, not the process |
+| `UNKNOWN` | 2 | start a fresh manager; `--check` reads the session-heartbeat endpoint and never the registry, so this is an unreachable or non-200 endpoint, a malformed row, a non-boolean `live`, or a stale cluster-reachability marker — *cannot tell*, never *dead* |
+| `AMBIGUOUS` | 3 | start a fresh manager; the prefix matches two rows the store holds, which need not both be **live** (the matcher spans stale rows too), and a longer id resolves it |
+
+`manager_session_id` is written when a manager arms the subject — by the *Record the manager's
+session on the subject's page* step in `commands/manager-loop.md`, which is a named paragraph
+rather than a `## ` heading — and overwritten whenever a new manager arms it, so a value is
+evidence of **who**, never of **alive**.
+
+⚠️ **Three things this is not.** It is **not** the `claude_session_id` stamp of § Session
+stamps: that one names the session working a *task*, this one names the manager serving a
+*goal or topic*, and the multiplicity rule above governs only the former — a session may hold
+many task stamps, while the manager stamp is a different field on a different page. It is
+**not** the chain in `docs/subject-resolution.md`, which resolves a different question — which
+*subject* a session is serving — and is unchanged by this section; the two compose, and neither
+is a fallback for the other. And a missing `managed_by` is **not** an error: the task's own
+`goals:` are the documented default, tried in order, which is why a single-goal task never
+needs the field.
+
 ## Referencing vault notes
 
 Several fleet commands cite the operator's Obsidian runbooks. The rule is a **wikilink by
