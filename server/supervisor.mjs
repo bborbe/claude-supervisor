@@ -25,7 +25,7 @@ import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
@@ -34,6 +34,7 @@ import { resolveMessageChannel } from './message-channel.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
+import { managerSessions } from './manager-sessions.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, parentSessionId, readRecord, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
@@ -893,6 +894,21 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
   })
 }
 
+// The fleet-wide MANAGER cap — consulted only for a `role: manager` spawn, beside the worker
+// cap above and in the same split: resolve and count HERE, decide in `managerLimitRefusal`.
+// The count is `managerSessions()` — the fleet board's own manager classification, which sees
+// hand-started managers the spawn ledger never records. See `manager-sessions.mjs`.
+async function managerLimitError({ operatorNamed = false } = {}) {
+  const limits = resolveMaxManagers({ file: config.configFileContents, path: config.configFile })
+  const live = limits.error || limits.limit === null ? null : await managerSessions()
+  return managerLimitRefusal({
+    limits,
+    liveCount: live === null ? null : live.length,
+    operatorNamed,
+    configFile: config.configFile,
+  })
+}
+
 // The session start rate — how fast sessions may be OPENED, as distinct from how many may be
 // live at once. Enforced beside the concurrency cap, and for the same reason that cap is:
 // a rate consulted after the spawn has already spent the budget it exists to protect.
@@ -1245,6 +1261,13 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // Definition and its two stated limits: `worker-sessions.mjs`.
   const limitError = await concurrentLimitError({ operatorNamed })
   if (limitError) return { error: limitError }
+
+  // A manager also answers to the manager cap — a separate, smaller population bound. Checked
+  // here, with the other guards, before a tab or a ledger record exists.
+  if (roleResolution.role === 'manager') {
+    const managerError = await managerLimitError({ operatorNamed })
+    if (managerError) return { error: managerError }
+  }
 
   // An explicit window id WINS — the caller may need a window the map does not describe.
   // Otherwise the role decides, in-process, and no window id crosses the tool boundary.
