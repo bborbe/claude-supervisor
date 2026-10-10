@@ -222,16 +222,18 @@ def mcp_config_paths(argv):
     for i, tok in enumerate(tokens):
         if tok.startswith("--mcp-config="):
             paths.append(tok.split("=", 1)[1])
-        elif tok == "--mcp-config" and i + 1 < len(tokens):
+        elif tok == "--mcp-config" and i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
             paths.append(tokens[i + 1])
     return [os.path.expanduser(p) for p in paths if p]
 
 
 def launcher_path():
-    """The launcher the resume will run (`CLAUDE_SCRIPT`), resolved to a file, or `None`."""
-    script = os.environ.get("CLAUDE_SCRIPT")
-    if not script:
-        return None
+    """The launcher the resume will run, resolved to a file, or `None`.
+
+    Mirrors `resume_command()`: `CLAUDE_SCRIPT`, else the bare `claude` on PATH — so
+    the check compares the same script the resume will actually exec.
+    """
+    script = os.environ.get("CLAUDE_SCRIPT") or "claude"
     resolved = script if os.sep in script else shutil.which(script)
     return resolved if resolved and os.path.isfile(resolved) else None
 
@@ -554,7 +556,7 @@ def main():
     )
     print(
         f"   ↪ tell the resumed session it was restarted, and what changed: "
-        f"{PLUGIN} @ {os.path.basename(load_path)}"
+        "; ".join(f"{label} ({what})" for label, what in changed)
     )
     return 0
 

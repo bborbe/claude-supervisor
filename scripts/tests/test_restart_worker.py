@@ -240,6 +240,55 @@ class LoadPathSelection(unittest.TestCase):
         self.assertEqual(rw.newest_load_path(), (None, None))
 
 
+class WorkerArgv(unittest.TestCase):
+    """The live `ps` read and the input comparison, without the CLI override."""
+
+    def setUp(self):
+        self._env = os.environ.pop("SUPERVISOR_WORKER_ARGV", None)
+        self._run = rw.subprocess.run
+
+    def tearDown(self):
+        rw.subprocess.run = self._run
+        if self._env is not None:
+            os.environ["SUPERVISOR_WORKER_ARGV"] = self._env
+
+    def stub(self, returncode=0, stdout="", raises=False):
+        class Out:
+            pass
+
+        def run(*_a, **_k):
+            if raises:
+                raise OSError("no ps")
+            out = Out()
+            out.returncode, out.stdout = returncode, stdout
+            return out
+
+        rw.subprocess.run = run
+
+    def test_populated_read(self):
+        self.stub(stdout="claude --mcp-config=/x.json\n")
+        self.assertEqual(rw.worker_argv(1), "claude --mcp-config=/x.json")
+
+    def test_failed_query_is_none(self):
+        self.stub(returncode=1)
+        self.assertIsNone(rw.worker_argv(1))
+
+    def test_raising_query_is_none(self):
+        self.stub(raises=True)
+        self.assertIsNone(rw.worker_argv(1))
+
+    def test_flag_followed_by_flag_is_not_a_path(self):
+        self.assertEqual(rw.mcp_config_paths("claude --mcp-config --strict-mcp-config"), [])
+
+    def test_no_load_path_accepts_on_newer_mcp_config(self):
+        with tempfile.NamedTemporaryFile() as fh:
+            changed = rw.changed_inputs(None, None, f"claude --mcp-config={fh.name}", None, 0.0)
+        self.assertEqual([label for label, _ in changed], ["MCP config"])
+
+    def test_none_argv_contributes_nothing(self):
+        self.assertEqual(rw.changed_inputs(None, None, None, None, 0.0), [])
+
+
 class RefusalCode(unittest.TestCase):
     """Pin the exit code every refusal routes through.
 
@@ -323,11 +372,11 @@ class Cli(unittest.TestCase):
         """Drive the CLI with a fixture worker argv and launcher."""
         env = dict(os.environ)
         env["SUPERVISOR_LOAD_PATH"] = self.load
-        env.pop("CLAUDE_SCRIPT", None)
         if argv is not None:
             env["SUPERVISOR_WORKER_ARGV"] = argv
-        if launcher is not None:
-            env["CLAUDE_SCRIPT"] = launcher
+        # A stale launcher by default: an unset CLAUDE_SCRIPT falls back to the real
+        # `claude` on PATH, whose mtime would decide the case instead of the fixture.
+        env["CLAUDE_SCRIPT"] = launcher or self.stale(self.touch("cc-default"))
         out = subprocess.run(
             [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run"],
             capture_output=True, text=True, env=env,
@@ -378,8 +427,8 @@ class Cli(unittest.TestCase):
         self.assertEqual(lines[0], "stale-load-path", lines)
         self.assertIn(cfg, "\n".join(lines))
 
-    def test_unreadable_argv_falls_back_to_load_path_check(self):
-        """No argv and no launcher: only the (stale) load path decides — refuse."""
+    def test_no_mcp_config_falls_back_to_load_path_check(self):
+        """No --mcp-config and a stale launcher: only the (stale) load path decides."""
         self.fresh_session("noargv")
         code, lines = self.run_with("noargv", argv="")
         self.assertEqual(code, 1, lines)

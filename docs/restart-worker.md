@@ -72,7 +72,8 @@ restart. The script therefore compares **three** inputs against `startedAt`:
 2. every `--mcp-config` path in the worker's **live argv** — `ps -o args= -p <pid>`, read
    before the kill, because the registry carries no argv and afterwards there is no
    process left to read;
-3. the launcher script the resume will run (`CLAUDE_SCRIPT`, resolved to a file).
+3. the launcher script the resume will run — `CLAUDE_SCRIPT`, else `claude` on PATH,
+   exactly as `resume_command()` picks it — resolved to a file.
 
 Any one newer accepts, and the output's `changed:` line names which input changed. Only
 when **all** are no newer does it refuse as `stale-load-path`, and the refusal lists what
