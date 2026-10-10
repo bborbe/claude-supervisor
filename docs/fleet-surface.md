@@ -407,11 +407,14 @@ working directory — `$HOME` for a server started from a home directory. Claude
 on *"Accessing workspace /Users/&lt;user&gt; — do you trust this folder?"* and registers **no pid
 at all**, so a resume that worked perfectly reads as a no-op: a caller checking the registry
 finds nothing and reads "did not take", a caller checking the exit code reads "took", and
-neither reading names the trust dialog. The value comes from the session registry —
-`~/.claude/sessions/<pid>.json` carries a `cwd` field (verified 2026-09-24: 26 of 26 records on
-this host) — and is resolved **before** the spawn, never guessed or defaulted: a session whose
-record carries no `cwd` is refused rather than resumed into the wrong tree. Path A states the
-same requirement for `spawn_agent` at item 3 below; this is its path-B twin, and the two must
+neither reading names the trust dialog. The value is resolved **before** the spawn, never
+guessed or defaulted — and ⚠️ **this recipe is also the path for resuming a session that is
+genuinely orphaned, so the resolution rule carries an orphan branch that the registry alone
+cannot serve.** The rule, its two sources and its refusal have their **single home at resume
+decisions item 3 below** — ⚠️ **not "item 3" unqualified**, which in this document means the
+readiness ladder above and resolves to an unrelated check; read it there rather than resolving
+from the registry alone. Path A states the
+same requirement for `spawn_agent`; this is its path-B twin, and the two must
 not drift into two different resolution rules.
 
 **`$WINDOW_ID` and `$CHIP` are a role-resolved PAIR**, read from the published map before
@@ -528,8 +531,60 @@ a conversation, not a working directory, and nothing carries the old one across.
 names **neither** `cwd` nor `vault` is **refused** (item 8), not defaulted — so a worker
 resumed to finish repo work can no longer silently start somewhere else and send its first file
 operation to the wrong tree, but a caller who never had the directory still has to go and find
-it. Read `cwd` from the session registry (`~/.claude/sessions/<pid>.json`) rather than
-guessing; that record is the only place the original directory survives.
+it.
+
+**Where that directory comes from — and the orphan branch without which the rule can never
+fire for its own case.** ⚠️ **This is the rule's single home, and its citable name is "resume decisions item 3"** — the resume list below, never the readiness ladder above, whose own item 3 is an unrelated check. The path-B recipe above,
+`commands/open.md` § 3.1 and `agents/manager-drive.md` clause 3's `To resume` hand-over all
+point here rather than naming a source of their own.
+
+Resolve the value **before** the spawn, from whichever of the two sources applies to the
+session. ⚠️ **They are a partition, not a search — never try source 2 because source 1 came back
+empty.** Which one applies is decided by whether the session still has a registry record, and
+that is settled before either is read; a record that exists without a `cwd` is a refusal (below),
+never a cue to fall through:
+
+1. **The session registry** — `~/.claude/sessions/<pid>.json`, its `cwd` field. The source for a
+   session that still has a record.
+2. **The session's transcript** — `find ~/.claude/projects -name "<session-id>.jsonl"`, then the
+   **first** entry carrying a `cwd`. The source for a session with **no registry record at
+   all**.
+
+⚠️ **Source 2 is not a convenience — without it the rule can never be used for the case it
+exists for.** A registry entry is **deleted when its session exits** — `scripts/session-liveness.py`
+states the invariant in its own header, and this repo's `CLAUDE.md` registry table repeats it —
+so a **genuinely orphaned** session has no record *by construction*. The auto-resume gate's own
+clause reads *no registry entry on any id* as what makes a row an orphan at all
+(`agents/manager-drive.md`, clause 3). A rule naming only the registry therefore demands, from
+an orphan, the one field the orphan cannot have.
+
+⚠️ **The transcript's first `cwd`, never its last, and never the project-directory name.**
+Measured 2026-10-10 on this host: the first cwd-carrying entry equals the registry's `cwd` for
+**38 of 40** live sessions — of the two exceptions, one is a symlink alias of the same directory
+(`Personal` → `private-personal`) and the other is a genuine difference (registry
+`private-starcitizen` against a transcript `Gaming`, the transcript recording the **launch**
+directory where the registry had since moved). The **last** entry differs from the registry for
+**21 of 39**, because it records where the session had `cd`'d to — several of those landing
+outside every configured vault (`/private/tmp`, a `workspaces/` worktree) that item 8 refuses.
+The **project-directory name** is a lossy re-encoding of a value the transcript stores verbatim
+one level down: `-` is both its separator and a legal path character, and it can carry a
+symlink alias — `-Users-…-Personal` for a session whose registry `cwd` is `private-personal`.
+
+⚠️ **The refusal rule, corrected — it guards a cwd-less record, not a missing one.** A session
+whose registry record **exists but carries no `cwd`** is refused rather than resumed into the
+wrong tree. A session with **no record** is **not** a refusal: it selects source 2. If neither
+source yields a `cwd`, refuse. Item 8's containment check still applies to whatever value you
+resolve, so a path outside every configured vault is refused however it was found.
+
+⚠️ **A `kill -9` fits neither source cleanly, and it is not a third one.** A record left behind
+by a `kill -9` reads **LIVE**, because its pid is recycled, so the auto-resume gate withholds the
+row rather than resuming it. That residue is
+[[A Substring-Matched Liveness Probe Reports a Dead Session as Live]]'s defect, not this rule's,
+and it must not be read as a source.
+
+⚠️ **A cluster worker is out of this rule's reach, and that is stated rather than implied.** Its
+transcript is not on this host, and the registry cannot hold a cluster worker either — so
+neither source covers it. Say so rather than guessing a cwd for one.
 
 **Confirming a headless spawn took — and what to read instead of `.status` — is owned by
 § A headless worker exits at turn end.** Do not restate it here: a restated copy is what let
