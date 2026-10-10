@@ -588,6 +588,14 @@ Then pass the pair to whichever spawn path runs:
 ### 3.1 Spawn — the wezterm path (fallback, and always the resume branch)
 
 ```bash
+# Pace the start FIRST, and never skip this line on this branch. The resume branch bypasses
+# the server, so this is the ONLY thing that throttles it — a batch of resumes issued without
+# it is exactly the 2026-10-10 burst (22 starts in 2.8 min). It reserves a slot and sleeps
+# until it, so no timing logic belongs here; exit 1 means the rate refused the start and the
+# reason is on stderr. The rule's single home is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md`
+# § Spawn a worker item 5 — this is the call site, not the recipe.
+node "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/start-rate.mjs" || exit 1
+
 wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
 ```
 

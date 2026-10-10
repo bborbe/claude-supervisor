@@ -26,6 +26,7 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { RATE_STATE_FILE, readReservedAt, resolveMaxStarts, startRateDecision, writeReservedAt } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
@@ -892,6 +893,47 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
   })
 }
 
+// The session start rate — how fast sessions may be OPENED, as distinct from how many may be
+// live at once. Enforced beside the concurrency cap, and for the same reason that cap is:
+// a rate consulted after the spawn has already spent the budget it exists to protect.
+//
+// ⚠️ THIS ONE WAITS RATHER THAN ONLY REFUSING, and that is the deliberate difference from
+// `concurrentLimitError` above. The callers are automated bulk paths, and refusing a 22-row
+// batch outright fails half of it; pacing the same starts spreads the first-turn context
+// loads that took the backend down on 2026-10-10. The wait is bounded — past the ceiling
+// `startRateDecision` returns an error instead, so this cannot park a caller indefinitely.
+//
+// ⚠️ THE RESERVATION IS WRITTEN BEFORE THE WAIT, not after. Writing it after would let every
+// caller in a simultaneous batch read the same stale stamp, compute the same slot, and then
+// all sleep to the same instant — the burst arriving on the far side of the check meant to
+// spread it.
+//
+// ⚠️ CALLED AS LATE AS POSSIBLE — immediately before the session is created, not beside the
+// other guards. The guards above it refuse a malformed call without creating anything, and a
+// slot consumed by a call that was never going to spawn would charge the next legitimate
+// start for a config typo.
+async function reserveStart() {
+  const rate = resolveMaxStarts({
+    env: config.maxStartsPerMinute,
+    file: config.configFileContents,
+    path: config.configFile,
+  })
+  const stateFile = join(config.stateDir, RATE_STATE_FILE)
+  const decision = startRateDecision({
+    rate,
+    lastReservedAt: readReservedAt(stateFile),
+    now: Date.now(),
+    configFile: config.configFile,
+  })
+  if (decision.error) return { error: decision.error }
+  writeReservedAt(stateFile, decision.reservedAt)
+  if (decision.action === 'delay') {
+    log(`${decision.message}\n`)
+    await new Promise((resolve) => setTimeout(resolve, decision.waitMs))
+  }
+  return { waitMs: decision.waitMs }
+}
+
 // The cluster target EVERY cluster call resolves — one home, so a spawn and a follow-up
 // cannot disagree about which service they address or which token they present.
 //
@@ -1006,6 +1048,12 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 
   const target = clusterTarget()
   if (target.error) return { error: target.error }
+
+  // A cluster session is a session start like any other, so it answers to the same rate —
+  // and it is paced HERE, after every refusal above, so a call that never reaches the
+  // service does not spend a slot.
+  const rateError = await reserveStart()
+  if (rateError.error) return { error: rateError.error }
 
   const started = await startClusterSession({
     baseUrl: target.url,
@@ -1434,6 +1482,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     createdAt: new Date().toISOString(),
   }
   agents.set(id, agent)
+
+  // The last guard before a session exists, and deliberately the last: everything above
+  // refuses without creating anything, so a slot is only spent by a spawn that is actually
+  // going ahead. See `reserveStart` for why this waits rather than only refusing.
+  const rateError = await reserveStart()
+  if (rateError.error) return { error: rateError.error }
 
   if (opensInteractive) {
     agent.status = 'interactive'
