@@ -823,8 +823,8 @@ session id of the manager that armed it — and treat it as a **lead only**, nev
 |---|---|---|
 | `LIVE` | 0 | jump to it |
 | `ABSENT` | 1 | resume it by id — the conversation is what is durable, not the process |
-| `UNKNOWN` | 2 | start a fresh manager; an unreadable registry cannot prove a session dead |
-| `AMBIGUOUS` | 3 | start a fresh manager; a prefix matching two live sessions resumes neither |
+| `UNKNOWN` | 2 | start a fresh manager; `--check` reads the session-heartbeat endpoint and never the registry, so this is an unreachable or non-200 endpoint, a malformed row, a non-boolean `live`, or a stale cluster-reachability marker — *cannot tell*, never *dead* |
+| `AMBIGUOUS` | 3 | start a fresh manager; the prefix matches two rows the store holds, which need not both be **live** (the matcher spans stale rows too), and a longer id resolves it |
 
 `manager_session_id` is written when a manager arms the subject — by the *Record the manager's
 session on the subject's page* step in `commands/manager-loop.md`, which is a named paragraph
