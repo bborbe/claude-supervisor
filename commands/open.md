@@ -594,6 +594,13 @@ Then pass the pair to whichever spawn path runs:
 # until it, so no timing logic belongs here; exit 1 means the rate refused the start and the
 # reason is on stderr. The rule's single home is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md`
 # § Spawn a worker item 5 — this is the call site, not the recipe.
+#
+# ⚠️ RUN THIS WITH A TIMEOUT OF AT LEAST 300s — never under the Bash tool's 120s default. The
+# script may sleep to MAX_START_DELAY_MS (300s) and it writes the reservation BEFORE sleeping,
+# so a caller that kills it mid-sleep has already spent a slot without spawning anything, and
+# this `|| exit 1` then aborts the row. At the default rate a 22-row batch reaches waits of
+# 4-5 minutes, so the default timeout fails the batch exactly where the pacing matters. Pass
+# an explicit timeout on the call (the Bash tool's maximum is 600s).
 node "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/start-rate.mjs" || exit 1
 
 wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'

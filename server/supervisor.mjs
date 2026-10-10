@@ -26,7 +26,7 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
-import { RATE_STATE_FILE, readReservedAt, resolveMaxStarts, startRateDecision, writeReservedAt } from './start-rate.mjs'
+import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
@@ -903,35 +903,28 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
 // loads that took the backend down on 2026-10-10. The wait is bounded — past the ceiling
 // `startRateDecision` returns an error instead, so this cannot park a caller indefinitely.
 //
-// ⚠️ THE RESERVATION IS WRITTEN BEFORE THE WAIT, not after. Writing it after would let every
-// caller in a simultaneous batch read the same stale stamp, compute the same slot, and then
-// all sleep to the same instant — the burst arriving on the far side of the check meant to
-// spread it.
+// ⚠️ THE SEQUENCE IS `reserveSlot`'S, NOT THIS CALL SITE'S. Reading, deciding, writing and
+// waiting are one ordering, and the WRITE-BEFORE-WAIT half of it is load-bearing: a caller
+// that wrote after the wait would let a simultaneous batch read one stale stamp, compute one
+// slot, and all sleep to the same instant — the burst arriving on the far side of the check
+// meant to spread it. Stated here as well, the two copies drift, which is the defect this
+// module family exists to refuse. This function resolves the config and hands off.
 //
 // ⚠️ CALLED AS LATE AS POSSIBLE — immediately before the session is created, not beside the
 // other guards. The guards above it refuse a malformed call without creating anything, and a
 // slot consumed by a call that was never going to spawn would charge the next legitimate
 // start for a config typo.
 async function reserveStart() {
-  const rate = resolveMaxStarts({
-    env: config.maxStartsPerMinute,
-    file: config.configFileContents,
-    path: config.configFile,
-  })
-  const stateFile = join(config.stateDir, RATE_STATE_FILE)
-  const decision = startRateDecision({
-    rate,
-    lastReservedAt: readReservedAt(stateFile),
-    now: Date.now(),
+  return reserveSlot({
+    rate: resolveMaxStarts({
+      env: config.maxStartsPerMinute,
+      file: config.configFileContents,
+      path: config.configFile,
+    }),
+    stateFile: join(config.stateDir, RATE_STATE_FILE),
     configFile: config.configFile,
+    log: (message) => log(`${message}\n`),
   })
-  if (decision.error) return { error: decision.error }
-  writeReservedAt(stateFile, decision.reservedAt)
-  if (decision.action === 'delay') {
-    log(`${decision.message}\n`)
-    await new Promise((resolve) => setTimeout(resolve, decision.waitMs))
-  }
-  return { waitMs: decision.waitMs }
 }
 
 // The cluster target EVERY cluster call resolves — one home, so a spawn and a follow-up

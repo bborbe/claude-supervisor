@@ -181,13 +181,57 @@ export function readReservedAt(file, { fs } = {}) {
 
 // Record a reservation. Written to a temp file and renamed, so a reader never sees a partial
 // file — the same discipline `ledger.mjs` uses for the same reason.
+//
+// ⚠️ THE TEMP NAME MUST BE UNIQUE PER WRITER, WHICH IS WHERE THIS DIVERGES FROM `ledger.mjs`.
+// That module's `.tmp` path is unique per record, so the collision below cannot arise there;
+// THIS state file is shared by every caller. With a fixed `${file}.tmp`, two cross-process
+// writers — the server and the § 3.1 CLI, or two CLIs in one batch — interleave so that the
+// first `renameSync` moves the temp file away and the second throws ENOENT. That throw lands
+// on the spawn path, where an uncaught error is a failed spawn rather than a wrong number.
 export function writeReservedAt(file, reservedAt, { fs } = {}) {
   const mkdir = fs?.mkdirSync ?? defaultMkdirSync
   const write = fs?.writeFileSync ?? defaultWriteFileSync
   const rename = fs?.renameSync ?? defaultRenameSync
   mkdir(dirname(file), { recursive: true })
-  const tmp = `${file}.tmp`
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
   write(tmp, `${JSON.stringify({ last_reserved_at: reservedAt }, null, 2)}\n`)
   rename(tmp, file)
   return reservedAt
+}
+
+// The whole impure reservation in one place: read, decide, WRITE, then wait.
+//
+// ⚠️ THE WRITE-BEFORE-WAIT ORDERING LIVES HERE AND NOWHERE ELSE, AND THAT IS THIS FUNCTION'S
+// REASON TO EXIST. It is the one ordering in this module a reader cannot infer from the pure
+// half, and it is load-bearing: a caller that wrote AFTER the wait would let a simultaneous
+// batch read one stale stamp, compute one slot, and all sleep to the same instant — the burst
+// arriving on the far side of the check meant to spread it. Stating it at each call site is
+// how two copies drift, which is the defect this module exists to refuse.
+//
+// `sleep` and `log` are injected so the ordering is testable without a real timer or a real
+// process: `start-rate.test.mjs` asserts the stamp is on disk BEFORE the sleep resolves.
+export async function reserveSlot({
+  rate,
+  stateFile,
+  now = Date.now(),
+  maxDelayMs = MAX_START_DELAY_MS,
+  configFile,
+  fs,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  log,
+} = {}) {
+  const decision = startRateDecision({
+    rate,
+    lastReservedAt: readReservedAt(stateFile, { fs }),
+    now,
+    maxDelayMs,
+    configFile,
+  })
+  if (decision.error) return { error: decision.error }
+  writeReservedAt(stateFile, decision.reservedAt, { fs })
+  if (decision.action === 'delay') {
+    if (log) log(decision.message)
+    await sleep(decision.waitMs)
+  }
+  return { reservedAt: decision.reservedAt, waitMs: decision.waitMs, message: decision.message }
 }

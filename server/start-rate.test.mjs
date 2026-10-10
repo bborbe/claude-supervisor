@@ -13,6 +13,7 @@ import {
   MAX_STARTS_ENV,
   MAX_START_DELAY_MS,
   readReservedAt,
+  reserveSlot,
   resolveMaxStarts,
   startRateDecision,
   writeReservedAt,
@@ -164,8 +165,11 @@ test('the reservation round-trips through the state file', () => {
     readFileSync: () => writes[0][1],
   }
   writeReservedAt('/state/start-rate.json', iso(NOW), { fs })
-  // Written to a temp path first, so a reader never sees a partial file.
-  assert.equal(writes[0][0], '/state/start-rate.json.tmp')
+  // Written to a temp path first, so a reader never sees a partial file — and the temp name
+  // carries a PER-WRITER suffix, because unlike `ledger.mjs`'s per-record temp this state file
+  // is shared. A fixed `.tmp` lets two cross-process writers interleave so the first rename
+  // moves the temp file away and the second throws ENOENT, on the spawn path.
+  assert.match(writes[0][0], /^\/state\/start-rate\.json\.[0-9]+\.[0-9]+\.tmp$/)
   assert.equal(readReservedAt('/state/start-rate.json', { fs }), iso(NOW))
 })
 
@@ -176,4 +180,83 @@ test('an absent, unreadable or malformed state file reads as no reservation', ()
   assert.equal(readReservedAt('/state/start-rate.json', { fs: { readFileSync: boom } }), null)
   assert.equal(readReservedAt('/state/start-rate.json', { fs: { readFileSync: () => 'not json' } }), null)
   assert.equal(readReservedAt('/state/start-rate.json', { fs: { readFileSync: () => '{"other":1}' } }), null)
+})
+
+// ── the whole reservation, ordering included ─────────────────────────────────────────────
+//
+// `reserveSlot` is the one place the read → decide → WRITE → wait ordering lives, and both
+// call sites go through it. The write-before-wait half is the part a reader cannot infer from
+// the pure decision, so it is asserted from INSIDE the sleep: that is the only instant at
+// which the ordering is observable, and a caller that wrote after the wait reads the stale
+// stamp there — which is exactly how a simultaneous batch computes one slot and all sleeps to
+// the same instant.
+
+const stateFs = (initial) => {
+  const state = { body: initial }
+  return {
+    state,
+    fs: {
+      mkdirSync: () => {},
+      writeFileSync: (_p, body) => {
+        state.body = body
+      },
+      renameSync: () => {},
+      readFileSync: () => state.body,
+    },
+  }
+}
+
+test('the slot is on disk BEFORE the wait resolves, never after', async () => {
+  const rate = resolveMaxStarts({})
+  const { state, fs } = stateFs(JSON.stringify({ last_reserved_at: iso(NOW) }))
+  let bodyAtSleep = null
+  const result = await reserveSlot({
+    rate,
+    stateFile: '/state/start-rate.json',
+    now: NOW,
+    fs,
+    sleep: async () => {
+      bodyAtSleep = state.body
+    },
+  })
+  assert.equal(result.waitMs, rate.intervalMs)
+  assert.ok(
+    String(bodyAtSleep).includes(iso(NOW + rate.intervalMs)),
+    `the new stamp must already be on disk when the wait resolves, got ${bodyAtSleep}`,
+  )
+})
+
+test('a delayed start reports the pacing and waits exactly what the decision computed', async () => {
+  const rate = resolveMaxStarts({})
+  const { fs } = stateFs(JSON.stringify({ last_reserved_at: iso(NOW) }))
+  const logged = []
+  const slept = []
+  await reserveSlot({
+    rate,
+    stateFile: '/state/start-rate.json',
+    now: NOW,
+    fs,
+    log: (message) => logged.push(message),
+    sleep: async (ms) => slept.push(ms),
+  })
+  assert.deepEqual(slept, [rate.intervalMs])
+  assert.equal(logged.length, 1)
+  assert.match(logged[0], /paced, not dropped/)
+})
+
+test('a refused start writes nothing and never sleeps, so a refusal cannot charge the queue', async () => {
+  const rate = resolveMaxStarts({})
+  const { fs } = stateFs(JSON.stringify({ last_reserved_at: iso(NOW + 10 * 60_000) }))
+  const result = await reserveSlot({
+    rate,
+    stateFile: '/state/start-rate.json',
+    now: NOW,
+    fs: {
+      ...fs,
+      writeFileSync: () => assert.fail('a refused start must not write the state file'),
+    },
+    sleep: () => assert.fail('a refused start must not sleep'),
+  })
+  assert.ok(result.error, 'expected the ceiling to refuse this start')
+  assert.match(result.error, /start rate is 4\/min/)
 })
