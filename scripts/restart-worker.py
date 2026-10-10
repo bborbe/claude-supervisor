@@ -298,6 +298,10 @@ def resolve_launcher(sid, cwd, fb):
     real_cwd = os.path.realpath(cwd) if cwd else ""
     best = None
     for vault in configs:
+        # Guard each element, inside the loop: a payload that parses to a list holding a
+        # non-dict must refuse cleanly, never raise — `resolve-task-file.py` learned this.
+        if not isinstance(vault, dict):
+            continue
         root = os.path.realpath(os.path.expanduser(str(vault.get("path") or "")))
         if root and (real_cwd == root or real_cwd.startswith(root + os.sep)):
             if best is None or len(root) > len(best[0]):
@@ -309,20 +313,34 @@ def resolve_launcher(sid, cwd, fb):
     if not vault_launcher:
         return None, f"vault {vault.get('name')!r} has no claude_script"
 
-    own, goal_values = "", []
+    # The task bound to this session, matched on the row's WHOLE id set —
+    # `claude_session_id` plus every `metrics_sessions[].session_id`, read through
+    # `manager-predispatch.py`'s `session_id_set`, never re-derived. Many tasks carry the
+    # id only in `metrics_sessions`, and a single-field match would drop their `launcher:`.
+    session_id_set = load_sibling("manager-predispatch.py").session_id_set
+    claimants = []
     for path in fb._pages(root, fb.TASK_SUBDIRS):
-        head = fb._read(path, fb.TASK_HEAD)
-        if not re.search(rf"^claude_session_id:[ \t]*['\"]?{re.escape(sid)}", head, re.M):
+        text = fb._read(path)
+        if sid not in text:
             continue
+        fm = fb.frontmatter(text)
+        if sid in session_id_set(fm):
+            claimants.append((path, fm))
+    if len(claimants) > 1:
+        names = ", ".join(os.path.basename(p)[:-3] for p, _ in claimants)
+        return None, f"{len(claimants)} task pages claim session {sid} ({names})"
+
+    own, goal_values = "", []
+    if claimants:
+        path, fm = claimants[0]
         own = _launcher_field(path)
         if not own:
-            for goal in fb.frontmatter_links(fb.frontmatter(head), "goals"):
+            for goal in fb.frontmatter_links(fm, "goals"):
                 for gpath in fb._pages(root, fb.GOAL_SUBDIRS):
                     if os.path.basename(gpath)[:-3].lower() == goal.strip().lower():
                         value = _launcher_field(gpath)
                         if value:
                             goal_values.append(value)
-        break
 
     for value in [own, *goal_values]:
         if value and (not SAFE_LAUNCHER.match(value) or ".." in value.split("/")):

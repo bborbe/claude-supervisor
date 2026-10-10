@@ -251,6 +251,38 @@ class ResolveLauncher(unittest.TestCase):
         self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc;rm -rf")
         self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
 
+    def test_metrics_sessions_only_binding_is_matched(self):
+        self.page("25 Tasks", "T", "launcher: cc-private-claude\nmetrics_sessions:\n    - session_id: s9\n      started_at: x")
+        self.assertEqual(rw.resolve_launcher("s9", self.vault, self.fb)[1], "task")
+
+    def test_two_claimants_is_none(self):
+        self.page("25 Tasks", "A", "claude_session_id: s1")
+        self.page("25 Tasks", "B", "claude_session_id: s1")
+        path, reason = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertIsNone(path)
+        self.assertIn("2 task pages", reason)
+
+    def test_goals_naming_different_launchers_is_none(self):
+        self.page("24 Goals", "G1", "launcher: cc-goal")
+        self.page("24 Goals", "G2", "launcher: cc-private-claude")
+        self.page("25 Tasks", "T", "claude_session_id: s1\ngoals:\n    - '[[G1]]'\n    - '[[G2]]'")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+
+    def test_unreadable_vault_config_is_none(self):
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = os.path.join(self.tmp.name, "absent.json")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+
+    def test_non_dict_config_element_is_skipped_not_raised(self):
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump(["junk", {"name": "v", "path": self.vault,
+                                "claude_script": os.path.join(self.scripts, "cc-private")}], fh)
+        self.assertEqual(rw.resolve_launcher("x", self.vault, self.fb)[1], "vault")
+
+    def test_override_bypasses_shape_and_file_checks(self):
+        """Deliberate: the override is the drill/test lever, set by the caller itself."""
+        os.environ["SUPERVISOR_LAUNCHER"] = "/no/such/launcher"
+        self.assertEqual(rw.resolve_launcher("s1", "/nowhere", self.fb), ("/no/such/launcher", "override"))
+
     def test_missing_launcher_file_is_none(self):
         self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-absent")
         self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])

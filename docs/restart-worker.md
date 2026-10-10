@@ -154,10 +154,11 @@ manager with no `CLAUDE_SCRIPT` restarted a worker, the `changed:` line named ba
 `a2a` server.
 
 Precedence is the spawn path's (`server/spawn-cwd.mjs` `resolveTaskLauncher`): the task bound
-to the session (`claude_session_id`) names a `launcher:`; else its goals agree on one; else
+to the session — matched on its whole id set, `claude_session_id` plus every
+`metrics_sessions[].session_id` — names a `launcher:`; else its goals agree on one; else
 the `claude_script` of the vault whose path holds the session's `cwd` (from
 `vault-cli config list`). A bare name resolves beside the vault launcher. A value that is not
-a plain path, goals that disagree, a `cwd` under no vault, or a launcher file that does not
+a plain path, goals that disagree, two task pages claiming the session, a `cwd` under no vault, or a launcher file that does not
 exist all leave it **unresolved** — and an unresolved launcher refuses **before the kill**
 with an `❌ error:` line, the same operational class as a missing `cwd`. It is not a target
 refusal, so the seven tokens stay seven. The output's `launcher:` line names the file and its
