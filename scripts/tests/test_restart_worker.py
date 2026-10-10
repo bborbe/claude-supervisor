@@ -396,6 +396,22 @@ class WorkerArgv(unittest.TestCase):
         self.assertEqual(rw.changed_inputs(None, None, None, None, 0.0), [])
 
 
+class DescribeChanged(unittest.TestCase):
+    """Regression 2026-10-10: an f-string followed by `"; ".join(...)` concatenated the two
+    literals into the separator, so the hand-off line read `plugin version (…)   ↪ tell …: ; MCP config (…)`."""
+
+    def test_joins_each_input_once(self):
+        self.assertEqual(
+            rw.describe_changed([("plugin version", "0.1.0"), ("MCP config", "/p")]),
+            "plugin version (0.1.0); MCP config (/p)",
+        )
+
+    def test_handoff_line_is_built_from_it(self):
+        with open(SCRIPT, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("what changed: {describe_changed(changed)}", src)
+
+
 class RefusalCode(unittest.TestCase):
     """Pin the exit code every refusal routes through.
 
