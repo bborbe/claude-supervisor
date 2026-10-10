@@ -1481,13 +1481,22 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     error: null,
     createdAt: new Date().toISOString(),
   }
-  agents.set(id, agent)
-
-  // The last guard before a session exists, and deliberately the last: everything above
-  // refuses without creating anything, so a slot is only spent by a spawn that is actually
+  // The last guard before anything is created, and deliberately the last: every refusal above
+  // it returns without a side effect, so a slot is only spent by a spawn that is actually
   // going ahead. See `reserveStart` for why this waits rather than only refusing.
+  //
+  // ⚠️ IT SITS ABOVE `agents.set`, AND THAT ORDER IS LOAD-BEARING. Registration is this
+  // function's first side effect and it writes `status: 'running'` — so a guard below it
+  // leaves a REFUSED start registered as a running worker that no session backs, for the life
+  // of the process: the only reaper, `pruneRehydratedAgents`, skips every entry that is not
+  // `rehydrated`. The same ordering would also report a DELAYED start as running for up to
+  // the 5-minute ceiling, which is the entire window a paced batch spends waiting — i.e. the
+  // common case, not the edge. `agents.delete(id)` on the refusal branch would patch the
+  // first half and leave the second.
   const rateError = await reserveStart()
   if (rateError.error) return { error: rateError.error }
+
+  agents.set(id, agent)
 
   if (opensInteractive) {
     agent.status = 'interactive'
