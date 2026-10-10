@@ -532,8 +532,9 @@ operation to the wrong tree, but a caller who never had the directory still has 
 it.
 
 **Where that directory comes from — and the orphan branch without which the rule can never
-fire for its own case.** ⚠️ **This is the rule's single home.** The path-B recipe above and
-`commands/open.md` § 3.1 both point here rather than naming a source of their own.
+fire for its own case.** ⚠️ **This is the rule's single home.** The path-B recipe above,
+`commands/open.md` § 3.1 and `agents/manager-drive.md` clause 3's `To resume` hand-over all
+point here rather than naming a source of their own.
 
 Resolve the value **before** the spawn, from the first of two sources that yields one:
 
