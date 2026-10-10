@@ -842,14 +842,16 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
 // path consulted would be a second counter by omission, which is the defect this number's
 // single home exists to prevent.
 //
-// The count is live WORKER SESSIONS — the spawn ledger joined to the registry OR the heartbeat
-// store, minus auto-resumes. ⚠️ **Both liveness channels are needed, and reading either alone
-// is the defect this instrument has now had twice:** the heartbeat store alone answered 0 while
-// 11 interactive workers were live (measured 2026-10-01), and the registry alone rendered every
-// headless and cluster worker dead (corrected 2026-10-05) — the registry is pid-keyed and
-// local-only, so it cannot see a worker with no pid of its own. A cap counting one population
-// while the managers' target counts another is a defect with no error on either side — and the
-// target IS this number, so they must agree by construction.
+// The count is live WORKER SESSIONS — the spawn ledger joined to the **session-heartbeat
+// endpoint**, minus auto-resumes. ⚠️ **The liveness source moved to the endpoint on 2026-10-09,
+// and the join did not.** Until then this read the registry OR the local heartbeat store, and
+// the move is the third correction of one instrument: the store alone answered 0 while 11
+// interactive workers were live (measured 2026-10-01), the registry alone rendered every
+// headless and cluster worker dead (corrected 2026-10-05, because the registry is pid-keyed and
+// local-only and cannot see a worker with no pid of its own), and now the endpoint holds BOTH
+// populations in one store, so the union rule goes with the channels. A cap counting one
+// population while the managers' target counts another is a defect with no error on either side
+// — and the target IS this number, so they must agree by construction.
 // Definition and its two stated limits: `worker-sessions.mjs`.
 // ⚠️ TWO THRESHOLDS SINCE 2026-10-04, ON THE OPERATOR'S RULING — *"lets start with 30 = soft
 // cap and 50 = hard cap"*. The SOFT cap refuses ORDINARY spawns; the HARD cap refuses EVERY
@@ -863,7 +865,11 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
 // default of `true` would make the soft cap unenforceable, so an absent argument means an
 // ordinary spawn. The marker and its provenance rule have one home in `commands/open.md`
 // § Step 1.5; this is the enforcement, not a second definition.
-function concurrentLimitError({ operatorNamed = false } = {}) {
+// ⚠️ **Asynchronous since 2026-10-09, because the count's liveness source is the
+// session-heartbeat endpoint** — an HTTP read, where it used to be two filesystem reads. Both
+// callers are already `async` and must await it: a count resolved after the spawn has already
+// spent the budget it protects is exactly the ordering this function's own comment forbids.
+async function concurrentLimitError({ operatorNamed = false } = {}) {
   // Resolve and count HERE; decide THERE. The decision is `concurrentLimitRefusal` in
   // `spawn-mode.mjs` — pure, and therefore unit-testable, which this module is not, because
   // importing it starts an MCP server. Only the two side-effectful reads stay in this file.
@@ -874,8 +880,8 @@ function concurrentLimitError({ operatorNamed = false } = {}) {
     path: config.configFile,
   })
   // Skipped when the pair is off or unresolvable: `concurrentLimitRefusal` answers both of
-  // those before it ever looks at the count, and the store read is the expensive half.
-  const live = limits.error || limits.limit === null ? null : workerSessions()
+  // those before it ever looks at the count, and the endpoint read is the expensive half.
+  const live = limits.error || limits.limit === null ? null : await workerSessions()
   return concurrentLimitRefusal({
     limits,
     // `null` is "a store could not be read", which is NOT "no worker is live" — the refusal
@@ -992,7 +998,7 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
   // wrong with it rather than told the fleet is full — both refuse, but only one names the
   // thing the caller can actually fix. It is still checked BEFORE anything is created, which
   // is what matters: a cap consulted after the spawn has already spent the budget it protects.
-  const limitError = concurrentLimitError({ operatorNamed })
+  const limitError = await concurrentLimitError({ operatorNamed })
   if (limitError) return { error: limitError }
 
   const minted = newSessionId()
@@ -1189,14 +1195,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // guards, before a worker, a tab or a ledger record exists. A limit checked after the
   // spawn has already spent the budget it exists to protect.
   //
-  // The count is live WORKER SESSIONS — the spawn ledger joined to the registry OR the
-  // heartbeat store, minus auto-resumes. Both channels are needed: the registry is pid-keyed
-  // and local-only, and the heartbeat store is what covers a worker with no pid of its own.
-  // Reading either alone is the defect this instrument has had twice — see the longer note on
-  // `concurrentLimitError`. A cap counting one population while the managers' target counts
-  // another is a defect with no error on either side — and the target IS this number, so they
-  // must agree by construction. Definition and its two stated limits: `worker-sessions.mjs`.
-  const limitError = concurrentLimitError({ operatorNamed })
+  // The count is live WORKER SESSIONS — the spawn ledger joined to the session-heartbeat
+  // endpoint, minus auto-resumes. The endpoint holds every population in one store, including
+  // the headless and cluster workers the registry is structurally blind to (it is pid-keyed and
+  // local-only). See the longer note on `concurrentLimitError` for why the source moved. A cap
+  // counting one population while the managers' target counts another is a defect with no error
+  // on either side — and the target IS this number, so they must agree by construction.
+  // Definition and its two stated limits: `worker-sessions.mjs`.
+  const limitError = await concurrentLimitError({ operatorNamed })
   if (limitError) return { error: limitError }
 
   // An explicit window id WINS — the caller may need a window the map does not describe.

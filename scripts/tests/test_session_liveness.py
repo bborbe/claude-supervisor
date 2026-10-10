@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""Tests for scripts/session-liveness.py.
+"""Tests for scripts/session-liveness.py — the endpoint-only liveness instrument.
+
+Liveness is answered by the attention store's `session-heartbeat` endpoint alone (since
+2026-10-08; the registry read moved to `session-identity.py`, whose own suite is
+`test_session_identity.py`). So the whole suite runs against a **fixture endpoint** rather than
+the live store — a real session on this machine must not be able to turn an ABSENT assertion
+into LIVE.
 
 The load-bearing properties, in the order the 2026-09-26 near-miss ranks them:
 
-  * a prefix and the full id it abbreviates return the SAME verdict — the falsifier the
-    task states, because a probe that answers differently for (b) than (a) is the defect;
-  * an unreadable registry is UNKNOWN, never ABSENT — a caller that folds an I/O error
-    into "not live" resumes onto a live conversation;
-  * a readable-but-empty registry IS ABSENT — `{}` and `None` are different answers;
-  * an ambiguous prefix refuses rather than guessing, and names candidates a caller can
-    actually tell apart;
-  * a registered id whose pid is gone is a stale record, not a live session.
+  * a prefix and the full id it abbreviates return the SAME verdict — a probe that answers
+    differently for the two is the defect;
+  * an unreachable endpoint, or a response that is not the store's 404, is UNKNOWN, never
+    ABSENT — a caller that folds an I/O error into "not live" resumes onto a live conversation;
+  * a readable endpoint that positively reports an id as not live IS ABSENT — a 404, or a row
+    whose `live` is false;
+  * an ambiguous prefix refuses rather than guessing, and names candidates a caller can tell
+    apart;
+  * `--list --json` carries the identity fields `/supervisor:open` joins on.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -19,21 +26,15 @@ import importlib.util
 import io
 import json
 import os
-import subprocess
-import sys
 import tempfile
-import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
+
+from endpoint_fixture import FixtureEndpoint, dead_url, row
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
-
-# Distinguishes "the caller said nothing, use the isolated store" from "the caller passed
-# None", which is a real argument value in this suite.
-_DEFAULT = object()
 
 
 def load():
@@ -45,356 +46,554 @@ def load():
     return mod
 
 
-def dead_pid():
-    """A pid that has certainly exited — reaped, so `os.kill` raises ProcessLookupError."""
-    p = subprocess.Popen(["/usr/bin/true"])
-    p.wait()
-    return p.pid
+def load_from(directory):
+    """Load a COPY of `session-liveness.py` placed alone in `directory`.
 
-
-def live_proc_start(pid):
-    """`pid`'s real start time, formatted the way the registry writes `procStart`: ctime, UTC.
-
-    A planted record has to carry this to be realistic. The probe compares it against the
-    live holder's `ps -o lstart=` (which prints LOCAL, hence the conversion), and a record
-    with no `procStart` is UNKNOWN by design — so a fixture that omits it exercises the
-    missing-field path, not the live one, and would read every planted session as unproven.
+    The sibling imports (`live-workers.py`, `session-identity.py`) resolve against the script's
+    OWN directory, so a copy in an otherwise empty directory is how a case makes one of them
+    unimportable without touching the real tree — the same isolation rule the fixture, registry
+    and heartbeat store follow.
     """
-    out = subprocess.run(
-        ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True
-    ).stdout.strip()
-    if not out:
-        return None
-    return (
-        datetime.strptime(out, "%a %b %d %H:%M:%S %Y")
-        .astimezone(timezone.utc)
-        .strftime("%a %b %d %H:%M:%S %Y")
-    )
+    with open(os.path.join(os.path.dirname(_HERE), "session-liveness.py"), encoding="utf-8") as src:
+        text = src.read()
+    dst = os.path.join(directory, "session-liveness.py")
+    with open(dst, "w", encoding="utf-8") as out:
+        out.write(text)
+    spec = importlib.util.spec_from_file_location("session_liveness_isolated", dst)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 class SessionLiveness(unittest.TestCase):
     def setUp(self):
         self.m = load()
         self.tmp = tempfile.TemporaryDirectory()
-        self.dir = self.tmp.name
-        # An isolated heartbeat store, and it is not optional. Without it every case would
-        # read the REAL store, so a headless worker running on this machine while the suite
-        # runs would turn an ABSENT assertion into LIVE — a suite whose result depends on the
-        # fleet's mood rather than on the code.
-        self.hb = os.path.join(self.tmp.name, "heartbeats")
-        os.makedirs(self.hb)
-        # A path that cannot be listed (`NotADirectoryError`), for the unreadable-store cases.
-        self.blocked = os.path.join(self.tmp.name, "blocked-file")
-        with open(self.blocked, "w", encoding="utf-8") as fh:
-            fh.write("not a directory\n")
-        # The start-time cache, isolated for the same reason the heartbeat store is — and it
-        # is not optional either. It is keyed by PID, so a suite reading the real one would
-        # answer for whatever process held that number when the machine last wrote it, and
-        # the result would depend on the host rather than on the code.
+        # An identity registry the `--list` join reads names from. It is isolated so the
+        # machine's real registry cannot supply a name a fixture did not plant.
+        self.registry = os.path.join(self.tmp.name, "registry")
+        os.makedirs(self.registry)
+        # The start-time cache is keyed by PID, so the same isolation rule applies: a suite
+        # reading the real one would answer for whatever process last held that number.
         self._prior_cache_env = os.environ.get("SUPERVISOR_START_CACHE")
         os.environ["SUPERVISOR_START_CACHE"] = os.path.join(self.tmp.name, "starts.json")
+        # The cluster reachability marker lives in the heartbeat store, and it decides a
+        # not-live cluster row's verdict — so it is isolated too: a suite reading the real store
+        # would answer for whatever the machine's mirror last wrote. `live-workers.py` resolves
+        # this variable, which is exactly the store the marker is read from.
+        self.heartbeat = os.path.join(self.tmp.name, "heartbeat")
+        os.makedirs(self.heartbeat)
+        self._prior_heartbeat_env = os.environ.get("SUPERVISOR_HEARTBEAT_DIR")
+        os.environ["SUPERVISOR_HEARTBEAT_DIR"] = self.heartbeat
+        # The spawn ledger decides WHICH sessions the `--list` guard covers (SC11), so it is
+        # isolated for the same reason as the other three stores: a suite reading the machine's
+        # real ledger would let 1600 real spawn records decide a fixture's verdict.
+        self.ledger = os.path.join(self.tmp.name, "ledger")
+        os.makedirs(self.ledger)
+        self._prior_ledger_env = os.environ.get("SUPERVISOR_LEDGER_DIR")
+        os.environ["SUPERVISOR_LEDGER_DIR"] = self.ledger
 
     def tearDown(self):
-        # Restored, never popped: the sibling suites that load this module set one shared
-        # isolated store at import, and popping here would send every later test back to the
-        # real one — the leak this isolation exists to close, re-entered by the cleanup.
         if self._prior_cache_env is None:
             os.environ.pop("SUPERVISOR_START_CACHE", None)
         else:
             os.environ["SUPERVISOR_START_CACHE"] = self._prior_cache_env
+        if self._prior_heartbeat_env is None:
+            os.environ.pop("SUPERVISOR_HEARTBEAT_DIR", None)
+        else:
+            os.environ["SUPERVISOR_HEARTBEAT_DIR"] = self._prior_heartbeat_env
+        if self._prior_ledger_env is None:
+            os.environ.pop("SUPERVISOR_LEDGER_DIR", None)
+        else:
+            os.environ["SUPERVISOR_LEDGER_DIR"] = self._prior_ledger_env
         self.tmp.cleanup()
 
-    def plant(self, session_id, pid, name="synth", status="running", proc_start=_DEFAULT):
-        """Plant a registry record. `proc_start` defaults to the pid's REAL start time.
+    def plant(self, session_id, pid=None, name="synth", **extra):
+        """A registry record — the identity half of `--list`. Any live pid works for names.
 
-        Pass an explicit value to plant a mismatch on purpose, or `None` to omit the field.
+        ⚠️ **Named by session id, not pid.** Two planted sessions in one case would otherwise
+        collide on the same `<pid>.json` and the second would overwrite the first; the reader
+        globs `*.json` and keys on the record's own `sessionId`, so the filename is free.
         """
-        rec = {"sessionId": session_id, "pid": pid, "name": name, "status": status}
-        start = live_proc_start(pid) if proc_start is _DEFAULT else proc_start
-        if start is not None:
-            rec["procStart"] = start
-        with open(os.path.join(self.dir, "%s.json" % pid), "w", encoding="utf-8") as fh:
+        rec = {"sessionId": session_id, "pid": pid or os.getpid(), "name": name, "status": "busy"}
+        rec.update(extra)
+        with open(os.path.join(self.registry, "%s.json" % session_id), "w", encoding="utf-8") as fh:
             json.dump(rec, fh)
 
-    def beat(self, session_id, age_seconds=1):
-        """Plant a heartbeat stamp aged `age_seconds`. The TTL is 60s, so the default is fresh."""
-        path = os.path.join(self.hb, "%s.json" % session_id)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"pid": None}, fh)
-        stamp = time.time() - age_seconds
-        os.utime(path, (stamp, stamp))
+    def ledger_entry(self, session_id, label="synth worker", **extra):
+        """A spawn-ledger record — what makes a session one the `--list` guard covers.
 
-    def unreadable(self):
-        """A heartbeat-dir path that raises `NotADirectoryError` on listdir -> `None`."""
-        return os.path.join(self.blocked, "live")
+        ⚠️ **A registry record alone is NOT enough since SC11 (2026-10-09).** The guard's
+        population is `registry_live ∩ spawn ledger`, so a case that wants the guard to fire
+        must plant BOTH halves; planting only the registry half is now the case that must
+        NOT fire, which is its own test below.
+        """
+        rec = {"session_id": session_id, "label": label, "mode": "interactive"}
+        rec.update(extra)
+        with open(os.path.join(self.ledger, "%s.json" % session_id), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
 
-    def check(self, session_id, directory=None, heartbeat_dir=_DEFAULT):
+    def check(self, session_id, endpoint):
         out, err = io.StringIO(), io.StringIO()
-        hb = self.hb if heartbeat_dir is _DEFAULT else heartbeat_dir
         with redirect_stdout(out), redirect_stderr(err):
-            rc = self.m.main(["--check", session_id, "--dir", directory or self.dir, "--heartbeat-dir", hb])
+            rc = self.m.main(["--check", session_id, "--endpoint", endpoint])
         return rc, out.getvalue() + err.getvalue()
 
-    def listing(self, directory=None, heartbeat_dir=_DEFAULT):
+    def listing(self, endpoint, directory=None):
         out, err = io.StringIO(), io.StringIO()
-        hb = self.hb if heartbeat_dir is _DEFAULT else heartbeat_dir
         with redirect_stdout(out), redirect_stderr(err):
-            rc = self.m.main(["--list", "--dir", directory or self.dir, "--heartbeat-dir", hb])
+            rc = self.m.main(
+                ["--list", "--endpoint", endpoint, "--dir", directory or self.registry]
+            )
+        return rc, out.getvalue() + err.getvalue()
+
+    def json_listing(self, endpoint, directory=None):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.main(
+                ["--list", "--json", "--endpoint", endpoint, "--dir", directory or self.registry]
+            )
+        return rc, json.loads(out.getvalue())
+
+    def coverage(self, endpoint, directory=None):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.main(
+                ["--coverage", "--endpoint", endpoint, "--dir", directory or self.registry]
+            )
         return rc, out.getvalue() + err.getvalue()
 
     # ---- the falsifier: prefix and full id agree -------------------------------------
 
     def test_prefix_and_full_id_return_the_same_verdict(self):
-        # The 2026-09-26 near-miss: `3fd529af` was published as `registry ABSENT` while the
-        # session was registered against a running pid. A unique prefix must resolve.
-        self.plant("3fd529af-1111-2222-3333-444455556666", os.getpid())
-        full = self.check("3fd529af-1111-2222-3333-444455556666")
-        pref = self.check("3fd529af")
+        # The 2026-09-26 near-miss: a prefix read as ABSENT while its session was live. The
+        # per-id route 404s on a prefix (it is an exact lookup), so a unique prefix must
+        # resolve through the list route to the same verdict the full id gets.
+        sid = "3fd529af-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            full = self.check(sid, fx.url)
+            pref = self.check("3fd529af", fx.url)
         self.assertEqual(full[0], LIVE)
         self.assertEqual(pref[0], LIVE)
         self.assertEqual(full[0], pref[0], "prefix verdict must equal full-id verdict")
 
     def test_absent_id_differs_from_a_resolving_prefix(self):
         # (b) and (c) must NOT agree, or the probe is a constant-return stub.
-        self.plant("3fd529af-1111-2222-3333-444455556666", os.getpid())
-        self.assertEqual(self.check("3fd529af")[0], LIVE)
-        self.assertEqual(self.check("deadbeef")[0], ABSENT)
+        sid = "3fd529af-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            self.assertEqual(self.check("3fd529af", fx.url)[0], LIVE)
+            self.assertEqual(self.check("deadbeef", fx.url)[0], ABSENT)
 
     def test_prefix_match_is_case_insensitive(self):
-        self.plant("ABCDEF12-1111-2222-3333-444455556666", os.getpid())
-        self.assertEqual(self.check("abcdef12")[0], LIVE)
+        with FixtureEndpoint([row("ABCDEF12-1111-2222-3333-444455556666")]) as fx:
+            self.assertEqual(self.check("abcdef12", fx.url)[0], LIVE)
 
     # ---- UNKNOWN vs ABSENT: the dangerous direction -----------------------------------
 
-    def test_unreadable_registry_is_unknown_not_absent(self):
-        rc, out = self.check("3fd529af", directory=os.path.join(self.dir, "does-not-exist"))
+    def test_a_404_is_absent_not_unknown(self):
+        # The store positively reporting it holds no such session — a READABLE endpoint that
+        # licenses ABSENT.
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.check("does-not-exist-xyz", fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("ABSENT", out)
+
+    def test_unreachable_endpoint_is_unknown_not_absent(self):
+        # The SC4 direction. A dead socket means the probe could not run, and folding that into
+        # "not live" is permission to resume onto a live conversation.
+        rc, out = self.check("3fd529af", dead_url())
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
 
-    def test_readable_but_empty_registry_is_absent_not_unknown(self):
-        # `{}` and `None` are different answers; collapsing them is the whole bug class.
-        self.assertEqual(self.check("3fd529af")[0], ABSENT)
-        self.assertEqual(self.check("3fd529af", directory=os.path.join(self.dir, "nope"))[0], UNKNOWN)
+    def test_a_non_200_non_404_status_is_unknown_not_absent(self):
+        # A 500 from the list route (reached when the per-id route answered 404) is not the
+        # store saying "gone" — it is the store failing, which is UNKNOWN.
+        with FixtureEndpoint([], list_status=500) as fx:
+            rc, out = self.check("3fd529af", fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_a_stale_row_is_absent_not_live(self):
+        # A row the store holds but marks not live — positively reported, so ABSENT is licensed.
+        sid = "57a1e111-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, live=False)]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("ABSENT", out)
+
+    def test_a_row_without_a_live_flag_is_unknown(self):
+        # The store always sends `live`; a row that carries something else is a store this
+        # reader does not understand, and "I do not understand this row" is never ABSENT.
+        sid = "n0f1a600-1111-2222-3333-444455556666"
+        bad = row(sid)
+        bad["live"] = None
+        with FixtureEndpoint([bad]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("no usable `live` flag", out)
+
+    def test_a_row_with_a_non_string_session_id_is_unknown(self):
+        # `by_id` keys on `r["session_id"]` and then calls `.lower()` on it; a non-string id
+        # raises `AttributeError`, which without a guard escapes `check()` as exit 1 = ABSENT.
+        # The row cannot be compared against the (string) argument, so the answer is UNKNOWN —
+        # the same "a store this reader does not understand" rule the non-boolean `live` gets.
+        bad = row("12345678-1111-2222-3333-444455556666")
+        bad["session_id"] = 12345678
+        with FixtureEndpoint([bad]) as fx:
+            rc, out = self.check("12345678", fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_an_unexpected_exception_is_unknown_not_a_crash(self):
+        # The blanket guard on `check()`: an exception `_check` does not itself anticipate (a
+        # RuntimeError from the HTTP layer, say — not the `OSError`/`ValueError` it catches) must
+        # become UNKNOWN. An uncaught traceback would exit 1, this file's ABSENT code, i.e.
+        # permission to resume onto a live conversation.
+        def boom(*_a, **_k):
+            raise RuntimeError("boom")
+
+        real = self.m._get_json
+        self.m._get_json = boom
+        try:
+            rc, out = self.check("3fd529af", "http://127.0.0.1:1")
+        finally:
+            self.m._get_json = real
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
 
     # ---- ambiguity ---------------------------------------------------------------------
 
-    def plant_colliding_pair(self):
-        """Two LIVE sessions sharing an 8-char prefix.
-
-        The registry file is named by pid, so the pair needs two distinct live pids —
-        this process and its parent. Planting both under one pid silently leaves a
-        single file, and the ambiguity this asserts would never arise.
-        """
-        pids = (os.getpid(), os.getppid())
-        self.assertNotEqual(pids[0], pids[1], "need two distinct live pids")
-        self.plant("abc12345-1111-2222-3333-444455556666", pids[0])
-        self.plant("abc12345-9999-8888-7777-666655554444", pids[1])
+    def colliding_pair(self):
+        """Two sessions sharing an 8-char prefix."""
+        return [
+            row("abc12345-1111-2222-3333-444455556666"),
+            row("abc12345-9999-8888-7777-666655554444"),
+        ]
 
     def test_ambiguous_prefix_refuses_rather_than_guesses(self):
-        self.plant_colliding_pair()
-        rc, out = self.check("abc12345")
+        with FixtureEndpoint(self.colliding_pair()) as fx:
+            rc, out = self.check("abc12345", fx.url)
         self.assertEqual(rc, AMBIGUOUS)
         self.assertIn("pass a longer id", out)
 
     def test_ambiguous_candidates_are_distinguishable(self):
         # Echoing 8 chars back hands the caller two identical strings and no way to choose.
-        self.plant_colliding_pair()
-        _, out = self.check("abc12345")
+        with FixtureEndpoint(self.colliding_pair()) as fx:
+            _, out = self.check("abc12345", fx.url)
         self.assertIn("abc12345-111", out)
         self.assertIn("abc12345-999", out)
 
     def test_a_longer_prefix_disambiguates(self):
-        self.plant_colliding_pair()
-        self.assertEqual(self.check("abc12345-1111")[0], LIVE)
-        self.assertEqual(self.check("abc12345-9999")[0], LIVE)
+        with FixtureEndpoint(self.colliding_pair()) as fx:
+            self.assertEqual(self.check("abc12345-1111", fx.url)[0], LIVE)
+            self.assertEqual(self.check("abc12345-9999", fx.url)[0], LIVE)
 
-    # ---- pid IDENTITY: occupancy is not liveness -----------------------------------------
-    #
-    # `os.kill(pid, 0)` asks whether SOME process holds the pid, never whether it is THIS
-    # session's. These pin the residual `[[A Substring-Matched Liveness Probe Reports a Dead
-    # Session as Live]]` left open: a record that outlives its session (a `kill -9` leaves it
-    # behind) plus a pid the OS has since recycled. Before the identity check that pair read
-    # LIVE, which is how a close-me line gets printed for a session that is already gone.
+    # ---- the cluster reachability marker (the dropped safety signal) --------------------
 
-    def test_a_mismatched_proc_start_is_unknown_when_the_heartbeat_store_is_unreadable(self):
-        # A mismatch is a NEGATIVE, so it needs both sources readable — the same rule the
-        # stale-record branch applies.
-        self.plant(
-            "m15ma7ch-1111-2222-3333-444455556666",
-            os.getpid(),
-            proc_start="Thu Jan  1 00:00:00 1970",
-        )
-        rc, out = self.check("m15ma7ch", heartbeat_dir=self.unreadable())
+    def test_a_not_live_cluster_row_with_a_stale_marker_is_unknown(self):
+        # The regression this guards: the row's `state` is the session's ACTIVITY, never whether
+        # the cluster was reachable, so the cluster-unreachable fact survives only in the LOCAL
+        # marker. A missing marker is stale, and a stale marker means the mirror could not read
+        # the cluster — so this row may be a worker alive behind a network fault, and ABSENT
+        # would authorise a resume onto it.
+        sid = "c1u57e00-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, live=False, source="cluster")]) as fx:
+            rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, UNKNOWN)
-        self.assertIn("heartbeat store is unreadable", out)
+        self.assertIn("UNKNOWN", out)
 
-    def test_a_recycled_pid_is_omitted_from_the_listing(self):
-        # `--list` is "one line per live session", so an unproven identity must not appear.
-        self.plant(
-            "rec1c1ed-1111-2222-3333-444455556666",
-            os.getpid(),
-            name="Recycled",
-            proc_start="Thu Jan  1 00:00:00 1970",
-        )
-        _, out = self.listing()
-        self.assertNotIn("Recycled", out)
+    def test_a_not_live_cluster_row_with_a_fresh_marker_is_absent(self):
+        # A fresh marker means the mirror DID read the cluster, so the staleness is the ordinary
+        # death case and ABSENT is licensed.
+        open(os.path.join(self.heartbeat, "_cluster-reachability.json"), "w").close()
+        sid = "c1u57e00-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, live=False, source="cluster")]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("ABSENT", out)
 
-    # ---- --list -------------------------------------------------------------------------
+    def test_a_not_live_non_cluster_row_is_absent_even_with_a_stale_marker(self):
+        # The marker is consulted ONLY for a cluster row: a local stale row keeps its ABSENT.
+        sid = "10ca1500-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, live=False, source="mcp-timer")]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("ABSENT", out)
+
+    def test_a_live_cluster_row_is_live(self):
+        # The marker governs only the not-live arm — a live cluster row is LIVE regardless.
+        sid = "11vec1u5-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, source="cluster")]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, LIVE)
+
+    def test_an_unimportable_live_workers_is_unknown_not_absent(self):
+        # `_live_workers()` exec_module's the sibling with no guard, and this runs ON the
+        # ABSENT-licensing path (a not-live `source: cluster` row). A missing or unparseable
+        # `live-workers.py` must therefore answer UNKNOWN: an escape here is exit 1 = ABSENT,
+        # i.e. permission to resume onto a cluster worker that may be alive behind a fault.
+        mod = load_from(self.tmp.name)  # the copy sits alone: no sibling live-workers.py
+        sid = "c1u57e00-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, live=False, source="cluster")]) as fx:
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = mod.main(["--check", sid, "--endpoint", fx.url])
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out.getvalue() + err.getvalue())
+
+    # ---- the id is an argument, and the per-id URL is where it is interpolated -----------
+
+    def test_a_hostile_id_never_reaches_the_wire_raw(self):
+        # `quote(sid, safe="")` is the only thing between a hostile argument and a path traversal
+        # or a query injection on the per-id route. Pin it: none of `../`, `?`, `%2f` may survive
+        # unescaped into a URL the probe builds.
+        seen = []
+        real = self.m._get_json
+
+        def spy(url, timeout=None):
+            seen.append(url)
+            return real(url, timeout)
+
+        self.m._get_json = spy
+        try:
+            with FixtureEndpoint([]) as fx:
+                for hostile in ("../etc/passwd", "abc?live=true", "abc%2fdef"):
+                    rc, out = self.check(hostile, fx.url)
+                    self.assertEqual(rc, ABSENT, hostile)
+        finally:
+            self.m._get_json = real
+        self.assertTrue(seen)
+        for url in seen:
+            self.assertNotIn("../", url)
+            self.assertNotIn("?", url)
+            self.assertNotIn("%2f", url)
+
+    # ---- --list ------------------------------------------------------------------------
 
     def test_list_shows_only_live_sessions(self):
-        self.plant("aaaa1111-1111-2222-3333-444455556666", os.getpid(), name="Alive")
-        self.plant("bbbb2222-1111-2222-3333-444455556666", dead_pid(), name="Dead")
-        rc, out = self.listing()
+        self.plant("aaaa1111-1111-2222-3333-444455556666", name="Alive")
+        self.plant("bbbb2222-1111-2222-3333-444455556666", name="Dead")
+        rows = [
+            row("aaaa1111-1111-2222-3333-444455556666"),
+            row("bbbb2222-1111-2222-3333-444455556666", live=False),
+        ]
+        with FixtureEndpoint(rows) as fx:
+            rc, out = self.listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertIn("Alive", out)
         self.assertNotIn("Dead", out)
 
+    def test_list_includes_a_row_with_no_identity_entry(self):
+        # A headless or cluster worker holds a heartbeat row and no registry entry; it must
+        # still appear, with an empty name rather than being dropped.
+        sid = "11571e57-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertIn(sid, out)
+
+    def test_list_on_an_unreachable_endpoint_is_unknown(self):
+        rc, out = self.listing(dead_url())
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
     def test_list_on_an_unreadable_registry_is_unknown(self):
-        rc, out = self.listing(directory=os.path.join(self.dir, "does-not-exist"))
+        # The names half is load-bearing: a names-less list makes `/supervisor:open`'s
+        # topic->manager join match nothing and spawn a SECOND manager onto a live topic.
+        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+            rc, out = self.listing(fx.url, directory=os.path.join(self.tmp.name, "does-not-exist"))
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
 
-
-    # ---- the second source: heartbeats --------------------------------------------------
-    #
-    # The registry cannot answer for a session with no process of its own — a headless worker
-    # or a cluster worker. These pin the half that can, and the composition rule that keeps
-    # "could not tell" from collapsing into "not live".
-
-    def test_a_fresh_heartbeat_is_live_with_no_registry_entry(self):
-        # The cluster case, in one assertion: no pid, no registry entry, still live.
-        self.beat("c1u57e12-1111-2222-3333-444455556666")
-        rc, out = self.check("c1u57e12")
-        self.assertEqual(rc, LIVE)
-        self.assertIn("heartbeat", out)
-
-    def test_a_stale_heartbeat_is_absent_not_live(self):
-        # Age, not existence: a `kill -9`'d writer leaves the file behind. 120s is past the 60s
-        # TTL, so the stamp is not evidence of life.
-        self.beat("57a1e111-1111-2222-3333-444455556666", age_seconds=120)
-        self.assertEqual(self.check("57a1e111")[0], ABSENT)
-
-    def test_a_heartbeat_prefix_resolves_like_a_registry_prefix(self):
-        # The prefix contract is a property of the ARGUMENT, not of the source it resolves in.
-        self.beat("bea7bea7-1111-2222-3333-444455556666")
-        self.assertEqual(self.check("bea7bea7")[0], LIVE)
-        self.assertEqual(self.check("bea7bea7-1111-2222-3333-444455556666")[0], LIVE)
-
-    def test_a_fresh_heartbeat_is_decisive_when_the_registry_is_unreadable(self):
-        # A positive from one channel is an answer; "could not tell" from the other is not a
-        # refutation of it.
-        self.beat("dec151ve-1111-2222-3333-444455556666")
-        rc, _ = self.check("dec151ve", directory=os.path.join(self.dir, "does-not-exist"))
-        self.assertEqual(rc, LIVE)
-
-    def test_unreadable_heartbeat_store_makes_an_unknown_id_unknown_not_absent(self):
-        # The SC4 direction. With the second store unreadable, "no match" cannot rule out a
-        # match in the half we could not read, so the answer is UNKNOWN — never ABSENT, which
-        # is the one answer that permits a resume.
-        rc, out = self.check("3fd529af", heartbeat_dir=self.unreadable())
-        self.assertEqual(rc, UNKNOWN)
-        self.assertIn("heartbeat store unreadable", out)
-
-    def test_list_includes_a_heartbeat_only_session(self):
-        self.beat("11571e57-1111-2222-3333-444455556666")
-        rc, out = self.listing()
-        self.assertEqual(rc, LIVE)
-        self.assertIn("11571e57", out)
-
-    def test_list_on_an_unreadable_heartbeat_store_is_unknown(self):
-        # A partial list presented as complete reads as "not live" for every session in the
-        # half that failed, which is the dangerous direction.
-        rc, out = self.listing(heartbeat_dir=self.unreadable())
+    def test_empty_list_refuses_a_partial_rollout(self):
+        # A partial rollout: the endpoint holds no live row while the registry still lists a live
+        # session. An empty list here is the confident-empty-fleet shape — `commands/open.md`
+        # Step 2C reads this call to decide whether to open a session — so it must not be
+        # presented as complete. It pays the same coverage precondition ABSENT pays.
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        self.ledger_entry("aaaa1111-1111-2222-3333-444455556666")
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.listing(fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
 
+    def test_empty_list_is_live_when_the_fleet_is_genuinely_idle(self):
+        # Endpoint empty AND registry empty: coverage is complete, so the empty list is honest.
+        with FixtureEndpoint([]) as fx:
+            rc, rows = self.json_listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertEqual(rows, [])
+
+    def test_non_empty_list_refuses_a_partial_rollout(self):
+        # The dangerous half of the same case, and the one that used to slip through: the
+        # endpoint holds a live row, so the list is NON-empty and was handed back as complete
+        # while a registry-live session with no live row was silently dropped. `commands/open.md`
+        # Step 2C matches `<topic> Manager` against `name`/`formerNames` from exactly this
+        # output and spawns on no match, so the omission is a SECOND manager onto a live topic.
+        # A non-empty list is a positive claim about the whole fleet, so it pays the same
+        # coverage precondition the empty one pays.
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        self.plant("bbbb2222-1111-2222-3333-444455556666")
+        self.ledger_entry("aaaa1111-1111-2222-3333-444455556666")
+        self.ledger_entry("bbbb2222-1111-2222-3333-444455556666")
+        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_a_registry_live_session_outside_the_ledger_does_not_withhold_the_list(self):
+        """SC11's narrowing — the reason the guard was realigned on 2026-10-09.
+
+        A manager, a bot and the operator's own sessions are registry-live and hold **no
+        ledger record**, because they were not opened by the supervisor and never load the
+        plugin that stamps. Measured live before the narrowing: `unstamped=11 registry_live=27`,
+        with 9 of the 11 in exactly this class — so the guard refused on sessions that cannot
+        stamp by construction, and `approved-not-started.py` rendered `unknown` behind it.
+        Here the registry-live session with no row and no ledger record must NOT withhold the
+        list; the live one is served.
+        """
+        sid = "aaaa1111-1111-2222-3333-444455556666"
+        self.plant("bbbb2222-1111-2222-3333-444455556666", name="Fleet Manager")
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, rows = self.json_listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertEqual([r["sessionId"] for r in rows], [sid])
+
+    def test_a_ledger_worker_that_is_registry_live_with_no_row_still_withholds_the_list(self):
+        """The residual hazard is the OTHER direction, and it is preserved deliberately.
+
+        Narrowing the guard re-opens the duplicate-spawn hazard for a live session that is
+        not a ledger worker (recorded at `commands/open.md` Step 2C). It must not also stop
+        catching a session that IS a worker: a ledger record plus a live registry entry plus
+        no endpoint row is precisely the rollout gap the guard exists for.
+        """
+        sid = "aaaa1111-1111-2222-3333-444455556666"
+        self.plant(sid, name="Stamping Worker")
+        self.ledger_entry(sid)
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_an_unreadable_ledger_is_unknown_not_a_pass(self):
+        """`{}` and None are different answers, and only one of them may satisfy the guard.
+
+        A ledger that cannot be read must not narrow the population to nothing and hand back
+        a passing precondition — that is the resume-authorising direction, and it is the same
+        collapse the endpoint and registry reads already refuse.
+        """
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        # A path that exists as a FILE: `os.listdir` raises NotADirectoryError (an OSError),
+        # which is the "could not read it" arm rather than the missing-directory `{}` arm.
+        not_a_dir = os.path.join(self.tmp.name, "ledger-is-a-file")
+        with open(not_a_dir, "w", encoding="utf-8") as fh:
+            fh.write("")
+        os.environ["SUPERVISOR_LEDGER_DIR"] = not_a_dir
+        with FixtureEndpoint([row("bbbb2222-1111-2222-3333-444455556666")]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out)
+
+    def test_an_unimportable_spawn_ledger_is_unknown_not_a_crash(self):
+        """`_spawn_ledger()` exec_module's its sibling with no guard, and the guard it feeds
+        is the one that LICENSES the list. An escape here would surface as exit 1 — this
+        file's ABSENT code, which every caller reads as "not live, resume is authorised" —
+        so a missing `spawn-ledger.py` must answer UNKNOWN, the same rule `live-workers.py`
+        already carries on the cluster path.
+        """
+        alone = os.path.join(self.tmp.name, "no-ledger-module")
+        os.makedirs(alone)
+        # `session-identity.py` is present so the failure is specifically the ledger sibling,
+        # not whichever import happens to run first.
+        with open(os.path.join(os.path.dirname(_HERE), "session-identity.py"), encoding="utf-8") as src:
+            text = src.read()
+        with open(os.path.join(alone, "session-identity.py"), "w", encoding="utf-8") as out:
+            out.write(text)
+        mod = load_from(alone)
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+            out_s, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out_s), redirect_stderr(err):
+                rc = mod.main(["--list", "--endpoint", fx.url, "--dir", self.registry])
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("UNKNOWN", out_s.getvalue() + err.getvalue())
+
+    def test_non_empty_list_is_live_when_every_registry_session_is_stamped(self):
+        # Coverage complete — every registry-live session has a live row — so the list IS the
+        # whole live fleet and is served. Without this the refusal above could be a blanket
+        # "never list anything" and still pass.
+        sid = "aaaa1111-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, rows = self.json_listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertEqual(len(rows), 1)
 
     # ---- --list --json: the shape `/supervisor:open` reads -------------------------------
 
-    def json_listing(self):
-        out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
-            rc = self.m.main(["--list", "--json", "--dir", self.dir, "--heartbeat-dir", self.hb])
-        return rc, json.loads(out.getvalue())
-
     def test_json_listing_carries_former_names_and_cwd(self):
         # `/supervisor:open` resolves a topic's manager by matching the topic against the
-        # current name AND every name the session has held, then spawns into `cwd`. Those two
-        # fields are the whole reason it can use this reader instead of opening the registry
-        # itself — a name-only match spawns a SECOND manager onto a live topic.
-        with open(os.path.join(self.dir, "%s.json" % os.getpid()), "w", encoding="utf-8") as fh:
-            json.dump(
-                {
-                    "sessionId": "f0rmer00-1111-2222-3333-444455556666",
-                    "pid": os.getpid(),
-                    "procStart": live_proc_start(os.getpid()),
-                    "name": "Renamed Topic Manager",
-                    "status": "busy",
-                    "formerNames": [{"name": "Topic Manager", "at": "2026-09-18"}],
-                    "cwd": "/Users/bborbe/Documents/workspaces/thing",
-                    "nameSource": "user",
-                },
-                fh,
-            )
-        rc, rows = self.json_listing()
+        # current name AND every name the session has held, then spawns into `cwd`.
+        sid = "f0rmer00-1111-2222-3333-444455556666"
+        self.plant(
+            sid,
+            name="Renamed Topic Manager",
+            formerNames=[{"name": "Topic Manager", "at": "2026-09-18"}],
+            cwd="/Users/bborbe/Documents/workspaces/thing",
+            nameSource="user",
+        )
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, rows = self.json_listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "Renamed Topic Manager")
         self.assertEqual(rows[0]["formerNames"], ["Topic Manager"])
         self.assertEqual(rows[0]["cwd"], "/Users/bborbe/Documents/workspaces/thing")
         self.assertEqual(rows[0]["nameSource"], "user")
 
-    def test_json_listing_omits_a_dead_pid(self):
-        self.plant("deadp1d0-1111-2222-3333-444455556666", dead_pid())
-        _, rows = self.json_listing()
+    def test_json_listing_marks_the_source(self):
+        sid = "bea70001-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid, source="cluster")]) as fx:
+            _, rows = self.json_listing(fx.url)
+        self.assertEqual([r["source"] for r in rows], ["cluster"])
+
+    def test_json_listing_omits_a_stale_row(self):
+        with FixtureEndpoint([row("deadp1d0-1111-2222-3333-444455556666", live=False)]) as fx:
+            _, rows = self.json_listing(fx.url)
         self.assertEqual(rows, [])
 
-    def test_json_listing_marks_a_heartbeat_row_by_source(self):
-        self.beat("bea70001-1111-2222-3333-444455556666")
-        _, rows = self.json_listing()
-        self.assertEqual([r["source"] for r in rows], ["heartbeat"])
+    # ---- --coverage: the ABSENT precondition, measured not assumed ----------------------
 
-    def cluster_stamp(self, session_id, age_seconds=300, reachable=False):
-        """A stale cluster stamp, and optionally a fresh mirror reachability marker."""
-        path = os.path.join(self.hb, "%s.json" % session_id)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"source": "cluster", "pid": None}, fh)
-        stamp = time.time() - age_seconds
-        os.utime(path, (stamp, stamp))
-        if reachable:
-            with open(os.path.join(self.hb, "_cluster-reachability.json"), "w", encoding="utf-8") as fh:
-                fh.write("{}")
+    def test_coverage_is_complete_when_every_registry_live_session_is_stamped(self):
+        # A planted record with this process's pid is not dead by the registry's own rule
+        # (`alive` is `None`, not `False`), so it must be stamped at the endpoint.
+        sid = "c0ve2a6e-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, line = self.coverage(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertIn("endpoint_live=1 registry_live=1 missing=0", line)
 
-    def test_a_stale_cluster_stamp_is_unknown_when_the_cluster_could_not_be_read(self):
-        # SC4, and the whole reason the reachability marker exists. The mirror stops
-        # refreshing a cluster worker's stamp when the cluster is unreachable, so the stamp
-        # goes stale — and a stale stamp is indistinguishable from a dead worker without the
-        # marker. Reporting STALE here would permit a resume onto a worker that may be alive
-        # behind a network fault.
-        self.cluster_stamp("c1u57e12-1111-2222-3333-444455556666", reachable=False)
-        rc, out = self.check("c1u57e12")
+    def test_coverage_is_incomplete_when_a_registry_live_session_is_unstamped(self):
+        # The state in which ABSENT is unsafe: a session the registry holds live with no live
+        # endpoint row. Non-zero exit is the whole point.
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        with FixtureEndpoint([row("bbbb2222-1111-2222-3333-444455556666")]) as fx:
+            rc, line = self.coverage(fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("missing=1", line)
+
+    def test_coverage_on_an_unreachable_endpoint_is_unknown(self):
+        # "Could not measure" is not "measured complete" — never a fabricated 0.
+        rc, line = self.coverage(dead_url())
         self.assertEqual(rc, UNKNOWN)
-        self.assertIn("cluster store could not be read", out)
+        self.assertIn("UNKNOWN", line)
 
-    def test_a_stale_cluster_stamp_is_absent_once_the_mirror_is_reachable(self):
-        # The marker is fresh, so the cluster WAS read and this worker simply stopped
-        # refreshing — an ordinary death, which must stay ABSENT and not drift to UNKNOWN.
-        self.cluster_stamp("c1u57e12-1111-2222-3333-444455556666", reachable=True)
-        self.assertEqual(self.check("c1u57e12")[0], ABSENT)
-
-    def test_a_stale_non_cluster_stamp_is_absent_even_with_the_cluster_down(self):
-        # A headless worker's death must not be laundered into UNKNOWN by an unrelated cluster
-        # outage — the rule keys on the stamp's own source, not on the marker alone.
-        self.beat("11vea11f-1111-2222-3333-444455556666", age_seconds=300)
-        self.assertEqual(self.check("11vea11f")[0], ABSENT)
-
-    def test_a_stale_record_is_unknown_when_the_heartbeat_store_is_unreadable(self):
-        # A stale record is a NEGATIVE, so it needs both sources readable — the same rule the
-        # no-match branch applies. Returning ABSENT here would let a fresh stamp in the half we
-        # could not read be outvoted, and ABSENT is the one answer that permits a resume.
-        self.plant("57a1e57a-1111-2222-3333-444455556666", dead_pid())
-        rc, out = self.check("57a1e57a", heartbeat_dir=self.unreadable())
+    def test_coverage_on_an_unreadable_registry_is_unknown(self):
+        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+            rc, line = self.coverage(fx.url, directory=os.path.join(self.tmp.name, "nope"))
         self.assertEqual(rc, UNKNOWN)
-        self.assertIn("heartbeat store is unreadable", out)
+        self.assertIn("UNKNOWN", line)
 
 
 if __name__ == "__main__":
