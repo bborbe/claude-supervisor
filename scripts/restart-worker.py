@@ -21,8 +21,9 @@ Seven refusals, each exit 1 with a stable reason token as the first line of outp
                       resume guard, so its liveness stays undetermined.
   manager-target      the target resolves as a manager. A manager is NEVER restarted.
   role-undetermined   no role signal could be read. Fail closed; never assume worker.
-  stale-load-path     nothing would load differently: no load-path copy is newer than
-                      the session's own start, so restarting it buys nothing.
+  stale-load-path     nothing would load differently: no load-path copy, no MCP config
+                      file and no launcher script is newer than the session's own
+                      start, so restarting it buys nothing.
 
 Exit codes: 0 success, 1 refusal, 2 usage error.
 
@@ -45,6 +46,7 @@ import glob
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -180,6 +182,86 @@ def newest_load_path():
         return None, None
     _, best, mtime = max(candidates, key=lambda candidate: candidate[0])
     return best, mtime
+
+
+def worker_argv(pid):
+    """The live worker's argv as one string, or `None` when it cannot be read.
+
+    The registry carries no argv, so the `--mcp-config` path the session was launched
+    with is only recoverable from the running process itself — read here, before the
+    kill, because afterwards there is nothing left to read. `SUPERVISOR_WORKER_ARGV`
+    overrides the read, for the same reason `SUPERVISOR_LOAD_PATH` does: a drill or a
+    test must not depend on a real process.
+    """
+    override = os.environ.get("SUPERVISOR_WORKER_ARGV")
+    if override is not None:
+        return override
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "args=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
+
+
+def mcp_config_paths(argv):
+    """Every `--mcp-config` value in `argv`, in both the `=` and the spaced form.
+
+    `ps` prints argv unquoted, so a path containing a space splits apart here. That
+    fails closed: the fragment stats as missing and contributes nothing, leaving the
+    other inputs to decide.
+    """
+    if not argv:
+        return []
+    tokens = argv.split()
+    paths = []
+    for i, tok in enumerate(tokens):
+        if tok.startswith("--mcp-config="):
+            paths.append(tok.split("=", 1)[1])
+        elif tok == "--mcp-config" and i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+            paths.append(tokens[i + 1])
+    return [os.path.expanduser(p) for p in paths if p]
+
+
+def launcher_path():
+    """The launcher the resume will run, resolved to a file, or `None`.
+
+    Mirrors `resume_command()`: `CLAUDE_SCRIPT`, else the bare `claude` on PATH — so
+    the check compares the same script the resume will actually exec.
+    """
+    script = os.environ.get("CLAUDE_SCRIPT") or "claude"
+    resolved = script if os.sep in script else shutil.which(script)
+    return resolved if resolved and os.path.isfile(resolved) else None
+
+
+def changed_inputs(load_path, load_mtime, argv, launcher, started):
+    """`[(label, path)]` for every input newer than `started`.
+
+    Three inputs decide whether a restart would load anything differently: the plugin
+    load path, the MCP config file(s) the worker was launched with, and the launcher
+    script. An input that cannot be read contributes nothing — it can never turn a
+    refusal into an accept, so an unreadable argv falls back to the load-path check.
+    """
+    changed = []
+    if load_path is not None and load_mtime > started:
+        changed.append(("plugin version", os.path.basename(load_path)))
+    for path in mcp_config_paths(argv):
+        try:
+            if os.path.getmtime(path) > started:
+                changed.append(("MCP config", path))
+        except OSError:
+            continue
+    if launcher:
+        try:
+            if os.path.getmtime(launcher) > started:
+                changed.append(("launcher", launcher))
+        except OSError:
+            pass
+    return changed
 
 
 def parse_started(rec):
@@ -371,31 +453,46 @@ def main():
             f"session {sid} ({name!r}) resolves as a manager; a manager is never restarted",
         )
 
-    # Precondition 4 — something must actually load differently. Compare the newest
-    # load-path copy against the session's own start; a load path no newer than the
-    # session means the restart would reload identical code.
+    # Precondition 4 — something must actually load differently. Three inputs are
+    # compared against the session's own start: the newest load-path copy, the MCP
+    # config file(s) in the worker's live argv, and the launcher script. Only when ALL
+    # are no newer would the restart reload identical code and env. The argv is read
+    # here, before the kill, because afterwards there is no process left to read.
     load_path, load_mtime = newest_load_path()
     started = parse_started(rec)
-    if load_path is None:
-        return refuse("stale-load-path", f"no load-path copy found under {LOAD_PATH_ROOT}")
     if started is None:
         return refuse(
             "stale-load-path",
             f"session {sid} carries no parseable start time, so it cannot be shown that "
             "anything would load differently",
         )
-    if load_mtime <= started:
+    argv = worker_argv(pid)
+    launcher = launcher_path()
+    changed = changed_inputs(load_path, load_mtime, argv, launcher, started)
+    if not changed:
+        checked = [
+            f"load path {os.path.basename(load_path)}" if load_path
+            else f"no load path under {LOAD_PATH_ROOT}",
+            "MCP config (unreadable argv)" if argv is None
+            else ", ".join(mcp_config_paths(argv)) or "no --mcp-config",
+            launcher or "launcher (CLAUDE_SCRIPT unresolved)",
+        ]
         return refuse(
             "stale-load-path",
-            f"load path {os.path.basename(load_path)} is not newer than session {sid}'s "
-            "start; restarting would reload identical code",
+            f"none of plugin version, MCP config or launcher is newer than session "
+            f"{sid}'s start ({'; '.join(checked)}); restarting would reload identical "
+            "code and config",
         )
 
     print(
         f"🔄 restart-worker · session {sid[:8]} · pid {pid} · {name!r}"
         f"{' · dry-run' if args.dry_run else ''}"
     )
-    print(f"   role: worker · status: {status} · load path: {os.path.basename(load_path)}")
+    print(
+        f"   role: worker · status: {status} · load path: "
+        f"{os.path.basename(load_path) if load_path else 'none'}"
+    )
+    print("   changed: " + "; ".join(f"{label} ({what})" for label, what in changed))
 
     # The cwd the session must resume INTO. Read here, before the kill: a session
     # resumed without its own cwd lands in wezterm's default working directory and
@@ -459,7 +556,7 @@ def main():
     )
     print(
         f"   ↪ tell the resumed session it was restarted, and what changed: "
-        f"{PLUGIN} @ {os.path.basename(load_path)}"
+        "; ".join(f"{label} ({what})" for label, what in changed)
     )
     return 0
 

@@ -43,7 +43,7 @@ anything is signalled, so no code path reaches `os.kill` on a target it has not 
 | `headless-target` | `kind` is not `interactive`. | A headless worker has no reliable resume guard, so its liveness stays undetermined — see `a separate task`. |
 | `manager-target` | The target resolves as a manager. | A manager is NEVER restarted. The mandate is class A for workers only. |
 | `role-undetermined` | No role signal could be read. | Fail closed. An unreadable index proves nothing about a role; never assume worker. |
-| `stale-load-path` | No load-path copy is newer than the session's own start, or the session carries no parseable start time. | Nothing would load differently — the restart buys nothing. |
+| `stale-load-path` | None of the three inputs — newest load-path copy, the worker's MCP config file(s), the launcher script — is newer than the session's own start, or the session carries no parseable start time. | Nothing would load differently — the restart buys nothing. |
 
 ## Operational failures — not refusals
 
@@ -63,8 +63,24 @@ before killing anything."*
 The script enforces it rather than leaving it to memory. It takes the newest directory
 under the **load path** (never the marketplace clone, which updates independently of what
 a running session loaded) and compares its mtime against the session's own `startedAt`.
-A load path no newer than the session refuses as `stale-load-path`; a session with no
-parseable start time refuses too, because "cannot be shown to differ" is not "differs".
+Code is not the only thing a restart reloads. Claude Code spawns MCP servers from the
+config it read at session start, and `/mcp` Reconnect never re-reads that file — so a
+changed `env` in the MCP config, or a changed launcher, reaches the worker only through a
+restart. The script therefore compares **three** inputs against `startedAt`:
+
+1. the newest load-path directory (as above);
+2. every `--mcp-config` path in the worker's **live argv** — `ps -o args= -p <pid>`, read
+   before the kill, because the registry carries no argv and afterwards there is no
+   process left to read;
+3. the launcher script the resume will run — `CLAUDE_SCRIPT`, else `claude` on PATH,
+   exactly as `resume_command()` picks it — resolved to a file.
+
+Any one newer accepts, and the output's `changed:` line names which input changed. Only
+when **all** are no newer does it refuse as `stale-load-path`, and the refusal lists what
+it checked. An input that cannot be read — no argv, an unresolved `CLAUDE_SCRIPT`, a
+missing file — contributes nothing: it can never turn a refusal into an accept, so the
+check falls back to the load path alone. A session with no parseable start time refuses
+too, because "cannot be shown to differ" is not "differs".
 
 ## How role is decided
 
