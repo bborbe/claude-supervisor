@@ -395,6 +395,11 @@ def changed_inputs(load_path, load_mtime, argv, launcher, started):
     return changed
 
 
+def describe_changed(changed):
+    """`plugin version (0.1.0); MCP config (/p)` — one line naming every changed input."""
+    return "; ".join(f"{label} ({what})" for label, what in changed)
+
+
 def parse_started(rec):
     """The session's start time as an epoch float, or `None` when unparseable.
 
@@ -623,7 +628,7 @@ def main():
         f"   role: worker · status: {status} · load path: "
         f"{os.path.basename(load_path) if load_path else 'none'}"
     )
-    print("   changed: " + "; ".join(f"{label} ({what})" for label, what in changed))
+    print(f"   changed: {describe_changed(changed)}")
 
     # The cwd the session must resume INTO. Read here, before the kill: a session
     # resumed without its own cwd lands in wezterm's default working directory and
@@ -697,8 +702,7 @@ def main():
         f"(pane {pane[-1] if pane else '?'})"
     )
     print(
-        f"   ↪ tell the resumed session it was restarted, and what changed: "
-        "; ".join(f"{label} ({what})" for label, what in changed)
+        f"   ↪ tell the resumed session it was restarted, and what changed: {describe_changed(changed)}"
     )
     return 0
 

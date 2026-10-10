@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `restart-worker.py`'s post-restart hand-off line no longer garbles the changed-inputs list (an f-string implicitly concatenated into the `join` separator)
+
 ## v0.128.1
 
 - fix: `restart-worker.py` resumes a worker through its own launcher (task `launcher:` > goal > vault `claude_script`) instead of the caller's `CLAUDE_SCRIPT` or bare `claude`, which dropped the worker's `--mcp-config` and launcher env; an unresolvable launcher now refuses before the kill
