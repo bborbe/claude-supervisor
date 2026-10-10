@@ -240,6 +240,55 @@ class LoadPathSelection(unittest.TestCase):
         self.assertEqual(rw.newest_load_path(), (None, None))
 
 
+class WorkerArgv(unittest.TestCase):
+    """The live `ps` read and the input comparison, without the CLI override."""
+
+    def setUp(self):
+        self._env = os.environ.pop("SUPERVISOR_WORKER_ARGV", None)
+        self._run = rw.subprocess.run
+
+    def tearDown(self):
+        rw.subprocess.run = self._run
+        if self._env is not None:
+            os.environ["SUPERVISOR_WORKER_ARGV"] = self._env
+
+    def stub(self, returncode=0, stdout="", raises=False):
+        class Out:
+            pass
+
+        def run(*_a, **_k):
+            if raises:
+                raise OSError("no ps")
+            out = Out()
+            out.returncode, out.stdout = returncode, stdout
+            return out
+
+        rw.subprocess.run = run
+
+    def test_populated_read(self):
+        self.stub(stdout="claude --mcp-config=/x.json\n")
+        self.assertEqual(rw.worker_argv(1), "claude --mcp-config=/x.json")
+
+    def test_failed_query_is_none(self):
+        self.stub(returncode=1)
+        self.assertIsNone(rw.worker_argv(1))
+
+    def test_raising_query_is_none(self):
+        self.stub(raises=True)
+        self.assertIsNone(rw.worker_argv(1))
+
+    def test_flag_followed_by_flag_is_not_a_path(self):
+        self.assertEqual(rw.mcp_config_paths("claude --mcp-config --strict-mcp-config"), [])
+
+    def test_no_load_path_accepts_on_newer_mcp_config(self):
+        with tempfile.NamedTemporaryFile() as fh:
+            changed = rw.changed_inputs(None, None, f"claude --mcp-config={fh.name}", None, 0.0)
+        self.assertEqual([label for label, _ in changed], ["MCP config"])
+
+    def test_none_argv_contributes_nothing(self):
+        self.assertEqual(rw.changed_inputs(None, None, None, None, 0.0), [])
+
+
 class RefusalCode(unittest.TestCase):
     """Pin the exit code every refusal routes through.
 
@@ -318,6 +367,72 @@ class Cli(unittest.TestCase):
         """A session started after the load path would reload identical code."""
         self.write(1, entry("fresh", name="Some Worker", startedAt="2099-01-01T00:00:00Z"))
         self.assert_refusal("fresh", "stale-load-path")
+
+    def run_with(self, sid, argv=None, launcher=None):
+        """Drive the CLI with a fixture worker argv and launcher."""
+        env = dict(os.environ)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        if argv is not None:
+            env["SUPERVISOR_WORKER_ARGV"] = argv
+        # A stale launcher by default: an unset CLAUDE_SCRIPT falls back to the real
+        # `claude` on PATH, whose mtime would decide the case instead of the fixture.
+        env["CLAUDE_SCRIPT"] = launcher or self.stale(self.touch("cc-default"))
+        out = subprocess.run(
+            [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def touch(self, name):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            fh.write("x")
+        return path
+
+    def stale(self, path):
+        os.utime(path, (946684800, 946684800))  # 2000-01-01, before every fixture start
+        return path
+
+    def fresh_session(self, sid):
+        """A session started after the load path but before files touched now."""
+        os.utime(os.path.join(self.load, "9.9.9"), (946684800, 946684800))
+        self.write(1, entry(sid, name="Some Worker", startedAt="2020-01-01T00:00:00Z"))
+
+    def test_accepts_when_only_mcp_config_is_newer(self):
+        self.fresh_session("mcp")
+        cfg = self.touch("mcp.json")
+        code, lines = self.run_with("mcp", argv=f"claude --mcp-config={cfg} --strict-mcp-config")
+        self.assertEqual(code, 0, lines)
+        self.assertIn("MCP config", "\n".join(lines))
+
+    def test_accepts_spaced_mcp_config_form(self):
+        self.fresh_session("mcp2")
+        cfg = self.touch("mcp.json")
+        code, lines = self.run_with("mcp2", argv=f"claude --mcp-config {cfg}")
+        self.assertEqual(code, 0, lines)
+
+    def test_accepts_when_only_launcher_is_newer(self):
+        self.fresh_session("lau")
+        script = self.touch("cc-launcher")
+        code, lines = self.run_with("lau", argv="claude", launcher=script)
+        self.assertEqual(code, 0, lines)
+        self.assertIn("launcher", "\n".join(lines))
+
+    def test_refuses_when_all_three_are_older(self):
+        self.fresh_session("old")
+        cfg = self.stale(self.touch("mcp.json"))
+        script = self.stale(self.touch("cc-launcher"))
+        code, lines = self.run_with("old", argv=f"claude --mcp-config={cfg}", launcher=script)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "stale-load-path", lines)
+        self.assertIn(cfg, "\n".join(lines))
+
+    def test_no_mcp_config_falls_back_to_load_path_check(self):
+        """No --mcp-config and a stale launcher: only the (stale) load path decides."""
+        self.fresh_session("noargv")
+        code, lines = self.run_with("noargv", argv="")
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "stale-load-path", lines)
 
     def test_happy_path_dry_run_signals_nothing(self):
         """Cleared target: the dry run reports what it WOULD do and exits 0."""
