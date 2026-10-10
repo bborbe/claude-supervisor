@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.126.1
 
 - fix: `restart-worker.py`'s `stale-load-path` check also accepts a restart when the worker's MCP config (from its live argv) or launcher script is newer than the session start, and names which input changed
 
