@@ -72,12 +72,12 @@ restart. The script therefore compares **three** inputs against `startedAt`:
 2. every `--mcp-config` path in the worker's **live argv** — `ps -o args= -p <pid>`, read
    before the kill, because the registry carries no argv and afterwards there is no
    process left to read;
-3. the launcher script the resume will run — `CLAUDE_SCRIPT`, else `claude` on PATH,
-   exactly as `resume_command()` picks it — resolved to a file.
+3. the launcher script the resume will run — the worker's own, resolved as in
+   § *Which launcher the resume runs* below.
 
 Any one newer accepts, and the output's `changed:` line names which input changed. Only
 when **all** are no newer does it refuse as `stale-load-path`, and the refusal lists what
-it checked. An input that cannot be read — no argv, an unresolved `CLAUDE_SCRIPT`, a
+it checked. An input that cannot be read — no argv, an unresolved launcher, a
 missing file — contributes nothing: it can never turn a refusal into an accept, so the
 check falls back to the load path alone. A session with no parseable start time refuses
 too, because "cannot be shown to differ" is not "differs".
@@ -142,6 +142,27 @@ jq -r '.permissions.allow[]' ~/.claude/settings.json | grep -E 'Bash\([^)]*p?kil
   probe is the sibling `scripts/restart-precheck.py`, which owns the worktree check and the
   cause-of-death classification; the two scripts share the registry read but not the
   refusal vocabulary — the seven tokens above stay exactly seven.
+
+## Which launcher the resume runs
+
+The resume runs the **worker's own launcher**, never the caller's. A launcher script exports
+what the session needs before it execs `claude` — the router base URL, the model, and the
+`--mcp-config` file — so a resume through bare `claude` brings the session back on a reduced
+MCP surface and possibly the wrong backend, while still exiting `0`. Measured 2026-10-10: a
+manager with no `CLAUDE_SCRIPT` restarted a worker, the `changed:` line named bare
+`~/.local/bin/claude` as the launcher, and the resumed process had no `--mcp-config` and no
+`a2a` server.
+
+Precedence is the spawn path's (`server/spawn-cwd.mjs` `resolveTaskLauncher`): the task bound
+to the session — matched on its whole id set, `claude_session_id` plus every
+`metrics_sessions[].session_id` — names a `launcher:`; else its goals agree on one; else
+the `claude_script` of the vault whose path holds the session's `cwd` (from
+`vault-cli config list`). A bare name resolves beside the vault launcher. A value that is not
+a plain path, goals that disagree, two task pages claiming the session, a `cwd` under no vault, or a launcher file that does not
+exist all leave it **unresolved** — and an unresolved launcher refuses **before the kill**
+with an `❌ error:` line, the same operational class as a missing `cwd`. It is not a target
+refusal, so the seven tokens stay seven. The output's `launcher:` line names the file and its
+source (`task` / `goal` / `vault`).
 
 ## The one deliberate copy
 

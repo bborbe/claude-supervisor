@@ -154,12 +154,12 @@ class ResumeCommand(unittest.TestCase):
     """
 
     def test_cwd_is_passed(self):
-        argv = rw.resume_command("sid", "title", "pink", "/some/dir")
+        argv = rw.resume_command("sid", "title", "pink", "/some/dir", "/l/cc")
         self.assertIn("--cwd", argv)
         self.assertEqual(argv[argv.index("--cwd") + 1], "/some/dir")
 
     def test_no_cwd_flag_when_empty(self):
-        self.assertNotIn("--cwd", rw.resume_command("sid", "title", "pink", ""))
+        self.assertNotIn("--cwd", rw.resume_command("sid", "title", "pink", "", "/l/cc"))
 
     def test_colour_chip_carries_no_literal_quotes(self):
         """The shell quotes in `open.md`'s recipe are syntax, not value.
@@ -172,14 +172,19 @@ class ResumeCommand(unittest.TestCase):
         cue, so a restarted worker that should be pink is exactly the mis-coloured session
         that nearly got a manager relaunched as a worker on 2026-09-18.
         """
-        inner = rw.resume_command("sid", "title", "pink", "/d")[-1]
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
         self.assertIn('"/color pink"', inner)
         self.assertNotIn("'/color", inner)
         self.assertNotIn("pink'", inner)
 
+    def test_resumes_through_the_given_launcher_not_bare_claude(self):
+        """Regression 2026-10-10: a bare-`claude` resume dropped `--mcp-config` and `a2a`."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc-private-claude")[-1]
+        self.assertIn('exec "/l/cc-private-claude" --resume sid', inner)
+
     def test_resume_target_and_unset_list_intact(self):
         """The copied recipe's own invariants must survive the --cwd addition."""
-        inner = rw.resume_command("sid", "title", "pink", "/d")[-1]
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
         self.assertIn("--resume sid", inner)
         self.assertIn("-n \"title\"", inner)
         for var in (
@@ -189,6 +194,108 @@ class ResumeCommand(unittest.TestCase):
             "CLAUDE_CODE_CHILD_SESSION",
         ):
             self.assertIn(var, inner)
+
+
+class ResolveLauncher(unittest.TestCase):
+    """The resume runs the worker's OWN launcher: task > goal > vault `claude_script`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        self.vault = os.path.join(d, "vault")
+        self.scripts = os.path.join(d, "scripts")
+        for sub in ("25 Tasks", "24 Goals"):
+            os.makedirs(os.path.join(self.vault, sub))
+        os.makedirs(self.scripts)
+        for name in ("cc-private", "cc-private-claude", "cc-goal"):
+            open(os.path.join(self.scripts, name), "w").close()
+        cfg = os.path.join(d, "vaults.json")
+        with open(cfg, "w") as fh:
+            json.dump([{"name": "v", "path": self.vault,
+                        "claude_script": os.path.join(self.scripts, "cc-private")}], fh)
+        self._env = {k: os.environ.get(k) for k in ("SUPERVISOR_VAULT_CONFIG", "SUPERVISOR_LAUNCHER")}
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = cfg
+        os.environ.pop("SUPERVISOR_LAUNCHER", None)
+        self.fb = rw.load_sibling("fleet-board.py")
+
+    def tearDown(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.tmp.cleanup()
+
+    def page(self, sub, title, fm):
+        with open(os.path.join(self.vault, sub, f"{title}.md"), "w") as fh:
+            fh.write(f"---\n{fm}\n---\nbody\n")
+
+    def test_task_launcher_wins(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-private-claude")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "task"))
+
+    def test_goal_launcher_when_task_names_none(self):
+        self.page("24 Goals", "G", "launcher: cc-goal")
+        self.page("25 Tasks", "T", "claude_session_id: s1\ngoals:\n    - '[[G]]'")
+        self.assertEqual(rw.resolve_launcher("s1", self.vault, self.fb)[1], "goal")
+
+    def test_vault_default_for_an_unbound_session(self):
+        path, source = rw.resolve_launcher("nobody", os.path.join(self.vault, "25 Tasks"), self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private"), "vault"))
+
+    def test_cwd_outside_every_vault_is_none(self):
+        self.assertIsNone(rw.resolve_launcher("s1", "/nowhere", self.fb)[0])
+
+    def test_unsafe_launcher_is_none(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc;rm -rf")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+
+    def test_metrics_sessions_only_binding_is_matched(self):
+        self.page("25 Tasks", "T", "launcher: cc-private-claude\nmetrics_sessions:\n    - session_id: s9\n      started_at: x")
+        self.assertEqual(rw.resolve_launcher("s9", self.vault, self.fb)[1], "task")
+
+    def test_two_claimants_is_none(self):
+        self.page("25 Tasks", "A", "claude_session_id: s1")
+        self.page("25 Tasks", "B", "claude_session_id: s1")
+        path, reason = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertIsNone(path)
+        self.assertIn("2 task pages", reason)
+
+    def test_goals_naming_different_launchers_is_none(self):
+        self.page("24 Goals", "G1", "launcher: cc-goal")
+        self.page("24 Goals", "G2", "launcher: cc-private-claude")
+        self.page("25 Tasks", "T", "claude_session_id: s1\ngoals:\n    - '[[G1]]'\n    - '[[G2]]'")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+
+    def test_unreadable_vault_config_is_none(self):
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = os.path.join(self.tmp.name, "absent.json")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+
+    def test_non_dict_config_element_is_skipped_not_raised(self):
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump(["junk", {"name": "v", "path": self.vault,
+                                "claude_script": os.path.join(self.scripts, "cc-private")}], fh)
+        self.assertEqual(rw.resolve_launcher("x", self.vault, self.fb)[1], "vault")
+
+    def test_config_entry_without_path_claims_no_cwd(self):
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump([{"name": "empty", "path": "", "claude_script": "/x/cc"}], fh)
+        self.assertIsNone(rw.resolve_launcher("s1", os.getcwd(), self.fb)[0])
+
+    def test_launcher_survives_long_frontmatter(self):
+        filler = "\n".join(f"    - session_id: f{i}\n      started_at: x" for i in range(200))
+        self.page("25 Tasks", "T", f"claude_session_id: s1\nmetrics_sessions:\n{filler}\nlauncher: cc-private-claude")
+        self.assertEqual(rw.resolve_launcher("s1", self.vault, self.fb)[1], "task")
+
+    def test_override_bypasses_shape_and_file_checks(self):
+        """Deliberate: the override is the drill/test lever, set by the caller itself."""
+        os.environ["SUPERVISOR_LAUNCHER"] = "/no/such/launcher"
+        self.assertEqual(rw.resolve_launcher("s1", "/nowhere", self.fb), ("/no/such/launcher", "override"))
+
+    def test_missing_launcher_file_is_none(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-absent")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
 
 
 class LoadPathSelection(unittest.TestCase):
@@ -324,6 +431,7 @@ class Cli(unittest.TestCase):
     def run_cli(self, sid, *extra):
         env = dict(os.environ)
         env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
         out = subprocess.run(
             [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run", *extra],
             capture_output=True, text=True, env=env,
@@ -374,9 +482,9 @@ class Cli(unittest.TestCase):
         env["SUPERVISOR_LOAD_PATH"] = self.load
         if argv is not None:
             env["SUPERVISOR_WORKER_ARGV"] = argv
-        # A stale launcher by default: an unset CLAUDE_SCRIPT falls back to the real
-        # `claude` on PATH, whose mtime would decide the case instead of the fixture.
-        env["CLAUDE_SCRIPT"] = launcher or self.stale(self.touch("cc-default"))
+        # A stale launcher by default, so the fixture — never the real vault config or
+        # a real launcher's mtime — decides the case.
+        env["SUPERVISOR_LAUNCHER"] = launcher or self.stale(self.touch("cc-default"))
         out = subprocess.run(
             [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run"],
             capture_output=True, text=True, env=env,
@@ -433,6 +541,25 @@ class Cli(unittest.TestCase):
         code, lines = self.run_with("noargv", argv="")
         self.assertEqual(code, 1, lines)
         self.assertEqual(lines[0], "stale-load-path", lines)
+
+    def test_unresolved_launcher_refuses_before_the_kill(self):
+        """No override, cwd under no vault: exit 1 with an error line, nothing signalled."""
+        self.write(1, entry("nolauncher", name="Some Worker"))
+        cfg = os.path.join(self.dir, "vaults.json")
+        with open(cfg, "w") as fh:
+            json.dump([{"name": "v", "path": os.path.join(self.dir, "elsewhere"),
+                        "claude_script": "/x/cc"}], fh)
+        env = dict(os.environ)
+        env.pop("SUPERVISOR_LAUNCHER", None)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_VAULT_CONFIG"] = cfg
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "nolauncher", "--sessions-dir", self.reg],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("no launcher could be resolved", out.stdout)
+        self.assertNotIn("killed pid", out.stdout)
 
     def test_happy_path_dry_run_signals_nothing(self):
         """Cleared target: the dry run reports what it WOULD do and exits 0."""

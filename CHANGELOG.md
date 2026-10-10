@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `restart-worker.py` resumes a worker through its own launcher (task `launcher:` > goal > vault `claude_script`) instead of the caller's `CLAUDE_SCRIPT` or bare `claude`, which dropped the worker's `--mcp-config` and launcher env; an unresolvable launcher now refuses before the kill
+
 ## v0.128.0
 
 - feat: cap concurrent `role: manager` sessions fleet-wide — `spawn.maxManagers` (soft, default 3) / `spawn.maxManagersHard` (hard, default 5), Fleet Manager excluded; counted from `fleet-board.py`'s manager classification so hand-started managers count; hard-cap refusal carded by `/supervisor:open`
