@@ -410,8 +410,10 @@ finds nothing and reads "did not take", a caller checking the exit code reads "t
 neither reading names the trust dialog. The value is resolved **before** the spawn, never
 guessed or defaulted — and ⚠️ **this recipe is also the path for resuming a session that is
 genuinely orphaned, so the resolution rule carries an orphan branch that the registry alone
-cannot serve.** The rule, its two sources and its refusal have their **single home at item 3
-below**; read it there rather than resolving from the registry alone. Path A states the
+cannot serve.** The rule, its two sources and its refusal have their **single home at resume
+decisions item 3 below** — ⚠️ **not "item 3" unqualified**, which in this document means the
+readiness ladder above and resolves to an unrelated check; read it there rather than resolving
+from the registry alone. Path A states the
 same requirement for `spawn_agent`; this is its path-B twin, and the two must
 not drift into two different resolution rules.
 
@@ -532,11 +534,15 @@ operation to the wrong tree, but a caller who never had the directory still has 
 it.
 
 **Where that directory comes from — and the orphan branch without which the rule can never
-fire for its own case.** ⚠️ **This is the rule's single home.** The path-B recipe above,
+fire for its own case.** ⚠️ **This is the rule's single home, and its citable name is "resume decisions item 3"** — the resume list below, never the readiness ladder above, whose own item 3 is an unrelated check. The path-B recipe above,
 `commands/open.md` § 3.1 and `agents/manager-drive.md` clause 3's `To resume` hand-over all
 point here rather than naming a source of their own.
 
-Resolve the value **before** the spawn, from the first of two sources that yields one:
+Resolve the value **before** the spawn, from whichever of the two sources applies to the
+session. ⚠️ **They are a partition, not a search — never try source 2 because source 1 came back
+empty.** Which one applies is decided by whether the session still has a registry record, and
+that is settled before either is read; a record that exists without a `cwd` is a refusal (below),
+never a cue to fall through:
 
 1. **The session registry** — `~/.claude/sessions/<pid>.json`, its `cwd` field. The source for a
    session that still has a record.
