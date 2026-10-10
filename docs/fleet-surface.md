@@ -789,8 +789,23 @@ rule**:
 1. the task's own `managed_by` field, when it carries one — a wikilink to the goal or topic
    that owns it;
 2. otherwise the **first** goal listed in the task's `goals:`;
-3. otherwise that goal's **topic**, when the goal's page declares one;
+3. otherwise the **topic** whose `## Goals` section lists that goal — ⚠️ **the relation is
+   declared on the TOPIC page, never on the goal page.** A goal page carries no `## Goals`
+   list of its own; `scripts/fleet-board.py` builds its `goal_topics` index by scanning topic
+   pages for the goals they list (`topics_of(goal)` → *"the topics whose `## Goals` lists this
+   goal"*), and `commands/manager-loop.md` says the same of the goal branch. A reader looking
+   for a topic declaration *on the goal page* finds none and falls through to tier 4, skipping
+   the real owner;
 4. otherwise the **Fleet Manager**.
+
+⚠️ **`managed_by` has no writer yet, and saying so is part of the rule.** It is authored by
+hand — by the operator, or by a manager settling a task whose `goals:` genuinely names more
+than one owner — and nothing in this repo writes it automatically. The two resolvers that
+walk a task to its manager today (`scripts/fleet-board.py`'s goal→topic chain and
+`scripts/approved-not-started.py`'s `manager_for()`) still derive the owner from `goals:`
+alone and do not read this field, so a `managed_by` value is honoured by a reader that knows
+this section rather than by those two. Stating the tier without this caveat would describe a
+precedence step no code can currently reach.
 
 Then read the owner's `manager_session_id` off its page — a goal or topic page carries the
 session id of the manager that armed it — and treat it as a **lead only**, never as a verdict:
