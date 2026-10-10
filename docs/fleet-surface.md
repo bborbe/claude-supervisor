@@ -788,14 +788,19 @@ rule**:
 
 1. the task's own `managed_by` field, when it carries one — a wikilink to the goal or topic
    that owns it;
-2. otherwise the **first** goal listed in the task's `goals:`;
-3. otherwise the **topic** whose `## Goals` section lists that goal — ⚠️ **the relation is
-   declared on the TOPIC page, never on the goal page.** A goal page carries no `## Goals`
-   list of its own; `scripts/fleet-board.py` builds its `goal_topics` index by scanning topic
-   pages for the goals they list (`topics_of(goal)` → *"the topics whose `## Goals` lists this
-   goal"*), and `commands/manager-loop.md` says the same of the goal branch. A reader looking
-   for a topic declaration *on the goal page* finds none and falls through to tier 4, skipping
-   the real owner;
+2. otherwise the task's `goals:`, **in order** — ⚠️ **every goal is tried, not only the first.**
+   `scripts/fleet-board.py`'s `manager_on_chain` walks `goals` in order and returns the first
+   that resolves, so a task whose *second* goal has a live manager is owned by that manager
+   rather than falling through to tier 4. A rule naming only the first goal would contradict
+   the resolver this section cites, and it would bite exactly where the `managed_by` caveat
+   below matters;
+3. and for each goal, the goal itself before the **topic** whose `## Goals` section lists it —
+   ⚠️ **the relation is declared on the TOPIC page, never on the goal page.** A goal page
+   carries no `## Goals` list of its own; `scripts/fleet-board.py` builds its `goal_topics`
+   index by scanning topic pages for the goals they list (`topics_of(goal)` → *"the topics
+   whose `## Goals` lists this goal"*), and `commands/manager-loop.md` says the same of the
+   goal branch. A reader looking for a topic declaration *on the goal page* finds none and
+   falls through to tier 4, skipping the real owner;
 4. otherwise the **Fleet Manager**.
 
 ⚠️ **`managed_by` has no writer yet, and saying so is part of the rule.** It is authored by
@@ -828,8 +833,9 @@ stamps: that one names the session working a *task*, this one names the manager 
 many task stamps, while the manager stamp is a different field on a different page. It is
 **not** the chain in `docs/subject-resolution.md`, which resolves a different question — which
 *subject* a session is serving — and is unchanged by this section; the two compose, and neither
-is a fallback for the other. And a missing `managed_by` is **not** an error: the first-listed
-goal is the documented default, which is why a single-goal task never needs the field.
+is a fallback for the other. And a missing `managed_by` is **not** an error: the task's own
+`goals:` are the documented default, tried in order, which is why a single-goal task never
+needs the field.
 
 ## Referencing vault notes
 
