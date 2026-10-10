@@ -503,7 +503,14 @@ The goal branch **resolves and delegates**; it reimplements nothing. A worker ta
 
    ⚠️ **The registry lists live sessions only**, like `ListAgents`: an exited session's entry is removed and its `formerNames` with it. That is the right scope here (the failure being prevented is a duplicate spawn against a *running* manager), but do not read an empty result as "this topic never had a manager" — only as "none is running now".
 
-   ⚠️ **Do not key this on a `claude_session_id` stamp on the topic page.** Topic pages carry no such field today (0/6 in the primary vault) and adding one would be worse than the gap: a topic manager restarts constantly, so a written-once stamp goes stale, and a stale stamp is authoritative-looking — `/supervisor:open` would confidently resume a dead conversation, where the current name-match at least fails loudly by spawning.
+   ⚠️ **The topic page's `manager_session_id` is a lead, never the answer — and the ban on keying this step to a page stamp is superseded here rather than forgotten.** The registry above answers *who is running now* and stays the first read. When it matches nothing, read the topic page's `manager_session_id` — written by `commands/manager-loop.md` when a manager armed this subject — and **run `session-liveness.py --check <id>` on it before doing anything with it**:
+
+   - `LIVE` (exit 0) → **JUMP** to it, per step 2 below.
+   - `ABSENT` (exit 1) → **resume it by id**; the conversation is what is durable, not the process.
+   - `UNKNOWN` (exit 2) → start a **fresh manager**. An unreadable registry cannot prove a session dead, so it is never read as `ABSENT`.
+   - `AMBIGUOUS` (exit 3 — an 8-char prefix matching two live sessions) → start a **fresh manager**; a prefix resolving to two sessions resumes neither.
+
+   ⚠️ **The ban this replaces was right about the hazard and wrong about the remedy.** Its objection was that a topic manager restarts constantly, so a written-once stamp goes stale, and a stale stamp is authoritative-looking — `/supervisor:open` would confidently resume a dead conversation. That is precisely what the liveness lead above removes: the id is checked, never trusted, and `ABSENT` resumes the conversation instead of assuming a live session. What the ban also had right is that this is a **topic-page** field, not a task's `claude_session_id` — two different stamps serving different readers, neither substituting for the other. ⚠️ **The order by which an owner is resolved is stated once, in `docs/fleet-surface.md` § *Which manager owns a subject* — it is not restated here.**
 2. **Live → JUMP** to it, same `/supervisor:jump pane:<pane-id>` + window-id reporting as Step 2A.
 3. **None → spawn a manager** in a new tab:
 

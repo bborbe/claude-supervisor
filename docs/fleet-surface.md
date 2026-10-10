@@ -781,6 +781,41 @@ open tasks) and lists a **suspect** without failing: a stamp on one open task wh
 it. The field is read from the frontmatter block only, and an empty `claude_session_id:` is no
 stamp.
 
+## Which manager owns a subject
+
+A task's manager is resolved in one order, and **this section is the single statement of the
+rule**:
+
+1. the task's own `managed_by` field, when it carries one — a wikilink to the goal or topic
+   that owns it;
+2. otherwise the **first** goal listed in the task's `goals:`;
+3. otherwise that goal's **topic**, when the goal's page declares one;
+4. otherwise the **Fleet Manager**.
+
+Then read the owner's `manager_session_id` off its page — a goal or topic page carries the
+session id of the manager that armed it — and treat it as a **lead only**, never as a verdict:
+
+| `session-liveness.py --check` | exit | action |
+|---|---|---|
+| `LIVE` | 0 | jump to it |
+| `ABSENT` | 1 | resume it by id — the conversation is what is durable, not the process |
+| `UNKNOWN` | 2 | start a fresh manager; an unreadable registry cannot prove a session dead |
+| `AMBIGUOUS` | 3 | start a fresh manager; a prefix matching two live sessions resumes neither |
+
+`manager_session_id` is written when a manager arms the subject
+(`commands/manager-loop.md` § *Record the manager's session on the subject's page*) and
+overwritten whenever a new manager arms it, so a value is evidence of **who**, never of
+**alive**.
+
+⚠️ **Three things this is not.** It is **not** the `claude_session_id` stamp of § Session
+stamps: that one names the session working a *task*, this one names the manager serving a
+*goal or topic*, and the multiplicity rule above governs only the former — a session may hold
+many task stamps, while the manager stamp is a different field on a different page. It is
+**not** the chain in `docs/subject-resolution.md`, which resolves a different question — which
+*subject* a session is serving — and is unchanged by this section; the two compose, and neither
+is a fallback for the other. And a missing `managed_by` is **not** an error: the first-listed
+goal is the documented default, which is why a single-goal task never needs the field.
+
 ## Referencing vault notes
 
 Several fleet commands cite the operator's Obsidian runbooks. The rule is a **wikilink by
