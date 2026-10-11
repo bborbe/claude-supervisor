@@ -31,7 +31,13 @@ REPO = Path(__file__).resolve().parent.parent
 
 START = "Both doors into the record share one shape check"
 COMMANDS = (
-    "commands/manager-loop.md",
+    # ⚠️ `commands/manager-loop.md` was replaced by `commands/steps/sweep.md` on 2026-10-11,
+    # when the loop was restructured into a router with per-round step files. The clause
+    # describes what `--write-buckets` and `--save` accept, and both calls are made by the
+    # sweep step — so the clause moved with the calls. The check follows the rule, not the
+    # file it used to sit in; a fourth copy appearing anywhere is still caught by the same
+    # byte-identity comparison below.
+    "commands/steps/sweep.md",
     "commands/manager-drive.md",
     "commands/manager-status.md",
 )

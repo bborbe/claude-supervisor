@@ -70,7 +70,7 @@ class CheckSpawnModeTest(unittest.TestCase):
         (pathlib.Path(self.dir) / "scripts").mkdir()
         shutil.copy(SCRIPT, pathlib.Path(self.dir) / "scripts" / "check-spawn-mode.py")
         self.write("docs/fleet-surface.md", HOME)
-        for site in ("commands/open.md", "commands/manager-loop.md", "commands/manager-spawn.md",
+        for site in ("commands/open.md", "commands/steps/spawn.md", "commands/manager-spawn.md",
                      "commands/manager-drive.md", "agents/manager-drive.md"):
             self.write(site, SITE)
 
@@ -88,7 +88,7 @@ class CheckSpawnModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_site_without_the_reference_fails(self):
-        self.write("commands/manager-loop.md", SITE_NO_ANCHOR)
+        self.write("commands/steps/spawn.md", SITE_NO_ANCHOR)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("no reference to the rule's home", result.stderr)
@@ -104,7 +104,7 @@ class CheckSpawnModeTest(unittest.TestCase):
     def test_one_directional_site_fails(self):
         """Passing only `interactive=false` leaves `mode: interactive` inert — the defect
         this check gained a second assertion for on 2026-09-24."""
-        self.write("commands/manager-loop.md", SITE_ONE_DIRECTION)
+        self.write("commands/steps/spawn.md", SITE_ONE_DIRECTION)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("interactive=true", result.stderr)

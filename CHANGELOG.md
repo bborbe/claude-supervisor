@@ -8,6 +8,13 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`commands/manager-loop.md` becomes a router with per-round step files, and the loop splits into an arm and a tick.** The command was 184,352 B and the harness re-injected the whole body on every wakeup — roughly 96 times a day. It is now a router (a `#`/Step/When/File table plus the inline invariants and gates) whose per-round work lives in `commands/steps/*.md`, read **only when its `When` holds**; a new `commands/manager-loop-tick.md` (3.8 KB) is what the wakeup names, and the arm is invoked once. Every executable rule was **moved verbatim** — a provenance check confirms each source line now sits in exactly one artifact, with none dropped and none duplicated.
+- feat: **the budget lint is wired as a tighten-or-fail ratchet** (`scripts/check-budget.py` + `scripts/budget-baseline.json`). Eight bodies are over the 30 KB budget and this change may not shrink the seven it does not own, so the gate holds each at its recorded size and fails in **both** directions — above it (a regression) and below it (a stale baseline that would let the file regrow). `--tighten` lowers only the entries genuinely under their max, so a second branch rebasing onto this one cannot undo the ratchet.
+- feat: **two guards protect the restructure's own relocations.** `scripts/check-gate-class-order.py` asserts the gate class test still precedes the `attention-ask.py post` call in `steps/gates.md` — the ordering was a measured fix on 2026-10-11 and nothing asserted it before. `scripts/check-step-when.py` asserts every step file's `When:` is byte-identical to its router row's `When` cell, because a trigger narrower than the body it introduces silently gates out work that used to run every tick.
+- fix: **five repo guards now follow their rules to the new step files.** `check-spawn-mode`, `check-recording-step`, `check-bucket-clause`, `check-subject-write-scope` and `check-provenance-sentence` each named `commands/manager-loop.md` as the home of a rule that moved, so each would have failed on a correct restructure — a restructure that moves rules has to move the guards asserting where they live, not just the prose.
+
 ## v0.128.4
 
 - fix: `manager-loop`'s `waiting-on-human` bullet now leads with the gate class test, so a closer-line `pick` routes to the pane handover before the post-to-the-board instruction is reached — the instruction previously preceded its own exception, and a manager reading top-down carded a closer-line `pick` the bullet forbids carding
