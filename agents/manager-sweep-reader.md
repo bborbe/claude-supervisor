@@ -385,6 +385,8 @@ Plain markdown, in this order, omitting empty sections:
 </error_handling>
 
 <output_format>
+**Two artifacts, two shapes.** The **payload** is the render below, written to disk by step 7's `--write-payload`; the **hand-back** is the ≤ 1 KB verdict summary step 9 lists. ⚠️ **The box table below is the payload, never the hand-back** — the caller reads it from the payload path, so returning it in the report re-creates the 2,727 B / 12,364 B hand-back this file was corrected to remove.
+
 `mode: tick` — marker first, box indented two spaces under it:
 
 ```text
@@ -455,7 +457,7 @@ Omit any section that is empty. `Delta: no change` is never omitted — it is th
 </output_format>
 
 <success_criteria>
-- The table is byte-identical to `box-table.py` output for the same rows, indented two spaces, under the correct frame for the mode — a timestamped marker for `tick`, the caller's tracked-set line for `snapshot`, and never a leading glyph.
+- The **payload** table is byte-identical to `box-table.py` output for the same rows, indented two spaces, under the correct frame for the mode — a timestamped marker for `tick`, the caller's tracked-set line for `snapshot`, and never a leading glyph.
 - Every task in the tracked set carries exactly one bucket from the set **its own runbook declares** — no count is authoritative here, because the set is read from the runbook at run time — or is explicitly reported as unclassifiable with the fields that blocked it.
 - Every id set is complete — no `metrics_sessions` id is missed, and no anchored line-start match is used.
 - No orphan candidate is reported as a verdict, and no collision is reported without its non-terminal carrier count.
