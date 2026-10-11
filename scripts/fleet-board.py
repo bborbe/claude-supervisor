@@ -42,8 +42,11 @@ Manager Session runbook § Sweep output):
 
   1. manager   -- its name resolves to a `23 Topics` or `24 Goals` page, or its
                   colour is orange. The session named `Fleet Manager` is the root.
-  2. worker    -- parent comes from the task's `goals:` -> that goal -> the topic
-                  listing that goal -> the LIVE manager for that topic or goal.
+  2. worker    -- parent is the LIVE manager its task resolves to. Which manager
+                  that is follows the order stated in one place,
+                  `docs/fleet-surface.md` § Which manager owns a subject; the
+                  chain is deliberately not restated here, so this docstring
+                  cannot drift from `manager_on_chain`.
   3. no goal link, or no live manager on the chain -> the root, since the fleet
                   layer covers it.
   4. no task file at all -> `Unmanaged`.
