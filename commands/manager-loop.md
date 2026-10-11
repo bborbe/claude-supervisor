@@ -66,7 +66,7 @@ One manager per topic: owns ONE topic's declared goal set (e.g. the *Sentry* top
 | 6 | Spawn on the handover | the drive leg returned `To open` / `To resume` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-spawn.md` |
 | 7 | Repair | the `Audit` block carried `repairable` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-repair.md` |
 | 8 | Gate relay | the round has `waiting-on-human` or `waiting-approval` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-gates.md` |
-| 9 | Under-target offer | live workers below target **and** no ready row **and** the ask not declined | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-under-target.md` |
+| 9 | Under-target offer | live workers below target **and** no ready row | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-under-target.md` |
 | 11 | Fleet-manager handoff | a fleet-loop session is on `ListAgents` and the sets changed | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-handoff.md` |
 | 12 | Tail — `noop` and re-arm | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-tail.md` |
 | 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-self-improvement.md` |
