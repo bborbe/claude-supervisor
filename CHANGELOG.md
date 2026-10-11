@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.129.0
 
 - feat: **`commands/manager-loop.md` becomes a router with per-round step files, and the loop splits into an arm and a tick.** The command was 184,352 B and the harness re-injected the whole body on every wakeup — roughly 96 times a day. It is now a router (a `#`/Step/When/File table plus the inline invariants and gates) whose per-round work lives in `commands/steps/*.md`, read **only when its `When` holds**; a new `commands/manager-loop-tick.md` (3.8 KB) is what the wakeup names, and the arm is invoked once. Every executable rule was **moved verbatim** — a provenance check confirms each source line now sits in exactly one artifact, with none dropped and none duplicated.
 - feat: **the budget lint is wired as a tighten-or-fail ratchet** (`scripts/check-budget.py` + `scripts/budget-baseline.json`). Eight bodies are over the 30 KB budget and this change may not shrink the seven it does not own, so the gate holds each at its recorded size and fails in **both** directions — above it (a regression) and below it (a stale baseline that would let the file regrow). `--tighten` lowers only the entries genuinely under their max, so a second branch rebasing onto this one cannot undo the ratchet.
