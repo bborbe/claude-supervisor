@@ -79,7 +79,7 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 - **`$1` (optional — resolved from the session when omitted):** the **subject** — a goal name matching a page in `24 Goals/`, or a topic name matching a topic page in `23 Topics/`. The branch is detected from whichever page resolves (step 1); this command never assumes one.
   - `/manager-drive "Sample Task"` → explicit subject
   - `/manager-drive` (bare) → resolve the subject from § Subject resolution in the arm, which points at `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the same rule `/manager-loop` and `/manager-status` use, so a manager session's bare drive acts on the subject it is already watching.
-- **`--interval <N>m`** is the **arm's**, not this command's: a round arms nothing and schedules nothing. It is accepted only so the wakeup's prompt parses.
+- **`--interval <N>m`** is the **arm's**, not this command's: it is the loop's wakeup delay, armed by `/supervisor:manager-loop` § step 3 at the round's head, and nothing in this command reads it. ⚠️ **Do not read that as "a round arms nothing" — it is not inert here.** Step 12 makes one `ScheduleWakeup` call to correct `noop` on a no-change tick, and re-arms the two `Monitor` channels that expire mid-tick; what this command never does is *set* the interval. The flag is accepted solely so the wakeup's prompt parses.
 
 ## Pre-dispatch gate — by-hand rounds only
 
