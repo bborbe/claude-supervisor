@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: **`commands/open.md` shrinks 101,653 → 60,659 B (−40.3 %) as its rationale moves verbatim to the runbook, and the budget ratchet tightens to match.** The body is re-injected on every `/supervisor:open` invocation, so its incident narratives and dated citations now live in `65 Runbooks/Manager Session.md` § *Command rationale — maintained* (Personal vault) — deliberately a new maintained section rather than the banner-marked *"Historical — not normative"* one it now sits above. Every executable rule stays: all 20 headings preserved in order, all fenced code blocks byte-identical, 112 blocks moved, and **no backtick code span lost from either file**. `scripts/check-budget.py --tighten` lowers `commands/open.md`'s baseline entry from 101,653 to 60,659, so the ratchet now forbids it regrowing.
+
 ## v0.129.1
 
 - docs: `scripts/fleet-board.py`'s module docstring no longer restates the task-owner resolution order — rule 2 of its four tree rules still said a worker's parent comes from the task's `goals:` alone, which the tier-1 `managed_by` reader in v0.128.6 had just made false; it now points at `docs/fleet-surface.md` § *Which manager owns a subject*, the single statement of the rule, so the docstring cannot drift from `manager_on_chain` again
