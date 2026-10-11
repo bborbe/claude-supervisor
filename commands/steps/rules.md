@@ -1,44 +1,10 @@
 Rationale: [[Fleet Manager Session]] § Fleet-Manager Command — Rationale and Measured History
 
-```yaml
----
-description: Stateful fleet round — snapshot, diff against the previous sweep, classify every peer (progressing / stalled / parked / done), dispatch the drive leg, and act within a strict autonomy boundary. Composes /fleet-status; repeats by default at its `--interval` (default 15 min) via ScheduleWakeup, TTS on problems (voice-mode gated), routes to managers. (Renamed from /fleet-sweep 2026-09-10 when the two were merged.)
-allowed-tools:
-  - ListAgents
-  - SendMessage
-  - Monitor
-  - AskUserQuestion
-  - ScheduleWakeup
-  - mcp__supervisor__spawn_agent
-  - mcp__supervisor__list_agents
-  - mcp__supervisor__agent_status
-  - mcp__supervisor__answer_permission
-  - mcp__tts__say
-  - Bash(python3:*)
-  - Bash(date:*)
-  - Bash(vault-cli:*)
-  - Bash(ls:*)
-  - Bash(cat:*)
-  - Bash(mkdir:*)
-  - Bash(echo:*)
-  - Bash(grep:*)
-  - Bash(pgrep:*)
-  - Bash(comm:*)
-  - Bash(sort:*)
-  - Bash(kubectl*:*)
-  - Bash(gh:*)
-  - Bash(git log:*)
-  - Bash(wezterm cli list:*)
-  - Task
-  - Read
-  - Write
-  - Edit
-argument-hint: "[--interval <N>m] (interval defaults to 15m; the round repeats by default)"
----
-```
+The `allowed-tools` grant these steps run under lives in the command frontmatter — `${CLAUDE_PLUGIN_ROOT}/commands/fleet-tick.md` and `${CLAUDE_PLUGIN_ROOT}/commands/fleet-loop.md` — and is not restated here.
+
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
-`P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — every script below is `python3 $P/<script>`.
+`$P` is defined once per command (`${CLAUDE_PLUGIN_ROOT}/commands/fleet-tick.md`, `${CLAUDE_PLUGIN_ROOT}/commands/fleet-loop.md`) — every script below is `python3 $P/<script>`.
 ## Manager contract — a manager manages, it does not build
 
 The fleet manager never performs the *work*: no code edits, no repo/PR/k8s verification, no investigation, no debugging — not even small ones.
@@ -83,7 +49,7 @@ Before naming a cause in Step 5, confirm it against the system it is about — `
 - **Never preempt a busy peer.** Never ask a `busy`/`shell` session to drop its work; never touch its worktree, branch or containers.
 - **Work is task/goal anchored.** Every delegated message and spawned session names its task or goal.
 - **No permission laundering.** Never ask a peer to run something denied here — route it to the operator.
-- **An operator gate is never the manager's to decide — relaying the operator's own answer is the job.** Whether you may clear a gate at all is the Manager Session runbook § Gate triage — who clears what: standing mandates (spawn, auto-resume, write-back, close, auto-compaction) and gates a quotable written source determines are yours; everything else is the operator's; production-touching and live-trade gates are never relayed. Relay per § Cadence (provenance, exclusions, navigation, verification, `/supervisor:jump <pane-id>` fallback).
+- **An operator gate is never the manager's to decide — relaying the operator's own answer is the job.** Whether you may clear a gate at all is the Manager Session runbook § Gate triage — who clears what: standing mandates (spawn, auto-resume, write-back, close, auto-compaction) and gates a quotable written source determines are yours; everything else is the operator's; production-touching and live-trade gates are never relayed. Relay per `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` (provenance, exclusions, navigation, verification, `/supervisor:jump <pane-id>` fallback).
 - **No polling loops.** One round per invocation; nothing re-invokes itself or `ListAgents` on a sub-loop.
 - **Verify before telling a peer something did NOT happen** — check the target directly first (`git ls-remote`, `gh pr view --json state,mergeCommit`, the task file). Unverified phrasing: *"verify before re-issuing"*. Same for the operator: never report a peer "blocked for N minutes" from two snapshots joined by inference.
 - **Never forward a claim you did not measure.** A peer's or sub-agent's observation is testimony — quote it as testimony (*"pane 254 reports X"*) or measure it yourself. A sub-agent's caveat about its own sources is a finding.

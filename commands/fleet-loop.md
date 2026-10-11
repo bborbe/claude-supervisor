@@ -36,13 +36,15 @@ argument-hint: "[--interval <N>m] (interval defaults to 15m; the round repeats b
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — every script below is `python3 $P/<script>`.
 
-This is the **arm**, invoked once. The stateful fleet round remembers the last sweep, diffs against it, and acts only on evidence. It has side effects — a message consumes a peer's turn — so it never runs tighter than its 15-minute floor and is never invoked back-to-back by a polling loop. The arm re-arms itself; every wakeup runs `${CLAUDE_PLUGIN_ROOT}/commands/fleet-tick.md`, the per-round router.
+Answer one question: **does anything in the fleet need attention right now?**
+
+Not `/supervisor:worker-drive` (session-scoped) and not `/fleet-status` (stateless). This is the **arm**, invoked once. The stateful fleet round remembers the last sweep, diffs against it, and acts only on evidence. It has side effects — a message consumes a peer's turn — so it never runs tighter than its 15-minute floor (§ Interval) and is never invoked back-to-back by a polling loop. The arm re-arms itself; every wakeup runs `${CLAUDE_PLUGIN_ROOT}/commands/fleet-tick.md`, the per-round router.
 
 The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md` — their single normative home. This file and the tick do not restate them.
 
 ## Interval
 
-`--interval <N>m` sets the tick — default **15 min**, floor **15 min**; any other argument is ignored. A below-floor value is **clamped up and announced** (`⚠️ --interval 5m is below the 15m floor — clamped to 15m`), never rejected, because a loop that refuses its own interval stops silently. The round repeats by default; there is no one-sweep flag — a single round still dispatches the drive leg, sends and writes back, so it was never a read-only look.
+`--interval <N>m` sets the tick — default **15 min**, floor **15 min**; any other argument is ignored. A below-floor value is **clamped up and announced** (`⚠️ --interval 5m is below the 15m floor — clamped to 15m`), never rejected, because a loop that refuses its own interval stops silently. For one look without a loop, run `/fleet-status` (read-only); for one act pass, run `/fleet-drive`. The round repeats by default; there is no one-sweep flag — a single round still dispatches the drive leg, sends and writes back, so it was never a read-only look.
 
 ## Arm procedure
 
@@ -51,29 +53,7 @@ The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rule
 
 ## Router
 
-The tick's router, repeated here so the arm is self-contained; `${CLAUDE_PLUGIN_ROOT}/commands/fleet-tick.md` is its home.
-
-| # | Step | When | File |
-|---|---|---|---|
-| 0 | Rules | not already in this session's context — the first tick after an arm, or after a compaction | `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md` |
-| 1 | Re-arm | every tick — arm `ScheduleWakeup` FIRST, before the read half | `${CLAUDE_PLUGIN_ROOT}/commands/steps/re-arm.md` |
-| 2 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/sweep.md` |
-| 3 | Confirm the digest's candidates | the digest carries an orphan, collision or unmanaged-topic candidate | `${CLAUDE_PLUGIN_ROOT}/commands/steps/confirm-candidates.md` |
-| 4 | Adopt | `adopt-orphans.py` printed rows or exited non-zero — run: `python3 $P/adopt-orphans.py --self "$CLAUDE_CODE_SESSION_ID"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/adopt.md` |
-| 5 | Drive leg | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` |
-| 6 | Reap contract | the drive leg runs | `${CLAUDE_PLUGIN_ROOT}/commands/steps/reap.md` |
-| 7 | Answer a parked or exited worker | a worker is parked on a question or has exited | `${CLAUDE_PLUGIN_ROOT}/commands/steps/worker-channels.md` |
-| 8 | Act on the open-items ledger | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/act.md` · `${CLAUDE_PLUGIN_ROOT}/commands/steps/open-items.md` |
-| 9 | Verify a named cause | about to name a cause in the round's report | `${CLAUDE_PLUGIN_ROOT}/commands/steps/cause-verify.md` |
-| 10 | Escalate | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/escalate.md` |
-| 11 | Needs-input batch + relay | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` |
-| 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
-| 13 | Attention watchers | an arm has expired or been found dead — re-arm: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
-| 14 | Auto-compaction | the digest's CONTEXT section lists sessions over 70% | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
-| 15 | Voice + notification | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
-| 16 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
-| 17 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
-| 18 | Readings | either reading returned `unknown` or a non-zero exit — run: `python3 $P/fleet-board.py --json` · `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
+The router table has one home: `${CLAUDE_PLUGIN_ROOT}/commands/fleet-tick.md` § Router. The arm carries no copy of it — read the table there and follow it.
 
 ## Rationale and runbook
 

@@ -1,6 +1,6 @@
 ## When
 
-An arm has expired or been found dead.
+Every tick — arm ONE `Monitor` over the attention feed, and re-arm it whenever it expires or is found dead.
 
   - **Attention watcher:** arm ONE `Monitor` over the attention feed, **scoped by pane ownership** — the filter runs the producer itself and re-reads it every interval, so the arm survives its own first read:
 
