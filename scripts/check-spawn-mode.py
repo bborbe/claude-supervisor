@@ -56,7 +56,11 @@ MODE_ANCHOR = "Spawn a worker item 6"
 #: rows is now a spawn site and must carry the binding.
 SPAWN_SITES = (
     "commands/open.md",
-    "commands/manager-loop.md",
+    # ⚠️ `commands/manager-loop.md` left this set on 2026-10-11: the spawn moved OUT of the
+    # arm and into its per-round step file when the loop was restructured into a router.
+    # The arm still grants the tool, so it carries the anchor pointer below — a grant with
+    # no route to the rule is the exact bypass `agents/manager-drive.md` had.
+    "commands/steps/manager-spawn.md",
     "commands/manager-spawn.md",
     "commands/manager-drive.md",
     "agents/manager-drive.md",

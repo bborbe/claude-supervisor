@@ -1,3 +1,9 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
 # Persist
 
 When: the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py`

@@ -24,8 +24,16 @@ import unittest
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-subject-write-scope.py"
 REPO = SCRIPT.parent.parent
 DOC = "docs/subject-resolution.md"
-COMMANDS = [
+#: Files whose *frontmatter grants* the guard reads. These stay the COMMANDS, not the
+#: relocated step files: a step file has no frontmatter and grants nothing, so the grant the
+#: writer check is about lives on the command that reads the step. Kept separate from
+#: COMMANDS so the two roles cannot be conflated by a future bulk rename.
+GRANT_CARRIERS = [
     "commands/manager-loop.md",
+]
+
+COMMANDS = [
+    "commands/steps/manager-resolve.md",
     "commands/manager-drive.md",
     "commands/manager-status.md",
     "commands/manager-verify.md",
@@ -38,9 +46,20 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         (self.root / "docs").mkdir()
-        (self.root / "commands").mkdir()
+        # `parents=True`: one of the carriers is now a step file (`commands/steps/manager-resolve.md`),
+        # since the loop's subject resolution moved there when it became a router. The fixture
+        # mirrors the real layout, so it has to create the nested directory too.
+        (self.root / "commands" / "steps").mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / DOC, self.root / DOC)
         for rel in COMMANDS:
+            shutil.copy(REPO / rel, self.root / rel)
+        # The *grant* carrier is still the command, even though the writer's paragraph moved
+        # into a step file: the guard's grant loop deliberately reads `commands/<name>.md`
+        # rather than the relocated path, because the `Bash(vault-cli:*)` grant lives on the
+        # command's frontmatter and a step file carries none. The fixture needs it present or
+        # that loop skips silently — and a silently skipped check is what this test exists to
+        # catch.
+        for rel in GRANT_CARRIERS:
             shutil.copy(REPO / rel, self.root / rel)
 
     def run_guard(self):
@@ -178,6 +197,9 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
     def test_writer_with_unreadable_frontmatter_fails(self):
         # The writer-side half of the fail-closed frontmatter branch; the non-writer copy is
         # pinned separately, and the two paths are distinct code.
+        # Mutate the GRANT CARRIER, not the relocated writer: the guard reads grants from
+        # `commands/<name>.md`, so mutating the step file would leave the grant loop skipping
+        # silently and the test would pass for the wrong reason.
         self.mutate("commands/manager-loop.md", "---\n", "--- \n")
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
@@ -193,7 +215,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
 
     def test_writer_paragraph_losing_its_home_fails(self):
         # Dropping the pointer from *both* writers would otherwise pass every other assertion.
-        for rel in ("commands/manager-loop.md", "commands/manager-drive.md"):
+        for rel in ("commands/steps/manager-resolve.md", "commands/manager-drive.md"):
             self.mutate(
                 rel,
                 "run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *Reconcile the subject's status*",

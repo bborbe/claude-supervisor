@@ -46,6 +46,16 @@ REASONS = ("holds no `Bash(vault-cli:*)`", "read-only by its own contract")
 # The binaries § Reconcile the subject's status guarantees every writer is granted. `awk` reads
 # the page and `vault-cli` writes it; the section states both, so both are asserted.
 WRITER_GRANTS = ("Bash(awk:*)", "Bash(vault-cli:*)")
+
+#: Commands whose subject-resolution body moved into a step file when the loop was
+#: restructured into a router on 2026-10-11. The doc's table names the *command* — and the
+#: command still resolves a subject — but the reconcile paragraph now lives in the step file
+#: that does the resolving, so the body check follows the rule rather than the file it used
+#: to sit in. Keyed by the table's own name, so a row for a command with no relocation is
+#: unaffected.
+RELOCATED = {
+    "manager-loop": "commands/steps/manager-resolve.md",
+}
 PARAGRAPH_MARKER = "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.**"
 STEP_SLOT = re.compile(r"before the (sweep|gate)\b")
 
@@ -103,7 +113,7 @@ def main() -> int:
 
     writers: dict[str, str] = {}
     for name, verdict in rows.items():
-        rel = f"commands/{name}.md"
+        rel = RELOCATED.get(name, f"commands/{name}.md")
         path = REPO / rel
         if not path.is_file():
             failures.append(f"{rel}: named in the table but missing")

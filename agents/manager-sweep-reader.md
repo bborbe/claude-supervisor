@@ -335,6 +335,8 @@ The worked example is `a sample task` SC2 — *"Daily cron via recurring-task-cr
 
 9. **Return one compact report**
 
+⚠️ **The report obeys the hand-back contract — `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md`.** Verdict lines and counts in `key=value` form, **≤ 1 KB**, and non-empty: the **bucket counts** are this leg's required set and must be present even for a bucket at zero. The rendered table does **not** ride the report — it goes to the payload path the render already writes, and the report carries the verdict about it. Read the contract there; it is not restated here.
+
 Plain markdown, in this order, omitting empty sections:
 
 1. **The rendered table** — verbatim output of `box-table.py`, inside a fenced block. When the declared-optional set is non-empty this is **both** labelled boxes, in order (`Essential (first iteration)`, then `Optional (phase 2)`).
