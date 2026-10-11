@@ -93,7 +93,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 <output_format>
 **Two artifacts, two shapes.** The **payload** is the render below, written to disk; the **hand-back** is the ≤ 1 KB verdict summary the caller receives.
 
-**Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.drive`, verbatim and byte-for-byte: `mkdir -p` the directory, write `<path>.tmp`, then `mv` it over. It sits beside the `.digest` the sweep reader wrote for this same round — **sanitize the round timestamp the same way it does**: every character outside `[0-9A-Za-z._-]` replaced by `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.drive`. The caller reads it for the `REAPS` / `NUDGES` text it must send and for the `Waiting on your keystroke` list it prints — neither rides the hand-back.
+**Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.drive`, verbatim and byte-for-byte: `mkdir -p` the directory, write `<path>.tmp`, then `mv` it over. It sits beside the `.digest` the sweep reader wrote for this same round — **sanitize the round timestamp by the rule `agents/fleet-sweep-reader.md` § `<output_format>` states; that clause is its single home and is deliberately not copied here**, so the two filenames cannot drift apart. The caller reads it for the `REAPS` / `NUDGES` text it must send and for the `Waiting on your keystroke` list it prints — neither rides the hand-back.
 
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
@@ -135,9 +135,13 @@ is the sweep's business, not yours.
 **Hand-back** — obey `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md`: verdict lines and counts in `key=value` form, **≤ 1 KB**, non-empty. This leg's required set is the **drive verdicts — one line per candidate you decided, carrying the decision**:
 
 ```text
-candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · unverifiable=<U> · payload=<path>
+candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · unverifiable=<U> · truncated=<n> · payload=<path>
 <name> [<sid8>] = <verdict>
 ```
 
-⚠️ **Every candidate of every verdict gets a line** — revive, blocked, unverifiable and finished alike — because step 3's suppression compares each round against the previous one's value, and a row absent from the hand-back reads as a row that no longer exists. ⚠️ **`payload=` is the path you wrote**, and it is the one value the caller forwards verbatim. Read the contract for the form; it is not restated here.
+⚠️ **Every candidate of every verdict gets a line** — revive, blocked, unverifiable and finished alike — because step 3's suppression compares each round against the previous one's value, and a row absent from the hand-back reads as a row that no longer exists.
+
+⚠️ **Those two requirements meet at a cap, and the counts win.** One line per candidate and ≤ 1 KB cannot both hold on a large fleet — at roughly 45 bytes a line the cap arrives near twenty candidates. When they conflict, the **counts line is authoritative and is never dropped**; trim per-candidate lines until the whole hand-back fits and add `truncated=<n>` naming how many you dropped. Nothing is lost by the trim, because the payload carries every candidate regardless — so `truncated=` is the caller's instruction to read the payload, not a report that the fleet shrank. A hand-back that silently dropped rows to stay under the cap would read as candidates that no longer exist, which is the exact failure the per-line rule exists to prevent.
+
+⚠️ **`payload=` is the path you wrote**, and it is the one value the caller forwards verbatim. Read the contract for the form; it is not restated here.
 </output_format>

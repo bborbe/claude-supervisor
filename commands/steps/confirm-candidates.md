@@ -10,7 +10,7 @@ When: the hand-back reports `orphan`, `collision` or `unmanaged` > 0
 
 ### Confirming the digest's candidates
 
-Read the payload the sweep hand-back named (`~/.claude/state/fleet-handback/<round timestamp>.digest`) and work its `ORPHAN CANDIDATES`, `COLLISION CANDIDATES` and `UNMANAGED TOPICS` sections — those rows no longer ride the hand-back, only their counts do.
+Read the payload the sweep hand-back named — **take the path off its `payload=` value and never recompute it from the round timestamp**: the agent sanitizes the timestamp into the filename, so a recomputed template names a file that does not exist. Work that file's `ORPHAN CANDIDATES`, `COLLISION CANDIDATES` and `UNMANAGED TOPICS` sections; those rows no longer ride the hand-back, only their counts do.
 
 - **Orphan:** a candidate is open work with a dead session — for the operator to pick up or close, not a fault and not a stall. Report as its own group. `UNKNOWN` (check failed) is reported as unknown, never as clean.
 - **Collision (Step 2c):** a shared subject is not automatically a collision — confirm the overlap is on the same artifact. On a real one, **tell both sides without asking** (read-only context):
