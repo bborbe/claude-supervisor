@@ -12,6 +12,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - fix: `manager-loop`'s `waiting-on-human` bullet now leads with the gate class test, so a closer-line `pick` routes to the pane handover before the post-to-the-board instruction is reached — the instruction previously preceded its own exception, and a manager reading top-down carded a closer-line `pick` the bullet forbids carding
 
+## v0.128.3
+
+- fix: `/supervisor:manager-status`'s `description:` no longer reads as side-effect-free — it names the resolution record and the caller's promotion to manager that its own recording step performs
+
 ## v0.128.2
 
 - fix: `restart-worker.py`'s post-restart hand-off line no longer garbles the changed-inputs list (an f-string implicitly concatenated into the `join` separator)
