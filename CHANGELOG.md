@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `/supervisor:manager-status`'s `description:` no longer reads as side-effect-free — it names the resolution record and the caller's promotion to manager that its own recording step performs
+
 ## v0.128.2
 
 - fix: `restart-worker.py`'s post-restart hand-off line no longer garbles the changed-inputs list (an f-string implicitly concatenated into the `join` separator)
