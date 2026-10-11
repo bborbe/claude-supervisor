@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.129.5
 
 - fix: **a manager-loop tick that lands while the previous round is still in flight is now stated, not improvised.** `commands/steps/manager-readings.md` carries the rule: such a firing is **absorbed** — no reading, no sweep, no dispatch, no write — and each of the round's three writes belongs to the round that *produced* its input (the store save to the round that dispatched the sweep reader, the verdicts-cache write to the round that dispatched the drive leg, the topic-page write-back to the round whose own sweep produced the `noop: false`). A late leg's `Audit` block is **dropped**, never merged — which `commands/steps/manager-drive.md` already required in words (*"never merge in rows from an earlier tick"*). Measured 2026-10-11: a tick overran its interval by ~3× and the firing inside it was absorbed because the round was still in flight. `scripts/check-round-overlap.py` asserts the rule has exactly one home and that a **tick-router** row dispatches it every tick, and is wired into `precommit`.
 
