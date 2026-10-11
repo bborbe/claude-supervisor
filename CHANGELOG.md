@@ -8,9 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.129.2
+## Unreleased
 
 - fix: the tracked-set watcher no longer re-posts a park the operator has already answered. `open_store_items` reads `GET /api/1.0/attention`, which returns open items only, so an ANSWERED card left no trace in it and the watcher read that absence as a **store fault** — measured 2026-10-10, `park:beeb6128` was re-posted at 20:12:32, two minutes after the operator's 20:10:35 `skip`, and four times across ~3h20m. Candidates are now resolved against `GET /api/1.0/attention/history` (the only read that carries an answered card) and an answered key is recorded as `ANSWERED` — naming the answered instance — instead of re-posted. A key whose latest record is not an *answer* still re-posts — one with no record at all, and equally a **cleared or reaped** card, whose `closed` row carries no `answered_at` (the dominant closed shape: 9,339 of 9,454 rows per `answered-attribution.py`) and an answer about an **earlier** park on the same session still re-posts (this watcher is the only producer of `park:` rows, so an answered row would otherwise stay newest forever and silence every later lost park on that session) — so the change suppresses an answer and never a fault. Also corrects `open_store_items`'s docstring, which claimed the item read returns items in every state.
+
+## v0.129.2
+
 - test: **prove the budget ratchet's failure paths, not just its green one.** `scripts/check-budget.py` is a tighten-or-fail ratchet, and its baseline is seeded from this repository's own tree — so `make precommit` passes by construction on any revision of it, and a script that did nothing at all would pass identically. `scripts/tests/test_check_budget.py` covers the three failure modes the design turns on (a baselined body above its recorded max, below it, and a body over budget that is absent from the baseline), plus the strict `*-tick.md` cap at and over the line, the missing-baseline fail-closed path, a baselined file that vanished, and the property the ratchet exists for: `--tighten` lowers only under-max entries and **does not rescue a growth**.
 
 ## v0.129.1
