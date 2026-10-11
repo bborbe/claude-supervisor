@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.130.2
 
 - fix: **the under-target step's `When` drops the one clause the router could never evaluate.** `commands/steps/manager-under-target.md` gated on *live workers below target **and** no ready row **and** the ask not declined*, but the step's own text says the decline is *"an input this branch reads"* — so the third clause is produced **by the file it gates**, and a router instructed to read a step only when its `When` holds could not honour it. Measured 2026-10-11: a live tick read the step at 18:48:37Z, before its card poll returned `ANSWERED: skip`, which made the read look like an ungated one. The clause is dropped from the step and byte-identically from **both** router rows (`commands/manager-loop.md` and `commands/manager-loop-tick.md`, which `check-step-when.py` pins together), and the step's declined-ask bullet now records why so it is not re-added. The branch's behaviour is unchanged — it already handled the declined case.
 
