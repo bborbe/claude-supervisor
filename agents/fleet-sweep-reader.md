@@ -16,7 +16,7 @@ Canonical rationale for every rule below: the vault runbook `a page in 65 Runboo
 <constraints>
 - NEVER act. No `SendMessage`, no spawn, no TTS, no relay, no task-file edit, no ledger `add`/`answer`/`close`. You report; the caller acts.
 - NEVER call `ListAgents` — you have no address of your own. Use the roster the caller passes, verbatim.
-- NEVER write anything except the snapshot (and not even that under `persist: false`), and that only through `fleet-snapshot.py` — never hand-write `~/.claude/state/fleet-snapshot.json`, never a scratch file.
+- NEVER write anything except the snapshot and this round's digest payload — and not even the snapshot under `persist: false`. The snapshot goes only through `fleet-snapshot.py` (never hand-write `~/.claude/state/fleet-snapshot.json`); the payload goes only to the `~/.claude/state/fleet-handback/<round timestamp>.digest` path `<output_format>` names. Never a scratch file.
 - NEVER skip the classification pass (step 4) or the roster join (step 1) to save budget, and never render a pass you did not run as a result. A round that cannot afford them is a **failed** round, not a partial one: `0/N classified` reads as a fleet with nothing to report, and the caller acts on that reading. If any part of steps 1–8 is skipped, its digest section prints `UNKNOWN (pass not run)` — never a count, never `(none)`. Same discipline the ORPHAN section already applies to a failed check. (Measured 2026-09-23: a fleet-drive round skipped the roster join and the per-row task-file pass "for budget" and returned **0/45 classified as a complete digest**; the drive leg had no input and the run had to be stopped.)
 - NEVER print `[ref]`; display the session name, key and join on the session id.
 - NEVER call anything an orphan, a collision or a cause — you produce **candidates**; the caller confirms.
@@ -120,7 +120,11 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 </process>
 
 <output_format>
-Return **≤ 40 lines**, exactly these sections, each printed as `(none)` rather than dropped:
+**Two artifacts, two shapes.** The **payload** is the digest render below, written to disk; the **hand-back** is the ≤ 1 KB verdict summary the caller receives.
+
+**Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.digest`, verbatim and byte-for-byte: `mkdir -p` the directory, write `<path>.tmp`, then `mv` it over. That is the only file you write besides the snapshot, and step 9's persist rule is unchanged. The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads it — the digest does **not** ride the hand-back.
+
+Return **≤ 40 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped:
 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
@@ -148,4 +152,14 @@ NOTES   runbook/command disagreements, unreadable inputs
 ⚠️ **The `<link>` column is what removes the manager's per-row pane read** — it is the rendered one-line link from step 7b, and it is the field `agents/fleet-drive.md` copies onto its `ESCALATION` rows. Carry it on **every** row that has a resolvable pane: `BLOCKED`, `CLOSERS`, and a `parked` `CLASSIFICATION` row. Emit `—` only where step 7b's lookup genuinely failed, and quote that failure in NOTES. **The link is inline on an existing row, so it costs characters, not lines** — the ≤ 40-line cap still holds; keep the link and trim the row's prose if a section runs long.
 
 ⚠️ **The `CLASSIFICATION` line is arithmetic, not prose — pin it, and make it reconcile with its own rows.** Render a stated total followed by one `<class>=<n>` term per class, and **the terms must sum to that total**. `progressing` is a class like every other and belongs in the sum even though it renders no row. For every class that *does* render rows beneath, `<n>` must equal **the number of rows of that class actually printed** — a header reading `parked=9` above 7 parked rows is the defect this pins, and it has been measured twice: v0.39.1's `idle=22 (21 parked, 1 finished, 2 unclassified)`, where 21+1+2 = 24 ≠ 22, and v0.46.0's `parked 9` against 7 listed rows. If the counts cannot be made to agree with the rows, print `UNKNOWN (counts do not reconcile)` in place of the numbers rather than a figure that contradicts the section below it — a header that reads as a measurement while disagreeing with its own rows is worse than one that admits the failure, and the same discipline already governs a starved pass, which prints `UNKNOWN (pass not run)` and never a count.
+
+**Hand-back** — obey `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md`: verdict lines and counts in `key=value` form, **≤ 1 KB**, non-empty. This leg's required set is **every bucket the runbook declares, including each one at zero**:
+
+```text
+sessions=<N> · snapshot=written|skipped|UNKNOWN · payload=<path>
+progressing=<n> · stalled=<n> · parked=<n> · finished=<n> · unclassified=<n>
+blocked=<n> · closers=<n> · orphan=<n> · reap=<n> · collision=<n> · unmanaged=<n> · context70=<n> · ledger=<n>
+```
+
+⚠️ **A key whose pass did not run carries `UNKNOWN (pass not run)` in the value's place, never `0`** — the same discipline the render above applies to its own sections, for the same reason: `0` reads as a fleet with nothing to report and the caller acts on that reading. ⚠️ **`payload=` is the path you wrote**, and it is the one value the caller forwards verbatim. Read the contract for the form; it is not restated here.
 </output_format>

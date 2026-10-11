@@ -33,19 +33,19 @@ The fleet has a show (`/supervisor:fleet-status`) and an act loop (`/supervisor:
 
    `persist: false` is load-bearing: a by-hand drive run between two manager rounds must not advance `stall_count` or consume the snapshot the next manager round diffs against. The plugin prefix is required — a bare name resolves to a personal `~/.claude/agents/` copy.
 
-   **No usable digest** (error, empty, or the header lacks `snapshot written: skipped`) → stop and say so. Never fall back to a hand-rolled classification: every verdict would be UNKNOWN, and an empty fleet and a dead source must never render the same.
+   **No usable hand-back** (error, empty, or it names no `payload=` path) → stop and say so. Never fall back to a hand-rolled classification: every verdict would be UNKNOWN, and an empty fleet and a dead source must never render the same.
 
 3. **Dispatch the drive leg.**
 
-   `Task(subagent_type: "supervisor:fleet-drive", prompt: <digest verbatim + this session's name and id + vault path + round timestamp>)`
+   `Task(subagent_type: "supervisor:fleet-drive", prompt: <sweep hand-back verbatim + the payload= path it named + this session's name and id + vault path + round timestamp>)`
 
    The agent loads the ledger, suppresses re-nudges, verifies each `parked` session's blocker live, assigns revive / blocked / unverifiable / finished, persists the ledger and returns drafted nudges. Its rules live in `agents/fleet-drive.md` and are not restated here.
 
 4. **Send — from this session only.** Send every `REAPS` line first, then every `NUDGES` line — reap before drive, so a finished session is never told to continue. For each line, re-check the target's roster status first — moved to `busy`/`shell` since step 1 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Every send stays in this session because a sub-agent has no cross-session address — a reply to a sub-agent's message lands here after it has returned. Report any failed send; the ledger already counts it as nudged, so the next round suppresses rather than nags.
 
-5. **Print** the agent's report verbatim — table, escalation groups, the `Waiting on your keystroke` list, ledger line — with the one addition below, then `Sent: <n>` with one line per recipient, and `Skipped: <n>` with reasons.
+5. **Print** the agent's payload verbatim — read it at the `payload=` path its hand-back named: escalation groups, the `Waiting on your keystroke` list, ledger line — with the one addition below, then `Sent: <n>` with one line per recipient, and `Skipped: <n>` with reasons.
 
-   **The report carries a `Waiting on your keystroke` list** — the round's operator to-do list, built by the drive agent from the digest's `CLOSERS` lines and its own `blocked` verdicts. Print it as it arrives; its rules live in `agents/fleet-drive.md` and are not restated here.
+   **The report carries a `Waiting on your keystroke` list** — the round's operator to-do list, built by the drive agent from the payload's `CLOSERS` lines and its own `blocked` verdicts. Print it as it arrives; its rules live in `agents/fleet-drive.md` and are not restated here.
 
    **Every `ESCALATION` row carries its jump link — and this session renders none of them.** The drive agent hands each row its already-rendered link, produced by `fleet-sweep-reader` from the pane it resolved. Print the rows as they arrive. **Run no per-row pane read here**: no `jump-link.py`, no `who-needs-me.py --pane-for` — the sweep owns that lookup, and it already holds the session-registry join.
 

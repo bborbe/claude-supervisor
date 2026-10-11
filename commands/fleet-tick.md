@@ -45,7 +45,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 0 | Rules | not already in this session's context — the first tick after an arm, or after a compaction | `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md` |
 | 1 | Re-arm | every tick — arm `ScheduleWakeup` FIRST, before the read half | `${CLAUDE_PLUGIN_ROOT}/commands/steps/re-arm.md` |
 | 2 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/sweep.md` |
-| 3 | Confirm the digest's candidates | the digest carries an orphan, collision or unmanaged-topic candidate | `${CLAUDE_PLUGIN_ROOT}/commands/steps/confirm-candidates.md` |
+| 3 | Confirm the digest's candidates | the hand-back reports `orphan`, `collision` or `unmanaged` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/confirm-candidates.md` |
 | 4 | Adopt | `adopt-orphans.py` printed rows or exited non-zero — run: `python3 $P/adopt-orphans.py --self "$CLAUDE_CODE_SESSION_ID"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/adopt.md` |
 | 5 | Drive leg | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` |
 | 6 | Reap contract | the drive leg runs | `${CLAUDE_PLUGIN_ROOT}/commands/steps/reap.md` |
@@ -53,10 +53,10 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 8 | Act on the open-items ledger | the ledger holds ≥1 open entry | `${CLAUDE_PLUGIN_ROOT}/commands/steps/act.md` · `${CLAUDE_PLUGIN_ROOT}/commands/steps/open-items.md` |
 | 9 | Verify a named cause | about to name a cause in the round's report | `${CLAUDE_PLUGIN_ROOT}/commands/steps/cause-verify.md` |
 | 10 | Escalate | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/escalate.md` |
-| 11 | Needs-input batch + relay | the digest's BLOCKED set is non-empty | `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` |
+| 11 | Needs-input batch + relay | the hand-back reports `blocked` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` |
 | 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
 | 13 | Attention watchers | every tick — arm ONE `Monitor` over the attention feed, and re-arm it whenever it expires or is found dead: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
-| 14 | Auto-compaction | the digest's CONTEXT section lists sessions over 70% | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
+| 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
 | 15 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
 | 16 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 17 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
