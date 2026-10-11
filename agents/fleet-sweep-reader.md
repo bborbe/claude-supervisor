@@ -79,7 +79,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 7. **Unmanaged topics (Step 2d).** Primary signal: the sentence `No manager session resolves for this topic` in any pane read or gate preamble you saw. Secondary: a 2c subject group with **≥2 live workers** and no roster row resolving as that topic's manager (the ≥2 is a guess, not a measurement). For each, check the topic page exists under the vault's `topics_dir`; report topic, workers, page present/absent.
 
-7b. **Render the jump link on every escalation-bearing row — this is what keeps the per-row pane read out of the manager's context.** The manager used to resolve one pane per `ESCALATION` row itself (`commands/fleet-loop.md` Step 3b, `commands/fleet-drive.md` step 5); that read now happens here, once, using the same two scripts the sweep already has.
+7b. **Render the jump link on every escalation-bearing row — this is what keeps the per-row pane read out of the manager's context.** The manager used to resolve one pane per `ESCALATION` row itself (`${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` Step 3b, `commands/fleet-drive.md` step 5); that read now happens here, once, using the same two scripts the sweep already has.
 
    ```bash
    python3 $P/jump-link.py "$(python3 $P/who-needs-me.py --pane-for <sid8>)"   # → the rendered link

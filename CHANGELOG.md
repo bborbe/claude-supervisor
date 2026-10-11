@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: split `commands/fleet-loop.md` into an arm, a `commands/fleet-tick.md` router and `commands/steps/` step files; the recurring payload per tick falls from 70,790 B to 31,209 B
+
 ## v0.128.4
 
 - fix: `manager-loop`'s `waiting-on-human` bullet now leads with the gate class test, so a closer-line `pick` routes to the pane handover before the post-to-the-board instruction is reached — the instruction previously preceded its own exception, and a manager reading top-down carded a closer-line `pick` the bullet forbids carding
