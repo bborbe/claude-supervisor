@@ -103,17 +103,22 @@ const CONNECTION_ERROR_CODES = new Set([
   'UND_ERR_HEADERS_TIMEOUT',
 ])
 
-// Whether this error is worth another attempt. `AbortError` is excluded first: it is this
-// module's own timeout firing, and retrying a service that did not answer inside ten minutes
-// spends thirty to learn the same thing.
+// Whether this error is worth another attempt.
+//
+// Keyed on the CODE, never on undici's wrapper. `TypeError: fetch failed` is thrown for every
+// transport failure including permanent ones, so matching that wrapper alone retries a settled
+// answer: a request to a blocked port reports `fetch failed — bad port`, and a predicate that
+// matched the wrapper spent three attempts and 750 ms reaching the same verdict (measured
+// 2026-10-11 against `http://127.0.0.1:9`). The code is what makes the question decidable, and
+// an unrecognised one is treated as permanent — the cause is reported either way, so an
+// unidentifiable failure is diagnosable on its next occurrence rather than guessed at here.
+//
+// `AbortError` is excluded first: it is this module's own timeout firing, and retrying a
+// service that did not answer inside ten minutes spends thirty to learn the same thing.
 function isConnectionFailure(error) {
   if (!error || error.name === 'AbortError') return false
   const code = error.code ?? error.cause?.code ?? error.cause?.errno
-  if (code && CONNECTION_ERROR_CODES.has(String(code))) return true
-  // undici's own wrapper, which is what the observed failure actually was: a connection-level
-  // failure arrives as `TypeError: fetch failed` with the real reason on `cause`. Matched by
-  // name AND message so an unrelated `TypeError` is not retried.
-  return error.name === 'TypeError' && error.message === 'fetch failed'
+  return Boolean(code) && CONNECTION_ERROR_CODES.has(String(code))
 }
 
 // The connection-level detail undici puts on `error.cause` — the detail this module used to

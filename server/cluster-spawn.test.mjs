@@ -289,6 +289,7 @@ test('a connection failure names its cause rather than only fetch failed', async
     prompt: 'x',
     sessionId: UUID,
     authToken: TOKEN,
+    sleepImpl: async () => {},
     fetchImpl: async () => {
       const failure = new TypeError('fetch failed')
       failure.cause = { code: 'ECONNREFUSED', address: '192.168.178.34', port: 443 }
@@ -361,6 +362,30 @@ test('an AbortError timeout is not retried', async () => {
   })
   assert.equal(attempts, 1, 'an AbortError must not be retried')
   assert.match(error, /no answer within 5ms/)
+})
+
+test('a fetch failure with no connection code is not retried', async () => {
+  // The trap this pins: undici throws `TypeError: fetch failed` for EVERY transport failure,
+  // permanent ones included. Matching that wrapper alone retries a settled answer — measured
+  // 2026-10-11 against a blocked port, whose real message is `fetch failed — bad port`, where a
+  // wrapper-keyed predicate spent three attempts and 750 ms reaching the same verdict. Only an
+  // identifiable connection code is retried; anything else is reported on the first attempt.
+  let attempts = 0
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1
+      const failure = new TypeError('fetch failed')
+      failure.cause = new Error('bad port')
+      throw failure
+    },
+  })
+  assert.equal(attempts, 1, 'a failure carrying no connection code must not be retried')
+  assert.match(error, /fetch failed — bad port/)
 })
 
 // --- resolveClusterTarget: which source each cluster value comes from ----------------------
