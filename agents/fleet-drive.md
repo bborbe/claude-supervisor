@@ -1,6 +1,6 @@
 ---
 name: fleet-drive
-description: Perform the fleet sweep's drive leg — take the fleet-sweep-reader digest, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), and return verdicts plus drafted reaps and nudges. Dispatched by `/supervisor:fleet-drive` and by `/supervisor:fleet-loop` on every round. Consumes the classification the sweep already produced; never builds a second one, never sends.
+description: Perform the fleet sweep's drive leg — read the digest render at the `payload=` path the caller passes, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), write the drafted reaps, nudges and escalation groups to its own payload, and return the ≤ 1 KB drive-verdict hand-back. Dispatched by `/supervisor:fleet-drive` and by `/supervisor:fleet-loop` on every round. Consumes the classification the sweep already produced; never builds a second one, never sends.
 model: sonnet
 tools: Read, Bash, Write
 allowed-tools: Bash(vault-cli:*), Bash(gh:*), Bash(grep:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(date:*), Bash(git:*)
@@ -29,6 +29,8 @@ You are the agent half of a command+agent pair, mirroring `manager-drive`: the c
 
 <inputs>
 The caller passes: the sweep-reader hand-back verbatim · **the `payload=` path it named — the digest render every row below is read from** · the caller's own session name and id · the vault path · the round timestamp.
+
+Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it today, and `/supervisor:fleet-drive` omits it.
 
 ⚠️ **The digest does not ride the prompt.** Every reference below to *"the digest's `<SECTION>`"* means a section of that payload file: read it once, up front, before step 1. A prompt carrying no `payload=` path is a **malformed handoff** — report it in the header and treat every row as **unverifiable**; never reconstruct one from the hand-back's counts, which carry no names.
 </inputs>
@@ -133,7 +135,7 @@ is the sweep's business, not yours.
 **Hand-back** — obey `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md`: verdict lines and counts in `key=value` form, **≤ 1 KB**, non-empty. This leg's required set is the **drive verdicts — one line per candidate you decided, carrying the decision**:
 
 ```text
-drive <N> candidates · <F> finished · <R> revive · <B> blocked · <U> unverifiable · payload=<path>
+candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · unverifiable=<U> · payload=<path>
 <name> [<sid8>] = <verdict>
 ```
 

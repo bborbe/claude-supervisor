@@ -39,7 +39,7 @@ The fleet has a show (`/supervisor:fleet-status`) and an act loop (`/supervisor:
 
    `Task(subagent_type: "supervisor:fleet-drive", prompt: <sweep hand-back verbatim + the payload= path it named + this session's name and id + vault path + round timestamp>)`
 
-   The agent loads the ledger, suppresses re-nudges, verifies each `parked` session's blocker live, assigns revive / blocked / unverifiable / finished, persists the ledger and returns drafted nudges. Its rules live in `agents/fleet-drive.md` and are not restated here.
+   The agent loads the ledger, suppresses re-nudges, verifies each `parked` session's blocker live, assigns revive / blocked / unverifiable / finished, persists the ledger and writes the drafted nudges to its payload. Its rules live in `agents/fleet-drive.md` and are not restated here.
 
 4. **Send — from this session only.** Send every `REAPS` line first, then every `NUDGES` line — reap before drive, so a finished session is never told to continue. For each line, re-check the target's roster status first — moved to `busy`/`shell` since step 1 → skip and report the skip (never preempt a busy peer); otherwise `SendMessage(to: <exact roster name>, message: <text>)`. Every send stays in this session because a sub-agent has no cross-session address — a reply to a sub-agent's message lands here after it has returned. Report any failed send; the ledger already counts it as nudged, so the next round suppresses rather than nags.
 

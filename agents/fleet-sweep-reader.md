@@ -157,9 +157,11 @@ NOTES   runbook/command disagreements, unreadable inputs
 
 ```text
 sessions=<N> · snapshot=written|skipped|UNKNOWN · payload=<path>
-progressing=<n> · stalled=<n> · parked=<n> · finished=<n> · unclassified=<n>
+progressing=<n> · stalled=<n> · parked=<n> · held=<n> · finished=<n> · unclassified=<n>
 blocked=<n> · closers=<n> · orphan=<n> · reap=<n> · collision=<n> · unmanaged=<n> · context70=<n> · ledger=<n>
 ```
+
+⚠️ **Every class the render's `CLASSIFICATION` line emits needs a key here, `held` included.** The hand-back is the caller's only view of the bucket set, so a class that appears in the render and is absent here is a bucket the caller cannot see at all — and `held` is the one class the render treats as winning over every other, which makes its absence the most misleading of the set.
 
 ⚠️ **A key whose pass did not run carries `UNKNOWN (pass not run)` in the value's place, never `0`** — the same discipline the render above applies to its own sections, for the same reason: `0` reads as a fleet with nothing to report and the caller acts on that reading. ⚠️ **`payload=` is the path you wrote**, and it is the one value the caller forwards verbatim. Read the contract for the form; it is not restated here.
 </output_format>
