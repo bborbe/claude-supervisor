@@ -40,6 +40,8 @@ Not `/supervisor:worker-drive` (session-scoped) and not `/fleet-status` (statele
 
 The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md` — their single normative home. This file and the tick do not restate them.
 
+⚠️ This file's frontmatter grants `mcp__supervisor__spawn_agent`; the mode rule that governs every spawn — the classifier, the `mode:` field and both headless constraints — has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6. Read it there; never restate it here.
+
 ## Interval
 
 `--interval <N>m` sets the tick — default **15 min**, floor **15 min**; any other argument is ignored. A below-floor value is **clamped up and announced** (`⚠️ --interval 5m is below the 15m floor — clamped to 15m`), never rejected, because a loop that refuses its own interval stops silently. For one look without a loop, run `/fleet-status` (read-only); for one act pass, run `/fleet-drive`. The round repeats by default; there is no one-sweep flag — a single round still dispatches the drive leg, sends and writes back, so it was never a read-only look.

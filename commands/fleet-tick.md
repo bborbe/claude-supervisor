@@ -84,7 +84,7 @@ One imperative per rule; full text and the `⚠️` clauses live in `steps/rules
 - **Voice gate** — `~/.claude/hooks/voice-mode.py`; speak only on an ACTION; notify once per round via `python3 $P/notify-gate.py --layer fleet`.
 - **Stop** when the human stops it or no sessions remain in flight.
 - **The feed answers "was a gate raised", never "is a gate open"** — confirm via `gate-relay-read`; every liveness verdict and action stays here.
-- **`resume=` is the only reason this file holds `mcp__supervisor__spawn_agent`** — never use it to open a worker; route through `/supervisor:open`.
+- **`resume=` is the only reason this file holds `mcp__supervisor__spawn_agent`** — never use it to open a worker; route through `/supervisor:open`. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6.
 - **Prefix by who answered** — `Operator answer, via supervisor:` only when the operator answered here; `Manager answer, via supervisor:` for your own.
 - **A manager cannot close a worker's session.**
 - **Step 4** — read-only context sends freely; course corrections only on an explicit operator yes; work always goes to a worker.
