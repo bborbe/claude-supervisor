@@ -10,6 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- refactor: **`commands/manager-loop.md` — the arm — shrinks 37,276 → 26,981 B (−27.6 %), bringing it under the 30 KB command-body budget.** Its incident narratives and dated citations move verbatim to the same runbook section. The router step table, the frontmatter and every fenced code block are byte-identical, every moved block is present in the runbook, and **0 dated citations remain outside code fences**. `scripts/check-budget.py --tighten` lowers the baseline entry from 37,276 to 26,981.
 - refactor: **`commands/open.md` shrinks 101,653 → 60,659 B (−40.3 %) as its rationale moves verbatim to the runbook, and the budget ratchet tightens to match.** The body is re-injected on every `/supervisor:open` invocation, so its incident narratives and dated citations now live in `65 Runbooks/Manager Session.md` § *Command rationale — maintained* (Personal vault) — deliberately a new maintained section rather than the banner-marked *"Historical — not normative"* one it now sits above. Every executable rule stays: all 20 headings preserved in order, all fenced code blocks byte-identical, 112 blocks moved, and **no backtick code span lost from either file**. `scripts/check-budget.py --tighten` lowers `commands/open.md`'s baseline entry from 101,653 to 60,659, so the ratchet now forbids it regrowing.
 
 ## v0.129.1
