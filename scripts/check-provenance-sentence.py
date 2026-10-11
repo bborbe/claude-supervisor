@@ -73,7 +73,13 @@ OLD_PRODUCER = re.compile(
 # which is the half that catches a rename — the paragraph comparison catches a *partial*
 # rename, the negative one catches a rename that reached every carrier.
 PARAGRAPH_CARRIERS = (
-    "commands/manager-loop.md",
+    # ⚠️ `commands/manager-loop.md` was replaced by `commands/steps/manager-drive.md` on 2026-10-11,
+    # when the loop was restructured into a router with per-round step files. The paragraph
+    # lives inside the drive-leg dispatch bullet, which is the drive step's own text now, so
+    # the byte-identity comparison below still runs — it just compares the two copies where
+    # they actually sit. A paragraph moved to a file the guard does not name is the failure
+    # this list exists to make visible.
+    "commands/steps/manager-drive.md",
     "commands/manager-drive.md",
 )
 
