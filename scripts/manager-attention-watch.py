@@ -147,11 +147,32 @@ import glob
 import hashlib
 import json
 import os
+import importlib.util
 import re
 import subprocess
 import sys
 import time
 import urllib.request
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(_HERE, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# The answered-park read borrows its RULES from `attention-card-lookup.py` rather
+# than restating them: that script owns the paging constant (`HISTORY_LIMIT`, and
+# why the store's default 1000-item page is a trap), the `ANSWERED_STATES` set and
+# the timestamp parse. A second copy here would be a second place for the limit to
+# drift — and that drift is silent, because too short a window reads as "no
+# record" rather than as an error.
+card_lookup = _load("attention_card_lookup", "attention-card-lookup.py")
 
 POLL_SECONDS = 60
 SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
@@ -1033,15 +1054,24 @@ def open_store_items(store=STORE, timeout=STORE_TIMEOUT):
     """`({producer_id}, {dedup_key})` over the store's OPEN items, or `None`.
 
     `GET /api/1.0/attention` is the store's item read — the same one
-    `who-needs-me.py:213` uses — and it answers with items in **every** state, not
-    only open ones.
+    `who-needs-me.py:213` uses — and **measured 2026-10-11 it returns OPEN items
+    only**: 11 items, all `open`, and neither `?limit=50000` nor `?state=answered`
+    changed that. An ANSWERED card is therefore absent from this read by
+    construction, so it cannot tell an answered park from a lost one — see
+    `answered_park_keys` for the read that can.
 
-    ⚠️ **So the `state` filter below is load-bearing, not belt-and-braces.**
-    `who-needs-me.py:271` maps a non-`open` `state` to `answered`, and that branch
-    is only reachable if the endpoint can return one — so three sibling docstrings
-    that call this endpoint "open items only" are wrong. An ANSWERED card counted
-    as open would suppress the re-post for a worker that is still parked on a
-    fresh question, which is a **missed** escalation rather than a noisy one.
+    ⚠️ **This docstring said the opposite until 2026-10-11** — that the endpoint
+    "answers with items in **every** state", that the `state` filter below was
+    consequently load-bearing, and that three sibling docstrings calling it "open
+    items only" were wrong. Its stated evidence was `who-needs-me.py:271`'s
+    `"open" if … else "answered"`, which is a defensive else-branch and proves
+    nothing about an endpoint's contract. `attention-card-lookup.py`'s docstring
+    had it right; the live store settles it.
+
+    ⚠️ **The `state` filter stays anyway, and is not dead code.** It is the only
+    thing between a future endpoint that *does* return every state and a
+    **missed** escalation: an ANSWERED card counted as open would suppress the
+    re-post for a worker still parked on a fresh question.
 
     ⚠️ **`None` on failure, never two empty sets.** An empty result is a positive
     claim — "the store holds nothing for anyone" — and the re-post acts on it, so
@@ -1066,6 +1096,74 @@ def open_store_items(store=STORE, timeout=STORE_TIMEOUT):
               f"poll; this is NOT a reading that the store holds nothing",
               file=sys.stderr, flush=True)
         return None
+
+
+def answered_park_keys(sids, store=STORE, timeout=None):
+    """`{sid8: <its latest history row>}` for the keys whose latest record is
+    ANSWERED, or `None` on a failed read.
+
+    ⚠️ **This is the read that makes ANSWERED distinguishable from LOST, and it is
+    NOT `open_store_items`.** The item read returns open items only (see that
+    function), so a park the operator answered leaves no trace in it — which is
+    the whole defect: the watcher read that absence as a store fault and
+    re-posted. The only read carrying an answered card is
+    `GET /api/1.0/attention/history`, whose paging rule and answered-state set
+    live in `attention-card-lookup.py` and are borrowed from there rather than
+    restated.
+
+    ⚠️ **The MOST RECENT record decides, not any answered one.** A key re-parked
+    after an earlier answer carries a newer row; reading any answered row as
+    decisive would suppress a live park — a **missed** escalation, the direction
+    the sibling function already warns about.
+
+    ⚠️ **`None` on failure, never an empty set**, matching `open_store_items`. An
+    empty set is a positive claim — "nothing here was answered" — and the caller
+    acts on it by re-posting, so an unreachable store would re-post for every
+    parked worker on every poll.
+
+    ⚠️ **One read for the whole poll, never one per session.** The page is tens of
+    thousands of items; the caller passes every candidate at once for that reason,
+    and this returns early when there are none — an idle arm must not depend on
+    the store being up.
+    """
+    if not sids:
+        return {}
+    if timeout is None:
+        # This read is far heavier than the item read, and `card_lookup` owns the
+        # timeout for it — `STORE_TIMEOUT` here is tuned for a small response.
+        timeout = card_lookup.STORE_TIMEOUT
+    try:
+        with urllib.request.urlopen(
+                f"{store}/api/1.0/attention/history"
+                f"?limit={card_lookup.HISTORY_LIMIT}",
+                timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8") or "[]")
+        # ⚠️ Strict, unlike `card_lookup.items_of`, which tolerates a wrapper by
+        # design. A 200 carrying an error object must not be representable as an
+        # empty page — that is the same rule `open_store_items` states, and here
+        # the false empty would re-post every parked worker.
+        if not isinstance(payload, list):
+            raise ValueError("history body is not a list")
+    except Exception as exc:
+        print(f"WATCH WARN: answered-park read failed ({exc}) — re-post "
+              f"suppressed this poll; this is NOT a reading that the keys are "
+              f"unanswered", file=sys.stderr, flush=True)
+        return None
+    newest = {}
+    for item in payload:
+        key = str(item.get("dedup_key") or "")
+        if not key.startswith("park:"):
+            continue
+        sid8 = key[len("park:"):]
+        if sid8 not in sids:
+            continue
+        stamp = card_lookup.parse_ts(item.get("created_at"))
+        if stamp is None:
+            continue
+        if sid8 not in newest or stamp > newest[sid8][0]:
+            newest[sid8] = (stamp, item)
+    return {sid8: row for sid8, (_, row) in newest.items()
+            if row.get("state") in card_lookup.ANSWERED_STATES}
 
 
 def parked_keys(state):
@@ -1189,6 +1287,17 @@ def repost_empty_parks(parked, entries, log_path, post=None):
 
     ⚠️ A store read that FAILS re-posts nothing — `open_store_items` returns
     `None` — rather than reading as "the store holds nothing".
+
+    ⚠️ **"No open item" is two facts, and the second read is what tells them
+    apart.** A store that FORGOT a park must be re-raised — that is this
+    function's purpose — while a store that RESOLVED one must not. The
+    suppression is open-scoped, so both render as "no open item", and until
+    2026-10-10 this function assumed the worse case and re-posted: `park:beeb6128`
+    was re-posted at 17:20:04, 18:07:39, 18:53:07 and 20:12:32, the last of them
+    two minutes after the operator had answered the previous instance. So the
+    candidates are now resolved against `answered_park_keys` first, and an
+    answered one is recorded as `ANSWERED` and skipped. The extra read is one per
+    poll and only when a candidate exists — never one per session.
     """
     if post is None:
         post = post_repost
@@ -1204,12 +1313,34 @@ def repost_empty_parks(parked, entries, log_path, post=None):
     if items is None:
         return []
     producers, dedup_keys = items
-    out = []
+    candidates = []
     for sid8 in parked:
         if f"park:{sid8}" in dedup_keys:
             continue
         name, full = entries.get(sid8, ("", ""))
         if not full or full in producers:
+            continue
+        candidates.append((sid8, name, full))
+    if not candidates:
+        return []
+    answered = answered_park_keys({sid8 for sid8, _, _ in candidates})
+    if answered is None:
+        return []
+    out = []
+    for sid8, name, full in candidates:
+        row = answered.get(sid8)
+        if row is not None:
+            # ⚠️ An ANSWERED park is an answered QUESTION, not a store fault. The
+            # suppression is open-scoped, so the operator's answer leaves no open
+            # item and that absence used to read as a lost record. Recorded rather
+            # than announced, like `HELD` and `LIVENESS`: a suppression the
+            # operator already acted on needs no manager turn.
+            log_event(log_path, "ANSWERED", sid8, name,
+                      f"store holds no open item for {sid8}, but its latest "
+                      f"park:{sid8} record is ANSWERED "
+                      f"({row.get('item_id')} at {row.get('answered_at')}, "
+                      f"answer={row.get('answer')!r}) — the operator already "
+                      f"answered it, so this is not a store fault; not re-posted")
             continue
         if not post(sid8, full, name or sid8):
             continue

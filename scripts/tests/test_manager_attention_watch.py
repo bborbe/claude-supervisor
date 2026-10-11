@@ -1067,16 +1067,26 @@ class RepostTest(unittest.TestCase):
     SID8 = "aaaa1111"
     ENTRIES = {SID8: ("A", SID)}
 
-    def _run(self, open_items, parked=(SID8,)):
+    ANSWERED_ROW = {
+        "item_id": "c0ffee00c0ffee00c0ffee00c0ffee00",
+        "answer": "skip",
+        "answered_at": "2026-10-10T18:10:35.900805Z",
+    }
+
+    def _run(self, open_items, parked=(SID8,), answered=None, answered_ok=True):
         posted = []
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.object(watch, "open_store_items",
                                    lambda *a, **kw: open_items):
-                watch.repost_empty_parks(
-                    list(parked), self.ENTRIES,
-                    os.path.join(d, "events.jsonl"),
-                    post=lambda sid8, full, label: (
-                        posted.append((sid8, full)) or True))
+                with mock.patch.object(
+                        watch, "answered_park_keys",
+                        lambda *a, **kw: ((answered or {}) if answered_ok
+                                          else None)):
+                    watch.repost_empty_parks(
+                        list(parked), self.ENTRIES,
+                        os.path.join(d, "events.jsonl"),
+                        post=lambda sid8, full, label: (
+                            posted.append((sid8, full)) or True))
         return posted
 
     def test_a_park_the_store_lost_is_re_posted(self):
@@ -1109,6 +1119,64 @@ class RepostTest(unittest.TestCase):
                     [self.SID8], self.ENTRIES, os.path.join(d, "events.jsonl"),
                     post=lambda *a: False)
         self.assertEqual(out, [], "a refused post is not a re-post")
+
+    def test_an_answered_park_is_not_re_posted(self):
+        """SC1 — the key's most recent store record reads ANSWERED.
+
+        The defect this closes: the store's suppression is open-scoped, so an
+        ANSWERED card leaves no open item, and the watcher read that absence as a
+        store fault. Measured 2026-10-10, `park:beeb6128` was re-posted at
+        20:12:32 — two minutes after the operator answered its prior instance.
+        """
+        self.assertEqual(
+            self._run((set(), set()), answered={self.SID8: self.ANSWERED_ROW}),
+            [], "an answered park is an answered question, not a fault")
+
+    def test_a_lost_park_still_re_posts_when_nothing_is_answered(self):
+        """SC3 — the fix suppresses an ANSWER, never a FAULT.
+
+        Pairs with the test above: that one alone is satisfied by a build that
+        suppresses every re-post, and this one alone by a build that re-posts
+        everything. Neither is a fix; the pair is the test.
+        """
+        self.assertEqual(self._run((set(), set()), answered={}),
+                         [(self.SID8, self.SID)])
+
+    def test_an_answered_park_is_logged_naming_the_answered_instance(self):
+        """SC2's positive assertion — the line names the answer, not a fault.
+
+        The absence half (`0 REPOST`) is satisfied by a build that simply stops
+        logging, so the criterion leads with this line existing.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "events.jsonl")
+            with mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: (set(), set())):
+                with mock.patch.object(
+                        watch, "answered_park_keys",
+                        lambda *a, **kw: {self.SID8: self.ANSWERED_ROW}):
+                    watch.repost_empty_parks(
+                        [self.SID8], self.ENTRIES, log, post=lambda *a: True)
+            with open(log, encoding="utf-8") as fh:
+                rows = [json.loads(line) for line in fh if line.strip()]
+        kinds = [r["kind"] for r in rows]
+        self.assertIn("ANSWERED", kinds,
+                      "the suppression must be visible in the durable log")
+        detail = next(r["detail"] for r in rows if r["kind"] == "ANSWERED")
+        self.assertIn("park:" + self.SID8, detail,
+                      "the line names the key, not 'store held no open item'")
+        self.assertIn(self.ANSWERED_ROW["item_id"], detail,
+                      "and it names the answered INSTANCE, not just the key")
+
+    def test_a_failed_answered_read_re_posts_nothing(self):
+        """The `None` contract extends to the second store read.
+
+        A read that FAILED is not a reading that the key was answered. Same
+        direction `open_store_items` already rules: the safe side is the silent
+        one, because a re-post on an unreadable store fires for every parked
+        worker at once.
+        """
+        self.assertEqual(self._run((set(), set()), answered_ok=False), [])
 
 
     def test_a_headless_park_is_parked_too(self):
@@ -1224,6 +1292,83 @@ class OpenStoreItemsTest(unittest.TestCase):
         self.assertIsNone(self._fetch('{"error": "unknown agent"}'))
 
 
+class AnsweredParkKeysTest(unittest.TestCase):
+    """`answered_park_keys` — the one read that can tell ANSWERED from LOST.
+
+    ⚠️ It reads `GET /api/1.0/attention/history`, NOT `GET /api/1.0/attention`.
+    Measured against the live store 2026-10-11: the item read returned 11 items,
+    ALL `open`, and neither `?limit=50000` nor `?state=answered` changed that — so
+    an answered card is absent from it by construction, and relaxing the open-state
+    filter cannot reach one. `attention-card-lookup.py`'s docstring says the same;
+    `open_store_items`'s said the opposite until this change, citing
+    `who-needs-me.py:271`'s defensive else-branch as evidence — which proves
+    nothing about an endpoint's contract.
+
+    ⚠️ The paging rule is the sibling's, deliberately not restated: a key whose
+    cards all predate the page reads as `no record`, which is the false negative
+    that re-posts the very card this read exists to find.
+    """
+
+    SID = "bbbb2222-0000-0000-0000-000000000000"
+    SID8 = "bbbb2222"
+
+    def _read(self, body):
+        resp = mock.MagicMock()
+        resp.read.return_value = body.encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+        with mock.patch("urllib.request.urlopen", lambda *a, **kw: resp):
+            return watch.answered_park_keys([self.SID8])
+
+    def _row(self, state, created_at, sid8=None):
+        return {"dedup_key": f"park:{sid8 or self.SID8}", "state": state,
+                "created_at": created_at, "item_id": f"item-{state}"}
+
+    def test_a_closed_record_reads_answered(self):
+        out = self._read(json.dumps([self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8])
+
+    def test_an_answered_record_reads_answered(self):
+        out = self._read(json.dumps([self._row("answered", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8])
+
+    def test_the_row_is_carried_so_the_caller_can_name_the_instance(self):
+        """SC1: the event detail names the answered INSTANCE, not just the key."""
+        out = self._read(json.dumps([self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(out[self.SID8]["item_id"], "item-closed")
+
+    def test_an_open_record_does_not_read_answered(self):
+        self.assertEqual(
+            self._read(json.dumps([self._row("open", "2026-10-10T18:12:32Z")])),
+            {})
+
+    def test_the_most_recent_record_decides(self):
+        """SC1's wording is "most recent store record", and it is load-bearing: a
+        key re-parked after an earlier answer carries a NEWER row, so treating any
+        answered row as decisive would suppress a live park."""
+        self.assertEqual(self._read(json.dumps([
+            self._row("closed", "2026-10-10T15:20:04Z"),
+            self._row("open", "2026-10-10T18:12:32Z")])), {})
+
+    def test_another_keys_records_are_ignored(self):
+        self.assertEqual(self._read(json.dumps([
+            self._row("closed", "2026-10-10T18:12:32Z", sid8="deadbeef")])), {})
+
+    def test_a_failed_read_is_none_never_empty(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            self.assertIsNone(watch.answered_park_keys([self.SID8]))
+
+    def test_a_non_list_body_is_none_not_an_exception(self):
+        """A 200 carrying an error object must not read as an empty page — the
+        false empty would re-post for every parked worker at once."""
+        self.assertIsNone(self._read('{"error": "unknown agent"}'))
+
+    def test_no_sids_does_not_touch_the_store(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("read with nothing to check")):
+            self.assertEqual(watch.answered_park_keys([]), {})
+
+
 class PostRepostArgvTest(unittest.TestCase):
     """The re-post's command line, pinned.
 
@@ -1314,6 +1459,8 @@ class IncidentReplayTest(unittest.TestCase):
                                    lambda *a, **kw: parked), \
                  mock.patch.object(watch, "open_store_items",
                                    lambda *a, **kw: seq_items.pop(0)), \
+                 mock.patch.object(watch, "answered_park_keys",
+                                   lambda *a, **kw: {}), \
                  mock.patch.object(watch, "post_repost",
                                    lambda sid8, full, label, **kw: (
                                        posted.append((sid8, full)) or True)), \

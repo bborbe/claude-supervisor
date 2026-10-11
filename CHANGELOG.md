@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: the tracked-set watcher no longer re-posts a park the operator has already answered. `open_store_items` reads `GET /api/1.0/attention`, which returns open items only, so an ANSWERED card left no trace in it and the watcher read that absence as a **store fault** — measured 2026-10-10, `park:beeb6128` was re-posted at 20:12:32, two minutes after the operator's 20:10:35 `skip`, and four times across ~3h20m. Candidates are now resolved against `GET /api/1.0/attention/history` (the only read that carries an answered card) and an answered key is recorded as `ANSWERED` — naming the answered instance — instead of re-posted. A key with no record at all still re-posts, so the change suppresses an answer and never a fault. Also corrects `open_store_items`'s docstring, which claimed the item read returns items in every state.
+
 ## v0.128.5
 
 - refactor: split `commands/fleet-loop.md` into an arm, a `commands/fleet-tick.md` router and `commands/steps/` step files; the recurring payload per tick falls from 70,790 B to 31,209 B
