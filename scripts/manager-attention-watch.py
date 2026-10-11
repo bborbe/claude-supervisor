@@ -1296,7 +1296,46 @@ def post_repost(sid8, full, label, script_dir=None, timeout=30):
     return True
 
 
-def repost_empty_parks(parked, entries, log_path, post=None):
+def answer_covers_current_park(row, since):
+    """True when `row`'s answer is about the park IN PROGRESS, not an earlier one.
+
+    ⚠️ **This is the predicate that keeps the answered read from silencing a
+    FAULT, and without it the read is wrong in the dangerous direction.**
+    `park:<sid8>` rows have exactly ONE producer — `post_repost`, below — so an
+    answered row is the newest row for its key **forever**: the re-post that would
+    write a newer row is the very thing the answer suppresses. The premise that a
+    re-parked key "carries a newer row" therefore does NOT hold for this key
+    space, and a *later* lost park on the same session would never be raised —
+    the change suppressing a fault as well as an answer, contrary to its own
+    changelog. Measured basis: the incident this arm closes re-posted the SAME key
+    four times over ~3h20m, so repeated parks on one session are the normal case,
+    not a corner.
+
+    So an answer only counts for a park it **postdates**. `since` is when this arm
+    first observed the park in progress (`park_ages[sid8]["since"]`), and an
+    answered row created before it belongs to a previous park.
+
+    ⚠️ **A `since` the caller does not have means DO NOT SUPPRESS.** An answer that
+    cannot be dated against the park is not evidence the park is answered, and the
+    safe side here is the noisy one — re-post. The arm always supplies the clock,
+    so this branch is reached only by a caller that passed none; it is stated
+    rather than left to be inferred, because the alternative reading (assume it
+    covers) silently restores the whole defect.
+
+    ⚠️ **Restarting the arm resets `since`**, exactly as `advance_park_ages`
+    documents, so a park already in progress when the arm starts can read as
+    newer than its own answer and re-post once. That is the noisy direction, and
+    it is the same cost that function already accepts.
+    """
+    if since is None:
+        return False
+    stamp = card_lookup.parse_ts(row.get("created_at"))
+    if stamp is None:
+        return False
+    return stamp.timestamp() >= since
+
+
+def repost_empty_parks(parked, entries, log_path, post=None, park_since=None):
     """Re-post a card for every parked session the store no longer holds.
 
     Returns the `sid8`s re-posted. `post(sid8, full, label)` is injectable, so
@@ -1331,6 +1370,13 @@ def repost_empty_parks(parked, entries, log_path, post=None):
     candidates are now resolved against `answered_park_keys` first, and an
     answered one is recorded as `ANSWERED` and skipped. The extra read is one per
     poll and only when a candidate exists — never one per session.
+
+    ⚠️ **And the answer must be about the park in progress.** `park:<sid8>` rows
+    have exactly one producer (this file), so an answered row stays newest for its
+    key forever and a naive read would suppress a *later* lost park on the same
+    session — a fault, not an answer. `park_since` carries this arm's own park
+    clock so `answer_covers_current_park` can date the answer against it; a caller
+    that passes none re-posts, which is the safe direction.
     """
     if post is None:
         post = post_repost
@@ -1362,7 +1408,8 @@ def repost_empty_parks(parked, entries, log_path, post=None):
     out = []
     for sid8, name, full in candidates:
         row = answered.get(sid8)
-        if row is not None:
+        if row is not None and answer_covers_current_park(
+                row, (park_since or {}).get(sid8)):
             # ⚠️ An ANSWERED park is an answered QUESTION, not a store fault. The
             # suppression is open-scoped, so the operator's answer leaves no open
             # item and that absence used to read as a lost record. Recorded rather
@@ -1613,7 +1660,14 @@ def main(argv=None):
                 print(f"AGED  {sid8}  {minutes}m", flush=True)
                 log_event(log_path, "AGED", sid8, label,
                           f"{minutes}m parked [{reason}]")
-            repost_empty_parks(parked, entries, log_path)
+            # ⚠️ The park clock goes in with the candidates. Without it the
+            # answered read cannot tell an answer about THIS park from one about a
+            # previous park on the same session — and since this watcher is the
+            # only producer of `park:<sid8>` rows, the answered row would stay
+            # newest forever and silence every later lost park on that session.
+            repost_empty_parks(
+                parked, entries, log_path,
+                park_since={s: r.get("since") for s, r in park_ages.items()})
             # tmp + os.replace, same convention and same reason as the gated-set
             # write above: a truncated park file restarts every clock, and the
             # read path cannot tell that from a first run.
