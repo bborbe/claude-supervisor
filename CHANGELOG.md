@@ -18,6 +18,14 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - fix: **the restructure's own step paths were unresolvable, and the arm carried its step list twice.** The router tables named `steps/<name>.md`, a relative path that resolves against the session's cwd — a vault or workspace directory — rather than the plugin root; all 28 references now use the absolute `${CLAUDE_PLUGIN_ROOT}/commands/steps/…` form the fleet row's tables already use. The arm also restated its entire step list a second time under `## Steps`, so the list had two homes and only the router table was guarded; the duplicate is gone and the arm drops from 38,553 B.
 - fix: `scripts/check-budget.py --tighten` re-encoded the baseline's non-ASCII escapes, so lowering one entry rewrote the whole file; it now reproduces the file's own escaping and the diff stays on the entries that actually moved.
 
+## v0.128.6
+
+- fix: both task-owner resolvers now read a task's `managed_by` as tier 1 of the order `docs/fleet-surface.md` § *Which manager owns a subject* states — `scripts/fleet-board.py`'s `manager_on_chain` and `scripts/approved-not-started.py`'s `manager_for()` previously derived the owner from `goals:` alone, so the tier the doc calls the first step of the rule was reachable by no code; an absent or unresolvable `managed_by` still falls through to `goals:` in order, so a single-goal task never needs the field
+
+## v0.128.5
+
+- refactor: split `commands/fleet-loop.md` into an arm, a `commands/fleet-tick.md` router and `commands/steps/` step files; the recurring payload per tick falls from 70,790 B to 31,209 B
+
 ## v0.128.4
 
 - fix: `manager-loop`'s `waiting-on-human` bullet now leads with the gate class test, so a closer-line `pick` routes to the pane handover before the post-to-the-board instruction is reached — the instruction previously preceded its own exception, and a manager reading top-down carded a closer-line `pick` the bullet forbids carding

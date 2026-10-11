@@ -4,7 +4,7 @@
   "files": {
     "agents/manager-drive.md": 133348,
     "agents/manager-sweep-reader.md": 158988,
-    "commands/fleet-loop.md": 70790,
+    "commands/fleet-loop.md": 4180,
     "commands/manager-drive.md": 40927,
     "commands/manager-loop.md": 37276,
     "commands/manager-status.md": 46480,
