@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The round-overlap rule has exactly one home, and a router dispatches it every tick.
+"""The round-overlap rule has exactly one home, and the tick router dispatches it every tick.
 
 `commands/steps/manager-readings.md` states what a tick does when the previous round is
 still in flight, which round owns each of the round's three writes, and the fate of a
@@ -10,23 +10,33 @@ fails silently on its own:
    still "exactly one home" under a naive count — so the marker must be *found*, not
    merely left uncounted.
 2. **One copy, not one file.** The repo's own law is that *"a restated copy is a second
-   counter"* (`docs/fleet-surface.md` § Spawn a worker). Counting files is not enough:
-   the marker pasted twice inside the same file is two homes wearing one filename.
-3. **Dispatched every tick — read from the router, never from the step file.** This is the
-   one that reads backwards. A step file's own `When:` line is a *restatement*; the
-   normative trigger is the router row that names it (`check-step-when.py` exists to keep
-   the two in agreement). So asserting on the step file alone proves only that the file
-   describes itself — **delete the row naming it from every router and the assertion still
-   passes while nothing reads the rule at all.** The reach must therefore be read from the
-   router table: some row must name this file *and* carry an every-tick `When`. Measured
-   2026-10-11 by mutation — removing the `manager-readings.md` row from both router tables
-   left the step-file-only form green at exit 0.
+   counter"* (`docs/fleet-surface.md` § Spawn a worker). Counting files is not enough: the
+   marker pasted twice inside the same file is two homes wearing one filename.
+3. **Dispatched every tick — and by the router that actually fires every tick.** This is
+   the one that reads backwards, twice.
+   - A step file's own `When:` line is a *restatement*; the normative trigger is the router
+     row that names it (`check-step-when.py` keeps the two in agreement). Asserting on the
+     step file alone proves only that the file describes itself — **delete the row naming
+     it from every router and the assertion still passes while nothing reads the rule at
+     all** (measured 2026-10-11 by mutation).
+   - ⚠️ **And "some router names it" is still too weak, because the loop has two routers
+     and only one of them re-runs.** `commands/manager-loop.md` is the *arm* — invoked once
+     to start the loop and never re-invoked, which its own tick file states — and it
+     carries the same step table as the *tick* router `commands/manager-loop-tick.md`,
+     which is what a wakeup names. A row in either satisfies an "any router" test, so
+     deleting the row from the **tick** router alone leaves the guard green while the rule
+     stops being read on every round it governs. Measured 2026-10-11 by mutation, on the
+     review of #256 — the guard printed *"named by a router row that fires every tick"*
+     while the only row that fires was gone.
+   The reach is therefore pinned to a `*-tick.md` router — the repo's own name for the
+   per-round artifact, which `check-budget.py` already caps separately — so the arm's
+   duplicate row cannot stand in for the row that fires.
 
 **What this proves, and what it does not.** It proves the rule is present, single-copy,
-and named by a router row whose trigger is every-tick. It does **not** prove the ownership
-answers are right — a rule that is present, single-copy and every-tick, and wrong in all
-three, passes here. A green run reads as more than it is, so the limit is stated rather
-than implied.
+and named by a **tick** router row whose trigger is every-tick. It does **not** prove the
+ownership answers are right — a rule that is present, single-copy and tick-dispatched, and
+wrong in all three, passes here. A green run reads as more than it is, so the limit is
+stated rather than implied.
 
 The marker is matched as a plain substring rather than as a regex or a heading, so it
 survives a reflow of the surrounding prose. It is deliberately a phrase from the rule's
@@ -42,6 +52,7 @@ COMMANDS = REPO / "commands"
 STEPS = COMMANDS / "steps"
 MARKER = "is ABSORBED, never run"
 EVERY_TICK = "every tick"
+TICK_ROUTER = "-tick.md"
 HEADER = ("#", "Step", "When", "File")
 
 
@@ -129,26 +140,33 @@ def main() -> int:
             )
         else:
             base = home.name
-            reaching = [
-                (router, when)
-                for router, when, named in router_rows()
-                if base in named and when.startswith(EVERY_TICK)
+            rows = router_rows()
+            named_by = [(r, w) for r, w, named in rows if base in named]
+            tick_rows = [
+                (r, w) for r, w in named_by if r.name.endswith(TICK_ROUTER)
             ]
-            named_by = [
-                (router, when)
-                for router, when, named in router_rows()
-                if base in named
-            ]
+            reaching = [(r, w) for r, w in tick_rows if w.startswith(EVERY_TICK)]
+
             if not named_by:
                 failures.append(
                     f"{rel}: no router row names this file.\n"
                     f"      The file's own `When:` describes itself; the router is what "
                     f"actually reads it. A step file nothing dispatches is dead text."
                 )
-            elif not reaching:
+            elif not tick_rows:
                 shown = "; ".join(f"{r.name}: {w!r}" for r, w in named_by)
                 failures.append(
-                    f"{rel}: a router names it, but no row's `When` is every-tick — {shown}.\n"
+                    f"{rel}: only a non-tick router names it — {shown}.\n"
+                    f"      The arm (`commands/manager-loop.md`) is invoked once to start "
+                    f"the loop and is never re-invoked, so a row there does NOT read the "
+                    f"rule on the rounds it governs. A `*{TICK_ROUTER}` router must name "
+                    f"this file."
+                )
+            elif not reaching:
+                shown = "; ".join(f"{r.name}: {w!r}" for r, w in tick_rows)
+                failures.append(
+                    f"{rel}: the tick router names it, but no row's `When` is every-tick "
+                    f"— {shown}.\n"
                     f"      A gated row is skipped on every tick whose `When` does not "
                     f"hold, so the rule would not be read on the rounds it governs."
                 )
@@ -162,7 +180,7 @@ def main() -> int:
     home = found[0][0].relative_to(REPO)
     print(
         f"round-overlap ok: {MARKER!r} appears once, in {home}, "
-        f"named by a router row that fires every tick"
+        f"named by a tick router row that fires every tick"
     )
     return 0
 
