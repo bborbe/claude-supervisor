@@ -5,7 +5,7 @@
 # `allowed-tools` and `argument-hint` and nothing else. `name:` is required for
 # `agents/*.md` (`agent-cmd/agent-frontmatter`) and `skills/<name>/SKILL.md`. All 22
 # commands in this repo omit it, so adding it to one would be the inconsistency.
-description: Read-only goal-or-topic snapshot — ONE goal's declared task set (from `24 Goals/`) or ONE topic's declared goal set (from `23 Topics/`), its sessions, a status table with bucket icons, and a blocked-by-you jump list (clickable jump links). No vault writes, no loop, no TTS. Subject via $1, or detected from the session when omitted. Per the the Manager Session runbook runbook in the active vault.
+description: Read-only goal-or-topic snapshot — ONE goal's declared task set (from `24 Goals/`) or ONE topic's declared goal set (from `23 Topics/`), its sessions, a status table with bucket icons, and a blocked-by-you jump list (clickable jump links). No vault writes, no loop, no TTS. Subject via $1, or detected from the session when omitted. Per the the Manager Session runbook runbook in the active vault. — ⚠️ not side-effect-free: it records the resolution and registers the caller as a manager for the subject.
 allowed-tools:
   - Task
   - ListAgents
