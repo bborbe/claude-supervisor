@@ -8,7 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.129.1
+
+- docs: `scripts/fleet-board.py`'s module docstring no longer restates the task-owner resolution order — rule 2 of its four tree rules still said a worker's parent comes from the task's `goals:` alone, which the tier-1 `managed_by` reader in v0.128.6 had just made false; it now points at `docs/fleet-surface.md` § *Which manager owns a subject*, the single statement of the rule, so the docstring cannot drift from `manager_on_chain` again
+
+## v0.129.0
 
 - fix: **a manager-loop tick that lands while the previous round is still in flight is now stated, not improvised.** `commands/steps/manager-readings.md` carries the rule: such a firing is **absorbed** — no reading, no sweep, no dispatch, no write — and each of the round's three writes belongs to the round that *produced* its input (the store save to the round that dispatched the sweep reader, the verdicts-cache write to the round that dispatched the drive leg, the topic-page write-back to the round whose own sweep produced the `noop: false`). A late leg's `Audit` block is **dropped**, never merged — which `commands/steps/manager-drive.md` already required in words (*"never merge in rows from an earlier tick"*). Measured 2026-10-11: a tick overran its interval by ~3× and the firing inside it was absorbed because the round was still in flight. `scripts/check-round-overlap.py` asserts the rule has exactly one home and that the home is reached every tick, and is wired into `precommit`.
 - feat: **`commands/manager-loop.md` becomes a router with per-round step files, and the loop splits into an arm and a tick.** The command was 184,352 B and the harness re-injected the whole body on every wakeup — roughly 96 times a day. It is now a router (a `#`/Step/When/File table plus the inline invariants and gates) whose per-round work lives in `commands/steps/*.md`, read **only when its `When` holds**; a new `commands/manager-loop-tick.md` (3.8 KB) is what the wakeup names, and the arm is invoked once. Every executable rule was **moved verbatim** — a provenance check confirms each source line now sits in exactly one artifact, with none dropped and none duplicated.
