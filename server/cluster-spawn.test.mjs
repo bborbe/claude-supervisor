@@ -303,17 +303,20 @@ test('a connection failure names its cause rather than only fetch failed', async
 
 test('a transient connection failure is retried, and a refusal is not', async () => {
   let attempts = 0
+  const backoffs = []
   const recovered = await startClusterSession({
     baseUrl: 'http://host:30090',
     prompt: 'x',
     sessionId: UUID,
     authToken: TOKEN,
-    sleepImpl: async () => {},
+    sleepImpl: async (ms) => {
+      backoffs.push(ms)
+    },
     fetchImpl: async () => {
       attempts += 1
       if (attempts < 3) {
         const failure = new TypeError('fetch failed')
-        failure.cause = { code: 'ECONNRESET' }
+        failure.cause = { code: 'ECONNREFUSED' }
         throw failure
       }
       return ok('recovered')()
@@ -322,6 +325,10 @@ test('a transient connection failure is retried, and a refusal is not', async ()
   // The count is asserted, not the outcome alone: an implementation that swallowed the failures
   // and answered without ever reaching the service would satisfy the outcome by itself.
   assert.equal(attempts, 3, 'two connection failures then a success is three attempts')
+  // The delay is asserted too, not merely injected. Every other assertion here passes against a
+  // no-op `sleepImpl`, so an implementation that retried with no backoff at all would otherwise
+  // go unnoticed — which is exactly what injecting a no-op sleep makes easy to ship.
+  assert.deepEqual(backoffs, [250, 500], 'the backoff must step by CLUSTER_CONNECT_BACKOFF_MS * attempt')
   assert.equal(recovered.answer, 'recovered')
 
   // A refusal is a settled answer. Retrying it would turn one honest 401 into three identical
@@ -386,6 +393,32 @@ test('a fetch failure with no connection code is not retried', async () => {
   })
   assert.equal(attempts, 1, 'a failure carrying no connection code must not be retried')
   assert.match(error, /fetch failed — bad port/)
+})
+
+test('a post-delivery connection failure is not retried, because POST /prompt is not idempotent', async () => {
+  // The request may already have started a turn when the socket dies, and the response carries
+  // nothing that would reveal a second one — so a retry here can silently run the turn twice.
+  // That is not hypothetical: the 16:1x failure on this path was exactly that shape, with the
+  // pod log showing `prompt intake: bytes=81` while the client saw a failure. Each of these
+  // codes is reachable AFTER delivery, so none of them may be retried.
+  for (const code of ['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT']) {
+    let attempts = 0
+    const { error } = await startClusterSession({
+      baseUrl: 'http://host:30090',
+      prompt: 'x',
+      sessionId: UUID,
+      authToken: TOKEN,
+      sleepImpl: async () => {},
+      fetchImpl: async () => {
+        attempts += 1
+        const failure = new TypeError('fetch failed')
+        failure.cause = { code }
+        throw failure
+      },
+    })
+    assert.equal(attempts, 1, `${code} is reachable after delivery and must not be retried`)
+    assert.match(error, new RegExp(code))
+  }
 })
 
 // --- resolveClusterTarget: which source each cluster value comes from ----------------------

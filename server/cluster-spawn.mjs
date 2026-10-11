@@ -86,21 +86,36 @@ export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
 export const CLUSTER_CONNECT_ATTEMPTS = 3
 export const CLUSTER_CONNECT_BACKOFF_MS = 250
 
-// The connection-level codes worth a second try: the socket never opened, or opened and died.
-// `EAI_AGAIN` is in here on purpose — a resolver that did not answer in time is exactly the
-// transient case — while a permanent `ENOTFOUND` costs one extra attempt and still fails.
+// The codes worth a second try — and every one of them is a PRE-DELIVERY failure: the request
+// never reached the service, so a retry sends it for the first time.
+//
+// ⚠️ **The post-delivery codes are deliberately absent, and that is the load-bearing decision
+// here.** `POST /prompt` is not idempotent — it runs a turn — so a connection that dies AFTER
+// the request was delivered may already have started one, and a retry would run a SECOND turn on
+// the same session id, silently and with nothing in the response to reveal it. That is not
+// hypothetical: the 16:1x failure on this path is exactly that shape, with the pod log showing
+// `prompt intake: bytes=81` while the client saw a failure. `ECONNRESET`, `EPIPE`,
+// `UND_ERR_SOCKET` ("other side closed") and `UND_ERR_HEADERS_TIMEOUT` are all reachable after
+// delivery, so none is retried: a duplicate turn is worse than one honest failure the caller can
+// re-issue itself.
+//
+// `UND_ERR_HEADERS_TIMEOUT` is doubly excluded. A server that accepts the connection and never
+// answers is wedged, not busy, so it is the code a retry is least likely to help and most likely
+// to cost — retrying it would turn the guarantee at `DEFAULT_TIMEOUT_MS` above ("a wedged pod
+// costs one error, not a manager session stuck inside a tool call") into three.
+//
+// `ETIMEDOUT` stays because at this layer it is the OS connect timeout — the SYN never got an
+// answer, so nothing was delivered. `EAI_AGAIN` is in on purpose: a resolver that did not answer
+// in time is exactly the transient case, while a permanent `ENOTFOUND` costs two extra attempts
+// (250 ms + 500 ms) and still fails.
 const CONNECTION_ERROR_CODES = new Set([
   'ECONNREFUSED',
-  'ECONNRESET',
-  'ETIMEDOUT',
-  'EPIPE',
   'EHOSTUNREACH',
   'ENETUNREACH',
   'ENOTFOUND',
   'EAI_AGAIN',
-  'UND_ERR_SOCKET',
+  'ETIMEDOUT',
   'UND_ERR_CONNECT_TIMEOUT',
-  'UND_ERR_HEADERS_TIMEOUT',
 ])
 
 // Whether this error is worth another attempt.
@@ -117,7 +132,10 @@ const CONNECTION_ERROR_CODES = new Set([
 // service that did not answer inside ten minutes spends thirty to learn the same thing.
 function isConnectionFailure(error) {
   if (!error || error.name === 'AbortError') return false
-  const code = error.code ?? error.cause?.code ?? error.cause?.errno
+  // `errno` is deliberately NOT consulted: Node sets it to a number (`-111`) while every member
+  // of the set above is a symbolic name, so a `String(errno)` comparison could never match —
+  // it only read as if it could.
+  const code = error.code ?? error.cause?.code
   return Boolean(code) && CONNECTION_ERROR_CODES.has(String(code))
 }
 
