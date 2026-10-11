@@ -1,3 +1,9 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
 # Answer a parked or exited worker
 
 When: a worker is parked on a question or has exited

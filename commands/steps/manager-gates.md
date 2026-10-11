@@ -1,3 +1,9 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
 # Gates
 
 When: the round has `waiting-on-human` or `waiting-approval` rows

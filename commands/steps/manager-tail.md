@@ -1,3 +1,9 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
 # Tail
 
 When: end of every tick
