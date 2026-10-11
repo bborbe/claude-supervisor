@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: split `commands/fleet-loop.md` into an arm, a `commands/fleet-tick.md` router and `commands/steps/` step files; the recurring payload per tick falls from 70,790 B to 22,635 B
+
 ## v0.128.2
 
 - fix: `restart-worker.py`'s post-restart hand-off line no longer garbles the changed-inputs list (an f-string implicitly concatenated into the `join` separator)
