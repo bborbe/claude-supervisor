@@ -28,12 +28,18 @@ fails silently on its own:
      stops being read on every round it governs. Measured 2026-10-11 by mutation, on the
      review of #256 — the guard printed *"named by a router row that fires every tick"*
      while the only row that fires was gone.
-   The reach is therefore pinned to a `*-tick.md` router — the repo's own name for the
-   per-round artifact, which `check-budget.py` already caps separately — so the arm's
-   duplicate row cannot stand in for the row that fires.
+   The reach is therefore pinned to a **round router** — a `*-tick.md` file, or one of the
+   paths listed in `ROUND_ROUTERS` — so the arm's row cannot stand in for the row that
+   fires.
+   - ⚠️ **The filename was only ever a proxy for the property.** On 2026-10-11 the manager
+     loop's round router stopped being a `*-tick.md` file: `commands/manager-drive.md`
+     became the one full round and the tick was retired, and the arm's duplicate table was
+     removed in the same change. The property this check needs is unchanged — *a router the
+     wakeup re-invokes every round, which the arm is not* — so the round routers are named
+     explicitly here rather than inferred from a suffix that no longer tracks the fact.
 
 **What this proves, and what it does not.** It proves the rule is present, single-copy,
-and named by a **tick** router row whose trigger is every-tick. It does **not** prove the
+and named by a **round-router** row whose trigger is every-tick. It does **not** prove the
 ownership answers are right — a rule that is present, single-copy and tick-dispatched, and
 wrong in all three, passes here. A green run reads as more than it is, so the limit is
 stated rather than implied.
@@ -53,6 +59,12 @@ STEPS = COMMANDS / "steps"
 MARKER = "is ABSORBED, never run"
 EVERY_TICK = "every tick"
 TICK_ROUTER = "-tick.md"
+# ⚠️ The manager loop's round router is no longer named `*-tick.md`: since 2026-10-11
+# `commands/manager-drive.md` is the one full round and the separate tick is retired, so the
+# suffix no longer tracks the property this check needs. That property — "a router the wakeup
+# re-invokes every round, which the arm is not" — is unchanged, so the round routers are
+# listed explicitly beside the `*-tick.md` glob the fleet loop still satisfies.
+ROUND_ROUTERS = ("commands/manager-drive.md",)
 HEADER = ("#", "Step", "When", "File")
 
 
@@ -142,10 +154,12 @@ def main() -> int:
             base = home.name
             rows = router_rows()
             named_by = [(r, w) for r, w, named in rows if base in named]
-            tick_rows = [
-                (r, w) for r, w in named_by if r.name.endswith(TICK_ROUTER)
+            round_rows = [
+                (r, w) for r, w in named_by
+                if r.name.endswith(TICK_ROUTER)
+                or str(r.relative_to(REPO)) in ROUND_ROUTERS
             ]
-            reaching = [(r, w) for r, w in tick_rows if w.startswith(EVERY_TICK)]
+            reaching = [(r, w) for r, w in round_rows if w.startswith(EVERY_TICK)]
 
             if not named_by:
                 failures.append(
@@ -153,17 +167,17 @@ def main() -> int:
                     f"      The file's own `When:` describes itself; the router is what "
                     f"actually reads it. A step file nothing dispatches is dead text."
                 )
-            elif not tick_rows:
+            elif not round_rows:
                 shown = "; ".join(f"{r.name}: {w!r}" for r, w in named_by)
                 failures.append(
-                    f"{rel}: only a non-tick router names it — {shown}.\n"
+                    f"{rel}: only the arm names it — {shown}.\n"
                     f"      The arm (`commands/manager-loop.md`) is invoked once to start "
                     f"the loop and is never re-invoked, so a row there does NOT read the "
-                    f"rule on the rounds it governs. A `*{TICK_ROUTER}` router must name "
-                    f"this file."
+                    f"rule on the rounds it governs. A round router — a `*{TICK_ROUTER}` "
+                    f"file, or one of {', '.join(ROUND_ROUTERS)} — must name this file."
                 )
             elif not reaching:
-                shown = "; ".join(f"{r.name}: {w!r}" for r, w in tick_rows)
+                shown = "; ".join(f"{r.name}: {w!r}" for r, w in round_rows)
                 failures.append(
                     f"{rel}: the tick router names it, but no row's `When` is every-tick "
                     f"— {shown}.\n"
@@ -180,7 +194,7 @@ def main() -> int:
     home = found[0][0].relative_to(REPO)
     print(
         f"round-overlap ok: {MARKER!r} appears once, in {home}, "
-        f"named by a tick router row that fires every tick"
+        f"named by a round-router row that fires every tick"
     )
     return 0
 
