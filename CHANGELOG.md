@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- refactor: split `commands/fleet-loop.md` into an arm, a `commands/fleet-tick.md` router and `commands/steps/` step files; the recurring payload per tick falls from 70,790 B to 22,635 B
+- refactor: split `commands/fleet-loop.md` into an arm, a `commands/fleet-tick.md` router and `commands/steps/` step files; the recurring payload per tick falls from 70,790 B to 31,209 B
 
 ## v0.128.2
 
