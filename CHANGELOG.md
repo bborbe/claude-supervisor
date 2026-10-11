@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.128.3
 
 - fix: `/supervisor:manager-status`'s `description:` no longer reads as side-effect-free — it names the resolution record and the caller's promotion to manager that its own recording step performs
 
