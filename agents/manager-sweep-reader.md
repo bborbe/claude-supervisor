@@ -85,7 +85,7 @@ blocked_by:
 
 **Keep the parse single-pass and bounded.** The tracked set can run to a hundred-plus files. Measured 2026-09-16: an `awk` scan over 123 tracked tasks was **OOM-killed mid-sweep** and had to be recovered with a single-pass Python read — the tick ran 192 s against a ~60 s baseline. Read each file once, extract what you need in that pass, and never build an unbounded intermediate structure over the whole set.
 
-**Record each task file's mtime in that same pass.** The `stuck` rows carry it to the caller (step 9, section 7) so the act leg can tell a task that moved since your read from one that did not — the freshness bound the nudge path needs, and the reason a candidate's staleness never rests on your classification alone. Read it with a **`PATH`-independent** command, never a bare `stat` flag:
+**Record each task file's mtime in that same pass.** The `stuck` rows carry it to the caller (step 9, section 6) so the act leg can tell a task that moved since your read from one that did not — the freshness bound the nudge path needs, and the reason a candidate's staleness never rests on your classification alone. Read it with a **`PATH`-independent** command, never a bare `stat` flag:
 
 ```bash
 python3 -c "import os,sys;print(int(os.path.getmtime(sys.argv[1])))" <task-file>
@@ -335,7 +335,7 @@ The worked example is `a sample task` SC2 — *"Daily cron via recurring-task-cr
 
 9. **Return one compact report**
 
-⚠️ **The report obeys the hand-back contract — `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md`.** Verdict lines and counts in `key=value` form, **≤ 1 KB**, and non-empty: the **bucket counts** are this leg's required set and must be present even for a bucket at zero. The rendered table does **not** ride the report — it goes to the payload path the render already writes, and the report carries the verdict about it. Read the contract there; it is not restated here. ⚠️ **The rendered table is deliberately absent from the list below** — `--write-payload` writes it, and re-adding it re-creates the 2026-10-11 defect where this line said one thing and item 1 another.
+⚠️ **The report obeys the hand-back contract — `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md`.** Verdict lines and counts in `key=value` form, **≤ 1 KB**, and non-empty: the **bucket counts** are this leg's required set and must be present even for a bucket at zero. The rendered table does **not** ride the report — it goes to the payload path the render already writes, and the report carries the verdict about it. Read the contract there; it is not restated here. ⚠️ **The rendered table is deliberately absent from the list below** — `--write-payload` writes it, and re-adding it re-creates the 2026-10-11 defect where this line and the list disagreed.
 
 Plain markdown, in this order, omitting empty sections:
 
