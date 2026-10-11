@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.129.1
 
 - docs: `scripts/fleet-board.py`'s module docstring no longer restates the task-owner resolution order — rule 2 of its four tree rules still said a worker's parent comes from the task's `goals:` alone, which the tier-1 `managed_by` reader in v0.128.6 had just made false; it now points at `docs/fleet-surface.md` § *Which manager owns a subject*, the single statement of the rule, so the docstring cannot drift from `manager_on_chain` again
 
