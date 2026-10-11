@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.128.5
 
 - refactor: split `commands/fleet-loop.md` into an arm, a `commands/fleet-tick.md` router and `commands/steps/` step files; the recurring payload per tick falls from 70,790 B to 31,209 B
 
