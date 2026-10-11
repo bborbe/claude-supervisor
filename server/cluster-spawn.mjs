@@ -67,6 +67,72 @@ export const AUTH_SCHEME = 'Bearer '
 // session stuck inside a tool call.
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
 
+// How many times one spawn tries the service when the failure is a CONNECTION failure, and how
+// long it waits between tries.
+//
+// ⚠️ **This exists because the failure it retries was observed and then stopped reproducing.**
+// On 2026-10-11 a cluster spawn failed three times in a row with `fetch failed` between 19:30
+// and 20:05, while every shell probe to the same host, port and path answered in under 10 ms —
+// and at 20:24 the identical call succeeded twice, full round trip. An intermittent connection
+// failure that kills the spawn outright is the wrong shape for a path a manager relies on, and
+// the caller cannot tell it from a permanent refusal: undici reports both as one opaque
+// `TypeError: fetch failed`.
+//
+// The retry is deliberately NARROW. Only a connection-level failure is retried; an `AbortError`
+// (this module's own timeout) and every HTTP response — 401 above all — return on the first
+// attempt. A retry around a refusal would turn one honest "the token does not match" into three
+// identical refusals and three times the wait, which is the failure this bound exists to avoid
+// causing rather than to cause.
+export const CLUSTER_CONNECT_ATTEMPTS = 3
+export const CLUSTER_CONNECT_BACKOFF_MS = 250
+
+// The connection-level codes worth a second try: the socket never opened, or opened and died.
+// `EAI_AGAIN` is in here on purpose — a resolver that did not answer in time is exactly the
+// transient case — while a permanent `ENOTFOUND` costs one extra attempt and still fails.
+const CONNECTION_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+])
+
+// Whether this error is worth another attempt. `AbortError` is excluded first: it is this
+// module's own timeout firing, and retrying a service that did not answer inside ten minutes
+// spends thirty to learn the same thing.
+function isConnectionFailure(error) {
+  if (!error || error.name === 'AbortError') return false
+  const code = error.code ?? error.cause?.code ?? error.cause?.errno
+  if (code && CONNECTION_ERROR_CODES.has(String(code))) return true
+  // undici's own wrapper, which is what the observed failure actually was: a connection-level
+  // failure arrives as `TypeError: fetch failed` with the real reason on `cause`. Matched by
+  // name AND message so an unrelated `TypeError` is not retried.
+  return error.name === 'TypeError' && error.message === 'fetch failed'
+}
+
+// The connection-level detail undici puts on `error.cause` — the detail this module used to
+// discard, and the reason a cluster spawn could fail three times and say only `fetch failed`.
+// Rendered rather than JSON-stringified: this lands in a manager session's context, and
+// `ECONNREFUSED 192.168.178.34:443` is the whole of what it needs.
+//
+// Nothing here can carry the credential: the cause describes the socket, and the token only
+// ever travels in a request header.
+function describeConnectionCause(error) {
+  const cause = error?.cause
+  if (!cause || typeof cause !== 'object') return ''
+  const code = cause.code ?? cause.errno
+  const address = cause.address ? `${cause.address}${cause.port ? `:${cause.port}` : ''}` : ''
+  const detail = [code, address].filter(Boolean).join(' ')
+  if (detail) return detail
+  return typeof cause.message === 'string' && cause.message ? cause.message : ''
+}
+
 // How much of the child's answer travels back to the caller. The answer is a whole turn's
 // text and its reader is a manager session whose context it lands in, so it is bounded
 // rather than pasted whole. 4000 matches `agent-loop.mjs`'s bound on the SDK result it
@@ -318,6 +384,10 @@ export async function startClusterSession({
   authToken,
   fetchImpl = fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  // Injected so the retry's backoff costs a test nothing. This is the only clock the function
+  // touches, and a test that had to sit through 250 ms twice would cost more than the
+  // behaviour it pins is worth.
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const resolved = resolveClusterBaseUrl(baseUrl)
   if (resolved.error) return { error: resolved.error }
@@ -334,25 +404,41 @@ export async function startClusterSession({
   const auth = resolveAuthToken(authToken)
   if (auth.error) return { error: auth.error }
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
   let response
-  try {
-    response = await fetchImpl(`${resolved.baseUrl}${PROMPT_PATH}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'text/plain; charset=utf-8',
-        [SESSION_HEADER]: sessionId,
-        [AUTH_HEADER]: `${AUTH_SCHEME}${auth.token}`,
-      },
-      body: prompt,
-      signal: controller.signal,
-    })
-  } catch (error) {
-    const why = error?.name === 'AbortError' ? `no answer within ${timeoutMs}ms` : error?.message || String(error)
-    return { error: `could not reach the cluster service at ${resolved.baseUrl}${PROMPT_PATH}: ${why}` }
-  } finally {
-    clearTimeout(timer)
+  // The retry lives around the fetch alone, never around the body read or the status handling:
+  // a 401 or a malformed body is a settled answer, and re-sending it would spend three
+  // identical refusals to reach the same one.
+  for (let attempt = 1; ; attempt += 1) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      response = await fetchImpl(`${resolved.baseUrl}${PROMPT_PATH}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          [SESSION_HEADER]: sessionId,
+          [AUTH_HEADER]: `${AUTH_SCHEME}${auth.token}`,
+        },
+        body: prompt,
+        signal: controller.signal,
+      })
+      break
+    } catch (error) {
+      // Cleared here rather than only in the `finally`: this attempt is over, and leaving its
+      // timer armed would abort a controller nothing is waiting on during the backoff.
+      clearTimeout(timer)
+      if (isConnectionFailure(error) && attempt < CLUSTER_CONNECT_ATTEMPTS) {
+        await sleepImpl(CLUSTER_CONNECT_BACKOFF_MS * attempt)
+        continue
+      }
+      const why =
+        error?.name === 'AbortError'
+          ? `no answer within ${timeoutMs}ms`
+          : [error?.message || String(error), describeConnectionCause(error)].filter(Boolean).join(' — ')
+      return { error: `could not reach the cluster service at ${resolved.baseUrl}${PROMPT_PATH}: ${why}` }
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   let body = ''

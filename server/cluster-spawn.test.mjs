@@ -279,6 +279,90 @@ test('the default timeout is bounded', () => {
   assert.ok(Number.isFinite(DEFAULT_TIMEOUT_MS) && DEFAULT_TIMEOUT_MS > 0)
 })
 
+test('a connection failure names its cause rather than only fetch failed', async () => {
+  // The shape undici ACTUALLY throws, which is the one the module used to flatten: a bare
+  // `TypeError: fetch failed` with the real reason on `cause`. Reporting `error.message` alone
+  // is why a cluster spawn could fail three times in a row (2026-10-11, 19:30–20:05) and say
+  // nothing a reader could act on.
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    fetchImpl: async () => {
+      const failure = new TypeError('fetch failed')
+      failure.cause = { code: 'ECONNREFUSED', address: '192.168.178.34', port: 443 }
+      throw failure
+    },
+  })
+  assert.match(error, /could not reach the cluster service/)
+  assert.match(error, /ECONNREFUSED 192\.168\.178\.34:443/)
+  assert.doesNotMatch(error, new RegExp(TOKEN), 'the failure text must not carry the credential')
+})
+
+test('a transient connection failure is retried, and a refusal is not', async () => {
+  let attempts = 0
+  const recovered = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1
+      if (attempts < 3) {
+        const failure = new TypeError('fetch failed')
+        failure.cause = { code: 'ECONNRESET' }
+        throw failure
+      }
+      return ok('recovered')()
+    },
+  })
+  // The count is asserted, not the outcome alone: an implementation that swallowed the failures
+  // and answered without ever reaching the service would satisfy the outcome by itself.
+  assert.equal(attempts, 3, 'two connection failures then a success is three attempts')
+  assert.equal(recovered.answer, 'recovered')
+
+  // A refusal is a settled answer. Retrying it would turn one honest 401 into three identical
+  // ones and triple the wait — the failure the narrow predicate exists to prevent.
+  let refusals = 0
+  const refused = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      refusals += 1
+      return { ok: false, status: 401, text: async () => 'unauthorized\n' }
+    },
+  })
+  assert.equal(refusals, 1, 'a 401 must not be retried')
+  assert.match(refused.error, /HTTP 401/)
+})
+
+test('an AbortError timeout is not retried', async () => {
+  // `AbortError` is this module's own timeout firing, not a transient connection blip.
+  // Retrying it would spend three ten-minute windows to learn the same thing.
+  let attempts = 0
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    timeoutMs: 5,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1
+      const aborted = new Error('aborted')
+      aborted.name = 'AbortError'
+      throw aborted
+    },
+  })
+  assert.equal(attempts, 1, 'an AbortError must not be retried')
+  assert.match(error, /no answer within 5ms/)
+})
+
 // --- resolveClusterTarget: which source each cluster value comes from ----------------------
 
 test('the env var wins over the config file for both cluster values', () => {

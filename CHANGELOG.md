@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a cluster spawn reports the connection-level cause instead of only `fetch failed`, and retries a transient connection failure.** A spawn failed three times in a row on 2026-10-11 (19:30–20:05) with undici's opaque `TypeError: fetch failed`, while every shell probe to the same host, port and path answered in under 10 ms — and at 20:24 the identical call succeeded twice, full round trip. The real reason was on `error.cause` the whole time and the module discarded it, so the failure could not be diagnosed from its own report. `startClusterSession` now renders that cause (`ECONNREFUSED 192.168.178.34:443`) and retries a connection-level failure up to `CLUSTER_CONNECT_ATTEMPTS` with a backoff — narrowly: an `AbortError` (the module's own timeout) and every HTTP response, 401 above all, still return on the first attempt, so a refusal is never tripled.
+
 ## v0.129.2
 
 - test: **prove the budget ratchet's failure paths, not just its green one.** `scripts/check-budget.py` is a tighten-or-fail ratchet, and its baseline is seeded from this repository's own tree — so `make precommit` passes by construction on any revision of it, and a script that did nothing at all would pass identically. `scripts/tests/test_check_budget.py` covers the three failure modes the design turns on (a baselined body above its recorded max, below it, and a body over budget that is absent from the baseline), plus the strict `*-tick.md` cap at and over the line, the missing-baseline fail-closed path, a baselined file that vanished, and the property the ratchet exists for: `--tighten` lowers only under-max entries and **does not rescue a growth**.
