@@ -367,6 +367,59 @@ class TestGroupingRules(unittest.TestCase):
         self.assertEqual(g.role_of(_sid(3)), "worker")
         self.assertEqual(g.parent_of(_sid(3)), _sid(9))
 
+    def test_tier_1_managed_by_beats_the_goals_order(self):
+        """The doc's tier 1: a task's own `managed_by` subject is tried before its
+        `goals:`, so a two-goal task resolves to the manager it names rather than to
+        the first goal that resolves."""
+        index = fb.VaultIndex(
+            goals=["Sample Goal A", "Sample Goal B"],
+            task_titles=["Some Task"],
+            task_goals={"some task": ["Sample Goal A", "Sample Goal B"]},
+            task_managed_by={"some task": "Sample Goal B"},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Sample Goal A", "cwd": CWD},
+            _sid(7): {"status": "idle", "name": "Sample Goal B", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(7))
+
+    def test_tier_1_absent_managed_by_falls_through_to_goals(self):
+        """The field is hand-authored, so absent is the common case and never an
+        error — the task's `goals:` order still decides."""
+        index = fb.VaultIndex(
+            goals=["Sample Goal A", "Sample Goal B"],
+            task_titles=["Some Task"],
+            task_goals={"some task": ["Sample Goal A", "Sample Goal B"]},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Sample Goal A", "cwd": CWD},
+            _sid(7): {"status": "idle", "name": "Sample Goal B", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(10))
+
+    def test_tier_1_unresolvable_managed_by_falls_through_to_goals(self):
+        """A `managed_by` naming a subject with no live manager is not an error and
+        must not strand the worker — the chain continues at tier 2."""
+        index = fb.VaultIndex(
+            goals=["Sample Goal A"],
+            task_titles=["Some Task"],
+            task_goals={"some task": ["Sample Goal A"]},
+            task_managed_by={"some task": "Nobody Is Live Here"},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Sample Goal A", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(10))
+
     def test_rule_4_no_task_file_is_unmanaged(self):
         g = _grouping()
         self.assertEqual(g.role_of(_sid(5)), "unmanaged")

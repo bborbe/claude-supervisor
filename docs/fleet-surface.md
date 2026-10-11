@@ -811,12 +811,13 @@ rule**:
 
 ⚠️ **`managed_by` has no writer yet, and saying so is part of the rule.** It is authored by
 hand — by the operator, or by a manager settling a task whose `goals:` genuinely names more
-than one owner — and nothing in this repo writes it automatically. The two resolvers that
-walk a task to its manager today (`scripts/fleet-board.py`'s goal→topic chain and
-`scripts/approved-not-started.py`'s `manager_for()`) still derive the owner from `goals:`
-alone and do not read this field, so a `managed_by` value is honoured by a reader that knows
-this section rather than by those two. Stating the tier without this caveat would describe a
-precedence step no code can currently reach.
+than one owner — and nothing in this repo writes it automatically. **Both resolvers read it**,
+so tier 1 is reachable by code rather than honoured only by a reader that knows this section:
+`scripts/fleet-board.py`'s `manager_on_chain` takes the task's `managed_by` and
+`scripts/approved-not-started.py`'s `manager_for()` does the same, each trying that subject
+before the task's `goals:`. What remains missing is the field's **writer**, not its
+**reader** — an absent or unresolvable `managed_by` falls through to tier 2 rather than
+erroring.
 
 Then read the owner's `manager_session_id` off its page — a goal or topic page carries the
 session id of the manager that armed it — and treat it as a **lead only**, never as a verdict:

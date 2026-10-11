@@ -212,12 +212,14 @@ class VaultIndex:
     repo resolves one.
     """
 
-    def __init__(self, topics=(), goals=(), task_titles=(), task_goals=None, goal_topics=None):
+    def __init__(self, topics=(), goals=(), task_titles=(), task_goals=None, goal_topics=None,
+                 task_managed_by=None):
         self.topics = {t.lower(): t for t in topics}
         self.goals = {g.lower(): g for g in goals}
         self.task_titles = {t.lower(): t for t in task_titles}
         self.task_goals = task_goals or {}
         self.goal_topics = goal_topics or {}
+        self.task_managed_by = task_managed_by or {}
         self._norm_titles = None
 
     def subject(self, title):
@@ -234,6 +236,14 @@ class VaultIndex:
     def goals_of(self, task_title):
         """The goal titles a task's `goals:` frontmatter names, in order."""
         return self.task_goals.get((task_title or "").lower(), [])
+
+    def managed_by_of(self, task_title):
+        """The subject a task's `managed_by` names, or `None` — tier 1 of the order.
+
+        Hand-authored, so absent is the common case and never an error; the caller
+        falls through to `goals_of` when this answers `None`.
+        """
+        return self.task_managed_by.get((task_title or "").lower())
 
     def topics_of(self, goal_title):
         """The topics whose `## Goals` lists this goal, in order."""
@@ -383,7 +393,7 @@ def vault_index():
     aborting the board: the buckets and the coverage assertion do not depend on
     the vault, and a board that renders flat beats no board at all.
     """
-    topics, goals, task_titles, task_goals = {}, {}, {}, {}
+    topics, goals, task_titles, task_goals, task_managed_by = {}, {}, {}, {}, {}
     goal_pages = []  # (goal key, page text) deferred to the second pass
     topic_pages = []
     for vault in _vault_roots():
@@ -397,9 +407,13 @@ def vault_index():
         for path in _pages(vault, TASK_SUBDIRS):
             title = os.path.basename(path)[:-3]
             task_titles[title.lower()] = title
-            links = frontmatter_links(frontmatter(_read(path, TASK_HEAD)), "goals")
+            block = frontmatter(_read(path, TASK_HEAD))
+            links = frontmatter_links(block, "goals")
             if links:
                 task_goals[title.lower()] = [l.strip() for l in links]
+            owner = frontmatter_links(block, "managed_by")
+            if owner:
+                task_managed_by[title.lower()] = owner[0].strip()
 
     goal_topics = {}
     for path in topic_pages:
@@ -412,7 +426,7 @@ def vault_index():
                     goal_topics[key].append(topic)
 
     return VaultIndex(topics.values(), goals.values(),
-                      task_titles.values(), task_goals, goal_topics)
+                      task_titles.values(), task_goals, goal_topics, task_managed_by)
 
 
 def loop_slugs(state_dir=None):
@@ -824,14 +838,19 @@ class Grouping:
         return self.subjects.get(sid)
 
 
-def manager_on_chain(goal_titles, index, roles, subjects):
-    """The live manager covering any of a task's goals, or `None`.
+def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None):
+    """The live manager covering a task, or `None`.
+
+    The order is the one `docs/fleet-surface.md` § *Which manager owns a subject* states,
+    and this function reads tier 1: a task's own `managed_by` subject is tried before its
+    `goals:`. The field is hand-authored — nothing writes it automatically — so an absent
+    or unresolvable value is not an error; it falls through to `goals:`.
 
     A goal reaches a manager two ways: a manager whose subject IS the goal, or a
     manager whose subject is a topic listing that goal. The goal is tried before
     its topics, so the more specific parent wins when both exist.
     """
-    for goal in goal_titles:
+    for goal in ([managed_by] if managed_by else []) + list(goal_titles):
         for subject in [goal] + index.topics_of(goal):
             for sid, found in subjects.items():
                 if roles.get(sid) != ROLE_MANAGER or not found:
@@ -876,7 +895,8 @@ def build_grouping(registry, index, colours, slugs, task_titles):
         # Rule 2 — the goal chain; rule 3's fallback to the root is the default.
         roles[sid], parents[sid] = ROLE_WORKER, root
         for title in titles:
-            manager = manager_on_chain(index.goals_of(title), index, roles, subjects)
+            manager = manager_on_chain(index.goals_of(title), index, roles, subjects,
+                                       index.managed_by_of(title))
             if manager:
                 parents[sid] = manager
                 break

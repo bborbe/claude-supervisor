@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: both task-owner resolvers now read a task's `managed_by` as tier 1 of the order `docs/fleet-surface.md` § *Which manager owns a subject* states — `scripts/fleet-board.py`'s `manager_on_chain` and `scripts/approved-not-started.py`'s `manager_for()` previously derived the owner from `goals:` alone, so the tier the doc calls the first step of the rule was reachable by no code; an absent or unresolvable `managed_by` still falls through to `goals:` in order, so a single-goal task never needs the field
+
 ## v0.128.5
 
 - refactor: split `commands/fleet-loop.md` into an arm, a `commands/fleet-tick.md` router and `commands/steps/` step files; the recurring payload per tick falls from 70,790 B to 31,209 B
