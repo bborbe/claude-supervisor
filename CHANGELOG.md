@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.129.4
 
 - fix: **the manager loop stops asking the operator a question the manager owns, and stops reading a roster `[ref]` as a session id.** Two runtime-measured corrections to the loop's step files. `commands/steps/manager-classify.md`'s plan-gate parking cell classified a worker parked on its own `plan-task` gate as **waiting-on-human** — but sections, decomposition, DoD and SC evidence shapes are the manager's authored act (`docs/fleet-surface.md` § Spawn a worker item 4), so a worker the ladder opened at 7–8/10 that raised shape gaps put them to the operator, who was never their owner: measured 2026-10-10, a worker opened at 8/10 hit its own `plan-task` ≥8 gate at 7/10 and raised three SC/evidence-shape gaps as an operator modal. The cell now routes those gaps **worker → its manager** and cards only a gap that is genuinely an operator decision. `commands/steps/manager-readings.md`'s roster bullet now states that `[ref]` is a 6-char display handle and **not** a Claude session id — reading one as an id produced a wrong assertion about a live session (a manager called `64b4a415` *"the recorder, not a manager that returned"*, an 8-char **session-id** prefix, while `session-liveness.py --check 64b4a415-906d-457f-81f9-48a842007b88` returned LIVE with 121,321 pre-stop turns) — and points at the join rule's single home in `agents/manager-sweep-reader.md` step 5 rather than restating it.
 
