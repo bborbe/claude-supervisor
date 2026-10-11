@@ -123,6 +123,20 @@ class ManagerFor(unittest.TestCase):
     def test_no_goals_is_none(self):
         self.assertIsNone(ans.manager_for([], {"manager layer": "sid-1"}))
 
+    def test_managed_by_beats_the_goals_order(self):
+        """The doc's tier 1 — the row's own `managed_by` subject wins over its `goals:`."""
+        live = {"goal a manager": "sid-1", "goal b manager": "sid-2"}
+        self.assertEqual(ans.manager_for(["[[Goal A]]"], live, "[[Goal B]]"), "Goal B Manager")
+
+    def test_absent_managed_by_falls_through_to_goals(self):
+        live = {"goal a manager": "sid-1"}
+        self.assertEqual(ans.manager_for(["[[Goal A]]"], live), "Goal A Manager")
+        self.assertEqual(ans.manager_for(["[[Goal A]]"], live, None), "Goal A Manager")
+
+    def test_unresolvable_managed_by_falls_through_to_goals(self):
+        live = {"goal a manager": "sid-1"}
+        self.assertEqual(ans.manager_for(["[[Goal A]]"], live, "[[Nobody]]"), "Goal A Manager")
+
 
 class Collect(unittest.TestCase):
     def setUp(self):
