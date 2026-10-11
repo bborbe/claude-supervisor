@@ -1320,12 +1320,35 @@ class AnsweredParkKeysTest(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", lambda *a, **kw: resp):
             return watch.answered_park_keys([self.SID8])
 
-    def _row(self, state, created_at, sid8=None):
+    def _row(self, state, created_at, sid8=None,
+             answered_at="2026-10-10T18:13:00Z"):
         return {"dedup_key": f"park:{sid8 or self.SID8}", "state": state,
-                "created_at": created_at, "item_id": f"item-{state}"}
+                "created_at": created_at, "item_id": f"item-{state}",
+                "answered_at": answered_at}
 
-    def test_a_closed_record_reads_answered(self):
+    def test_a_closed_record_carrying_an_answer_reads_answered(self):
         out = self._read(json.dumps([self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8])
+
+    def test_a_closed_record_with_no_answer_does_not_read_answered(self):
+        """⚠️ A `closed` row with no `answered_at` is a CLEAR or a REAP, not an
+        answer — `answered-attribution.py`: `open -> closed` "records that a card
+        was cleared: `answered_at` and `decision` stay unset and no answer is
+        routed, so the asking session stays frozen", and it measures that shape as
+        the DOMINANT one (9,339 of 9,454 rows). Reading the state alone would
+        suppress the re-post for a worker that is still parked and still frozen —
+        a missed escalation, the direction this read must never take."""
+        out = self._read(json.dumps([
+            self._row("closed", "2026-10-10T18:12:32Z", answered_at=None)]))
+        self.assertEqual(out, {})
+
+    def test_a_reaped_key_is_a_candidate_again_once_a_newer_row_exists(self):
+        """The reaped key has a RECORD, so 'no record at all' is the wrong test —
+        the test is 'no answered record'. A cleared row followed by a newer
+        answered one reads answered."""
+        out = self._read(json.dumps([
+            self._row("closed", "2026-10-10T15:20:04Z", answered_at=None),
+            self._row("closed", "2026-10-10T18:12:32Z")]))
         self.assertEqual(list(out), [self.SID8])
 
     def test_an_answered_record_reads_answered(self):
@@ -1379,6 +1402,17 @@ class AnsweredParkKeysTest(unittest.TestCase):
         """A 200 carrying an error object must not read as an empty page — the
         false empty would re-post for every parked worker at once."""
         self.assertIsNone(self._read('{"error": "unknown agent"}'))
+
+    def test_a_non_dict_element_is_skipped_not_raised(self):
+        """⚠️ The strictness must reach one level BELOW the body. A list carrying
+        `[null]` or `["error"]` would raise `AttributeError` out of the poll, and
+        the poll's handler abandons the REST of that poll — `park_ages` unwritten,
+        the gated-set transition uncommitted — for as long as the element stays in
+        the history window."""
+        out = self._read(json.dumps([
+            None, "error", self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8],
+                         "the good row still resolves; the bad ones are skipped")
 
     def test_no_sids_does_not_touch_the_store(self):
         with mock.patch("urllib.request.urlopen",

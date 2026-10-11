@@ -1116,6 +1116,19 @@ def answered_park_keys(sids, store=STORE, timeout=None):
     decisive would suppress a live park — a **missed** escalation, the direction
     the sibling function already warns about.
 
+    ⚠️ **ANSWERED is a state AND a recorded answer — never the state alone.** A
+    `closed` row with no `answered_at` is a **clear** (a board Acknowledge/X) or a
+    **reap**, not an answer: `answered-attribution.py` records that `open ->
+    closed` "records that a card was cleared: `answered_at` and `decision` stay
+    unset and no answer is routed, so the asking session stays frozen", and it
+    measures that shape as the **dominant** one (9,339 of 9,454 rows). Reading the
+    state alone would classify a reaped card as answered and suppress the re-post
+    for a worker that is still parked and still frozen — a **missed** escalation,
+    the direction this function's caller must never take. So both halves of the
+    sibling's rule are taken: `attention-card-lookup.py`'s `select_latest` filters
+    on `state in ANSWERED_STATES` **and** `answered_at is not None`, and so does
+    this.
+
     ⚠️ **`None` on failure, never an empty set**, matching `open_store_items`. An
     empty set is a positive claim — "nothing here was answered" — and the caller
     acts on it by re-posting, so an unreachable store would re-post for every
@@ -1151,6 +1164,15 @@ def answered_park_keys(sids, store=STORE, timeout=None):
         return None
     newest = {}
     for item in payload:
+        # ⚠️ Guarded per ELEMENT, not only per body. The `isinstance(payload,
+        # list)` check above is strict about the shape, but a list carrying a
+        # non-dict (`[null]`, `["error"]`) still raises `AttributeError` out of
+        # here and out of `repost_empty_parks`. The poll's own handler catches it,
+        # yet the REST of that poll is then abandoned — `park_ages` unwritten and
+        # the gated-set transition uncommitted — for as long as the element stays
+        # in the window. The strictness has to reach one level further down.
+        if not isinstance(item, dict):
+            continue
         key = str(item.get("dedup_key") or "")
         if not key.startswith("park:"):
             continue
@@ -1173,7 +1195,8 @@ def answered_park_keys(sids, store=STORE, timeout=None):
             # the key drops out of the answered set and the caller re-posts.
             newest[sid8] = (stamp, {})
     return {sid8: row for sid8, (_, row) in newest.items()
-            if row.get("state") in card_lookup.ANSWERED_STATES}
+            if row.get("state") in card_lookup.ANSWERED_STATES
+            and card_lookup.answered_at(row) is not None}
 
 
 def parked_keys(state):
