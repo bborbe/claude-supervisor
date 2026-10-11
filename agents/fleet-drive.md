@@ -91,7 +91,7 @@ The caller passes: the sweep-reader hand-back verbatim · **the `payload=` path 
 <output_format>
 **Two artifacts, two shapes.** The **payload** is the render below, written to disk; the **hand-back** is the ≤ 1 KB verdict summary the caller receives.
 
-**Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.drive`, verbatim and byte-for-byte: `mkdir -p` the directory, write `<path>.tmp`, then `mv` it over. It sits beside the `.digest` the sweep reader wrote for this same round. The caller reads it for the `REAPS` / `NUDGES` text it must send and for the `Waiting on your keystroke` list it prints — neither rides the hand-back.
+**Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.drive`, verbatim and byte-for-byte: `mkdir -p` the directory, write `<path>.tmp`, then `mv` it over. It sits beside the `.digest` the sweep reader wrote for this same round — **sanitize the round timestamp the same way it does**: every character outside `[0-9A-Za-z._-]` replaced by `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.drive`. The caller reads it for the `REAPS` / `NUDGES` text it must send and for the `Waiting on your keystroke` list it prints — neither rides the hand-back.
 
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
