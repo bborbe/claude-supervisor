@@ -5,8 +5,8 @@
     "agents/manager-drive.md": 133794,
     "agents/manager-sweep-reader.md": 159469,
     "commands/fleet-loop.md": 4180,
-    "commands/manager-drive.md": 40927,
-    "commands/manager-loop.md": 26981,
+    "commands/manager-drive.md": 9064,
+    "commands/manager-loop.md": 25579,
     "commands/manager-status.md": 46480,
     "commands/open.md": 60659,
     "commands/worker-drive.md": 57692

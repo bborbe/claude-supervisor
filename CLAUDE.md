@@ -126,8 +126,8 @@ commands/{manager-spawn,fleet-workers,manager-answer,manager-drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
 commands/attention-next.md + scripts/attention-answer.py  answer an attention item, route it to the asker
 commands/{fleet-loop,fleet-tick,fleet-status,fleet-drive}.md  fleet surface — many sessions
-commands/{manager-loop,manager-status}.md       one goal or topic
-commands/manager-drive.md                        one goal or topic — the act leg, by hand
+commands/{manager-loop,manager-status}.md       one goal or topic — the loop's arm and its read-only snapshot
+commands/manager-drive.md                        one goal or topic — the loop's round, and runnable by hand
 commands/fleet-verify.md                         fleet manager — verify the fleet layer's contract, suggest fixes
 commands/manager-verify.md                       goal/topic manager — verify one subject, suggest fixes
 commands/worker-drive.md                         one worker session — drive its anchored task to done

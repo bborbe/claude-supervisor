@@ -45,6 +45,9 @@ class CheckBudgetTest(unittest.TestCase):
         # the ones currently over the line.
         self.write("commands/big.md", BODY_MAX + 1024)
         self.write("agents/small.md", 1000)
+        # The suffix-less wakeup target must exist in the fixture, or the guard's own
+        # "named as a wakeup target but the file is gone" failure fires on every case.
+        self.write("commands/manager-drive.md", 1000)
         self.baseline({"commands/big.md": BODY_MAX + 1024, "agents/small.md": 1000})
 
     def write(self, rel, size):
@@ -105,6 +108,30 @@ class CheckBudgetTest(unittest.TestCase):
         self.write("commands/thing-tick.md", TICK_MAX)
         result = self.run_guard()
         self.assertEqual(0, result.returncode, result.stderr)
+
+    # --- the strict cap follows the WAKEUP TARGET, not the filename -------------------
+
+    def test_oversized_suffixless_wakeup_target_fails(self):
+        # The manager loop's wakeup names `commands/manager-drive.md`, which carries no
+        # `-tick` suffix — so the glob cannot find it and the explicit list is the only
+        # thing holding the cap on that side.
+        self.write("commands/manager-drive.md", TICK_MAX + 1)
+        result = self.run_guard()
+        self.assertEqual(1, result.returncode)
+        self.assertIn("commands/manager-drive.md", result.stderr)
+
+    def test_suffixless_wakeup_target_at_the_cap_passes(self):
+        self.write("commands/manager-drive.md", TICK_MAX)
+        result = self.run_guard()
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_missing_wakeup_target_fails(self):
+        # A cap pointed at a file that is gone reports green against nothing, so its
+        # absence is a failure rather than a skip.
+        (self.root / "commands" / "manager-drive.md").unlink()
+        result = self.run_guard()
+        self.assertEqual(1, result.returncode)
+        self.assertIn("wakeup target", result.stderr)
 
     def test_tighten_lowers_only_the_under_max_entry(self):
         # The half the criterion calls out by name: --tighten must rewrite the entries
