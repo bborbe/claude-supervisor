@@ -145,9 +145,9 @@ than cleared: no `CLEARED` is emitted, because nothing was answered.
 import argparse
 import glob
 import hashlib
+import importlib.util
 import json
 import os
-import importlib.util
 import re
 import subprocess
 import sys
@@ -1162,6 +1162,16 @@ def answered_park_keys(sids, store=STORE, timeout=None):
             continue
         if sid8 not in newest or stamp > newest[sid8][0]:
             newest[sid8] = (stamp, item)
+        elif stamp == newest[sid8][0]:
+            # ⚠️ A TIE is UNDECIDABLE, and the sibling REFUSES one rather than
+            # picking it (`attention-card-lookup.py`: two cards sharing the
+            # maximum timestamp "make 'latest-answered' undecidable … never to
+            # pick"). Keeping the first-seen row would make this key's
+            # ANSWERED/LOST verdict payload-order dependent — re-posting an
+            # answered park, or suppressing a live one, on nothing but the
+            # store's row order. The safe side is the noisy one: blank the row so
+            # the key drops out of the answered set and the caller re-posts.
+            newest[sid8] = (stamp, {})
     return {sid8: row for sid8, (_, row) in newest.items()
             if row.get("state") in card_lookup.ANSWERED_STATES}
 

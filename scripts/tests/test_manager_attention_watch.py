@@ -1350,6 +1350,23 @@ class AnsweredParkKeysTest(unittest.TestCase):
             self._row("closed", "2026-10-10T15:20:04Z"),
             self._row("open", "2026-10-10T18:12:32Z")])), {})
 
+    def test_a_tie_on_created_at_re_posts_rather_than_picking(self):
+        """⚠️ The sibling REFUSES an undecidable ordering — "never to pick".
+
+        A silent first-seen pick would make this key's ANSWERED/LOST verdict
+        payload-order dependent: an open row first re-posts an already-answered
+        park (the defect this read exists to close), an answered row first
+        suppresses a live one (a missed escalation). Both orders must agree, and
+        the safe side is the noisy one — drop the key, let the caller re-post.
+        """
+        self.assertEqual(self._read(json.dumps([
+            self._row("closed", "2026-10-10T18:12:32Z"),
+            self._row("open", "2026-10-10T18:12:32Z")])), {})
+        self.assertEqual(self._read(json.dumps([
+            self._row("open", "2026-10-10T18:12:32Z"),
+            self._row("closed", "2026-10-10T18:12:32Z")])), {},
+            "the store's row order must not decide it")
+
     def test_another_keys_records_are_ignored(self):
         self.assertEqual(self._read(json.dumps([
             self._row("closed", "2026-10-10T18:12:32Z", sid8="deadbeef")])), {})
