@@ -1,3 +1,7 @@
+# Escalate
+
+When: every tick
+
   - **Routing:** on `stalled`/crashed-looking, `SendMessage` the owning manager first (*"`<session>` looks stalled — your topic"*); TTS the human only if it persists — voice-gated.
 ## Step 5 — Escalate: an ask and a report
 

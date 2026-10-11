@@ -1,3 +1,7 @@
+# Covered-subject invariant
+
+When: a covered subject's manager is live
+
     - ⚠️ **Manager-first is a ROUTING rule, never a trust rule — the fleet still reads the board itself.** Dropping an entry because its manager is live is correct only while that manager is actually raising the ask. A covered subject whose non-terminal rows are **all blocked on the operator** and which has **no open card attributable to it** is a subject the whole stack has gone quiet on, and the manager's own report cannot rule that out: a manager that has stopped posting reports the same `waiting-on-human` rows either way. Measured 2026-10-08: `MDM Bugs` had a live manager, so this bullet raised nothing for it; that manager's under-target branch then suppressed its own card; the operator was told he was being waited on with nothing on the board to answer. **So run the model-free invariant over every covered subject whose manager is live.** ⚠️ **The script is VAULT-side, not plugin-shipped:** `sweep-gate.py` lives in the **active vault's** `.claude/scripts/`, is delivered by that vault's own git, and **this repo does not carry it** — `--invariant` appears nowhere in this tree. The plugin and the vault therefore ship this rule **together** and neither alone is sufficient: this bullet without the vault's script names a flag that resolves to nothing, and the script without this bullet has nothing calling it.
 
       ```bash

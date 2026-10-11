@@ -1,3 +1,7 @@
+# Drive leg
+
+When: every tick
+
 ## Step 3b — Drive: dispatch the drive leg
 
 Reap is the drive leg's: **reap runs before drive**, which is why the dispatch sits after the sweep and never before it.

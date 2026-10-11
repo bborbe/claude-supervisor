@@ -1,3 +1,7 @@
+# Answer a parked or exited worker
+
+When: a worker is parked on a question or has exited
+
 ### Two channels reach a worker, and they are not interchangeable
 
 | The worker is… | Whose answer | Channel | Call |

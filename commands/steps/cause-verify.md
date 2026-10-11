@@ -1,3 +1,7 @@
+# Verify a named cause
+
+When: about to name a cause in the round's report
+
 **Delegate that verification.** One sub-agent per candidate cause (`Explore` or `general-purpose`, **Sonnet**), the cause as a yes/no question plus the systems to check; take back only the verdict:
 
 > "Is `github-update-go-agent` actually broken right now? Check merged PRs on `bborbe/github-update-go-agent`, the latest released tag, and live Job states in `kubectl<wrapper> -n prod`. Answer: broken / fixed / can't tell, with the evidence line for each."

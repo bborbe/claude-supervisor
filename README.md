@@ -56,7 +56,7 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | `scripts/jump-link.py` | render a pane's jump target as a clickable link (falls back to `/supervisor:jump <N>` when the local fleet-jump server is not configured) |
 | `scripts/restart-worker.py` | restart ONE stale idle worker session under a narrow allow rule — seven registry-guarded refusals, never a manager, never a broad `kill` |
 | `scripts/manager-predispatch.py` | the **pre-dispatch gate** `/supervisor:manager-drive` and `/supervisor:manager-status` run first — when the tracked tree has not moved it replays the stored table and dispatches **no agent**; a worker dying counts as movement, because session liveness is in the digest |
-| `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
+| `/supervisor:fleet-loop` `/supervisor:fleet-tick` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
 | `/supervisor:fleet-drive` | one-shot by hand, and dispatched by `/supervisor:fleet-loop` every round: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
 | `/supervisor:fleet-verify` | read-only: verify the fleet layer's own contract, ending in a numbered fix list |
 | `/supervisor:manager-loop` `/supervisor:manager-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |

@@ -1,6 +1,6 @@
-## When
+# Attention watchers
 
-Every tick — arm ONE `Monitor` over the attention feed, and re-arm it whenever it expires or is found dead.
+When: every tick — arm ONE `Monitor` over the attention feed, and re-arm it whenever it expires or is found dead: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py`
 
   - **Attention watcher:** arm ONE `Monitor` over the attention feed, **scoped by pane ownership** — the filter runs the producer itself and re-reads it every interval, so the arm survives its own first read:
 

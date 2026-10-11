@@ -1,3 +1,7 @@
+# Needs-input batch + relay
+
+When: the digest's BLOCKED set is non-empty
+
   - **Needs-input** — the digest's BLOCKED section (from the attention feed) is the primary blocked-session channel; `ListAgents` `waiting` does not say *what* a session waits on. Group into ONE report, never N pings. TTS when a wait exceeds ~30 min continuous, re-TTS at 1h — voice-gated. Names lead; ids are secondary.
     - **Manager first.** Before including an entry, check `ListAgents` for its owning manager; if live, it already reports its `waiting-on-human` sessions (`/manager-loop` step 4) — drop the entry and say so in one line.
     - **Claim before asking — this is what makes it asked ONCE.** Manager-first is not sufficient alone: the fleet and a live manager can both hold the same blocked session and neither sees the other's batch. Claim each subject through the **`supervisor:asked-ledger` skill** — `/supervisor:asked-ledger claim …`, the single home of its rules and the claim contract; follow it verbatim, never restate them here. **Exit 0 → include the subject in the batch; exit 3 → another layer holds it, drop it from the batch** and say so in one line. `resolve` once the answer is relayed.

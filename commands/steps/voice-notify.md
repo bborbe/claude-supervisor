@@ -1,3 +1,7 @@
+# Voice + notification
+
+When: every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E)
+
     **The notification follows the same test, through the plugin's publisher — never a vault command.** Once per round, with every gate the round raised:
 
     ```bash

@@ -1,6 +1,6 @@
-## When
+# Adopt
 
-`adopt-orphans.py` printed rows or exited non-zero.
+When: `adopt-orphans.py` printed rows or exited non-zero — run: `python3 $P/adopt-orphans.py --self "$CLAUDE_CODE_SESSION_ID"`
 
 ## Step 3a — Adopt: give an exited manager's workers an owner
 

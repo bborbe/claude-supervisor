@@ -1,6 +1,6 @@
-## When
+# Persist
 
-The snapshot path is missing or the write failed.
+When: the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py`
 
   - **Persist:** Step 6, via `fleet-snapshot.py` only — never hand-write `~/.claude/state/fleet-snapshot.json`.
 ## Step 6 — Persist the new snapshot

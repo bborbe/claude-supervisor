@@ -1,3 +1,7 @@
+# Confirm the digest's candidates
+
+When: the digest carries an orphan, collision or unmanaged-topic candidate
+
 ### Confirming the digest's candidates
 
 - **Orphan:** a candidate is open work with a dead session — for the operator to pick up or close, not a fault and not a stall. Report as its own group. `UNKNOWN` (check failed) is reported as unknown, never as clean.

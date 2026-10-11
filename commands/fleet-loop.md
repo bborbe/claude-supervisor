@@ -34,8 +34,6 @@ argument-hint: "[--interval <N>m] (interval defaults to 15m; the round repeats b
 ---
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
-`P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — every script below is `python3 $P/<script>`.
-
 Answer one question: **does anything in the fleet need attention right now?**
 
 Not `/supervisor:worker-drive` (session-scoped) and not `/fleet-status` (stateless). This is the **arm**, invoked once. The stateful fleet round remembers the last sweep, diffs against it, and acts only on evidence. It has side effects — a message consumes a peer's turn — so it never runs tighter than its 15-minute floor (§ Interval) and is never invoked back-to-back by a polling loop. The arm re-arms itself; every wakeup runs `${CLAUDE_PLUGIN_ROOT}/commands/fleet-tick.md`, the per-round router.

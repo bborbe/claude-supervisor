@@ -1,6 +1,6 @@
-## When
+# Readings
 
-Every tick.
+When: every tick — print both readings with the marker line, run: `python3 $P/fleet-board.py --json` · `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"`
 
 ## The saturation reading — the ratio, not tok/s
 

@@ -1,3 +1,7 @@
+# Render the output shape
+
+When: every tick
+
   - **Global delta:** on progress, a 3–5 line chat delta; detail stays in task files.
 ## Output shape
 

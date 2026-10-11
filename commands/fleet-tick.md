@@ -57,7 +57,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
 | 13 | Attention watchers | every tick — arm ONE `Monitor` over the attention feed, and re-arm it whenever it expires or is found dead: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the digest's CONTEXT section lists sessions over 70% | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
-| 15 | Voice + notification | every tick — publish every gate the round raised, and send `{"gates": []}` on a round that raised none | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
+| 15 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
 | 16 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 17 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 | 18 | Readings | every tick — print both readings with the marker line, run: `python3 $P/fleet-board.py --json` · `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |

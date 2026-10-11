@@ -1,3 +1,7 @@
+# Sweep
+
+When: every tick
+
 ## Steps 0–3 — Read half, delegated to `supervisor:fleet-sweep-reader`
 
 **Step 0 — roster.** Call `ListAgents` — the only place this command calls it. (Do not reimplement `/fleet-status`'s roster join here.)
