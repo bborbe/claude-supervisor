@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the sweep reader stops returning the rendered table it was told not to return.** `agents/manager-sweep-reader.md` step 9 carried the hand-back contract's pointer — *"The rendered table does **not** ride the report — it goes to the payload path the render already writes"* — and then, one line below, **item 1 of the report list required that table verbatim, in a fenced block**. The leg obeyed the list: measured 2026-10-11 across two live rounds, the hand-back was **2,727 B** and **12,364 B** against a 1 KB cap whose required set is 15 bucket counts. Item 1 is deleted and the list renumbered, so the ⚠️ and the list no longer disagree, and the section names the correction so the item is not re-added.
+
 ## v0.129.5
 
 - fix: **a manager-loop tick that lands while the previous round is still in flight is now stated, not improvised.** `commands/steps/manager-readings.md` carries the rule: such a firing is **absorbed** — no reading, no sweep, no dispatch, no write — and each of the round's three writes belongs to the round that *produced* its input (the store save to the round that dispatched the sweep reader, the verdicts-cache write to the round that dispatched the drive leg, the topic-page write-back to the round whose own sweep produced the `noop: false`). A late leg's `Audit` block is **dropped**, never merged — which `commands/steps/manager-drive.md` already required in words (*"never merge in rows from an earlier tick"*). Measured 2026-10-11: a tick overran its interval by ~3× and the firing inside it was absorbed because the round was still in flight. `scripts/check-round-overlap.py` asserts the rule has exactly one home and that a **tick-router** row dispatches it every tick, and is wired into `precommit`.
