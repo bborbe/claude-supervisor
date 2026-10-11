@@ -1067,16 +1067,38 @@ class RepostTest(unittest.TestCase):
     SID8 = "aaaa1111"
     ENTRIES = {SID8: ("A", SID)}
 
-    def _run(self, open_items, parked=(SID8,)):
+    ANSWERED_ROW = {
+        "item_id": "c0ffee00c0ffee00c0ffee00c0ffee00",
+        "answer": "skip",
+        "answered_at": "2026-10-10T18:10:35.900805Z",
+        # The row's own creation time — what `answer_covers_current_park` dates
+        # the answer against. Present here because a row without it cannot be
+        # dated, and an undateable answer deliberately does not suppress.
+        "created_at": "2026-10-10T18:12:32Z",
+    }
+
+    def _run(self, open_items, parked=(SID8,), answered=None, answered_ok=True,
+             park_since=None):
         posted = []
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.object(watch, "open_store_items",
                                    lambda *a, **kw: open_items):
-                watch.repost_empty_parks(
-                    list(parked), self.ENTRIES,
-                    os.path.join(d, "events.jsonl"),
-                    post=lambda sid8, full, label: (
-                        posted.append((sid8, full)) or True))
+                with mock.patch.object(
+                        watch, "answered_park_keys",
+                        lambda *a, **kw: ((answered or {}) if answered_ok
+                                          else None)):
+                    watch.repost_empty_parks(
+                        list(parked), self.ENTRIES,
+                        os.path.join(d, "events.jsonl"),
+                        post=lambda sid8, full, label: (
+                            posted.append((sid8, full)) or True),
+                        # Epoch 0 — the park predates every answer row, so the
+                        # answer covers it. Tests that need the opposite pass one.
+                        # ⚠️ `self.SID8`, not a bare `SID8`: inside a method body a
+                        # bare name resolves to the MODULE global (a different
+                        # session id), which silently made the clock cover nothing.
+                        park_since=(park_since if park_since is not None
+                                    else {self.SID8: 0.0}))
         return posted
 
     def test_a_park_the_store_lost_is_re_posted(self):
@@ -1109,6 +1131,106 @@ class RepostTest(unittest.TestCase):
                     [self.SID8], self.ENTRIES, os.path.join(d, "events.jsonl"),
                     post=lambda *a: False)
         self.assertEqual(out, [], "a refused post is not a re-post")
+
+    def test_an_answered_park_is_not_re_posted(self):
+        """SC1 — the key's most recent store record reads ANSWERED.
+
+        The defect this closes: the store's suppression is open-scoped, so an
+        ANSWERED card leaves no open item, and the watcher read that absence as a
+        store fault. Measured 2026-10-10, `park:beeb6128` was re-posted at
+        20:12:32 — two minutes after the operator answered its prior instance.
+        """
+        self.assertEqual(
+            self._run((set(), set()), answered={self.SID8: self.ANSWERED_ROW}),
+            [], "an answered park is an answered question, not a fault")
+
+    def test_a_lost_park_still_re_posts_when_nothing_is_answered(self):
+        """SC3 — the fix suppresses an ANSWER, never a FAULT.
+
+        Pairs with the test above: that one alone is satisfied by a build that
+        suppresses every re-post, and this one alone by a build that re-posts
+        everything. Neither is a fix; the pair is the test.
+        """
+        self.assertEqual(self._run((set(), set()), answered={}),
+                         [(self.SID8, self.SID)])
+
+    def test_an_answered_park_is_logged_naming_the_answered_instance(self):
+        """SC2's positive assertion — the line names the answer, not a fault.
+
+        The absence half (`0 REPOST`) is satisfied by a build that simply stops
+        logging, so the criterion leads with this line existing.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "events.jsonl")
+            with mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: (set(), set())):
+                with mock.patch.object(
+                        watch, "answered_park_keys",
+                        lambda *a, **kw: {self.SID8: self.ANSWERED_ROW}):
+                    watch.repost_empty_parks(
+                        [self.SID8], self.ENTRIES, log, post=lambda *a: True,
+                        park_since={self.SID8: 0.0})
+            with open(log, encoding="utf-8") as fh:
+                rows = [json.loads(line) for line in fh if line.strip()]
+        kinds = [r["kind"] for r in rows]
+        self.assertIn("ANSWERED", kinds,
+                      "the suppression must be visible in the durable log")
+        detail = next(r["detail"] for r in rows if r["kind"] == "ANSWERED")
+        self.assertIn("park:" + self.SID8, detail,
+                      "the line names the key, not 'store held no open item'")
+        self.assertIn(self.ANSWERED_ROW["item_id"], detail,
+                      "and it names the answered INSTANCE, not just the key")
+
+    def test_a_failed_answered_read_re_posts_nothing(self):
+        """The `None` contract extends to the second store read.
+
+        A read that FAILED is not a reading that the key was answered. Same
+        direction `open_store_items` already rules: the safe side is the silent
+        one, because a re-post on an unreadable store fires for every parked
+        worker at once.
+        """
+        self.assertEqual(self._run((set(), set()), answered_ok=False), [])
+
+    def test_an_answer_from_a_previous_park_does_not_suppress_a_later_one(self):
+        """⚠️ The predicate that keeps this fix from silencing a FAULT.
+
+        `park:<sid8>` rows have exactly ONE producer — this watcher — so an
+        answered row stays the newest row for its key **forever**: the re-post that
+        would write a newer row is the very thing the answer suppresses. Without
+        the park clock a *later* lost park on the same session is never raised, and
+        the change suppresses a fault as well as an answer. Measured basis: the
+        incident this arm closes re-posted the SAME key four times over ~3h20m, so
+        repeated parks on one session are the normal case, not a corner.
+        """
+        earlier = watch.card_lookup.parse_ts("2026-10-10T15:20:04Z").timestamp()
+        row = dict(self.ANSWERED_ROW)
+        row["created_at"] = "2026-10-10T15:20:04Z"
+        self.assertEqual(
+            self._run((set(), set()), answered={self.SID8: row},
+                      park_since={self.SID8: earlier + 3600}),
+            [(self.SID8, self.SID)],
+            "the answer predates the park in progress, so it is about an earlier "
+            "one and the park must be re-raised")
+        self.assertEqual(
+            self._run((set(), set()), answered={self.SID8: row},
+                      park_since={self.SID8: earlier - 3600}),
+            [],
+            "the same answer DOES cover a park it postdates")
+
+    def test_a_missing_park_clock_re_posts_rather_than_suppressing(self):
+        """An answer that cannot be dated against the park is not evidence the park
+        is answered. The safe side is the noisy one; the arm always supplies the
+        clock, so this branch is only reached by a caller that passed none."""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: (set(), set())):
+                with mock.patch.object(
+                        watch, "answered_park_keys",
+                        lambda *a, **kw: {self.SID8: self.ANSWERED_ROW}):
+                    out = watch.repost_empty_parks(
+                        [self.SID8], self.ENTRIES,
+                        os.path.join(d, "events.jsonl"), post=lambda *a: True)
+        self.assertEqual(out, [self.SID8])
 
 
     def test_a_headless_park_is_parked_too(self):
@@ -1224,6 +1346,144 @@ class OpenStoreItemsTest(unittest.TestCase):
         self.assertIsNone(self._fetch('{"error": "unknown agent"}'))
 
 
+class AnsweredParkKeysTest(unittest.TestCase):
+    """`answered_park_keys` — the one read that can tell ANSWERED from LOST.
+
+    ⚠️ It reads `GET /api/1.0/attention/history`, NOT `GET /api/1.0/attention`.
+    Measured against the live store 2026-10-11: the item read returned 11 items,
+    ALL `open`, and neither `?limit=50000` nor `?state=answered` changed that — so
+    an answered card is absent from it by construction, and relaxing the open-state
+    filter cannot reach one. `attention-card-lookup.py`'s docstring says the same;
+    `open_store_items`'s said the opposite until this change, citing
+    `who-needs-me.py:271`'s defensive else-branch as evidence — which proves
+    nothing about an endpoint's contract.
+
+    ⚠️ The paging rule is the sibling's, deliberately not restated: a key whose
+    cards all predate the page reads as `no record`, which is the false negative
+    that re-posts the very card this read exists to find.
+    """
+
+    SID = "bbbb2222-0000-0000-0000-000000000000"
+    SID8 = "bbbb2222"
+
+    def _read(self, body):
+        resp = mock.MagicMock()
+        resp.read.return_value = body.encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+        with mock.patch("urllib.request.urlopen", lambda *a, **kw: resp):
+            return watch.answered_park_keys([self.SID8])
+
+    def _row(self, state, created_at, sid8=None,
+             answered_at="2026-10-10T18:13:00Z"):
+        return {"dedup_key": f"park:{sid8 or self.SID8}", "state": state,
+                "created_at": created_at, "item_id": f"item-{state}",
+                "answered_at": answered_at}
+
+    def test_a_closed_record_carrying_an_answer_reads_answered(self):
+        out = self._read(json.dumps([self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8])
+
+    def test_a_closed_record_with_no_answer_does_not_read_answered(self):
+        """⚠️ A `closed` row with no `answered_at` is a CLEAR or a REAP, not an
+        answer — `answered-attribution.py`: `open -> closed` "records that a card
+        was cleared: `answered_at` and `decision` stay unset and no answer is
+        routed, so the asking session stays frozen", and it measures that shape as
+        the DOMINANT one (9,339 of 9,454 rows). Reading the state alone would
+        suppress the re-post for a worker that is still parked and still frozen —
+        a missed escalation, the direction this read must never take."""
+        out = self._read(json.dumps([
+            self._row("closed", "2026-10-10T18:12:32Z", answered_at=None)]))
+        self.assertEqual(out, {})
+
+    def test_a_reaped_key_is_a_candidate_again_once_a_newer_row_exists(self):
+        """The reaped key has a RECORD, so 'no record at all' is the wrong test —
+        the test is 'no answered record'. A cleared row followed by a newer
+        answered one reads answered."""
+        out = self._read(json.dumps([
+            self._row("closed", "2026-10-10T15:20:04Z", answered_at=None),
+            self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8])
+
+    def test_an_answered_record_reads_answered(self):
+        out = self._read(json.dumps([self._row("answered", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8])
+
+    def test_the_row_is_carried_so_the_caller_can_name_the_instance(self):
+        """SC1: the event detail names the answered INSTANCE, not just the key."""
+        out = self._read(json.dumps([self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(out[self.SID8]["item_id"], "item-closed")
+
+    def test_an_open_record_does_not_read_answered(self):
+        self.assertEqual(
+            self._read(json.dumps([self._row("open", "2026-10-10T18:12:32Z")])),
+            {})
+
+    def test_the_most_recent_record_decides(self):
+        """SC1's wording is "most recent store record", and it is load-bearing: a
+        key re-parked after an earlier answer carries a NEWER row, so treating any
+        answered row as decisive would suppress a live park."""
+        self.assertEqual(self._read(json.dumps([
+            self._row("closed", "2026-10-10T15:20:04Z"),
+            self._row("open", "2026-10-10T18:12:32Z")])), {})
+
+    def test_a_tie_on_created_at_re_posts_rather_than_picking(self):
+        """⚠️ The sibling REFUSES an undecidable ordering — "never to pick".
+
+        A silent first-seen pick would make this key's ANSWERED/LOST verdict
+        payload-order dependent: an open row first re-posts an already-answered
+        park (the defect this read exists to close), an answered row first
+        suppresses a live one (a missed escalation). Both orders must agree, and
+        the safe side is the noisy one — drop the key, let the caller re-post.
+        """
+        self.assertEqual(self._read(json.dumps([
+            self._row("closed", "2026-10-10T18:12:32Z"),
+            self._row("open", "2026-10-10T18:12:32Z")])), {})
+        self.assertEqual(self._read(json.dumps([
+            self._row("open", "2026-10-10T18:12:32Z"),
+            self._row("closed", "2026-10-10T18:12:32Z")])), {},
+            "the store's row order must not decide it")
+
+    def test_another_keys_records_are_ignored(self):
+        self.assertEqual(self._read(json.dumps([
+            self._row("closed", "2026-10-10T18:12:32Z", sid8="deadbeef")])), {})
+
+    def test_a_non_park_key_for_the_same_session_is_ignored(self):
+        """The `park:` prefix branch. A `stuck:<sid8>` row names the same session
+        but is a different contract on a different key space — `test_another_keys_
+        records_are_ignored` only exercises the `sid8 not in sids` skip, since its
+        key still carries the `park:` prefix."""
+        self.assertEqual(self._read(json.dumps([
+            {"dedup_key": f"stuck:{self.SID8}", "state": "closed",
+             "created_at": "2026-10-10T18:12:32Z", "item_id": "item-stuck",
+             "answered_at": "2026-10-10T18:13:00Z"}])), {})
+
+    def test_a_failed_read_is_none_never_empty(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            self.assertIsNone(watch.answered_park_keys([self.SID8]))
+
+    def test_a_non_list_body_is_none_not_an_exception(self):
+        """A 200 carrying an error object must not read as an empty page — the
+        false empty would re-post for every parked worker at once."""
+        self.assertIsNone(self._read('{"error": "unknown agent"}'))
+
+    def test_a_non_dict_element_is_skipped_not_raised(self):
+        """⚠️ The strictness must reach one level BELOW the body. A list carrying
+        `[null]` or `["error"]` would raise `AttributeError` out of the poll, and
+        the poll's handler abandons the REST of that poll — `park_ages` unwritten,
+        the gated-set transition uncommitted — for as long as the element stays in
+        the history window."""
+        out = self._read(json.dumps([
+            None, "error", self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8],
+                         "the good row still resolves; the bad ones are skipped")
+
+    def test_no_sids_does_not_touch_the_store(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("read with nothing to check")):
+            self.assertEqual(watch.answered_park_keys([]), {})
+
+
 class PostRepostArgvTest(unittest.TestCase):
     """The re-post's command line, pinned.
 
@@ -1314,6 +1574,8 @@ class IncidentReplayTest(unittest.TestCase):
                                    lambda *a, **kw: parked), \
                  mock.patch.object(watch, "open_store_items",
                                    lambda *a, **kw: seq_items.pop(0)), \
+                 mock.patch.object(watch, "answered_park_keys",
+                                   lambda *a, **kw: {}), \
                  mock.patch.object(watch, "post_repost",
                                    lambda sid8, full, label, **kw: (
                                        posted.append((sid8, full)) or True)), \
