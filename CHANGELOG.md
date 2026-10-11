@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.129.2
 
 - test: **prove the budget ratchet's failure paths, not just its green one.** `scripts/check-budget.py` is a tighten-or-fail ratchet, and its baseline is seeded from this repository's own tree — so `make precommit` passes by construction on any revision of it, and a script that did nothing at all would pass identically. `scripts/tests/test_check_budget.py` covers the three failure modes the design turns on (a baselined body above its recorded max, below it, and a body over budget that is absent from the baseline), plus the strict `*-tick.md` cap at and over the line, the missing-baseline fail-closed path, a baselined file that vanished, and the property the ratchet exists for: `--tighten` lowers only under-max entries and **does not rescue a growth**.
 
