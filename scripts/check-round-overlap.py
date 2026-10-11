@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The round-overlap rule has exactly one home, and it is a step file read every tick.
+"""The round-overlap rule has exactly one home, and a router dispatches it every tick.
 
 `commands/steps/manager-readings.md` states what a tick does when the previous round is
 still in flight, which round owns each of the round's three writes, and the fate of a
@@ -9,21 +9,24 @@ fails silently on its own:
 1. **Present at all.** A deleted rule satisfies the other two vacuously — zero copies is
    still "exactly one home" under a naive count — so the marker must be *found*, not
    merely left uncounted.
-2. **Single home.** A second copy is the counter a `grep` cannot tell from the real one,
-   which is the repo's own stated law (`docs/fleet-surface.md` § Spawn a worker, *"a
-   restated copy is a second counter"*).
-3. **Every-tick reach.** A per-round rule placed in the arm is read **once** and never
-   again; one placed in a `When`-gated step file is skipped on every tick whose `When`
-   does not hold. Either way the rule stops governing the rounds it exists for, and no
-   other check notices — every file is individually well-formed and every size is within
-   budget. This is the same class `check-step-when.py` guards from the other side: that
-   one asserts a step file's `When` agrees with its router row, this one asserts the
-   rule's own home is a file an every-tick `When` actually reaches.
+2. **One copy, not one file.** The repo's own law is that *"a restated copy is a second
+   counter"* (`docs/fleet-surface.md` § Spawn a worker). Counting files is not enough:
+   the marker pasted twice inside the same file is two homes wearing one filename.
+3. **Dispatched every tick — read from the router, never from the step file.** This is the
+   one that reads backwards. A step file's own `When:` line is a *restatement*; the
+   normative trigger is the router row that names it (`check-step-when.py` exists to keep
+   the two in agreement). So asserting on the step file alone proves only that the file
+   describes itself — **delete the row naming it from every router and the assertion still
+   passes while nothing reads the rule at all.** The reach must therefore be read from the
+   router table: some row must name this file *and* carry an every-tick `When`. Measured
+   2026-10-11 by mutation — removing the `manager-readings.md` row from both router tables
+   left the step-file-only form green at exit 0.
 
-**What this proves, and what it does not.** It proves the rule is present, single-homed,
-and reachable on every tick. It does **not** prove the ownership answers are right: a rule
-that is present, single-homed and every-tick, and wrong in all three, passes here. A green
-run reads as more than it is, so the limit is stated rather than implied.
+**What this proves, and what it does not.** It proves the rule is present, single-copy,
+and named by a router row whose trigger is every-tick. It does **not** prove the ownership
+answers are right — a rule that is present, single-copy and every-tick, and wrong in all
+three, passes here. A green run reads as more than it is, so the limit is stated rather
+than implied.
 
 The marker is matched as a plain substring rather than as a regex or a heading, so it
 survives a reflow of the surrounding prose. It is deliberately a phrase from the rule's
@@ -39,43 +42,83 @@ COMMANDS = REPO / "commands"
 STEPS = COMMANDS / "steps"
 MARKER = "is ABSORBED, never run"
 EVERY_TICK = "every tick"
+HEADER = ("#", "Step", "When", "File")
 
 
-def when_line(path: Path) -> str | None:
-    """The step file's own trigger, or None when it carries no `When:` line."""
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("When:"):
-            return line[len("When:"):].strip()
-    return None
+def cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
-def carriers() -> list[Path]:
-    """Every markdown file under commands/ carrying the marker, arm and step files alike."""
-    return sorted(
-        p for p in COMMANDS.rglob("*.md") if MARKER in p.read_text(encoding="utf-8")
-    )
+def is_separator(line: str) -> bool:
+    return set(line.strip().strip("|").replace(" ", "")) <= set("-:|")
+
+
+def router_rows() -> list[tuple[Path, str, list[str]]]:
+    """-> [(router, when_cell, [step file basenames])] over every router under commands/.
+
+    Discovered by header, never hard-coded, so a second router is covered without
+    registration — the same shape `check-step-when.py` uses. `File` cells are matched on
+    basename, so a `${CLAUDE_PLUGIN_ROOT}/…` absolute path works, and a cell naming more
+    than one step file (separated by `·`) is split rather than truncated.
+    """
+    rows: list[tuple[Path, str, list[str]]] = []
+    for path in sorted(COMMANDS.glob("*.md")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        i = 0
+        while i < len(lines):
+            if cells(lines[i]) == list(HEADER):
+                j = i + 1
+                if j < len(lines) and is_separator(lines[j]):
+                    j += 1
+                while j < len(lines) and lines[j].strip().startswith("|"):
+                    c = cells(lines[j])
+                    if len(c) >= 4:
+                        named = []
+                        for part in c[3].split("·"):
+                            base = part.strip().strip("`").strip()
+                            if not base or base.startswith("*"):
+                                continue  # an inline row names no step file
+                            named.append(Path(base).name)
+                        if named:
+                            rows.append((path, c[2], named))
+                    j += 1
+                i = j
+            else:
+                i += 1
+    return rows
+
+
+def marker_occurrences() -> list[tuple[Path, int]]:
+    """-> [(file, count)] for every file carrying the marker, files with none omitted."""
+    found = []
+    for p in sorted(COMMANDS.rglob("*.md")):
+        n = p.read_text(encoding="utf-8").count(MARKER)
+        if n:
+            found.append((p, n))
+    return found
 
 
 def main() -> int:
-    found = carriers()
     failures: list[str] = []
+    found = marker_occurrences()
+    total = sum(n for _, n in found)
 
-    if not found:
+    if total == 0:
         failures.append(
             f"no file under {COMMANDS.relative_to(REPO)}/ carries the rule marker "
             f"{MARKER!r}.\n"
             f"      The rule is missing, not merely misplaced — and a missing rule "
             f"passes a naive single-home count."
         )
-    elif len(found) > 1:
-        names = ", ".join(str(p.relative_to(REPO)) for p in found)
+    elif total > 1:
+        where = ", ".join(f"{p.relative_to(REPO)} ×{n}" for p, n in found)
         failures.append(
-            f"{len(found)} files carry the rule marker {MARKER!r}: {names}.\n"
-            f"      One home only — a second copy is the counter a grep cannot tell "
-            f"from the real one."
+            f"the rule marker {MARKER!r} appears {total} times: {where}.\n"
+            f"      One copy only — a second copy is the counter a grep cannot tell "
+            f"from the real one, and one file carrying it twice is still two homes."
         )
     else:
-        home = found[0]
+        home, _ = found[0]
         rel = home.relative_to(REPO)
         if home.parent != STEPS:
             failures.append(
@@ -85,14 +128,29 @@ def main() -> int:
                 f"there stops governing after the first tick."
             )
         else:
-            when = when_line(home)
-            if when is None:
-                failures.append(f"{rel}: carries no `When:` line")
-            elif not when.startswith(EVERY_TICK):
+            base = home.name
+            reaching = [
+                (router, when)
+                for router, when, named in router_rows()
+                if base in named and when.startswith(EVERY_TICK)
+            ]
+            named_by = [
+                (router, when)
+                for router, when, named in router_rows()
+                if base in named
+            ]
+            if not named_by:
                 failures.append(
-                    f"{rel}: `When:` is {when!r}, which is not an every-tick trigger.\n"
-                    f"      A gated step file is skipped on every tick whose When does "
-                    f"not hold, so the rule would not be read on the rounds it governs."
+                    f"{rel}: no router row names this file.\n"
+                    f"      The file's own `When:` describes itself; the router is what "
+                    f"actually reads it. A step file nothing dispatches is dead text."
+                )
+            elif not reaching:
+                shown = "; ".join(f"{r.name}: {w!r}" for r, w in named_by)
+                failures.append(
+                    f"{rel}: a router names it, but no row's `When` is every-tick — {shown}.\n"
+                    f"      A gated row is skipped on every tick whose `When` does not "
+                    f"hold, so the rule would not be read on the rounds it governs."
                 )
 
     if failures:
@@ -101,8 +159,11 @@ def main() -> int:
             print(f"  - {f}", file=sys.stderr)
         return 1
 
-    home = found[0].relative_to(REPO)
-    print(f"round-overlap ok: {MARKER!r} has one home, {home}, reached every tick")
+    home = found[0][0].relative_to(REPO)
+    print(
+        f"round-overlap ok: {MARKER!r} appears once, in {home}, "
+        f"named by a router row that fires every tick"
+    )
     return 0
 
 
