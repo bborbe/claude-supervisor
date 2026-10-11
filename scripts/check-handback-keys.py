@@ -10,7 +10,14 @@ trigger and the data it tests do.
 It is not hypothetical. The hand-back was introduced with the class `held` present in the
 digest render and absent from the key set, and `held` is the class the render treats as
 winning over every other — so the one bucket a reader most needed was the one no cell
-could see. This asserts the whole set instead of the one key that happened to be caught.
+could see.
+
+**Scope, stated precisely.** This asserts the keys a router `When` cell *tests* — today
+`orphan`, `collision`, `unmanaged`, `blocked`, `context70`. It is deliberately not a check
+of the contract's full required set: that set lives in `docs/handback-contract.md` and
+covers buckets no cell tests, so `held`'s absence would still pass here. Widening it means
+reading the required set from somewhere this script does not own; until then it does not
+claim to.
 
 Reads both artifacts directly: no registry, no build, no network.
 """
@@ -36,12 +43,21 @@ def keys_tested(text: str) -> set[str]:
 
 
 def keys_emitted(text: str) -> set[str]:
-    """Keys in the `<output_format>` hand-back block, which is where the required set lives."""
+    """Keys in the fenced block inside `<output_format>`'s hand-back section.
+
+    Scoped to the fence on purpose. Scanning the whole section accepts any `word=` in the
+    surrounding prose — `key=value` alone yields a spurious `key`, and a synthetic case
+    with `blocked=` only in prose would satisfy the guard while the block lacked it. A
+    guard that passes on prose is the false-green this file exists to avoid.
+    """
     _, sep, rest = text.partition("**Hand-back**")
     if not sep:
         return set()
     body = rest.partition("</output_format>")[0]
-    return set(re.findall(r"\b([a-z0-9_]+)=", body))
+    fenced = re.search(r"```[a-z]*\n(.*?)```", body, re.DOTALL)
+    if not fenced:
+        return set()
+    return set(re.findall(r"\b([a-z0-9_]+)=", fenced.group(1)))
 
 
 def main() -> int:
