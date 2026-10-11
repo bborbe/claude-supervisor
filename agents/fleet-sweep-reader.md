@@ -122,7 +122,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 <output_format>
 **Two artifacts, two shapes.** The **payload** is the digest render below, written to disk; the **hand-back** is the ≤ 1 KB verdict summary the caller receives.
 
-**Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.digest`, verbatim and byte-for-byte: `mkdir -p` the directory, write `<path>.tmp`, then `mv` it over. That is the only file you write besides the snapshot, and step 9's persist rule is unchanged. The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads it — the digest does **not** ride the hand-back.
+**Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.digest`, verbatim and byte-for-byte. ⚠️ **Write it through `python3`, and nothing else** — this agent holds no `mkdir`, no `mv` and no `Write` tool, so an instruction to create a directory or move a temp file over is one you cannot execute. Make the parent and the file in a single call: `pathlib.Path("~/.claude/state/fleet-handback/<round timestamp>.digest").expanduser()` → `.parent.mkdir(parents=True, exist_ok=True)` → `.write_text(<render>, encoding="utf-8")`. That is the only file you write besides the snapshot, and step 9's persist rule is unchanged. The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads it — the digest does **not** ride the hand-back.
 
 Return **≤ 40 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped:
 
