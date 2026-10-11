@@ -111,7 +111,10 @@ def main(argv: list[str]) -> int:
             files[rel] = n
         for rel in dropped:
             files.pop(rel, None)
-        BASELINE.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        # ensure_ascii=True: reproduce the baseline file's own escaping so a tighten moves
+        # only the entries that changed. Re-encoding non-ASCII rewrites every escaped
+        # character in the `_note`, burying the one changed number under a whole-file diff.
+        BASELINE.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
         for rel, n in sorted(lowered.items()):
             print(f"budget tightened: {rel} -> {n}")
         for rel in sorted(dropped):

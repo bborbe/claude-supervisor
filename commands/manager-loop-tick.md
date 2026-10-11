@@ -40,24 +40,26 @@ argument-hint: "[goal|topic] [--interval <N>m] (subject detected when omitted; i
 
 This is the **tick**, not the arm. The wakeup prompt names THIS command; the arm (`/supervisor:manager-loop`) is invoked **once** to arm the loop and is **never** re-invoked from a wakeup.
 
+## Router — read a step file only when its When holds
+
 | # | Step | When | File |
 |---|---|---|---|
 | 0 | Correct the `noop` field and re-arm | end of every tick | *inline — see the tail step* |
-| 1 | Resolve the subject and the tracked set | manager start; the declaration read re-runs every tick | `steps/resolve.md` |
-| 2 | Take the round's readings | every tick, **before** the sweep dispatch | `steps/readings.md` |
-| 3 | Sweep | every tick | `steps/sweep.md` |
-| 4 | Classify the rows | every tick, after the sweep | `steps/classify.md` |
-| 5 | Drive | every tick, after the table renders | `steps/drive.md` |
-| 6 | Spawn on the handover | the drive leg returned `To open` / `To resume` rows | `steps/spawn.md` |
-| 7 | Repair | the `Audit` block carried `repairable` rows | `steps/repair.md` |
-| 8 | Gate relay | the round has `waiting-on-human` or `waiting-approval` rows | `steps/gates.md` |
-| 9 | Under-target offer | live workers below target **and** no ready row **and** the ask not declined | `steps/under-target.md` |
-| 11 | Fleet-manager handoff | a fleet-loop session is on `ListAgents` and the sets changed | `steps/handoff.md` |
-| 12 | Tail — `noop` and re-arm | end of every tick | `steps/tail.md` |
-| 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `steps/self-improvement.md` |
-| 14 | Unowned check | before declaring any member task unowned | `steps/unowned.md` |
+| 1 | Resolve the subject and the tracked set | manager start; the declaration read re-runs every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-resolve.md` |
+| 2 | Take the round's readings | every tick, **before** the sweep dispatch | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-readings.md` |
+| 3 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-sweep.md` |
+| 4 | Classify the rows | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-classify.md` |
+| 5 | Drive | every tick, after the table renders | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-drive.md` |
+| 6 | Spawn on the handover | the drive leg returned `To open` / `To resume` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-spawn.md` |
+| 7 | Repair | the `Audit` block carried `repairable` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-repair.md` |
+| 8 | Gate relay | the round has `waiting-on-human` or `waiting-approval` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-gates.md` |
+| 9 | Under-target offer | live workers below target **and** no ready row **and** the ask not declined | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-under-target.md` |
+| 11 | Fleet-manager handoff | a fleet-loop session is on `ListAgents` and the sets changed | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-handoff.md` |
+| 12 | Tail — `noop` and re-arm | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-tail.md` |
+| 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-self-improvement.md` |
+| 14 | Unowned check | before declaring any member task unowned | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-unowned.md` |
 
-⚠️ **Opening a worker is bound by `docs/fleet-surface.md` § Spawn a worker item 6** — the mode is passed in both directions (`mode: headless` → `interactive=false`, `mode: interactive` → `interactive=true`). This file grants the tool but does not open; the binding and the call live in `steps/spawn.md`.
+⚠️ **Opening a worker is bound by `docs/fleet-surface.md` § Spawn a worker item 6** — the mode is passed in both directions (`mode: headless` → `interactive=false`, `mode: interactive` → `interactive=true`). This file grants the tool but does not open; the binding and the call live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-spawn.md`.
 
 **Read a step file only when its `When` holds**, and if a step's text is not in context — after a compaction, say — **re-read it** rather than assuming it survived.
 

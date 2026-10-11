@@ -58,23 +58,23 @@ One manager per topic: owns ONE topic's declared goal set (e.g. the *Sentry* top
 | # | Step | When | File |
 |---|---|---|---|
 | 0 | Arm the tick | manager start, before the first sweep | *inline — the arm step below* |
-| 1 | Resolve the subject and the tracked set | manager start; the declaration read re-runs every tick | `steps/resolve.md` |
-| 2 | Take the round's readings | every tick, **before** the sweep dispatch | `steps/readings.md` |
-| 3 | Sweep | every tick | `steps/sweep.md` |
-| 4 | Classify the rows | every tick, after the sweep | `steps/classify.md` |
-| 5 | Drive | every tick, after the table renders | `steps/drive.md` |
-| 6 | Spawn on the handover | the drive leg returned `To open` / `To resume` rows | `steps/spawn.md` |
-| 7 | Repair | the `Audit` block carried `repairable` rows | `steps/repair.md` |
-| 8 | Gate relay | the round has `waiting-on-human` or `waiting-approval` rows | `steps/gates.md` |
-| 9 | Under-target offer | live workers below target **and** no ready row **and** the ask not declined | `steps/under-target.md` |
-| 11 | Fleet-manager handoff | a fleet-loop session is on `ListAgents` and the sets changed | `steps/handoff.md` |
-| 12 | Tail — `noop` and re-arm | end of every tick | `steps/tail.md` |
-| 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `steps/self-improvement.md` |
-| 14 | Unowned check | before declaring any member task unowned | `steps/unowned.md` |
+| 1 | Resolve the subject and the tracked set | manager start; the declaration read re-runs every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-resolve.md` |
+| 2 | Take the round's readings | every tick, **before** the sweep dispatch | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-readings.md` |
+| 3 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-sweep.md` |
+| 4 | Classify the rows | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-classify.md` |
+| 5 | Drive | every tick, after the table renders | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-drive.md` |
+| 6 | Spawn on the handover | the drive leg returned `To open` / `To resume` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-spawn.md` |
+| 7 | Repair | the `Audit` block carried `repairable` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-repair.md` |
+| 8 | Gate relay | the round has `waiting-on-human` or `waiting-approval` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-gates.md` |
+| 9 | Under-target offer | live workers below target **and** no ready row **and** the ask not declined | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-under-target.md` |
+| 11 | Fleet-manager handoff | a fleet-loop session is on `ListAgents` and the sets changed | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-handoff.md` |
+| 12 | Tail — `noop` and re-arm | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-tail.md` |
+| 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-self-improvement.md` |
+| 14 | Unowned check | before declaring any member task unowned | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-unowned.md` |
 
 Read a step file **only when its `When` holds** — and if a step's text is not in context (after a compaction, say), re-read it rather than assuming it survived. The rules below are **inline because they must hold whether or not a step file was read**: a rule that lives only in a step file is skipped whenever that file is not read.
 
-⚠️ **Opening a worker is bound by `docs/fleet-surface.md` § Spawn a worker item 6** — the mode is passed in both directions (`mode: headless` → `interactive=false`, `mode: interactive` → `interactive=true`). This file grants the tool but does not open; the binding and the call live in `steps/spawn.md`.
+⚠️ **Opening a worker is bound by `docs/fleet-surface.md` § Spawn a worker item 6** — the mode is passed in both directions (`mode: headless` → `interactive=false`, `mode: interactive` → `interactive=true`). This file grants the tool but does not open; the binding and the call live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-spawn.md`.
 
 ## Interval — the tick and its floor
 
@@ -182,20 +182,3 @@ Read and write it only through the **`supervisor:open-items` skill** — `/super
    ⚠️ **A headless worker's prompts park only with the session that spawned it** — spawn your own workers and answer them yourself; a fleet manager cannot see them. Overlap ownership is unresolved.
 
 **Path-B relay rules.** Legitimate only when (a) the operator answered in this session, current exchange; (b) the relay is verbatim with the `Operator answer, relayed verbatim from the manager session (not a peer inference):` prefix; (c) never on a peer's claim of an operator decision. The mechanics live in the **`gate-relay-send` agent** — dispatch it **once per round** carrying every answer from the batch (per pane: pane id, worker label, the operator's answer verbatim, provenance), never once per pane; it re-reads the pane immediately before typing and reports `not sent` with no pane mutation — **naming which cause, because the two are opposite readings**: `gate cleared` (the worker resolved it meanwhile) or **`gate not cleared`** (the composer still holds unsubmitted text, so the operator's own Enter in that pane is what releases it — hand over the pane and never re-dispatch the send leg). ⚠️ **Never read `not sent` as `gate cleared`**: the pair diverges exactly where a worker stays parked, and collapsing them is the silent suppression this relay exists to remove. **Never relay** a production-touching or irreversible approval, nor a selection modal (match `Enter to select` at the **start of a line** — the real render is `Enter to select · ↑/↓ to navigate · Esc to cancel`, so the anchor is the line's opening, never the whole string and never a bare containment match), nor a multi-question wizard: record it and batch the one-line output of `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py <pane-id>` **verb-free**, exactly as `manager-status` / `fleet-status` render their `jump:` rows. **Classify before dispatching — this check runs here, never inside the agent.** A relay its own contract forbids must not be dispatched at all: `gate-relay-send` is dispatched *after* this decision, so a refusal it performs still spends the subagent the refusal was meant to save. A **bare affirmative** (`y` / `yes` / `ok`) against a `👤 You:` line this session emitted is **not an answer** when that line's action is class D or E — and the classification is of the **action the line names, not the line's verb**, so `you run: … and to proceed to the deploy step` is class D however incidental the verb looks. Say so once (*"that is not an answer; the pane needs your own keystroke"*), hand over the one-line `jump-link.py <pane-id>` output verb-free, dispatch nothing, and never report a relay "in flight". It is a link the operator follows, not a command anyone types here, so there is no actor to label: `/supervisor:jump` is the executor and the managers' commands emit links without running it. The gate itself is released only by the operator's **own keystroke in that pane**, never by anything typed here. **One action per line** — never bundle a second action (e.g. `/reload-plugins`) onto the handover, or the operator's reply is ambiguous between them. A multi-question wizard → `/supervisor:jump <pane-id>`, never relayed. A relay the worker refuses → do not retry; hand over `/supervisor:jump <pane-id>`. Emit `ACTION NEEDED` as a numbered pick list, option 1 `(recommended)`. **Verify submission** from the agent's own one-line result: `delivered` requires the composer cleared *and* the worker visibly working — anything else is reported as it came back, never rounded up.
-
-## Steps
-
-- **Arm the tick** — *inline — the arm step below* · When: manager start, before the first sweep
-- **Resolve the subject and the tracked set** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/resolve.md` · When: manager start; the declaration read re-runs every tick
-- **Take the round's readings** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` · When: every tick, **before** the sweep dispatch
-- **Sweep** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/sweep.md` · When: every tick
-- **Classify the rows** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/classify.md` · When: every tick, after the sweep
-- **Drive** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` · When: every tick, after the table renders
-- **Spawn on the handover** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/spawn.md` · When: the drive leg returned `To open` / `To resume` rows
-- **Repair** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/repair.md` · When: the `Audit` block carried `repairable` rows
-- **Gate relay** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/gates.md` · When: the round has `waiting-on-human` or `waiting-approval` rows
-- **Under-target offer** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/under-target.md` · When: live workers below target **and** no ready row **and** the ask not declined
-- **Fleet-manager handoff** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/handoff.md` · When: a fleet-loop session is on `ListAgents` and the sets changed
-- **Tail — `noop` and re-arm** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/tail.md` · When: end of every tick
-- **Self-improvement** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/self-improvement.md` · When: before the session ends, or a sweep exposes a gap
-- **Unowned check** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/unowned.md` · When: before declaring any member task unowned

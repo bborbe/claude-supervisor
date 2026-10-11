@@ -54,7 +54,7 @@ WRITER_GRANTS = ("Bash(awk:*)", "Bash(vault-cli:*)")
 #: to sit in. Keyed by the table's own name, so a row for a command with no relocation is
 #: unaffected.
 RELOCATED = {
-    "manager-loop": "commands/steps/resolve.md",
+    "manager-loop": "commands/steps/manager-resolve.md",
 }
 PARAGRAPH_MARKER = "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.**"
 STEP_SLOT = re.compile(r"before the (sweep|gate)\b")

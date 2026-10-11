@@ -33,7 +33,7 @@ GRANT_CARRIERS = [
 ]
 
 COMMANDS = [
-    "commands/steps/resolve.md",
+    "commands/steps/manager-resolve.md",
     "commands/manager-drive.md",
     "commands/manager-status.md",
     "commands/manager-verify.md",
@@ -46,7 +46,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         (self.root / "docs").mkdir()
-        # `parents=True`: one of the carriers is now a step file (`commands/steps/resolve.md`),
+        # `parents=True`: one of the carriers is now a step file (`commands/steps/manager-resolve.md`),
         # since the loop's subject resolution moved there when it became a router. The fixture
         # mirrors the real layout, so it has to create the nested directory too.
         (self.root / "commands" / "steps").mkdir(parents=True, exist_ok=True)
@@ -215,7 +215,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
 
     def test_writer_paragraph_losing_its_home_fails(self):
         # Dropping the pointer from *both* writers would otherwise pass every other assertion.
-        for rel in ("commands/steps/resolve.md", "commands/manager-drive.md"):
+        for rel in ("commands/steps/manager-resolve.md", "commands/manager-drive.md"):
             self.mutate(
                 rel,
                 "run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *Reconcile the subject's status*",
