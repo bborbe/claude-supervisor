@@ -157,19 +157,32 @@ def read_live(registry_dir=None, heartbeat_dir=None):
     return records if isinstance(records, list) else None
 
 
-def manager_for(goals, live_by_name):
+def _manager_named(subject, live_by_name):
+    """The live manager session whose registry name matches `subject`, or None."""
+    title = subject.strip().strip("[]").strip()
+    for candidate in (title, title + " Manager"):
+        if live_by_name.get(candidate.lower()):
+            return candidate
+    return None
+
+
+def manager_for(goals, live_by_name, managed_by=None):
     """The live manager session for a row, or None.
 
-    Convention, not invention: a session whose registry name matches a goal title (a
+    The order is the one `docs/fleet-surface.md` § *Which manager owns a subject* states,
+    and this function reads tier 1: a row's own `managed_by` subject is tried before its
+    `goals:`. The field is hand-authored — nothing writes it automatically — so an absent
+    or unresolvable value is not an error; it falls through to `goals:`.
+
+    Convention, not invention: a session whose registry name matches a subject title (a
     `<X> Manager` suffix allowed) is that subject's manager — the same rule
     `fleet-board.py` uses to place a session under its parent. A row whose goal has no
     live manager reads `unmanaged`, which is a fact about the fleet, not a failure.
     """
-    for goal in goals:
-        title = goal.strip().strip("[]").strip()
-        for candidate in (title, title + " Manager"):
-            if live_by_name.get(candidate.lower()):
-                return candidate
+    for subject in ([managed_by] if managed_by else []) + list(goals):
+        found = _manager_named(subject, live_by_name)
+        if found:
+            return found
     return None
 
 
@@ -211,7 +224,8 @@ def collect(tasks_dir, live, now):
                 "name": entry[:-3],
                 "approved_at": approved.isoformat(),
                 "age_seconds": (now - approved).total_seconds(),
-                "manager": manager_for(list_field(block, "goals"), live_by_name),
+                "manager": manager_for(list_field(block, "goals"), live_by_name,
+                                       field(block, "managed_by")),
             }
         )
     rows.sort(key=lambda r: r["age_seconds"], reverse=True)
