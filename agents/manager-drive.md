@@ -300,6 +300,8 @@ Rank the round's **actionable** rows — the ones this sweep handed the operator
 
 One compact report — see `<output_format>`. You do not render the status table; the caller owns the frame, and the ordering it needs is the ordering of your lines.
 
+⚠️ **The report obeys the hand-back contract — `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md`.** Verdict lines and counts in `key=value` form, **≤ 1 KB**, and non-empty: the **drive verdicts** are this leg's required set and must be present. The `Audit` block does **not** ride the report — the caller persists it to the verdicts cache, and the report carries the verdict about it. Read the contract there; it is not restated here.
+
 </process>
 
 <error_handling>

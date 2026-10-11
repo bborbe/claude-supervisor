@@ -45,8 +45,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # Commands that resolve a subject AND can run the recording block.
+#
+# ⚠️ `commands/manager-loop.md` was replaced by `commands/steps/manager-resolve.md` on 2026-10-11,
+# when the loop was restructured into a router with per-round step files. The recording step
+# is a *resolve-time* step, so it moved with the rest of subject resolution — and the check
+# follows the rule rather than the file it used to sit in. The block must stay INTACT in its
+# new home: `step_block()` reads from the marker to the next `## ` heading, so splitting the
+# marker from the two lines beneath it breaks the comparison even though no text was lost.
+# The block is therefore the tail of `resolve.md`, where it runs to EOF.
 COMMANDS = [
-    "commands/manager-loop.md",
+    "commands/steps/manager-resolve.md",
     "commands/manager-status.md",
     "commands/manager-drive.md",
 ]
