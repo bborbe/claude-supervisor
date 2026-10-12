@@ -133,10 +133,18 @@ class SessionLiveness(unittest.TestCase):
         with open(os.path.join(self.ledger, "%s.json" % session_id), "w", encoding="utf-8") as fh:
             json.dump(rec, fh)
 
-    def check(self, session_id, endpoint):
+    def check(self, session_id, endpoint, directory=None):
+        # ⚠️ **`--dir` is not optional here since the ABSENT-licence guard (2026-10-12).** The
+        # verdict path now reads the identity registry on the one path that would otherwise
+        # license ABSENT, so a case omitting `--dir` would read the MACHINE's real registry —
+        # the same isolation rule `setUp` states for the other three stores, and the way a real
+        # session on this host could flip a fixture's verdict. Defaults to the planted registry,
+        # exactly as `listing` / `json_listing` / `coverage` already do.
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = self.m.main(["--check", session_id, "--endpoint", endpoint])
+            rc = self.m.main(
+                ["--check", session_id, "--endpoint", endpoint, "--dir", directory or self.registry]
+            )
         return rc, out.getvalue() + err.getvalue()
 
     def listing(self, endpoint, directory=None):
@@ -594,6 +602,84 @@ class SessionLiveness(unittest.TestCase):
             rc, line = self.coverage(fx.url, directory=os.path.join(self.tmp.name, "nope"))
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", line)
+
+    # ---- the ABSENT licence: the registry's coverage precondition (2026-10-12) -------------
+    #
+    # The 2026-10-10 incident: `--check` returned a decisive ABSENT (exit 1) for a session that
+    # was demonstrably live on three independent signals. The verdict path licensed ABSENT from
+    # a readable endpoint alone, while the `--list` path already paid the coverage precondition
+    # (`unstamped()`). These cases pin the licence and — as importantly — the two things it must
+    # NOT swallow: the genuinely-dead id, and the endpoint's own positive `live: false`.
+
+    def test_a_registry_live_id_with_no_endpoint_row_is_unknown_not_absent(self):
+        # SC1. The exact shape: the registry holds the id as non-dead while the endpoint holds NO
+        # row for it. "The endpoint has never heard of it" is a fact about the endpoint's
+        # COVERAGE, not about the session, and ABSENT is the one verdict that authorises a resume.
+        # Pre-fix this answered ABSENT — the message the incident recorded verbatim.
+        sid = "bf00c554-b829-44eb-813b-437fe2f45322"
+        self.plant(sid)
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("coverage of live sessions is", out)
+
+    def test_an_unmatched_id_keeps_its_absent_even_when_the_registry_is_populated(self):
+        # SC2's control, and the half a careless fix loses: a POPULATED registry with no match
+        # for the argument is still the genuine ABSENT. A guard that answered UNKNOWN for every
+        # unmatched id would erase the death verdict the whole instrument exists to give — the
+        # failure mode in the opposite direction from the incident.
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.check("does-not-exist-xyz", fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("no session id matches", out)
+
+    def test_an_endpoint_row_reporting_not_live_is_absent_even_when_the_registry_holds_it(self):
+        # SC2. Here the endpoint POSITIVELY answered about this id — `live: false` is a dead
+        # session the store can see and is reporting on, not a rollout gap. The guard is scoped
+        # to the no-row case, so this keeps its ABSENT even with a registry record present; a
+        # fix that widened to every ABSENT would lose the death verdict.
+        sid = "57a1e111-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with FixtureEndpoint([row(sid, live=False)]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, ABSENT)
+
+    def test_an_unreadable_registry_is_unknown_not_absent(self):
+        # "Could not measure the precondition" is not "the precondition holds". `read_registry`
+        # returns `None` for a missing directory — distinct from `{}` — and folding it into
+        # ABSENT re-opens the hole on a host where the registry is unreadable rather than merely
+        # incomplete. Same rule `coverage()` carries at exit 2.
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.check(
+                "does-not-exist-xyz", fx.url, directory=os.path.join(self.tmp.name, "nope")
+            )
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("identity registry could not be read", out)
+
+    def test_a_prefix_of_a_registry_live_id_is_unknown_not_absent(self):
+        # The argument is a prefix as often as a full id (`[ref]` is 6 chars, `sid8` is 8), and
+        # `read_registry` is keyed by the FULL id only — so the guard resolves a prefix the same
+        # way `_check` resolves one against the endpoint. Without that, a prefixed probe keeps
+        # the false ABSENT the guard exists to remove.
+        sid = "bf00c554-b829-44eb-813b-437fe2f45322"
+        self.plant(sid)
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.check("bf00c554", fx.url)
+        self.assertEqual(rc, UNKNOWN)
+
+    def test_coverage_and_check_agree_on_the_incomplete_coverage_fixture(self):
+        # SC3. One predicate, two readers: `--coverage` reports `missing >= 1` in exactly the
+        # state `--check` refuses to call ABSENT, so the measurement and the verdict rest on one
+        # rule and cannot disagree about the same fixture.
+        sid = "bf00c554-b829-44eb-813b-437fe2f45322"
+        self.plant(sid)
+        with FixtureEndpoint([]) as fx:
+            cov_rc, line = self.coverage(fx.url)
+            chk_rc, _ = self.check(sid, fx.url)
+        self.assertEqual(cov_rc, ABSENT)
+        self.assertIn("missing=1", line)
+        self.assertEqual(chk_rc, UNKNOWN)
 
 
 if __name__ == "__main__":
