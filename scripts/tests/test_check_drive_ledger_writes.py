@@ -42,11 +42,20 @@ class Base(unittest.TestCase):
         (self.root / "scripts").mkdir()
         shutil.copyfile(SCRIPT, self.root / "scripts" / SCRIPT.name)
 
-    def stage(self, drive=GOOD, extra=None):
-        """A repo layout with `agents/fleet-drive.md` and any sibling files."""
+    def stage(self, drive=GOOD, extra=None, script=True):
+        """A repo layout with `agents/fleet-drive.md` and any sibling files.
+
+        `script=True` writes `scripts/drive-ledger.py`, because clause (d) asserts the
+        callee exists -- a tree that names the script without shipping it is exactly the
+        state the PR review caught this gate passing on.
+        """
         agents = self.root / "agents"
         agents.mkdir(exist_ok=True)
         (agents / "fleet-drive.md").write_text(drive, encoding="utf-8")
+        if script:
+            path = self.root / "scripts" / "drive-ledger.py"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# stub for the gate's existence check\n", encoding="utf-8")
         for rel, body in (extra or {}).items():
             path = self.root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +180,76 @@ class TestClauseCNoInlineInterpreter(Base):
         # ⚠️ `\b` must never appear: git's ERE has no `\b`, and Python's DOES -- so a
         # pattern written for git grep and pasted here would behave differently.
         self.assertNotIn(r"\b", module.INLINE_INTERPRETER.pattern)
+
+
+def load_module():
+    """The check as an importable module, so its patterns can be asserted directly."""
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    spec = spec_from_file_location("cdlw", SCRIPT)
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestClauseDTheCalleeExists(Base):
+    def test_naming_a_script_that_is_not_there_fails(self):
+        """The PR review's finding: clause (a) counts a NAME, which a broken call also has.
+
+        Measured on the branch that raised it — (a) was green while the drive leg would
+        have died at runtime with `No such file`, because the gate checked the mention
+        and never the file.
+        """
+        self.stage(script=False)
+        proc = self.run_check()
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("does not exist", proc.stderr)
+        self.assertIn("scripts/drive-ledger.py", proc.stderr)
+
+    def test_a_present_script_passes(self):
+        self.stage()
+        self.assertEqual(self.run_check().returncode, 0)
+
+
+class TestPatternHygiene(Base):
+    def test_no_word_boundary_escape_in_any_pattern(self):
+        """⚠️ `\\b` works in Python `re` and matches NOTHING in git's ERE.
+
+        A pattern correct here and silently broken one file over is a worse neighbour
+        than a longer one that is correct in both — and this file's own docstring warns
+        against `\\b`. Raised by the PR review, which found `WRITE_SIGNAL` using it.
+        """
+        module = load_module()
+        for name in ("INLINE_INTERPRETER", "WRITE_SIGNAL"):
+            with self.subTest(pattern=name):
+                self.assertNotIn(
+                    r"\b",
+                    getattr(module, name).pattern,
+                    "%s must spell its boundaries [^A-Za-z0-9_], not \\b" % name,
+                )
+
+    def test_the_write_signal_still_fires_and_still_excludes_word_internals(self):
+        """Rewriting the pattern must not narrow it — proven both ways."""
+        w = load_module().WRITE_SIGNAL
+        for positive in (
+            "jq '.a' x.json > out.json",
+            "cat x | tee log",
+            "sponge",
+            "json.dump(d, f)",
+            "os.replace(tmp, path)",
+            "shutil.copyfile(a, b)",
+            "handle.write(x)",
+        ):
+            with self.subTest(case=positive):
+                self.assertIsNotNone(w.search(positive), positive)
+        for negative in (
+            "teeth",              # `tee` needs a pipe before it
+            "sponges",            # a word merely containing `sponge`
+            "replaces it",        # `os.replace` is the whole token
+            "writing prose",      # `.write(` is the call, not the verb
+        ):
+            with self.subTest(case=negative):
+                self.assertIsNone(w.search(negative), negative)
 
 
 class TestTheScanCannotSilentlyFindNothing(Base):

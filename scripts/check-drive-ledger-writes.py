@@ -14,7 +14,13 @@ check, not a keep-in-sync sentence"*. The difference here is that the contract h
 call site and the failure mode is a silent data loss, so the check is about the write
 path rather than about keeping copies in step.
 
-Three assertions, all required:
+Four assertions, all required:
+
+  (d) **`scripts/drive-ledger.py` exists on disk.** Added after a PR review caught the
+      gate passing on a branch where the agent named a script that was not there: (a)
+      counts the string in prose, so it is satisfied by a name alone, and the drive leg
+      would have died at runtime with `No such file`. A gate that guards a call must
+      check the callee, not the mention. Measured on that branch: (a) green, (d) red.
 
   (a) `agents/fleet-drive.md` **names the script** at least twice -- a read and a write.
       This is the only assertion that fails on the tree as it stood before the change
@@ -98,8 +104,33 @@ LEDGER = re.compile(r"ledger", re.I)
 #: `<SECTION>` placeholders, so a bare `>` matches the closing angle bracket of an
 #: ordinary placeholder -- measured 2026-10-12, where it flagged step 7 on the `>` in
 #: `"<ts>"`. A redirect is preceded by whitespace; a placeholder's bracket is not.
+def whole(token):
+    """`token` as a whole word, in the POSIX-safe spelling this file uses everywhere.
+
+    ⚠️ Deliberately NOT `\\b`, even though this is Python `re` where `\\b` does work.
+    One spelling in the file means there is no wrong one to copy: a `\\b` pattern lifted
+    from here into a `git grep -E` sweep matches NOTHING and reports a clean tree, which
+    is the trap the module docstring records. A pattern that is correct here and silently
+    broken one file over is a worse neighbour than a slightly longer one that is correct
+    in both. (Raised by the PR review, which found `\\b` here contradicting this file's
+    own warning. `INLINE_INTERPRETER` above already had the right spelling; this brings
+    the two into line.)
+    """
+    return r"(^|[^A-Za-z0-9_])%s([^A-Za-z0-9_]|$)" % token
+
+
 WRITE_SIGNAL = re.compile(
-    r"\s>|\|\s*tee\b|\bsponge\b|\bjson\.dump|\bos\.replace\b|\bshutil\.(copy|move)\b|\.write\("
+    r"\s>"                                        # a redirect, never a bare `>` (see above)
+    r"|\|\s*tee([^A-Za-z0-9_]|$)"                 # the pipe supplies the leading boundary
+    r"|" + whole("sponge")
+    + r"|" + whole(r"json\.dump")
+    + r"|" + whole(r"os\.replace")
+    # No trailing boundary here, deliberately: `shutil.copyfile` and `shutil.movefile` are
+    # writes too, and a trailing `[^A-Za-z0-9_]|$` would reject them because `copy` is
+    # followed by `f`. (The `\b` this replaced had the same hole -- found by the test that
+    # asserts the pattern still fires on each shape it is meant to catch.)
+    + r"|(^|[^A-Za-z0-9_])shutil\.(copy|move)"
+    + r"|\.write\("
 )
 
 
@@ -135,6 +166,16 @@ def main():
         print("check-drive-ledger-writes: FAIL", file=sys.stderr)
         print("  - %s does not exist -- the drive leg has no body to check" % DRIVE, file=sys.stderr)
         return 1
+
+    # (d) the callee exists. Checked BEFORE the mention count, because a name is exactly
+    # what the mention count cannot tell from a working call.
+    script = REPO / "scripts" / SCRIPT
+    if not script.exists():
+        failures.append(
+            "%s names `%s` but scripts/%s does not exist -- the drive leg would run a "
+            "command that is not there, and the mention count below would still be green"
+            % (DRIVE, SCRIPT, SCRIPT)
+        )
 
     # (a) the script is actually wired in.
     mentions = drive.read_text(encoding="utf-8").count(SCRIPT)
@@ -184,9 +225,9 @@ def main():
         return 1
 
     print(
-        "drive-ledger-writes ok: %s names %s %d time(s), `%s` appears once (the report "
-        "line), and no ledger line reaches an inline interpreter across %d file(s)"
-        % (DRIVE, SCRIPT, mentions, PATH_LITERAL, len(files))
+        "drive-ledger-writes ok: scripts/%s exists, %s names it %d time(s), `%s` appears "
+        "once (the report line), and no ledger line reaches an inline interpreter across "
+        "%d file(s)" % (SCRIPT, DRIVE, mentions, PATH_LITERAL, len(files))
     )
     return 0
 
