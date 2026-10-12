@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.133.4
 
 - docs: **register `scripts/drive-ledger.py` in the README's script table and `llms.txt`'s helper list.** The script shipped in v0.133.2 and `agents/fleet-drive.md` was wired to it in v0.133.3, but neither index named it -- so the two places a reader looks to find out what a `scripts/*.py` is for both omitted the one that now owns the fleet-drive ledger's write path.
 
