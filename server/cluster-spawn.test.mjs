@@ -349,6 +349,85 @@ test('a transient connection failure is retried, and a refusal is not', async ()
   assert.match(refused.error, /HTTP 401/)
 })
 
+test('every pre-delivery connection code in the documented set is retried', async () => {
+  // ⚠️ Deliberately NOT imported from cluster-spawn.mjs, and the reason is the gap this test
+  // closes rather than a style preference.
+  //
+  // `CONNECTION_ERROR_CODES` is not exported, and until this test the suite's only retry case
+  // exercised `ECONNREFUSED` alone: the four post-delivery codes are pinned as NOT retried,
+  // while six of the seven retryable ones were pinned by nothing. An edit dropping
+  // `UND_ERR_CONNECT_TIMEOUT`, or `EAI_AGAIN`, from the set would therefore have left every
+  // existing test green — the classification losing an error class silently, which is the
+  // failure mode this guard exists to make impossible.
+  //
+  // The list is restated from the module's own documented decision (`cluster-spawn.mjs`
+  // § CONNECTION_ERROR_CODES): each of these is a PRE-DELIVERY failure — the request never
+  // reached the service — so a retry sends it for the first time. Restating it here means a
+  // change to the set has to be made in two places, deliberately, rather than one.
+  const RETRYABLE = [
+    'ECONNREFUSED',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'UND_ERR_CONNECT_TIMEOUT',
+  ]
+  for (const code of RETRYABLE) {
+    let attempts = 0
+    const backoffs = []
+    const { error } = await startClusterSession({
+      baseUrl: 'http://host:30090',
+      prompt: 'x',
+      sessionId: UUID,
+      authToken: TOKEN,
+      sleepImpl: async (ms) => {
+        backoffs.push(ms)
+      },
+      fetchImpl: async () => {
+        attempts += 1
+        const failure = new TypeError('fetch failed')
+        failure.cause = { code }
+        throw failure
+      },
+    })
+    // The count, not the outcome alone: an implementation that answered without ever reaching
+    // the service would satisfy any outcome-shaped assertion by itself.
+    assert.equal(attempts, 3, `${code} is a pre-delivery failure and must be retried`)
+    // The delay too, for the reason the sibling test states: every assertion here passes against
+    // a no-op `sleepImpl`, so a retry with no backoff at all would otherwise go unnoticed.
+    assert.deepEqual(backoffs, [250, 500], `${code} must back off between attempts`)
+    assert.match(error, new RegExp(code), `${code} must be named in the final error`)
+  }
+})
+
+test('the classification reads the code from the error itself, not only from its cause', async () => {
+  // `isConnectionFailure` reads `error.code ?? error.cause?.code`. Every other test here sets the
+  // code on the CAUSE, exercising only the right-hand side of that `??` — so dropping the
+  // left-hand read would leave the suite green while an error carrying its code on itself stopped
+  // being retried. This pins that branch by putting the code where undici's own `TypeError` does
+  // not.
+  let attempts = 0
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1
+      const failure = new TypeError('fetch failed')
+      failure.code = 'ECONNREFUSED'
+      throw failure
+    },
+  })
+  assert.equal(attempts, 3, 'a code carried on the error itself must be retried')
+  // Deliberately NOT asserted against the message: with no `cause` there is no detail for
+  // `describeConnectionCause` to render, so the reported string is the bare wrapper. Asserting
+  // the code here would pin the opposite of what the module documents.
+  assert.match(error, /fetch failed/)
+})
+
 test('an AbortError timeout is not retried', async () => {
   // `AbortError` is this module's own timeout firing, not a transient connection blip.
   // Retrying it would spend three ten-minute windows to learn the same thing.
