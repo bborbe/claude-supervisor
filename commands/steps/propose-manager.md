@@ -1,0 +1,19 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
+# Propose a manager
+
+When: `propose-managers.py` printed a card — run: `python3 $P/propose-managers.py --post`
+
+Rationale: runbook § Propose a manager for an unmanaged goal — maintained.
+
+- **A goal holding approved work and no live manager is a lapse the fleet surfaces itself.** The round's own classification is blind to it: the sweep classifies **live sessions**, so a goal whose work was approved and never opened has no session to sweep from, and the unmanaged-topic candidate covers the other half — a topic whose workers are live and whose manager is not. Neither reaches this case. Measured 2026-10-12: five approved planning tasks on goal *Read CDB Data Through Weldall (MVP)* (seibert-brogrammers) sat unmanaged until the operator noticed and pushed the Fleet Manager by hand.
+- **Run the script — it owns the predicate, the ranking and the slot gate.** `python3 $P/propose-managers.py --post` scans every configured vault's task files for goals holding at least **2** approved (`approved_at`), non-terminal, `phase: planning`/`execution` tasks with **no live manager**, ranks them by goal priority then approved-task count, and posts at most `free` cards. Every one of those rules lives in the script; do not re-derive a count, a threshold or a ranking here. `--json` prints the whole computation instead of posting, for a diagnosis.
+- **The card is an ASK, never an act.** Two options — `start manager` / `not now` — under the per-goal dedup key `fleet-propose-manager:<goal name>`, which the script derives from the goal's **name alone**: a key carrying a timestamp makes a re-post of an unchanged goal a *different* key, the store's open-scoped suppression never matches, and the operator is asked the same question twice (measured 2026-10-02 on the sibling under-target card). ⚠️ **This step never spawns.** Nothing opens until the operator answers, and the answer is read back with `attention-ask.py poll <item-id>`.
+- ⚠️ **The slot gate reads the HARD manager cap, and the script is the only place that decides it.** The card's action is an *operator-named* manager spawn, which `managerLimitRefusal` allows through the whole soft/hard band — so the soft cap is not the count at which this offer stops being keepable, and gating on it would withhold a card whose `start manager` answer the server would have honoured. ⚠️ **At the cap the script posts nothing and says so** (`no card — at the manager cap`): a suppressed round and a round that found nothing must never render the same.
+- ⚠️ **Exit codes are the branch, and `2` is never read as `3`.** `0` posted one or more cards · `3` nothing to do (no qualifying goal, or no free slot) · **`2` REFUSED** — the cap or the live-manager count could not be read. On `2` print the script's `UNKNOWN` line and post nothing: an unreadable board and an empty fleet must not render the same, and only the second is a fact about the fleet.
+- ⚠️ **On `start manager`, the manager is spawned by the operator's naming, never by this step's own initiative.** A `role: manager` session is still not something a manager opens on its own — `commands/steps/manager-spawn.md` carries that ban and this card is its one exception, because the answer *is* the operator's naming. The spawn recipe, the `-n "<goal> Manager"` name and the `orange` colour have one home in `commands/open.md` § Step 2B; the answer handling — which subject, which vault, and the `/supervisor:manager-loop "<goal>"` that arms it — has one home in `65 Runbooks/Fleet Manager Session.md` § Propose a manager for an unmanaged goal. Read them there; this step restates neither.
+- ⚠️ **On `not now`, nothing is spawned and no state is written here** — the card's own record is the answer. Do not re-post the same goal this round.
