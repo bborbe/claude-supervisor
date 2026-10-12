@@ -436,8 +436,13 @@ class Cli(unittest.TestCase):
         os.makedirs(self.reg)
         self.load = os.path.join(self.dir, "loadpath")
         os.makedirs(os.path.join(self.load, "9.9.9"))
+        # No role map: the Hold-window source is off for the store/CLI tests, so they
+        # never shell out to a real WezTerm and stay host-independent. The window is
+        # exercised on its own in HoldWindow below.
+        os.environ["SUPERVISOR_ROLE_MAP"] = os.path.join(self.dir, "no-role-map.json")
 
     def tearDown(self):
+        os.environ.pop("SUPERVISOR_ROLE_MAP", None)
         self.tmp.cleanup()
 
     def write(self, pid, rec):
@@ -667,6 +672,90 @@ class HeldSession(Cli):
             handle.write("{not json")
         _code, lines = self.run_cli(SID_HELD)
         self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+
+SID_WINDOW = "cccccccc-1111-2222-3333-444444444444"
+
+
+class HoldWindow(Cli):
+    """The Hold WINDOW -- a pane parked in the role map's Hold window is refused.
+
+    The second source of heldness, and the one where a failed read must REFUSE: a
+    restart KILLS a process, so a broken transport read as "not held" is the
+    direction that restarts a session the operator parked. `docs/pane-reads.md`
+    prescribes *refuse non-zero, naming the transport* for a caller that already
+    exits non-zero -- which this one does on every refusal.
+
+    Both directions are asserted by name. The whole path is real -- a fixture role
+    map, a fixture registry and a fake `wezterm` on PATH -- so the test never
+    depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held worker"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        super().setUp()
+        self.role_map = os.path.join(self.dir, "role-map.json")
+        with open(self.role_map, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        os.environ["SUPERVISOR_ROLE_MAP"] = self.role_map
+        # registry_names() reads SESSIONS_DIR, so point it at the fixture registry and
+        # seed the session's name -- the join the pane title carries.
+        os.environ["SUPERVISOR_SESSIONS_DIR"] = self.reg
+        self.bin = os.path.join(self.dir, "bin")
+        os.makedirs(self.bin)
+        self.write_wezterm(self.HOLD_WINDOW)
+        self.write(4242, entry(SID_WINDOW, name=self.NAME))
+
+    def tearDown(self):
+        os.environ.pop("SUPERVISOR_SESSIONS_DIR", None)
+        super().tearDown()
+
+    def write_wezterm(self, window, fail=False):
+        path = os.path.join(self.bin, "wezterm")
+        with open(path, "w", encoding="utf-8") as handle:
+            if fail:
+                handle.write("#!/bin/sh\nexit 1\n")
+            else:
+                listing = json.dumps(
+                    [{"pane_id": self.PANE, "window_id": window,
+                      "title": "✳ " + self.NAME}]
+                )
+                handle.write("#!/bin/sh\ncat <<'JSON'\n" + listing + "\nJSON\n")
+        os.chmod(path, 0o755)
+
+    def run_hold(self):
+        env = dict(os.environ)
+        env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+        out = subprocess.run(
+            [sys.executable, SCRIPT, SID_WINDOW, "--sessions-dir", self.reg, "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def test_a_session_in_the_hold_window_is_refused(self):
+        """Too-tight: a Hold-window pane refuses the restart with no store entry."""
+        code, lines = self.run_hold()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "held-session", lines)
+
+    def test_a_session_outside_the_hold_window_is_not_refused_for_a_hold(self):
+        """Too-loose: the SAME session, pane in another window, is not held."""
+        self.write_wezterm(self.AGENT_WINDOW)
+        code, lines = self.run_hold()
+        self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+    def test_an_unreadable_pane_list_refuses_naming_the_transport(self):
+        """The chosen response for THIS caller: refuse, never read as not held."""
+        self.write_wezterm(self.HOLD_WINDOW, fail=True)
+        code, lines = self.run_hold()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "hold-unreadable", lines)
 
 
 if __name__ == "__main__":

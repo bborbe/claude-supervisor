@@ -52,6 +52,16 @@ SITE_LIST = {
     # every pane in the Hold window. `pane_title` stays listed for the closure, the
     # same way every other caller is.
     ("session-holds.py", "panes"), ("session-holds.py", "pane_title"),
+    # added 2026-10-12 — the SAME Hold-window predicate inlined into the four
+    # consumers that decide whether a session is held: `manager-predispatch.py`
+    # (digest input), `notify-gate.py` (escalation suppression), `restart-worker.py`
+    # (restart refusal) and `orphan-candidates.py` (candidate drop). Each carries its
+    # own `panes()` with the identical three-state contract — `None` on a failed
+    # `wezterm cli list`, `[]` only for a reachable WezTerm holding nothing (or an
+    # absent `wezterm` binary). A failed read collapsed into "no panes" would silently
+    # un-hold every pane in the Hold window at that consumer.
+    ("manager-predispatch.py", "panes"), ("notify-gate.py", "panes"),
+    ("restart-worker.py", "panes"), ("orphan-candidates.py", "panes"),
     # added 2026-10-05 — `open-items.py`'s pane-existence probe, the read half of the new
     # origin record. `classify` asks whether an entry's recorded raising pane still exists;
     # `live_panes` is that query, and it must keep the same three-state contract as every
@@ -147,6 +157,10 @@ POPULATED = {
     ("pvc", "wezterm_panes"): '[{"pane_id": "204", "tty_name": "/dev/ttys001"}]',
     ("pvc", "_pid_ttys"): "101 ttys001",
     ("sh", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("mp", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("ng", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("rw", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("oc", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
 }
 
 
@@ -219,6 +233,10 @@ def main():
             ("oi", "open-items.py"),
             ("pvc", "plugin-version-census.py"),
             ("sh", "session-holds.py"),
+            ("mp", "manager-predispatch.py"),
+            ("ng", "notify-gate.py"),
+            ("rw", "restart-worker.py"),
+            ("oc", "orphan-candidates.py"),
         )
     }
 
@@ -245,6 +263,8 @@ def main():
         ("oi", "live_panes", ()),
         ("pvc", "wezterm_panes", ()), ("pvc", "_pid_ttys", ([1],)),
         ("sh", "panes", ()),
+        ("mp", "panes", ()), ("ng", "panes", ()),
+        ("rw", "panes", ()), ("oc", "panes", ()),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")

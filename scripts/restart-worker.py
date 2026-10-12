@@ -499,6 +499,176 @@ def held_reason(session_id):
     return entry.get("reason") or "held"
 
 
+# --------------------------------------------------------------------------- #
+# the Hold window -- the second source of heldness
+# --------------------------------------------------------------------------- #
+#
+# A pane parked in the WezTerm role map's Hold window is held with no store entry
+# at all: the operator's statement is the pane's POSITION, not a `hold` call. It is
+# resolved at read time from the map's `Hold.window_id` plus `wezterm cli list`, and
+# never persisted -- a stored entry would outlive the pane leaving the window.
+# Inlined, like `read_holds` above: the plugin's scripts do not import each other.
+
+# The WezTerm role map. Same variable the server reads (`server/config.mjs`) and
+# `session-holds.py` reads.
+ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
+    "~/.cache/wezterm-role-map.json"
+)
+
+
+def panes():
+    """Every WezTerm pane, or `None` when the query FAILED.
+
+    ⚠️ `None`, never `[]`: a failed `wezterm cli list` cannot prove a pane is gone
+    any more than it can prove one is live. `[]` is reserved for a transport that
+    answered with zero panes, and for a machine with no `wezterm` BINARY -- an
+    absent transport has no panes, and the Hold window is a WezTerm concept. Only
+    `FileNotFoundError` reads that way; any other `OSError` is a genuine failure and
+    stays `None`. See `docs/pane-reads.md`.
+    """
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        listing = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return listing if isinstance(listing, list) else None
+
+
+# The activity glyph WezTerm puts in front of a pane title (`✳` active, `◑`/`◐`
+# otherwise). Decoration on the title, never part of the name.
+_GLYPH = re.compile(r"^[^\w\s]{1,2}\s+")
+
+
+def registry_names():
+    """name -> session id, for the pane join. Later entries win on a clash."""
+    names = {}
+    for path in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        sid = data.get("sessionId") or data.get("session_id")
+        name = data.get("name")
+        if sid and name:
+            names[name] = sid
+    return names
+
+
+def session_pane(session_id, listing):
+    """The pane currently showing this session, or None when the listing has none.
+
+    The registry carries no pane id, so a session id joins to its pane through the
+    registry `name`, which is what the tab TITLE carries.
+    """
+    names = registry_names()
+    for pane in listing:
+        title = pane.get("title") or ""
+        name = title if title in names else _GLYPH.sub("", title)
+        if names.get(name) == session_id:
+            return pane.get("pane_id")
+    return None
+
+
+def pane_window(pane_id, listing):
+    """The WezTerm window id owning this pane, or None when the listing has none.
+
+    Read straight off the pane record, with no name join, so it answers for a
+    Hold-window pane whose title the registry does not know.
+    """
+    for pane in listing:
+        if str(pane.get("pane_id")) == str(pane_id):
+            window = pane.get("window_id")
+            if isinstance(window, bool) or not isinstance(window, int):
+                return None
+            return window
+    return None
+
+
+def hold_window_id():
+    """The role map's Hold window id, or None when it cannot be read.
+
+    Read directly from the map's `Hold.window_id`, never through the server's role
+    map: its `ROLES` deliberately excludes Hold, because the Hold window is a
+    parking lot rather than a role and is never spawned into.
+    """
+    try:
+        with open(ROLE_MAP, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    entry = data.get("Hold") if isinstance(data, dict) else None
+    window = entry.get("window_id") if isinstance(entry, dict) else None
+    if isinstance(window, bool) or not isinstance(window, int):
+        return None
+    return window
+
+
+def in_hold_window(target):
+    """Whether session `target` sits in the role map's Hold window.
+
+    Three states, per `docs/pane-reads.md`: `True` in the window, `False` not in
+    it, `None` when the pane listing could NOT be read, so the question is
+    unanswered. A missing role map, an unreadable one, or one carrying no `Hold`
+    key is NOT that third state -- it is the documented fallback to explicit holds
+    only, and it answers `False`.
+    """
+    window = hold_window_id()
+    if window is None:
+        return False
+    listing = panes()
+    if listing is None:
+        return None
+    pane = target if str(target).isdigit() else session_pane(target, listing)
+    if pane is None:
+        return False
+    return pane_window(pane, listing) == window
+
+
+def hold_refusal(session_id):
+    """The refusal a hold warrants for `session_id`, or `(None, None)` when free.
+
+    Returns `(token, detail)`. A hold -- store entry OR a pane in the WezTerm Hold
+    window -- returns `held-session`. ⚠️ A FAILED pane read returns a distinct
+    `hold-unreadable` refusal rather than `(None, None)`, and that is the decision
+    for THIS caller: a restart KILLS a process, so a broken transport must never be
+    read as "not held" -- that is the direction that restarts a session the operator
+    parked. `docs/pane-reads.md` prescribes *refuse non-zero, naming the transport*
+    for a caller that already exits non-zero, which this one does on every refusal.
+    """
+    reason = held_reason(session_id)
+    if reason is not None:
+        return "held-session", (
+            f"session {session_id} carries an operator hold ({reason}); only the "
+            "operator releases it -- see the /supervisor:hold skill"
+        )
+    verdict = in_hold_window(session_id)
+    if verdict is None:
+        return "hold-unreadable", (
+            f"the WezTerm pane list could not be read, so whether session "
+            f"{session_id} sits in the operator's Hold window is unknown; refusing "
+            "rather than restarting a session the operator may have parked"
+        )
+    if verdict:
+        return "held-session", (
+            f"session {session_id} sits in the operator's WezTerm Hold window; only "
+            "the operator releases it -- see the /supervisor:hold skill"
+        )
+    return None, None
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Restart one stale idle worker session, registry-guarded.",
@@ -537,14 +707,12 @@ def main():
     # this module documents. Checked BEFORE the status and kind gates because a hold is
     # the stronger statement: `busy` says the moment is wrong, a hold says the session
     # is not yours to touch at all, and it outranks every other consideration here.
-    # Restarting is exactly the act the operator held the session to prevent.
-    held = held_reason(sid)
-    if held is not None:
-        return refuse(
-            "held-session",
-            f"session {sid} carries an operator hold ({held}); only the operator "
-            "releases it -- see the /supervisor:hold skill",
-        )
+    # Restarting is exactly the act the operator held the session to prevent. A hold is
+    # either a store entry or a pane parked in the WezTerm Hold window; an UNREADABLE
+    # pane list refuses too (`hold-unreadable`) rather than reading as "not held".
+    token, detail = hold_refusal(sid)
+    if token is not None:
+        return refuse(token, detail)
 
     pid = rec.get("pid")
     if not isinstance(pid, int):

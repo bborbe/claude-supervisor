@@ -15,6 +15,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 """
 
 import importlib.util
+import json
 import os
 import tempfile
 import time
@@ -176,9 +177,14 @@ class HoldTest(unittest.TestCase):
         self.holds = os.path.join(self.dir, "session-holds.json")
         self._saved = oc.HOLDS_PATH
         oc.HOLDS_PATH = self.holds
+        # No role map: the Hold-window source is off for these store tests, so they
+        # never shell out to a real WezTerm and stay host-independent.
+        self._saved_map = oc.ROLE_MAP
+        oc.ROLE_MAP = os.path.join(self.dir, "no-role-map.json")
 
     def tearDown(self):
         oc.HOLDS_PATH = self._saved
+        oc.ROLE_MAP = self._saved_map
 
     def write_holds(self, *session_ids):
         entries = ", ".join(
@@ -220,6 +226,71 @@ class HoldTest(unittest.TestCase):
         with open(self.holds, "w", encoding="utf-8") as handle:
             handle.write("{not json")
         self.assertEqual(["free", "held"], sorted(self.names()))
+
+
+class HoldWindowTest(unittest.TestCase):
+    """The Hold WINDOW -- a pane parked in the role map's Hold window is held.
+
+    The second source of heldness. A failed pane read answers *not held* here, the
+    same direction the store read above documents: this predicate DROPS a candidate,
+    so inventing a hold would silently drop a real orphan -- the false clean this
+    script exists to prevent -- while reading a broken transport as "nothing held"
+    merely leaves the row in the candidate list for a later sweep.
+
+    Both directions are asserted by name, and the pane read is stubbed so the suite
+    never depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._holds, self._map = oc.HOLDS_PATH, oc.ROLE_MAP
+        self._panes, self._names = oc.panes, oc.registry_names
+        # An absent store: the window must hold on its own, with no entry.
+        oc.HOLDS_PATH = os.path.join(self.dir, "session-holds.json")
+        oc.ROLE_MAP = os.path.join(self.dir, "role-map.json")
+        with open(oc.ROLE_MAP, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        oc.registry_names = lambda: {self.NAME: HELD}
+
+    def tearDown(self):
+        oc.HOLDS_PATH, oc.ROLE_MAP = self._holds, self._map
+        oc.panes, oc.registry_names = self._panes, self._names
+
+    def pane_in(self, window):
+        oc.panes = lambda: [
+            {"pane_id": self.PANE, "window_id": window, "title": "✳ " + self.NAME}
+        ]
+
+    def seed(self):
+        task_file(self.dir, "held.md", "status: in_progress\nclaude_session_id: " + HELD)
+        task_file(self.dir, "free.md", "status: in_progress\nclaude_session_id: " + FREE)
+
+    def names(self):
+        return [n for n, _, _ in oc.candidates(self.dir, date.today(), 30, set())]
+
+    def test_a_pane_in_the_hold_window_drops_the_candidate(self):
+        """Too-tight: a Hold-window pane excludes the row with no store entry."""
+        self.pane_in(self.HOLD_WINDOW)
+        self.seed()
+        self.assertNotIn("held", self.names())
+        self.assertIn("free", self.names())
+
+    def test_a_pane_outside_the_hold_window_keeps_the_candidate(self):
+        """Too-loose: a pane in another window is an ordinary session."""
+        self.pane_in(self.AGENT_WINDOW)
+        self.seed()
+        self.assertIn("held", self.names())
+
+    def test_a_failed_pane_read_keeps_the_candidate(self):
+        """The chosen response for THIS caller: a broken read must not drop a row."""
+        oc.panes = lambda: None
+        self.seed()
+        self.assertIn("held", self.names())
 
 
 if __name__ == "__main__":
