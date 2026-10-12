@@ -208,6 +208,7 @@ import json
 import os
 import re
 import select
+import subprocess
 import sys
 import time
 import unicodedata
@@ -1156,11 +1157,170 @@ def read_holds() -> dict:
     return holds if isinstance(holds, dict) else {}
 
 
+# --------------------------------------------------------------------------- #
+# the Hold window -- the second source of heldness
+# --------------------------------------------------------------------------- #
+#
+# A pane parked in the WezTerm role map's Hold window is held with no store entry
+# at all: the operator's statement is the pane's POSITION, not a `hold` call. It is
+# resolved at read time from the map's `Hold.window_id` plus `wezterm cli list`, and
+# never persisted -- a stored entry would outlive the pane leaving the window, so
+# the hold would then be unreleasable by the gesture that set it. Inlined, like
+# `read_holds` above: the plugin's scripts do not import each other.
+
+# The WezTerm role map. Same variable the server reads (`server/config.mjs`) and
+# `session-holds.py` reads, so a test can point at a tmp map exactly as it already
+# points `SUPERVISOR_SESSION_HOLDS` at a tmp store.
+ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
+    "~/.cache/wezterm-role-map.json"
+)
+
+
+def panes():
+    """Every WezTerm pane, or `None` when the query FAILED.
+
+    ⚠️ `None`, never `[]`: a failed `wezterm cli list` cannot prove a pane is gone
+    any more than it can prove one is live, so no caller may read it as "no panes
+    exist". `[]` is reserved for a transport that answered with zero panes.
+
+    ⚠️ A machine with no `wezterm` BINARY is a fourth state and answers `[]`: an
+    absent transport has no panes, and the Hold window is a WezTerm concept, so
+    where WezTerm is not installed there is nothing for it to apply to. Only
+    `FileNotFoundError` reads that way; any other `OSError` (a mux socket that is
+    gone) is a genuine failure and stays `None`. See `docs/pane-reads.md`.
+    """
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        listing = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return listing if isinstance(listing, list) else None
+
+
+# The activity glyph WezTerm puts in front of a pane title (`✳` active, `◑`/`◐`
+# otherwise). Decoration on the title, never part of the name.
+_GLYPH = re.compile(r"^[^\w\s]{1,2}\s+")
+
+
+def registry_names():
+    """name -> session id, for the pane join. Later entries win on a clash."""
+    names = {}
+    for path in glob.glob(os.path.join(REGISTRY_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        sid = data.get("sessionId") or data.get("session_id")
+        name = data.get("name")
+        if sid and name:
+            names[name] = sid
+    return names
+
+
+def session_pane(session_id, listing):
+    """The pane currently showing this session, or None when the listing has none.
+
+    The registry carries no pane id, so a session id joins to its pane through the
+    registry `name`, which is what the tab TITLE carries -- the same join the
+    server's `findRegisteredByName` uses.
+    """
+    names = registry_names()
+    for pane in listing:
+        title = pane.get("title") or ""
+        name = title if title in names else _GLYPH.sub("", title)
+        if names.get(name) == session_id:
+            return pane.get("pane_id")
+    return None
+
+
+def pane_window(pane_id, listing):
+    """The WezTerm window id owning this pane, or None when the listing has none.
+
+    Read straight off the pane record, with no name join, so it answers for a
+    Hold-window pane whose title the registry does not know.
+    """
+    for pane in listing:
+        if str(pane.get("pane_id")) == str(pane_id):
+            window = pane.get("window_id")
+            if isinstance(window, bool) or not isinstance(window, int):
+                return None
+            return window
+    return None
+
+
+def hold_window_id():
+    """The role map's Hold window id, or None when it cannot be read.
+
+    Read directly from the map's `Hold.window_id`, never through the server's role
+    map: its `ROLES` deliberately excludes Hold, because the Hold window is a
+    parking lot rather than a role and is never spawned into.
+    """
+    try:
+        with open(ROLE_MAP, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    entry = data.get("Hold") if isinstance(data, dict) else None
+    window = entry.get("window_id") if isinstance(entry, dict) else None
+    if isinstance(window, bool) or not isinstance(window, int):
+        return None
+    return window
+
+
+def in_hold_window(target):
+    """Whether session `target` sits in the role map's Hold window.
+
+    Three states, per `docs/pane-reads.md`: `True` in the window, `False` not in
+    it, `None` when the pane listing could NOT be read, so the question is
+    unanswered. A missing role map, an unreadable one, or one carrying no `Hold`
+    key is NOT that third state -- it is the documented fallback to explicit holds
+    only, and it answers `False`.
+    """
+    window = hold_window_id()
+    if window is None:
+        return False
+    listing = panes()
+    if listing is None:
+        return None
+    pane = target if str(target).isdigit() else session_pane(target, listing)
+    if pane is None:
+        return False
+    return pane_window(pane, listing) == window
+
+
 def is_held(session_id: str) -> bool:
-    """True when this session carries a hold. Never raises."""
+    """True when this session carries a hold -- store or Hold window. Never raises.
+
+    The second source is the WezTerm Hold window: a pane parked there is held with
+    no store entry, resolved at read time.
+
+    ⚠️ A failed pane read answers *not held* here, and that is the safe direction
+    for THIS caller rather than a collapse. The value is only ever a DIGEST INPUT
+    (`digest_of`), and this gate is fail-open -- CHANGE authorises a sweep, it never
+    suppresses one. So a missed Hold-window hold costs one un-moved digest while the
+    held row still renders on the next tick, whereas inventing a hold would make the
+    gate answer CHANGE on every tick for as long as the transport stayed down,
+    defeating the saving the gate exists for. That is the same direction the store
+    read above documents, and the two must agree.
+    """
     if not session_id:
         return False
-    return isinstance(read_holds().get(session_id), dict)
+    if isinstance(read_holds().get(session_id), dict):
+        return True
+    return in_hold_window(session_id) is True
 
 
 def liveness_change_term(t: dict) -> int:

@@ -872,6 +872,10 @@ class Hold(_Harness):
         self.mod.publish = lambda *a, **k: self.sent.append(a)
         self.holds = os.path.join(self.dir, "holds.json")
         self.mod.HOLDS_PATH = self.holds
+        # No role map: the Hold-window source is off for these store tests, so they
+        # never shell out to a real WezTerm and stay host-independent. The window is
+        # exercised on its own below.
+        self.mod.ROLE_MAP = os.path.join(self.dir, "no-role-map.json")
 
     def write_holds(self, *session_ids):
         entries = ", ".join(
@@ -923,6 +927,62 @@ class Hold(_Harness):
             handle.write("{not json")
         out = self.round([self.gate(HELD, "approve: make apply")])
         self.assertIn("make apply", out)
+
+
+class HoldWindow(Hold):
+    """The Hold WINDOW -- a pane parked in the role map's Hold window is held.
+
+    The second source of heldness, and the one this caller must never collapse
+    SILENTLY: this predicate decides whether a real escalation is published, so a
+    broken transport that read as "not held" would swallow a gate, while a broken
+    transport that read as "held" would silence one. `docs/pane-reads.md`: a caller
+    that would read a failed read as a clean answer degrades LOUDLY and continues.
+
+    Both directions are asserted by name, and the pane read is stubbed so the suite
+    never depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held worker"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        super().setUp()
+        self.mod.ROLE_MAP = os.path.join(self.dir, "role-map.json")
+        with open(self.mod.ROLE_MAP, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        self.mod.registry_names = lambda: {self.NAME: HELD}
+
+    def pane_in(self, window):
+        self.mod.panes = lambda: [
+            {"pane_id": self.PANE, "window_id": window, "title": "✳ " + self.NAME}
+        ]
+
+    def test_a_pane_in_the_hold_window_is_not_published(self):
+        """Too-tight: a Hold-window pane suppresses the gate with no store entry."""
+        self.pane_in(self.HOLD_WINDOW)
+        out = self.round([self.gate(HELD, "approve: make apply")])
+        self.assertNotIn("make apply", out)
+
+    def test_a_pane_outside_the_hold_window_is_published(self):
+        """Too-loose: a pane in another window is an ordinary session."""
+        self.pane_in(self.AGENT_WINDOW)
+        out = self.round([self.gate(HELD, "approve: make apply")])
+        self.assertIn("make apply", out)
+
+    def test_a_failed_pane_read_escalates_and_names_the_transport(self):
+        """A broken transport must NEVER silence a real escalation.
+
+        The chosen response for THIS caller: keep the gate (publish) and name the
+        failure, rather than read the failed read as "held" and swallow it.
+        """
+        self.mod.panes = lambda: None
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            out = self.round([self.gate(HELD, "approve: make apply")])
+        self.assertIn("make apply", out, "a failed read must not swallow the gate")
+        self.assertIn("wezterm cli list", captured.getvalue())
 
 
 HELD = "aaaaaaaa-1111-2222-3333-444444444444"

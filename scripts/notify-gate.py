@@ -108,8 +108,10 @@ place they must remember to consult.
 import argparse
 import datetime
 import fcntl
+import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -126,6 +128,12 @@ LAYER = None  # set by main(); diagnostics only
 # second spelling of the default would let one of them silently point elsewhere.
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+
+# The session registry, read only by the Hold-window pane join. Same dir and env
+# var as the other consumers, so a test can point it at a fixture tree.
+REGISTRY_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSIONS_DIR") or "~/.claude/sessions"
+)
 
 
 def ledger_path(layer):
@@ -704,11 +712,162 @@ def read_holds():
     return holds if isinstance(holds, dict) else {}
 
 
+# --------------------------------------------------------------------------- #
+# the Hold window -- the second source of heldness
+# --------------------------------------------------------------------------- #
+#
+# A pane parked in the WezTerm role map's Hold window is held with no store entry
+# at all: the operator's statement is the pane's POSITION, not a `hold` call. It is
+# resolved at read time from the map's `Hold.window_id` plus `wezterm cli list`, and
+# never persisted -- a stored entry would outlive the pane leaving the window.
+# Inlined, like `read_holds` above: the plugin's scripts do not import each other.
+
+# The WezTerm role map. Same variable the server reads (`server/config.mjs`) and
+# `session-holds.py` reads.
+ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
+    "~/.cache/wezterm-role-map.json"
+)
+
+
+def panes():
+    """Every WezTerm pane, or `None` when the query FAILED.
+
+    ⚠️ `None`, never `[]`: a failed `wezterm cli list` cannot prove a pane is gone
+    any more than it can prove one is live. `[]` is reserved for a transport that
+    answered with zero panes, and for a machine with no `wezterm` BINARY -- an
+    absent transport has no panes, and the Hold window is a WezTerm concept. Only
+    `FileNotFoundError` reads that way; any other `OSError` is a genuine failure and
+    stays `None`. See `docs/pane-reads.md`.
+    """
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        listing = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return listing if isinstance(listing, list) else None
+
+
+# The activity glyph WezTerm puts in front of a pane title (`✳` active, `◑`/`◐`
+# otherwise). Decoration on the title, never part of the name.
+_GLYPH = re.compile(r"^[^\w\s]{1,2}\s+")
+
+
+def registry_names():
+    """name -> session id, for the pane join. Later entries win on a clash."""
+    names = {}
+    for path in glob.glob(os.path.join(REGISTRY_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        sid = data.get("sessionId") or data.get("session_id")
+        name = data.get("name")
+        if sid and name:
+            names[name] = sid
+    return names
+
+
+def session_pane(session_id, listing):
+    """The pane currently showing this session, or None when the listing has none.
+
+    The registry carries no pane id, so a session id joins to its pane through the
+    registry `name`, which is what the tab TITLE carries.
+    """
+    names = registry_names()
+    for pane in listing:
+        title = pane.get("title") or ""
+        name = title if title in names else _GLYPH.sub("", title)
+        if names.get(name) == session_id:
+            return pane.get("pane_id")
+    return None
+
+
+def pane_window(pane_id, listing):
+    """The WezTerm window id owning this pane, or None when the listing has none.
+
+    Read straight off the pane record, with no name join, so it answers for a
+    Hold-window pane whose title the registry does not know.
+    """
+    for pane in listing:
+        if str(pane.get("pane_id")) == str(pane_id):
+            window = pane.get("window_id")
+            if isinstance(window, bool) or not isinstance(window, int):
+                return None
+            return window
+    return None
+
+
+def hold_window_id():
+    """The role map's Hold window id, or None when it cannot be read.
+
+    Read directly from the map's `Hold.window_id`, never through the server's role
+    map: its `ROLES` deliberately excludes Hold, because the Hold window is a
+    parking lot rather than a role and is never spawned into.
+    """
+    try:
+        with open(ROLE_MAP, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    entry = data.get("Hold") if isinstance(data, dict) else None
+    window = entry.get("window_id") if isinstance(entry, dict) else None
+    if isinstance(window, bool) or not isinstance(window, int):
+        return None
+    return window
+
+
+def in_hold_window(target):
+    """Whether session `target` sits in the role map's Hold window.
+
+    Three states, per `docs/pane-reads.md`: `True` in the window, `False` not in
+    it, `None` when the pane listing could NOT be read, so the question is
+    unanswered. A missing role map, an unreadable one, or one carrying no `Hold`
+    key is NOT that third state -- it is the documented fallback to explicit holds
+    only, and it answers `False`.
+    """
+    window = hold_window_id()
+    if window is None:
+        return False
+    listing = panes()
+    if listing is None:
+        return None
+    pane = target if str(target).isdigit() else session_pane(target, listing)
+    if pane is None:
+        return False
+    return pane_window(pane, listing) == window
+
+
 def is_held(session_id):
-    """True when this session carries a hold. Never raises."""
+    """True when this session carries a hold, False when it does not, `None` when
+    the Hold-window question could NOT be answered.
+
+    The second source is the WezTerm Hold window: a pane parked there is held with
+    no store entry, resolved at read time from the role map's `Hold.window_id`.
+
+    ⚠️ `None` is the third state, and the caller must not collapse it into "not
+    held" *silently*: this predicate decides whether a real escalation is PUBLISHED,
+    so a broken transport must never swallow a gate. The caller names the failure
+    and still escalates -- `docs/pane-reads.md`'s *degrade loudly* response for a
+    caller that would otherwise read a failed read as a clean answer.
+    """
     if not session_id:
         return False
-    return isinstance(read_holds().get(session_id), dict)
+    if isinstance(read_holds().get(session_id), dict):
+        return True
+    return in_hold_window(session_id)
 
 
 def read_gates():
@@ -803,12 +962,27 @@ def publish_round(now, gates):
     # the same shape `suppressed` uses. Pruning the item would make a RELEASED hold
     # re-notify as though the gate were new, which inverts the design: a hold suppresses
     # the message, never the record.
+    #
+    # ⚠️ A `None` verdict is a FAILED Hold-window read, and it must NOT silence the
+    # gate: a broken transport that swallowed a real escalation is the dangerous
+    # direction, so the gate is kept (escalated) and the failure is named loudly below.
+    # Answering "not held" here is right precisely because this caller PUBLISHES.
     held = {}
+    hold_read_failed = False
     for key in list(current):
         gate = current[key]
-        if is_held(gate.get("session") or ""):
+        verdict = is_held(gate.get("session") or "")
+        if verdict is None:
+            hold_read_failed = True
+            continue
+        if verdict:
             held[key] = gate
             del current[key]
+    if hold_read_failed:
+        print(
+            "notify-gate: `wezterm cli list` unreadable -- the Hold window could not "
+            "be checked; gates are escalated WITHOUT hold-window suppression"
+        )
 
     # Read the store ONCE per round rather than once per gate -- the join is a scan of
     # the item list and a sweep raises a handful of gates. `None` means the store was

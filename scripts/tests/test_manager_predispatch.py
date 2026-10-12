@@ -1657,6 +1657,10 @@ class HoldDigest(Base):
         super().setUp()
         self.holds = os.path.join(self.tmp, "holds.json")
         self.m.HOLDS_PATH = self.holds
+        # No role map: the Hold-window source is off for these store tests, so they
+        # never shell out to a real WezTerm and stay host-independent. The window is
+        # exercised on its own in HoldWindowDigest below.
+        self.m.ROLE_MAP = os.path.join(self.tmp, "no-role-map.json")
         self.write_holds()
 
     def write_holds(self, *session_ids):
@@ -1703,6 +1707,77 @@ class HoldDigest(Base):
         with open(self.holds, "w", encoding="utf-8") as handle:
             handle.write("{not json")
         self.assertEqual(before, self.m.digest_of(tracked))
+
+
+class HoldWindowDigest(Base):
+    """The Hold WINDOW as a digest input -- the second source of heldness.
+
+    A pane parked in the role map's Hold window is held with no store entry at all.
+    Like the store hold, that is a DIGEST INPUT here, never a suppression: this gate
+    only decides whether the sweep runs, so adding or releasing a Hold-window hold
+    must move the digest and wake the loop to re-render the row.
+
+    A failed pane read answers *not held*, and that is the chosen direction for THIS
+    caller rather than a collapse: the gate is fail-open (CHANGE authorises a sweep,
+    it never suppresses one), so a missed Hold-window hold costs one un-moved digest
+    while the held row still renders on the next tick -- whereas inventing a hold
+    would answer CHANGE on every tick for as long as the transport stayed down,
+    defeating the saving the gate exists for. Same direction the store read
+    documents, and the two must agree.
+
+    Both directions are asserted by name, and the pane read is stubbed so the suite
+    never depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        super().setUp()
+        # An absent store: the window must hold on its own, with no entry.
+        self.m.HOLDS_PATH = os.path.join(self.tmp, "holds.json")
+        self.m.ROLE_MAP = os.path.join(self.tmp, "role-map.json")
+        with open(self.m.ROLE_MAP, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        self.m.registry_names = lambda: {self.NAME: HELD}
+
+    def pane_in(self, window):
+        self.m.panes = lambda: [
+            {"pane_id": self.PANE, "window_id": window, "title": "✳ " + self.NAME}
+        ]
+
+    def row(self, name, session):
+        return {
+            "name": name,
+            "status": "in_progress",
+            "phase": "execution",
+            "session": session,
+        }
+
+    def test_a_pane_in_the_hold_window_is_held(self):
+        """Too-tight: position alone is a hold, with no store entry."""
+        self.pane_in(self.HOLD_WINDOW)
+        self.assertTrue(self.m.is_held(HELD))
+
+    def test_a_pane_outside_the_hold_window_is_not_held(self):
+        """Too-loose: a pane in another window is an ordinary session."""
+        self.pane_in(self.AGENT_WINDOW)
+        self.assertFalse(self.m.is_held(HELD))
+
+    def test_the_hold_window_moves_the_digest(self):
+        """The digest input the gate is graded on: moving the pane moves it."""
+        tracked = [self.row("a", HELD)]
+        self.pane_in(self.HOLD_WINDOW)
+        held = self.m.digest_of(tracked)
+        self.pane_in(self.AGENT_WINDOW)
+        self.assertNotEqual(held, self.m.digest_of(tracked))
+
+    def test_a_failed_pane_read_reads_not_held(self):
+        """The chosen response: no spurious CHANGE while the transport is down."""
+        self.m.panes = lambda: None
+        self.assertFalse(self.m.is_held(HELD))
 
 
 class TestStuck(Base):
