@@ -21,6 +21,14 @@ those files are at their max rather than under it.
 
 An entry whose file has disappeared is a failure too — the baseline has drifted from the
 tree — and `--tighten` drops it, since a deleted file has no size to hold.
+
+⚠️ **The strict cap follows the WAKEUP TARGET, never a filename pattern alone.** A wakeup
+re-injects whatever prompt it names, so that body — and only that body — is paid again on
+every tick. Until 2026-10-11 the target was always a `commands/*-tick.md`, so a glob found
+them all. The manager loop's wakeup now names `/supervisor:manager-drive`, a round with no
+`-tick` suffix, and a glob-only rule would have applied the cap to nothing on that side
+while reporting green. Both spellings are therefore checked: the glob (the fleet loop still
+names `commands/fleet-tick.md`) plus an explicit list of the targets that carry no suffix.
 """
 
 import json
@@ -32,6 +40,12 @@ BASELINE = REPO / "scripts" / "budget-baseline.json"
 BODY_MAX = 30 * 1024
 TICK_MAX = 10 * 1024
 SCAN_DIRS = ("commands", "agents", "skills")
+
+#: Wakeup targets that carry no `-tick` suffix, so the glob below cannot find them.
+#: `commands/manager-drive.md` is the manager loop's round since 2026-10-11 — the prompt
+#: `/supervisor:manager-loop` arms `ScheduleWakeup` with. A target missing from this list
+#: is a body the strict cap silently stops covering.
+WAKEUP_TARGETS = ("commands/manager-drive.md",)
 
 
 def load() -> dict:
@@ -95,7 +109,7 @@ def main(argv: list[str]) -> int:
                     f"new oversized bodies are refused outright, not ratcheted."
                 )
 
-    # The tick command is the one class with a strict cap: it is what a wakeup injects.
+    # The wakeup target is the one class with a strict cap: it is what a wakeup injects.
     tick_dir = REPO / "commands"
     if tick_dir.is_dir():
         for p in sorted(tick_dir.glob("*-tick.md")):
@@ -105,6 +119,24 @@ def main(argv: list[str]) -> int:
                     f"{p.relative_to(REPO)}: {n} exceeds the {TICK_MAX} tick budget. "
                     f"A tick is re-injected on every wakeup, so this cap is strict."
                 )
+
+    # The wakeup targets that carry no `-tick` suffix, so the glob above cannot reach them.
+    # A target named here but gone is a failure rather than a skip: a cap pointed at a file
+    # that no longer exists reports green against a tree it never measured.
+    for rel in WAKEUP_TARGETS:
+        p = REPO / rel
+        if not p.exists():
+            failures.append(
+                f"{rel}: named as a wakeup target but the file is gone — the strict tick "
+                f"cap would otherwise report green against nothing"
+            )
+            continue
+        n = p.stat().st_size
+        if n > TICK_MAX:
+            failures.append(
+                f"{rel}: {n} exceeds the {TICK_MAX} tick budget. It is the manager loop's "
+                f"wakeup target, re-injected on every wakeup, so this cap is strict."
+            )
 
     if lowered or dropped:
         for rel, n in lowered.items():

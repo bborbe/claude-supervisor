@@ -1,19 +1,24 @@
-"""check-round-overlap.py: the reach assertion must be pinned to the TICK router.
+"""check-round-overlap.py: the reach assertion must be pinned to the ROUND router.
 
-The guard's headline claim is that the rule's home is *dispatched every tick*. Its first
+The guard's headline claim is that the rule's home is *dispatched every round*. Its first
 version read that reach from the step file's own `When:` line — a restatement, not the
 normative trigger — so deleting the row naming the file from every router left it green.
-The second version read the router tables but accepted **any** router, and the loop has
+The second version read the router tables but accepted **any** router, and the loop had
 two: `commands/manager-loop.md` is the arm, invoked once to start the loop and never
-re-invoked, and it carries the same step table as `commands/manager-loop-tick.md`, which
-is what a wakeup names. So deleting the row from the **tick** router alone still exited 0
-while the success message read *"named by a router row that fires every tick"* — an
-instrument reporting success on a weaker condition than the one it names, which is the
-defect class the guard exists to catch, reproduced inside the guard.
+re-invoked, and it carried the same step table as the router a wakeup named. So deleting
+the row from that router alone still exited 0 while the success message read *"named by a
+router row that fires every tick"* — an instrument reporting success on a weaker condition
+than the one it names, which is the defect class the guard exists to catch, reproduced
+inside the guard.
 
-`test_tick_router_row_deleted_fails` is the case that keeps that gap closed, and it is why
-this file exists rather than being skipped as boilerplate. The arm-only and gated-`When`
-cases are its neighbours, and the marker cases cover the single-copy half.
+⚠️ **The fixture follows the tree, and the tree changed on 2026-10-11.** The wakeup now
+names `commands/manager-drive.md` — the round — and `commands/manager-loop-tick.md` was
+retired, and the arm no longer carries a step table at all. The *property* the guard asserts
+is unchanged, so the fixture now models the real shape: an arm with no table, a round router
+that names the step, and a `*-tick.md` file kept as the fleet loop's still-valid shape.
+`test_round_router_row_deleted_fails` is the case that keeps the gap closed, and it is why
+this file exists rather than being skipped as boilerplate. The arm-only, gated-`When` and
+`*-tick.md` cases are its neighbours, and the marker cases cover the single-copy half.
 
 Same shape as `test_check_inflight_limb.py`.
 """
@@ -26,6 +31,7 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-round-overlap.py"
 ARM = "commands/manager-loop.md"
+DRIVE = "commands/manager-drive.md"
 TICK = "commands/manager-loop-tick.md"
 STEP = "commands/steps/manager-readings.md"
 
@@ -64,8 +70,10 @@ class Base(unittest.TestCase):
         (root / "scripts").mkdir()
         (root / "commands" / "steps").mkdir(parents=True)
         shutil.copy(SCRIPT, root / "scripts" / "check-round-overlap.py")
-        self.write(ARM, router([ROW]))
-        self.write(TICK, router([ROW]))
+        # The real shape since 2026-10-11: the arm carries no step table, and the router a
+        # wakeup names is the round (`commands/manager-drive.md`).
+        self.write(ARM, router([]))
+        self.write(DRIVE, router([ROW]))
         self.write(STEP, STEP_BODY)
 
     def write(self, rel: str, text: str) -> None:
@@ -84,29 +92,36 @@ class TestGuard(Base):
         r = self.guard()
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_tick_router_row_deleted_fails(self) -> None:
+    def test_round_router_row_deleted_fails(self) -> None:
         # The case the second version of the guard could not detect: the arm's
-        # duplicate row stood in for the tick router's, so the rule stopped being
+        # duplicate row stood in for the round router's, so the rule stopped being
         # read every round while the guard printed success.
-        self.write(TICK, router([]))
+        self.write(ARM, router([ROW]))
+        self.write(DRIVE, router([]))
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("only a non-tick router names it", r.stderr)
+        self.assertIn("only the arm names it", r.stderr)
 
     def test_arm_row_deleted_still_passes(self) -> None:
         # The arm is not what fires; losing its copy costs nothing.
         self.write(ARM, router([]))
         self.assertEqual(self.guard().returncode, 0)
 
-    def test_both_router_rows_deleted_fails(self) -> None:
+    def test_tick_router_still_counts(self) -> None:
+        # A `*-tick.md` router remains a valid round router — the fleet loop's shape.
+        self.write(DRIVE, router([]))
+        self.write(TICK, router([ROW]))
+        self.assertEqual(self.guard().returncode, 0)
+
+    def test_no_router_row_names_it_fails(self) -> None:
         self.write(ARM, router([]))
-        self.write(TICK, router([]))
+        self.write(DRIVE, router([]))
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no router row names this file", r.stderr)
 
-    def test_tick_row_gated_fails(self) -> None:
-        self.write(TICK, router([("2", GATED, STEP)]))
+    def test_round_row_gated_fails(self) -> None:
+        self.write(DRIVE, router([("2", GATED, STEP)]))
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no row's `When` is every-tick", r.stderr)
