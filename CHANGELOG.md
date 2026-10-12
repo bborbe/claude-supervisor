@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.131.2
 
 - test: **the cluster spawn's retry classification is now pinned by the codes it must cover, not by one example.** `server/cluster-spawn.test.mjs` exercised `ECONNREFUSED` retrying and the four post-delivery codes (`ECONNRESET`, `EPIPE`, `UND_ERR_SOCKET`, `UND_ERR_HEADERS_TIMEOUT`) *not* retrying — but the other six members of the retryable set (`EHOSTUNREACH`, `ENETUNREACH`, `ENOTFOUND`, `EAI_AGAIN`, `ETIMEDOUT`, `UND_ERR_CONNECT_TIMEOUT`) were pinned by nothing, so an edit dropping one from `CONNECTION_ERROR_CODES` would have left every test green. The set is now restated in the test from the module's own documented decision and asserted code by code — three attempts each, `[250, 500]` backoff, and the code named in the final error — so a change to the classification has to be made in two places, deliberately. A second case pins `error.code` as well as `error.cause?.code`, the left-hand branch of `isConnectionFailure`'s `??` that every existing test left unexercised. Both guard the same silent failure: an error class leaving the set with nothing to notice.
 
