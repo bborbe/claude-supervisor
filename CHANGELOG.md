@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.133.3
 
 - fix: **`agents/fleet-drive.md` routes both of its ledger steps through the script.** Step 3 loads with `python3 $P/drive-ledger.py read` and step 7 persists with `merge`, so the agent supplies only this round's entries and never holds the merged set — a round can no longer shrink the ledger by omission. An **exit 2** from `read` means the file exists but cannot be parsed, which is **not** an empty ledger: every candidate is `unverifiable` that round and the refusal is reported in the header. A genuinely absent file prints `{"round": null, "entries": []}` and exits 0, and the two cases are deliberately different — reading a corrupt ledger as empty is how the 2026-09-23 run lost 29 entries. The file also gains the `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` definition its siblings already carry and it never had. `commands/steps/drive.md` owns no ledger rules and is unchanged.
 
