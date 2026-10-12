@@ -23,7 +23,11 @@ Three assertions, all required:
   (b) `ledger.json` appears **exactly once** across `agents/` and `commands/`, in
       `agents/fleet-drive.md`, as the `LEDGER  ~/.claude/state/...` output-format line.
       The script owns the path, so prose naming it again is a hand-rolled write waiting
-      to happen. (Measured 2026-10-12: 3 hits before the change, 1 after.)
+      to happen. (Measured 2026-10-12, LINES: 3 before the change, 1 after -- 5
+      occurrences over those 3 lines, since step 7 named both `ledger.json` and
+      `ledger.json.tmp`. The count is stated as lines because that is what a
+      `grep -c` reports, and the two measures disagreeing is what made this
+      sentence ambiguous once already.)
   (c) **No line that references the ledger also WRITES it through an inline
       interpreter** -- no `jq` redirect, no `python3 -c` that dumps JSON, no heredoc
       into a shell. This is the clause that would have caught the original wipe.
