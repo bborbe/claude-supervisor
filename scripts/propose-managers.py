@@ -28,35 +28,62 @@ in a live phase** and **no live manager**.
     approve` and only by it, so it is the vault's own record of the operator's approval
     rather than a proxy inferred from `status`/`phase`. Same predicate, same reason, as
     `approved-not-started.py`.
-  * *live phase* — `phase` in `planning` / `execution`. A row still at `phase: todo` has
-    not been approved, and a row past `execution` is in review or done.
+  * *live phase* — `phase` in `planning` / `execution`. ⚠️ This is the operator's own
+    threshold ("approved (phase planning/execution)"), not a claim that a `phase: todo`
+    row is unapproved — rows carrying `approved_at` at `phase: todo` do exist, and they
+    are excluded here by the phase test rather than by the approval test.
   * *non-terminal* — `status` is not completed / aborted / hold / backlog.
-  * *no live manager* — no live session's name matches the goal title (a `<X> Manager`
-    suffix allowed), which is the convention `docs/fleet-surface.md` § *Which manager owns
-    a subject* states and `approved-not-started.py`'s `manager_for` already implements.
+  * *no live manager* — see below.
 
 Threshold 2, not 1: the operator's ruling on this card was *">= 2 approved tasks"*. One
 approved task is a row to open, not a subject to manage — the threshold is what keeps the
 card a signal about a goal rather than a second copy of the `approved-not-started` reading.
+
+Which manager owns a goal
+-------------------------
+**Delegated to `scripts/fleet-board.py`, never re-derived here.** That file already owns
+"does this session name this subject" (`_norm_session_name` + `_matches_one_title`, which
+normalise the registry's `⚙ ` decoration and accept a truncated title) and the two-hop
+goal→topic→manager chain. This script imports those helpers rather than restating them,
+because a second matcher is a second answer.
+
+⚠️ **An exact-equality match is not enough, and the counter-example is this change's own
+motivating case.** The live manager for the CDB goal is named `Read CDB Data Through
+Weldall Manager` against a goal titled `Read CDB Data Through Weldall (MVP)`: an
+abbreviated label, which `_matches_one_title`'s length-gated prefix branch accepts and
+equality never does. Measured 2026-10-12 — the naive form listed that goal as unmanaged
+with its manager running.
+
+A goal also reaches a manager through its **topic**: a live manager whose subject is the
+topic page listing the goal under `## Goals` owns it. Both hops are read, and a goal
+matching neither is `unmanaged` — a fact about the fleet, not a failure.
 
 The slot gate
 -------------
 The card is posted only when a manager slot is free, and the slot count comes from the
 code that enforces it — never a number restated here.
 
-  * the cap is `resolveMaxManagers` in `server/spawn-mode.mjs`, the same function
-    `supervisor.mjs` applies at spawn time, called through node exactly as
-    `scripts/worker-target.py` calls `resolveMaxConcurrent` for the worker pair.
-  * ⚠️ **The gate reads the HARD cap, not the soft one.** The card's action is an
-    OPERATOR-NAMED manager spawn, and `managerLimitRefusal` lets an operator-named spawn
-    open through the whole soft/hard band — so the soft cap is not the count at which this
-    card's offer stops being keepable. The hard cap is, and it is the cap whose refusal
-    opens `the manager fleet is FULL` (`MANAGER_FLEET_FULL`). Gating on the soft cap would
-    withhold a card whose `start manager` answer the server would have honoured.
-  * the live-manager count is `scripts/fleet-board.py --json`'s own manager classification,
-    Fleet Manager excluded — the instrument `server/manager-sessions.mjs` names. `null`
-    (the board could not be read) is UNKNOWN and refuses; it never reads as zero, because
-    an empty fleet is the answer that posts past a limit.
+  * the cap is `resolveMaxManagers` in `server/spawn-mode.mjs`, called through node
+    exactly as `scripts/worker-target.py` calls `resolveMaxConcurrent` for the worker
+    pair. No Python reimplementation: that would be a second counter.
+  * ⚠️ **The gate reads the HARD cap, not the soft one, and the reason is the operator's
+    ceiling rather than the server's refusal.** The card's spawn is an operator-named
+    manager, and the `docs/fleet-surface.md` band argument does **not** carry here: the
+    recipe this card's answer uses (`commands/open.md` § Step 2C) spawns a wezterm tab
+    directly, which bypasses `spawn_agent` and therefore never reaches
+    `managerLimitRefusal` at all. So this gate is the fleet's own, not the server's, and
+    the number it applies is the operator's stated ceiling for managers — the hard cap
+    (`spawn.maxManagersHard`, default 5), the same 5 the operator's own ruling names.
+    Gating on the soft cap would silently substitute a number the operator did not choose
+    for this decision.
+  * ⚠️ **A `0` on the soft key is the documented OFF SWITCH and disables BOTH thresholds**
+    (`server/spawn-mode.mjs`), so the resolver returns `hardLimit: null` there. That is
+    **unlimited**, not unknown: every candidate is posted. Reading it as "no free slot"
+    would turn the operator's own off switch into permanent silence.
+  * the live-manager count is `scripts/fleet-board.py --json`'s own manager
+    classification, Fleet Manager excluded — the instrument `server/manager-sessions.mjs`
+    names. `null` (the board could not be read) is UNKNOWN and refuses; it never reads as
+    zero, because an empty fleet is the answer that posts past a limit.
 
 When several goals qualify and fewer slots are free, only the top `free` get a card,
 ranked by goal priority then by approved-task count. Ranking rather than a bulk post is
@@ -72,13 +99,22 @@ in the key makes a re-post of an unchanged goal a *different* key, so the store'
 open-scoped suppression never matches and the operator is asked the same question twice
 (measured 2026-10-02 on the sibling under-target card).
 
+⚠️ **The key carries no vault, so two same-titled goals in two vaults would collide** —
+and the store's open-scoped suppression would swallow the second silently while this run
+counted it as posted. `qualify()` deliberately keeps those two goals separate (goal titles
+are not namespaced across vaults), so the collision is detected here and **refused** (exit
+`2`) rather than lost. The key form is the operator's, stated in the runbook; changing it
+is a spec change, not a bug fix.
+
 Exit codes
 ----------
   0  one or more cards emitted (or, without `--post`, would be)
   3  nothing to do — no qualifying goal, or no free slot
-  2  REFUSED — the cap or the live-manager count could not be read. Never read as 3.
+  2  REFUSED — the cap, the live-manager count, a tasks dir or the dedup keys could not
+     be resolved. Never read as 3.
 """
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -106,6 +142,11 @@ LIVE_STATUSES = {"next", "todo", "in_progress", ""}
 ROOT_NAME = "Fleet Manager"
 
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+
+# The topic dirs a vault may keep its topic pages in. Probed, never assumed: a vault that
+# has neither simply contributes no topic hop, which can only fail to *suppress* a card —
+# the loud direction, never the silent one.
+TOPIC_DIRS = ("23 Topics", "22 Topics")
 
 # Resolved the way `server/config.mjs` does — `XDG_CONFIG_HOME`, then `SUPERVISOR_CONFIG`
 # over it. A reader resolving a different path than the server would report the default
@@ -136,6 +177,20 @@ RESOLVE = (
     "    : { limit: r.limit, source: r.source, hardLimit: r.hardLimit, hardSource: r.hardSource }));"
     "}"
 )
+
+
+def _board():
+    """`scripts/fleet-board.py` as a module — its own name-match helpers, imported.
+
+    ⚠️ **Imported, not copied.** `_norm_session_name` / `_matches_one_title` /
+    `_MANAGER_SUFFIX` are the single definition of "does this session name this subject",
+    shared with the fleet board the operator reads. A copy here would be a second answer
+    that drifts, which is the failure this repo's `check-*` guards exist to refuse.
+    """
+    spec = importlib.util.spec_from_file_location("fleet_board", os.path.join(HERE, "fleet-board.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def frontmatter(text):
@@ -175,39 +230,54 @@ def goal_name(link):
 
 
 def vaults():
-    """Every configured vault that declares a `tasks_dir`, newest config read.
+    """Every configured vault that declares a `tasks_dir`.
 
-    A vault that cannot answer is skipped and named, never fatal — the same rule
-    `commands/open.md` § Step 0.5 carries for the batch scan, and for the same measured
-    reason: one unreadable vault truncated every vault after it in the loop order.
+    ⚠️ **A vault that cannot answer is skipped AND NAMED**, never silent — the rule
+    `commands/open.md` § Step 0.5 states for the batch scan, and the one this file's
+    earlier revision claimed without doing. A skipped vault is a hole in the scan, and a
+    hole and a clean vault must not render the same.
     """
     try:
         proc = subprocess.run(
             ["vault-cli", "config", "list", "--output", "json"],
             capture_output=True, text=True,
         )
-    except OSError:
-        return []
+    except OSError as error:
+        print(f"UNKNOWN — cannot run vault-cli to list vaults: {error}", file=sys.stderr)
+        return None
     if proc.returncode != 0:
-        return []
+        print("UNKNOWN — `vault-cli config list` failed; the vault set is unknown", file=sys.stderr)
+        return None
     try:
         entries = json.loads(proc.stdout)
     except ValueError:
-        return []
+        print("UNKNOWN — `vault-cli config list` did not return JSON", file=sys.stderr)
+        return None
     if not isinstance(entries, list):
-        return []
-    out = []
+        print("UNKNOWN — `vault-cli config list` did not return a list", file=sys.stderr)
+        return None
+
+    out, skipped = [], []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         path, tasks_dir = entry.get("path"), entry.get("tasks_dir")
         if not path or not tasks_dir:
             continue
+        root = os.path.join(path, tasks_dir)
+        if not os.path.isdir(root):
+            skipped.append(f"{entry.get('name') or path} ({root})")
+            continue
+        topics_dir = next((os.path.join(path, d) for d in TOPIC_DIRS
+                           if os.path.isdir(os.path.join(path, d))), None)
         out.append({
             "name": entry.get("name") or os.path.basename(path),
-            "tasks_dir": os.path.join(path, tasks_dir),
+            "tasks_dir": root,
             "goals_dir": os.path.join(path, entry["goals_dir"]) if entry.get("goals_dir") else None,
+            "topics_dir": topics_dir,
         })
+    for name in skipped:
+        print(f"⚠️ skipped vault with no tasks dir: {name}", file=sys.stderr)
     return out
 
 
@@ -235,10 +305,46 @@ def goal_priority(goals_dir, name):
         return None
 
 
-def scan(tasks_dirs):
+def topics_by_goal(vault):
+    """`{goal title: {topic title, …}}` for one vault's topic pages.
+
+    A topic page lists its member goals under `## Goals` (in this vault's shape, inside
+    `# Scope`). The hop exists because a goal's manager is often named for the **topic**,
+    not the goal — the chain `docs/fleet-surface.md` § *Which manager owns a subject*
+    states and `fleet-board.py`'s `manager_on_chain` reads.
+    """
+    topics_dir = vault.get("topics_dir")
+    if not topics_dir:
+        return {}
+    out = {}
+    try:
+        names = sorted(os.listdir(topics_dir))
+    except OSError:
+        return {}
+    for filename in names:
+        if not filename.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(topics_dir, filename), encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        collecting = False
+        for line in text.splitlines():
+            if line.startswith("#"):
+                collecting = line.strip().lower().lstrip("#").strip() == "goals"
+                continue
+            if not collecting:
+                continue
+            for link in re.findall(r"\[\[([^\]]+)\]\]", line):
+                out.setdefault(goal_name(link), set()).add(filename[:-3])
+    return out
+
+
+def scan(roots):
     """Every approved, non-terminal, live-phase task row, as `(goal, vault, title)` triples."""
     rows = []
-    for root in tasks_dirs:
+    for root in roots:
         try:
             names = sorted(os.listdir(root["tasks_dir"]))
         except OSError:
@@ -246,9 +352,8 @@ def scan(tasks_dirs):
         for filename in names:
             if not filename.endswith(".md"):
                 continue
-            path = os.path.join(root["tasks_dir"], filename)
             try:
-                with open(path, encoding="utf-8") as handle:
+                with open(os.path.join(root["tasks_dir"], filename), encoding="utf-8") as handle:
                     block = frontmatter(handle.read())
             except OSError:
                 continue
@@ -285,22 +390,23 @@ def live_manager_labels(board_json):
     ]
 
 
-def managed(goal, labels):
-    """Whether a live manager's label names this goal.
+def managed(titles, labels, board):
+    """Whether a live manager names any of `titles`.
 
-    The `<X> Manager` suffix is allowed, and the match is case-insensitive — the convention
-    `docs/fleet-surface.md` § *Which manager owns a subject* states, which
-    `approved-not-started.py`'s `_manager_named` and `fleet-board.py` both read the same way.
+    `titles` is the goal plus every topic that lists it. The match is `fleet-board.py`'s
+    own — `_MANAGER_SUFFIX` stripped, `_norm_session_name` applied, `_matches_one_title`
+    compared — so a decorated label, a case difference and an abbreviated title all match
+    exactly as they do on the board the operator reads.
     """
-    title = goal.strip().lower()
+    normalized = {board._norm_session_name(t): t for t in titles if t}
     for label in labels:
-        lowered = label.lower()
-        if lowered in (title, title + " manager"):
+        base = board._MANAGER_SUFFIX.sub("", label)
+        if board._matches_one_title(board._norm_session_name(base), normalized):
             return True
     return False
 
 
-def qualify(rows, labels, threshold=GOAL_THRESHOLD):
+def qualify(rows, labels, topics, board, threshold=GOAL_THRESHOLD):
     """The qualifying goals, ranked — a pure function over already-read inputs.
 
     Grouping is by `(vault name, goal name)`: goal titles are not namespaced across vaults,
@@ -316,7 +422,8 @@ def qualify(rows, labels, threshold=GOAL_THRESHOLD):
     for (_, goal), group in groups.items():
         if len(group["titles"]) < threshold:
             continue
-        if managed(goal, labels):
+        titles = [goal] + sorted(topics.get(goal, ()))
+        if managed(titles, labels, board):
             continue
         priority = goal_priority(group["vault"]["goals_dir"], goal)
         candidates.append({
@@ -335,7 +442,13 @@ def qualify(rows, labels, threshold=GOAL_THRESHOLD):
 
 
 def cap_cards(candidates, free):
-    """The top `free` candidates, in rank order. A pure slice — never a re-rank."""
+    """The top `free` candidates, in rank order. A pure slice — never a re-rank.
+
+    `free` is `None` for an UNLIMITED fleet (the operator's `0` off switch), which posts
+    every candidate — never zero. A number `<= 0` posts none.
+    """
+    if free is None:
+        return list(candidates)
     if free <= 0:
         return []
     return candidates[:free]
@@ -344,6 +457,20 @@ def cap_cards(candidates, free):
 def dedup_key(goal):
     """`fleet-propose-manager:<goal name>` — membership only, never a timestamp."""
     return f"fleet-propose-manager:{goal}"
+
+
+def key_collisions(candidates):
+    """`{key: [goal, …]}` for keys two or more candidates share.
+
+    The key carries the goal's name and no vault, so two same-titled goals in two vaults
+    collide. The store's open-scoped suppression would swallow the second and this run
+    would still count it as posted — a card silently never asked. Refusing is the honest
+    answer; see the header.
+    """
+    seen = {}
+    for candidate in candidates:
+        seen.setdefault(dedup_key(candidate["goal"]), []).append(candidate["goal"])
+    return {key: goals for key, goals in seen.items() if len(goals) > 1}
 
 
 def resolve_cap():
@@ -399,7 +526,8 @@ def card_for(candidate, free, cap):
         "context": (
             f"approved: {candidate['approved']} · priority: "
             f"{candidate['priority'] if candidate['priority'] is not None else 'unset'} · "
-            f"manager slots free: {free} of {cap} · tasks: "
+            f"manager slots free: {'unlimited' if free is None else free} of "
+            f"{'unlimited' if cap is None else cap} · tasks: "
             + "; ".join(candidate["tasks"][:3])
             + ("; …" if len(candidate["tasks"]) > 3 else "")
         ),
@@ -409,7 +537,13 @@ def card_for(candidate, free, cap):
 
 
 def post(card):
-    """Post one card through `attention-ask.py`, returning its item id or None."""
+    """Post one card through `attention-ask.py`, returning its item id or None.
+
+    ⚠️ **The id is PARSED, never the whole stdout.** `attention-ask.py post` prints
+    `ITEM_ID: <id>` and then a `POLL:` line, so returning stdout whole would hand the
+    caller a two-line blob where it expects one id — and the step file tells the reader to
+    poll exactly that value. Same parse as `scripts/open-items.py`.
+    """
     ask = os.path.join(HERE, "attention-ask.py")
     cmd = [
         "python3", ask, "post",
@@ -429,7 +563,36 @@ def post(card):
         detail = (proc.stderr.strip().splitlines() or ["(no output)"])[-1]
         print(f"❌ post failed: {detail}", file=sys.stderr)
         return None
-    return (proc.stdout or "").strip() or None
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("ITEM_ID:"):
+            return line[len("ITEM_ID:"):].strip()
+    print(f"❌ post returned no ITEM_ID: {(proc.stdout or '').strip()[:120]}", file=sys.stderr)
+    return None
+
+
+def roots_from_args(tasks_dirs):
+    """`--tasks-dir` roots, or None when one of them is not a tasks dir.
+
+    ⚠️ **A typo'd path must not read as a clean round.** A missing dir is REFUSED (exit 2),
+    the same answer `approved-not-started.py` gives (`❌ tasks dir not found`), because
+    "no qualifying goal" and "I could not look" must never render the same.
+    """
+    roots = []
+    for raw in tasks_dirs:
+        path = os.path.abspath(raw)
+        if not os.path.isdir(path):
+            print(f"UNKNOWN — tasks dir not found: {path}", file=sys.stderr)
+            return None
+        parent = os.path.dirname(path)
+        roots.append({
+            "name": os.path.basename(parent),
+            "tasks_dir": path,
+            "goals_dir": next((os.path.join(parent, g) for g in ("24 Goals", "23 Goals")
+                               if os.path.isdir(os.path.join(parent, g))), None),
+            "topics_dir": next((os.path.join(parent, d) for d in TOPIC_DIRS
+                                if os.path.isdir(os.path.join(parent, d))), None),
+        })
+    return roots
 
 
 def main(argv):
@@ -440,20 +603,23 @@ def main(argv):
     parser.add_argument("--post", action="store_true",
                         help="post the cards; without it the run is a dry print")
     parser.add_argument("--json", action="store_true",
-                        help="emit the payload as JSON instead of the printed lines")
+                        help="emit the payload as JSON instead of the printed lines "
+                             "(implies --dry-run: it never posts)")
     parser.add_argument("--threshold", type=int, default=GOAL_THRESHOLD,
                         help=f"approved-task count a goal must reach (default {GOAL_THRESHOLD})")
     args = parser.parse_args(argv)
 
+    if args.post and args.json:
+        print("UNKNOWN — --json implies a dry run and cannot be combined with --post",
+              file=sys.stderr)
+        return 2
+
     if args.tasks_dir:
-        roots = [{"name": os.path.basename(os.path.dirname(d)),
-                  "tasks_dir": d,
-                  "goals_dir": next((os.path.join(os.path.dirname(d), g)
-                                     for g in ("24 Goals", "23 Goals")
-                                     if os.path.isdir(os.path.join(os.path.dirname(d), g))), None)}
-                 for d in args.tasks_dir]
+        roots = roots_from_args(args.tasks_dir)
     else:
         roots = vaults()
+    if roots is None:
+        return 2
     if not roots:
         print("UNKNOWN — no vault declares a tasks_dir", file=sys.stderr)
         return 2
@@ -469,14 +635,27 @@ def main(argv):
               file=sys.stderr)
         return 2
 
-    # The HARD cap gates the card — see the header. `soft` is carried only for the report.
-    if hard is None:
-        free = None
-    else:
-        free = max(0, hard - count)
+    # `hard is None` is the resolver's UNLIMITED (the operator's `0` off switch), never
+    # "unknown" — `cap_cards` posts every candidate for it. An unreadable board or cap
+    # refused above, so nothing here can collapse unknown into a number.
+    free = None if hard is None else max(0, hard - count)
 
-    candidates = qualify(scan(roots), labels, args.threshold)
-    cards = [] if free is None else cap_cards(candidates, free)
+    board = _board()
+    topics = {}
+    for root in roots:
+        for goal, names in topics_by_goal(root).items():
+            topics.setdefault(goal, set()).update(names)
+
+    candidates = qualify(scan(roots), labels, topics, board, args.threshold)
+    collisions = key_collisions(candidates)
+    if collisions:
+        for key, goals in sorted(collisions.items()):
+            print(f"UNKNOWN — dedup key {key} is shared by {len(goals)} goals "
+                  f"({', '.join(sorted(goals))}); the key carries no vault, so one card "
+                  f"would be silently swallowed", file=sys.stderr)
+        return 2
+
+    cards = cap_cards(candidates, free)
 
     if args.json:
         print(json.dumps({
@@ -488,10 +667,10 @@ def main(argv):
         }, indent=2))
         return 0 if cards else 3
 
-    print(f"managers: {count} live / {hard if hard is not None else 'unlimited'} hard cap "
+    print(f"managers: {count} live / {'unlimited' if hard is None else hard} hard cap "
           f"(soft {soft if soft is not None else 'unlimited'}, source: {hard_source})")
     print(f"qualifying goals: {len(candidates)} · free slots: "
-          f"{free if free is not None else 'unknown'}")
+          f"{'unlimited' if free is None else free}")
 
     if not cards:
         # A suppressed round and a round that found nothing must never render the same, so
@@ -503,8 +682,7 @@ def main(argv):
         return 3
 
     for candidate in cards:
-        card = card_for(candidate, free, hard)
-        print(f"  card: {card['dedup_key']} — {candidate['goal']} "
+        print(f"  card: {dedup_key(candidate['goal'])} — {candidate['goal']} "
               f"({candidate['vault']}, {candidate['approved']} approved)")
 
     if not args.post:
