@@ -1,6 +1,6 @@
 ---
 name: fleet-drive
-description: Perform the fleet sweep's drive leg — read the digest render at the `payload=` path the caller passes, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), write the drafted reaps, nudges and escalation groups to its own payload, and return the ≤ 1 KB drive-verdict hand-back. Dispatched by `/supervisor:fleet-drive` and by `/supervisor:fleet-loop` on every round. Consumes the classification the sweep already produced; never builds a second one, never sends.
+description: Perform the fleet sweep's drive leg — read the digest render at the `payload=` path the caller passes, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), write the drafted reaps, nudges and escalation groups to its own payload, and return the ≤ 1 KB drive-verdict hand-back. Dispatched by the fleet round `/supervisor:fleet-drive` on every round (armed by `/supervisor:fleet-loop`, or run by hand). Consumes the classification the sweep already produced; never builds a second one, never sends.
 model: sonnet
 tools: Read, Bash, Write
 allowed-tools: Bash(vault-cli:*), Bash(gh:*), Bash(grep:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(date:*), Bash(git:*)

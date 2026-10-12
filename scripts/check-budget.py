@@ -28,7 +28,7 @@ every tick. Until 2026-10-11 the target was always a `commands/*-tick.md`, so a 
 them all. The manager loop's wakeup now names `/supervisor:manager-drive`, a round with no
 `-tick` suffix, and a glob-only rule would have applied the cap to nothing on that side
 while reporting green. Both spellings are therefore checked: the glob (the fleet loop still
-names `commands/fleet-tick.md`) plus an explicit list of the targets that carry no suffix.
+names `commands/manager-drive.md`) plus an explicit list of the targets that carry no suffix.
 """
 
 import json
@@ -43,9 +43,11 @@ SCAN_DIRS = ("commands", "agents", "skills")
 
 #: Wakeup targets that carry no `-tick` suffix, so the glob below cannot find them.
 #: `commands/manager-drive.md` is the manager loop's round since 2026-10-11 — the prompt
-#: `/supervisor:manager-loop` arms `ScheduleWakeup` with. A target missing from this list
-#: is a body the strict cap silently stops covering.
-WAKEUP_TARGETS = ("commands/manager-drive.md",)
+#: `/supervisor:manager-loop` arms `ScheduleWakeup` with. `commands/fleet-drive.md` is the
+#: fleet loop's round since 2026-10-12, when the former fleet round command was folded
+#: into it and the `*-tick.md` glob stopped matching anything on the fleet side. A target
+#: missing from this list is a body the strict cap silently stops covering.
+WAKEUP_TARGETS = ("commands/manager-drive.md", "commands/fleet-drive.md")
 
 
 def load() -> dict:

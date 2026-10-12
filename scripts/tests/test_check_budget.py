@@ -45,9 +45,11 @@ class CheckBudgetTest(unittest.TestCase):
         # the ones currently over the line.
         self.write("commands/big.md", BODY_MAX + 1024)
         self.write("agents/small.md", 1000)
-        # The suffix-less wakeup target must exist in the fixture, or the guard's own
+        # The suffix-less wakeup targets must exist in the fixture, or the guard's own
         # "named as a wakeup target but the file is gone" failure fires on every case.
+        # One per `WAKEUP_TARGETS` entry: the manager loop's round, and the fleet loop's.
         self.write("commands/manager-drive.md", 1000)
+        self.write("commands/fleet-drive.md", 1000)
         self.baseline({"commands/big.md": BODY_MAX + 1024, "agents/small.md": 1000})
 
     def write(self, rel, size):

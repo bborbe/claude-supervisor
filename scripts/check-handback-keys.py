@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-ROUTER = REPO / "commands" / "fleet-tick.md"
+ROUTER = REPO / "commands" / "fleet-drive.md"
 SWEEP = REPO / "agents" / "fleet-sweep-reader.md"
 
 # `the hand-back reports `orphan`, `collision` or `unmanaged` > 0` — the count-test cell shape.
