@@ -10,11 +10,11 @@ When: not already in this session's context — the first tick after an arm, or 
 
 Rationale: [[Fleet Manager Session]] § Fleet-Manager Command — Rationale and Measured History
 
-The `allowed-tools` grant these steps run under lives in the command frontmatter — `${CLAUDE_PLUGIN_ROOT}/commands/fleet-tick.md` and `${CLAUDE_PLUGIN_ROOT}/commands/fleet-loop.md` — and is not restated here.
+The `allowed-tools` grant these steps run under lives in the command frontmatter — `${CLAUDE_PLUGIN_ROOT}/commands/fleet-drive.md` and `${CLAUDE_PLUGIN_ROOT}/commands/fleet-loop.md` — and is not restated here.
 
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
-`$P` is defined once per command (`${CLAUDE_PLUGIN_ROOT}/commands/fleet-tick.md`) — every script below is `python3 $P/<script>`.
+`$P` is defined once per command (`${CLAUDE_PLUGIN_ROOT}/commands/fleet-drive.md`) — every script below is `python3 $P/<script>`.
 ## Manager contract — a manager manages, it does not build
 
 The fleet manager never performs the *work*: no code edits, no repo/PR/k8s verification, no investigation, no debugging — not even small ones.
