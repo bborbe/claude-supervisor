@@ -62,6 +62,8 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 17 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 | 18 | Readings | every tick — print both readings with the marker line, run: `python3 $P/fleet-board.py --json` · `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
 
+⚠️ **The table is evaluated more than once per round, and the later reads are the ones that get skipped.** At the head only the rows decidable then can be honoured (`every tick` and the cold `rules` row); **every other row gates on data the round does not hold yet** — including `reap`, whose `When` is the drive leg — so **re-read this table the moment the sweep hand-back exists** — and again before the output shape renders — reading each row whose `When` has newly become decidable **and that has not already run this round**. Never re-run a leg: **every row whose `When` is `every tick` is once-per-round**, and a second sweep or drive leg would duplicate sends to peers. Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
+
 ## INLINE — the hard rules
 
 One imperative per rule; full text and the `⚠️` clauses live in `steps/rules.md`.
