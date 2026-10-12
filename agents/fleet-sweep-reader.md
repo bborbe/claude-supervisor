@@ -26,7 +26,7 @@ Canonical rationale for every rule below: the vault runbook `a page in 65 Runboo
 <inputs>
 The caller passes: this round's `ListAgents` roster verbatim · this manager's session id (`SID`) · the vault path and its tasks dir · the round timestamp.
 
-Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: write no snapshot, and print `snapshot written: skipped (persist: false)` in the digest header. `/supervisor:fleet-drive` passes it, because a by-hand drive run between two manager rounds must not advance `stall_count` or consume the previous snapshot the next manager round diffs against. Absent → persist as normal.
+Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: write no snapshot, and print `snapshot written: skipped (persist: false)` in the digest header. `/supervisor:fleet-drive` passes it, because a round run by hand between two armed rounds must not advance `stall_count` or consume the previous snapshot the next round diffs against. Absent → persist as normal.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>
