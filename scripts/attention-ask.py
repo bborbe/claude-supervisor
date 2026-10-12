@@ -182,13 +182,31 @@ def _positive_float_env(name, default):
 
 
 # Local store; a hung one must cost a clear failure, never a stalled loop tick.
+#
+# ⚠️ 10 s, and the raise is measured rather than defensive. The store's create
+# path is O(items): `Push` walks the whole items bucket on every push, and it
+# queues behind the read path on one BoltDB write lock
+# (`attention-controller` `pkg/attention-store-impl.go:1845`; 38,194 items when
+# this was measured). Measured 2026-10-12: 0.10–0.19 s idle, 0.42–1.11 s under 6
+# concurrent readers, 2.26 s peak under 20 — under 1.5x headroom at the old 3 s,
+# and a gate lost to a timeout is worse than a gate that arrives late. 10 s is
+# the value two siblings already use (`attention-card-lookup.py`,
+# `answered-watch.py`).
+#
+# ⚠️ The repo therefore reads this variable with TWO defaults, and that is stated
+# rather than hidden — it is the condition the note below sets. `attention-answer.py`,
+# `pod-attention.py`, `manager-attention-watch.py`, `who-needs-me.py` and
+# `notify-gate.py` still take 3 s, and unifying the policy is its own change.
+# `post` is the deliberate exception: it raises a gate the OPERATOR answers, so it
+# is the one call where paying latency beats losing the card.
+#
 # ⚠️ Deliberately left as the bare `float(...)` form rather than routed through
 # `_positive_float_env`, and that is a scope decision, not an oversight: the same
 # variable is read the same bare way by `pod-attention.py` and `answered-watch.py`,
 # so hardening one of the three would leave the repo reading one env var two
 # different ways with nothing saying which was intended. Hardening all three
 # belongs in its own change.
-STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "10"))
 
 # How long a posted ask stays on the board before it expires. ⚠️ This exists
 # because the `owner:` liveness default makes a card outlive the session that
@@ -595,6 +613,62 @@ def _expires_at_or_default(args):
     return (datetime.now(timezone.utc) + timedelta(hours=_ask_ttl_hours())).isoformat()
 
 
+def _report_transport_failure(reason, item_may_exist, out):
+    """Print a transport failure, naming a timeout as a timeout. Returns 1.
+
+    ⚠️ **A timeout is not an unreachable store, and one `except` clause used to
+    say it was.** `socket.timeout` is an alias of `TimeoutError`, which subclasses
+    `OSError`, so a single `except (urllib.error.URLError, OSError)` swallowed
+    both and printed "unreachable at <url>" for a store that had accepted the
+    connection and was merely slow. Measured 2026-10-12 against a listener that
+    accepts and never answers: `FAILED: attention store unreachable at
+    http://127.0.0.1:18099 (timed out)` — the timeout was the fact, the store was
+    reachable, and the message sent the reader to the network instead.
+
+    ⚠️ Nor is reachability decidable from the error, which is why the old wording
+    was never something this branch could know: an unroutable host raises a
+    `URLError` whose `reason` is a `TimeoutError` — a connect that TIMED OUT, not
+    one that was refused — so only the timeout is observable. A genuinely refused
+    connection arrives as `URLError(reason=ConnectionRefusedError)` and keeps the
+    unreachable wording; that is the negative control the tests pin, because a
+    blanket relabel of every transport failure would pass the positive probe
+    while making the message useless in the case it was written for.
+
+    ⚠️ **On `post` the timeout also leaves the item's existence UNKNOWN, and the
+    message has to say so.** The store may have committed the card while this
+    client gave up waiting for the response, so a bare "failed" reads as "nothing
+    happened" when a live card may be sitting on the board. Measured 2026-10-12:
+    at a 0.15 s timeout against a store whose create path takes ~0.13 s, the
+    client printed `FAILED` and the store had committed the item. The retry is
+    safe and non-duplicating — the store suppresses a re-push on the same
+    `producer_id` + `dedup_key` — so the message names that rather than leaving
+    the caller to guess.
+
+    ⚠️ That is why `item_may_exist` is a PARAMETER and not a property of the
+    error: it is a fact about the CALLER, not about the failure. `poll` writes
+    nothing, so the same timeout there carries no ambiguity and must not claim
+    one.
+    """
+    if isinstance(reason, TimeoutError):
+        print(
+            f"FAILED: attention store at {STORE} did not answer within "
+            f"{STORE_TIMEOUT:g}s (timed out — which is NOT proof the store is "
+            "unreachable).",
+            file=out,
+        )
+        if item_may_exist:
+            print(
+                "  ⚠️ The item's existence is UNKNOWN: the store may have created "
+                "the card before this client gave up waiting. Re-post the SAME "
+                "--dedup-key to retry — the store suppresses a duplicate push on "
+                "the same producer_id + dedup_key, so the retry cannot post twice.",
+                file=out,
+            )
+        return 1
+    print(f"FAILED: attention store unreachable at {STORE} ({reason})", file=out)
+    return 1
+
+
 def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
     """POST one item and print its id and poll line. Returns the exit code."""
     # ⚠️ Resolved BEFORE the store call, and reported HERE rather than raised out
@@ -625,6 +699,21 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
         detail = err.read().decode(errors="replace")
         print(f"FAILED: store returned {err.code} for the push -- {detail}", file=out)
         return 1
+    except urllib.error.URLError as err:
+        # ⚠️ `HTTPError` is a `URLError` subclass, so its clause must stay ABOVE
+        # this one. A timeout can arrive either way and both are one fact:
+        # `urlopen` wraps an `OSError` raised around the request write, so a
+        # connect that timed out reaches here as `URLError(reason=TimeoutError)`,
+        # while a response read that timed out raises a bare `TimeoutError` past
+        # the wrapper.
+        #
+        # `item_may_exist=True` — this is the POST path, and that is the whole
+        # reason the parameter exists. See `_report_transport_failure`.
+        return _report_transport_failure(err.reason, True, out)
+    except TimeoutError as err:
+        return _report_transport_failure(err, True, out)
+    except OSError as err:
+        return _report_transport_failure(err, True, out)
     record_posted_closer(producer_id, getattr(args, "closer", ""), args.dedup_key)
     print(f"ITEM_ID: {item.get('item_id')}", file=out)
     print(f"POLL: python3 attention-ask.py poll {item.get('item_id')}", file=out)
@@ -694,6 +783,17 @@ def cmd_poll(item_id, out=sys.stdout):
             detail = err.read().decode(errors="replace")
             print(f"FAILED: store returned {err.code} for {item_id} -- {detail}", file=out)
         return 1
+    except urllib.error.URLError as err:
+        # `item_may_exist=False`, and the asymmetry with `_post_and_report` is the
+        # point: a poll writes nothing, so a timeout here carries no ambiguity
+        # about what the store holds. The timeout itself is still named as one —
+        # measured 2026-10-12, `poll` printed the same `unreachable … (timed out)`
+        # misreport that the post path printed.
+        return _report_transport_failure(err.reason, False, out)
+    except TimeoutError as err:
+        return _report_transport_failure(err, False, out)
+    except OSError as err:
+        return _report_transport_failure(err, False, out)
     verdict, reason = attribution.classify(item)
     described = describe_answer(item)
     # `OPEN` is the one terminal that means "still unanswered", and it is
@@ -807,9 +907,24 @@ def main(argv=None):
         # from an AttributeError, not a defect in the shipped path.
         print(f"FAILED: store returned {err.code}")
         return 1
-    except (urllib.error.URLError, OSError) as err:
-        print(f"FAILED: attention store unreachable at {STORE} ({err})")
-        return 1
+    except urllib.error.URLError as err:
+        # The backstop. `_post_and_report` and `cmd_poll` catch their own
+        # transport failures, so reaching here means the failure predates the
+        # store call — and a caller that never reached the store cannot know
+        # whether an item was involved, so this claims no ambiguity. That is the
+        # honest default: `item_may_exist=True` is a fact about the POST path,
+        # and only the two commands that own that fact pass it.
+        #
+        # ⚠️ `HTTPError` is a `URLError` subclass and its clause above must stay
+        # first, or every store rejection would be reported as a transport
+        # failure. `TimeoutError` is not a `URLError`, so it needs its own clause
+        # below — it is an `OSError`, and the ordering is what keeps the timeout
+        # out of the unreachable wording.
+        return _report_transport_failure(err.reason, False, sys.stdout)
+    except TimeoutError as err:
+        return _report_transport_failure(err, False, sys.stdout)
+    except OSError as err:
+        return _report_transport_failure(err, False, sys.stdout)
 
 
 if __name__ == "__main__":
