@@ -828,6 +828,7 @@ session id of the manager that armed it — and treat it as a **lead only**, nev
 | `ABSENT` | 1 | resume it by id — the conversation is what is durable, not the process |
 | `UNKNOWN` | 2 | start a fresh manager; `--check` reads the session-heartbeat endpoint and never the registry, so this is an unreachable or non-200 endpoint, a malformed row, a non-boolean `live`, or a stale cluster-reachability marker — *cannot tell*, never *dead* |
 | `AMBIGUOUS` | 3 | start a fresh manager; the prefix matches two rows the store holds, which need not both be **live** (the matcher spans stale rows too), and a longer id resolves it |
+| `MALFORMED` — malformed argument | 4 | **no verdict was reached**: the argument is not a single session id — a newline-separated id blob, a value carrying whitespace, or a string with no session-id shape. Never *dead*, and never a resume authorisation. ⚠️ **A caller that arrives here with a multi-id set has a shell bug, not a dead session**: under zsh an unquoted expansion is **not** word-split, so `for id in $ids` hands the whole blob over as ONE argument — probe **one id per invocation** |
 
 `manager_session_id` is written when a manager arms the subject — by the *Record the manager's
 session on the subject's page* step in `commands/manager-loop.md`, which is a named paragraph
