@@ -28,6 +28,7 @@
 // Nothing here reads the filesystem, the environment, or the clock.
 
 import { randomUUID } from 'node:crypto'
+import { Agent, fetch as undiciFetch } from 'undici'
 
 // Verbatim from `interactive/session-id.go` (`sessionIDPattern`): one to 64 characters, the
 // first of which is not `-`. A `randomUUID` satisfies it; a hand-built id may not, which is
@@ -67,6 +68,49 @@ export const AUTH_SCHEME = 'Bearer '
 // session stuck inside a tool call.
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
 
+// ⚠️ **Without this the module's 10-minute bound is unreachable and the real ceiling is 5.**
+//
+// Node's `fetch` IS undici, whose `headersTimeout` defaults to 300 000 ms. `POST /prompt` sends
+// no response headers until the turn ends, so undici aborts a HEALTHY long turn at 300 s and the
+// caller sees `UND_ERR_HEADERS_TIMEOUT` — measured 2026-10-12 against a local stub that held its
+// headers 310 s: 300 931 ms on Node 26.11.1 (undici 8.11.2) and 300 966 ms on Node 22.22.3
+// (undici 6.24.1). The client's disconnect then cancels the turn in the pod
+// (`prompt intake failed: turn cancelled: context canceled`), so the answer AND the work are lost.
+//
+// The bound sits ABOVE `DEFAULT_TIMEOUT_MS` on purpose: this module's own `AbortController` stays
+// the authority, because it produces the readable `no answer within <timeoutMs>ms`, while
+// undici's is a backstop for a socket that dies without a signal. Equal bounds would make which
+// one fires a race.
+export const TRANSPORT_TIMEOUT_SLACK_MS = 5 * 1000
+
+// The dispatcher every spawn sends through, created on first use and reused.
+//
+// ⚠️ **`fetch` and `Agent` must come from the SAME copy of undici**, which is why this module
+// imports both from the package instead of using the global `fetch`. A dispatcher is honoured
+// only by the fetch sharing its undici instance, and Node exposes no `node:undici` builtin — so a
+// package `Agent` handed to the global fetch mixes majors on whichever runtime bundles a
+// different one. This fleet is split: 24 of 33 live supervisor servers run Node 26 (bundled
+// undici 8.11.2) and 9 run Node 22 (bundled 6.24.1), chosen by the launching session's PATH
+// because `package.json`'s `start` script calls bare `node`.
+//
+// One instance rather than one per request: an `Agent` owns a connection pool, so a per-request
+// agent leaks a socket per spawn unless destroyed — and both the retry loop and the body read
+// need it alive anyway.
+let clusterDispatcher
+
+// The dispatcher for a spawn, created on first use.
+//
+// Sized from `DEFAULT_TIMEOUT_MS`, which is what every production caller uses. A caller that
+// raises `timeoutMs` above it MUST inject its own `dispatcher`, or undici's bound would fall
+// below the deadline it exists to sit above — reintroducing this very defect.
+export function clusterTransportDispatcher() {
+  clusterDispatcher ??= new Agent({
+    headersTimeout: DEFAULT_TIMEOUT_MS + TRANSPORT_TIMEOUT_SLACK_MS,
+    bodyTimeout: DEFAULT_TIMEOUT_MS + TRANSPORT_TIMEOUT_SLACK_MS,
+  })
+  return clusterDispatcher
+}
+
 // How many times one spawn tries the service when the failure is a CONNECTION failure, and how
 // long it waits between tries.
 //
@@ -99,10 +143,13 @@ export const CLUSTER_CONNECT_BACKOFF_MS = 250
 // delivery, so none is retried: a duplicate turn is worse than one honest failure the caller can
 // re-issue itself.
 //
-// `UND_ERR_HEADERS_TIMEOUT` is doubly excluded. A server that accepts the connection and never
-// answers is wedged, not busy, so it is the code a retry is least likely to help and most likely
-// to cost — retrying it would turn the guarantee at `DEFAULT_TIMEOUT_MS` above ("a wedged pod
-// costs one error, not a manager session stuck inside a tool call") into three.
+// ⚠️ **`UND_ERR_HEADERS_TIMEOUT` is excluded for the post-delivery reason above, and NOT because
+// a header-less server is necessarily wedged** — that reading was wrong, and is corrected here.
+// This service holds response headers for the whole turn by design, so this code is exactly what
+// a HEALTHY long turn used to produce at undici's 300 s default; see `TRANSPORT_TIMEOUT_SLACK_MS`.
+// It stays unretried because it is reachable only after delivery and `POST /prompt` is not
+// idempotent. With the transport bound now raised above `DEFAULT_TIMEOUT_MS` it should not fire
+// at all — and if it does, the pod itself has stopped answering.
 //
 // `ETIMEDOUT` stays because at this layer it is the OS connect timeout — the SYN never got an
 // answer, so nothing was delivered. `EAI_AGAIN` is in on purpose: a resolver that did not answer
@@ -405,8 +452,14 @@ export async function startClusterSession({
   prompt,
   sessionId,
   authToken,
-  fetchImpl = fetch,
+  // ⚠️ **undici's own fetch, never the global one** — the `dispatcher` below is an `undici`
+  // instance and is honoured only by the fetch that shares its copy. See
+  // `clusterTransportDispatcher` for why that pairing is load-bearing on this fleet.
+  fetchImpl = undiciFetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  // Injected by the regression test, which needs a transport bound it can observe inside a test's
+  // lifetime. Defaults to the shared instance above.
+  dispatcher = clusterTransportDispatcher(),
   // Injected so the retry's backoff costs a test nothing. This is the only clock the function
   // touches, and a test that had to sit through 250 ms twice would cost more than the
   // behaviour it pins is worth.
@@ -444,6 +497,9 @@ export async function startClusterSession({
         },
         body: prompt,
         signal: controller.signal,
+        // The whole of this change: without a dispatcher undici's own 300 s `headersTimeout`
+        // fires first on any turn longer than five minutes, and the answer is lost.
+        dispatcher,
       })
       break
     } catch (error) {
