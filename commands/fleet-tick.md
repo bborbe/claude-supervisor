@@ -62,7 +62,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 17 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 | 18 | Readings | every tick — print both readings with the marker line, run: `python3 $P/fleet-board.py --json` · `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
 
-⚠️ **Read this table TWICE per round — the second read is the one that gets skipped.** At the head, only the rows decidable then can be honoured (`every tick`, the cold `rules` row, and `reap`). Rows **3, 4, 7, 8, 9, 11, 12, 14, 16** each gate on data the round does not hold yet, so **re-read this table the moment the sweep hand-back exists** — and again before the output shape renders — reading every row whose `When` then holds. Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
+⚠️ **Read this table TWICE per round — the second read is the one that gets skipped.** At the head only the rows decidable then can be honoured (`every tick`, the cold `rules` row, and `reap`); **every other row gates on data the round does not hold yet**, so **re-read this table the moment the sweep hand-back exists** — and again before the output shape renders — reading each row whose `When` now holds. Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
 
 ## INLINE — the hard rules
 
