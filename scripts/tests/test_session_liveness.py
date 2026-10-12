@@ -36,6 +36,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
 
+# The refusal code for a `--check` argument that could not name a session at all. Pinned here
+# rather than imported so the suite fails loudly if the module renumbers it.
+MALFORMED = 4
+
 
 def load():
     spec = importlib.util.spec_from_file_location(
@@ -139,6 +143,19 @@ class SessionLiveness(unittest.TestCase):
             rc = self.m.main(["--check", session_id, "--endpoint", endpoint])
         return rc, out.getvalue() + err.getvalue()
 
+    def check_streams(self, session_id, endpoint):
+        """`check`, but with stdout and stderr kept apart.
+
+        ⚠️ **The split is load-bearing for the malformed cases.** The refusal prints to stderr
+        while the `--list` fall-through it replaced printed to **stdout**, so a case that merged
+        the two could not tell a roster from a verdict — and `assertNotIn("ABSENT", combined)`
+        would pass on a build whose stderr carried exactly the ABSENT it is meant to catch.
+        """
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.main(["--check", session_id, "--endpoint", endpoint])
+        return rc, out.getvalue(), err.getvalue()
+
     def listing(self, endpoint, directory=None):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -193,8 +210,11 @@ class SessionLiveness(unittest.TestCase):
     def test_a_404_is_absent_not_unknown(self):
         # The store positively reporting it holds no such session — a READABLE endpoint that
         # licenses ABSENT.
+        # ⚠️ The probe must be a WELL-FORMED id (lowercase alphanumerics). A non-id string is now
+        # refused as malformed before any verdict, so it can no longer stand in for "an id that
+        # matches nothing" — keeping those two apart is the point of the shape guard.
         with FixtureEndpoint([]) as fx:
-            rc, out = self.check("does-not-exist-xyz", fx.url)
+            rc, out = self.check("doesnotexist", fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
 
@@ -220,6 +240,100 @@ class SessionLiveness(unittest.TestCase):
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
+
+    # ---- the malformed argument: a value that could not name a session is never a verdict ---
+
+    def test_a_multi_id_blob_is_malformed_not_absent(self):
+        # The incident this guard exists for. A shell loop expanded a newline-separated id string
+        # unquoted; under zsh that is not word-split, so the whole blob arrived as ONE argument
+        # and the probe answered ABSENT — the one verdict that authorises a resume onto a session
+        # that is already running. No endpoint is needed: the refusal precedes every HTTP read.
+        rc, out, err = self.check_streams("abc12345\nabc12345", dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertIn("malformed", err)
+        self.assertNotIn("ABSENT", out)
+        self.assertNotIn("ABSENT", err)
+
+    def test_a_non_id_string_is_malformed(self):
+        # ⚠️ The clause a whitespace-only guard would miss: this value carries no whitespace at
+        # all, so only the hyphen-position rule rejects it. Without this case, a guard that
+        # tested `" " in arg or "\n" in arg` would tick every other malformed probe while this
+        # one still read ABSENT/exit 1.
+        rc, out, err = self.check_streams("not-an-id-at-all", dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertNotIn("ABSENT", out + err)
+
+    def test_a_whitespace_only_argument_is_malformed_not_empty(self):
+        # ⚠️ Deliberately NOT the empty case below. `_check` strips before its own emptiness
+        # test, so an implementation that stripped first would fold the two together and answer
+        # UNKNOWN — which is exactly why the guard runs on the RAW argument.
+        rc, out, err = self.check_streams("   ", dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertNotIn("ABSENT", out + err)
+
+    def test_an_argument_with_internal_whitespace_is_malformed(self):
+        rc, _, err = self.check_streams("abc 12345", dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertNotIn("ABSENT", err)
+
+    def test_an_overlong_argument_is_malformed(self):
+        # The ≤36 cap is part of the rule; without this case a guard that drops it still passes.
+        rc, _, err = self.check_streams("a" * 37, dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertNotIn("ABSENT", err)
+
+    def test_an_empty_argument_is_unknown_and_prints_no_roster(self):
+        # ⚠️ The falsy-guard half of the fix. `if args.check:` sent `""` past the branch and into
+        # the `--list` fall-through, so an empty argument silently changed the command's MODE and
+        # a caller reading the roster as a verdict saw a non-empty result.
+        with FixtureEndpoint([row("3fd529af-1111-2222-3333-444455556666")]) as fx:
+            rc, out, err = self.check_streams("", fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("no session id given", err)
+        self.assertEqual(out, "", "an empty id must not fall through to the listing")
+
+    def test_a_well_formed_non_matching_id_is_still_absent(self):
+        # The unchanged control: the guard rejects non-ids, never ids that simply match nothing.
+        with FixtureEndpoint([]) as fx:
+            rc, out, err = self.check_streams("zzzzzzzz", fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("ABSENT — no session id matches zzzzzzzz", err)
+        self.assertEqual(out, "")
+
+    def test_the_ambiguous_recovery_prefix_is_not_malformed(self):
+        # ⚠️ **The regression guard for the tightening direction.** `_check` answers a collision
+        # with `AMBIGUOUS — … pass a longer id: <m[:12]>`, so a 12-char prefix of a HYPHENATED id
+        # — which carries a hyphen at offset 8 — is the instrument's own recovery input. A rule
+        # demanding exactly 8 characters would refuse the instruction it had just printed, and
+        # would narrow `prefix matching` that the verdict machinery is documented to leave alone.
+        sid = "3fd529af-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, _, _ = self.check_streams("3fd529af-111", fx.url)
+        self.assertNotEqual(rc, MALFORMED)
+        self.assertEqual(rc, LIVE)
+
+    def test_a_longer_prefix_of_a_real_id_is_not_malformed(self):
+        # Any prefix length resolves, not only 8 and not only the UUID's own separators.
+        sid = "3fd529af-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, _, _ = self.check_streams("3fd529af-1111-2222", fx.url)
+        self.assertEqual(rc, LIVE)
+
+    def test_an_uppercase_id_is_not_malformed(self):
+        # `_check` folds case, so the guard must fold too — a literal-lowercase rule would turn
+        # an id that resolves today into an input error.
+        sid = "abcdef12-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, _, _ = self.check_streams("ABCDEF12", fx.url)
+        self.assertEqual(rc, LIVE)
+
+    def test_a_list_is_unaffected_by_the_guard(self):
+        # The branch the empty case used to fall through to still works when it is ASKED for.
+        sid = "3fd529af-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertIn("3fd529af", out)
 
     def test_a_row_without_a_live_flag_is_unknown(self):
         # The store always sends `live`; a row that carries something else is a store this
@@ -347,6 +461,13 @@ class SessionLiveness(unittest.TestCase):
         # `quote(sid, safe="")` is the only thing between a hostile argument and a path traversal
         # or a query injection on the per-id route. Pin it: none of `../`, `?`, `%2f` may survive
         # unescaped into a URL the probe builds.
+        #
+        # ⚠️ **Two layers, and the case asserts both.** `main()`'s shape guard refuses these at
+        # the argument boundary, so they can no longer reach the wire *through `main()`* — but
+        # the encoding guarantee belongs to `_check` and must still hold for any other caller,
+        # so it is pinned where it lives rather than inferred from the guard. Asserting only the
+        # refusal would retire this coverage silently; asserting only `_check` would miss that
+        # the boundary now rejects them.
         seen = []
         real = self.m._get_json
 
@@ -358,7 +479,12 @@ class SessionLiveness(unittest.TestCase):
         try:
             with FixtureEndpoint([]) as fx:
                 for hostile in ("../etc/passwd", "abc?live=true", "abc%2fdef"):
-                    rc, out = self.check(hostile, fx.url)
+                    # Layer 1 — the argument boundary refuses it, and never as a verdict.
+                    rc_main, _, err = self.check_streams(hostile, fx.url)
+                    self.assertEqual(rc_main, MALFORMED, hostile)
+                    self.assertNotIn("ABSENT", err)
+                    # Layer 2 — reached directly, `_check` still encodes it.
+                    rc, _, _ = self.m._check(hostile, fx.url)
                     self.assertEqual(rc, ABSENT, hostile)
         finally:
             self.m._get_json = real
