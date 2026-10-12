@@ -32,17 +32,17 @@ allowed-tools:
   - Edit
 argument-hint: "[--interval <N>m] (interval defaults to 15m; the round repeats by default)"
 ---
-Fleet-drive — **the round**. The round the fleet loop's wakeup runs, and runnable by hand: one round, once, over the whole fleet. The fleet has a show (`/supervisor:fleet-status`) and this round; the arm that schedules it is `/supervisor:fleet-loop`.
+Fleet-drive — **the round**: one round, once, over the whole fleet, runnable by hand. The fleet's show is `/supervisor:fleet-status`.
 
 ⚠️ **This is the round, not the arm.** The wakeup names THIS command; the arm (`/supervisor:fleet-loop`) is invoked **once** to arm the loop and is **never** re-invoked from a wakeup — a wakeup re-invokes THIS command (`/supervisor:fleet-drive --interval <N>m`). This file is the **round** (read on every wakeup); `commands/fleet-loop.md` is the **arm** (read once).
 
 ⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep inside a worker collapses the two roles silently: the session keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
 
-One round per invocation. The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; the INLINE section mirrors them so no rule is ever absent from the round.
+The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; the INLINE section mirrors them so no rule is ever absent from the round.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — every script below is `python3 $P/<script>`.
 
-Rationale and incident history: the Fleet Manager Session runbook § Fleet-Manager Command — Rationale and Measured History.
+Rationale and history: runbook § Fleet-Manager Command — Rationale and Measured History.
 
 ## Router
 
@@ -69,6 +69,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 16 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 17 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 | 18 | Readings | every tick — print both readings with the marker line, run: `python3 $P/fleet-board.py --json` · `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
+| 19 | Propose a manager | `propose-managers.py` printed a card — run: `python3 $P/propose-managers.py --post` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/propose-manager.md` |
 
 ⚠️ **The table is evaluated more than once per round, and the later reads are the ones that get skipped.** At the head only the rows decidable then can be honoured (`every tick` and the cold `rules` row); **every other row gates on data the round does not hold yet** — including `reap`, whose `When` is the drive leg — so **re-read this table the moment the sweep hand-back exists**, and again before the output shape renders, reading each row whose `When` has newly become decidable **and that has not already run this round**. Never re-run a leg: **every `every tick` row is once-per-round**, and a second sweep or drive leg would duplicate sends to peers. Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
 
