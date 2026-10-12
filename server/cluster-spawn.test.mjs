@@ -9,13 +9,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { Agent } from 'undici'
 import {
   CLUSTER_ANSWER_MAX,
   CLUSTER_SESSION_ID_PATTERN,
   DEFAULT_TIMEOUT_MS,
   PROMPT_PATH,
   SESSION_HEADER,
+  TRANSPORT_TIMEOUT_SLACK_MS,
   classifyClusterAnswer,
+  clusterTransportDispatcher,
   newSessionId,
   resolveAuthToken,
   resolveClusterBaseUrl,
@@ -720,4 +724,119 @@ test('a non-string token reports its TYPE and never echoes the value', () => {
   const numeric = resolveAuthToken(1234567890)
   assert.match(numeric.error, /not a token string/)
   assert.ok(!numeric.error.includes('1234567890'), 'the value must not be echoed')
+})
+
+// --- The 300 s transport ceiling (2026-10-12) ---------------------------------------------
+//
+// The defect: `startClusterSession` armed its own ten-minute `AbortController`, but the request
+// went through Node's global `fetch` -- undici -- whose `headersTimeout` defaults to 300 000 ms.
+// `POST /prompt` sends no response headers until the turn ends, so undici aborted a HEALTHY long
+// turn at 300 s, and the client's disconnect then cancelled the turn in the pod
+// (`prompt intake failed: turn cancelled: context canceled`). Measured 2026-10-12 against a stub
+// holding its headers 310 s: 300 931 ms on Node 26.11.1 / undici 8.11.2 and 300 966 ms on Node
+// 22.22.3 / undici 6.24.1. The module's own bound never fired.
+//
+// **Why this test is shaped this way, and why the obvious alternative proves nothing.**
+// Every other timeout test in this file injects `fetchImpl`, so it exercises the module's own
+// `AbortController` and can NEVER observe undici's transport bound -- a fake fetch has no
+// `headersTimeout` to fire. And a test that merely asserted "the options object carries a
+// dispatcher" would pin the SHAPE of the fix, passing against any implementation that passed the
+// key -- including the one measured below, where a package agent handed to the GLOBAL fetch is
+// not a raised timeout but a broken request. So this drives the REAL transport, against a real
+// socket, and injects only the dispatcher, whose bound is what the assertion is about.
+//
+// **The injected bound is small rather than 300 s, and undici's granularity sets the stub hold.**
+// undici enforces `headersTimeout` on a coarse timer: measured here, a 200 ms bound let a 600 ms
+// response through and fired at ~1008 ms. Two consequences, and they pull in opposite directions:
+//
+// - The hold must sit ABOVE that tick, or the stub answers first, the request succeeds, and the
+//   test passes on the fixed code too -- reading as a broken fix.
+// - The hold is also the failure path's duration, so it cannot simply be made enormous.
+//
+// 4000 ms gives ~3 s of headroom over the measured ~1008 ms tick. That margin is deliberate: if
+// the tick fires LATE under load, the stub answers first and the test reports a false failure --
+// the one direction that costs a debugging session. On the fixed code the request still fails at
+// the tick, so the wider hold costs the passing path nothing.
+
+const TRANSPORT_TEST_BOUND_MS = 200
+const TRANSPORT_TEST_HOLD_MS = 4000
+
+// Accepts the request and holds its RESPONSE HEADERS, which is the shape the real service has on a
+// long turn. Server-side timeouts are disabled so the stub can never be the thing that closes the
+// connection -- otherwise the test would measure the stub rather than the client.
+function headersHoldingStub(holdMs) {
+  const server = createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      setTimeout(() => {
+        try {
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+          res.end('late answer')
+        } catch {
+          // The client is expected to have gone by now; that is the behaviour under test.
+        }
+      }, holdMs)
+    })
+  })
+  server.requestTimeout = 0
+  server.headersTimeout = 0
+  server.keepAliveTimeout = 0
+  return server
+}
+
+test('a long turn is bounded by the injected dispatcher, not by the transport default', async () => {
+  const server = headersHoldingStub(TRANSPORT_TEST_HOLD_MS)
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const dispatcher = new Agent({
+    headersTimeout: TRANSPORT_TEST_BOUND_MS,
+    bodyTimeout: TRANSPORT_TEST_BOUND_MS,
+  })
+  try {
+    const started = Date.now()
+    const { error, outcome } = await startClusterSession({
+      baseUrl: `http://127.0.0.1:${server.address().port}`,
+      prompt: 'x',
+      sessionId: UUID,
+      authToken: TOKEN,
+      dispatcher,
+    })
+    const elapsed = Date.now() - started
+    // On the pre-fix code the injected dispatcher is ignored, the global fetch's 300 s default
+    // applies, the stub answers at 2500 ms and this call SUCCEEDS -- so `error` is undefined and
+    // this is the assertion that fails, for the right reason.
+    assert.match(error ?? '', /UND_ERR_HEADERS_TIMEOUT/)
+    assert.equal(outcome, undefined, 'a timed-out spawn must not report an outcome')
+    // The bound that fired is the DISPATCHER's -- not the module's ten minutes, and not the
+    // transport default the whole change exists to get out from under.
+    assert.ok(
+      elapsed < TRANSPORT_TEST_HOLD_MS,
+      `expected the transport bound to fire before the stub answered; took ${elapsed} ms`,
+    )
+  } finally {
+    await dispatcher.destroy()
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('the spawn fetches through undici own fetch, never the global one', () => {
+  // The pairing this pins, and why it is not cosmetic: a dispatcher is honoured only by the fetch
+  // sharing its undici copy, and Node exposes no `node:undici` builtin. Measured on Node 26, a
+  // package `Agent` handed to the GLOBAL fetch fails with `InvalidArgumentError: invalid
+  // onRequestStart method` (`UND_ERR_INVALID_ARG`) -- not a raised timeout, a broken request. So
+  // the import and the default have to move together, and a future edit that reverts one alone
+  // silently restores the 300 s ceiling.
+  const src = readFileSync(new URL('./cluster-spawn.mjs', import.meta.url), 'utf8')
+  assert.match(src, /import \{ Agent, fetch as undiciFetch \} from 'undici'/)
+  assert.match(src, /fetchImpl = undiciFetch/)
+  assert.match(src, /dispatcher,\n/)
+})
+
+test('the transport bound sits above the module deadline, and is one shared instance', () => {
+  // Above, not equal: this module's own `AbortController` must stay the authority, because it is
+  // what produces the readable `no answer within <timeoutMs>ms`. Equal bounds would make which one
+  // fires a race.
+  assert.ok(TRANSPORT_TIMEOUT_SLACK_MS > 0, 'the backstop must sit above the deadline')
+  // One instance, not one per spawn: an `Agent` owns a connection pool, so a fresh one per call
+  // would leak a socket per spawn. Identity is the only observable that pins it.
+  assert.equal(clusterTransportDispatcher(), clusterTransportDispatcher())
 })
