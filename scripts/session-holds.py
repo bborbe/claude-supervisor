@@ -149,10 +149,20 @@ def panes():
 
     ⚠️ `None`, never `[]`: a failed `wezterm cli list` cannot prove a pane is gone
     any more than it can prove one is live, so no caller may read it as "no panes
-    exist". `[]` is reserved for a WezTerm that answered with zero panes — a real
-    empty answer that must keep working. Same convention as `jump.py`'s
-    `wezterm_panes()`, and the reason `transport-read-check.py` enumerates this
-    function as a transport read site.
+    exist". `[]` is reserved for a transport that answered with zero panes. Same
+    convention as `jump.py`'s `wezterm_panes()`, and the reason
+    `transport-read-check.py` enumerates this function as a transport read site.
+
+    ⚠️ **A machine with no `wezterm` BINARY is a fourth state, and it answers `[]`
+    rather than `None`.** An absent transport has no panes -- the Hold window is a
+    WezTerm concept, so where WezTerm is not installed there is nothing for it to
+    apply to, and `[]` is the true answer rather than a failed read. Folding it in
+    with the failure state is the *false refusal* severity of
+    `docs/pane-reads.md`: measured 2026-10-12, the first cut of this change did
+    exactly that and made `is-held <session>` exit non-zero on a headless runner,
+    failing CI on three tests that passed on a Mac purely because a Mac has
+    WezTerm. Only `FileNotFoundError` reads that way -- any other `OSError` (a mux
+    socket that is gone) is a genuine failure and stays `None`.
     """
     try:
         result = subprocess.run(
@@ -161,10 +171,15 @@ def panes():
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            return None
+    except FileNotFoundError:
+        return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
         listing = json.loads(result.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except ValueError:
         return None
     return listing if isinstance(listing, list) else None
 
