@@ -49,6 +49,16 @@ class SessionHoldsTest(unittest.TestCase):
         sh.HOLDS = os.path.join(self.dir, "session-holds.json")
         sh.LOCK = sh.HOLDS + ".lock"
         self.live = {LIVE}
+        # ⚠️ Stub the pane read so these tests never depend on the HOST having
+        # WezTerm. Measured 2026-10-12: without this they passed on a Mac (which
+        # has WezTerm) and failed on CI (which does not) — they were asserting the
+        # host, not the store. The store's own contract is what these cover; the
+        # Hold window has its own class below.
+        self._panes = sh.panes
+        sh.panes = lambda: []
+
+    def tearDown(self):
+        sh.panes = self._panes
 
     def run_cmd(self, argv):
         """Run a subcommand, returning (exit_code, stdout)."""
@@ -337,6 +347,38 @@ class HoldWindowTest(unittest.TestCase):
         self.both_windows()
         sh.panes = lambda: []
         rc, out = self.run_cmd(["is-held", str(self.HOLD_PANE)])
+        self.assertEqual(1, rc)
+        self.assertEqual("", out)
+
+    def test_a_machine_with_no_wezterm_binary_reads_not_held(self):
+        """An ABSENT transport is not a FAILED one: no WezTerm means no Hold window.
+
+        `[]` for a missing binary, `None` for a broken one. Folding the two
+        together makes every `is-held <session>` exit non-zero on a headless box —
+        the *false refusal* severity of `docs/pane-reads.md`. Measured 2026-10-12:
+        that is exactly how the first cut of this change failed CI, on three tests
+        that passed on a Mac only because a Mac has WezTerm.
+        """
+        self.both_windows()
+        original = sh.subprocess
+
+        class _Absent:
+            def __getattr__(self, name):
+                return getattr(original, name)
+
+            @staticmethod
+            def run(*_a, **_k):
+                raise FileNotFoundError("wezterm")
+
+        sh.subprocess = _Absent()
+        # The REAL accessor, not this class's fixture stub -- the point of the
+        # test is what `panes()` does when the binary is missing.
+        sh.panes = self._panes
+        try:
+            self.assertEqual([], sh.panes())
+            rc, out = self.run_cmd(["is-held", str(self.HOLD_PANE)])
+        finally:
+            sh.subprocess = original
         self.assertEqual(1, rc)
         self.assertEqual("", out)
 
