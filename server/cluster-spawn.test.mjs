@@ -747,11 +747,19 @@ test('a non-string token reports its TYPE and never echoes the value', () => {
 //
 // **The injected bound is small rather than 300 s, and undici's granularity sets the stub hold.**
 // undici enforces `headersTimeout` on a coarse timer: measured here, a 200 ms bound let a 600 ms
-// response through and fired at ~1008 ms. A stub hold shorter than that tick would pass on the
-// fixed code too and read as a broken fix, so the hold sits comfortably above it.
+// response through and fired at ~1008 ms. Two consequences, and they pull in opposite directions:
+//
+// - The hold must sit ABOVE that tick, or the stub answers first, the request succeeds, and the
+//   test passes on the fixed code too -- reading as a broken fix.
+// - The hold is also the failure path's duration, so it cannot simply be made enormous.
+//
+// 4000 ms gives ~3 s of headroom over the measured ~1008 ms tick. That margin is deliberate: if
+// the tick fires LATE under load, the stub answers first and the test reports a false failure --
+// the one direction that costs a debugging session. On the fixed code the request still fails at
+// the tick, so the wider hold costs the passing path nothing.
 
 const TRANSPORT_TEST_BOUND_MS = 200
-const TRANSPORT_TEST_HOLD_MS = 2500
+const TRANSPORT_TEST_HOLD_MS = 4000
 
 // Accepts the request and holds its RESPONSE HEADERS, which is the shape the real service has on a
 // long turn. Server-side timeouts are disabled so the stub can never be the thing that closes the
