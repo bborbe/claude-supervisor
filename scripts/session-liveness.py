@@ -7,6 +7,7 @@ in-process worker, a cluster pod — so one channel answers for all of them, and
 the store's own `live` boolean (its age against its window), never a recomputation here.
 
   --check <session-id>   LIVE (exit 0) / ABSENT (exit 1) / UNKNOWN (exit 2) / AMBIGUOUS (exit 3)
+  --check <not-an-id>    MALFORMED (exit 4) — the argument is not a single session id at all
   --list                 one line per live session: `<session-id>  <where>  <name>  [<source>]`
   --coverage             endpoint-live vs registry-live counts; exit 1 when a registry-live
                          session has no live endpoint row
@@ -74,6 +75,17 @@ import urllib.parse
 import urllib.request
 
 LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
+
+# Exit code for a `--check` argument that could not have named a session at all.
+# ⚠️ **Deliberately not 2.** argparse already exits 2 for its own usage errors (`--check` with
+# no value at all), and `_check` returns UNKNOWN (2) for a zero-length argument. Three facts,
+# three codes — reusing 2 would make a malformed VALUE indistinguishable from a missing one.
+# `scripts/inbox.py` returns 4 for its own refusal, so the code is precedented in this tree.
+MALFORMED = 4
+
+# A full session id is a UUID, so its hyphens sit at these offsets and nowhere else.
+_UUID_SEPARATORS = frozenset((8, 13, 18, 23))
+_ID_MAX = 36
 
 # The attention store, resolved exactly as the rest of the plugin resolves it: the same
 # variable and default `who-needs-me.py`, `attention-board.py` and `attention-ask.py` carry,
@@ -258,6 +270,42 @@ def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
             type(exc).__name__,
             exc,
         ), None
+
+
+def is_session_id(value):
+    """Could `value` name a session — a prefix of one, or a full UUID?
+
+    ⚠️ **This validates the argument's SHAPE, never its existence.** `True` here still reaches
+    the verdict path, where a well-formed id matching nothing is the genuine ABSENT. The two
+    must not be collapsed: ABSENT is the one verdict that authorises a resume, so it may only be
+    reached by an argument that could have named a session in the first place.
+
+    ⚠️ **Loose about length on purpose, and that is load-bearing.** `_check` matches by
+    `startswith`, so *any* prefix of a real id is a legitimate argument — and on a collision it
+    answers `AMBIGUOUS — … pass a longer id: <m[:12]>`, handing the caller a **12-char prefix**
+    as the recovery input. A rule demanding exactly 8 characters would refuse the instrument's
+    own instruction, which is a regression rather than a tightening.
+
+    ⚠️ **Strict about hyphens, and that is what separates a prefix from prose.** They are
+    admitted only at the UUID separator offsets, so the 12-char recovery prefix of a hyphenated
+    id (`fa2dc5f3-8dd`) passes while `not-an-id-at-all` — hyphens at 3/6/9/12 — does not.
+
+    Case is folded because `_check` folds it: a guard stricter than the function it fronts would
+    turn an id that resolves today into an input error.
+
+    ⚠️ **The caller must not strip before calling this.** A whitespace-only argument is malformed
+    here and is *not* the same fact as a zero-length one — `_check`'s own `.strip()` would fold
+    the two together, which is why the empty case is settled by the caller instead.
+    """
+    if not value or len(value) > _ID_MAX:
+        return False
+    for index, char in enumerate(value.lower()):
+        if char == "-":
+            if index not in _UUID_SEPARATORS:
+                return False
+        elif not ("0" <= char <= "9" or "a" <= char <= "z"):
+            return False
+    return True
 
 
 def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
@@ -627,7 +675,26 @@ def main(argv=None):
             print(line)
         return verdict
 
-    if args.check:
+    # ⚠️ **`is not None`, never truthiness — and that one word is half this fix.** A truthy test
+    # sent `--check ""` past this branch and into the `--list` fall-through below, so an empty
+    # argument silently changed the command's MODE and a caller reading the roster as a verdict
+    # saw a non-empty result. An empty argument is still not a verdict: it is UNKNOWN, which is
+    # what `_check` already returns for it, so the guard admits it and the verdict path answers.
+    if args.check is not None:
+        # ⚠️ **A value that could not have named a session must not reach a verdict at all.**
+        # The caller-side bug this stops is a shell loop that expanded a multi-id string
+        # unquoted; under zsh that is not word-split, so the whole blob arrived as ONE argument
+        # and the probe answered ABSENT — the one verdict that authorises a resume onto a
+        # session that is already running. Refusing the shape here turns a confident negative
+        # into the input error it always was. See `is_session_id` for the rule itself.
+        if args.check and not is_session_id(args.check):
+            print(
+                "MALFORMED — %r is not a single session id: the argument is malformed "
+                "(expected one id, or a prefix of one — 8+ lowercase alphanumerics, hyphens "
+                "only at UUID separator positions)" % args.check,
+                file=sys.stderr,
+            )
+            return MALFORMED
         verdict, message, row = check(args.check, args.endpoint)
         if verdict == LIVE:
             print(
