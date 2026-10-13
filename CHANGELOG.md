@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.138.0
 
 - feat: **an A2A worker's first turn is now sent, and its result collected afterwards.** The `docker` and `k8s` spawns created a worker and never prompted it; they now send the first turn over the streaming A2A route and file the outcome against the agent record when it arrives. ⚠️ **The send and the collection are two calls, not one, and the split IS SC5.** SC5 measures the send's latency against the turn's own duration — *"the send returns in **< 2 s** while the turn's duration is **> 60 s**"* — and names its falsifier outright: *"a send whose latency tracks the turn's duration (blocking)"*. A single call that returned the reply would BE that falsifier by construction, because its latency is the turn's duration and no amount of care in the caller could change it. `openWorkerTurn` issues the request and waits at most **1500 ms** for acknowledgement **without ever aborting** — an abort would kill the turn it had just started — and hands back either the response or the still-pending request, so a worker that has not answered yet degrades the tool result to *"sent, not yet acknowledged"* instead of blocking the spawn. `collectWorkerTurn` consumes the SSE body and derives the state, `contextId` and reply. A **failed send is filed against the record rather than returned as an error**, because the worker exists by then and something has to reap it — the same distinction the card failure draws, arriving in the opposite order.
 
