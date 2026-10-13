@@ -82,6 +82,22 @@ test('writeLedger actually passes the agent role into the record', () => {
   assert.match(src, /^[ \t]*const record = buildRecord\(\{$/m)
 })
 
+test('the shipping claim and the code agree', () => {
+  // SC4. `server/supervisor.mjs` claimed the flag was recorded "so a resume can see the
+  // worker was shipping", while `buildRecord` has no `shipping` parameter and
+  // `registry-rehydrate.mjs` hardcodes `shipping: false` and calls it unrecoverable. Two
+  // sites agreed and one did not; the fix corrected the outlier rather than the code, so
+  // this test pins BOTH halves of the agreement — the record carries no `shipping` key, AND
+  // no comment in supervisor.mjs claims it is recorded.
+  //
+  // ⚠️ If someone later persists the flag, the first assertion fails — deliberately. That
+  // failure is the reminder that the comment and `registry-rehydrate.mjs` must move in the
+  // same change, which is exactly the drift this pins.
+  assert.equal('shipping' in spawnRecord({ shipping: true }), false, 'buildRecord does not persist shipping')
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(src, /Recorded so a resume can see the worker was shipping/)
+})
+
 test('buildRecord refuses a record it could not file', () => {
   assert.throws(() => buildRecord({ mode: 'interactive' }), /needs a sessionId/)
   assert.throws(() => buildRecord({ sessionId: SESSION, mode: 'telepathy' }), /unknown mode/)

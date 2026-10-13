@@ -29,7 +29,17 @@ import { readRegistry } from './liveness.mjs'
 // so every cluster worker ran with no ledger record at all, which is the durable half the
 // fleet reads to answer "who started this". A rejected value that only warns is the failure
 // this file's own callers refuse elsewhere.
-export const MODES = ['interactive', 'headless', 'cluster']
+// ⚠️ `a2a` is a THIRD worker kind, added 2026-10-13 with the docker / k8s spawn targets, and it
+// is neither of the other two. A cluster worker is the shared long-lived `claude-interactive`
+// pod; an A2A worker is a per-task container or pod the controller created and this server
+// reaches over A2A. Folding it into `headless` would file it under a mode whose whole meaning is
+// "a local process that parks its gates on this server", which is exactly what it is not.
+//
+// Consumers read this field tolerantly — `fleet-sessions.py`'s `spawn_mode` passes it through and
+// `session-liveness.py` does not read it — and `unobservedPatch` answers the generic
+// non-interactive reason for every mode but `interactive`, so a new value inherits a correct-if-
+// coarse reason rather than a wrong one. Checked before adding, not assumed.
+export const MODES = ['interactive', 'headless', 'cluster', 'a2a']
 
 // The spawn edge: the session that called spawn_agent, resolved from the live registry
 // (keyed by pid) and stamped into a record that outlives it.
