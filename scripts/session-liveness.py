@@ -32,16 +32,27 @@ live** — a 200 carrying `live: false`, or a 404 from the store, or a readable 
 matching id. Nothing else may reach it.
 
 ⚠️ **ABSENT is licensed only while the endpoint's coverage of live sessions is COMPLETE, and
-that is a precondition this file cannot establish for itself.** Every verdict rests on the
+that is a precondition this file cannot establish for itself — it is established PER ID on the
+one path that needs it.** Every verdict rests on the
 store's `session-heartbeat` endpoint holding a row for EVERY live session — an interactive tab,
 a headless worker, a cluster pod. While the fleet is fully stamped that holds; during a partial
 rollout it does not, and then a session that is live but not yet stamping the store reads as
 ABSENT. ⚠️ **That is the dangerous direction: ABSENT is the one verdict that authorises a
 resume, so a partial rollout turns a live conversation into a second writer.** So do not deploy
 this endpoint ahead of the sessions that must stamp it, and do not trust ABSENT until the
-coverage has been MEASURED. `--coverage` is that measurement: it counts the endpoint's live
-rows against the identity registry's live sessions and exits non-zero while a registry-live
-session has no live endpoint row. See `coverage()`.
+coverage has been MEASURED. Two measurements stand between a partial rollout and that second
+writer, and both rest on ONE predicate — `alive is not False`, read from the identity registry,
+the same predicate `coverage()` and `unstamped()` already use, so they cannot disagree:
+
+  * **`--coverage` is the FLEET measurement** — it counts the endpoint's live rows against the
+    identity registry's live sessions and exits non-zero while a registry-live session has no
+    live endpoint row. See `coverage()`.
+  * **`_absent_licensed` is the PER-ID measurement the verdict path pays**, and it is what stops
+    a single `--check` from publishing ABSENT for a session the registry still calls non-dead.
+    ⚠️ Until 2026-10-12 the verdict path paid neither, so a live session the endpoint had not yet
+    seen read as a confident negative — measured 2026-10-10, where `--check` answered `ABSENT`
+    for a session whose registry entry said `busy`, whose transcript had been written a minute
+    earlier, and whose pane rendered with a live status bar.
 
 ⚠️ **AMBIGUOUS is a fourth answer, and it is not a liveness verdict.** Two sessions sharing an
 8-char prefix means the ARGUMENT did not identify one session; answering LIVE or ABSENT either
@@ -249,7 +260,7 @@ def read_endpoint(endpoint=None, timeout=_HTTP_TIMEOUT):
     return payload
 
 
-def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
+def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     """`(verdict, message, row)` for one id argument — `_check` guarded so it never crashes.
 
     ⚠️ **An exception escaping here would exit 1, which is this file's ABSENT code, so no
@@ -261,15 +272,80 @@ def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
     wrapped: a `check()` that cannot complete answers UNKNOWN (exit 2), never a crash that reads
     as ABSENT. `_check` also returns UNKNOWN on its own terms for the two failures it can name —
     a non-string `session_id`, and an unresolvable cluster-reachability marker.
+
+    `registry_dir` is threaded to `_check` and read **only** on the path that would otherwise
+    license ABSENT — see `_absent_licensed`. The LIVE path never touches it, so a caller asking
+    about a live session still pays no identity probe.
     """
     try:
-        return _check(session_id, endpoint, timeout)
+        return _check(session_id, endpoint, timeout, registry_dir)
     except Exception as exc:  # noqa: BLE001 — any escape here is ABSENT-shaped to a caller
         return UNKNOWN, "session-liveness could not complete the check for %r: %s: %s" % (
             (session_id or "").strip(),
             type(exc).__name__,
             exc,
         ), None
+
+
+def _absent_licensed(sid, registry_dir=None):
+    """`(verdict, message, None)` for an id the endpoint holds NO row for — the ABSENT licence.
+
+    ⚠️ **The three-tuple is `_check`'s contract, and the `None` row is part of it.** `_check`
+    returns `(verdict, message, row)` and every caller unpacks three; returning a two-tuple here
+    raises `ValueError: not enough values to unpack` out of `main()` — caught by `check()`'s
+    blanket guard, so it degrades to UNKNOWN rather than to ABSENT, but it would have made the
+    whole verdict path UNKNOWN. Measured by the reproduction harness before the suite ran.
+
+    ⚠️ **This is the precondition the module docstring says the file "cannot establish for
+    itself", established per id.** ABSENT is the one verdict that authorises a resume, and it is
+    safe only while the endpoint holds a row for every live session. A session the **identity
+    registry** still holds as non-dead, for which the endpoint holds **no row at all**, is exactly
+    the rollout gap that docstring warns about: the endpoint has never heard of it, which is a
+    statement about the endpoint's coverage and not about the session. Measured 2026-10-10: the
+    probe answered `ABSENT` for a session three independent signals read live — the registry
+    listed it `busy`, its transcript had been written a minute earlier, and its pane rendered.
+
+    ⚠️ **The predicate is `alive is not False`, and it is deliberately the SAME one `coverage()`
+    and `unstamped()` already use.** `session-identity.py`'s `alive` is a THREE-state — `True`
+    (pid occupied and the record's `procStart` matches the live holder), `False` (the pid is gone,
+    or is held by another process), and `None` (the pid is occupied but identity cannot be
+    proved). Only `False` is death; `None` is "cannot tell", and reading it as death is the
+    direction that resumes onto a live conversation. One predicate across the three call sites is
+    what keeps `--coverage` and `--check` from disagreeing: `coverage()` reports `missing >= 1` in
+    exactly the state this function refuses, which is what SC3 of the filing task asserts.
+
+    ⚠️ **An unreadable registry is UNKNOWN, never ABSENT.** `read_registry` returns `None` for a
+    missing or unreadable directory — distinct from `{}` — and "I could not measure the
+    precondition" is not "the precondition holds". Same rule `coverage()` carries at exit 2, and
+    the same reason `--list` refuses on an unreadable registry: absence of evidence is not
+    evidence of death.
+
+    ⚠️ **A prefix is resolved the way `_check` resolves one against the endpoint**, because the
+    argument is a full id or a prefix and `read_registry` is keyed by the full id only. A prefix
+    matching no registry entry, like a full id matching none, is not evidence about that session
+    and keeps its ABSENT — so the genuinely-dead case is not lost to this guard.
+
+    Returns `(ABSENT, "no session id matches <sid>", None)` — the original wording, byte for
+    byte, so no caller's message parsing moves — or `(UNKNOWN, <why>, None)`.
+    """
+    identity = _identity().read_registry(registry_dir)
+    if identity is None:
+        return UNKNOWN, (
+            "the identity registry could not be read (%s), so the endpoint's coverage of live "
+            "sessions could not be measured and ABSENT cannot be licensed for %s"
+            % (registry_dir or "default path", sid)
+        ), None
+    keys = list(identity)
+    exact = next((k for k in keys if k.lower() == sid), None)
+    matched = [exact] if exact is not None else [k for k in keys if k.lower().startswith(sid)]
+    non_dead = [k for k in matched if (identity.get(k) or {}).get("alive") is not False]
+    if non_dead:
+        return UNKNOWN, (
+            "%s is held by the identity registry as non-dead while the session-heartbeat "
+            "endpoint holds no row for it — the endpoint's coverage of live sessions is "
+            "incomplete, so ABSENT cannot be licensed" % non_dead[0]
+        ), None
+    return ABSENT, "no session id matches %s" % sid, None
 
 
 def is_session_id(value):
@@ -308,7 +384,7 @@ def is_session_id(value):
     return True
 
 
-def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
+def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     """`(verdict, message, row)` for one id argument, from the endpoint alone.
 
     ⚠️ **The list route is fetched FIRST, and that is a cost fix, not a taste.** The per-id
@@ -406,6 +482,13 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
 
     # The list was readable and matched nothing. Confirm against the per-id route before
     # licensing ABSENT — the one verdict a caller acts on by starting a second writer.
+    #
+    # ⚠️ **And a 404 from that route is NOT sufficient on its own: the identity registry is read
+    # before ABSENT is licensed.** `_absent_licensed` holds the rule and the reasoning; the short
+    # version is that "the endpoint has no row" is a fact about the endpoint's COVERAGE, and a
+    # session the registry still calls non-dead is one the endpoint has simply never heard of.
+    # The `--list` path already pays this precondition (`unstamped()`); until 2026-10-12 the
+    # verdict path did not, which is how `ABSENT` was published for a demonstrably live session.
     try:
         status, row = _get_json(
             "%s%s/%s" % (base, HEARTBEAT_PATH, urllib.parse.quote(sid, safe="")), timeout
@@ -415,7 +498,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT):
     if status == 200 and isinstance(row, dict):
         return _verdict_for(row, sid)
     if status == 404:
-        return ABSENT, "no session id matches %s" % sid, None
+        return _absent_licensed(sid, registry_dir)
     return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s" % (status, sid), None
 
 
@@ -695,7 +778,7 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return MALFORMED
-        verdict, message, row = check(args.check, args.endpoint)
+        verdict, message, row = check(args.check, args.endpoint, registry_dir=args.dir)
         if verdict == LIVE:
             print(
                 "LIVE — %s  heartbeat age %ss  source %s"
