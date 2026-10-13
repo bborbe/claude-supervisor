@@ -82,6 +82,22 @@ test('writeLedger actually passes the agent role into the record', () => {
   assert.match(src, /^[ \t]*const record = buildRecord\(\{$/m)
 })
 
+test('the shipping claim and the code agree', () => {
+  // SC4. `server/supervisor.mjs` claimed the flag was recorded "so a resume can see the
+  // worker was shipping", while `buildRecord` has no `shipping` parameter and
+  // `registry-rehydrate.mjs` hardcodes `shipping: false` and calls it unrecoverable. Two
+  // sites agreed and one did not; the fix corrected the outlier rather than the code, so
+  // this test pins BOTH halves of the agreement — the record carries no `shipping` key, AND
+  // no comment in supervisor.mjs claims it is recorded.
+  //
+  // ⚠️ If someone later persists the flag, the first assertion fails — deliberately. That
+  // failure is the reminder that the comment and `registry-rehydrate.mjs` must move in the
+  // same change, which is exactly the drift this pins.
+  assert.equal('shipping' in spawnRecord({ shipping: true }), false, 'buildRecord does not persist shipping')
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(src, /Recorded so a resume can see the worker was shipping/)
+})
+
 test('buildRecord refuses a record it could not file', () => {
   assert.throws(() => buildRecord({ mode: 'interactive' }), /needs a sessionId/)
   assert.throws(() => buildRecord({ sessionId: SESSION, mode: 'telepathy' }), /unknown mode/)
@@ -254,4 +270,18 @@ test('stamping an unobserved worker keeps the spawn fields and drops the claim',
     assert.equal(stamped.parent_session, spawnRecord().parent_session)
     assert.equal(readRecord(dir, SESSION).status, 'unknown', 'the stamp is persisted, not just returned')
   })
+})
+
+test('an A2A record carries its worker id and target, and never a token', () => {
+  const record = buildRecord({ sessionId: SESSION, agentId: 'agent_1', mode: 'a2a', cwd: null, workerId: 'w-1', target: 'docker', spawnedAt: '2026-10-13T00:00:00.000Z' })
+  assert.equal(record.worker_id, 'w-1')
+  assert.equal(record.target, 'docker')
+  // The token authenticates turns; the ledger is a world-readable file. No key may carry it.
+  assert.ok(!Object.keys(record).some((k) => /token/i.test(k)), `record keys: ${Object.keys(record).join(',')}`)
+})
+
+test('a local record leaves the A2A fields null', () => {
+  const record = buildRecord({ sessionId: SESSION, agentId: 'agent_1', mode: 'headless', cwd: '/tmp', spawnedAt: '2026-10-13T00:00:00.000Z' })
+  assert.equal(record.worker_id, null)
+  assert.equal(record.target, null)
 })

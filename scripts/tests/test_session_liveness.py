@@ -36,6 +36,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 LIVE, ABSENT, UNKNOWN, AMBIGUOUS = 0, 1, 2, 3
 
+# The refusal code for a `--check` argument that could not name a session at all. Pinned here
+# rather than imported so the suite fails loudly if the module renumbers it.
+MALFORMED = 4
+
 
 def load():
     spec = importlib.util.spec_from_file_location(
@@ -133,11 +137,36 @@ class SessionLiveness(unittest.TestCase):
         with open(os.path.join(self.ledger, "%s.json" % session_id), "w", encoding="utf-8") as fh:
             json.dump(rec, fh)
 
-    def check(self, session_id, endpoint):
+    def check(self, session_id, endpoint, directory=None):
+        # ⚠️ **`--dir` is not optional here since the ABSENT-licence guard (2026-10-12).** The
+        # verdict path now reads the identity registry on the one path that would otherwise
+        # license ABSENT, so a case omitting `--dir` would read the MACHINE's real registry —
+        # the same isolation rule `setUp` states for the other three stores, and the way a real
+        # session on this host could flip a fixture's verdict. Defaults to the planted registry,
+        # exactly as `listing` / `json_listing` / `coverage` already do.
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = self.m.main(["--check", session_id, "--endpoint", endpoint])
+            rc = self.m.main(
+                ["--check", session_id, "--endpoint", endpoint, "--dir", directory or self.registry]
+            )
         return rc, out.getvalue() + err.getvalue()
+
+    def check_streams(self, session_id, endpoint):
+        """`check`, but with stdout and stderr kept apart.
+
+        ⚠️ **The split is load-bearing for the malformed cases.** The refusal prints to stderr
+        while the `--list` fall-through it replaced printed to **stdout**, so a case that merged
+        the two could not tell a roster from a verdict — and `assertNotIn("ABSENT", combined)`
+        would pass on a build whose stderr carried exactly the ABSENT it is meant to catch.
+        """
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            # `--dir` for the same reason `check` passes it: without it the licence path reads
+            # this machine's real registry — present on a workstation, absent on a CI runner,
+            # where it reads as unreadable and the verdict becomes UNKNOWN (measured: PR #280's
+            # `test` job failed on exactly that while every local run passed).
+            rc = self.m.main(["--check", session_id, "--endpoint", endpoint, "--dir", self.registry])
+        return rc, out.getvalue(), err.getvalue()
 
     def listing(self, endpoint, directory=None):
         out, err = io.StringIO(), io.StringIO()
@@ -193,8 +222,11 @@ class SessionLiveness(unittest.TestCase):
     def test_a_404_is_absent_not_unknown(self):
         # The store positively reporting it holds no such session — a READABLE endpoint that
         # licenses ABSENT.
+        # ⚠️ The probe must be a WELL-FORMED id (lowercase alphanumerics). A non-id string is now
+        # refused as malformed before any verdict, so it can no longer stand in for "an id that
+        # matches nothing" — keeping those two apart is the point of the shape guard.
         with FixtureEndpoint([]) as fx:
-            rc, out = self.check("does-not-exist-xyz", fx.url)
+            rc, out = self.check("doesnotexist", fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
 
@@ -220,6 +252,100 @@ class SessionLiveness(unittest.TestCase):
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
+
+    # ---- the malformed argument: a value that could not name a session is never a verdict ---
+
+    def test_a_multi_id_blob_is_malformed_not_absent(self):
+        # The incident this guard exists for. A shell loop expanded a newline-separated id string
+        # unquoted; under zsh that is not word-split, so the whole blob arrived as ONE argument
+        # and the probe answered ABSENT — the one verdict that authorises a resume onto a session
+        # that is already running. No endpoint is needed: the refusal precedes every HTTP read.
+        rc, out, err = self.check_streams("abc12345\nabc12345", dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertIn("malformed", err)
+        self.assertNotIn("ABSENT", out)
+        self.assertNotIn("ABSENT", err)
+
+    def test_a_non_id_string_is_malformed(self):
+        # ⚠️ The clause a whitespace-only guard would miss: this value carries no whitespace at
+        # all, so only the hyphen-position rule rejects it. Without this case, a guard that
+        # tested `" " in arg or "\n" in arg` would tick every other malformed probe while this
+        # one still read ABSENT/exit 1.
+        rc, out, err = self.check_streams("not-an-id-at-all", dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertNotIn("ABSENT", out + err)
+
+    def test_a_whitespace_only_argument_is_malformed_not_empty(self):
+        # ⚠️ Deliberately NOT the empty case below. `_check` strips before its own emptiness
+        # test, so an implementation that stripped first would fold the two together and answer
+        # UNKNOWN — which is exactly why the guard runs on the RAW argument.
+        rc, out, err = self.check_streams("   ", dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertNotIn("ABSENT", out + err)
+
+    def test_an_argument_with_internal_whitespace_is_malformed(self):
+        rc, _, err = self.check_streams("abc 12345", dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertNotIn("ABSENT", err)
+
+    def test_an_overlong_argument_is_malformed(self):
+        # The ≤36 cap is part of the rule; without this case a guard that drops it still passes.
+        rc, _, err = self.check_streams("a" * 37, dead_url())
+        self.assertEqual(rc, MALFORMED)
+        self.assertNotIn("ABSENT", err)
+
+    def test_an_empty_argument_is_unknown_and_prints_no_roster(self):
+        # ⚠️ The falsy-guard half of the fix. `if args.check:` sent `""` past the branch and into
+        # the `--list` fall-through, so an empty argument silently changed the command's MODE and
+        # a caller reading the roster as a verdict saw a non-empty result.
+        with FixtureEndpoint([row("3fd529af-1111-2222-3333-444455556666")]) as fx:
+            rc, out, err = self.check_streams("", fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("no session id given", err)
+        self.assertEqual(out, "", "an empty id must not fall through to the listing")
+
+    def test_a_well_formed_non_matching_id_is_still_absent(self):
+        # The unchanged control: the guard rejects non-ids, never ids that simply match nothing.
+        with FixtureEndpoint([]) as fx:
+            rc, out, err = self.check_streams("zzzzzzzz", fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("ABSENT — no session id matches zzzzzzzz", err)
+        self.assertEqual(out, "")
+
+    def test_the_ambiguous_recovery_prefix_is_not_malformed(self):
+        # ⚠️ **The regression guard for the tightening direction.** `_check` answers a collision
+        # with `AMBIGUOUS — … pass a longer id: <m[:12]>`, so a 12-char prefix of a HYPHENATED id
+        # — which carries a hyphen at offset 8 — is the instrument's own recovery input. A rule
+        # demanding exactly 8 characters would refuse the instruction it had just printed, and
+        # would narrow `prefix matching` that the verdict machinery is documented to leave alone.
+        sid = "3fd529af-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, _, _ = self.check_streams("3fd529af-111", fx.url)
+        self.assertNotEqual(rc, MALFORMED)
+        self.assertEqual(rc, LIVE)
+
+    def test_a_longer_prefix_of_a_real_id_is_not_malformed(self):
+        # Any prefix length resolves, not only 8 and not only the UUID's own separators.
+        sid = "3fd529af-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, _, _ = self.check_streams("3fd529af-1111-2222", fx.url)
+        self.assertEqual(rc, LIVE)
+
+    def test_an_uppercase_id_is_not_malformed(self):
+        # `_check` folds case, so the guard must fold too — a literal-lowercase rule would turn
+        # an id that resolves today into an input error.
+        sid = "abcdef12-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, _, _ = self.check_streams("ABCDEF12", fx.url)
+        self.assertEqual(rc, LIVE)
+
+    def test_a_list_is_unaffected_by_the_guard(self):
+        # The branch the empty case used to fall through to still works when it is ASKED for.
+        sid = "3fd529af-1111-2222-3333-444455556666"
+        with FixtureEndpoint([row(sid)]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertIn("3fd529af", out)
 
     def test_a_row_without_a_live_flag_is_unknown(self):
         # The store always sends `live`; a row that carries something else is a store this
@@ -347,6 +473,13 @@ class SessionLiveness(unittest.TestCase):
         # `quote(sid, safe="")` is the only thing between a hostile argument and a path traversal
         # or a query injection on the per-id route. Pin it: none of `../`, `?`, `%2f` may survive
         # unescaped into a URL the probe builds.
+        #
+        # ⚠️ **Two layers, and the case asserts both.** `main()`'s shape guard refuses these at
+        # the argument boundary, so they can no longer reach the wire *through `main()`* — but
+        # the encoding guarantee belongs to `_check` and must still hold for any other caller,
+        # so it is pinned where it lives rather than inferred from the guard. Asserting only the
+        # refusal would retire this coverage silently; asserting only `_check` would miss that
+        # the boundary now rejects them.
         seen = []
         real = self.m._get_json
 
@@ -358,7 +491,12 @@ class SessionLiveness(unittest.TestCase):
         try:
             with FixtureEndpoint([]) as fx:
                 for hostile in ("../etc/passwd", "abc?live=true", "abc%2fdef"):
-                    rc, out = self.check(hostile, fx.url)
+                    # Layer 1 — the argument boundary refuses it, and never as a verdict.
+                    rc_main, _, err = self.check_streams(hostile, fx.url)
+                    self.assertEqual(rc_main, MALFORMED, hostile)
+                    self.assertNotIn("ABSENT", err)
+                    # Layer 2 — reached directly, `_check` still encodes it.
+                    rc, _, _ = self.m._check(hostile, fx.url, registry_dir=self.registry)
                     self.assertEqual(rc, ABSENT, hostile)
         finally:
             self.m._get_json = real
@@ -594,6 +732,93 @@ class SessionLiveness(unittest.TestCase):
             rc, line = self.coverage(fx.url, directory=os.path.join(self.tmp.name, "nope"))
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", line)
+
+    # ---- the ABSENT licence: the registry's coverage precondition (2026-10-12) -------------
+    #
+    # The 2026-10-10 incident: `--check` returned a decisive ABSENT (exit 1) for a session that
+    # was demonstrably live on three independent signals. The verdict path licensed ABSENT from
+    # a readable endpoint alone, while the `--list` path already paid the coverage precondition
+    # (`unstamped()`). These cases pin the licence and — as importantly — the two things it must
+    # NOT swallow: the genuinely-dead id, and the endpoint's own positive `live: false`.
+
+    def test_a_registry_live_id_with_no_endpoint_row_is_unknown_not_absent(self):
+        # SC1. The exact shape: the registry holds the id as non-dead while the endpoint holds NO
+        # row for it. "The endpoint has never heard of it" is a fact about the endpoint's
+        # COVERAGE, not about the session, and ABSENT is the one verdict that authorises a resume.
+        # Pre-fix this answered ABSENT — the message the incident recorded verbatim.
+        sid = "bf00c554-b829-44eb-813b-437fe2f45322"
+        self.plant(sid)
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("coverage of live sessions is", out)
+
+    def test_an_unmatched_id_keeps_its_absent_even_when_the_registry_is_populated(self):
+        # SC2's control, and the half a careless fix loses: a POPULATED registry with no match
+        # for the argument is still the genuine ABSENT. A guard that answered UNKNOWN for every
+        # unmatched id would erase the death verdict the whole instrument exists to give — the
+        # failure mode in the opposite direction from the incident.
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        with FixtureEndpoint([]) as fx:
+            # ⚠️ **A WELL-FORMED id that matches nothing — never a prose string.** Since #277
+            # (`is_session_id`), a value with no session-id shape is refused as `MALFORMED`
+            # (exit 4) at the argument boundary and never reaches the licence path at all, so
+            # `does-not-exist-xyz` would assert the wrong layer. Master's own 404 case made the
+            # same correction; this is that rule applied to a case added in the same PR.
+            rc, out = self.check("deadbeef-1111-2222-3333-444455556666", fx.url)
+        self.assertEqual(rc, ABSENT)
+        self.assertIn("no session id matches", out)
+
+    def test_an_endpoint_row_reporting_not_live_is_absent_even_when_the_registry_holds_it(self):
+        # SC2. Here the endpoint POSITIVELY answered about this id — `live: false` is a dead
+        # session the store can see and is reporting on, not a rollout gap. The guard is scoped
+        # to the no-row case, so this keeps its ABSENT even with a registry record present; a
+        # fix that widened to every ABSENT would lose the death verdict.
+        sid = "57a1e111-1111-2222-3333-444455556666"
+        self.plant(sid)
+        with FixtureEndpoint([row(sid, live=False)]) as fx:
+            rc, out = self.check(sid, fx.url)
+        self.assertEqual(rc, ABSENT)
+
+    def test_an_unreadable_registry_is_unknown_not_absent(self):
+        # "Could not measure the precondition" is not "the precondition holds". `read_registry`
+        # returns `None` for a missing directory — distinct from `{}` — and folding it into
+        # ABSENT re-opens the hole on a host where the registry is unreadable rather than merely
+        # incomplete. Same rule `coverage()` carries at exit 2.
+        with FixtureEndpoint([]) as fx:
+            # ⚠️ Well-formed id, for the reason stated on the unmatched-id control above: a prose
+            # string exits 4 at the argument boundary and never reaches the registry read this
+            # case is about.
+            rc, out = self.check(
+                "deadbeef-1111-2222-3333-444455556666", fx.url,
+                directory=os.path.join(self.tmp.name, "nope"),
+            )
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("identity registry could not be read", out)
+
+    def test_a_prefix_of_a_registry_live_id_is_unknown_not_absent(self):
+        # The argument is a prefix as often as a full id (`[ref]` is 6 chars, `sid8` is 8), and
+        # `read_registry` is keyed by the FULL id only — so the guard resolves a prefix the same
+        # way `_check` resolves one against the endpoint. Without that, a prefixed probe keeps
+        # the false ABSENT the guard exists to remove.
+        sid = "bf00c554-b829-44eb-813b-437fe2f45322"
+        self.plant(sid)
+        with FixtureEndpoint([]) as fx:
+            rc, out = self.check("bf00c554", fx.url)
+        self.assertEqual(rc, UNKNOWN)
+
+    def test_coverage_and_check_agree_on_the_incomplete_coverage_fixture(self):
+        # SC3. One predicate, two readers: `--coverage` reports `missing >= 1` in exactly the
+        # state `--check` refuses to call ABSENT, so the measurement and the verdict rest on one
+        # rule and cannot disagree about the same fixture.
+        sid = "bf00c554-b829-44eb-813b-437fe2f45322"
+        self.plant(sid)
+        with FixtureEndpoint([]) as fx:
+            cov_rc, line = self.coverage(fx.url)
+            chk_rc, _ = self.check(sid, fx.url)
+        self.assertEqual(cov_rc, ABSENT)
+        self.assertIn("missing=1", line)
+        self.assertEqual(chk_rc, UNKNOWN)
 
 
 if __name__ == "__main__":

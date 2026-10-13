@@ -139,7 +139,8 @@ commands/open.md                                 resolve a name → jump / resum
 commands/ready.md                                ready ONE named task to the bar, then open it (cross-tier)
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
-docs/fleet-surface.md                            spawn shape + table render spec (canonical)
+docs/fleet-surface.md                            spawn shape + fleet table render spec (canonical)
+docs/sweep-output.md                             the manager sweep's output frame — columns, widths, icons (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the four manager commands share
 docs/voice-asks.md                               a voiced question is also a board card — rule + detector (canonical)
@@ -148,6 +149,7 @@ scripts/manager-predispatch.py                   the pre-dispatch gate both mana
 scripts/plugin-version-census.py                 the fleet reading of the plugin-install probe — who is stale, and `--reload` the lever that moves them
 scripts/approved-not-started.py                  the approved-but-unstarted reading both loops print (tick = 30 min constant; `unknown`, never `0`, on an unreadable registry)
 scripts/adopt-orphans.py                         adopts an exited manager's live workers into the ownership-claim store (/fleet-loop Step 3a) — successor-by-subject, else the tick session
+scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns (state: ~/.claude/state/gate-feed/<self-session-id>.json)
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/manager-wrangler.md                routine approval loop over headless workers

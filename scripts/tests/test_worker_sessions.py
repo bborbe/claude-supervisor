@@ -130,6 +130,43 @@ class WorkerSessionsTest(unittest.TestCase):
             result = self.run_script("--count")
         self.assertEqual(result.stdout.strip(), "0", result.stderr)
 
+    def test_a_manager_record_is_not_counted_against_the_worker_cap(self):
+        """`spawn_agent(role="manager")` writes a ledger record exactly like a worker's, so
+        presence in the ledger alone counted a manager against the fleet-wide
+        `spawn.maxConcurrent` cap and pushed the fleet toward refusing ordinary spawns. The
+        record's own `role` is what separates them."""
+        manager = "ffffffff-0000-0000-0000-000000000010"
+        agent = "ffffffff-0000-0000-0000-000000000011"
+        self.ledger_entry(manager, "topic manager", role="manager")
+        self.ledger_entry(agent, "worker", role="agent")
+        with FixtureEndpoint(rows=[row(manager), row(agent)]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "1", result.stderr)
+
+    def test_two_agent_records_are_both_counted(self):
+        """The control for the manager exclusion: without it the case above passes on a counter
+        that returns 0 for everything."""
+        ids = [f"ffffffff-0000-0000-0000-00000000001{i}" for i in (2, 3)]
+        for sid, label in zip(ids, ("worker a", "worker b")):
+            self.ledger_entry(sid, label, role="agent")
+        with FixtureEndpoint(rows=[row(s) for s in ids]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "2", result.stderr)
+
+    def test_a_role_less_record_still_reads_as_a_worker(self):
+        """⚠️ The exclusion is `role == "manager"`, never `role != "agent"`. A record with no
+        `role` was written before the field existed, and those are pre-field workers and
+        managers alike — so treating absence as "manager" would drop every pre-field worker out
+        of the count this cap exists to enforce."""
+        sid = "ffffffff-0000-0000-0000-000000000014"
+        self.ledger_entry(sid, "pre-field worker")
+        with FixtureEndpoint(rows=[row(sid)]) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "1", result.stderr)
+
     def test_list_names_the_source_for_an_endpoint_sourced_worker(self):
         """`status` is the store row's `source` — `cluster` for a mirrored cluster session. It
         is descriptive only, but a reader that dropped it would leave the column empty."""

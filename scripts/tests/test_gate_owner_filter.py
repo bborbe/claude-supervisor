@@ -452,6 +452,69 @@ class LoadLedger(unittest.TestCase):
             self.assertEqual(gf.load_ledger(d), {})
 
 
+class CorruptRecordsFailOpen(unittest.TestCase):
+    """A record that parses but is not an object must be SKIPPED, never raise.
+
+    `null`, a list and a scalar are all valid JSON, so `json.load` returns them
+    happily and the next `.get` raises `AttributeError` out of `main()`. The
+    module's central contract is fail-open -- an unresolvable input keeps the
+    gate -- and a crash is the opposite of that: it takes the whole filter down
+    for every pane, not just the one record. Three readers had the shape
+    (`load_ledger`, `live_ids`, `log_items`), which is why this class tests the
+    class rather than the single surface the report named.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.ledger = os.path.join(self.dir, "ledger")
+        for path in (self.state, self.registry, self.ledger):
+            os.makedirs(path)
+        with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "open", "item_id": "1", "pane": "372", "session_id": GATED,
+            }) + "\n")
+
+    def write(self, directory, name, text):
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def run_filter(self):
+        return subprocess.run(
+            [sys.executable, _SCRIPT, "--pane", "372", "--self", ME, "--explain",
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", self.ledger],
+            capture_output=True, text=True,
+        )
+
+    def test_a_null_ledger_record_exits_zero(self):
+        """SC3's probe, end to end: pointed at a fixture ledger containing `null`, the
+        filter exits 0 and omits that record rather than raising `AttributeError`."""
+        self.write(self.ledger, "null.json", "null")
+        result = self.run_filter()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("AttributeError", result.stderr)
+
+    def test_a_null_ledger_record_is_omitted(self):
+        self.write(self.ledger, "null.json", "null")
+        self.assertEqual(gf.load_ledger(self.ledger), {})
+
+    def test_a_null_registry_entry_is_skipped(self):
+        """The registry is Claude Code's own file, not ours, so a shape this reader did
+        not anticipate is a live possibility rather than a hypothetical."""
+        self.write(self.registry, "null.json", "null")
+        self.assertEqual(gf.live_ids(self.registry), set())
+
+    def test_a_null_event_line_is_skipped(self):
+        """The event log is append-only and shared, so one such line would otherwise take
+        the whole pane->session hop down and fail the filter open for every gate."""
+        self.write(self.state, "b.events.jsonl", "null\n")
+        self.assertEqual([i["item_id"] for i in gf.log_items(self.state)], ["1"])
+
+
 class Evaluate(unittest.TestCase):
     def test_full_chain_pane_to_peer_manager(self):
         ledger = {"w1": {"session_id": "w1", "parent_session": PEER}}
@@ -1069,10 +1132,19 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         return f"{sys.executable} {script}"
 
     def invoke(self, *argv):
+        # ⚠️ `--feed-state-dir` is REQUIRED here, not optional hygiene. The arm's
+        # memory defaults to a real, shared `~/.claude/state/gate-feed/<self>.json`,
+        # and every test in this class passes the same `ME` — so without this the
+        # suite reads and writes ONE file across all of them, in the developer's
+        # home, and the second test to run sees the first one's panes as already
+        # emitted. Measured 2026-10-12: 4 failures in this class, all of them a
+        # pane that should have been news being suppressed by a sibling test's
+        # leftover entry.
         return subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
              "--ledger-dir", self.ledger,
+             "--feed-state-dir", os.path.join(self.dir, "feed-state"),
              "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
             capture_output=True, text=True,
         )
@@ -1261,6 +1333,264 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
         self.assertNotIn("LIVENESS", result.stderr)
+
+
+class FeedStateSurvivesTheReArm(unittest.TestCase):
+    """The arm's memory — what it has already surfaced crosses the re-arm.
+
+    `poll()` was a change-detector WITHIN an arm and had no memory ACROSS one:
+    `previous = None` opened every arm, so the first poll of each treated every
+    held gate as newly entered. A `Monitor` is bounded at 30 min and re-armed, so
+    a held gate cost a full manager turn every arm for as long as it stayed open.
+    Measured 2026-10-12 on the Fleet Manager: panes 1065, 1151, 1175, 1094, 1193,
+    1191, 1196 re-reported ~8 times over a ~600k-token context each, for no state
+    change.
+
+    ⚠️ Every test here drives a SEPARATE arm, and that is the whole point: each
+    `poll()` is a new process with its own producer counter, so the state file is
+    the ONLY thing that crosses between them. A test that reused one process would
+    re-prove the in-process detector that already worked.
+
+    ⚠️ The backstop tests exist because the fix removes one. The re-arm used to be
+    what retried a wake the manager never saw; once the emit is persisted, nothing
+    does — dedup plus event-only delivery, a permanent silent stall. So a held gate
+    is re-emitted once its entry expires, and both directions are pinned below.
+    """
+
+    ONE = "  [ 98765] 0m  first gate\n"
+    TWO = "  [ 98765] 0m  first gate\n  [ 98766] 0m  second gate\n"
+    EMPTY = "Needs you (0)\nNothing needs you.\n"
+    SID = "55555555-5555-4555-8555-555555555555"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.ledger = os.path.join(self.dir, "ledger")
+        self.feed_state = os.path.join(self.dir, "feed-state")
+        for path in (self.state, self.registry, self.ledger):
+            os.makedirs(path)
+        self.arm = 0
+        self.ts = 0
+
+    # --- fixtures ------------------------------------------------------------
+
+    def gate(self, pane, detail):
+        """APPEND an event-log item for `pane` — the record the fingerprint reads.
+
+        The gate's own text lives here, not on the feed line: the feed renders an
+        AGE (`0m`, `5h49m`) beside every row, so a fingerprint taken off the line
+        would differ on every poll and re-emit everything. `detail` is the stable
+        identity, and `notify-gate.py` keys its own dedup on the same field.
+
+        Appends rather than rewrites: `log_items` folds the log by `item_id` and
+        `newest_item_for_pane` picks the newest by `ts`, so a second call for one
+        pane must be a NEWER record and a call for another pane must not erase it.
+        """
+        self.ts += 1
+        with open(
+            os.path.join(self.state, f"{self.SID}.events.jsonl"), "a", encoding="utf-8"
+        ) as handle:
+            handle.write(
+                json.dumps({
+                    "item_id": f"item-{pane}-{self.ts}", "session_id": self.SID,
+                    "pane": pane, "type": "open", "detail": detail, "ts": self.ts,
+                }) + "\n"
+            )
+
+    def producer(self, frames, counter, tag):
+        frames_path = os.path.join(self.dir, f"frames-{tag}.json")
+        with open(frames_path, "w", encoding="utf-8") as handle:
+            json.dump(list(frames), handle)
+        script = os.path.join(self.dir, f"producer-{tag}.py")
+        with open(script, "w", encoding="utf-8") as handle:
+            handle.write(
+                "import json, sys\n"
+                f"FRAMES = json.load(open({frames_path!r}))\n"
+                "try:\n"
+                f"    n = int(open({counter!r}).read())\n"
+                "except Exception:\n"
+                "    n = 0\n"
+                "n += 1\n"
+                f"open({counter!r}, 'w').write(str(n))\n"
+                "sys.stdout.write(FRAMES[min(n - 1, len(FRAMES) - 1)])\n"
+            )
+        return f"{sys.executable} {script}"
+
+    def invoke(self, *argv, feed_state_dir=None, stdin_text=""):
+        return subprocess.run(
+            [sys.executable, _SCRIPT,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--ledger-dir", self.ledger,
+             "--feed-state-dir", feed_state_dir or self.feed_state,
+             "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
+            input=stdin_text, capture_output=True, text=True,
+        )
+
+    def poll(self, frames, polls=None, feed_state_dir=None, reemit_after=None):
+        """ONE arm of the loop — a fresh process and a fresh producer counter."""
+        self.arm += 1
+        counter = os.path.join(self.dir, f"count-{self.arm}")
+        argv = ["--feed", "--self", ME, "--interval", "0",
+                "--max-polls", str(polls if polls is not None else len(frames)),
+                "--producer", self.producer(frames, counter, f"arm{self.arm}")]
+        if reemit_after is not None:
+            argv += ["--reemit-after", str(reemit_after)]
+        return self.invoke(*argv, feed_state_dir=feed_state_dir)
+
+    def stored(self):
+        with open(
+            os.path.join(self.feed_state, f"{ME}.json"), encoding="utf-8"
+        ) as handle:
+            return json.load(handle)
+
+    def age_the_store(self, seconds):
+        """Push every stored entry's clock back, as a lost wake's arm would."""
+        path = os.path.join(self.feed_state, f"{ME}.json")
+        data = self.stored()
+        for entry in data["gates"].values():
+            entry["emitted_at"] -= seconds
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+    # --- SC1: one entry per open gate ----------------------------------------
+
+    def test_the_store_holds_one_entry_per_open_gate(self):
+        self.gate("98765", "first gate")
+        self.gate("98766", "second gate")
+        result = self.poll([self.TWO], polls=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gates = self.stored()["gates"]
+        self.assertEqual(sorted(gates), ["98765", "98766"], gates)
+        for pane, entry in gates.items():
+            self.assertTrue(entry["fingerprint"], (pane, entry))
+            self.assertGreater(entry["emitted_at"], 0, (pane, entry))
+
+    def test_the_store_is_keyed_on_the_self_session(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.assertTrue(os.path.exists(os.path.join(self.feed_state, f"{ME}.json")))
+
+    # --- SC2: a re-arm is silent; a changed question is news -----------------
+
+    def test_a_re_arm_with_unchanged_gates_emits_nothing(self):
+        """The defect itself: the first poll of EVERY arm re-emitted the kept set."""
+        self.gate("98765", "first gate")
+        self.gate("98766", "second gate")
+        first = self.poll([self.TWO], polls=2)
+        self.assertEqual(first.stdout.split(), ["98765", "98766"], first.stdout)
+        second = self.poll([self.TWO], polls=2)
+        self.assertEqual(second.stdout.split(), [], second.stdout)
+        self.assertIn("new: 0  no change", second.stderr)
+
+    def test_a_changed_question_on_one_pane_emits_only_that_pane(self):
+        self.gate("98765", "first gate")
+        self.gate("98766", "second gate")
+        self.poll([self.TWO], polls=1)
+        self.gate("98766", "second gate, re-worded")
+        result = self.poll([self.TWO], polls=1)
+        self.assertEqual(result.stdout.split(), ["98766"], result.stdout)
+
+    def test_a_re_render_of_the_same_question_is_not_news(self):
+        """`normalise()` collapses whitespace, so re-wrapping keeps one identity."""
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.gate("98765", "first   gate")
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), [], result.stdout)
+
+    # --- SC3: a closed gate is pruned, a reopened one is news again ----------
+
+    def test_a_closed_gate_is_pruned_from_the_store(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.assertIn("98765", self.stored()["gates"])
+        self.poll([self.EMPTY], polls=1)
+        self.assertNotIn("98765", self.stored()["gates"])
+
+    def test_a_reopened_gate_is_emitted_again(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.poll([self.EMPTY], polls=1)
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    # --- the backstop: a lost wake must not become a permanent silence -------
+
+    def test_a_held_gate_is_re_emitted_once_its_entry_expires(self):
+        """Without this, dedup plus event-only delivery is a permanent silent stall."""
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.assertEqual(self.poll([self.ONE], polls=1).stdout.split(), [])
+        self.age_the_store(3600)
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    def test_reemit_after_zero_disables_the_backstop(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.age_the_store(10 ** 7)
+        result = self.poll([self.ONE], polls=1, reemit_after=0)
+        self.assertEqual(result.stdout.split(), [], result.stdout)
+
+    # --- an absent or corrupt store is FIRST RUN, never "unchanged" ----------
+
+    def test_a_missing_store_emits_every_kept_gate(self):
+        self.gate("98765", "first gate")
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    def test_a_corrupt_store_reads_as_first_run_not_as_no_change(self):
+        """Reading it as 'nothing changed' would silently suppress every gate."""
+        self.gate("98765", "first gate")
+        os.makedirs(self.feed_state, exist_ok=True)
+        with open(
+            os.path.join(self.feed_state, f"{ME}.json"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write("{ not json at all")
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    # --- the write itself ----------------------------------------------------
+
+    def test_the_store_is_written_atomically_leaving_no_tmp(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=2)
+        leftovers = [f for f in os.listdir(self.feed_state) if f.endswith(".tmp")]
+        self.assertEqual(leftovers, [], leftovers)
+
+    def test_an_unwritable_store_is_reported_once_and_fails_open(self):
+        """A store that cannot be written must not leave the arm looking fixed.
+
+        Fail-open means the PRE-fix behaviour — every kept pane re-emitted on every
+        poll — which is a wake rather than a silence. The warning is what keeps that
+        degradation visible instead of reading as a fixed arm.
+        """
+        blocker = os.path.join(self.dir, "blocker")
+        with open(blocker, "w", encoding="utf-8") as handle:
+            handle.write("not a directory")
+        result = self.poll(
+            [self.ONE, self.ONE, self.ONE],
+            feed_state_dir=os.path.join(blocker, "feed-state"),
+        )
+        self.assertEqual(result.stderr.count("STATE  unwritable"), 1, result.stderr)
+        self.assertEqual(result.stdout.split(), ["98765"] * 3, result.stdout)
+
+    # --- the flag is required, because without it the fix is a no-op ---------
+
+    def test_interval_without_self_is_a_usage_error(self):
+        """Without a key there is no store, so the arm would silently stay unfixed."""
+        result = self.invoke("--feed", "--interval", "5", "--max-polls", "1")
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("--self", result.stderr)
+
+    def test_the_one_shot_shape_writes_no_store(self):
+        self.gate("98765", "first gate")
+        result = self.invoke("--feed", "--self", ME, stdin_text=self.ONE)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+        self.assertFalse(os.path.exists(self.feed_state), os.listdir(self.dir))
 
 
 if __name__ == "__main__":
