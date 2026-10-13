@@ -6,7 +6,7 @@
 // **The definition takes one identity store and one liveness source.** A worker session is
 // one that is
 //
-//   (a) present in the **spawn ledger** (`config.ledgerDir`) — which is what makes it a
+//   (a) present in the **spawn ledger**, which the **session-ledger endpoint** answers — what makes it a
 //       session this supervisor opened, rather than a manager or one of the operator's own;
 //       and
 //   (b) **live**, which the **session-heartbeat endpoint** answers.
@@ -42,36 +42,23 @@
 // cap exists to bound. Managers started by hand — `/supervisor:open` in a plain wezterm tab —
 // write no record at all. `scripts/worker-sessions.py` carries the same definition for shell
 // callers.
-import { readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-
-import { config } from './config.mjs'
 import { liveFromHeartbeat, readHeartbeat } from './session-heartbeat.mjs'
+import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 
-// `{sessionId: record}`, or `null` when the ledger directory cannot be read.
+// `{sessionId: record}`, or `null` when the ledger cannot be read.
 //
-// An absent directory is `{}` — nobody has ever been spawned — which is a different answer
-// from `null`, "could not read it". Collapsing them turns a permissions error into a
-// confident empty fleet, and an empty fleet is the answer that opens past a limit.
-export function readLedger(dir = config.ledgerDir) {
-  let names
-  try {
-    names = readdirSync(dir)
-  } catch (error) {
-    if (error?.code === 'ENOENT') return {}
-    return null
-  }
-  const known = {}
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue
-    try {
-      const record = JSON.parse(readFileSync(join(dir, name), 'utf8'))
-      if (record && typeof record.session_id === 'string') known[record.session_id] = record
-    } catch {
-      continue // a half-written record is skipped, not fatal
-    }
-  }
-  return known
+// ⚠️ **The source is the ENDPOINT, and the three-state contract survived the move.** An empty
+// store is `{}` — nobody has ever been spawned — which is a different answer from `null`,
+// "could not read it". Collapsing them turns a store outage into a confident empty fleet, and
+// an empty fleet is the answer that opens past a limit.
+//
+// ⚠️ **Async, because the endpoint is.** Both callers already await `workerSessions`, and a
+// count resolved after the spawn has already spent the budget it protects is the failure the
+// awaited read exists to prevent.
+export async function readLedger({ endpoint, fetchImpl } = {}) {
+  const rows = await readSessionLedger({ endpoint, fetchImpl })
+  if (rows === null) return null
+  return Object.fromEntries(ledgerBySessionId(rows))
 }
 
 // Live worker sessions as `[{sessionId, status, label}]`, or `null` when a store failed.
@@ -94,8 +81,11 @@ export function readLedger(dir = config.ledgerDir) {
 // heartbeat, `cluster` for a mirrored cluster session. It is no longer the registry's own
 // `status`, because the registry is no longer on this path. Descriptive only — nothing decides
 // on it.
-export async function workerSessions({ endpoint, ledgerDir, fetchImpl, now } = {}) {
-  const ledger = readLedger(ledgerDir)
+export async function workerSessions({ endpoint, fetchImpl, now } = {}) {
+  // ⚠️ `ledgerDir` left the signature with the file read, and a caller still passing it is
+  // harmless rather than broken — an extra key on a destructured parameter is ignored. It is
+  // named because a silent acceptance would let a reader believe a path is still in force.
+  const ledger = await readLedger({ endpoint, fetchImpl })
   if (ledger === null) return null
 
   // Read once, not once per ledger entry: the endpoint answers the whole fleet in one request,
