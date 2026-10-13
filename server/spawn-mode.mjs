@@ -131,7 +131,8 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
   return { mode: 'interactive', source: 'default' }
 }
 
-// WHERE a worker is created — this Mac, or the nuke cluster — and the argument that decided it.
+// WHERE a worker is created — this Mac, the nuke cluster, or a per-task container/pod — and
+// the argument that decided it.
 //
 // This is a second question from `resolveSpawnMode`, not a third answer to it, and keeping
 // them apart is the whole point. "Which way does this worker open" (a tab the operator can
@@ -141,16 +142,28 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
 // default, so a `spawn.mode: cluster` in `~/.config/claude-supervisor/config.json` able to
 // default the entire fleet into the cluster is exactly the shape this split forecloses.
 //
-// ⚠️ So `cluster` is deliberately NOT a `SPAWN_MODES` value. Adding it there would make it
-// env- and config-selectable for free, which is the failure above arriving silently — the
-// list has no notion of "per-call only", and every future reader of it would reasonably
+// ⚠️ So none of `cluster`, `docker` or `k8s` is a `SPAWN_MODES` value. Adding one there would
+// make it env- and config-selectable for free, which is the failure above arriving silently —
+// the list has no notion of "per-call only", and every future reader of it would reasonably
 // assume otherwise.
+//
+// ⚠️ `docker` and `k8s` are the A2A worker-controller targets (2026-10-13): `docker` asks the
+// controller for one container per task on this Mac, `k8s` for one pod per task in nuke dev,
+// and both then reach the worker DIRECTLY over A2A, never through the controller. They are
+// distinct from `cluster`, which is the shared long-lived `claude-interactive` pod and is
+// untouched by them.
+//
+// ⚠️ Being listed here says the CALL is well-formed, NOT that the spawn can be carried out.
+// `IMPLEMENTED_SPAWN_TARGETS` below is the second list, and the dispatch consults it. Without
+// that split, `docker` and `k8s` would have to stay out of this list until their client
+// shipped, and a caller would be told "not a spawn target" — which names the wrong problem,
+// since the target is perfectly well-formed and merely unimplemented.
 //
 // An unknown value REFUSES rather than falling back, for the reason `resolveSpawnMode`
 // refuses: a spawn that ignored the caller's target would create the worker somewhere the
 // caller did not ask for, and where a worker was created is otherwise discovered only by
 // noticing it. Falling back to `local` would look exactly like a working call.
-export const SPAWN_TARGETS = ['local', 'cluster']
+export const SPAWN_TARGETS = ['local', 'cluster', 'docker', 'k8s']
 
 // The target this spawn runs under, plus the source that decided it — or `{error}` for a
 // value that is not a known target.
@@ -171,6 +184,46 @@ export function resolveSpawnTarget({ target } = {}) {
     }
   }
   return { target, source: 'argument' }
+}
+
+// The targets a spawn can actually be CARRIED OUT for — the subset of `SPAWN_TARGETS` with a
+// shipped client.
+//
+// ⚠️ THE TWO LISTS ARE NOT THE SAME, AND COLLAPSING THEM IS THE BUG THIS EXISTS TO PREVENT.
+// `SPAWN_TARGETS` answers "is this a target at all" and is what the tool schema publishes;
+// this answers "does anything implement it". `docker` and `k8s` are in the first and not the
+// second while the A2A worker-controller client is unbuilt. Without the distinction a spawn
+// for a listed-but-unimplemented target reaches the LOCAL path in `supervisor.mjs` — which is
+// the branch that runs when the target is `local` — so `target: "docker"` would open an
+// ordinary local worker and report success. That is the failure the header above names: a
+// spawn that fell back to `local` "would look exactly like a working call", and where the
+// worker was created is otherwise discovered only by noticing it.
+//
+// ⚠️ ADDING A TARGET HERE WITHOUT A DISPATCH BRANCH IN `supervisor.mjs` REOPENS EXACTLY THAT
+// HOLE. A backend ships as two edits in one change: the branch that creates the worker, and
+// the entry here. Removing an entry is never a way to retire a backend — it would silently
+// reroute that target to `local` rather than refusing it.
+export const IMPLEMENTED_SPAWN_TARGETS = ['local', 'cluster']
+
+// Whether a resolved target can be carried out — a refusal string, or `null` to allow it.
+//
+// Pure and exported for the reason `concurrentLimitRefusal` is: `supervisor.mjs` connects a
+// stdio server at load and so cannot be imported by a test at all, and this is the guard
+// standing between a listed target and the local fall-through. A rule that lives only in that
+// file ships uncovered.
+//
+// Takes the RESOLVED `{ target }` rather than the raw argument, so it runs after
+// `resolveSpawnTarget` has already refused anything that is not a target at all. This answers
+// the second question only and never repeats the first.
+export function spawnTargetImplementationRefusal({ target } = {}) {
+  if (IMPLEMENTED_SPAWN_TARGETS.includes(target)) return null
+  return (
+    `target ${JSON.stringify(target)} is a known spawn target but has no client yet — the A2A ` +
+    `worker-controller path is not implemented, so this spawn is REFUSED rather than falling ` +
+    `through to the local path, which would open an ordinary local worker under a call that ` +
+    `asked for a container or a pod and would look exactly like a working call. Use ` +
+    `target: "local" or target: "cluster" until the controller ships.`
+  )
 }
 
 // How many workers the fleet may hold open at once — one value, fleet-wide.

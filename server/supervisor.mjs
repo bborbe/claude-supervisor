@@ -25,7 +25,7 @@ import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
@@ -1228,6 +1228,17 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     return spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed, env: envOverrides })
   }
 
+  // ⚠️ THE LAST GUARD BEFORE THE LOCAL PATH, and it sits here rather than beside
+  // `resolveSpawnTarget` only because `cluster` returns above. Everything reaching this line
+  // is either `local` or a KNOWN target with no client yet (`docker`, `k8s`), and without this
+  // check the latter would FALL THROUGH into the local path below — opening an ordinary local
+  // worker under a call that asked for a container or a pod, and reporting success. That is
+  // the same failure `resolveSpawnTarget` refuses an unknown value to avoid, applied to a
+  // value that IS known. The rule lives in `spawnTargetImplementationRefusal` so it is
+  // unit-tested; this file cannot be imported by a test at all.
+  const unimplementedTarget = spawnTargetImplementationRefusal(spawnTarget)
+  if (unimplementedTarget) return { error: unimplementedTarget }
+
   // Resolved first, because every guard below asks which way this worker opens and they
   // must all get the same answer. A bad value in the env or the file refuses here,
   // before a worker, a ledger record or a tab exists.
@@ -1808,9 +1819,9 @@ const TOOLS = [
         },
         target: {
           type: 'string',
-          enum: ['local', 'cluster'],
+          enum: ['local', 'cluster', 'docker', 'k8s'],
           description:
-            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. `cluster` starts a session in the `claude-interactive` service in nuke dev instead, which requires `task` and a configured SUPERVISOR_CLUSTER_URL. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the cluster is a second option rather than the fleet default — a config value able to default the whole fleet into the cluster is exactly what that split forecloses. A value that is neither `local` nor `cluster` REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. ⚠️ With `target: "cluster"` the local-only arguments `interactive`, `resume` and `policy` are REFUSED rather than ignored: the cluster path can honour none of them, and a dropped `resume` would look like a resume while opening a fresh session. Omit all three on a cluster call.',
+            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. `cluster` starts a session in the `claude-interactive` service in nuke dev instead, which requires `task` and a configured SUPERVISOR_CLUSTER_URL. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the cluster is a second option rather than the fleet default — a config value able to default the whole fleet into the cluster is exactly what that split forecloses. A value that is neither `local` nor `cluster` REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. ⚠️ With `target: "cluster"` the local-only arguments `interactive`, `resume` and `policy` are REFUSED rather than ignored: the cluster path can honour none of them, and a dropped `resume` would look like a resume while opening a fresh session. Omit all three on a cluster call. ⚠️ `docker` and `k8s` are the A2A worker-controller targets: `docker` asks the controller for one container per task on this Mac, `k8s` for one pod per task in nuke dev, and both then talk to the worker DIRECTLY over A2A. They are currently ACCEPTED BY THIS SCHEMA BUT REFUSED BY THE SPAWN — the A2A client has not shipped, and the spawn refuses rather than falling through to the local path, because a `docker` call that quietly opened a local worker would look exactly like a working call. Both are PER-CALL ONLY for the same reason `cluster` is. They are distinct from `cluster`, which is the shared long-lived `claude-interactive` pod and is untouched by them.',
         },
         task: {
           type: 'string',
