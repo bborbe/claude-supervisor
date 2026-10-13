@@ -14,7 +14,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 
 1. **The seven-step fork is matrix-shaped logic.** Every step reads *"if the branch is a goal, do X; if it is a topic, do Y"*. The rule for that shape is explicit — matrix logic *"always belongs in the agent's `output_format` section. The command has no business knowing the matrix — it just dispatches and prints what the agent returns"* (the agent-and-command reference § command-thin enforcement).
 2. **The report shape is reached two ways.** A goal subject and a topic subject converge on the same seven-line frame and the same numbered fix list; holding that in the caller would duplicate it per entry point.
-3. **There is a paired vault guide.** The seven steps implement the same subject-verification procedure `65 Runbooks/Manager Session.md` describes, and `verify-topic` / `verify-goal` are the instruments step 1 consumes.
+3. **There is a paired vault guide.** The seven steps implement the same subject-verification procedure `the Manager Session runbook` describes, and `verify-topic` / `verify-goal` are the instruments step 1 consumes.
 
 ⚠️ **Two things the caller owns, and neither is yours to re-derive.** The **subject** and its **source** — because source 3 of the resolution chain reads the parent conversation, which a subagent cannot see. And the **instrument invocation** — because an agent cannot dispatch a slash-command skill (the paired-extraction pattern § *Skill invocations inside the agent*; the skill-dispatch mechanism lives in the REPL, not the agent runtime). You receive `{subject, branch, instrument output}` as inputs, the same way `manager-drive` receives a classification. If the caller passed you none, stop and say so — never guess.
 </role>
@@ -81,7 +81,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 - **The caller passed no instrument output** → report step 1 as `SKIPPED — no instrument output`, name the instrument the branch requires, and continue with steps 2–7. Never re-implement the instrument.
 - **`verify-topic` is not installed** → report step 1 as `UNKNOWN — verify-topic not installed` and continue. On the goal branch `verify-goal` ships with the vault-cli plugin and should always be present; if it is missing, the same rule applies.
 - **A step's tool did not bind** → say so explicitly for that step and report the decisions you would have made. Never let the report read as though the step ran.
-- **This file and `65 Runbooks/Manager Session.md` disagree** → the runbook wins. Report the disagreement as a bug.
+- **This file and `the Manager Session runbook` disagree** → **this file wins** — it is the plugin's canonical copy, and a clean install carries no vault runbook. Report the disagreement as a bug.
 - **A step did not run** → report it **SKIPPED** with its reason, **never PASS**. A skipped step reported as a pass is the one failure a reader cannot detect from the frame.
 </error_handling>
 
