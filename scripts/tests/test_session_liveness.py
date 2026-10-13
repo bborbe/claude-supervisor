@@ -161,7 +161,11 @@ class SessionLiveness(unittest.TestCase):
         """
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = self.m.main(["--check", session_id, "--endpoint", endpoint])
+            # `--dir` for the same reason `check` passes it: without it the licence path reads
+            # this machine's real registry — present on a workstation, absent on a CI runner,
+            # where it reads as unreadable and the verdict becomes UNKNOWN (measured: PR #280's
+            # `test` job failed on exactly that while every local run passed).
+            rc = self.m.main(["--check", session_id, "--endpoint", endpoint, "--dir", self.registry])
         return rc, out.getvalue(), err.getvalue()
 
     def listing(self, endpoint, directory=None):
@@ -492,7 +496,7 @@ class SessionLiveness(unittest.TestCase):
                     self.assertEqual(rc_main, MALFORMED, hostile)
                     self.assertNotIn("ABSENT", err)
                     # Layer 2 — reached directly, `_check` still encodes it.
-                    rc, _, _ = self.m._check(hostile, fx.url)
+                    rc, _, _ = self.m._check(hostile, fx.url, registry_dir=self.registry)
                     self.assertEqual(rc, ABSENT, hostile)
         finally:
             self.m._get_json = real
