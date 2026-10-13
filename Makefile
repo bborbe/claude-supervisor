@@ -72,7 +72,27 @@ check:
 	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json']]" && echo "  manifests parse"
 	@test -f .mcp.json && test -f README.md && echo "  plugin files present"
 
-test: check
+# ⚠️ The guard the suite's own failure cannot give you, and the reason it is a target rather
+# than another paragraph of the note below. With `server/node_modules` absent, `node --test`
+# emits one `ERR_MODULE_NOT_FOUND` per module it cannot load — three here (`undici`, for
+# `cluster-spawn.test.mjs`; the Agent SDK, for `mode.test.mjs` and, through the DYNAMIC
+# `await import('./mode.mjs')` at `shipping-settings.test.mjs:45`, for that file too) — and
+# then aborts before running a single test. Three module errors read as three broken tests,
+# which is how they were read on 2026-10-14: a worker concluded the baseline was red and filed
+# a task against a repo that was green. The note below is a comment; this is what `make` prints.
+#
+# ⚠️ It installs nothing, deliberately. A check that reaches the network fails for reasons that
+# are not about the tree, and an `npm install` here would also drop an untracked
+# `server/package-lock.json` into every worktree that ran it.
+#
+# ⚠️ It hangs off `test`, not off `precommit`, because `test` is the single point every path
+# that runs the suites goes through — `make test` and `make precommit` alike. Wiring it into
+# both would be two homes for one rule.
+check-server-deps:
+	@test -d server/node_modules || { echo "server/node_modules is missing — the suites cannot load. Run: cd server && npm install --no-audit --no-fund"; exit 1; }
+	@echo "  server deps present"
+
+test: check check-server-deps
 	@rc=0; \
 	node --test server/*.test.mjs || rc=1; \
 	python3 -m unittest discover -s scripts/tests || rc=1; \
@@ -97,4 +117,4 @@ test: check
 # inside `server/` works too.
 precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-ledger-writes test
 
-.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check test precommit
+.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check check-server-deps test precommit
