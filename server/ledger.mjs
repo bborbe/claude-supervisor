@@ -109,6 +109,8 @@ export function buildRecord({
   parentSession = null,
   role = null,
   result = null,
+  workerId = null,
+  target = null,
   spawnedAt,
 }) {
   if (!sessionId) throw new Error('buildRecord needs a sessionId — it is the key')
@@ -154,6 +156,14 @@ export function buildRecord({
     // its result is final before the record is written. Hard-coding null here is what left the
     // durable half asserting nothing about a turn that had already answered.
     result,
+    // The A2A worker this session runs in, and which target created it. Null for every local
+    // and cluster mode. ⚠️ CARRIED BECAUSE NOTHING ELSE CAN MAP A CONTROLLER WORKER BACK TO ITS
+    // SESSION: liveness lists the controller's workers by id, and a reconnected server has no
+    // in-memory record to consult — without these the A2A mirror stamps nothing and every A2A
+    // worker reads dead after a restart. The worker's TOKEN is deliberately absent: it
+    // authenticates turns, and this record is a file anyone on the machine can read.
+    worker_id: workerId,
+    target,
   }
 }
 
