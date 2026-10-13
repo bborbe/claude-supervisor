@@ -16,9 +16,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - feat: **`a2a` is a fourth ledger `mode`, and the roster status is the target name.** An A2A worker is neither a tab, an in-process query, nor the shared cluster pod, so folding it into `headless` would file it under a mode whose whole meaning is "a local process that parks its gates on this server". ⚠️ `buildRecord` **throws** on a mode outside `MODES`, so a status the derivation did not know would lose the ledger record entirely rather than mis-file it — the mapping now has one home in the spawn module and is unit-tested.
 
-- test: **32 new cases**, and the refusals are asserted as hard as the successes. The two wire calls take an injectable `fetch`, so a `FAILED` create, a reply with no `a2a_url`, a reply with no token, a non-2xx, a transport failure, a card that 404s and a card carrying only a top-level `url` are all exercised against a stub rather than a live controller. `make precommit` **PASS** — 640/640 node tests (up from 608), 2161 python tests `OK`.
-
-- ⚠️ **Not exercised end-to-end yet.** Nothing here has run against a real controller: the sibling task that owns the Docker backend is one probe away from landing its own SC1b, and no turn has been sent to a worker. The `target: "docker"` / `"k8s"` call path is written and unit-tested, not proven.
+- test: **32 new cases**, and the refusals are asserted as hard as the successes. The two wire calls take an injectable `fetch`, so a `FAILED` create, a reply with no `a2a_url`, a reply with no token, a non-2xx, a transport failure, a card that 404s and a card carrying only a top-level `url` are all exercised against a stub rather than a live controller. `make precommit` **PASS** — 640/640 node tests (up from 608), 2161 python tests `OK`. ⚠️ **Nothing here has run against a real controller, and no turn has been sent to a worker** — the `target: "docker"` / `"k8s"` path is written and unit-tested, not proven end to end.
 
 ## v0.136.1
 
