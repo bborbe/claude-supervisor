@@ -47,6 +47,7 @@ import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
 import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
 import { liveSessionIds, rehydratableAgents } from './registry-rehydrate.mjs'
+import { postSessionLedger, recordToWire } from './session-ledger.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -160,7 +161,7 @@ if (config.claudeHomeRefusal) {
 // Best-effort by design: a store that cannot be read leaves the roster as it was before this
 // fix — empty — rather than taking the server down. The warning is the observable.
 {
-  const rehydrated = rehydratableAgents({ log })
+  const rehydrated = await rehydratableAgents({ log })
   if (rehydrated === null) {
     log('WARNING: a store could not be read — the roster starts empty and will not show workers spawned before this process')
   } else {
@@ -187,6 +188,50 @@ function pruneRehydratedAgents() {
   for (const agent of adopted) {
     if (!live.has(agent.sessionId)) agents.delete(agent.id)
   }
+}
+
+// The roster AS OF NOW: this process's own workers, union'd with every live worker the ledger
+// endpoint knows that this process did not spawn.
+//
+// ⚠️ **This is the fix, and the adoption block above is not a substitute for it.** Adoption
+// runs ONCE, at import, and `pruneRehydratedAgents` can only remove — so a session that was not
+// live at that instant stays invisible to this process for its whole life, however live it
+// becomes. Measured 2026-10-13: 4 of 35 live-and-ledgered sessions were absent from a live
+// roster, this server's own session id among them, because its heartbeat is written by the very
+// server that performs the adoption and so cannot exist at import. A read here happens at
+// REQUEST time and cannot freeze, which is the property the adoption block cannot have.
+//
+// ⚠️ **This process's own row WINS on a `session_id` collision**, and the direction is
+// deliberate rather than incidental: an in-process agent carries the live transcript, the park
+// queue and the permission rules, while an endpoint row carries identity alone. Letting the
+// fresh row win would replace a working worker's record with a hollow one.
+//
+// ⚠️ **A store that cannot be read returns the in-process roster rather than an empty one.**
+// The endpoint is a second source, not a replacement for what this process already knows;
+// dropping its own workers on a store outage would be the same failure this change exists to
+// remove, one direction over.
+async function currentRoster() {
+  // Still pruned: an adopted row carries a BOOT-TIME liveness reading, and a worker that died
+  // since would otherwise sit in the roster under a status that reads as fine.
+  pruneRehydratedAgents()
+  const roster = new Map(agents)
+  const own = new Set([...roster.values()].map((a) => a.sessionId))
+  const takenIds = new Set(roster.keys())
+  const fresh = await rehydratableAgents({ log })
+  if (fresh === null) return roster
+  for (const agent of fresh) {
+    if (own.has(agent.sessionId)) continue
+    // ⚠️ An endpoint id shares a namespace with this process's own mints (`agent_${++seq}`),
+    // and the two are minted by different processes, so a collision here is a live worker
+    // answering under an id another live worker holds. Disambiguated rather than dropped —
+    // the same choice, for the same reason, as `agentsFromRecords` makes within one read.
+    let id = agent.id
+    if (takenIds.has(id)) id = `${id}~${agent.sessionId.slice(0, 8)}`
+    while (takenIds.has(id)) id = `${id}~`
+    takenIds.add(id)
+    roster.set(id, { ...agent, id })
+  }
+  return roster
 }
 
 // ── attention-store delivery ────────────────────────────────────────────────
@@ -583,7 +628,14 @@ function writeLedger(agent, patch) {
     return null
   }
   try {
-    if (patch) return updateRecord(config.ledgerDir, agent.sessionId, patch)
+    // The patch arm merges into the stored row and hands the MERGED row back, so the endpoint
+    // is published the same row the file holds rather than the patch on its own — a patch-only
+    // POST would blank every field the patch does not name.
+    if (patch) {
+      const merged = updateRecord(config.ledgerDir, agent.sessionId, patch)
+      publishLedgerRow(merged)
+      return merged
+    }
     const record = buildRecord({
       sessionId: agent.sessionId,
       agentId: agent.id,
@@ -627,11 +679,34 @@ function writeLedger(agent, patch) {
       spawnedAt: agent.createdAt,
     })
     writeRecord(config.ledgerDir, record)
+    publishLedgerRow(record)
     return record
   } catch (error) {
     log(`WARNING: could not write the ledger record for ${agent.id}: ${error.message}`)
     return null
   }
+}
+
+// Publish a record to the session-ledger endpoint, beside the file write.
+//
+// ⚠️ **A TRANSITIONAL dual-write, and deliberate rather than an oversight.** The roster reads
+// the endpoint now (see `currentRoster`), so a spawn that wrote only a file would be invisible
+// to every manager — but the file is still what the resume path and the shutdown stamp read, so
+// retiring it is a separate step with its own acceptance criteria. Writing both keeps every
+// reader correct in the meantime; the file write goes when its last reader does.
+//
+// ⚠️ **Not awaited, on purpose.** A store outage must not turn a spawn that already produced a
+// working worker into a failed spawn, and the shutdown path has no caller left to catch a
+// rejection. A failure is logged and nothing else; the endpoint is a second copy here, so a
+// missed POST costs visibility, not durability.
+function publishLedgerRow(record) {
+  const wire = recordToWire(record)
+  if (!wire) return
+  postSessionLedger(wire)
+    .then((ok) => {
+      if (!ok) log(`WARNING: the session-ledger endpoint did not take the row for ${wire.session_id}`)
+    })
+    .catch(() => {})
 }
 
 // The shutdown path: what this server owes the ledger when it goes away.
@@ -2239,7 +2314,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
 
     case 'send_agent_message': {
-      const agent = agents.get(args.agent_id)
+      // ⚠️ The request-time roster, for the same reason `list_agents` reads it: the worker a
+      // manager is being asked to message is the one it did NOT spawn — that is the whole
+      // point of the endpoint — so a Map-only lookup refuses exactly the call this change
+      // exists to make work. The transport still comes from the row (`pane_id`, `worker_id`),
+      // which `toAgentRecord` carries. ⚠️ The `agent.messages` append below is a no-op for a
+      // row built fresh from the endpoint: that array is this process's own in-memory log and
+      // was never persisted for any worker, so nothing regresses — it is named so the missing
+      // entry is not read as a delivery failure.
+      const agent = (await currentRoster()).get(args.agent_id)
       if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
       if (typeof args.message !== 'string' || !args.message.trim()) {
         return reply({ error: 'message is required' })
@@ -2297,12 +2380,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'list_agents':
-      pruneRehydratedAgents()
-      return reply([...agents.values()].map(agentView))
+      // ⚠️ The request-time roster, not the in-process Map: a worker another manager spawned —
+      // or one resumed from a WezTerm pane — is not in this process's Map at all, and reading
+      // only the Map is the defect this task exists to close. See `currentRoster`.
+      return reply([...(await currentRoster()).values()].map(agentView))
 
     case 'agent_status': {
-      pruneRehydratedAgents()
-      const agent = agents.get(args.agent_id)
+      const agent = (await currentRoster()).get(args.agent_id)
       if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
       // A tab worker's permission prompt never enters the park queue, so
       // `pending_permissions` is empty for it by construction. Its attention-store cards

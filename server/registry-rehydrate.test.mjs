@@ -48,11 +48,33 @@ function fixture() {
   const dirs = {
     root,
     registryDir: join(root, 'registry'),
-    ledgerDir: join(root, 'ledger'),
     heartbeatDir: join(root, 'heartbeats'),
+    // ⚠️ The ledger is now the ENDPOINT, so its fixture is a row array served in-process
+    // rather than a directory of files. The suite still dials nothing — the transport is
+    // injected — and `rows` is the whole store, so a spec that wants an unreadable ledger
+    // fails the transport instead of pointing at a missing directory.
+    rows: [],
   }
-  for (const key of ['registryDir', 'ledgerDir', 'heartbeatDir']) mkdirSync(dirs[key])
+  for (const key of ['registryDir', 'heartbeatDir']) mkdirSync(dirs[key])
   return dirs
+}
+
+// The endpoint as the suite sees it: one row array, served from memory.
+function serving(dir) {
+  return async () => ({ status: 200, json: async () => dir.rows })
+}
+
+// The roster, read the way `supervisor.mjs` reads it — from the endpoint, with the registry and
+// heartbeat channels still supplying liveness. Every spec goes through here so the read has ONE
+// spelling and a change to its shape cannot leave half the suite asserting the old one.
+function roster(dir, overrides = {}) {
+  return rehydratableAgents({
+    endpoint: 'http://fixture.invalid',
+    fetchImpl: serving(dir),
+    registryDir: dir.registryDir,
+    heartbeatDir: dir.heartbeatDir,
+    ...overrides,
+  })
 }
 
 // A pid that cannot be running. macOS caps pids well below this, so `pidIsAlive` answers
@@ -71,31 +93,28 @@ function register(dir, sessionId, { pid = process.pid, status = 'busy' } = {}) {
 // A durable ledger record. `status: 'running'` is the default because that is what a record
 // reads when its server died without observing the outcome — the whole hazard.
 function ledger(dir, sessionId, { agentId = `agent_${sessionId}`, mode = 'interactive', ...extra } = {}) {
-  writeFileSync(
-    join(dir.ledgerDir, `${sessionId}.json`),
-    JSON.stringify({
-      session_id: sessionId,
-      agent_id: agentId,
-      label: `label-${sessionId}`,
-      mode,
-      spawned_at: '2026-10-06T00:00:00.000Z',
-      status: 'running',
-      ...extra,
-    }),
-  )
+  dir.rows.push({
+    session_id: sessionId,
+    agent_id: agentId,
+    label: `label-${sessionId}`,
+    mode,
+    spawned_at: '2026-10-06T00:00:00.000Z',
+    status: 'running',
+    ...extra,
+  })
 }
 
 function beat(dir, sessionId, { mode = 'headless' } = {}) {
   stampRecord(dir.heartbeatDir, { sessionId, pid: process.pid, mode })
 }
 
-test('adopts a live worker the ledger carries — the roster rebuilds on a fresh process', (t) => {
+test('adopts a live worker the ledger carries — the roster rebuilds on a fresh process', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-tab')
   ledger(dir, 's-tab', { agentId: 'agent_1' })
 
-  const agents = rehydratableAgents(dir)
+  const agents = await roster(dir)
 
   assert.equal(agents.length, 1)
   assert.equal(agents[0].id, 'agent_1')
@@ -103,17 +122,17 @@ test('adopts a live worker the ledger carries — the roster rebuilds on a fresh
   assert.equal(agents[0].rehydrated, true)
 })
 
-test('a ledger record with no liveness in either channel is NOT adopted — dead stays unknown', (t) => {
+test('a ledger record with no liveness in either channel is NOT adopted — dead stays unknown', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   // The ledger's own `status: running` is the trap: nothing closes a record whose server
   // went away, so this row is exactly the one a naive rehydrate would resurrect.
   ledger(dir, 's-dead', { agentId: 'agent_dead' })
 
-  assert.deepEqual(rehydratableAgents(dir), [])
+  assert.deepEqual(await roster(dir), [])
 })
 
-test('a registry entry whose pid is DEAD is not adopted — presence is not liveness', (t) => {
+test('a registry entry whose pid is DEAD is not adopted — presence is not liveness', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   // The file is still on disk because the session crashed rather than exited, which is
@@ -122,43 +141,43 @@ test('a registry entry whose pid is DEAD is not adopted — presence is not live
   register(dir, 's-crashed', { pid: DEAD_PID })
   ledger(dir, 's-crashed', { agentId: 'agent_crashed' })
 
-  assert.deepEqual(rehydratableAgents(dir), [])
+  assert.deepEqual(await roster(dir), [])
 })
 
-test('the heartbeat store alone is enough — a headless worker has no registry entry', (t) => {
+test('the heartbeat store alone is enough — a headless worker has no registry entry', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   ledger(dir, 's-headless', { agentId: 'agent_h', mode: 'headless' })
   beat(dir, 's-headless', { mode: 'headless' })
 
-  const agents = rehydratableAgents(dir)
+  const agents = await roster(dir)
 
   assert.equal(agents.length, 1)
   assert.equal(agents[0].id, 'agent_h')
   assert.equal(agents[0].status, 'running')
 })
 
-test('a resumed worker IS adopted, unlike the cap counter which filters it out', (t) => {
+test('a resumed worker IS adopted, unlike the cap counter which filters it out', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-resumed')
   ledger(dir, 's-resumed', { agentId: 'agent_r', resumed_from: 's-original' })
 
-  const agents = rehydratableAgents(dir)
+  const agents = await roster(dir)
 
   assert.equal(agents.length, 1, 'a roster must not inherit workerSessions() resumed_from filter')
   assert.equal(agents[0].resumedFrom, 's-original')
 })
 
-test('a registry session with no ledger record is not a worker — the operator and managers stay out', (t) => {
+test('a registry session with no ledger record is not a worker — the operator and managers stay out', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-operator')
 
-  assert.deepEqual(rehydratableAgents(dir), [])
+  assert.deepEqual(await roster(dir), [])
 })
 
-test('a duplicate agent_id keeps BOTH workers addressable — the loser is disambiguated, not dropped', (t) => {
+test('a duplicate agent_id keeps BOTH workers addressable — the loser is disambiguated, not dropped', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   // `supervisor.mjs` mints ids from a per-process counter, so a reconnect restarts it and two
@@ -171,7 +190,7 @@ test('a duplicate agent_id keeps BOTH workers addressable — the loser is disam
   ledger(dir, 'bbbbbbbb-2222-4222-8222-222222222222', { agentId: 'agent_1' })
   const logged = []
 
-  const agents = rehydratableAgents({ ...dir, log: (line) => logged.push(line) })
+  const agents = await roster(dir, { log: (line) => logged.push(line) })
 
   assert.equal(agents.length, 2, 'a live worker must not become unaddressable')
   assert.equal(agents[0].id, 'agent_1')
@@ -182,44 +201,47 @@ test('a duplicate agent_id keeps BOTH workers addressable — the loser is disam
   assert.match(logged[0], /share agent id agent_1/)
 })
 
-test('an unreadable ledger answers null, never an empty roster', (t) => {
+test('an unreadable ledger endpoint answers null, never an empty roster', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-tab')
   ledger(dir, 's-tab')
-  // A ledger path that exists but is a FILE, not a directory — readLedger reports the error
-  // rather than treating it as "nobody was ever spawned".
-  writeFileSync(join(dir.root, 'not-a-dir'), 'x')
+  // ⚠️ A store OUTAGE, not an empty store: the endpoint refuses to answer, which is a
+  // different fact from "nobody was ever spawned" — `[]` — and collapsing the two would let a
+  // permissions error read as a fleet with no workers.
+  const fetchImpl = async () => {
+    throw new Error('connect ECONNREFUSED')
+  }
 
-  assert.equal(rehydratableAgents({ ...dir, ledgerDir: join(dir.root, 'not-a-dir') }), null)
+  assert.equal(await roster(dir, { fetchImpl }), null)
 })
 
-test('an unreadable registry answers null — the other store a permissions error takes', (t) => {
+test('an unreadable registry answers null — the other store a permissions error takes', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   ledger(dir, 's-tab')
   writeFileSync(join(dir.root, 'registry-file'), 'x')
 
-  assert.equal(rehydratableAgents({ ...dir, registryDir: join(dir.root, 'registry-file') }), null)
+  assert.equal(await roster(dir, { registryDir: join(dir.root, 'registry-file') }), null)
 })
 
-test('an unreadable heartbeat store answers null — the third store, and the one headless needs', (t) => {
+test('an unreadable heartbeat store answers null — the third store, and the one headless needs', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-tab')
   ledger(dir, 's-tab')
   writeFileSync(join(dir.root, 'beat-file'), 'x')
 
-  assert.equal(rehydratableAgents({ ...dir, heartbeatDir: join(dir.root, 'beat-file') }), null)
+  assert.equal(await roster(dir, { heartbeatDir: join(dir.root, 'beat-file') }), null)
 })
 
-test('a rehydrated record carries the arrays agentView dereferences unconditionally', (t) => {
+test('a rehydrated record carries the arrays agentView dereferences unconditionally', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-tab')
   ledger(dir, 's-tab', { agentId: 'agent_1' })
 
-  const [agent] = rehydratableAgents(dir)
+  const [agent] = await roster(dir)
 
   // agentView does `a.transcript.length` and `a.permissions.filter(...)` with no guard, so an
   // absent field takes the WHOLE roster down rather than one row.
@@ -227,16 +249,13 @@ test('a rehydrated record carries the arrays agentView dereferences unconditiona
   assert.ok(Array.isArray(agent.permissions))
 })
 
-test('a record with no agent_id is skipped rather than adopted under a synthesised id', (t) => {
+test('a record with no agent_id is skipped rather than adopted under a synthesised id', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-noid')
-  writeFileSync(
-    join(dir.ledgerDir, 's-noid.json'),
-    JSON.stringify({ session_id: 's-noid', label: 'no agent id', mode: 'interactive' }),
-  )
+  dir.rows.push({ session_id: 's-noid', label: 'no agent id', mode: 'interactive' })
 
-  assert.deepEqual(rehydratableAgents(dir), [])
+  assert.deepEqual(await roster(dir), [])
 })
 
 test('liveSessionIds pid-checks the registry half, and unions in the heartbeat store', (t) => {
@@ -318,12 +337,25 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // supervisor.mjs's text — the remedy this repo already uses in cluster-spawn.test.mjs and
   // attention-poll.test.mjs, because supervisor.mjs starts an MCP server at import.
   const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
-  assert.match(src, /rehydratableAgents\(\{ log \}\)/)
+  assert.match(src, /await rehydratableAgents\(\{ log \}\)/)
   assert.match(src, /for \(const agent of rehydrated\) agents\.set\(agent\.id, agent\)/)
   assert.match(src, /function pruneRehydratedAgents\(\)/)
-  // Called before both readers answer, so a worker that died after boot leaves the roster.
-  assert.match(src, /case 'list_agents':\n\s+pruneRehydratedAgents\(\)/)
-  assert.match(src, /case 'agent_status': \{\n\s+pruneRehydratedAgents\(\)/)
+  // ⚠️ **Both readers answer from the REQUEST-TIME roster, not the in-process Map.** The boot
+  // adoption above is a snapshot that can never gain a row, so a reader that went back to
+  // `agents.values()`/`agents.get()` would restore the exact defect this change closes while
+  // every other assertion here stayed green. The Map-only shape is asserted ABSENT for that
+  // reason, not for tidiness.
+  assert.match(src, /case 'list_agents':[\s\S]{0,400}?return reply\(\[\.\.\.\(await currentRoster\(\)\)\.values\(\)\]\.map\(agentView\)\)/)
+  assert.match(src, /case 'agent_status': \{[\s\S]{0,400}?const agent = \(await currentRoster\(\)\)\.get\(args\.agent_id\)/)
+  assert.match(src, /case 'send_agent_message': \{[\s\S]{0,900}?const agent = \(await currentRoster\(\)\)\.get\(args\.agent_id\)/)
+  assert.ok(!/case 'list_agents':\n\s+pruneRehydratedAgents\(\)/.test(src), 'the Map-only list_agents must not come back')
+  assert.ok(!/case 'agent_status': \{\n\s+pruneRehydratedAgents\(\)/.test(src), 'the Map-only agent_status must not come back')
+  // And the union itself: a request-time read, deduped on `session_id`, with this process's own
+  // row winning — an endpoint row carries identity alone and must never displace a live one.
+  assert.match(src, /async function currentRoster\(\)/)
+  assert.match(src, /if \(own\.has\(agent\.sessionId\)\) continue/)
+  assert.match(src, /const fresh = await rehydratableAgents\(\{ log \}\)/)
+  assert.match(src, /if \(fresh === null\) return roster/)
   // ⚠️ The resume path must PRUNE and then guard on EVERY row — never filter rehydrated rows
   // out. Filtering fixed the dead-worker deadlock by breaking the live case: a rehydrated row
   // whose worker still runs must keep blocking a resume, or two writers land on one

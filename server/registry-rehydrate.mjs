@@ -56,7 +56,7 @@
 // roster for complete would be wrong about exactly these two rows.
 import { config } from './config.mjs'
 import { liveSessionIds as liveSessionIdsFromLiveness, pidIsAlive } from './liveness.mjs'
-import { readLedger } from './worker-sessions.mjs'
+import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 
 // The live session ids, as a Map — or `null` when a channel could not be read.
 //
@@ -155,8 +155,12 @@ export function rehydratedStatus(record) {
   return 'running'
 }
 
-// Every live worker the ledger knows, as agent records — or `null` when a store could not be
-// read.
+// The agent records for a set of ledger records, filtered to the live ones.
+//
+// This is the whole of the adoption RULE, and it is deliberately separated from the read that
+// feeds it: the records now arrive from the endpoint, but the rule — live-only, keyed on
+// `session_id`, `agent_id` disambiguated rather than dropped — is unchanged, and it must stay
+// one implementation so a request-time read and a boot-time one cannot answer differently.
 //
 // A record with no `agent_id` is skipped rather than adopted under a synthesised id — the id
 // is what `agent_status` and `send_agent_message` are keyed on, so an invented one would be
@@ -167,25 +171,14 @@ export function rehydratedStatus(record) {
 // rather than a no-op — the duplicate-`agent_id` branch exists so a manager can tell why a
 // worker answers under `agent_1~<sid8>`, and a silent default would lose exactly that for any
 // caller that forgot the argument.
-export function rehydratableAgents({
-  registryDir,
-  ledgerDir = config.ledgerDir,
-  heartbeatDir,
-  now,
-  log = console.warn,
-} = {}) {
-  const ledger = readLedger(ledgerDir)
-  if (ledger === null) return null
-  const live = liveSessionIds({ registryDir, heartbeatDir, now })
-  if (live === null) return null
-
-  // Sorted, so the adoption order is a property of the data rather than of `readdirSync`.
-  // It matters only for the collision branch below, but an order that varies run to run
-  // would make that branch's "first wins" undecidable after the fact.
+export function agentsFromRecords(records, { live, log = console.warn } = {}) {
+  // Sorted, so the adoption order is a property of the data rather than of the read that
+  // supplied it. It matters only for the collision branch below, but an order that varies
+  // run to run would make that branch's "first wins" undecidable after the fact.
   const agents = []
   const claimed = new Map() // agent_id -> session_id
-  for (const sessionId of Object.keys(ledger).sort()) {
-    const record = ledger[sessionId]
+  for (const sessionId of [...records.keys()].sort()) {
+    const record = records.get(sessionId)
     if (!record?.agent_id) continue
     if (!live.has(sessionId)) continue
     const prior = claimed.get(record.agent_id)
@@ -207,4 +200,31 @@ export function rehydratableAgents({
     agents.push(toAgentRecord(record))
   }
   return agents
+}
+
+// Every live worker the ledger knows, as agent records — or `null` when a store could not be
+// read.
+//
+// ⚠️ **This reads the ENDPOINT, and that is the fix rather than a refactor.** The roster used
+// to be built once, at import, from the ledger gated on liveness at that instant, and the only
+// later mutation could delete but never insert — so a session not in `live` when the server
+// started stayed invisible to that process for its whole life, however live it became. A read
+// here happens at REQUEST time and cannot freeze; see `session-ledger.mjs`.
+//
+// ⚠️ **`null` still means "could not read it", from either store.** The caller must be able to
+// tell a store outage from a fleet with no workers, and collapsing the two is the direction
+// that hides live workers.
+export async function rehydratableAgents({
+  endpoint,
+  registryDir,
+  heartbeatDir,
+  now,
+  fetchImpl,
+  log = console.warn,
+} = {}) {
+  const rows = await readSessionLedger({ endpoint, fetchImpl })
+  if (rows === null) return null
+  const live = liveSessionIds({ registryDir, heartbeatDir, now })
+  if (live === null) return null
+  return agentsFromRecords(ledgerBySessionId(rows), { live, log })
 }
