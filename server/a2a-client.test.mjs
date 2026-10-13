@@ -290,6 +290,19 @@ test('the same reply parses from the streaming framing, because one handler serv
   assert.equal(response.create.worker.worker_id, 'w-1')
 })
 
+test('a one-shot reply wrapped as SendMessageResponse { task } is unwrapped', () => {
+  // The shape a2a-go v2 actually sends (measured against a2a-worker-controller v0.4.4). Reading
+  // `result` as the task found no status and no artifact, and orphaned a worker it had created.
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    result: { task: { id: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_COMPLETED' }, artifacts: [{ artifactId: 'a-1', parts: [{ data: { operation: 'create', create: { worker: { worker_id: 'w-1' }, token: 'not-a-real-token' } } }] }] } },
+  })
+  const { response, state } = a2aControlResponseFor(body, { sentOperation: 'create' })
+  assert.equal(state, 'TASK_STATE_COMPLETED')
+  assert.equal(response.create.worker.worker_id, 'w-1')
+})
+
 test('a FAILED status is the error, and it is read BEFORE the missing payload', () => {
   // ⚠️ A backend failure yields TASK_STATE_FAILED with NO artifact, and the controller
   // deliberately withholds the backend's error text. A client that hunted for the data part first
