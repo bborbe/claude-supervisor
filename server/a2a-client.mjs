@@ -1,4 +1,6 @@
-// The supervisor's A2A client — the WORKER-facing half of the `docker` and `k8s` spawn targets.
+// The supervisor's A2A client — BOTH faces of the `docker` and `k8s` spawn targets: the
+// WORKER-facing turn (traps 1–4, below) and the CONTROLLER-facing control call (traps 5–6, at
+// the foot of this file).
 //
 // Why this is a pure module and not code inside `supervisor.mjs`: that file connects a stdio
 // server at load, so no test can import it at all. Everything here is a pure function over
@@ -209,4 +211,223 @@ export function a2aOutcome(frames, { sentContextId } = {}) {
   const statusUpdates = frames.map((f) => f?.statusUpdate).filter((s) => s?.state)
   const state = statusUpdates.at(-1)?.state ?? task.status?.state
   return { state, contextId, reply }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// THE CONTROLLER-FACING HALF — the control API of the A2A worker controller
+// (`bborbe/a2a-worker-controller`), whose `create` / `list` / `stop` a spawn calls before any
+// worker exists.
+//
+// The controller is a DIFFERENT SERVICE from a worker, and it differs on exactly two wire
+// points. Both were read at source — `pkg/types.go`, `pkg/a2a.go`, `pkg/a2a-executor.go` and
+// the `a2a-go` v2 SDK's `a2a/core.go` — rather than inferred from the worker's shape, because
+// the worker's shape is exactly what would have produced a request that looks right and is not:
+//
+//   5. THE CONTROL CALL CARRIES A **DATA** PART, NOT A TEXT PART. The controller reads the
+//      `ControlRequest` from the message's FIRST data part and refuses a message carrying none.
+//      A text part is therefore not a near miss: the controller answers `ErrInvalidParams` and
+//      no operation runs at all.
+//
+//   6. THE CONTROL CALL IS ONE-SHOT — the bare method `SendMessage`, never
+//      `SendStreamingMessage`. A control call is a single request and response with no live turn
+//      to interrupt, which the controller's own `Cancel` states outright, so there is no stream
+//      to consume. (`NewJSONRPCHandler` serves both spellings; the one-shot name is the one that
+//      matches the executor's semantics.)
+//
+// ⚠️ The flattened-part rule is the same on both faces, and the SDK enforces it more sharply
+// than trap 2 alone says: `Part.UnmarshalJSON` requires EXACTLY ONE of `text` / `raw` / `data` /
+// `url`. Zero yields `unknown part content type` — the literal text of the `-32700` this
+// module's worker half was built around, so that defect's cause is now pinned rather than
+// suspected — and more than one yields `expected exactly one of text, raw, data, or url`.
+
+// The JSON-RPC method for a ONE-SHOT turn. ⚠️ BARE, like trap 4's streaming name — the v2 SDK
+// dispatches bare names, and the controller was measured to answer this one.
+export const A2A_SEND_METHOD = 'SendMessage'
+
+// The operations the controller's schema defines, and the only values its
+// `ControlRequest.operation` accepts.
+export const A2A_CONTROL_OPERATIONS = ['create', 'list', 'stop']
+
+// The terminal state a control call ends in when the operation did not happen. It earns its own
+// constant because it is load-bearing here: the controller reports a backend failure as a FAILED
+// status carrying NO artifact, and deliberately withholds the backend's error text, so a client
+// that looked only for a data part would find none and have to invent a reason for it.
+const A2A_STATE_FAILED = 'TASK_STATE_FAILED'
+
+// The `ControlRequest` for one operation — `{ request }`, or `{ error }`.
+//
+// ⚠️ EXACTLY ONE OPERATION-SPECIFIC FIELD, and that is the controller's own rule rather than
+// this module's preference: it refuses a request that sets none or more than one instead of
+// guessing at the intent. A builder that silently dropped a stray field would turn a caller's
+// mistake into a different operation than the one it asked for.
+export function a2aControlRequestFor({ operation, task, workerId } = {}) {
+  if (!A2A_CONTROL_OPERATIONS.includes(operation)) {
+    return {
+      error:
+        `\`operation\` must be one of ${A2A_CONTROL_OPERATIONS.map((o) => JSON.stringify(o)).join(', ')} ` +
+        `— got ${JSON.stringify(operation) ?? 'undefined'}.`,
+    }
+  }
+  if (operation === 'list') {
+    if (task !== undefined || workerId !== undefined) {
+      return { error: '`list` takes no arguments — it reports every worker the controller owns.' }
+    }
+    return { request: { operation } }
+  }
+  if (operation === 'create') {
+    if (typeof task !== 'string' || task === '') {
+      return { error: '`create` requires a non-empty `task` name.' }
+    }
+    if (workerId !== undefined) {
+      return { error: '`create` takes no `workerId` — the controller mints the worker id.' }
+    }
+    return { request: { operation, create: { task } } }
+  }
+  if (typeof workerId !== 'string' || workerId === '') {
+    return { error: '`stop` requires a non-empty `workerId`.' }
+  }
+  if (task !== undefined) {
+    return { error: '`stop` names a worker, not a task — pass `workerId`, never `task`.' }
+  }
+  return { request: { operation, stop: { worker_id: workerId } } }
+}
+
+// A message part carrying structured data — `{ part }`, or `{ error }`.
+//
+// ⚠️ `{ data }`, NOT `{ text }` — see trap 5. The payload must be a non-null object: the SDK
+// hydrates `data` into a `*any`, so a JSON `null` leaves that pointer nil and counts as NO
+// discriminator at all, which the SDK refuses as `unknown part content type`. A null payload
+// therefore fails on the wire exactly as a missing part does — quietly enough to be worth
+// refusing here instead.
+export function a2aDataPart(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      error:
+        `a data part must carry a non-null object — got ${JSON.stringify(value) ?? 'undefined'}. ⚠️ A ` +
+        '`null` payload hydrates to no discriminator at all and is refused as an unknown part ' +
+        'content type, so it fails on the wire exactly as a missing part does.',
+    }
+  }
+  return { part: { data: value } }
+}
+
+// The JSON-RPC request for one control call — `{ url, headers, body }`, or `{ error }`.
+//
+// ⚠️ ONE-SHOT, NOT STREAMING — see trap 6. No `accept: text/event-stream`: a one-shot route
+// answers a single object, and asking it for a stream reads as a call that produced no frames.
+// `contextId` is sent for the same reason the worker half sends it — a control call is a turn on
+// the controller's conversation, and a follow-up must land on the one it started.
+export function a2aSendRequestFor({ endpoint, contextId, request, token, messageId } = {}) {
+  for (const [name, value] of Object.entries({ endpoint, contextId, token, messageId })) {
+    if (value === undefined || value === null || value === '') {
+      return { error: `\`${name}\` is required to send a control call over A2A.` }
+    }
+  }
+  const { part, error } = a2aDataPart(request)
+  if (error) return { error }
+
+  return {
+    url: endpoint,
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${token}`,
+    },
+    body: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: A2A_SEND_METHOD,
+      params: {
+        message: {
+          messageId,
+          role: A2A_USER_ROLE,
+          parts: [part],
+          contextId,
+        },
+      },
+    },
+  }
+}
+
+// The parts and terminal state a control reply carries, from EITHER framing.
+//
+// ⚠️ TWO FRAMINGS, AND THE CALLER MUST NOT HAVE TO KNOW WHICH. `NewJSONRPCHandler` serves the
+// streaming spelling beside the one-shot one and the executor is identical behind either: a
+// one-shot reply is a single JSON-RPC object whose `result` is the task, while a streaming reply
+// is SSE frames carrying the same task, artifact and status events. Accepting both is not
+// guesswork — both are genuinely served — and refusing the wrong one would be.
+function a2aControlReply(body) {
+  if (typeof body !== 'string') return { error: 'the control reply body must be a string.' }
+  if (!/^\s*data:/m.test(body)) {
+    let payload
+    try {
+      payload = JSON.parse(body)
+    } catch (err) {
+      return { error: `the control reply is neither SSE nor JSON: ${body.slice(0, 200)}` }
+    }
+    if (payload?.error) {
+      return {
+        error:
+          `the controller refused the control call: ${JSON.stringify(payload.error)}. ⚠️ A refusal ` +
+          'here is a JSON-RPC error, not a FAILED task — the request never reached a backend.',
+      }
+    }
+    const task = payload?.result ?? payload
+    return { task, frames: [task] }
+  }
+  const { frames, error } = a2aFrames(body)
+  if (error) return { error }
+  return { task: frames.map((f) => f?.task ?? f).find((t) => t?.id) ?? {}, frames }
+}
+
+// The `ControlResponse` a control call produced — `{ response, state }`, or `{ error }`.
+//
+// `sentOperation` is asserted against the operation that comes back. ⚠️ THAT ASSERTION IS THE
+// POINT OF PASSING IT, exactly as `sentContextId` is in `a2aOutcome`: a reply naming a different
+// operation is the only client-side observable that the answer does not belong to the call that
+// asked for it, and nothing else on this side reads as wrong.
+export function a2aControlResponseFor(body, { sentOperation } = {}) {
+  const { task, frames, error } = a2aControlReply(body)
+  if (error) return { error }
+
+  // ⚠️ THE STATUS IS READ BEFORE THE PAYLOAD, and the order is load-bearing: a backend failure
+  // yields `TASK_STATE_FAILED` with NO artifact, so a client that hunted for the data part first
+  // would find none and have to invent a reason, while the status states the real one.
+  const statusUpdates = frames.map((f) => f?.statusUpdate).filter((s) => s?.state)
+  const state = statusUpdates.at(-1)?.state ?? task?.status?.state
+
+  if (state === A2A_STATE_FAILED) {
+    return {
+      error:
+        'the controller reported the control call FAILED. ⚠️ It deliberately returns no detail — ' +
+        "the backend's error text is logged controller-side and never sent — so this status is all " +
+        'the caller gets, and it means the operation did not happen.',
+    }
+  }
+
+  const parts = [
+    ...(task?.artifacts ?? []),
+    ...frames.map((f) => f?.artifactUpdate?.artifact ?? f?.artifact),
+  ].flatMap((a) => a?.parts ?? [])
+  const response = parts
+    .filter((p) => p !== null && typeof p === 'object' && 'data' in p)
+    .map((p) => p.data)
+    .find((d) => d !== null && d !== undefined)
+
+  if (response === undefined) {
+    return {
+      error:
+        `the control call ended ${JSON.stringify(state ?? 'with no status')} but carried no data ` +
+        'part, so there is no `ControlResponse` to read. ⚠️ A text part here is not a near miss: the ' +
+        'controller answers with a data part, and the SDK refuses any part that does not carry ' +
+        'exactly one of text, raw, data or url.',
+    }
+  }
+  if (sentOperation && response.operation !== sentOperation) {
+    return {
+      error:
+        `the control call asked for ${JSON.stringify(sentOperation)} but the reply names ` +
+        `${JSON.stringify(response.operation)} — the answer does not belong to this call.`,
+    }
+  }
+  return { response, state }
 }
