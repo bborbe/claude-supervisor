@@ -381,7 +381,13 @@ function a2aControlReply(body) {
           'here is a JSON-RPC error, not a FAILED task — the request never reached a backend.',
       }
     }
-    const task = payload?.result ?? payload
+    // ⚠️ The result is a `SendMessageResponse` ONEOF — `{ "task": {…} }` or `{ "message": {…} }` —
+    // not the task itself. Measured 2026-10-13 against a2a-worker-controller v0.4.4 (a2a-go
+    // v2.6.0): reading `result` as the task found no status and no artifact on a `create` that had
+    // in fact started a container, so every real control call failed and the worker was orphaned.
+    // A bare task is still accepted, so a server that does not wrap keeps working.
+    const result = payload?.result ?? payload
+    const task = result?.task ?? result?.message ?? result
     return { task, frames: [task] }
   }
   const { frames, error } = a2aFrames(body)
