@@ -192,6 +192,24 @@ export const config = Object.freeze({
   // message belong to cluster-spawn.mjs, which can be tested without an environment.
   clusterAuthToken: ENV.INTERACTIVE_AUTH_TOKEN || null,
 
+  // The A2A worker-controller's base URL and the token this server presents to it — the `docker`
+  // and `k8s` spawn targets.
+  //
+  // ⚠️ TWO names of OUR OWN, unlike the cluster pair above, and the asymmetry is deliberate. The
+  // cluster token reuses `INTERACTIVE_AUTH_TOKEN` because that is the name the SERVICE reads at
+  // startup, so one variable configures both halves. The controller mints a PER-WORKER token for
+  // each turn and its own control token is a separate secret with no counterparty name to borrow,
+  // so these are the supervisor's own keys and appear under `a2a` in the config file.
+  //
+  // Unset means "the A2A targets are not configured here", and such a spawn REFUSES rather than
+  // reaching for a default — see `resolveA2AControllerTarget`, which owns both the shape rules
+  // and the refusals so they can be tested without an environment.
+  //
+  // ⚠️ The token is never logged, echoed or written. Nothing in this module prints it, and the
+  // record that holds it is an allowlisted projection away from every read surface.
+  a2aUrl: ENV.SUPERVISOR_A2A_URL || null,
+  a2aToken: ENV.SUPERVISOR_A2A_TOKEN || null,
+
   // Whether a reported cost figure describes the traffic that actually ran. See the
   // note above the resolution — this is a property of the deployment, not of a turn.
   anthropicBaseUrl: ANTHROPIC_BASE_URL,

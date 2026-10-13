@@ -1,0 +1,377 @@
+// Tests for the A2A spawn path.
+//
+// The cases here pin the rules the dispatch must get right, and the refusals are asserted as
+// hard as the successes — a module whose whole job is to refuse a call it cannot honour is not
+// tested by its happy path. Two assertions are load-bearing beyond their own subject: the record
+// carries NO result (the asynchrony SC5 requires), and the token appears in no projection.
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  A2A_LEDGER_MODE,
+  A2A_SPAWN_TARGETS,
+  a2aCardUrlFor,
+  a2aCreateCallFor,
+  a2aSpawnArgumentRefusal,
+  a2aWorkerRecord,
+  a2aWorkerStatus,
+  createWorkerOnController,
+  fetchWorkerCard,
+  ledgerModeForStatus,
+  resolveA2AControllerTarget,
+} from './a2a-spawn.mjs'
+
+const TOKEN = 'token-value-that-must-never-be-echoed'
+
+// --- the target surface -------------------------------------------------------------------
+
+test('the A2A targets are docker and k8s, and nothing else', () => {
+  assert.deepEqual(A2A_SPAWN_TARGETS, ['docker', 'k8s'])
+})
+
+test('the roster status is the target name, mirroring cluster', () => {
+  assert.equal(a2aWorkerStatus({ target: 'docker' }), 'docker')
+  assert.equal(a2aWorkerStatus({ target: 'k8s' }), 'k8s')
+  // A local or cluster worker is not this path's to name.
+  assert.equal(a2aWorkerStatus({ target: 'local' }), null)
+  assert.equal(a2aWorkerStatus({ target: 'cluster' }), null)
+  assert.equal(a2aWorkerStatus({}), null)
+})
+
+test('the ledger mode is its own value, and only for an A2A status', () => {
+  assert.equal(A2A_LEDGER_MODE, 'a2a')
+  assert.equal(ledgerModeForStatus('docker'), 'a2a')
+  assert.equal(ledgerModeForStatus('k8s'), 'a2a')
+  // The existing modes keep their own answers — this must not swallow them.
+  assert.equal(ledgerModeForStatus('interactive'), null)
+  assert.equal(ledgerModeForStatus('cluster'), null)
+  assert.equal(ledgerModeForStatus('running'), null)
+})
+
+// --- argument refusals --------------------------------------------------------------------
+
+test('a well-formed call is allowed for both targets', () => {
+  assert.equal(a2aSpawnArgumentRefusal({ target: 'docker', task: 'some task' }), null)
+  assert.equal(a2aSpawnArgumentRefusal({ target: 'k8s', task: 'some task' }), null)
+})
+
+test('task is required, because the controller creates one worker per task name', () => {
+  for (const task of [undefined, null, '', 42]) {
+    const refusal = a2aSpawnArgumentRefusal({ target: 'docker', task })
+    assert.match(refusal, /requires `task`/)
+  }
+})
+
+test('every local-only argument is refused rather than silently dropped', () => {
+  const cases = [
+    { env: { A: '1' }, names: /env is not supported/ },
+    { resume: 'abc', names: /resume is not supported/ },
+    { policy: '/tmp/policy.json', names: /policy is not supported/ },
+    { interactive: true, names: /interactive is not supported/ },
+    { windowId: '3', names: /window_id is not supported/ },
+    { role: 'agent', names: /role is not supported/ },
+    { shipping: true, names: /shipping is not supported/ },
+  ]
+  for (const { names, ...args } of cases) {
+    const refusal = a2aSpawnArgumentRefusal({ target: 'docker', task: 'some task', ...args })
+    assert.match(refusal, names)
+    // The refusal names the target, so the caller can tell which leg refused.
+    assert.match(refusal, /"docker"/)
+  }
+})
+
+test('an empty env object is not a refusal — it sets nothing', () => {
+  assert.equal(a2aSpawnArgumentRefusal({ target: 'docker', task: 't', env: {} }), null)
+})
+
+test('the refusal is only defined for an A2A target', () => {
+  assert.match(a2aSpawnArgumentRefusal({ target: 'local', task: 't' }), /not an A2A target/)
+})
+
+// --- locating the controller ---------------------------------------------------------------
+
+test('the controller URL and token resolve from the file', () => {
+  const resolved = resolveA2AControllerTarget({
+    file: { a2a: { url: 'http://127.0.0.1:8080/a2a', token: TOKEN } },
+  })
+  assert.equal(resolved.url, 'http://127.0.0.1:8080/a2a')
+  assert.equal(resolved.token, TOKEN)
+})
+
+test('the environment wins over the file, and a trailing slash is trimmed', () => {
+  const resolved = resolveA2AControllerTarget({
+    envUrl: 'http://127.0.0.1:9099/a2a/',
+    envToken: TOKEN,
+    file: { a2a: { url: 'http://elsewhere/a2a', token: 'other' } },
+  })
+  assert.equal(resolved.url, 'http://127.0.0.1:9099/a2a')
+})
+
+test('a bad URL in the LOSER still refuses — a dormant value breaks the spawn later', () => {
+  const resolved = resolveA2AControllerTarget({
+    envUrl: 'http://127.0.0.1:9099/a2a',
+    envToken: TOKEN,
+    file: { a2a: { url: 'not-a-url' } },
+  })
+  assert.match(resolved.error, /"a2a\.url" in/)
+})
+
+test('an unset controller refuses rather than defaulting to a guessed address', () => {
+  const resolved = resolveA2AControllerTarget({ file: {} })
+  assert.match(resolved.error, /SUPERVISOR_A2A_URL/)
+})
+
+test('a missing token refuses, and the refusal names the key rather than a value', () => {
+  const resolved = resolveA2AControllerTarget({ file: { a2a: { url: 'http://127.0.0.1:8080/a2a' } } })
+  assert.match(resolved.error, /SUPERVISOR_A2A_TOKEN/)
+})
+
+test('a non-object a2a section refuses without echoing it', () => {
+  const resolved = resolveA2AControllerTarget({ file: { a2a: TOKEN } })
+  assert.match(resolved.error, /is not an object/)
+  assert.doesNotMatch(resolved.error, new RegExp(TOKEN))
+})
+
+// --- the create call -----------------------------------------------------------------------
+
+test('create is a ONE-SHOT control call carrying a data part, not a text part', () => {
+  const call = a2aCreateCallFor({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 'some task',
+    token: TOKEN,
+    messageId: 'msg-1',
+    contextId: 'ctx-1',
+  })
+  assert.equal(call.body.method, 'SendMessage')
+  assert.equal(call.body.params.message.role, 'ROLE_USER')
+  assert.deepEqual(call.body.params.message.parts, [{ data: { operation: 'create', create: { task: 'some task' } } }])
+  assert.equal(call.headers.authorization, `Bearer ${TOKEN}`)
+  // ⚠️ A control call is one-shot: asking the route for a stream reads as a call with no frames.
+  assert.equal(call.headers.accept, undefined)
+})
+
+test('the first call mints a contextId rather than omitting it', () => {
+  const call = a2aCreateCallFor({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 't',
+    token: TOKEN,
+    messageId: 'msg-1',
+    mint: () => 'minted-ctx',
+  })
+  assert.equal(call.contextId, 'minted-ctx')
+})
+
+test('create refuses an empty task before it reaches the wire', () => {
+  const call = a2aCreateCallFor({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: '',
+    token: TOKEN,
+    messageId: 'msg-1',
+    mint: () => 'ctx',
+  })
+  assert.match(call.error, /non-empty `task`/)
+})
+
+// --- the card ------------------------------------------------------------------------------
+
+test('the card is read from the ORIGIN create returned, never from the /a2a path', () => {
+  assert.equal(
+    a2aCardUrlFor({ a2aUrl: 'http://localhost:9093/a2a' }).url,
+    'http://localhost:9093/.well-known/agent-card.json',
+  )
+  assert.equal(
+    a2aCardUrlFor({ a2aUrl: 'https://worker.example:8443/a2a' }).url,
+    'https://worker.example:8443/.well-known/agent-card.json',
+  )
+})
+
+test('a missing or unparseable worker URL refuses', () => {
+  assert.match(a2aCardUrlFor({}).error, /not a worker A2A URL/)
+  assert.match(a2aCardUrlFor({ a2aUrl: 'nonsense' }).error, /not a parseable URL/)
+})
+
+// --- the record ----------------------------------------------------------------------------
+
+test('the record carries NO result — the spawn returns before any turn is sent', () => {
+  const { record } = a2aWorkerRecord({
+    id: 'agent_1',
+    prompt: 'do the thing',
+    task: 'some task',
+    target: 'docker',
+    sessionId: 'sess-1',
+    workerId: 'worker-1',
+    a2aUrl: 'http://localhost:9093/a2a',
+    workerToken: TOKEN,
+    createdAt: '2026-10-13T00:00:00.000Z',
+  })
+  assert.equal(record.result, null)
+  assert.equal(record.status, 'docker')
+  assert.equal(record.sessionId, 'sess-1')
+})
+
+test('the record seeds transcript and permissions EMPTY, never absent', () => {
+  // `agentView` dereferences both unconditionally and `list_agents` maps over every agent, so a
+  // missing one makes the whole roster unreadable rather than just that row.
+  const { record } = a2aWorkerRecord({
+    id: 'agent_1',
+    prompt: 'p',
+    task: 't',
+    target: 'k8s',
+    sessionId: 's',
+    workerId: 'w',
+    a2aUrl: 'http://localhost:9093/a2a',
+    workerToken: TOKEN,
+    createdAt: '2026-10-13T00:00:00.000Z',
+  })
+  assert.deepEqual(record.transcript, [])
+  assert.deepEqual(record.permissions, [])
+})
+
+test('the token is held on the record, and the record is the ONLY place it lives', () => {
+  const { record } = a2aWorkerRecord({
+    id: 'agent_1',
+    prompt: 'p',
+    task: 't',
+    target: 'docker',
+    sessionId: 's',
+    workerId: 'w',
+    a2aUrl: 'http://localhost:9093/a2a',
+    workerToken: TOKEN,
+    createdAt: '2026-10-13T00:00:00.000Z',
+  })
+  assert.equal(record.workerToken, TOKEN)
+})
+
+test('the record refuses a target this path does not own', () => {
+  const { error } = a2aWorkerRecord({ target: 'cluster', sessionId: 's' })
+  assert.match(error, /not an A2A target/)
+})
+
+// --- the two calls, against a stub fetch ----------------------------------------------------
+//
+// Both are driven with a stub rather than a live controller: the point of these cases is the
+// refusal behaviour, and a controller that has to exist before a refusal can be tested is a
+// controller whose refusals never get tested.
+
+const WORKER = { worker_id: 'w1', task: 'some task', a2a_url: 'http://localhost:9093/a2a', backend: 'docker', state: 'running' }
+
+// The raw body a one-shot control reply arrives as — a STRING, which is what the client parses.
+const createReply = ({ worker = WORKER, token = TOKEN, state = 'TASK_STATE_COMPLETED' } = {}) =>
+  JSON.stringify({
+    result: {
+      id: 'task-1',
+      status: { state },
+      artifacts: [{ parts: [{ data: { operation: 'create', create: { worker, token } } }] }],
+    },
+  })
+
+const stubFetch = (body, { ok = true, status = 200 } = {}) => async () => ({
+  ok,
+  status,
+  text: async () => body,
+  json: async () => JSON.parse(body),
+})
+
+test('create returns the worker and its token, and never logs either', async () => {
+  const result = await createWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 'some task',
+    token: TOKEN,
+    messageId: 'msg-1',
+    mint: () => 'ctx-1',
+    fetchImpl: stubFetch(createReply()),
+  })
+  assert.equal(result.worker.worker_id, 'w1')
+  assert.equal(result.token, TOKEN)
+  assert.equal(result.contextId, 'ctx-1')
+})
+
+test('a FAILED create is reported as an unknown outcome, never as "no worker was created"', async () => {
+  // ⚠️ The store copy fails AFTER the executor has run, so a FAILED status can accompany a
+  // container that WAS started. A caller that read this as "nothing happened" would leak it.
+  const result = await createWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 'some task',
+    token: TOKEN,
+    messageId: 'msg-1',
+    mint: () => 'ctx-1',
+    fetchImpl: stubFetch(createReply({ state: 'TASK_STATE_FAILED' })),
+  })
+  assert.match(result.error, /FAILED/)
+  assert.match(result.error, /does NOT mean the operation did not happen/)
+  assert.match(result.error, /reconcile/)
+})
+
+test('a create reply with no a2a_url refuses rather than falling back to the controller', async () => {
+  const result = await createWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 't',
+    token: TOKEN,
+    messageId: 'm',
+    mint: () => 'c',
+    fetchImpl: stubFetch(createReply({ worker: { worker_id: 'w1' } })),
+  })
+  assert.match(result.error, /no `a2a_url`/)
+})
+
+test('a create reply with no token refuses — nothing could authenticate to that worker', async () => {
+  const result = await createWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 't',
+    token: TOKEN,
+    messageId: 'm',
+    mint: () => 'c',
+    fetchImpl: stubFetch(createReply({ token: '' })),
+  })
+  assert.match(result.error, /no worker token/)
+})
+
+test('a non-2xx from the controller refuses with the status', async () => {
+  const result = await createWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 't',
+    token: TOKEN,
+    messageId: 'm',
+    mint: () => 'c',
+    fetchImpl: stubFetch('nope', { ok: false, status: 503 }),
+  })
+  assert.match(result.error, /HTTP 503/)
+})
+
+test('a transport failure refuses rather than throwing out of the spawn', async () => {
+  const result = await createWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 't',
+    token: TOKEN,
+    messageId: 'm',
+    mint: () => 'c',
+    fetchImpl: async () => {
+      throw new Error('ECONNREFUSED')
+    },
+  })
+  assert.match(result.error, /could not be made/)
+})
+
+test('the card is read from the origin and its endpoint resolved from supportedInterfaces', async () => {
+  const result = await fetchWorkerCard({
+    a2aUrl: 'http://localhost:9093/a2a',
+    fetchImpl: stubFetch(JSON.stringify({ supportedInterfaces: [{ url: 'http://localhost:9093/a2a' }] })),
+  })
+  assert.equal(result.endpoint, 'http://localhost:9093/a2a')
+})
+
+test('a card with no supportedInterfaces refuses — never a top-level url fallback', async () => {
+  const result = await fetchWorkerCard({
+    a2aUrl: 'http://localhost:9093/a2a',
+    fetchImpl: stubFetch(JSON.stringify({ url: 'http://localhost:9093/a2a' })),
+  })
+  assert.match(result.error, /supportedInterfaces/)
+})
+
+test('a card that 404s refuses at spawn rather than at the first turn', async () => {
+  const result = await fetchWorkerCard({
+    a2aUrl: 'http://localhost:9093/a2a',
+    fetchImpl: stubFetch('not found', { ok: false, status: 404 }),
+  })
+  assert.match(result.error, /HTTP 404/)
+})

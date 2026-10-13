@@ -1,0 +1,413 @@
+// The A2A worker-controller spawn path — what the `docker` and `k8s` targets can and cannot
+// honour, how the controller is located, and the shape a spawned A2A worker takes.
+//
+// ⚠️ THIS PATH IS ASYNCHRONOUS, AND THAT IS THE ONE THING IT CANNOT COPY FROM `cluster`.
+// `spawnClusterWorker` holds its request open until the pod answers and writes a FINISHED
+// `result` into the agent record, because a cluster turn is over by the time that call returns.
+// SC5 requires the opposite here — the send returns in **under 2 s** while the turn runs **over
+// 60 s** — so nothing on this path may wait for a turn, and the record a spawn writes must carry
+// NO result. A wiring that copied the cluster shape would satisfy the letter of "wire it" and
+// fail SC5 outright, which is why that difference is stated here rather than left to the reader.
+//
+// Every RULE here is pure — no fetch, no clock, no filesystem — because `supervisor.mjs`
+// connects a stdio server at load and so cannot be imported by a test at all, and a rule that
+// lives only in that file ships uncovered. The two CALLS at the bottom are the module's only
+// impure exports, and each takes its `fetchImpl` as an argument for the same reason: a call
+// that can only be exercised against a live controller is a call nobody exercises.
+
+import {
+  a2aControlRequestFor,
+  a2aControlResponseFor,
+  a2aContextIdFor,
+  a2aSendRequestFor,
+  resolveA2AEndpoint,
+} from './a2a-client.mjs'
+
+// The targets this path serves. Kept as one list so the dispatch and the argument refusals
+// cannot disagree about which targets it implements.
+export const A2A_SPAWN_TARGETS = ['docker', 'k8s']
+
+// The ledger `mode` for a worker created over A2A.
+//
+// ⚠️ A THIRD VALUE, NOT A REUSE OF `cluster`, for the reason `cluster` itself is not `headless`:
+// the mode says how a worker runs and therefore what its liveness means. A cluster worker is the
+// shared long-lived `claude-interactive` pod; an A2A worker is a per-task container or pod the
+// controller created. Folding either into `headless` would file it under a mode whose whole
+// meaning is "a local process that parks its gates on this server", which is exactly what it is
+// not. `unobservedPatch` already answers the generic non-interactive reason for every mode but
+// `interactive`, so a new value inherits a correct-if-coarse reason rather than a wrong one.
+export const A2A_LEDGER_MODE = 'a2a'
+
+// The roster status an A2A worker carries — the TARGET NAME, mirroring `cluster`.
+//
+// ⚠️ The status names WHERE the worker runs, and `cluster` already works exactly this way: it is
+// both a spawn target and the status a spawned cluster worker carries. A docker worker reported
+// as `running` would erase the target from every roster read, and a manager could no longer tell
+// a container on this Mac from a pod in nuke dev.
+export const a2aWorkerStatus = ({ target } = {}) =>
+  A2A_SPAWN_TARGETS.includes(target) ? target : null
+
+// The ledger `mode` for a worker status, or `null` when the status is not an A2A one.
+//
+// Exported so `writeLedger`'s derivation consults one rule rather than growing a third nested
+// ternary — and so the mapping is unit-tested rather than inferred from the dispatch.
+export const ledgerModeForStatus = (status) => (A2A_SPAWN_TARGETS.includes(status) ? A2A_LEDGER_MODE : null)
+
+// Arguments the A2A path cannot honour — a refusal string, or `null` to allow the call.
+//
+// REFUSED RATHER THAN DROPPED, matching the cluster path and for the reason its own refusals
+// give: a key accepted and quietly ignored is how a caller ends up believing a worker was
+// resumed when a fresh session was opened, or that it runs under a policy nothing consults.
+//
+// The line every refusal below is drawn on: the controller creates this worker, so the
+// supervisor never runs it and never holds a process for it. Anything that names a LOCAL
+// process, a local window, or a local policy is therefore not something this path can honour.
+export function a2aSpawnArgumentRefusal({ target, resume, policy, interactive, windowId, role, env, shipping, task } = {}) {
+  if (!A2A_SPAWN_TARGETS.includes(target)) {
+    return `a2aSpawnArgumentRefusal was called for target ${JSON.stringify(target) ?? 'undefined'}, which is not an A2A target (${A2A_SPAWN_TARGETS.join(', ')}).`
+  }
+  if (env && Object.keys(env).length > 0) {
+    return (
+      `env is not supported with target "${target}": the controller creates this worker and this server ` +
+      'never runs it, so there is no local process here to set an environment on. Pass the environment to ' +
+      "the worker's own image, or spawn locally."
+    )
+  }
+  if (resume) {
+    return (
+      `resume is not supported with target "${target}": this path mints a NEW session id, so it cannot ` +
+      'continue an existing conversation. To send a further turn to a worker that already exists, call ' +
+      '`send_agent_message` on that worker — the refusal names it because a caller told only "not supported" ' +
+      'is left with no route at all. Omit `resume`, or spawn locally.'
+    )
+  }
+  if (policy) {
+    return (
+      `policy is not supported with target "${target}": the policy layer answers permission requests raised on ` +
+      'THIS server, and a worker the controller created raises its gates against its own attention route, never ' +
+      'against this one. Omit `policy`, or spawn locally.'
+    )
+  }
+  if (interactive !== undefined) {
+    return (
+      `interactive is not supported with target "${target}": it chooses between a local wezterm tab and a local ` +
+      'headless worker, and this target creates neither — the worker is created by the controller. Omit it.'
+    )
+  }
+  if (windowId !== undefined) {
+    return (
+      `window_id is not supported with target "${target}": it names a local WezTerm window, and this target opens ` +
+      'no tab on this machine. Omit it.'
+    )
+  }
+  if (role !== undefined) {
+    return (
+      `role is not supported with target "${target}": it resolves a colour and a window from the LOCAL role map, ` +
+      'and this target opens no local tab for either to apply to. Omit it.'
+    )
+  }
+  if (shipping === true) {
+    return (
+      `shipping is not supported with target "${target}": it pre-allows \`git add\` / \`commit\` / \`push\` for a ` +
+      'worker this server supervises, and a worker the controller created is supervised there. Omit it.'
+    )
+  }
+  if (typeof task !== 'string' || task === '') {
+    return (
+      `target "${target}" requires \`task\`: it names the vault task the worker is opened for, and it is the name ` +
+      'the controller creates one worker for. Pass the task name, plus `vault` when that name is not unique ' +
+      'across the configured vaults.'
+    )
+  }
+  return null
+}
+
+// A controller base URL, or a refusal. Refused rather than defaulted: the controller runs on
+// this Mac for `docker` and in nuke dev for `k8s`, and there is no address that is right for
+// both, so a guessed one either fails confusingly or reaches the wrong thing.
+function checkControllerUrl(value, label) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return {
+      error:
+        `${label} is ${JSON.stringify(value) ?? 'undefined'}, which is not a controller URL. Set it to the A2A ` +
+        'endpoint the controller serves, e.g. "http://127.0.0.1:8080/a2a".',
+    }
+  }
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    return { error: `${label} is not a parseable URL.` }
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { error: `${label} must be an http or https URL — got protocol ${JSON.stringify(parsed.protocol)}.` }
+  }
+  return { url: value.replace(/\/+$/, '') }
+}
+
+// The controller's base URL and the token this server presents to it — or `{ error }`.
+//
+// BOTH sources are validated, not only the winner, matching `resolveClusterTarget`: a bad value
+// in the loser sits dormant until the winner is removed, and then the spawn breaks with an error
+// that was present all along.
+//
+// ⚠️ The TOKEN's value is never echoed, here or anywhere else on this path — not in a refusal,
+// not in a log line, not in a tool result. `resolveClusterTarget` redacts a URL's userinfo for
+// the same reason, and the refusal below names the KEY rather than repeating what it held.
+export function resolveA2AControllerTarget({ envUrl, envToken, file, path = 'the supervisor config' } = {}) {
+  const section = file == null ? null : file.a2a
+  if (section != null && (typeof section !== 'object' || Array.isArray(section))) {
+    return {
+      error:
+        `"a2a" in ${path} is not an object — refusing rather than guessing, since a half-read controller ` +
+        'target is discovered only by noticing it. Expected {"url": "…", "token": "…"}.',
+    }
+  }
+
+  const urlSources = [
+    { label: 'SUPERVISOR_A2A_URL', value: envUrl },
+    { label: `"a2a.url" in ${path}`, value: section?.url },
+  ]
+  const tokenSources = [
+    { label: 'SUPERVISOR_A2A_TOKEN', value: envToken },
+    { label: `"a2a.token" in ${path}`, value: section?.token },
+  ]
+  const set = (s) => s.value !== undefined && s.value !== null && s.value !== ''
+  const pick = (sources) => sources.find(set)?.value ?? null
+
+  // The URL is checked for every source that is set, then the winner once more when none is —
+  // so the refusal always names the key the operator must change rather than a default path.
+  let url = null
+  for (const source of urlSources) {
+    if (!set(source)) continue
+    const checked = checkControllerUrl(source.value, source.label)
+    if (checked.error) return { error: checked.error }
+    if (url === null) url = checked.url
+  }
+  if (url === null) {
+    const checked = checkControllerUrl(undefined, `SUPERVISOR_A2A_URL (or "a2a.url" in ${path})`)
+    if (checked.error) return { error: checked.error }
+  }
+
+  const token = pick(tokenSources)
+  if (token === null) {
+    return {
+      error:
+        `no controller token is configured — set SUPERVISOR_A2A_TOKEN or "a2a.token" in ${path}. The controller ` +
+        'refuses an unauthenticated control call, so a spawn without one would fail at the controller rather ' +
+        'than here, with nothing on this side naming the missing key.',
+    }
+  }
+  if (typeof token !== 'string' || token.trim() === '') {
+    return {
+      error:
+        'the configured controller token is not a usable string — it is set but empty or non-string. The value ' +
+        'is deliberately not echoed. Check SUPERVISOR_A2A_TOKEN and "a2a.token".',
+    }
+  }
+  return { url, token }
+}
+
+// The one-shot control call that creates this worker — `{ url, headers, body, contextId }`, or
+// `{ error }`.
+//
+// `create` is a ONE-SHOT `SendMessage`, never the streaming spelling: the controller serves the
+// control API on a route that answers a single object, and asking it for a stream reads as a call
+// that produced no frames. The turn that follows goes to the WORKER, over the streaming spelling
+// — two different routes, and conflating them is the mistake this split exists to prevent.
+export function a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint } = {}) {
+  const context = a2aContextIdFor({ previous: contextId, mint })
+  if (context.error) return { error: context.error }
+  const control = a2aControlRequestFor({ operation: 'create', task })
+  if (control.error) return { error: control.error }
+  const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId })
+  if (call.error) return { error: call.error }
+  return { ...call, contextId: context.contextId }
+}
+
+// Where a worker's Agent Card is served, given the A2A URL `create` returned for it.
+//
+// ⚠️ THE ORIGIN, NOT THE PATH. `create` returns the worker's `/a2a` endpoint; the card is served
+// at the well-known path on the SAME origin. Reading the card is not decoration — it is what
+// proves the URL the controller handed back actually answers, and what yields the endpoint a
+// turn is sent to, rather than trusting the returned string to be the endpoint as well.
+export function a2aCardUrlFor({ a2aUrl } = {}) {
+  if (typeof a2aUrl !== 'string' || a2aUrl === '') {
+    return { error: `\`a2aUrl\` is ${JSON.stringify(a2aUrl) ?? 'undefined'}, which is not a worker A2A URL.` }
+  }
+  let parsed
+  try {
+    parsed = new URL(a2aUrl)
+  } catch {
+    return { error: 'the worker A2A URL returned by `create` is not a parseable URL.' }
+  }
+  return { url: `${parsed.origin}/.well-known/agent-card.json` }
+}
+
+// The agent record a spawn writes — pure, so the fields that must NOT appear can be asserted in
+// a test rather than checked by eye.
+//
+// ⚠️ NO `result`, AND THAT IS THE ASYNCHRONY MADE EXPLICIT. The cluster path writes a finished
+// result here because its turn is over; this path's turn has not been sent yet when the spawn
+// returns. A placeholder would be read by `agent_status` and `list_agents` as a finished turn
+// that produced nothing — the exact silence `clusterTurnResult` exists to remove, arriving from
+// the opposite direction. `null` is the honest value: nothing has been collected yet.
+//
+// ⚠️ `transcript` AND `permissions` ARE SEEDED, NOT OPTIONAL. `agentView` dereferences both
+// unconditionally (`a.transcript.length`, `a.permissions.filter`) and `list_agents` maps over
+// EVERY agent, so one record missing either makes the whole roster unreadable rather than just
+// that row. A worker the controller created has no transcript on this machine and parks no
+// permissions here, which is exactly why they must be EMPTY rather than absent.
+export function a2aWorkerRecord({
+  id,
+  label,
+  prompt,
+  task,
+  target,
+  sessionId,
+  workerId,
+  a2aUrl,
+  workerToken,
+  parentSession = null,
+  createdAt,
+} = {}) {
+  const status = a2aWorkerStatus({ target })
+  if (status === null) {
+    return { error: `a2aWorkerRecord was called for target ${JSON.stringify(target) ?? 'undefined'}, which is not an A2A target.` }
+  }
+  return {
+    record: {
+      id,
+      label: label || id,
+      prompt,
+      // No local working directory: the controller chose the worker's cwd, and a value here
+      // would be this server guessing at a directory it never set.
+      cwd: null,
+      status,
+      rules: null,
+      policyPath: null,
+      sessionId,
+      resumedFrom: null,
+      carriedDecision: null,
+      parentSession,
+      modeSource: 'argument',
+      role: null,
+      windowId: null,
+      launcher: null,
+      paneId: null,
+      transcript: [],
+      permissions: [],
+      // See the header: nothing has been collected, and null says so.
+      result: null,
+      error: null,
+      task,
+      createdAt,
+      // ⚠️ The three fields this path adds, and the three `agentView` and `buildRecord` must
+      // never project. Both are explicit allowlists of named fields with no spread, so a token
+      // held HERE is invisible to `list_agents` / `agent_status` and is never written to the
+      // ledger — provided a later change does not add any of them to either projection.
+      // `workerToken` authenticates every follow-up turn to this worker; it is the value this
+      // task's own Definition of Done forbids printing, echoing or writing anywhere.
+      a2aUrl,
+      workerId,
+      workerToken,
+    },
+  }
+}
+
+// --- the two calls ---------------------------------------------------------------------------
+//
+// Both take `fetchImpl`, defaulting to the global, so a test drives them with a stub rather than
+// a live controller. Neither logs and neither echoes the token: the response body of `create`
+// CARRIES a credential, and a body printed is a transcript write.
+
+// Ask the controller to create this task's worker — `{ worker, token, contextId }`, or `{ error }`.
+//
+// ⚠️ A FAILED STATUS DOES NOT MEAN NO WORKER WAS CREATED. The controller's store copies a task
+// through gob *after* the executor has run, so a `create` can have started a container and still
+// report FAILED. The caller must reconcile against the controller's own `list` — or against
+// `docker ps --filter label=…` — rather than assume nothing happened, which is why this returns
+// the controller's own refusal text rather than a "did not create" claim.
+export async function createWorkerOnController({ endpoint, task, token, messageId, contextId, mint, fetchImpl = fetch } = {}) {
+  const call = a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint })
+  if (call.error) return { error: call.error }
+
+  let res
+  try {
+    res = await fetchImpl(call.url, {
+      method: 'POST',
+      headers: call.headers,
+      body: JSON.stringify(call.body),
+    })
+  } catch (cause) {
+    return { error: `the create call to ${call.url} could not be made: ${cause?.message ?? cause}` }
+  }
+  if (!res.ok) {
+    return { error: `the controller answered HTTP ${res.status} to the create call at ${call.url}.` }
+  }
+  // ⚠️ `text()`, NOT `json()`. `a2aControlResponseFor` takes the RAW body and parses it itself,
+  // because the controller serves the same executor behind two framings — a one-shot JSON-RPC
+  // object and an SSE stream — and only the raw body says which arrived. Handing it a parsed
+  // object refuses with "the control reply body must be a string", which reads as a malformed
+  // reply rather than as the caller having parsed too early.
+  let body
+  try {
+    body = await res.text()
+  } catch (cause) {
+    return { error: `the create reply body could not be read: ${cause?.message ?? cause}` }
+  }
+
+  const parsed = a2aControlResponseFor(body, { sentOperation: 'create' })
+  if (parsed.error) return { error: parsed.error }
+
+  const created = parsed.response?.create
+  const worker = created?.worker
+  if (worker === null || typeof worker !== 'object') {
+    return { error: 'the create reply carried no `create.worker`, so there is no worker to reach.' }
+  }
+  if (typeof worker.a2a_url !== 'string' || worker.a2a_url === '') {
+    return {
+      error:
+        'the create reply named a worker with no `a2a_url`, so there is no route to send a turn to. ' +
+        'Refusing rather than falling back to the controller, which would send every worker turn to the ' +
+        'controller instead.',
+    }
+  }
+  // ⚠️ The token is required, not optional: every follow-up turn authenticates with it, so a
+  // create that returned none would produce a worker nothing can talk to.
+  if (typeof created?.token !== 'string' || created.token === '') {
+    return { error: 'the create reply carried no worker token, so no turn could authenticate to this worker.' }
+  }
+  return { worker, token: created.token, contextId: call.contextId }
+}
+
+// Read the worker's Agent Card and resolve the endpoint a turn is sent to — `{ endpoint }`, or
+// `{ error }`.
+//
+// ⚠️ THE CARD IS READ FOR A REASON, NOT AS DECORATION. It is what proves the URL the controller
+// returned actually answers, and it is where the endpoint comes from — `supportedInterfaces[0].url`
+// — rather than trusting the returned string to be the endpoint as well. A worker whose card 404s
+// is refused HERE, at spawn, instead of at the first turn.
+export async function fetchWorkerCard({ a2aUrl, fetchImpl = fetch } = {}) {
+  const cardUrl = a2aCardUrlFor({ a2aUrl })
+  if (cardUrl.error) return { error: cardUrl.error }
+
+  let res
+  try {
+    res = await fetchImpl(cardUrl.url, { method: 'GET' })
+  } catch (cause) {
+    return { error: `the worker's Agent Card at ${cardUrl.url} could not be fetched: ${cause?.message ?? cause}` }
+  }
+  if (!res.ok) {
+    return { error: `the worker's Agent Card at ${cardUrl.url} answered HTTP ${res.status}, so the worker is not reachable.` }
+  }
+  let card
+  try {
+    card = await res.json()
+  } catch {
+    return { error: `the worker's Agent Card at ${cardUrl.url} is not JSON.` }
+  }
+  const endpoint = resolveA2AEndpoint(card)
+  if (endpoint.error) return { error: endpoint.error }
+  return { card, endpoint: endpoint.url }
+}

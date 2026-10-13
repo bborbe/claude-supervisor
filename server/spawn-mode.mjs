@@ -191,8 +191,10 @@ export function resolveSpawnTarget({ target } = {}) {
 //
 // ⚠️ THE TWO LISTS ARE NOT THE SAME, AND COLLAPSING THEM IS THE BUG THIS EXISTS TO PREVENT.
 // `SPAWN_TARGETS` answers "is this a target at all" and is what the tool schema publishes;
-// this answers "does anything implement it". `docker` and `k8s` are in the first and not the
-// second while the A2A worker-controller client is unbuilt. Without the distinction a spawn
+// this answers "does anything implement it". `docker` and `k8s` were in the first and not the
+// second while the A2A worker-controller client was unbuilt; they joined this list on 2026-10-13
+// when the dispatch branch that creates their worker shipped BESIDE them, which is the rule two
+// paragraphs down. Without the distinction a spawn
 // for a listed-but-unimplemented target reaches the LOCAL path in `supervisor.mjs` — which is
 // the branch that runs when the target is `local` — so `target: "docker"` would open an
 // ordinary local worker and report success. That is the failure the header above names: a
@@ -203,7 +205,7 @@ export function resolveSpawnTarget({ target } = {}) {
 // HOLE. A backend ships as two edits in one change: the branch that creates the worker, and
 // the entry here. Removing an entry is never a way to retire a backend — it would silently
 // reroute that target to `local` rather than refusing it.
-export const IMPLEMENTED_SPAWN_TARGETS = ['local', 'cluster']
+export const IMPLEMENTED_SPAWN_TARGETS = ['local', 'cluster', 'docker', 'k8s']
 
 // Whether a resolved target can be carried out — a refusal string, or `null` to allow it.
 //
