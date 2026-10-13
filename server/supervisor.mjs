@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, openWorkerTurn, resolveA2AControllerTarget } from './a2a-spawn.mjs'
+import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, resolveA2AControllerTarget } from './a2a-spawn.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
@@ -38,7 +38,7 @@ import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
-import { buildRecord, parentSessionId, readRecord, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
+import { buildRecord, listRecords, parentSessionId, readRecord, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
 import { fetchOpenCards } from './open-cards.mjs'
@@ -620,6 +620,10 @@ function writeLedger(agent, patch) {
       // filed here is the only write its result will ever get, and hard-coding null in
       // `buildRecord` was silently discarding it from the durable half too.
       result: agent.result ?? null,
+      // Set only for an A2A worker: the id the liveness mirror matches against the controller's
+      // `list`, and the target whose name is the roster status. See `buildRecord`.
+      workerId: agent.workerId ?? null,
+      target: ledgerModeForStatus(agent.status) ? agent.status : null,
       spawnedAt: agent.createdAt,
     })
     writeRecord(config.ledgerDir, record)
@@ -2402,6 +2406,54 @@ const clusterTimer = setInterval(async () => {
   }
 }, HEARTBEAT_INTERVAL_MS)
 clusterTimer.unref?.()
+
+// The A2A equivalent of the cluster mirror: list the controller's workers and stamp every ledger
+// session it still runs, so an A2A worker reads live while it runs and dead within one sweep of
+// being killed (SC7). See `pollA2A` in a2a-spawn.mjs for why there is no reachability marker.
+//
+// ⚠️ SILENT WHEN NO CONTROLLER IS CONFIGURED, and that is the common case rather than a fault: most
+// servers never spawn an A2A worker, and logging a missing `SUPERVISOR_A2A_URL` every 30 s would
+// bury the signal. The ledger is read from disk each tick, never from the in-memory map, so a
+// reconnected server keeps stamping workers a previous process spawned.
+const a2aPollState = { ok: null, inFlight: false }
+const a2aTimer = setInterval(async () => {
+  if (a2aPollState.inFlight) return
+  const controller = resolveA2AControllerTarget({
+    envUrl: config.a2aUrl,
+    envToken: config.a2aToken,
+    file: config.configFileContents,
+    path: config.configFile,
+  })
+  if (controller.error) return
+  const records = listRecords(config.ledgerDir).filter((r) => r?.mode === 'a2a' && r.worker_id && !r.ended_at)
+  if (records.length === 0) return
+  a2aPollState.inFlight = true
+  try {
+    const result = await pollA2A({
+      records,
+      list: () =>
+        listWorkersOnController({
+          endpoint: controller.url,
+          token: controller.token,
+          messageId: randomUUID(),
+          mint: () => randomUUID(),
+        }),
+      stamp: (sessionId) => stampRecord(heartbeatDir, { sessionId, pid: null, mode: 'a2a', source: 'a2a' }),
+    })
+    if (!result.ok && a2aPollState.ok !== false) {
+      log(`a2a heartbeat: ${result.reason} — A2A stamps will go stale until it clears`)
+    } else if (result.ok && a2aPollState.ok === false) {
+      log(`a2a heartbeat: controller reachable again (${result.stamped.length} stamped)`)
+    }
+    a2aPollState.ok = result.ok
+  } catch (error) {
+    if (a2aPollState.ok !== false) log(`a2a heartbeat: poll failed: ${error?.message ?? error}`)
+    a2aPollState.ok = false
+  } finally {
+    a2aPollState.inFlight = false
+  }
+}, HEARTBEAT_INTERVAL_MS)
+a2aTimer.unref?.()
 
 // Said once at startup, so an operator learns the policy layer is unreachable without
 // having to spawn a worker and wonder why nothing happened. The per-spawn path refuses

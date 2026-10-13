@@ -24,6 +24,7 @@ import {
   a2aOutcome,
   a2aSendRequestFor,
   a2aStreamRequestFor,
+  a2aWorkerList,
   resolveA2AEndpoint,
 } from './a2a-client.mjs'
 
@@ -572,4 +573,117 @@ export function a2aTurnPatch(collected, { at } = {}) {
     },
     error: state === A2A_STATE_FAILED ? `the worker reported ${state} for this turn.` : null,
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// LIVENESS — what makes an A2A worker visible to every local liveness reader (SC7).
+//
+// ⚠️ WITHOUT THIS AN A2A WORKER IS DEAD FROM ITS FIRST SWEEP. The readers judge liveness from a
+// stamp in the local heartbeat store or a live registry pid, and an A2A worker has neither: it
+// runs in a container or pod the controller created, so nothing on this host ever stamps it. Every
+// sweep therefore read a RUNNING worker as not live, and a reconnect's rehydrate pruned it. The
+// cluster pod solves the same problem with `cluster-heartbeat.mjs`; this is its A2A equivalent,
+// and it needs no ConfigMap — the controller's own `list` is the source of truth.
+//
+// A killed worker drops out of `list`, so its stamp is not refreshed, ages past the TTL, and reads
+// dead — inside one sweep, which is the criterion. Nothing here decides liveness; the readers do.
+//
+// ⚠️ KNOWN LIMIT, STATED RATHER THAN HIDDEN: an unreachable controller makes every A2A stamp go
+// stale too, which reads as dead rather than `UNKNOWN`. The cluster mirror carries a reachability
+// marker for exactly that case, because there a STALE verdict authorises a resume onto a worker
+// that may be alive behind a network fault. This path refuses `resume` outright
+// (`a2aSpawnArgumentRefusal`), so that hazard cannot occur here, and a second marker would have to
+// be taught to every reader of the store — four of them name the cluster marker literally.
+
+// The worker states the controller reports for a worker that is not running. `list` may still
+// carry a stopped container, and a listed-but-exited worker stamped live is the exact false
+// positive SC7's falsifier names. Matched case-insensitively on a substring, because the
+// controller's state vocabulary is its own and is not pinned by this module.
+const A2A_NOT_RUNNING = /stop|exit|dead|fail|terminat|remov/i
+
+// The `list` control call — `{ url, headers, body, contextId }`, or `{ error }`.
+export function a2aListCallFor({ endpoint, token, messageId, contextId, mint } = {}) {
+  const context = a2aContextIdFor({ previous: contextId, mint })
+  if (context.error) return { error: context.error }
+  const control = a2aControlRequestFor({ operation: 'list' })
+  if (control.error) return { error: control.error }
+  const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId })
+  if (call.error) return { error: call.error }
+  return { ...call, contextId: context.contextId }
+}
+
+// Which ledger sessions the controller still runs — `[{ sessionId, workerId }]`.
+//
+// Pure. `records` are ledger records; only an A2A one with a `worker_id` and no `ended_at` can
+// match, and it matches only a listed worker whose state is not a stopped one. ⚠️ Keyed on the
+// WORKER ID, never the task: one task can be spawned again after its first worker died, and a
+// task-keyed match would stamp the dead session live on the strength of its successor.
+export function a2aLiveSessions({ workers, records } = {}) {
+  if (!Array.isArray(workers) || !Array.isArray(records)) return []
+  const running = new Set(
+    workers
+      .filter((w) => w && typeof w.worker_id === 'string' && w.worker_id !== '')
+      .filter((w) => !(typeof w.state === 'string' && A2A_NOT_RUNNING.test(w.state)))
+      .map((w) => w.worker_id),
+  )
+  const live = []
+  for (const record of records) {
+    if (!record || record.mode !== A2A_LEDGER_MODE) continue
+    if (record.ended_at) continue
+    if (typeof record.session_id !== 'string' || record.session_id === '') continue
+    if (!running.has(record.worker_id)) continue
+    live.push({ sessionId: record.session_id, workerId: record.worker_id })
+  }
+  return live
+}
+
+// Ask the controller which workers it runs — `{ workers }`, or `{ error }`.
+//
+// Mirrors `createWorkerOnController`, and for the same reasons reads the body as TEXT and never
+// logs it: a control reply is parsed by `a2aControlResponseFor`, which takes the raw body.
+export async function listWorkersOnController({ endpoint, token, messageId, contextId, mint, fetchImpl = fetch } = {}) {
+  const call = a2aListCallFor({ endpoint, token, messageId, contextId, mint })
+  if (call.error) return { error: call.error }
+
+  let res
+  try {
+    res = await fetchImpl(call.url, { method: 'POST', headers: call.headers, body: JSON.stringify(call.body) })
+  } catch (cause) {
+    return { error: `the list call to ${call.url} could not be made: ${cause?.message ?? cause}` }
+  }
+  if (!res.ok) return { error: `the controller answered HTTP ${res.status} to the list call at ${call.url}.` }
+
+  let body
+  try {
+    body = await res.text()
+  } catch (cause) {
+    return { error: `the list reply body could not be read: ${cause?.message ?? cause}` }
+  }
+  const parsed = a2aControlResponseFor(body, { sentOperation: 'list' })
+  if (parsed.error) return { error: parsed.error }
+  return a2aWorkerList(parsed.response)
+}
+
+// One liveness poll: list the controller's workers and stamp every ledger session it still runs.
+// Resolves to `{ ok, reason?, stamped }`; `ok: false` means the controller was not read, and the
+// caller must not treat that as "no A2A worker is live" — see the KNOWN LIMIT above.
+//
+// Every effect is injected — the records, the list call and the stamp — so the poll is tested
+// without a controller, a ledger directory or a heartbeat store.
+export async function pollA2A({ records, list, stamp } = {}) {
+  if (typeof list !== 'function' || typeof stamp !== 'function') {
+    return { ok: false, reason: 'pollA2A needs a list and a stamp function', stamped: [] }
+  }
+  let listed
+  try {
+    listed = await list()
+  } catch (cause) {
+    return { ok: false, reason: `the controller list failed: ${cause?.message ?? cause}`, stamped: [] }
+  }
+  if (!listed || listed.error) {
+    return { ok: false, reason: listed?.error ?? 'the controller list returned nothing', stamped: [] }
+  }
+  const live = a2aLiveSessions({ workers: listed.workers, records })
+  for (const { sessionId } of live) stamp(sessionId)
+  return { ok: true, stamped: live.map((l) => l.sessionId) }
 }

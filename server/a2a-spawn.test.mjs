@@ -22,6 +22,10 @@ import {
   fetchWorkerCard,
   ledgerModeForStatus,
   openWorkerTurn,
+  a2aListCallFor,
+  a2aLiveSessions,
+  listWorkersOnController,
+  pollA2A,
   resolveA2AControllerTarget,
 } from './a2a-spawn.mjs'
 
@@ -565,4 +569,72 @@ test('the patch carries only the outcome, never the record it is merged into', (
   const patch = a2aTurnPatch({ state: 'TASK_STATE_COMPLETED', contextId: 'ctx-1', reply: 'done' })
   assert.deepEqual(Object.keys(patch).sort(), ['error', 'result'])
   assert.deepEqual(Object.keys(patch.result).sort(), ['collectedAt', 'contextId', 'kind', 'reply', 'state'])
+})
+
+// --- liveness (SC7) -------------------------------------------------------------------------
+
+const a2aRecord = (over = {}) => ({ session_id: 's-1', mode: 'a2a', worker_id: 'w-1', ended_at: null, ...over })
+
+test('the list call is a one-shot control call asking for `list`', () => {
+  const call = a2aListCallFor({ endpoint: 'http://127.0.0.1:8080/a2a', token: TOKEN, messageId: 'm-1', mint: () => 'ctx-1' })
+  assert.equal(call.error, undefined)
+  assert.equal(call.body.method, 'SendMessage')
+  assert.equal(call.body.params.message.parts[0].data.operation, 'list')
+})
+
+test('a listed, running worker stamps its session', () => {
+  const live = a2aLiveSessions({ workers: [{ worker_id: 'w-1', state: 'running' }], records: [a2aRecord()] })
+  assert.deepEqual(live, [{ sessionId: 's-1', workerId: 'w-1' }])
+})
+
+test('a killed worker is not stamped — absent from the list, or listed as stopped', () => {
+  // ⚠️ SC7's falsifier is a killed worker still rendered live. Both shapes of "killed" must miss.
+  assert.deepEqual(a2aLiveSessions({ workers: [], records: [a2aRecord()] }), [])
+  for (const state of ['exited', 'stopped', 'dead', 'FAILED']) {
+    assert.deepEqual(a2aLiveSessions({ workers: [{ worker_id: 'w-1', state }], records: [a2aRecord()] }), [], state)
+  }
+})
+
+test('matching is by worker id, never by task, so a successor cannot revive a dead session', () => {
+  const records = [a2aRecord({ session_id: 'dead', worker_id: 'w-old', task: 'T' }), a2aRecord({ session_id: 'new', worker_id: 'w-new', task: 'T' })]
+  const live = a2aLiveSessions({ workers: [{ worker_id: 'w-new', task: 'T' }], records })
+  assert.deepEqual(live.map((l) => l.sessionId), ['new'])
+})
+
+test('only open A2A records match', () => {
+  const workers = [{ worker_id: 'w-1' }]
+  assert.deepEqual(a2aLiveSessions({ workers, records: [a2aRecord({ ended_at: '2026-10-13T00:00:00Z' })] }), [])
+  assert.deepEqual(a2aLiveSessions({ workers, records: [a2aRecord({ mode: 'cluster' })] }), [])
+  assert.deepEqual(a2aLiveSessions({ workers, records: [a2aRecord({ worker_id: null })] }), [])
+})
+
+const listReply = (workers) =>
+  JSON.stringify({ result: { id: 't', status: { state: 'TASK_STATE_COMPLETED' }, artifacts: [{ parts: [{ data: { operation: 'list', list: { workers } } }] }] } })
+
+test('an empty list arrives as null and reads as no workers', async () => {
+  // gob does not transmit zero values, so the controller's empty list is `null` on the wire.
+  const listed = await listWorkersOnController({ endpoint: 'http://127.0.0.1:8080/a2a', token: TOKEN, messageId: 'm', mint: () => 'c', fetchImpl: stubFetch(listReply(null)) })
+  assert.deepEqual(listed, { workers: [] })
+})
+
+test('a non-2xx list is an error, not an empty list', async () => {
+  const listed = await listWorkersOnController({ endpoint: 'http://127.0.0.1:8080/a2a', token: TOKEN, messageId: 'm', mint: () => 'c', fetchImpl: stubFetch('no', { ok: false, status: 503 }) })
+  assert.match(listed.error, /HTTP 503/)
+})
+
+test('a poll stamps every live session and reports them', async () => {
+  const stamped = []
+  const result = await pollA2A({ records: [a2aRecord()], list: async () => ({ workers: [{ worker_id: 'w-1' }] }), stamp: (id) => stamped.push(id) })
+  assert.equal(result.ok, true)
+  assert.deepEqual(stamped, ['s-1'])
+})
+
+test('a failed list stamps nothing and reports not-ok, never "no workers live"', async () => {
+  const stamped = []
+  const result = await pollA2A({ records: [a2aRecord()], list: async () => ({ error: 'HTTP 503' }), stamp: (id) => stamped.push(id) })
+  assert.equal(result.ok, false)
+  assert.deepEqual(stamped, [])
+  const thrown = await pollA2A({ records: [a2aRecord()], list: async () => { throw new Error('ECONNREFUSED') }, stamp: (id) => stamped.push(id) })
+  assert.equal(thrown.ok, false)
+  assert.match(thrown.reason, /ECONNREFUSED/)
 })

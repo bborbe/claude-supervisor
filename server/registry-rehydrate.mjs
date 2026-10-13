@@ -116,6 +116,10 @@ export function toAgentRecord(record, id = record.agent_id) {
     carriedDecision: null,
     shipping: false,
     result: record.result ?? null,
+    // The A2A worker id, so a re-adopted row is still the one the liveness mirror stamps. The
+    // worker TOKEN is not on the ledger and so cannot be restored: a re-adopted A2A row can be
+    // seen live, but cannot be sent another turn by this process.
+    workerId: record.worker_id ?? null,
     error: null,
     // Observable rather than inferred, and load-bearing at two call sites in
     // `supervisor.mjs`: a rehydrated row must not be stamped on shutdown
@@ -144,6 +148,10 @@ export function toAgentRecord(record, id = record.agent_id) {
 export function rehydratedStatus(record) {
   if (record.mode === 'interactive') return 'interactive'
   if (record.mode === 'cluster') return 'cluster'
+  // An A2A worker's status is its TARGET's name (`docker` / `k8s`), mirroring `cluster`, so a
+  // reconnect re-adopts it as the same kind of row it was spawned as. A record written before
+  // `target` was persisted carries none — `running` is then the honest fallback, not a guess.
+  if (record.mode === 'a2a') return record.target ?? 'running'
   return 'running'
 }
 

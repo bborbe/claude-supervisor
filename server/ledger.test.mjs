@@ -255,3 +255,17 @@ test('stamping an unobserved worker keeps the spawn fields and drops the claim',
     assert.equal(readRecord(dir, SESSION).status, 'unknown', 'the stamp is persisted, not just returned')
   })
 })
+
+test('an A2A record carries its worker id and target, and never a token', () => {
+  const record = buildRecord({ sessionId: SESSION, agentId: 'agent_1', mode: 'a2a', cwd: null, workerId: 'w-1', target: 'docker', spawnedAt: '2026-10-13T00:00:00.000Z' })
+  assert.equal(record.worker_id, 'w-1')
+  assert.equal(record.target, 'docker')
+  // The token authenticates turns; the ledger is a world-readable file. No key may carry it.
+  assert.ok(!Object.keys(record).some((k) => /token/i.test(k)), `record keys: ${Object.keys(record).join(',')}`)
+})
+
+test('a local record leaves the A2A fields null', () => {
+  const record = buildRecord({ sessionId: SESSION, agentId: 'agent_1', mode: 'headless', cwd: '/tmp', spawnedAt: '2026-10-13T00:00:00.000Z' })
+  assert.equal(record.worker_id, null)
+  assert.equal(record.target, null)
+})
