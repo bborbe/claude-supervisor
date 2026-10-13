@@ -25,6 +25,8 @@ import {
   workerEnvFor,
   SPAWN_MODES,
   SPAWN_TARGETS,
+  IMPLEMENTED_SPAWN_TARGETS,
+  spawnTargetImplementationRefusal,
   WORKER_MODE_ENV,
   WORKER_MODE_SOURCE_ENV,
 } from './spawn-mode.mjs'
@@ -402,6 +404,12 @@ test('a spawn with no target is local', () => {
 test('an explicit target is taken from the argument', () => {
   assert.deepEqual(resolveSpawnTarget({ target: 'cluster' }), { target: 'cluster', source: 'argument' })
   assert.deepEqual(resolveSpawnTarget({ target: 'local' }), { target: 'local', source: 'argument' })
+  // The A2A worker-controller targets. Listing them here is what makes the CALL well-formed;
+  // whether the spawn can be CARRIED OUT is `IMPLEMENTED_SPAWN_TARGETS`' question, asserted
+  // separately below. Both answers are needed — without the first, a caller is told "not a
+  // spawn target" for a target that is one, which names the wrong problem.
+  assert.deepEqual(resolveSpawnTarget({ target: 'docker' }), { target: 'docker', source: 'argument' })
+  assert.deepEqual(resolveSpawnTarget({ target: 'k8s' }), { target: 'k8s', source: 'argument' })
 })
 
 test('cluster is NOT a SPAWN_MODES value', () => {
@@ -417,6 +425,19 @@ test('cluster is NOT a SPAWN_MODES value', () => {
   assert.match(resolveSpawnMode({ file: { spawn: { mode: 'cluster' } } }).error, /not a spawn mode/)
 })
 
+test('docker and k8s are targets but NOT SPAWN_MODES values', () => {
+  // The same rule as `cluster`, extended 2026-10-13 with the A2A worker-controller targets. A
+  // target reachable from SUPERVISOR_SPAWN_MODE or `spawn.mode` would let one config edit
+  // default the whole fleet somewhere, which is exactly what "per-call only" forbids — so
+  // this asserts the absence on both sources, not just membership in the target list.
+  for (const t of ['docker', 'k8s']) {
+    assert.ok(SPAWN_TARGETS.includes(t), `${t} should be a spawn target`)
+    assert.ok(!SPAWN_MODES.includes(t), `${t} must not be a spawn mode`)
+    assert.match(resolveSpawnMode({ env: t }).error, /not a spawn mode/)
+    assert.match(resolveSpawnMode({ file: { spawn: { mode: t } } }).error, /not a spawn mode/)
+  }
+})
+
 test('an unknown target refuses rather than falling back to local', () => {
   // Falling back is the failure, not the safe answer: a worker created locally when the
   // caller asked for the cluster looks exactly like a working call, and is otherwise
@@ -426,6 +447,40 @@ test('an unknown target refuses rather than falling back to local', () => {
     assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
     assert.match(error, /not a spawn target/)
   }
+})
+
+test('a listed target with no client refuses rather than falling through to local', () => {
+  // ⚠️ The load-bearing guard, and the reason `IMPLEMENTED_SPAWN_TARGETS` exists at all.
+  // `supervisor.mjs` dispatches `cluster` and then falls through to the LOCAL path for
+  // everything else — so a target present in `SPAWN_TARGETS` with no dispatch branch of its own
+  // would open an ordinary local worker and report success. A `docker` call answered by a local
+  // tab is precisely the "looks exactly like a working call" failure this module refuses an
+  // UNKNOWN target to avoid; this asserts the same refusal for a KNOWN one.
+  for (const t of SPAWN_TARGETS) {
+    const refusal = spawnTargetImplementationRefusal({ target: t })
+    if (IMPLEMENTED_SPAWN_TARGETS.includes(t)) {
+      assert.equal(refusal, null, `${t} is implemented and must be allowed`)
+    } else {
+      assert.match(refusal, /has no client yet/, `${t} is unimplemented and must refuse`)
+    }
+  }
+  // Both directions, so neither list can drift alone: every implemented target is also a known
+  // target, and the difference between the two lists is exactly the unimplemented set. Listing
+  // it literally is deliberate — a new target appearing here is an edit someone must make on
+  // purpose, not a silent widening.
+  for (const t of IMPLEMENTED_SPAWN_TARGETS) {
+    assert.ok(SPAWN_TARGETS.includes(t), `${t} is implemented but is not a known spawn target`)
+  }
+  assert.deepEqual(
+    SPAWN_TARGETS.filter((t) => !IMPLEMENTED_SPAWN_TARGETS.includes(t)),
+    ['docker', 'k8s'],
+  )
+  // And the refusal must name the fall-through it is preventing, since that is the whole
+  // hazard — a message that only said "not implemented" would leave the next reader free to
+  // conclude the safe answer was to open a local worker.
+  const docker = spawnTargetImplementationRefusal({ target: 'docker' })
+  assert.match(docker, /not implemented/)
+  assert.match(docker, /falling\s+through to the local path/)
 })
 
 // --- the per-call environment ---------------------------------------------------------
