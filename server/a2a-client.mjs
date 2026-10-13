@@ -259,7 +259,10 @@ export const A2A_CONTROL_OPERATIONS = ['create', 'list', 'stop']
 // FAILED because the store's gob copy of the artifact was missing a type registration. A `create` on
 // that build could have started a container and still reported FAILED. Treat this status as "the
 // controller could not tell me the outcome", never as "nothing happened".
-const A2A_STATE_FAILED = 'TASK_STATE_FAILED'
+// Exported so a caller recording a turn's outcome does not re-spell the literal: the spawn path
+// needs the same value to decide whether a collected turn is a finished one or a failed one, and
+// two copies of a wire constant is how they drift.
+export const A2A_STATE_FAILED = 'TASK_STATE_FAILED'
 
 // The `ControlRequest` for one operation — `{ request }`, or `{ error }`.
 //

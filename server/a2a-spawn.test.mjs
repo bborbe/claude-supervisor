@@ -8,16 +8,20 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  A2A_ACK_TIMEOUT_MS,
   A2A_LEDGER_MODE,
   A2A_SPAWN_TARGETS,
   a2aCardUrlFor,
   a2aCreateCallFor,
   a2aSpawnArgumentRefusal,
+  a2aTurnPatch,
   a2aWorkerRecord,
   a2aWorkerStatus,
+  collectWorkerTurn,
   createWorkerOnController,
   fetchWorkerCard,
   ledgerModeForStatus,
+  openWorkerTurn,
   resolveA2AControllerTarget,
 } from './a2a-spawn.mjs'
 
@@ -374,4 +378,191 @@ test('a card that 404s refuses at spawn rather than at the first turn', async ()
     fetchImpl: stubFetch('not found', { ok: false, status: 404 }),
   })
   assert.match(result.error, /HTTP 404/)
+})
+
+// --- the turn half --------------------------------------------------------------------------
+
+// An SSE body — what a streaming turn actually returns, rather than a JSON object.
+const sse = (frames) => frames.map((f) => `data: ${JSON.stringify(f)}\n`).join('\n')
+
+// The frame order the worker really sends: `task(SUBMITTED)` → `artifactUpdate` →
+// `statusUpdate(COMPLETED)`. The order is load-bearing, not decorative — the `task` frame carries
+// a status of its own, so a collector reading `task.status.state` reports SUBMITTED on a turn that
+// completed. That defect was measured by the client's own tests before it shipped.
+const turnFrames = ({ contextId = 'ctx-1', reply = 'done', state = 'TASK_STATE_COMPLETED' } = {}) => [
+  { task: { id: 'task-1', contextId, status: { state: 'TASK_STATE_SUBMITTED' } } },
+  { artifactUpdate: { parts: [{ text: reply }] } },
+  { statusUpdate: { state } },
+]
+
+const turnFetch = (frames, opts) => stubFetch(sse(frames), opts)
+const turnResponse = (frames, opts) => turnFetch(frames, opts)('http://x', {})
+
+test('the send issues a streaming turn and returns once the worker acknowledges', async () => {
+  const sent = await openWorkerTurn({
+    endpoint: 'http://localhost:9093/a2a',
+    contextId: 'ctx-1',
+    text: 'do the thing',
+    token: TOKEN,
+    messageId: 'msg-1',
+    fetchImpl: turnFetch(turnFrames()),
+  })
+  assert.equal(sent.error, undefined)
+  assert.ok(sent.res, 'an acknowledging worker yields the response')
+  assert.equal(sent.contextId, 'ctx-1')
+})
+
+test('the send refuses with no contextId rather than opening a conversation', async () => {
+  const sent = await openWorkerTurn({
+    endpoint: 'http://localhost:9093/a2a',
+    text: 'do the thing',
+    token: TOKEN,
+    messageId: 'msg-1',
+    fetchImpl: turnFetch(turnFrames()),
+  })
+  assert.match(sent.error, /contextId/)
+})
+
+test('a request that never left is an error, not a slow worker', async () => {
+  const sent = await openWorkerTurn({
+    endpoint: 'http://localhost:9093/a2a',
+    contextId: 'ctx-1',
+    text: 'do the thing',
+    token: TOKEN,
+    messageId: 'msg-1',
+    fetchImpl: async () => {
+      throw new Error('ECONNREFUSED')
+    },
+  })
+  assert.match(sent.error, /could not be sent/)
+  assert.equal(sent.pending, undefined, 'a request that never left is not a pending turn')
+})
+
+test('the send hands back an unresolved request instead of blocking, and never aborts it', async () => {
+  // ⚠️ THIS IS SC5'S FALSIFIER, ASSERTED DIRECTLY: *"a send whose latency tracks the turn's
+  // duration (blocking)"*. The worker here does not answer until it is released, and the send must
+  // still return — carrying the REQUEST rather than the reply.
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const fetchImpl = async () => {
+    await gate
+    return { ok: true, status: 200, text: async () => sse(turnFrames()) }
+  }
+
+  const started = Date.now()
+  const sent = await openWorkerTurn({
+    endpoint: 'http://localhost:9093/a2a',
+    contextId: 'ctx-1',
+    text: 'do the thing',
+    token: TOKEN,
+    messageId: 'msg-1',
+    ackTimeoutMs: 20,
+    fetchImpl,
+  })
+  const elapsed = Date.now() - started
+
+  assert.equal(sent.error, undefined)
+  assert.equal(sent.res, undefined, 'a worker that has not acknowledged yields no response yet')
+  assert.ok(sent.pending, 'the send must hand the unresolved request back rather than block')
+  assert.ok(elapsed < 1000, `the send must return near its bound, took ${elapsed}ms`)
+
+  // ⚠️ AND THE REQUEST IS NOT ABORTED: releasing it still produces the turn's outcome. An abort
+  // would have killed the turn the send had just started, and reported a failure for work running.
+  release()
+  const collected = await collectWorkerTurn({ res: sent.pending, sentContextId: sent.contextId })
+  assert.equal(collected.error, undefined)
+  assert.equal(collected.state, 'TASK_STATE_COMPLETED')
+  assert.equal(collected.reply, 'done')
+})
+
+test("the ack bound sits below SC5's budget, because that budget covers the whole spawn", () => {
+  assert.ok(A2A_ACK_TIMEOUT_MS < 2000, `the bound must leave room inside 2s, is ${A2A_ACK_TIMEOUT_MS}`)
+})
+
+test('the collection reads the LAST statusUpdate, not the task frame that precedes it', async () => {
+  const collected = await collectWorkerTurn({
+    res: await turnResponse(turnFrames()),
+    sentContextId: 'ctx-1',
+  })
+  assert.equal(collected.error, undefined)
+  assert.equal(collected.state, 'TASK_STATE_COMPLETED')
+  assert.equal(collected.reply, 'done')
+})
+
+test('the collection refuses a turn that ran under a different contextId', async () => {
+  const collected = await collectWorkerTurn({
+    res: await turnResponse(turnFrames({ contextId: 'ctx-OTHER' })),
+    sentContextId: 'ctx-1',
+  })
+  assert.match(collected.error, /contextId/)
+})
+
+test('an error frame inside HTTP 200 is fatal, because the status proves nothing there', async () => {
+  const body = sse([{ error: { code: -32700, message: 'unknown part content type' } }])
+  const collected = await collectWorkerTurn({ res: await stubFetch(body)('http://x', {}), sentContextId: 'ctx-1' })
+  assert.match(collected.error, /refused the turn/)
+})
+
+test('a non-2xx answer is reported rather than read as frames', async () => {
+  const collected = await collectWorkerTurn({
+    res: await stubFetch('nope', { ok: false, status: 502 })('http://x', {}),
+    sentContextId: 'ctx-1',
+  })
+  assert.match(collected.error, /HTTP 502/)
+})
+
+test('the collection refuses with no response at all', async () => {
+  const collected = await collectWorkerTurn({ sentContextId: 'ctx-1' })
+  assert.match(collected.error, /no response/)
+})
+
+test('the collection reports a pending request that later fails, rather than hanging', async () => {
+  // ⚠️ THIS IS A PRODUCTION PATH, not a defensive one: it is what a worker that is slow to
+  // acknowledge produces when its connection then drops. `openWorkerTurn` has already returned
+  // `pending` by then, so the rejection arrives AFTER the send returned — and a collector that
+  // awaited it without a guard would leave the turn's outcome unfiled forever, with the record
+  // showing `result: null` and no error to explain it.
+  const failing = (async () => {
+    throw new Error('socket hang up')
+  })()
+  const collected = await collectWorkerTurn({ res: failing, sentContextId: 'ctx-1' })
+  assert.match(collected.error, /socket hang up/)
+})
+
+test('a collected turn files its outcome and no error', () => {
+  const patch = a2aTurnPatch(
+    { state: 'TASK_STATE_COMPLETED', contextId: 'ctx-1', reply: 'done' },
+    { at: '2026-10-13T00:00:00.000Z' },
+  )
+  assert.equal(patch.error, null)
+  assert.equal(patch.result.kind, 'a2a-turn')
+  assert.equal(patch.result.state, 'TASK_STATE_COMPLETED')
+  assert.equal(patch.result.reply, 'done')
+  assert.equal(patch.result.collectedAt, '2026-10-13T00:00:00.000Z')
+})
+
+test('a failed collection clears the result rather than leaving a stale one standing', () => {
+  const patch = a2aTurnPatch({ error: 'the worker answered HTTP 502 to the turn.' })
+  assert.equal(patch.result, null)
+  assert.match(patch.error, /HTTP 502/)
+})
+
+test('a FAILED turn is filed as an error AND keeps its outcome', () => {
+  // ⚠️ Both, not either. The state is the worker's own report and the error is what a roster read
+  // needs: dropping the result would lose the state, dropping the error would read as a turn that
+  // answered.
+  const patch = a2aTurnPatch({ state: 'TASK_STATE_FAILED', contextId: 'ctx-1', reply: '' })
+  assert.equal(patch.result.state, 'TASK_STATE_FAILED')
+  assert.match(patch.error, /TASK_STATE_FAILED/)
+})
+
+test('the patch carries only the outcome, never the record it is merged into', () => {
+  // ⚠️ The shape is pinned rather than spot-checked, because the way a token reaches the ledger is
+  // a spread — and a spread of the agent record would carry `workerToken` with it. An exact key
+  // set fails loudly on that change; a `does not include` check would pass while it happened.
+  const patch = a2aTurnPatch({ state: 'TASK_STATE_COMPLETED', contextId: 'ctx-1', reply: 'done' })
+  assert.deepEqual(Object.keys(patch).sort(), ['error', 'result'])
+  assert.deepEqual(Object.keys(patch.result).sort(), ['collectedAt', 'contextId', 'kind', 'reply', 'state'])
 })
