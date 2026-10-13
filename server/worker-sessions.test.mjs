@@ -148,6 +148,44 @@ test('an auto-resumed worker is not counted', async () => {
   assert.equal((await count(dir, [row(sid)])).length, 0)
 })
 
+test('a manager record is not counted against the worker cap', async () => {
+  // `spawn_agent(role="manager")` writes a ledger record exactly like a worker's, so presence
+  // in the ledger alone counted a manager against `spawn.maxConcurrent` and pushed the fleet
+  // toward refusing ordinary spawns. The record's own `role` is what separates them.
+  const dir = fixture()
+  const manager = 'ffffffff-0000-0000-0000-000000000010'
+  const agent = 'ffffffff-0000-0000-0000-000000000011'
+  ledger(dir, manager, 'topic manager', { role: 'manager' })
+  ledger(dir, agent, 'worker', { role: 'agent' })
+
+  const workers = await count(dir, [row(manager), row(agent)])
+  assert.equal(workers.length, 1)
+  assert.equal(workers[0].sessionId, agent)
+})
+
+test('two agent records are both counted — the control for the manager exclusion', async () => {
+  // Without this the manager case above passes on a counter that returns 0 for everything.
+  const dir = fixture()
+  const first = 'ffffffff-0000-0000-0000-000000000012'
+  const second = 'ffffffff-0000-0000-0000-000000000013'
+  ledger(dir, first, 'worker a', { role: 'agent' })
+  ledger(dir, second, 'worker b', { role: 'agent' })
+
+  assert.equal((await count(dir, [row(first), row(second)])).length, 2)
+})
+
+test('a role-less record still reads as a worker', async () => {
+  // ⚠️ The exclusion is `role === 'manager'`, never `role !== 'agent'`. A record with no
+  // `role` was written before the field existed, and those are pre-field workers and managers
+  // alike — so treating absence as "manager" would drop every pre-field worker out of the
+  // count this cap exists to enforce.
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000014'
+  ledger(dir, sid, 'pre-field worker')
+
+  assert.equal((await count(dir, [row(sid)])).length, 1)
+})
+
 test('status names the store row source', async () => {
   const dir = fixture()
   const sid = 'ffffffff-0000-0000-0000-000000000006'
