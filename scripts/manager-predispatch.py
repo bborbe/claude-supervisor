@@ -1468,6 +1468,75 @@ def verdicts_path(subject: str) -> str:
     return os.path.join(STATE_DIR, f"{slug(subject)}.verdicts.json")
 
 
+#: The four frontmatter fields the content key excludes — the fields a tick writes whose
+#: value the audit does not read. ⚠️ **`status:` and `phase:` are deliberately NOT here.**
+#: A tick writes six fields, and excluding all six would freeze a row's verdict label
+#: across an approval: `phase` moving `todo → planning` is precisely what turns
+#: `✅ Ready for approval` into `🚀 Ready`.
+CONTENT_KEY_EXCLUDED = ("mode", "last_auto_resume", "claude_session_id", "metrics_sessions")
+
+#: The key's truncation. ⚠️ **A constant, not a literal at the call site** — a formula
+#: without a stated truncation is a formula each caller finishes itself. Measured
+#: 2026-10-06, the caches on disk carried three lengths (2 at 12 hex, 7 at 16, 3 at 64),
+#: each cache internally uniform, which is the signature of a derivation invented per
+#: caller rather than read.
+CONTENT_KEY_HEX = 16
+
+
+def content_key(row_path: str) -> str:
+    """The verdicts cache's key for one row file — **the single implementation.**
+
+    ⚠️ **This function exists because the derivation used to live only as PROSE**, in
+    `agents/manager-drive.md` clause (1). The drive leg is an agent, so every leg
+    re-implemented the formula and they disagreed. A leg's own `Audit` block on
+    **2026-10-12T15:49:30Z** reported it verbatim: *"CACHE-KEY DRIFT (report, do not fix):
+    the 8 stored entries reproduce under a `mode:`-only exclusion, NOT the clause's
+    four-field derivation."* The writer and the reader keyed the same row differently, so
+    the row read as cold on every tick — the caches stayed under-covered while the audits
+    kept dispatching. `scripts/check-content-key-formula.py` predicted exactly this in its
+    own docstring (*"it cannot prove the leg computes the key this way"*): a prose-shape
+    check cannot hold a computation. So the computation lives here, the writer and the
+    reader both call it, and the clause points at it instead of restating it.
+
+    The derivation, unchanged from the clause it replaces:
+
+    - `sha256` over the row file's **raw bytes**, with `CONTENT_KEY_EXCLUDED` removed —
+      each field **together with its continuation block**, every following line indented
+      deeper than the key line. ⚠️ **The block half is load-bearing, not tidiness:**
+      `metrics_sessions` is written as a multi-line YAML block, so dropping only its key
+      line leaves the indented `- session_id: <uuid>` entries in the key, and those uuids
+      change on every worker run — the key would churn per tick and the exclusion buy
+      nothing.
+    - **No YAML parse, no re-serialisation, no newline normalisation.** Raw byte deletion
+      and a parse-and-re-serialise route disagree on CRLF, on the blank line a deleted
+      entry leaves behind, on quoted and multi-line values, and on a trailing newline.
+    - Truncated to the first `CONTENT_KEY_HEX` hex.
+    """
+    with open(row_path, "rb") as fh:
+        lines = fh.read().split(b"\n")
+    kept: list[bytes] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        name = (
+            line.split(b":", 1)[0].strip().decode("utf-8", "replace") if b":" in line else ""
+        )
+        if name in CONTENT_KEY_EXCLUDED:
+            indent = len(line) - len(line.lstrip())
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                if not nxt.strip():
+                    break
+                if (len(nxt) - len(nxt.lstrip())) <= indent:
+                    break
+                i += 1
+            continue
+        kept.append(line)
+        i += 1
+    return hashlib.sha256(b"\n".join(kept)).hexdigest()[:CONTENT_KEY_HEX]
+
+
 def payload_path(subject: str) -> str:
     """Where the render writes the table it just rendered, for `--save` to read back.
 
@@ -2304,6 +2373,15 @@ def main(argv: list[str]) -> int:
         help="persist the drive leg's Audit block (JSON on stdin) to <slug>.verdicts.json",
     )
     mode.add_argument(
+        "--content-keys",
+        action="store_true",
+        help=(
+            "print `<content_key>\\t<path>` for every row-file path on stdin — the single "
+            "home of the verdicts cache's key derivation, so no leg finishes the formula "
+            "itself"
+        ),
+    )
+    mode.add_argument(
         "--write-payload",
         action="store_true",
         help="write the rendered table (on stdin) to <slug>.table, for --save to read",
@@ -2344,6 +2422,32 @@ def main(argv: list[str]) -> int:
         # is told the argument was wrong instead of being handed a fail-open sweep.
         print(vault_error, file=sys.stderr)
         return EXIT_USAGE
+
+    if args.content_keys:
+        # The single home of the derivation clause (1) used to carry as prose. The leg is an
+        # agent, so a prose formula is re-implemented per leg and the implementations
+        # disagree — measured 2026-10-12, a leg's own `Audit` block reported that its stored
+        # keys reproduced under a `mode:`-only exclusion while the clause named four fields.
+        # Writer and reader therefore keyed the same row differently and the row read as
+        # cold on every tick. Routed through this script for the same transport reason
+        # `--write-verdicts` is: the manager commands grant `Bash(python3:*)` and no
+        # `Write`, so a heredoc into `python3` is the one shape that raises no prompt.
+        #
+        # ⚠️ **One line per input path, in the order given, and a path that cannot be read
+        # is reported rather than skipped** — a silently dropped row is indistinguishable,
+        # to the caller, from one that was never passed, which is the omission this mode
+        # exists to remove.
+        rc = 0
+        for raw in sys.stdin.read().splitlines():
+            row_path = raw.strip()
+            if not row_path:
+                continue
+            try:
+                print(f"{content_key(row_path)}\t{row_path}")
+            except OSError as exc:
+                print(f"UNREADABLE: {row_path}: {exc}", file=sys.stderr)
+                rc = EXIT_USAGE
+        return rc
 
     if args.write_tracked:
         # The caller's OWN scan is the only producer of this file — it is never derived

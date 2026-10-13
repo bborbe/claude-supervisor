@@ -36,7 +36,9 @@ HOME = "agents/manager-drive.md"
 CLAUSE = (
     "**The cache — re-audit only what changed.** Persist each row's verdict and score **keyed "
     "to the row file's content**, and re-audit only when that key changes. ⚠️ **The key is "
-    "derived by the formula stated here, never chosen per tick** — `sha256` over the row file's "
+    "COMPUTED, never derived by you: call `manager-predispatch.py --content-keys` with the row "
+    "paths on stdin and take the `<key>\\t<path>` it prints.** ⚠️ **The formula, restated here "
+    "for that check and not for re-use** — `sha256` over the row file's "
     "bytes with the four tick-written fields the audit does not judge removed, truncated to the "
     "first 16 hex. The excluded fields are `mode:`, `last_auto_resume`, `claude_session_id` and "
     "`metrics_sessions`. ⚠️ **`status:` and `phase:` are NOT excluded, and the cut is *the "
@@ -59,6 +61,14 @@ class Base(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         (pathlib.Path(self.dir) / "scripts").mkdir()
         shutil.copy(SCRIPT, pathlib.Path(self.dir) / "scripts" / "check-content-key-formula.py")
+        # ⚠️ **The real script, copied — never a stub.** Assertion (h) reads the constants back
+        # from the tree's own derivation home, so a fixture here would let a drift between the
+        # guard and the shipped `content_key` pass unnoticed — the false green this suite
+        # exists to prevent.
+        shutil.copy(
+            REPO / "scripts" / "manager-predispatch.py",
+            pathlib.Path(self.dir) / "scripts" / "manager-predispatch.py",
+        )
         self.write_clause(CLAUSE + MEASURED_NOTE)
 
     def write_clause(self, clause):
@@ -80,6 +90,33 @@ class TestContentKeyFormulaGuard(Base):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("content-key-formula ok", result.stdout)
+
+    def test_missing_call_fails(self):
+        """⚠️ **The assertion whose absence let the 2026-10-12 drift through.** Every other
+        assertion here was green while a drive leg implemented a different exclusion set,
+        because a clause can state a formula perfectly and still be re-implemented by the
+        agent reading it. The call is what makes the implementation reachable."""
+        self.write_clause(
+            CLAUSE.replace("call `manager-predispatch.py --content-keys`", "compute it")
+            + MEASURED_NOTE
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not name `--content-keys`", result.stderr)
+
+    def test_script_exclusion_drift_fails(self):
+        """The half a prose-only check could not reach, and the reason the derivation moved
+        into code: with it there, the guard can assert the constants themselves."""
+        home = pathlib.Path(self.dir) / "scripts" / "manager-predispatch.py"
+        home.write_text(
+            home.read_text().replace(
+                '"mode", "last_auto_resume", "claude_session_id", "metrics_sessions"',
+                '"mode", "last_auto_resume", "claude_session_id"',
+            )
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("CONTENT_KEY_EXCLUDED", result.stderr)
 
     def test_mode_removed_from_the_exclusion_sentence_fails(self):
         """The false-green the bot found. `mode:` still appears in the clause — the measured
