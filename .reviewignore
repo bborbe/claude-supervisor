@@ -1,10 +1,8 @@
 # Paths the PR reviewer skips — excluded from the MAX_ADDITIONS /
 # MAX_CHANGED_FILES size gate and from the reviewer's context.
 
-# Machine-produced frozen changelog archive — rotated out of CHANGELOG.md by
-# scripts/changelog-archive.py and never hand-edited. It is moved prose, not
-# authored content: scripts/tests/test_changelog_archive.py pins it byte-for-byte
-# against the input and asserts the retained and archived section counts sum to
-# the source's. Left in the reviewable set it is ~1900 added lines of frozen
-# history, which parks every archive PR at human_review on the size gate alone.
+# Frozen changelog archive — released sections rotated out of CHANGELOG.md and
+# never hand-edited. Moved prose rather than authored content, and at ~1900
+# added lines it would park an archive PR at human_review on the size gate
+# alone.
 CHANGELOG-archive.md
