@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.136.0
 
 - feat: **the A2A client gains its CONTROLLER-facing half (`server/a2a-client.mjs`) — the `create` / `list` / `stop` control call the `docker` and `k8s` spawn targets make before any worker exists.** The controller (`bborbe/a2a-worker-controller`) is a different service from a worker, and it differs on exactly two wire points, both read at source (`pkg/types.go`, `pkg/a2a.go`, `pkg/a2a-executor.go`, and the `a2a-go` v2 SDK's `a2a/core.go`) rather than inferred from the worker's shape — because the worker's shape is exactly what would have produced a request that looks right and is not. ⚠️ **The control call carries a DATA part, not a text part.** The controller reads its `ControlRequest` from the message's FIRST data part and refuses a message carrying none, so a text part is not a near miss: it answers `ErrInvalidParams` and no operation runs at all. ⚠️ **The control call is one-shot — the bare method `SendMessage`, never `SendStreamingMessage`.** A control call is a single request and response with no live turn to interrupt, which the controller's own `Cancel` states outright, so a client that opened a stream would wait on frames that are never sent. The call sends no `accept: text/event-stream`, and `contextId` is carried for the same reason the worker half carries it.
 
