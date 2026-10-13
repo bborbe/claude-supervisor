@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.139.0
 
 - feat: **an A2A worker is now stamped live while its controller still lists it.** Since v0.137.0 nothing stamped a `docker` / `k8s` worker, so every sweep read a running one as not-live and rehydrate pruned it. A new 30 s mirror beside the cluster poll lists the controller's workers and stamps each open `a2a` ledger record whose `worker_id` the controller still reports in a non-stopped state; it is silent when no controller is configured. The match is by `worker_id`, never by task. The ledger record gains `worker_id` and `target` (never the worker token), so a reconnected server can map a controller worker back to its session, and rehydrate re-adopts an A2A row under its target's name. The `list` call is bounded at 10 s, because the poll skips a tick while one is in flight and an unanswered list would otherwise wedge the mirror for the process's life. ⚠️ An unreachable controller makes these stamps read dead rather than UNKNOWN — acceptable only because A2A refuses `resume`.
 
