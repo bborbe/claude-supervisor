@@ -6,6 +6,19 @@ check-versions:
 check-changelog:
 	@python3 scripts/check-changelog.py
 
+# CHANGELOG.md grows a section per release and is never pruned, so it eventually crosses
+# the release watcher's 1 MiB read cap — and the watcher then drops the whole repo from
+# every poll cycle, so no release can be cut at all (measured 2026-10-13: 1 056 367 bytes,
+# `repo dropped from cycle … too large` on every cycle). This fails while there is still
+# runway, naming the remedy, so the cap can never be crossed silently again.
+check-changelog-size:
+	@python3 scripts/changelog-archive.py --check
+
+# Rotate the oldest released sections into CHANGELOG-archive.md. Idempotent — a second run
+# reports `nothing to archive`. Both byte limits live in scripts/changelog-archive.py.
+changelog-archive:
+	@python3 scripts/changelog-archive.py
+
 check-spawn-mode:
 	@python3 scripts/check-spawn-mode.py
 
@@ -102,6 +115,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-ledger-writes test
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-ledger-writes test
 
-.PHONY: default check-versions check-changelog check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check check-server-deps test precommit
+.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check check-server-deps test precommit
