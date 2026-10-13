@@ -364,6 +364,13 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   assert.ok(!/findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')
   // Not stamped on shutdown — that record belongs to the server that spawned the worker.
   assert.match(src, /if \(agent\.rehydrated\) continue/)
+  // ⚠️ And the WRITER refuses an adopted row outright, so the single-writer guarantee is a
+  // property of `writeLedger` rather than a `continue` each call site has to remember. This is
+  // load-bearing now that `send_agent_message` looks its agent up in `currentRoster()`: the
+  // cluster arm writes `{ result }` onto whatever it found, and the endpoint's `Post` REPLACES
+  // a row rather than merging one, so an unguarded write from a second server would blank the
+  // owner's row rather than lose a single field.
+  assert.match(src, /if \(agent\.rehydrated\) \{\n\s+log\(`WARNING: refusing to write the ledger row/)
   // ⚠️ The MINT must never land on an adopted id. `seq` restarts at 0 on every reconnect, so
   // without this loop the first spawn_agent after a reconnect overwrites a live worker's
   // rehydrated row — reproducing the exact `unknown agent` symptom this PR closes.

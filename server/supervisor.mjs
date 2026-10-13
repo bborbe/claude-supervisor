@@ -627,6 +627,26 @@ function writeLedger(agent, patch) {
     log(`WARNING: no ledger record for ${agent.id} — its session id never resolved, so there is no key to file it under`)
     return null
   }
+  // ⚠️ **THE SINGLE-WRITER GUARANTEE, and it is structural here rather than a comment at each
+  // call site.** A rehydrated row was adopted from the endpoint, so its ledger record belongs
+  // to the server that SPAWNED that worker — which may still be running and driving it. Since
+  // the endpoint's `Post` REPLACES a whole row rather than merging a patch, a write from a
+  // second server would not merely lose one field: it would rebuild the record from a row that
+  // carries identity alone and blank everything the owner had written.
+  //
+  // ⚠️ **This is reachable, not hypothetical.** `send_agent_message` looks an agent up in
+  // `currentRoster()` — which is the point, because the worker a manager messages is the one it
+  // did not spawn — and the cluster arm of that handler writes `{ result }` onto it. Before this
+  // guard, a manager messaging another server's cluster worker erased that worker's row.
+  //
+  // The refusal is logged rather than silent: the turn's `result` genuinely goes unrecorded for
+  // a cluster worker this process does not own, and that loss must be readable rather than
+  // discovered. `stampUnobservedWorkers` already skips these rows for the same reason; the
+  // guard is what makes that one site's discipline a property of the writer.
+  if (agent.rehydrated) {
+    log(`WARNING: refusing to write the ledger row for ${agent.id} — it was adopted from the endpoint, so its record belongs to the server that spawned it`)
+    return null
+  }
   try {
     // The patch arm merges into the stored row and hands the MERGED row back, so the endpoint
     // is published the same row the file holds rather than the patch on its own — a patch-only
