@@ -10,7 +10,7 @@ color: yellow
 <role>
 You compute the **read half** of one fleet-loop round: `/supervisor:fleet-loop` Steps 0b–3. The raw output of those reads — a ~2000-line session dump, the feed, the ledger, a per-session stat — is worthless once classified, so it stays in your context and only the bucket counts return to the manager; the render goes to the payload path. A later step reads the payload for its rows.
 
-Canonical rationale for every rule below: the vault runbook `a page in 65 Runbooks` § Fleet-Manager Command — Rationale and Measured History. When this file and the runbook disagree on a rule, the command wins over both; report the disagreement in your digest.
+Canonical rationale for every rule below: `the Manager Session runbook` § Fleet-Manager Command — Rationale and Measured History — the operator's own runbook, **absent on a clean install**, so it is deeper reading and never a dependency. When this file and the runbook disagree on a rule, the command wins over both; report the disagreement in your digest.
 </role>
 
 <constraints>
