@@ -16,10 +16,14 @@
 // that can only be exercised against a live controller is a call nobody exercises.
 
 import {
+  A2A_STATE_FAILED,
   a2aControlRequestFor,
   a2aControlResponseFor,
   a2aContextIdFor,
+  a2aFrames,
+  a2aOutcome,
   a2aSendRequestFor,
+  a2aStreamRequestFor,
   resolveA2AEndpoint,
 } from './a2a-client.mjs'
 
@@ -410,4 +414,162 @@ export async function fetchWorkerCard({ a2aUrl, fetchImpl = fetch } = {}) {
   const endpoint = resolveA2AEndpoint(card)
   if (endpoint.error) return { error: endpoint.error }
   return { card, endpoint: endpoint.url }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// THE TURN HALF — what happens to the worker once it exists.
+//
+// ⚠️ TWO CALLS, NOT ONE, AND THE SPLIT **IS** SC5. SC5 measures the SEND's latency against the
+// TURN's own duration in the same run — `< 2 s` against `> 60 s` — and names its falsifier
+// outright: *"a send whose latency tracks the turn's duration (blocking)"*. A single call that
+// returned the reply would BE that falsifier by construction: its latency is the turn's duration,
+// and no amount of care in the caller could change it. So the request is issued and acknowledged
+// by one call, and its body is consumed by a second the caller may await later — which is what
+// "the result is collected afterwards" means when it is a shape rather than a promise.
+
+// How long THE SEND waits for the worker to acknowledge before handing back an unresolved request.
+//
+// ⚠️ DELIBERATELY BELOW SC5'S 2 s BUDGET rather than equal to it: that budget covers the whole
+// spawn call, so a bound set at 2 s would spend the entire allowance on this one step and leave
+// the rest of the path nothing. At 1.5 s a worker that acknowledges promptly returns in
+// milliseconds, and one that never acknowledges still leaves the spawn inside its budget.
+export const A2A_ACK_TIMEOUT_MS = 1500
+
+// A sentinel no real outcome can equal, so `Promise.race` cannot confuse "the worker did not
+// answer in time" with "the worker answered with something falsy".
+const A2A_NOT_ACKNOWLEDGED = Symbol('a2a-not-acknowledged')
+
+// Send one turn to the worker — THE SEND.
+//
+// Returns `{ res, contextId }` once the worker has acknowledged, `{ pending, contextId }` when it
+// has not acknowledged within `ackTimeoutMs`, or `{ error }` when the request could not be issued
+// at all. ⚠️ THE THREE ARE DISTINCT ON PURPOSE: "the worker is thinking" and "the request never
+// left" are different facts, and a caller told the second when the first is true will send a
+// second turn to a worker already working on the first.
+//
+// ⚠️ IT NEVER ABORTS. The timeout bounds WAITING, not the request — the fetch is left running and
+// handed back as `pending` for `collectWorkerTurn` to await. Aborting would kill the very turn
+// this call exists to start, and the caller would be told the send failed while the worker was
+// working: the most expensive available way to be wrong.
+export async function openWorkerTurn({
+  endpoint,
+  contextId,
+  text,
+  token,
+  messageId,
+  ackTimeoutMs = A2A_ACK_TIMEOUT_MS,
+  fetchImpl = fetch,
+} = {}) {
+  const call = a2aStreamRequestFor({ endpoint, contextId, text, token, messageId })
+  if (call.error) return { error: call.error }
+
+  // ⚠️ `issued` RESOLVES TO THE RESPONSE ITSELF, not to a wrapper — because it is handed back as
+  // `pending` and `collectWorkerTurn` awaits it directly. A wrapper here would make the collector
+  // read `{ res }` as the response and fail with `settled.text is not a function`, which reads as
+  // a broken worker rather than as the shape mismatch it is.
+  const issued = (async () => {
+    try {
+      return await fetchImpl(call.url, {
+        method: 'POST',
+        headers: call.headers,
+        body: JSON.stringify(call.body),
+      })
+    } catch (cause) {
+      throw new Error(`the turn to ${call.url} could not be sent: ${cause?.message ?? cause}`)
+    }
+  })()
+
+  // A non-positive bound disables it outright, which is what a test wants when it asserts the
+  // send's own outcome rather than the timing of it.
+  if (!(ackTimeoutMs > 0)) return { pending: issued, contextId }
+
+  // `settled` never rejects: both outcomes are folded into one shape so `Promise.race` can
+  // compare them, and so an error arriving AFTER the bound has already fired cannot surface as an
+  // unhandled rejection on a promise the caller has stopped waiting on.
+  const settled = issued.then(
+    (res) => ({ res }),
+    (cause) => ({ error: cause?.message ?? String(cause) }),
+  )
+
+  let timer
+  const raced = await Promise.race([
+    settled,
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(A2A_NOT_ACKNOWLEDGED), ackTimeoutMs)
+    }),
+  ])
+  clearTimeout(timer)
+
+  if (raced === A2A_NOT_ACKNOWLEDGED) return { pending: issued, contextId }
+  if (raced.error) return { error: raced.error }
+  return { res: raced.res, contextId }
+}
+
+// Consume the turn's stream — THE COLLECTION. `{ state, contextId, reply }`, or `{ error }`.
+//
+// `res` may be a settled response OR the still-pending promise `openWorkerTurn` returned as
+// `pending`. `await` is the same expression for both, so the collector never has to know which
+// case it is in — and that is the point: the two differ only in WHEN they resolve, and a
+// collector that cared would be re-deriving a distinction the sender had already made.
+export async function collectWorkerTurn({ res, sentContextId } = {}) {
+  if (!res) return { error: 'collectWorkerTurn was given no response to collect from.' }
+
+  let settled
+  try {
+    settled = await res
+  } catch (cause) {
+    return { error: `the turn's response could not be read: ${cause?.message ?? cause}` }
+  }
+  if (!settled || typeof settled !== 'object') return { error: 'the turn produced no response object.' }
+  if (settled.ok === false) return { error: `the worker answered HTTP ${settled.status} to the turn.` }
+
+  // ⚠️ `text()`, NOT `json()`, for the reason `createWorkerOnController` gives: the frames arrive
+  // as an SSE body and `a2aFrames` takes the RAW string. `json()` here would throw on the first
+  // `data:` line and report a parse failure for a perfectly good stream.
+  let body
+  try {
+    body = await settled.text()
+  } catch (cause) {
+    return { error: `the turn's reply body could not be read: ${cause?.message ?? cause}` }
+  }
+
+  const parsed = a2aFrames(body)
+  if (parsed.error) return { error: parsed.error }
+  return a2aOutcome(parsed.frames, { sentContextId })
+}
+
+// The ledger patch a collected turn produces — `{ result, error }`, both always present.
+//
+// ⚠️ BOTH ARE ALWAYS SET, AND THE `result` IS NOT DISCARDED ON FAILURE. Writing only `result` on
+// success would leave a previously-recorded error standing against a turn that has since
+// succeeded; writing only `error` on failure would throw away the state and whatever partial
+// reply the worker did produce. A reader must be able to tell what was collected AND whether it
+// worked, so neither half is dropped for the other.
+//
+// ⚠️ A FAILED STATE IS AN ERROR, AND THE OUTCOME IS STILL FILED. `TASK_STATE_FAILED` on a turn is
+// the worker reporting its own failure; a record filing that as a result with no error would read
+// as a turn that answered.
+//
+// `at` is passed in rather than read here, because every rule in this module is clock-free so it
+// can be tested without freezing time.
+export function a2aTurnPatch(collected, { at } = {}) {
+  if (!collected || collected.error) {
+    return {
+      result: null,
+      error: collected?.error ?? 'the turn produced neither an outcome nor an error.',
+    }
+  }
+  const { state, contextId, reply } = collected
+  return {
+    result: {
+      // Named, so a reader can tell an A2A turn's outcome from a cluster turn's without inferring
+      // it from which fields happen to be present.
+      kind: 'a2a-turn',
+      state: state ?? null,
+      contextId: contextId ?? null,
+      reply: reply ?? '',
+      collectedAt: at ?? null,
+    },
+    error: state === A2A_STATE_FAILED ? `the worker reported ${state} for this turn.` : null,
+  }
 }

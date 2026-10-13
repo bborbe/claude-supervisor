@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aWorkerRecord, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, resolveA2AControllerTarget } from './a2a-spawn.mjs'
+import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, openWorkerTurn, resolveA2AControllerTarget } from './a2a-spawn.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
@@ -1266,6 +1266,51 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   agents.set(id, built.record)
   writeLedger(built.record)
 
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // THE FIRST TURN — issued here, COLLECTED LATER, and that split is SC5 rather than a style.
+  //
+  // SC5 measures this call's latency against the turn's own duration (`< 2 s` against `> 60 s`)
+  // and names its falsifier outright: *"a send whose latency tracks the turn's duration
+  // (blocking)"*. Awaiting the collection below would BE that falsifier, so the SEND is awaited
+  // and the COLLECTION is not — the turn keeps running against the worker while this call returns.
+  //
+  // ⚠️ A FAILED SEND IS NOT A FAILED SPAWN. The worker exists by this point and something has to
+  // reap it, so the failure is filed against the record — where a roster read will find it —
+  // rather than returned as though no worker had been created. That is the distinction the card
+  // failure above draws, arriving in the opposite order.
+  const sent = await openWorkerTurn({
+    endpoint: card.endpoint,
+    contextId: created.contextId,
+    text: prompt,
+    token: created.token,
+    messageId: randomUUID(),
+  })
+
+  if (sent.error) {
+    const patch = { result: null, error: `the first turn could not be sent: ${sent.error}` }
+    built.record.error = patch.error
+    writeLedger(built.record, patch)
+  } else {
+    // ⚠️ `void`, AND THAT ONE KEYWORD IS THE CRITERION. The record is patched in memory as well as
+    // on disk, so `agent_status` and `list_agents` read the same answer the ledger holds rather
+    // than the one from spawn time.
+    void collectWorkerTurn({ res: sent.res ?? sent.pending, sentContextId: sent.contextId })
+      .then((collected) => {
+        const patch = a2aTurnPatch(collected, { at: new Date().toISOString() })
+        built.record.result = patch.result
+        built.record.error = patch.error
+        writeLedger(built.record, patch)
+      })
+      .catch((cause) => {
+        // `collectWorkerTurn` returns its failures rather than throwing, so reaching here means
+        // something outside it broke. Filed rather than swallowed: a turn whose outcome was never
+        // recorded leaves a worker that looks idle forever.
+        const patch = { result: null, error: `collecting the turn failed: ${cause?.message ?? cause}` }
+        built.record.error = patch.error
+        writeLedger(built.record, patch)
+      })
+  }
+
   return {
     agent_id: id,
     label: built.record.label,
@@ -1281,10 +1326,16 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     // this server, which already holds the credential.
     a2a_url: card.endpoint,
     worker_id: created.worker.worker_id,
-    // Stated rather than left to inference: nothing has been sent, so there is no answer to
-    // report and no turn to have failed. A caller reading a null `answer` without this line
-    // could not tell "not sent yet" from "sent and silent".
-    turn: 'not sent — this spawn returns once the worker exists and is reachable; the first turn is sent separately',
+    // ⚠️ THREE ANSWERS, NOT TWO, because those are the three `openWorkerTurn` distinguishes: "the
+    // worker is thinking" and "the request never left" are different facts, and a caller unable to
+    // tell them apart would send a second turn to a worker already working on the first. There is
+    // deliberately no `answer` field — the result arrives in the background, and a null one would
+    // read as a turn that produced nothing.
+    turn: sent.error
+      ? `not sent — ${sent.error}`
+      : sent.res
+        ? 'sent — the worker acknowledged; its result is collected in the background'
+        : 'sent, not yet acknowledged — the request is outstanding and its result is collected in the background',
   }
 }
 
