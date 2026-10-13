@@ -20,6 +20,7 @@ import {
   a2aOutcome,
   a2aSendRequestFor,
   a2aStreamRequestFor,
+  a2aWorkerList,
   resolveA2AEndpoint,
 } from './a2a-client.mjs'
 
@@ -341,4 +342,47 @@ test('a JSON-RPC error is refused as a refusal, not read as a FAILED task', () =
 test('a reply that is neither SSE nor JSON refuses rather than being skipped', () => {
   assert.match(a2aControlResponseFor('<html>502</html>', { sentOperation: 'list' }).error, /neither SSE nor JSON/)
   assert.match(a2aControlResponseFor(undefined, {}).error, /must be a string/)
+})
+
+test('a FAILED status is an UNKNOWN outcome, never "nothing happened"', () => {
+  // ⚠️ The failure can land in the controller's task store AFTER the executor has run — measured
+  // 2026-10-13 on the controller's own v0.4.0, where every call including `list` answered FAILED
+  // because the store's gob copy of the artifact was missing a type registration. A `create` on
+  // that build could have started a container and still reported FAILED, so a caller that retried
+  // on "it did not happen" would be acting on a claim the controller never made.
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    result: { id: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_FAILED' } },
+  })
+  const { error } = a2aControlResponseFor(body, { sentOperation: 'create' })
+  assert.match(error, /UNKNOWN outcome/)
+  assert.match(error, /AFTER the executor has run/)
+  assert.doesNotMatch(error, /it means the operation did not happen/)
+})
+
+// --- the controller-facing half: the list result ---------------------------------------------
+
+test('an empty worker list is normalised from the null gob leaves behind', () => {
+  // ⚠️ gob does not transmit zero values, so the controller's store collapses an empty slice into
+  // `null` — the EMPTY case is the one that arrives as `null`, and it is the most common case at
+  // the start of a run. Iterating it without a guard throws.
+  assert.deepEqual(a2aWorkerList({ operation: 'list', list: { workers: null } }), { workers: [] })
+  assert.deepEqual(a2aWorkerList({ operation: 'list', list: { workers: [] } }), { workers: [] })
+  assert.deepEqual(a2aWorkerList({ operation: 'list', list: {} }), { workers: [] })
+  assert.deepEqual(a2aWorkerList({ operation: 'list' }), { workers: [] })
+})
+
+test('a populated worker list passes through unchanged', () => {
+  const workers = [{ worker_id: 'w-1', task: 'T', a2a_url: 'http://localhost:9091/a2a', backend: 'docker', state: 'running' }]
+  assert.deepEqual(a2aWorkerList({ operation: 'list', list: { workers } }), { workers })
+})
+
+test('a list result that is not a list refuses rather than being read as empty', () => {
+  // A `create` response read as a list would otherwise look like "no workers" — an empty answer
+  // invented from a reply that says something else entirely.
+  assert.match(a2aWorkerList({ operation: 'create', create: {} }).error, /expected a `list` response/)
+  assert.match(a2aWorkerList({ operation: 'list', list: { workers: 'w-1' } }).error, /must be an array or null/)
+  assert.match(a2aWorkerList('raw body').error, /`ControlResponse` object/)
+  assert.match(a2aWorkerList(undefined).error, /`ControlResponse` object/)
 })

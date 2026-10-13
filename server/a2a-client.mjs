@@ -248,10 +248,17 @@ export const A2A_SEND_METHOD = 'SendMessage'
 // `ControlRequest.operation` accepts.
 export const A2A_CONTROL_OPERATIONS = ['create', 'list', 'stop']
 
-// The terminal state a control call ends in when the operation did not happen. It earns its own
-// constant because it is load-bearing here: the controller reports a backend failure as a FAILED
-// status carrying NO artifact, and deliberately withholds the backend's error text, so a client
-// that looked only for a data part would find none and have to invent a reason for it.
+// The terminal state a control call ends in when the controller could not complete it. It earns its
+// own constant because it is load-bearing here: the controller reports a failure as a FAILED status
+// carrying NO artifact and returns no detail, so a client that looked only for a data part would
+// find none and have to invent a reason for it.
+//
+// ⚠️ IT DOES NOT MEAN THE OPERATION DID NOT HAPPEN, and this comment said that until 2026-10-13.
+// The failure can land in the controller's TASK STORE, after the executor has already run — measured
+// that day against the controller's own `v0.4.0`, where every control call including `list` answered
+// FAILED because the store's gob copy of the artifact was missing a type registration. A `create` on
+// that build could have started a container and still reported FAILED. Treat this status as "the
+// controller could not tell me the outcome", never as "nothing happened".
 const A2A_STATE_FAILED = 'TASK_STATE_FAILED'
 
 // The `ControlRequest` for one operation — `{ request }`, or `{ error }`.
@@ -398,9 +405,12 @@ export function a2aControlResponseFor(body, { sentOperation } = {}) {
   if (state === A2A_STATE_FAILED) {
     return {
       error:
-        'the controller reported the control call FAILED. ⚠️ It deliberately returns no detail — ' +
-        "the backend's error text is logged controller-side and never sent — so this status is all " +
-        'the caller gets, and it means the operation did not happen.',
+        'the controller reported the control call FAILED. It returns no detail on this path — the ' +
+        'error is logged controller-side and never sent — so this status is all the caller gets. ' +
+        '⚠️ It does NOT mean the operation did not happen: the failure can land in the controller\'s ' +
+        'task store AFTER the executor has run, measured 2026-10-13 when a store-side gob failure ' +
+        'failed every call including `list`. Treat it as an UNKNOWN outcome and reconcile against ' +
+        'the controller\'s own `list` rather than assuming nothing happened.',
     }
   }
 
@@ -430,4 +440,43 @@ export function a2aControlResponseFor(body, { sentOperation } = {}) {
     }
   }
   return { response, state }
+}
+
+// The workers a `list` response carries — `{ workers }`, or `{ error }`.
+//
+// ⚠️ `null` AND `[]` ARE BOTH VALID HERE, AND THE DIFFERENCE IS NOT PRESERVED. The controller's
+// store copies a task through gob, and **gob does not transmit zero values** — so an empty worker
+// list round-trips as `{"workers": null}` rather than `{"workers": []}`. Measured 2026-10-13 by the
+// controller's own session against its `v0.4.1`, and confirmed as a property of gob rather than a
+// defect in that build. A caller that iterated `workers` without a guard would throw on the EMPTY
+// case — the most common case at the start of a run, and therefore the one least likely to be
+// exercised before it ships. The normalising happens here, once, so no call site has to remember it.
+export function a2aWorkerList(response) {
+  if (response === null || typeof response !== 'object' || Array.isArray(response)) {
+    return {
+      error:
+        'a list result must be the `ControlResponse` object — pass what `a2aControlResponseFor` ' +
+        'returned as `response`, not the raw body.',
+    }
+  }
+  if (response.operation !== 'list') {
+    return {
+      error:
+        `expected a \`list\` response, got operation ${JSON.stringify(response.operation)} — the ` +
+        'call that produced this did not ask for a list.',
+    }
+  }
+  const workers = response.list?.workers
+  // ⚠️ `null` and a missing key are the same fact here — no workers — because gob collapsed the
+  // empty slice into the first of them. Normalised rather than returned as-is: `null` is not
+  // iterable, and every caller's first move is to iterate.
+  if (workers === null || workers === undefined) return { workers: [] }
+  if (!Array.isArray(workers)) {
+    return {
+      error:
+        `\`list.workers\` must be an array or null, got ${JSON.stringify(workers)}. The controller ` +
+        'returns null for an empty list, so anything else means this is not the shape it sends.',
+    }
+  }
+  return { workers }
 }
