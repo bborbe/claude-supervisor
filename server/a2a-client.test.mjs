@@ -9,10 +9,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   A2A_AGENT_CARD_PATH,
+  A2A_CONTROL_OPERATIONS,
+  A2A_SEND_METHOD,
   A2A_STREAM_METHOD,
   a2aContextIdFor,
+  a2aControlRequestFor,
+  a2aControlResponseFor,
+  a2aDataPart,
   a2aFrames,
   a2aOutcome,
+  a2aSendRequestFor,
   a2aStreamRequestFor,
   resolveA2AEndpoint,
 } from './a2a-client.mjs'
@@ -158,4 +164,181 @@ test('a contextId mismatch is the error, because it is the only client-side obse
 test('a turn with no frames refuses rather than reporting an empty success', () => {
   assert.match(a2aOutcome([], { sentContextId: 'ctx-1' }).error, /no frames/)
   assert.match(a2aOutcome(undefined, {}).error, /no frames/)
+})
+
+// --- the controller-facing half: the control request -----------------------------------------
+
+test('each operation builds its own ControlRequest, and exactly one field', () => {
+  assert.deepEqual(a2aControlRequestFor({ operation: 'list' }), { request: { operation: 'list' } })
+  assert.deepEqual(a2aControlRequestFor({ operation: 'create', task: 'Some Task' }), {
+    request: { operation: 'create', create: { task: 'Some Task' } },
+  })
+  assert.deepEqual(a2aControlRequestFor({ operation: 'stop', workerId: 'w-1' }), {
+    request: { operation: 'stop', stop: { worker_id: 'w-1' } },
+  })
+  // The controller refuses a request setting none or more than one operation-specific field
+  // rather than guessing, so a builder that dropped a stray field would silently ask for a
+  // DIFFERENT operation than the caller named.
+  for (const args of [
+    { operation: 'create' },
+    { operation: 'create', task: '' },
+    { operation: 'create', task: 'T', workerId: 'w-1' },
+    { operation: 'list', task: 'T' },
+    { operation: 'list', workerId: 'w-1' },
+    { operation: 'stop' },
+    { operation: 'stop', workerId: '', },
+    { operation: 'stop', workerId: 'w-1', task: 'T' },
+    { operation: 'delete', task: 'T' },
+    { operation: undefined },
+  ]) {
+    assert.equal(a2aControlRequestFor(args).error !== undefined, true, JSON.stringify(args))
+  }
+  assert.deepEqual(A2A_CONTROL_OPERATIONS, ['create', 'list', 'stop'])
+})
+
+// --- the controller-facing half: the data part -----------------------------------------------
+
+test('a data part is FLATTENED as { data }, never { content } and never { text }', () => {
+  // ⚠️ THE CONTROLLER'S OWN WIRE RULE. `controlRequestFromMessage` reads the ControlRequest from
+  // the message's FIRST data part and refuses a message carrying none, so a TEXT part — the shape
+  // the worker half sends — is not a near miss: the controller answers ErrInvalidParams and no
+  // operation runs at all.
+  assert.deepEqual(a2aDataPart({ operation: 'list' }), { part: { data: { operation: 'list' } } })
+  assert.equal('content' in a2aDataPart({ operation: 'list' }).part, false)
+  assert.equal('text' in a2aDataPart({ operation: 'list' }).part, false)
+})
+
+test('a null or non-object data payload refuses, because null hydrates to no discriminator', () => {
+  // ⚠️ The SDK hydrates `data` into a `*any`, so a JSON `null` leaves that pointer nil and counts
+  // as NO discriminator at all — refused as `unknown part content type`, exactly as a missing part
+  // is. It fails quietly enough to be worth refusing here instead.
+  for (const value of [null, undefined, 'list', 42, ['list'], true]) {
+    const { error, part } = a2aDataPart(value)
+    assert.equal(part, undefined, JSON.stringify(value))
+    assert.match(error, /non-null object/, JSON.stringify(value))
+  }
+})
+
+// --- the controller-facing half: the call ----------------------------------------------------
+
+test('the control call is ONE-SHOT — bare SendMessage, a data part, and no SSE accept', () => {
+  const { url, headers, body } = a2aSendRequestFor({
+    endpoint: 'http://localhost:8080/a2a',
+    contextId: 'ctx-1',
+    request: { operation: 'list' },
+    token: 'not-a-real-token',
+    messageId: 'msg-1',
+  })
+  assert.equal(url, 'http://localhost:8080/a2a')
+  assert.equal(headers.authorization, 'Bearer not-a-real-token')
+  assert.equal(body.method, A2A_SEND_METHOD)
+  // ⚠️ Bare, and NOT the streaming spelling: a control call is one request and response with no
+  // live turn to interrupt, so a client that opened a stream would wait on frames never sent.
+  assert.equal(body.method, 'SendMessage')
+  assert.notEqual(body.method, A2A_STREAM_METHOD)
+  assert.equal(headers.accept, undefined)
+  assert.equal(body.params.message.role, 'ROLE_USER')
+  assert.equal(body.params.message.contextId, 'ctx-1')
+  assert.deepEqual(body.params.message.parts, [{ data: { operation: 'list' } }])
+})
+
+test('every field the controller validates is required, and a missing one refuses', () => {
+  const CALL = {
+    endpoint: 'http://localhost:8080/a2a',
+    contextId: 'ctx-1',
+    request: { operation: 'list' },
+    token: 'not-a-real-token',
+    messageId: 'msg-1',
+  }
+  for (const field of ['endpoint', 'contextId', 'token', 'messageId']) {
+    const { error } = a2aSendRequestFor({ ...CALL, [field]: '' })
+    assert.match(error, new RegExp(`\`${field}\` is required`), `${field} should be required`)
+  }
+  assert.match(a2aSendRequestFor({ ...CALL, request: null }).error, /non-null object/)
+})
+
+// --- the controller-facing half: the reply ---------------------------------------------------
+
+const CONTROL_REPLY = (response) => ({
+  id: 't-1',
+  contextId: 'ctx-1',
+  status: { state: 'TASK_STATE_COMPLETED' },
+  artifacts: [{ artifactId: 'a-1', parts: [{ data: response }] }],
+})
+
+test('the ControlResponse is read from the artifact data part, in the one-shot JSON framing', () => {
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    result: CONTROL_REPLY({ operation: 'list', list: { workers: [] } }),
+  })
+  assert.deepEqual(a2aControlResponseFor(body, { sentOperation: 'list' }), {
+    response: { operation: 'list', list: { workers: [] } },
+    state: 'TASK_STATE_COMPLETED',
+  })
+})
+
+test('the same reply parses from the streaming framing, because one handler serves both', () => {
+  const body = sse(
+    { task: { id: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_SUBMITTED' } } },
+    { artifactUpdate: { artifact: { artifactId: 'a-1', parts: [{ data: { operation: 'create', create: { worker: { worker_id: 'w-1' }, token: 'not-a-real-token' } } }] } } },
+    { statusUpdate: { state: 'TASK_STATE_COMPLETED' } },
+  )
+  const { response, state } = a2aControlResponseFor(body, { sentOperation: 'create' })
+  assert.equal(state, 'TASK_STATE_COMPLETED')
+  assert.equal(response.create.worker.worker_id, 'w-1')
+})
+
+test('a FAILED status is the error, and it is read BEFORE the missing payload', () => {
+  // ⚠️ A backend failure yields TASK_STATE_FAILED with NO artifact, and the controller
+  // deliberately withholds the backend's error text. A client that hunted for the data part first
+  // would find none and have to invent a reason, while the status states the real one.
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    result: { id: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_FAILED' } },
+  })
+  const { error } = a2aControlResponseFor(body, { sentOperation: 'create' })
+  assert.match(error, /reported the control call FAILED/)
+  assert.match(error, /never sent/)
+})
+
+test('a completed call with no data part refuses, naming the text-part trap', () => {
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    result: {
+      id: 't-1',
+      contextId: 'ctx-1',
+      status: { state: 'TASK_STATE_COMPLETED' },
+      artifacts: [{ artifactId: 'a-1', parts: [{ text: 'ok' }] }],
+    },
+  })
+  const { error } = a2aControlResponseFor(body, { sentOperation: 'list' })
+  assert.match(error, /no data part/)
+  assert.match(error, /not a near miss/)
+})
+
+test('a reply naming a different operation refuses — the only client-side observable', () => {
+  // ⚠️ Exactly as `sentContextId` is in `a2aOutcome`: nothing else on this side reads as wrong.
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    result: CONTROL_REPLY({ operation: 'stop', stop: { worker: { worker_id: 'w-1' } } }),
+  })
+  const { error } = a2aControlResponseFor(body, { sentOperation: 'list' })
+  assert.match(error, /asked for "list"/)
+  assert.match(error, /"stop"/)
+})
+
+test('a JSON-RPC error is refused as a refusal, not read as a FAILED task', () => {
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'invalid params' } })
+  const { error } = a2aControlResponseFor(body, { sentOperation: 'list' })
+  assert.match(error, /refused the control call/)
+  assert.match(error, /never reached a backend/)
+})
+
+test('a reply that is neither SSE nor JSON refuses rather than being skipped', () => {
+  assert.match(a2aControlResponseFor('<html>502</html>', { sentOperation: 'list' }).error, /neither SSE nor JSON/)
+  assert.match(a2aControlResponseFor(undefined, {}).error, /must be a string/)
 })
