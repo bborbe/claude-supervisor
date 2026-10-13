@@ -24,13 +24,29 @@ list a later reader extends to *everything a tick writes*, which strips `phase` 
 silently freezes every approval; (d) without (c) is a principle with no fields attached,
 which is the state this check was written to end.
 
-**What this check does not prove.** It is a prose-shape check over markdown, because the
-derivation is executed by an agent — there is no function to call and no return value to
-assert on. So it cannot prove the leg *computes* the key this way; it proves the clause
-cannot silently lose the formula, which is the half a text scan can hold. The behavioural
-half is the live-tick measurement (a row prepared on tick N reporting a cache hit on tick
-N+1), which no grep can fake.
+**What this check proves, and what it still cannot.** Until 2026-10-13 this was a
+prose-shape check over markdown *only*, because the derivation was executed by an agent —
+there was no function to call and no return value to assert on, so it could not prove the
+leg *computed* the key this way. Its own docstring said so, and the defect it could not
+reach arrived anyway: measured **2026-10-12T15:49:30Z**, a drive leg's own `Audit` block
+reported that its stored keys reproduced under a `mode:`-only exclusion while the clause
+named four fields — so the writer and the reader keyed the same row differently and the row
+read as cold on every tick. The derivation now has a **single home in code** (`content_key`
+in `scripts/manager-predispatch.py`), the clause points at it, and this check asserts both
+halves:
+
+  * the clause still **names the call** (`--content-keys`) and still carries the four
+    excluded fields and the `status:` / `phase:` carve-out — so a reader never has to open
+    the script to know what the key ignores, and never re-implements it from prose; and
+  * the script's **constants** — the four excluded names and the 16-hex truncation — which
+    a prose-only check explicitly could not reach.
+
+The derivation's *behaviour* (a tick-written field does not move the key, `phase:` does, the
+exclusion reaches the continuation block, the hash is over raw bytes) is asserted by
+`scripts/tests/test_content_key.py`. The end-to-end half remains the live-tick measurement —
+a row prepared on tick N reporting a cache hit on tick N+1 — which no grep can fake.
 """
+import importlib.util
 import pathlib
 import re
 import sys
@@ -92,6 +108,30 @@ BLOCK_EXTENT = "continuation block"
 #: close. Raised as a Should-Fix by the maintainer bot on PR #172, third round: the clause and
 #: the CHANGELOG both called the mechanism pinned while nothing asserted it.
 MECHANISM = "no YAML parse, no re-serialisation, no newline normalisation"
+
+#: (g) — the **single home**. The clause must name the call that computes the key. A clause
+#: that states a formula without naming its implementation is one each leg finishes itself,
+#: which is the drift this whole check exists to end — and the drift that arrived anyway on
+#: 2026-10-12, while the clause was asserting every one of (a)–(f).
+SINGLE_HOME_CALL = "--content-keys"
+
+#: (g) — and it must say the derivation is not the reader's to write. The call alone reads
+#: as an option; this is the instruction.
+SINGLE_HOME_RULE = "never derived by you"
+
+#: (h) — the script holding the derivation, and the two constants read back from it. ⚠️
+#: **This is the half the prose-only check explicitly could not reach** (see the docstring):
+#: with the derivation in code there are constants to assert against, so a later edit that
+#: widens the exclusion set or changes the truncation fails here rather than in production.
+SCRIPT_HOME = "scripts/manager-predispatch.py"
+
+#: (h) — the excluded fields as the SCRIPT must carry them, bare names without their colons.
+#: Kept separate from `EXCLUDED` above, which is the markdown form: the two are read from
+#: different artifacts and a drift between them is exactly what this pair is here to catch.
+SCRIPT_EXCLUDED = ("mode", "last_auto_resume", "claude_session_id", "metrics_sessions")
+
+#: (h) — the truncation the script must apply.
+SCRIPT_HEX = 16
 
 
 def sentences_containing(text, token):
@@ -209,6 +249,53 @@ def check(root):
             f"entry leaves behind, on quoted and multi-line values, and on a trailing newline, "
             f"while every other assertion here stays green"
         )
+
+    # (g) — the single home, stated as a call. ⚠️ **This is the assertion whose absence let
+    # the 2026-10-12 drift through.** Every (a)–(f) assertion above was green while a leg
+    # implemented a different exclusion set, because a clause can state a formula perfectly
+    # and still be re-implemented by the agent reading it.
+    if SINGLE_HOME_CALL not in clause:
+        failures.append(
+            f"{HOME} clause (1): the clause does not name `{SINGLE_HOME_CALL}` — without the "
+            f"call a leg has no implementation to reach for and writes its own, which is the "
+            f"per-leg drift measured on 2026-10-12 (a `mode:`-only exclusion against this "
+            f"clause's four fields) while every other assertion here stayed green"
+        )
+
+    if SINGLE_HOME_RULE not in clause:
+        failures.append(
+            f"{HOME} clause (1): the clause no longer says the derivation is "
+            f"`{SINGLE_HOME_RULE}` — a call that reads as an option is one a leg may skip"
+        )
+
+    # (h) — the constants, read back from the script. ⚠️ **Import it; never grep it.** A text
+    # scan for `CONTENT_KEY_EXCLUDED = (...)` passes on a commented-out line or a docstring
+    # example, which is the same class of false green this check's own history is made of.
+    script_path = root / SCRIPT_HOME
+    if not script_path.exists():
+        failures.append(f"{SCRIPT_HOME}: the derivation's single home is missing")
+    else:
+        spec = importlib.util.spec_from_file_location("_content_key_checked", script_path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:  # any load failure is the same verdict on this path
+            failures.append(f"{SCRIPT_HOME}: cannot be loaded to read its key constants: {exc}")
+        else:
+            got = tuple(getattr(module, "CONTENT_KEY_EXCLUDED", ()))
+            if got != SCRIPT_EXCLUDED:
+                failures.append(
+                    f"{SCRIPT_HOME}: CONTENT_KEY_EXCLUDED is {got!r}, not {SCRIPT_EXCLUDED!r} — "
+                    f"the script's exclusion set and the clause's list are the two halves of "
+                    f"one contract, and a drift between them is the 2026-10-12 defect"
+                )
+            hex_len = getattr(module, "CONTENT_KEY_HEX", None)
+            if hex_len != SCRIPT_HEX:
+                failures.append(
+                    f"{SCRIPT_HOME}: CONTENT_KEY_HEX is {hex_len!r}, not "
+                    f"{SCRIPT_HEX} — a key written at one length can never match another, so "
+                    f"a drifted subject re-audits every one of its rows"
+                )
 
     return failures
 
