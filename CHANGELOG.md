@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.136.1
 
 - fix: **the A2A client no longer claims a `FAILED` control call means the operation did not happen — a claim measured false on 2026-10-13, when the controller's own `v0.4.0` answered `FAILED` to every call including `list`.** The controller's failure can land in its **task store**, *after* the executor has already run: that build's store copies a task through gob and died with `gob: type not registered for interface: pkg.ControlResponse`, so a `create` could have started a container and still reported `FAILED`. ⚠️ **The old wording asserted the opposite in a merged, released module** — *"it means the operation did not happen"* — and a caller trusting it would retry a side effect that had already occurred. `a2aControlResponseFor` now reports the outcome as **UNKNOWN** and names the reconciliation (`list`), and the `A2A_STATE_FAILED` constant's comment carries the measurement rather than the inference it replaced.
 
