@@ -518,6 +518,19 @@ test('the collection refuses with no response at all', async () => {
   assert.match(collected.error, /no response/)
 })
 
+test('the collection reports a pending request that later fails, rather than hanging', async () => {
+  // ⚠️ THIS IS A PRODUCTION PATH, not a defensive one: it is what a worker that is slow to
+  // acknowledge produces when its connection then drops. `openWorkerTurn` has already returned
+  // `pending` by then, so the rejection arrives AFTER the send returned — and a collector that
+  // awaited it without a guard would leave the turn's outcome unfiled forever, with the record
+  // showing `result: null` and no error to explain it.
+  const failing = (async () => {
+    throw new Error('socket hang up')
+  })()
+  const collected = await collectWorkerTurn({ res: failing, sentContextId: 'ctx-1' })
+  assert.match(collected.error, /socket hang up/)
+})
+
 test('a collected turn files its outcome and no error', () => {
   const patch = a2aTurnPatch(
     { state: 'TASK_STATE_COMPLETED', contextId: 'ctx-1', reply: 'done' },
