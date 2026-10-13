@@ -85,7 +85,7 @@ blocked_by:
 
 **Keep the parse single-pass and bounded.** The tracked set can run to a hundred-plus files. Measured 2026-09-16: an `awk` scan over 123 tracked tasks was **OOM-killed mid-sweep** and had to be recovered with a single-pass Python read — the tick ran 192 s against a ~60 s baseline. Read each file once, extract what you need in that pass, and never build an unbounded intermediate structure over the whole set.
 
-**Record each task file's mtime in that same pass.** The `stuck` rows carry it to the caller (step 9, section 7) so the act leg can tell a task that moved since your read from one that did not — the freshness bound the nudge path needs, and the reason a candidate's staleness never rests on your classification alone. Read it with a **`PATH`-independent** command, never a bare `stat` flag:
+**Record each task file's mtime in that same pass.** The `stuck` rows carry it to the caller (step 9, section 6) so the act leg can tell a task that moved since your read from one that did not — the freshness bound the nudge path needs, and the reason a candidate's staleness never rests on your classification alone. Read it with a **`PATH`-independent** command, never a bare `stat` flag:
 
 ```bash
 python3 -c "import os,sys;print(int(os.path.getmtime(sys.argv[1])))" <task-file>
@@ -335,16 +335,17 @@ The worked example is `a sample task` SC2 — *"Daily cron via recurring-task-cr
 
 9. **Return one compact report**
 
+⚠️ **The report obeys the hand-back contract — `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md`.** Verdict lines and counts in `key=value` form, **≤ 1 KB**, and non-empty: the **bucket counts** are this leg's required set and must be present even for a bucket at zero. The rendered table does **not** ride the report — it goes to the payload path the render already writes, and the report carries the verdict about it. Read the contract there; it is not restated here. ⚠️ **The rendered table is deliberately absent from the list below** — `--write-payload` writes it, and re-adding it re-creates the 2026-10-11 defect where this line and the list disagreed.
+
 Plain markdown, in this order, omitting empty sections:
 
-1. **The rendered table** — verbatim output of `box-table.py`, inside a fenced block. When the declared-optional set is non-empty this is **both** labelled boxes, in order (`Essential (first iteration)`, then `Optional (phase 2)`).
-2. **Bucket counts** — one line, e.g. `4 tasks · 2 🔄 · 1 ⌛ · 1 ✅`.
-3. **Blocker verdicts** — the evidence that the `ready-to-start` / `blocked-upstream` cells came from step 4's `--blocked-verdicts` call and not from your own frontmatter read. **Quote the call's line for every row whose entry count is ≥ 1**, verbatim and in the call's own order, in a fenced block. ⚠️ **This section is not decoration and is not omitted when it looks redundant** — it is the only thing that makes the classification attributable, and the criterion it serves cannot be met without it. A reader that renders a bucket **contradicting the verdict it quotes** — a row quoted `blocked` and rendered `🚀 ready-to-start` — has failed, and that contradiction is visible in one run rather than over a run of sweeps. ⚠️ **A run with no such rows prints `Blocker verdicts: no row declares a blocked_by`** rather than omitting the section: an absent section is indistinguishable from a run that read nothing. ⚠️ **The quote is the raw output** — do not reformat, summarise, sort, or drop the entry-count column, because a reformatted quote cannot be diffed against the call.
-4. **Orphan candidates** — one line per task: the task name, its full id set, and why it is a candidate. Never the word `ORPHANED` as a verdict.
-5. **Live collisions** — one line per id: the id, the non-terminal carrier count, and the task names.
-6. **Delta** — against the prior snapshot: buckets that moved, Progress entries added, problems appeared. `no change` when nothing moved — that is a real finding, not a failure to find one.
-7. **`stuck` rows and the mtime you observed** — one line per task you classified `stuck`: the task name, then the task-file mtime from step 2 as a bare epoch second (e.g. `1758729600`). The act leg re-reads that mtime before it nudges and drops any candidate whose file has moved since, so **a row sent without its mtime cannot be freshness-checked at all** — say so on the line rather than leaving it blank, because a blank and a zero look alike to a reader that parses the number. Omit the section entirely when no task was classified `stuck`.
-8. **Necessity** — only when the caller passed member goals (step 8). **One row per task you judged — all three verdicts, not just the two negative ones** — then one summary line:
+1. **Bucket counts** — one line, e.g. `4 tasks · 2 🔄 · 1 ⌛ · 1 ✅`.
+2. **Blocker verdicts** — the evidence that the `ready-to-start` / `blocked-upstream` cells came from step 4's `--blocked-verdicts` call and not from your own frontmatter read. **Quote the call's line for every row whose entry count is ≥ 1**, verbatim and in the call's own order, in a fenced block. ⚠️ **This section is not decoration and is not omitted when it looks redundant** — it is the only thing that makes the classification attributable, and the criterion it serves cannot be met without it. A reader that renders a bucket **contradicting the verdict it quotes** — a row quoted `blocked` and rendered `🚀 ready-to-start` — has failed, and that contradiction is visible in one run rather than over a run of sweeps. ⚠️ **A run with no such rows prints `Blocker verdicts: no row declares a blocked_by`** rather than omitting the section: an absent section is indistinguishable from a run that read nothing. ⚠️ **The quote is the raw output** — do not reformat, summarise, sort, or drop the entry-count column, because a reformatted quote cannot be diffed against the call.
+3. **Orphan candidates** — one line per task: the task name, its full id set, and why it is a candidate. Never the word `ORPHANED` as a verdict.
+4. **Live collisions** — one line per id: the id, the non-terminal carrier count, and the task names.
+5. **Delta** — against the prior snapshot: buckets that moved, Progress entries added, problems appeared. `no change` when nothing moved — that is a real finding, not a failure to find one.
+6. **`stuck` rows and the mtime you observed** — one line per task you classified `stuck`: the task name, then the task-file mtime from step 2 as a bare epoch second (e.g. `1758729600`). The act leg re-reads that mtime before it nudges and drops any candidate whose file has moved since, so **a row sent without its mtime cannot be freshness-checked at all** — say so on the line rather than leaving it blank, because a blank and a zero look alike to a reader that parses the number. Omit the section entirely when no task was classified `stuck`.
+7. **Necessity** — only when the caller passed member goals (step 8). **One row per task you judged — all three verdicts, not just the two negative ones** — then one summary line:
 
    ```
    needed: <task> — serves <SC<n>|DoD<n>>: "<served line>" ← "<task line>"
@@ -384,6 +385,8 @@ Plain markdown, in this order, omitting empty sections:
 </error_handling>
 
 <output_format>
+**Two artifacts, two shapes.** The **payload** is the render below, written to disk by step 7's `--write-payload`; the **hand-back** is the ≤ 1 KB verdict summary step 9 lists. ⚠️ **The box table below is the payload, never the hand-back** — the caller reads it from the payload path, so returning it in the report re-creates the 2,727 B / 12,364 B hand-back this file was corrected to remove.
+
 `mode: tick` — marker first, box indented two spaces under it:
 
 ```text
@@ -454,7 +457,7 @@ Omit any section that is empty. `Delta: no change` is never omitted — it is th
 </output_format>
 
 <success_criteria>
-- The table is byte-identical to `box-table.py` output for the same rows, indented two spaces, under the correct frame for the mode — a timestamped marker for `tick`, the caller's tracked-set line for `snapshot`, and never a leading glyph.
+- The **payload** table is byte-identical to `box-table.py` output for the same rows, indented two spaces, under the correct frame for the mode — a timestamped marker for `tick`, the caller's tracked-set line for `snapshot`, and never a leading glyph.
 - Every task in the tracked set carries exactly one bucket from the set **its own runbook declares** — no count is authoritative here, because the set is read from the runbook at run time — or is explicitly reported as unclassifiable with the fields that blocked it.
 - Every id set is complete — no `metrics_sessions` id is missed, and no anchored line-start match is used.
 - No orphan candidate is reported as a verdict, and no collision is reported without its non-terminal carrier count.

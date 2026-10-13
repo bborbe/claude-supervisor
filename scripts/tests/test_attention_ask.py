@@ -41,6 +41,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -859,6 +860,138 @@ class PollTest(unittest.TestCase):
         rc, text = self.poll({"item_id": STORE_ITEM_ID, "state": "open"})
         self.assertEqual(rc, 0)
         self.assertIn("OPEN", text)
+
+
+class TransportFailureReportingTest(unittest.TestCase):
+    """A timeout is a timeout, and it is not a claim about reachability.
+
+    ⚠️ The two-sided control is the point of this class. A test that only checked
+    the new wording appears would pass on a blanket relabel of *every* transport
+    failure — which fixes the reported symptom while destroying the message in
+    the one case it was written for (a genuinely refused connection). So every
+    positive case below is paired with a refused-connection negative, and the
+    pair is what discriminates.
+
+    Measured 2026-10-12 against a listener that accepts and never answers: the
+    old code printed `FAILED: attention store unreachable at
+    http://127.0.0.1:18099 (timed out)` — a reachable store blamed for a network
+    fault, because `socket.timeout` is an `OSError` and shared one clause with it.
+    """
+
+    def post(self, error):
+        def explode(req, timeout=None):
+            raise error
+
+        with mock.patch.object(ask.urllib.request, "urlopen", explode):
+            out = io.StringIO()
+            rc = ask.cmd_post(post_args(), out=out)
+        return rc, out.getvalue()
+
+    def poll(self, error):
+        # `fetch_item` passes a URL string, not a Request — the same asymmetry
+        # `PollTest.poll_error` documents.
+        def explode(url, timeout=None):
+            raise error
+
+        with mock.patch.object(ask.urllib.request, "urlopen", explode):
+            out = io.StringIO()
+            rc = ask.cmd_poll(STORE_ITEM_ID, out=out)
+        return rc, out.getvalue()
+
+    def test_a_post_timeout_names_the_timeout_and_its_value(self):
+        rc, text = self.post(TimeoutError("timed out"))
+        self.assertEqual(rc, 1)
+        self.assertIn("did not answer within", text)
+        self.assertIn(f"{ask.STORE_TIMEOUT:g}s", text)
+        self.assertNotIn("unreachable at", text)
+
+    def test_a_wrapped_post_timeout_is_read_from_the_url_error_reason(self):
+        """The second spelling of the same fact, and it is not hypothetical.
+
+        `urlopen` wraps an `OSError` raised around the request write, so a
+        connect that timed out arrives as `URLError(reason=TimeoutError)` while a
+        response read that timed out raises a bare `TimeoutError` past the
+        wrapper. Both were reproduced on 2026-10-12 — the black hole gave the
+        bare form, an unroutable host (`10.255.255.1`) the wrapped one.
+        """
+        rc, text = self.post(urllib.error.URLError(TimeoutError("timed out")))
+        self.assertEqual(rc, 1)
+        self.assertIn("did not answer within", text)
+        self.assertNotIn("unreachable at", text)
+
+    def test_a_post_timeout_states_the_item_may_exist_and_names_the_retry(self):
+        """The half that matters, and it is measured rather than assumed.
+
+        The store may have committed the card before the client gave up, so a
+        bare "failed" reads as "nothing happened" while a live card sits on the
+        board. Measured 2026-10-12: at a 0.15 s timeout against a store whose
+        create path takes ~0.13 s, the client printed `FAILED` and the store had
+        committed the item.
+        """
+        _, text = self.post(TimeoutError("timed out"))
+        self.assertIn("UNKNOWN", text)
+        self.assertIn("--dedup-key", text)
+
+    def test_a_poll_timeout_does_not_claim_the_item_may_exist(self):
+        """A poll writes nothing, so the same timeout carries no ambiguity.
+
+        The caveat is a fact about the CALLER, not about the failure — which is
+        why it is a parameter. A poll that claimed it would be telling the
+        operator to re-post something it never posted.
+        """
+        rc, text = self.poll(TimeoutError("timed out"))
+        self.assertEqual(rc, 1)
+        self.assertIn("did not answer within", text)
+        self.assertNotIn("unreachable at", text)
+        self.assertNotIn("--dedup-key", text)
+
+    def test_a_refused_post_still_reads_as_unreachable(self):
+        rc, text = self.post(
+            urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("unreachable at", text)
+        self.assertNotIn("did not answer within", text)
+
+    def test_a_refused_poll_still_reads_as_unreachable(self):
+        rc, text = self.poll(
+            urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("unreachable at", text)
+        self.assertNotIn("did not answer within", text)
+
+    def test_a_non_timeout_oserror_keeps_the_unreachable_wording(self):
+        """The split is on the exception, not on "something went wrong"."""
+        rc, text = self.post(OSError("broken pipe"))
+        self.assertEqual(rc, 1)
+        self.assertIn("unreachable at", text)
+        self.assertNotIn("did not answer within", text)
+
+    def test_the_shipped_default_is_ten_seconds(self):
+        """Read from the FILE, not from `ask.STORE_TIMEOUT`.
+
+        ⚠️ The module attribute is whatever the ambient environment made it at
+        import, so asserting it would pass on a developer's
+        `ATTENTION_STORE_TIMEOUT=10` shell and fail in CI — or, worse, pass in CI
+        on a default that was never shipped. The default is a property of the
+        source, so the source is what this reads.
+
+        The raise to 10 s is the mitigation for an O(items) create path that
+        queues on one BoltDB write lock: measured 2.26 s peak under 20 concurrent
+        readers against a 3 s default, under 1.5x headroom.
+        """
+        with open(_SCRIPT, encoding="utf-8") as handle:
+            source = handle.read()
+        found = re.search(
+            r'STORE_TIMEOUT\s*=\s*float\(\s*'
+            r'os\.environ\.get\(\s*"ATTENTION_STORE_TIMEOUT"\s*,\s*"([^"]+)"',
+            source,
+        )
+        self.assertIsNotNone(
+            found, "the STORE_TIMEOUT default is no longer a literal this test can read"
+        )
+        self.assertEqual(found.group(1), "10")
 
 
 class RecordPostedCloserTest(unittest.TestCase):

@@ -8,8 +8,15 @@ PR #173 actually found:
   * a writer losing its invocation — the table would claim a write that never fires;
   * a non-writer carrying the imperative — the file would instruct a vault write it is not
     permitted to make, which is the rule collision the third round found;
-  * the two writers' paragraphs diverging outside the step slot;
   * a non-writer regaining `Bash(vault-cli:*)` while the table still says it holds none.
+
+⚠️ **Since 2026-10-11 both writers resolve through the same step file**
+(`commands/steps/manager-resolve.md` — `manager-loop` became the arm and
+`commands/manager-drive.md` the loop's per-round router), so the guard's cross-copy
+paragraph comparison is a no-op and the test that exercised it was removed with the
+divergence it constructed. The paragraph-level mutations below now target the step file,
+which is where the paragraph lives; the frontmatter-grant mutations still target the
+commands, because the grant loop reads `commands/<name>.md`.
 
 `test_shipped_tree_passes` runs against this repository's real files rather than a fixture,
 so an edit that satisfies the fixture while breaking the shipped tree is still caught.
@@ -24,8 +31,16 @@ import unittest
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-subject-write-scope.py"
 REPO = SCRIPT.parent.parent
 DOC = "docs/subject-resolution.md"
-COMMANDS = [
+#: Files whose *frontmatter grants* the guard reads. These stay the COMMANDS, not the
+#: relocated step files: a step file has no frontmatter and grants nothing, so the grant the
+#: writer check is about lives on the command that reads the step. Kept separate from
+#: COMMANDS so the two roles cannot be conflated by a future bulk rename.
+GRANT_CARRIERS = [
     "commands/manager-loop.md",
+]
+
+COMMANDS = [
+    "commands/steps/manager-resolve.md",
     "commands/manager-drive.md",
     "commands/manager-status.md",
     "commands/manager-verify.md",
@@ -38,9 +53,20 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         (self.root / "docs").mkdir()
-        (self.root / "commands").mkdir()
+        # `parents=True`: one of the carriers is now a step file (`commands/steps/manager-resolve.md`),
+        # since the loop's subject resolution moved there when it became a router. The fixture
+        # mirrors the real layout, so it has to create the nested directory too.
+        (self.root / "commands" / "steps").mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO / DOC, self.root / DOC)
         for rel in COMMANDS:
+            shutil.copy(REPO / rel, self.root / rel)
+        # The *grant* carrier is still the command, even though the writer's paragraph moved
+        # into a step file: the guard's grant loop deliberately reads `commands/<name>.md`
+        # rather than the relocated path, because the `Bash(vault-cli:*)` grant lives on the
+        # command's frontmatter and a step file carries none. The fixture needs it present or
+        # that loop skips silently — and a silently skipped check is what this test exists to
+        # catch.
+        for rel in GRANT_CARRIERS:
             shutil.copy(REPO / rel, self.root / rel)
 
     def run_guard(self):
@@ -65,13 +91,13 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
 
     def test_writer_losing_its_invocation_fails(self):
         self.mutate(
-            "commands/manager-drive.md",
+            "commands/steps/manager-resolve.md",
             "§ *Reconcile the subject's status* **now**",
             "§ *Reconcile the subject's status*",
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("manager-drive.md", result.stderr)
+        self.assertIn("manager-resolve.md", result.stderr)
 
     def test_non_writer_carrying_the_imperative_fails(self):
         self.mutate(
@@ -84,12 +110,6 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("manager-status.md", result.stderr)
-
-    def test_writers_diverging_outside_the_step_slot_fails(self):
-        self.mutate("commands/manager-drive.md", "never again mid-run", "never again this pass")
-        result = self.run_guard()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("manager-drive.md", result.stderr)
 
     def test_non_writer_that_never_names_the_section_fails(self):
         # Assertion (b): a non-writer that says nothing at all reads as a missing step rather
@@ -131,7 +151,9 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertIn("distinct", result.stderr)
 
     def test_missing_command_file_fails(self):
-        (self.root / "commands/manager-drive.md").unlink()
+        # The writers' paragraph now lives in the step file both of them resolve through, so
+        # that is the file whose absence the table check must catch.
+        (self.root / "commands/steps/manager-resolve.md").unlink()
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("named in the table but missing", result.stderr)
@@ -146,7 +168,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         # The one branch with no mutation pinning it: the imperative can survive while the
         # shared marker does not, and the paragraph comparison then has nothing to compare.
         self.mutate(
-            "commands/manager-drive.md",
+            "commands/steps/manager-resolve.md",
             "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.**",
             "**⚠️ Reconcile the subject's status.**",
         )
@@ -178,6 +200,9 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
     def test_writer_with_unreadable_frontmatter_fails(self):
         # The writer-side half of the fail-closed frontmatter branch; the non-writer copy is
         # pinned separately, and the two paths are distinct code.
+        # Mutate the GRANT CARRIER, not the relocated writer: the guard reads grants from
+        # `commands/<name>.md`, so mutating the step file would leave the grant loop skipping
+        # silently and the test would pass for the wrong reason.
         self.mutate("commands/manager-loop.md", "---\n", "--- \n")
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
@@ -186,19 +211,19 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
     def test_step_word_missing_fails(self):
         # The STEP_SLOT fold is asserted to have fired; without this the assertion is itself
         # unchecked, and a third step word would degrade the compare to a strict literal.
-        self.mutate("commands/manager-drive.md", "before the gate", "before the pass")
+        self.mutate("commands/steps/manager-resolve.md", "before the sweep", "before the pass")
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("the fold never fired", result.stderr)
 
     def test_writer_paragraph_losing_its_home_fails(self):
-        # Dropping the pointer from *both* writers would otherwise pass every other assertion.
-        for rel in ("commands/manager-loop.md", "commands/manager-drive.md"):
-            self.mutate(
-                rel,
-                "run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *Reconcile the subject's status*",
-                "run § *Reconcile the subject's status*",
-            )
+        # Dropping the pointer from the shared carrier would otherwise pass every other
+        # assertion, since both writers read the same file.
+        self.mutate(
+            "commands/steps/manager-resolve.md",
+            "run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *Reconcile the subject's status*",
+            "run § *Reconcile the subject's status*",
+        )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("does not name its home", result.stderr)
@@ -216,22 +241,14 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertIn("does not state the reason its frontmatter implies", result.stderr)
 
     def test_table_demoted_to_one_writer_fails(self):
-        # The fail-open: demote a writer's row with the frontmatter-derived reason and drop its
-        # invocation paragraph, and every other assertion still passes while the cross-copy
-        # comparison quietly compares nothing.
+        # Demoting a writer's row must fail rather than let the run report green. The
+        # cross-copy paragraph comparison is a no-op today (both writers resolve through one
+        # step file), so this count assertion is now the whole of the protection — which is
+        # exactly why it is derived from the *table* rather than from the loop's survivors.
         self.mutate(
             DOC,
             "| `/manager-drive` | yes | **yes** |",
             "| `/manager-drive` | yes | **no** — read-only by its own contract |",
-        )
-        self.mutate(
-            "commands/manager-drive.md",
-            "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.** "
-            "Having resolved a subject, run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` "
-            "§ *Reconcile the subject's status* **now** — once the page and the branch are "
-            "known, and before the gate.",
-            "**⚠️ Reconcile the subject's status.** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` "
-            "§ *Reconcile the subject's status* names this command as a non-writer.",
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)

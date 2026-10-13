@@ -1,12 +1,14 @@
-"""check-bucket-clause.py: the per-bucket shape clause must not drift across its three homes.
+"""check-bucket-clause.py: the per-bucket shape clause must not drift across its homes.
 
 The defect this guards against, measured across two days: the clause telling a sweep reader
-what `--write-buckets` accepts lives byte-identical in `commands/manager-loop.md`,
-`manager-drive.md` and `manager-status.md`, and was amended by hand in all three on
-2026-10-03 (the vocabulary half) and again on 2026-10-04 (the shape half) — each time with
-the copies compared by eye.
+what `--write-buckets` accepts lives byte-identical in `commands/steps/manager-sweep.md`
+and `manager-status.md`, and was amended by hand at every site on 2026-10-03 (the vocabulary
+half) and again on 2026-10-04 (the shape half) — each time with the copies compared by eye.
+`commands/manager-drive.md` carried a third copy until 2026-10-11, when it became the loop's
+per-round router; a router holds no executable rule, so that copy was retired and the guard's
+list follows it.
 
-The load-bearing case is `test_indentation_differences_are_allowed`. The three files nest
+The load-bearing case is `test_indentation_differences_are_allowed`. The files nest
 the paragraph to their own depth, so a guard comparing raw lines would fail on a clean tree
 and be switched off within a day. `test_duplicated_clause_fails` is the second: the check is
 keyed on `len(hits) != 1`, so a copy that carries the clause twice must fail rather than
@@ -21,14 +23,13 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-bucket-clause.py"
 
-#: The clause as the three commands carry it, trimmed to the opening words the check anchors on.
+#: The clause as the commands carry it, trimmed to the opening words the check anchors on.
 CLAUSE = (
     "Both doors into the record share one shape check — `--write-buckets` and `--save`'s "
     "read path alike — so **every declared bucket must appear**, each mapping to a list of names."
 )
 COMMANDS = (
-    "commands/manager-loop.md",
-    "commands/manager-drive.md",
+    "commands/steps/manager-sweep.md",
     "commands/manager-status.md",
 )
 
@@ -78,7 +79,7 @@ class TestBucketClauseGuard(Base):
         self.assertIn(COMMANDS[1], result.stderr)
 
     def test_missing_clause_fails(self):
-        self.write(COMMANDS[2], "\n---\ntitle: x\n---\n\nNo clause here.\n")
+        self.write(COMMANDS[1], "\n---\ntitle: x\n---\n\nNo clause here.\n")
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("carries the clause 0 times", result.stderr)

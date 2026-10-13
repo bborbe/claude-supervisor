@@ -143,9 +143,12 @@ def read_live(directory, ttl=TTL_SECONDS, now=None):
                         "age_seconds": round(age, 1),
                         "pid": meta.get("pid"),
                         # `mode` is carried so a caller can name the channel that answered —
-                        # `worker-sessions.py` reports it as the row's `status`, and a reader
-                        # that dropped it left that column permanently `None` while the mjs
-                        # twin read the real value off the stamp file. Descriptive only.
+                        # it was `worker-sessions.py`'s `status` column until 2026-10-09, when
+                        # both twins moved to the session-heartbeat endpoint and that column
+                        # became the store row's `source`. ⚠️ The second half of this note was
+                        # true and is not any more: it read "while the mjs twin read the real
+                        # value off the stamp file", and neither twin reads a stamp for it now.
+                        # Kept, because a caller naming the channel still needs the field.
                         "mode": meta.get("mode"),
                         "state": "unknown",
                     }

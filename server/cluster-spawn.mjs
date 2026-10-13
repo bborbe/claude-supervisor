@@ -28,6 +28,7 @@
 // Nothing here reads the filesystem, the environment, or the clock.
 
 import { randomUUID } from 'node:crypto'
+import { Agent, fetch as undiciFetch } from 'undici'
 
 // Verbatim from `interactive/session-id.go` (`sessionIDPattern`): one to 64 characters, the
 // first of which is not `-`. A `randomUUID` satisfies it; a hand-built id may not, which is
@@ -66,6 +67,141 @@ export const AUTH_SCHEME = 'Bearer '
 // to wait for. Bounded rather than unbounded so a wedged pod costs one error, not a manager
 // session stuck inside a tool call.
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
+
+// ⚠️ **Without this the module's 10-minute bound is unreachable and the real ceiling is 5.**
+//
+// Node's `fetch` IS undici, whose `headersTimeout` defaults to 300 000 ms. `POST /prompt` sends
+// no response headers until the turn ends, so undici aborts a HEALTHY long turn at 300 s and the
+// caller sees `UND_ERR_HEADERS_TIMEOUT` — measured 2026-10-12 against a local stub that held its
+// headers 310 s: 300 931 ms on Node 26.11.1 (undici 8.11.2) and 300 966 ms on Node 22.22.3
+// (undici 6.24.1). The client's disconnect then cancels the turn in the pod
+// (`prompt intake failed: turn cancelled: context canceled`), so the answer AND the work are lost.
+//
+// The bound sits ABOVE `DEFAULT_TIMEOUT_MS` on purpose: this module's own `AbortController` stays
+// the authority, because it produces the readable `no answer within <timeoutMs>ms`, while
+// undici's is a backstop for a socket that dies without a signal. Equal bounds would make which
+// one fires a race.
+export const TRANSPORT_TIMEOUT_SLACK_MS = 5 * 1000
+
+// The dispatcher every spawn sends through, created on first use and reused.
+//
+// ⚠️ **`fetch` and `Agent` must come from the SAME copy of undici**, which is why this module
+// imports both from the package instead of using the global `fetch`. A dispatcher is honoured
+// only by the fetch sharing its undici instance, and Node exposes no `node:undici` builtin — so a
+// package `Agent` handed to the global fetch mixes majors on whichever runtime bundles a
+// different one. This fleet is split: 24 of 33 live supervisor servers run Node 26 (bundled
+// undici 8.11.2) and 9 run Node 22 (bundled 6.24.1), chosen by the launching session's PATH
+// because `package.json`'s `start` script calls bare `node`.
+//
+// One instance rather than one per request: an `Agent` owns a connection pool, so a per-request
+// agent leaks a socket per spawn unless destroyed — and both the retry loop and the body read
+// need it alive anyway.
+let clusterDispatcher
+
+// The dispatcher for a spawn, created on first use.
+//
+// Sized from `DEFAULT_TIMEOUT_MS`, which is what every production caller uses. A caller that
+// raises `timeoutMs` above it MUST inject its own `dispatcher`, or undici's bound would fall
+// below the deadline it exists to sit above — reintroducing this very defect.
+export function clusterTransportDispatcher() {
+  clusterDispatcher ??= new Agent({
+    headersTimeout: DEFAULT_TIMEOUT_MS + TRANSPORT_TIMEOUT_SLACK_MS,
+    bodyTimeout: DEFAULT_TIMEOUT_MS + TRANSPORT_TIMEOUT_SLACK_MS,
+  })
+  return clusterDispatcher
+}
+
+// How many times one spawn tries the service when the failure is a CONNECTION failure, and how
+// long it waits between tries.
+//
+// ⚠️ **This exists because the failure it retries was observed and then stopped reproducing.**
+// On 2026-10-11 a cluster spawn failed three times in a row with `fetch failed` between 19:30
+// and 20:05, while every shell probe to the same host, port and path answered in under 10 ms —
+// and at 20:24 the identical call succeeded twice, full round trip. An intermittent connection
+// failure that kills the spawn outright is the wrong shape for a path a manager relies on, and
+// the caller cannot tell it from a permanent refusal: undici reports both as one opaque
+// `TypeError: fetch failed`.
+//
+// The retry is deliberately NARROW. Only a connection-level failure is retried; an `AbortError`
+// (this module's own timeout) and every HTTP response — 401 above all — return on the first
+// attempt. A retry around a refusal would turn one honest "the token does not match" into three
+// identical refusals and three times the wait, which is the failure this bound exists to avoid
+// causing rather than to cause.
+export const CLUSTER_CONNECT_ATTEMPTS = 3
+export const CLUSTER_CONNECT_BACKOFF_MS = 250
+
+// The codes worth a second try — and every one of them is a PRE-DELIVERY failure: the request
+// never reached the service, so a retry sends it for the first time.
+//
+// ⚠️ **The post-delivery codes are deliberately absent, and that is the load-bearing decision
+// here.** `POST /prompt` is not idempotent — it runs a turn — so a connection that dies AFTER
+// the request was delivered may already have started one, and a retry would run a SECOND turn on
+// the same session id, silently and with nothing in the response to reveal it. That is not
+// hypothetical: the 16:1x failure on this path is exactly that shape, with the pod log showing
+// `prompt intake: bytes=81` while the client saw a failure. `ECONNRESET`, `EPIPE`,
+// `UND_ERR_SOCKET` ("other side closed") and `UND_ERR_HEADERS_TIMEOUT` are all reachable after
+// delivery, so none is retried: a duplicate turn is worse than one honest failure the caller can
+// re-issue itself.
+//
+// ⚠️ **`UND_ERR_HEADERS_TIMEOUT` is excluded for the post-delivery reason above, and NOT because
+// a header-less server is necessarily wedged** — that reading was wrong, and is corrected here.
+// This service holds response headers for the whole turn by design, so this code is exactly what
+// a HEALTHY long turn used to produce at undici's 300 s default; see `TRANSPORT_TIMEOUT_SLACK_MS`.
+// It stays unretried because it is reachable only after delivery and `POST /prompt` is not
+// idempotent. With the transport bound now raised above `DEFAULT_TIMEOUT_MS` it should not fire
+// at all — and if it does, the pod itself has stopped answering.
+//
+// `ETIMEDOUT` stays because at this layer it is the OS connect timeout — the SYN never got an
+// answer, so nothing was delivered. `EAI_AGAIN` is in on purpose: a resolver that did not answer
+// in time is exactly the transient case, while a permanent `ENOTFOUND` costs two extra attempts
+// (250 ms + 500 ms) and still fails.
+const CONNECTION_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+])
+
+// Whether this error is worth another attempt.
+//
+// Keyed on the CODE, never on undici's wrapper. `TypeError: fetch failed` is thrown for every
+// transport failure including permanent ones, so matching that wrapper alone retries a settled
+// answer: a request to a blocked port reports `fetch failed — bad port`, and a predicate that
+// matched the wrapper spent three attempts and 750 ms reaching the same verdict (measured
+// 2026-10-11 against `http://127.0.0.1:9`). The code is what makes the question decidable, and
+// an unrecognised one is treated as permanent — the cause is reported either way, so an
+// unidentifiable failure is diagnosable on its next occurrence rather than guessed at here.
+//
+// `AbortError` is excluded first: it is this module's own timeout firing, and retrying a
+// service that did not answer inside ten minutes spends thirty to learn the same thing.
+function isConnectionFailure(error) {
+  if (!error || error.name === 'AbortError') return false
+  // `errno` is deliberately NOT consulted: Node sets it to a number (`-111`) while every member
+  // of the set above is a symbolic name, so a `String(errno)` comparison could never match —
+  // it only read as if it could.
+  const code = error.code ?? error.cause?.code
+  return Boolean(code) && CONNECTION_ERROR_CODES.has(String(code))
+}
+
+// The connection-level detail undici puts on `error.cause` — the detail this module used to
+// discard, and the reason a cluster spawn could fail three times and say only `fetch failed`.
+// Rendered rather than JSON-stringified: this lands in a manager session's context, and
+// `ECONNREFUSED 192.168.178.34:443` is the whole of what it needs.
+//
+// Nothing here can carry the credential: the cause describes the socket, and the token only
+// ever travels in a request header.
+function describeConnectionCause(error) {
+  const cause = error?.cause
+  if (!cause || typeof cause !== 'object') return ''
+  const code = cause.code ?? cause.errno
+  const address = cause.address ? `${cause.address}${cause.port ? `:${cause.port}` : ''}` : ''
+  const detail = [code, address].filter(Boolean).join(' ')
+  if (detail) return detail
+  return typeof cause.message === 'string' && cause.message ? cause.message : ''
+}
 
 // How much of the child's answer travels back to the caller. The answer is a whole turn's
 // text and its reader is a manager session whose context it lands in, so it is bounded
@@ -316,8 +452,18 @@ export async function startClusterSession({
   prompt,
   sessionId,
   authToken,
-  fetchImpl = fetch,
+  // ⚠️ **undici's own fetch, never the global one** — the `dispatcher` below is an `undici`
+  // instance and is honoured only by the fetch that shares its copy. See
+  // `clusterTransportDispatcher` for why that pairing is load-bearing on this fleet.
+  fetchImpl = undiciFetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  // Injected by the regression test, which needs a transport bound it can observe inside a test's
+  // lifetime. Defaults to the shared instance above.
+  dispatcher = clusterTransportDispatcher(),
+  // Injected so the retry's backoff costs a test nothing. This is the only clock the function
+  // touches, and a test that had to sit through 250 ms twice would cost more than the
+  // behaviour it pins is worth.
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const resolved = resolveClusterBaseUrl(baseUrl)
   if (resolved.error) return { error: resolved.error }
@@ -334,25 +480,44 @@ export async function startClusterSession({
   const auth = resolveAuthToken(authToken)
   if (auth.error) return { error: auth.error }
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
   let response
-  try {
-    response = await fetchImpl(`${resolved.baseUrl}${PROMPT_PATH}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'text/plain; charset=utf-8',
-        [SESSION_HEADER]: sessionId,
-        [AUTH_HEADER]: `${AUTH_SCHEME}${auth.token}`,
-      },
-      body: prompt,
-      signal: controller.signal,
-    })
-  } catch (error) {
-    const why = error?.name === 'AbortError' ? `no answer within ${timeoutMs}ms` : error?.message || String(error)
-    return { error: `could not reach the cluster service at ${resolved.baseUrl}${PROMPT_PATH}: ${why}` }
-  } finally {
-    clearTimeout(timer)
+  // The retry lives around the fetch alone, never around the body read or the status handling:
+  // a 401 or a malformed body is a settled answer, and re-sending it would spend three
+  // identical refusals to reach the same one.
+  for (let attempt = 1; ; attempt += 1) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      response = await fetchImpl(`${resolved.baseUrl}${PROMPT_PATH}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          [SESSION_HEADER]: sessionId,
+          [AUTH_HEADER]: `${AUTH_SCHEME}${auth.token}`,
+        },
+        body: prompt,
+        signal: controller.signal,
+        // The whole of this change: without a dispatcher undici's own 300 s `headersTimeout`
+        // fires first on any turn longer than five minutes, and the answer is lost.
+        dispatcher,
+      })
+      break
+    } catch (error) {
+      // Cleared here rather than only in the `finally`: this attempt is over, and leaving its
+      // timer armed would abort a controller nothing is waiting on during the backoff.
+      clearTimeout(timer)
+      if (isConnectionFailure(error) && attempt < CLUSTER_CONNECT_ATTEMPTS) {
+        await sleepImpl(CLUSTER_CONNECT_BACKOFF_MS * attempt)
+        continue
+      }
+      const why =
+        error?.name === 'AbortError'
+          ? `no answer within ${timeoutMs}ms`
+          : [error?.message || String(error), describeConnectionCause(error)].filter(Boolean).join(' — ')
+      return { error: `could not reach the cluster service at ${resolved.baseUrl}${PROMPT_PATH}: ${why}` }
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   let body = ''

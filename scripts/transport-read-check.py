@@ -71,6 +71,11 @@ SITE_LIST = {
     # the three states below. It is listed here so the mechanism and this enumeration agree.
     ("plugin-version-census.py", "wezterm_panes"), ("plugin-version-census.py", "_pid_ttys"),
     ("plugin-version-census.py", "reload_pane"),
+    # added 2026-10-10 — `restart-worker.py`'s live-argv read: the `--mcp-config` path the
+    # worker was launched with, read before the kill because the registry carries no argv.
+    # It returns `None` for a failed query, never an empty argv, and an unreadable argv can
+    # only fall back to the load-path check, never turn a refusal into an accept.
+    ("restart-worker.py", "worker_argv"),
     ("who-needs-me.py", "main"), ("who-needs-me.py", "wezterm_panes"),
     # in-repo callers that hold no transport call of their own
     ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change

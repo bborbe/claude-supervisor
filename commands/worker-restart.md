@@ -16,7 +16,7 @@ Collapse kill → resume → re-orient into one verb. The Fleet Manager did this
 
 **This command is the orchestrator. It is not a second kill mechanism.** The kill+resume leg belongs to `scripts/restart-worker.py`, which carries the single-pid kill, the `pkill`/`killall` ban, the raw `wezterm --resume` recipe *including its `--cwd`*, and seven target refusals. Calling it is the whole point: a second copy of the resume recipe is how the fleet ends up with two mechanisms that disagree. What this file owns is what the script does not — the pre-kill worktree probe, the cause-of-death branch, the conditional message, and the report.
 
-**The two-axis contract is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker — read it there, do not restate it here.** Liveness picks the path; cause of death picks whether anything is typed afterwards. That section is the single home of the rule.
+**The two-axis contract is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker — read it there, do not restate it here.** The row's declared `mode:` picks the path first, liveness then decides only among the rows path A can serve, and cause of death picks whether anything is typed afterwards. That section is the single home of the rule.
 
 ## Argument
 

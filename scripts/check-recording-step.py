@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Every manager command that can run the recording block must reach it from its own body.
 
-`docs/subject-resolution.md` § Recording is the rule's one home. Three commands resolve a
-subject **and** hold the tools to run its block — `manager-loop`, `manager-status`,
-`manager-drive`. Each must carry the step in its own body, because a pointer alone is
+`docs/subject-resolution.md` § Recording is the rule's one home. Every command that resolves
+a subject **and** holds the tools to run its block — `manager-loop`, `manager-status`,
+`manager-drive` — must reach the step from the file it reads, because a pointer alone is
 exactly what failed: the manager reads the command it is about to run, not the document
 that command delegates to, and `commands/manager-loop.md` carried **0** occurrences of
 `worker-manager` while the write sat one hop away in the doc.
@@ -15,16 +15,15 @@ commands each carried the recording contract, which is why the rules live in one
 
 Three assertions, all required:
 
-  (a) each command **carries the step** — the marker paragraph is present, and it names
+  (a) each carrier **carries the step** — the marker paragraph is present, and it names
       the file it writes (`~/.claude/state/worker-manager/<session-id>.json`)
   (b) each step **references the home** for the rules — a pointer, not a copy of them
-  (c) the three step blocks are **identical apart from three enumerated slots** — the point
-      in each command's own flow where the step runs (`the sweep` / `the report` / `the
-      gate`), the verb in the read-back line (`arm` / `report` / `drive`), and the moment
-      the read-back names (`arm-time` for the command that arms a loop, `read-time` for the
-      two that do not). All three are command-specific by design and carry real
-      information; everything else must match, so a fourth divergence cannot appear
-      silently
+  (c) the step blocks are **identical apart from three enumerated slots** — the point
+      in each command's own flow where the step runs (`the sweep` / `the report`), the verb
+      in the read-back line (`arm` / `report`), and the moment the read-back names
+      (`arm-time` for the command that arms a loop, `read-time` for the one that does not).
+      All three are command-specific by design and carry real information; everything else
+      must match, so a further divergence cannot appear silently
 
 `manager-verify` is excluded **by design**, not by omission: its trimmed `allowed-tools`
 omits `Bash(python3:*)`, `Bash(mkdir:*)` and `Bash(vault-cli:*)`, so it can run neither
@@ -45,10 +44,23 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # Commands that resolve a subject AND can run the recording block.
+#
+# ⚠️ `commands/manager-loop.md` was replaced by `commands/steps/manager-resolve.md` on 2026-10-11,
+# when the loop was restructured into a router with per-round step files. The recording step
+# is a *resolve-time* step, so it moved with the rest of subject resolution — and the check
+# follows the rule rather than the file it used to sit in. The block must stay INTACT in its
+# new home: `step_block()` reads from the marker to the next `## ` heading, so splitting the
+# marker from the two lines beneath it breaks the comparison even though no text was lost.
+# The block is therefore the tail of `resolve.md`, where it runs to EOF.
+#
+# ⚠️ `commands/manager-drive.md` left this set on the same day, for the same reason and one
+# step further out: it became the loop's per-round **router**, and its subject resolution is
+# now the very same `commands/steps/manager-resolve.md`. It no longer carries a recording
+# block of its own, and the step it reaches is already checked here — so listing it would
+# demand a second copy of a block whose home is the resolve step.
 COMMANDS = [
-    "commands/manager-loop.md",
+    "commands/steps/manager-resolve.md",
     "commands/manager-status.md",
-    "commands/manager-drive.md",
 ]
 
 # Commands that resolve a subject and must NOT carry the step, with the reason.
@@ -71,8 +83,12 @@ def step_block(text: str, path: str) -> str | None:
 
 
 # The three slots that are command-specific by design. Everything else in the block must
-# match across the three commands; these are folded to a placeholder before comparing, so
-# a fourth divergence — the thing that actually drifts — still fails the check.
+# match across the carriers; these are folded to a placeholder before comparing, so
+# a further divergence — the thing that actually drifts — still fails the check.
+#
+# ⚠️ The alternations keep `gate` and `drive` even though no current carrier uses them:
+# `manager-drive` left this set on 2026-10-11 when it became the loop's router, and a
+# re-added carrier must still normalise rather than fail as an unexplained divergence.
 SLOTS = [
     (re.compile(r"before the (sweep|report|gate)\b"), "before the <STEP>"),
     (re.compile(r"Never (arm|report|drive) quietly\b"), "Never <VERB> quietly"),

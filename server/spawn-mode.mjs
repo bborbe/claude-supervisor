@@ -49,7 +49,7 @@ function stringSources({ env, file }) {
 // told them to set is ignored. A key that is read while being reported as unread is worse
 // than an unknown key, because it argues the operator out of a working configuration.
 const KNOWN_TOP_LEVEL = ['spawn', 'cluster']
-const KNOWN_SPAWN_KEYS = ['mode', 'maxConcurrent', 'maxConcurrentHard']
+const KNOWN_SPAWN_KEYS = ['mode', 'maxConcurrent', 'maxConcurrentHard', 'maxStartsPerMinute', 'maxManagers', 'maxManagersHard']
 const KNOWN_CLUSTER_KEYS = ['url', 'token']
 
 export function unknownKeyWarnings(file, path) {
@@ -131,7 +131,8 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
   return { mode: 'interactive', source: 'default' }
 }
 
-// WHERE a worker is created — this Mac, or the nuke cluster — and the argument that decided it.
+// WHERE a worker is created — this Mac, the nuke cluster, or a per-task container/pod — and
+// the argument that decided it.
 //
 // This is a second question from `resolveSpawnMode`, not a third answer to it, and keeping
 // them apart is the whole point. "Which way does this worker open" (a tab the operator can
@@ -141,16 +142,28 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
 // default, so a `spawn.mode: cluster` in `~/.config/claude-supervisor/config.json` able to
 // default the entire fleet into the cluster is exactly the shape this split forecloses.
 //
-// ⚠️ So `cluster` is deliberately NOT a `SPAWN_MODES` value. Adding it there would make it
-// env- and config-selectable for free, which is the failure above arriving silently — the
-// list has no notion of "per-call only", and every future reader of it would reasonably
+// ⚠️ So none of `cluster`, `docker` or `k8s` is a `SPAWN_MODES` value. Adding one there would
+// make it env- and config-selectable for free, which is the failure above arriving silently —
+// the list has no notion of "per-call only", and every future reader of it would reasonably
 // assume otherwise.
+//
+// ⚠️ `docker` and `k8s` are the A2A worker-controller targets (2026-10-13): `docker` asks the
+// controller for one container per task on this Mac, `k8s` for one pod per task in nuke dev,
+// and both then reach the worker DIRECTLY over A2A, never through the controller. They are
+// distinct from `cluster`, which is the shared long-lived `claude-interactive` pod and is
+// untouched by them.
+//
+// ⚠️ Being listed here says the CALL is well-formed, NOT that the spawn can be carried out.
+// `IMPLEMENTED_SPAWN_TARGETS` below is the second list, and the dispatch consults it. Without
+// that split, `docker` and `k8s` would have to stay out of this list until their client
+// shipped, and a caller would be told "not a spawn target" — which names the wrong problem,
+// since the target is perfectly well-formed and merely unimplemented.
 //
 // An unknown value REFUSES rather than falling back, for the reason `resolveSpawnMode`
 // refuses: a spawn that ignored the caller's target would create the worker somewhere the
 // caller did not ask for, and where a worker was created is otherwise discovered only by
 // noticing it. Falling back to `local` would look exactly like a working call.
-export const SPAWN_TARGETS = ['local', 'cluster']
+export const SPAWN_TARGETS = ['local', 'cluster', 'docker', 'k8s']
 
 // The target this spawn runs under, plus the source that decided it — or `{error}` for a
 // value that is not a known target.
@@ -171,6 +184,48 @@ export function resolveSpawnTarget({ target } = {}) {
     }
   }
   return { target, source: 'argument' }
+}
+
+// The targets a spawn can actually be CARRIED OUT for — the subset of `SPAWN_TARGETS` with a
+// shipped client.
+//
+// ⚠️ THE TWO LISTS ARE NOT THE SAME, AND COLLAPSING THEM IS THE BUG THIS EXISTS TO PREVENT.
+// `SPAWN_TARGETS` answers "is this a target at all" and is what the tool schema publishes;
+// this answers "does anything implement it". `docker` and `k8s` were in the first and not the
+// second while the A2A worker-controller client was unbuilt; they joined this list on 2026-10-13
+// when the dispatch branch that creates their worker shipped BESIDE them, which is the rule two
+// paragraphs down. Without the distinction a spawn
+// for a listed-but-unimplemented target reaches the LOCAL path in `supervisor.mjs` — which is
+// the branch that runs when the target is `local` — so `target: "docker"` would open an
+// ordinary local worker and report success. That is the failure the header above names: a
+// spawn that fell back to `local` "would look exactly like a working call", and where the
+// worker was created is otherwise discovered only by noticing it.
+//
+// ⚠️ ADDING A TARGET HERE WITHOUT A DISPATCH BRANCH IN `supervisor.mjs` REOPENS EXACTLY THAT
+// HOLE. A backend ships as two edits in one change: the branch that creates the worker, and
+// the entry here. Removing an entry is never a way to retire a backend — it would silently
+// reroute that target to `local` rather than refusing it.
+export const IMPLEMENTED_SPAWN_TARGETS = ['local', 'cluster', 'docker', 'k8s']
+
+// Whether a resolved target can be carried out — a refusal string, or `null` to allow it.
+//
+// Pure and exported for the reason `concurrentLimitRefusal` is: `supervisor.mjs` connects a
+// stdio server at load and so cannot be imported by a test at all, and this is the guard
+// standing between a listed target and the local fall-through. A rule that lives only in that
+// file ships uncovered.
+//
+// Takes the RESOLVED `{ target }` rather than the raw argument, so it runs after
+// `resolveSpawnTarget` has already refused anything that is not a target at all. This answers
+// the second question only and never repeats the first.
+export function spawnTargetImplementationRefusal({ target } = {}) {
+  if (IMPLEMENTED_SPAWN_TARGETS.includes(target)) return null
+  return (
+    `target ${JSON.stringify(target)} is a known spawn target but has no client yet — the A2A ` +
+    `worker-controller path is not implemented, so this spawn is REFUSED rather than falling ` +
+    `through to the local path, which would open an ordinary local worker under a call that ` +
+    `asked for a container or a pod and would look exactly like a working call. Use ` +
+    `target: "local" or target: "cluster" until the controller ships.`
+  )
 }
 
 // How many workers the fleet may hold open at once — one value, fleet-wide.
@@ -228,7 +283,7 @@ export const DEFAULT_MAX_CONCURRENT_HARD = 50
 // Extracted so the soft and hard halves cannot drift in how they validate — the same reason
 // the header gives for checking every source rather than only the winner: a rule restated
 // per key is a second rule a reader cannot tell from the first.
-function resolveThreshold({ env, fileValue, envName, key, path, fallback }) {
+function resolveThreshold({ env, fileValue, envName, key, path, fallback, noun = 'concurrent-worker' }) {
   const sources = []
   if (env !== undefined && env !== null && env !== '') sources.push({ source: 'env', value: env })
   if (fileValue !== undefined && fileValue !== null && fileValue !== '') {
@@ -244,7 +299,7 @@ function resolveThreshold({ env, fileValue, envName, key, path, fallback }) {
     if (!Number.isInteger(parsed) || parsed < 0) {
       return {
         error:
-          `${where} is ${JSON.stringify(value)}, which is not a concurrent-worker limit — refusing to spawn ` +
+          `${where} is ${JSON.stringify(value)}, which is not a ${noun} limit — refusing to spawn ` +
           `rather than guessing, since a limit that silently governs nothing is discovered only by the load it ` +
           `was meant to bound. Valid values: a non-negative integer (0 for unlimited), or omit ` +
           `the key for the default of ${fallback}.`,
@@ -397,6 +452,106 @@ export function concurrentLimitRefusal({ limits, liveCount, operatorNamed = fals
       `held-on-limit; it is picked up next sweep. An OPERATOR-NAMED task may still open here — this one was ` +
       `not named, so it is refused. Raise spawn.maxConcurrent in ${configFile}, or ` +
       `set it to 0 for unlimited.`
+    )
+  }
+  return null
+}
+
+// The fleet-wide MANAGER cap — a second pair of thresholds, over a different population.
+//
+// ⚠️ OPERATOR DESIGN 2026-10-10 (via the Fleet Manager session): soft 3 / hard 5, the Fleet
+// Manager excluded. Managers burn tokens every tick and are the fleet's highest-context
+// sessions, so they get their own, much smaller pair rather than sharing the worker one. This is
+// NOT the per-manager SPAWN cap the 2026-09-27 ruling removed — that bounded how many workers
+// one manager could open; this bounds how many managers run at once.
+//
+// Exported for the same reason as the worker defaults: one number, every call site.
+export const DEFAULT_MAX_MANAGERS = 3
+export const DEFAULT_MAX_MANAGERS_HARD = 5
+
+// The manager pair, resolved and validated as a pair — same rules as `resolveMaxConcurrent`:
+// every source checked, `0` on the soft key switches BOTH off, `0` on the hard key refused, and
+// a ceiling beneath its floor refused. Config file only: the operator's design names
+// `spawn.maxManagers` / `spawn.maxManagersHard` and no environment variable.
+export function resolveMaxManagers({ file, path = 'the supervisor config' } = {}) {
+  const noun = 'concurrent-manager'
+  const soft = resolveThreshold({
+    fileValue: file?.spawn?.maxManagers,
+    key: 'maxManagers',
+    path,
+    fallback: DEFAULT_MAX_MANAGERS,
+    noun,
+  })
+  if (soft.error) return soft
+  if (soft.limit === null) {
+    return { limit: null, hardLimit: null, source: soft.source, hardSource: soft.source }
+  }
+
+  const hard = resolveThreshold({
+    fileValue: file?.spawn?.maxManagersHard,
+    key: 'maxManagersHard',
+    path,
+    fallback: DEFAULT_MAX_MANAGERS_HARD,
+    noun,
+  })
+  if (hard.error) return hard
+
+  if (hard.limit === null) {
+    return {
+      error:
+        `"spawn.maxManagersHard" in ${path} is 0, which is not a hard concurrent-manager limit — refusing ` +
+        `to spawn rather than removing the ceiling while the soft cap stays in force. Set a non-negative ` +
+        `integer above the soft cap, or use the off switch: "spawn.maxManagers": 0 disables BOTH thresholds.`,
+    }
+  }
+
+  if (hard.limit < soft.limit) {
+    return {
+      error:
+        `the hard concurrent-manager limit is below the soft one: "spawn.maxManagers" resolves to ` +
+        `${soft.limit} (source: ${soft.source}) but "spawn.maxManagersHard" resolves to ${hard.limit} ` +
+        `(source: ${hard.source}) — refusing to spawn rather than running under a ceiling beneath its own ` +
+        `floor. Raise spawn.maxManagersHard in ${path} to at least ${soft.limit}, or lower spawn.maxManagers.`,
+    }
+  }
+
+  return { limit: soft.limit, hardLimit: hard.limit, source: soft.source, hardSource: hard.source }
+}
+
+// The phrase that opens a hard-cap manager refusal. Exported so the open path's card trigger
+// (`commands/open.md` § Step 1.5) and the tests name one string rather than restating it.
+export const MANAGER_FLEET_FULL = 'the manager fleet is FULL'
+
+// Whether a `role: manager` spawn may proceed — a refusal string, or `null` to allow it.
+// Same shape and the same ordering as `concurrentLimitRefusal`, for the same reasons: hard cap
+// first, `liveCount === null` refuses, `operatorNamed` is the caller's assertion.
+export function managerLimitRefusal({ limits, liveCount, operatorNamed = false, configFile }) {
+  if (limits.error) return limits.error
+  if (limits.limit === null) return null
+
+  if (liveCount === null) {
+    return (
+      `the concurrent-manager limit is set to ${limits.limit} but the live-manager count could not be ` +
+      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. The ` +
+      `count comes from scripts/fleet-board.py --json, which must run and parse.`
+    )
+  }
+
+  if (limits.hardLimit !== null && liveCount >= limits.hardLimit) {
+    return (
+      `${MANAGER_FLEET_FULL}: ${liveCount} live managers (Fleet Manager excluded) against a hard cap of ` +
+      `${limits.hardLimit} — "spawn.maxManagersHard" (source: ${limits.hardSource}) — so nothing opens, not ` +
+      `even an operator-named manager. Raise spawn.maxManagersHard in ${configFile}, or set ` +
+      `spawn.maxManagers to 0 for unlimited.`
+    )
+  }
+
+  if (liveCount >= limits.limit && !operatorNamed) {
+    return (
+      `the concurrent-manager limit is reached: ${liveCount} live managers (Fleet Manager excluded), ` +
+      `${limits.limit} allowed — "spawn.maxManagers" (source: ${limits.source}). An OPERATOR-NAMED manager ` +
+      `may still open here — this one was not named, so it is refused. Raise spawn.maxManagers in ` +
+      `${configFile}, or set it to 0 for unlimited.`
     )
   }
   return null
