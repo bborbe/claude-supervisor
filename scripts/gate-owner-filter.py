@@ -172,6 +172,7 @@ as "nothing to filter" rather than "the filter is broken".
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import shlex
@@ -235,6 +236,38 @@ PRODUCER = (
     os.path.join(os.path.dirname(os.path.realpath(__file__)), "who-needs-me.py")
     + " --section needs-you"
 )
+
+# ⚠️ THE ARM'S MEMORY, AND WHY IT IS A FILE RATHER THAN `previous = None`. The loop
+# below is a change-detector WITHIN an arm; across arms it had no memory at all, so
+# the first poll of every arm treated every held gate as newly entered. Measured
+# 2026-10-12 on the Fleet Manager: panes 1065, 1151, 1175, 1094, 1193, 1191, 1196
+# re-reported ~8 times, each a full manager turn over a ~600k-token context, for no
+# state change. A `Monitor` is bounded at 30 min and re-armed, so the cost recurs
+# every arm for as long as a gate stays open.
+#
+# Keyed by `--self`, so two managers never share one file: this is the watcher's own
+# record of what IT has already surfaced, not a fleet-wide ledger.
+FEED_STATE_DIR = os.environ.get("GATE_FEED_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/gate-feed"
+)
+
+# ⚠️ THE BACKSTOP, AND WHY A BARE "EMIT ONCE" WOULD BE A SILENT STALL. Persisting
+# the emit is exactly the shape that loses a message: the arm prints a pane, the
+# `Monitor`'s notification is lost (the arm died between the write and the manager's
+# turn), and a state file that records it as delivered never retries -- dedup plus
+# event-only delivery, with nothing left to re-drive it. The re-arm used to be that
+# backstop (`65 Runbooks/Manager Session.md`, both copies: *"the re-arm is the
+# documented backstop for a wake that was lost"*), and persisting the state removes
+# it. `manager-attention-watch.py`'s `AGED` rung is NOT a full replacement: it fires
+# on the TRACKED set, while this filter's kept set is wider -- unowned panes, a dead
+# spawner's panes, peer non-managers -- and a gate in that residual class would have
+# no re-drive at all.
+#
+# So a still-open gate is re-emitted once its stored entry is older than this, which
+# restores the backstop at a bounded cost: one turn per gate per hour instead of one
+# per <=30-minute arm. `--reemit-after 0` disables the re-emit and accepts the
+# residual class going unre-driven.
+REEMIT_SECONDS = int(os.environ.get("GATE_FEED_REEMIT_SECONDS") or 3600)
 
 
 def load_ledger(ledger_dir=LEDGER):
@@ -402,6 +435,21 @@ def log_items(state_dir=STATE):
     return items
 
 
+def newest_item_for_pane(pane, items):
+    """The newest event-log record for `pane`, or None.
+
+    Split out of `session_for_pane` so the fingerprint reads the SAME record the
+    session hop resolves. Taking the session from one record and the gate's text
+    from another would let a pane's identity and its text disagree — and the
+    fingerprint is exactly the thing that must not do that.
+    """
+    hits = [r for r in items if str(r.get("pane")) == str(pane)]
+    if not hits:
+        return None
+    hits.sort(key=lambda r: r.get("ts") or 0)
+    return hits[-1]
+
+
 def session_for_pane(pane, items):
     """The session that raised the gate on `pane`, or None.
 
@@ -410,11 +458,120 @@ def session_for_pane(pane, items):
     Absent stays absent: a pane with no item at all returns None and the caller
     treats it as unowned, which is a real answer rather than a failure.
     """
-    hits = [r for r in items if str(r.get("pane")) == str(pane)]
-    if not hits:
+    record = newest_item_for_pane(pane, items)
+    if record is None:
         return None
-    hits.sort(key=lambda r: r.get("ts") or 0)
-    return str(hits[-1].get("session_id") or "") or None
+    return str(record.get("session_id") or "") or None
+
+
+def gate_text(record):
+    """The gate's own words, read from the record the pane resolves to.
+
+    `detail` is the payload the feed's own rows render from, so it is the gate's
+    identity in the terms `who-needs-me.py` publishes. The fallbacks exist because
+    a record need not carry every field — and a gate whose text cannot be read
+    still has an identity (its pane), just a coarser one.
+    """
+    if not record:
+        return ""
+    detail = record.get("detail")
+    if detail:
+        return str(detail)
+    questions = record.get("questions")
+    if questions:
+        return " ".join(str(q) for q in questions)
+    return str(record.get("kind") or "")
+
+
+def normalise(text):
+    """Collapse whitespace so a re-rendered gate keeps one identity.
+
+    The same rule `notify-gate.py` applies to its own gate key, and for the same
+    reason: a gate re-rendered with different wrapping is the SAME gate, and a
+    fingerprint taken over the raw text would read it as new and re-wake the
+    manager for a gate it has already been told about.
+    """
+    return " ".join(str(text).split())
+
+
+def gate_fingerprint(pane, items):
+    """A stable identity for the gate on `pane`: its pane id plus its own text.
+
+    ⚠️ Seeded on the state that actually CHANGES, never on a timestamp or a poll
+    counter. A clock-derived fingerprint differs on every poll and re-emits
+    everything — the defect this change removes, reintroduced one layer down. A
+    counter-derived one re-emits everything on every restart. Pane plus normalised
+    text changes exactly when the gate does: a new question on the same pane is a
+    new gate, and a re-render of the same question is not.
+    """
+    record = newest_item_for_pane(pane, items)
+    payload = f"{pane}\x1f{normalise(gate_text(record))}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def feed_state_path(self_id, state_dir=None):
+    """`<state_dir>/<self-session-id>.json` — one arm's memory, per manager."""
+    return os.path.join(state_dir or FEED_STATE_DIR, f"{self_id}.json")
+
+
+def load_feed_state(path):
+    """The stored `{pane: {"fingerprint", "emitted_at"}}`, or `{}`.
+
+    ⚠️ An ABSENT or UNREADABLE store reads as FIRST RUN — every kept pane emits —
+    and never as "nothing changed". The two are indistinguishable from the file
+    alone, and choosing the quiet one would mean a store that was never written, or
+    was lost, silently suppresses every gate it should have carried with no way
+    back. The fail-open direction here is a wake rather than a silence, the same
+    asymmetry `load_claims` and the spawner hops take.
+
+    ⚠️ This is deliberately the OPPOSITE of `drive-ledger.py`, which REFUSES a
+    corrupt ledger rather than reading it as empty — and the difference is the
+    failure direction, not a disagreement. There, an empty read re-emits
+    everything, so refusing is the safe side. Here an empty read does exactly the
+    same thing, and refusing would only turn a recoverable wake into a dead arm.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.loads(handle.read())
+    except (OSError, ValueError):
+        return {}
+    gates = data.get("gates") if isinstance(data, dict) else None
+    return gates if isinstance(gates, dict) else {}
+
+
+def save_feed_state(path, self_id, gates):
+    """Persist atomically (makedirs -> pid-suffixed tmp -> `os.replace`).
+
+    The same discipline `manager-predispatch.py` documents: a plain
+    `open(path, "w")` truncates first, so a crash or a serialisation error
+    part-way through leaves a truncated file where a valid one stood, and the next
+    arm then reads it as first run. `os.replace` is atomic within a filesystem, so
+    a reader sees either the old file or the new one.
+
+    ⚠️ The pid suffix is not decoration. Every manager shares one
+    `FEED_STATE_DIR`, so a bare `<path>.tmp` would let one arm's half-written file
+    be renamed over another's good one — a corruption the keying by `--self`
+    otherwise prevents.
+
+    Returns the `OSError` on failure and `None` on success, so the caller can
+    report a store it cannot write rather than leaving the arm looking healthy
+    while the change silently does nothing.
+    """
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"self": self_id, "gates": gates}, handle, indent=2, sort_keys=True
+            )
+        os.replace(tmp, path)
+        return None
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return exc
 
 
 def spawner_verdict(spawner, ledger, live):
@@ -738,6 +895,48 @@ def one_shot(panes, args, ledger, live, items, claims):
     return 0
 
 
+def emit_decisions(kept, stored, items, now, reemit_after):
+    """-> (the panes to emit now, the state to persist).
+
+    Three ways a kept pane is news, and the third is the backstop:
+
+      * no stored entry — it entered the kept set this arm, or the store is new;
+      * a DIFFERENT fingerprint — the gate's own text changed, so this is a new
+        gate on a reused pane rather than the one already surfaced;
+      * the entry is older than `reemit_after` — the wake may have been lost, and
+        this is the only thing that re-drives it.
+
+    ⚠️ Entries for panes NOT in the kept set are dropped, and that is a deliberate
+    divergence from the rule that pruning is by AGE and LIVENESS rather than by
+    sweep-absence. That rule protects a SHARED ledger, where "absent from my sweep"
+    is a claim about one reader's partial view and pruning would let one sweep
+    delete another's marks. This store is per-session and single-writer, so there
+    is no other reader to protect — and the failure direction of a wrong prune here
+    is a re-emit, a wake, never a silence.
+
+    ⚠️ `reemit_after <= 0` disables the third branch entirely, which is the escape
+    hatch if the hourly re-emit ever proves noisier than the lost wakes it insures
+    against.
+    """
+    new_panes, next_state = set(), {}
+    for pane in kept:
+        fingerprint = gate_fingerprint(pane, items)
+        prior = stored.get(pane)
+        if not isinstance(prior, dict):
+            prior = None
+        try:
+            age = now - float(prior["emitted_at"])
+        except (KeyError, TypeError, ValueError):
+            age = 0.0
+        expired = reemit_after > 0 and prior is not None and age >= reemit_after
+        if prior is None or prior.get("fingerprint") != fingerprint or expired:
+            new_panes.add(pane)
+            next_state[pane] = {"fingerprint": fingerprint, "emitted_at": now}
+        else:
+            next_state[pane] = prior
+    return new_panes, next_state
+
+
 def poll(args, items):
     """Poll the producer, emitting only panes that ENTER the kept set.
 
@@ -780,7 +979,8 @@ def poll(args, items):
     it — and the `LIVENESS` line already written for the previous poll is what
     keeps a genuine quiet arm distinguishable from a lapsed one.
     """
-    previous = None
+    state_path = feed_state_path(args.self_id, args.feed_state_dir)
+    store_warned = False
     polls = 0
     while True:
         proc = subprocess.run(
@@ -805,8 +1005,26 @@ def poll(args, items):
             args.self_id,
             load_claims(args.claims_file),
         )
-        kept = {r["pane"] for r in rows if r["verdict"] == EMIT}
-        new_panes = kept if previous is None else kept - previous
+        kept = [r["pane"] for r in rows if r["verdict"] == EMIT]
+
+        # ⚠️ The store is re-read EVERY poll rather than hoisted. Nothing else
+        # writes this file, but a hoisted read would let the `--max-polls` loop and
+        # a restarted arm disagree about the same file — and the read is a ~0.2 ms
+        # open against a loop that already spawns a producer per poll.
+        now = time.time()
+        new_panes, next_state = emit_decisions(
+            kept, load_feed_state(state_path), items, now, args.reemit_after
+        )
+        # ⚠️ A store this arm cannot write is reported ONCE, never swallowed.
+        # Silent failure here is the worst shape available: the arm looks healthy,
+        # the LIVENESS line keeps advancing, and the change does nothing at all.
+        if not store_warned and save_feed_state(state_path, args.self_id, next_state):
+            store_warned = True
+            print(
+                f"STATE  unwritable: {state_path} — not persisting, so this arm "
+                f"re-emits every kept pane on each re-arm",
+                file=sys.stderr,
+            )
 
         render(rows, args, new_panes=new_panes)
 
@@ -819,7 +1037,6 @@ def poll(args, items):
         )
         sys.stderr.flush()
         sys.stdout.flush()
-        previous = kept
 
         # ⚠️ The bound is checked BEFORE the sleep, so `--max-polls 1` is a real
         # single poll rather than one poll plus an interval of dead waiting. It
@@ -843,6 +1060,24 @@ def main():
     parser.add_argument("--registry-dir", default=REGISTRY)
     parser.add_argument("--state-dir", default=STATE)
     parser.add_argument("--claims-file", default=CLAIMS)
+    parser.add_argument(
+        "--feed-state-dir",
+        default=FEED_STATE_DIR,
+        help=(
+            "where the arm's per-session memory lives; the file is named after "
+            "--self, so two managers never share one"
+        ),
+    )
+    parser.add_argument(
+        "--reemit-after",
+        type=int,
+        default=REEMIT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "re-emit a still-open gate once its stored entry is this old, so a "
+            "lost wake is retried; 0 disables it (only with --interval)"
+        ),
+    )
     parser.add_argument(
         "--interval",
         type=int,
@@ -894,6 +1129,14 @@ def main():
         parser.error("--interval polls the feed; it cannot be combined with --pane")
     if args.interval is not None and not args.feed:
         parser.error("--interval re-reads the feed each poll; pass --feed as well")
+    # ⚠️ `--self` is what keys the state file, so an interval arm without it has
+    # nowhere to persist and would silently keep the PRE-fix behaviour — re-emitting
+    # the whole kept set on every re-arm while looking exactly like a fixed one. The
+    # documented arm passes it, and refusing is what keeps that failure visible.
+    if args.interval is not None and not args.self_id:
+        parser.error(
+            "--interval keys its state file on --self; pass --self <this session id>"
+        )
     # ⚠️ The lower bound is not cosmetic. `time.sleep` rejects a negative value
     # outright, so `--interval -1` reached the loop and died with an unhandled
     # `ValueError` traceback — a crash rather than a usage error, on an argument
