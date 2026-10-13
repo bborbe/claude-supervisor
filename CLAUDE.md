@@ -139,7 +139,8 @@ commands/open.md                                 resolve a name → jump / resum
 commands/ready.md                                ready ONE named task to the bar, then open it (cross-tier)
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
-docs/fleet-surface.md                            spawn shape + table render spec (canonical)
+docs/fleet-surface.md                            spawn shape + fleet table render spec (canonical)
+docs/sweep-output.md                             the manager sweep's output frame — columns, widths, icons (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the four manager commands share
 docs/voice-asks.md                               a voiced question is also a board card — rule + detector (canonical)

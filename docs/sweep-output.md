@@ -11,7 +11,7 @@
 Every firing, no-change ticks included. **Every tick also prints a one-line liveness marker: timestamped, and always the first line of the tick's output:**
 
 ```
-19:55 ✓ Dark Factory Hygiene — 4 tasks · 2 ⌛ · 1 🔄 · 1 ✅ · no change
+19:55 ✓ Billing — 4 tasks · 2 ⌛ · 1 🔄 · 1 ✅ · no change
 ```
 
 Silence is ambiguous: a quiet loop and a dead loop look identical from the outside, and the wakeup is session-scoped so it can genuinely stop — the marker answers *alive or stuck?* at a glance down the transcript. For one on-demand table without a loop, run `/supervisor:manager-status`.
@@ -28,7 +28,7 @@ Silence is ambiguous: a quiet loop and a dead loop look identical from the outsi
 
 ### The Status cell — the icon legend
 
-Status carries the bucket icon per `[[Icons]]`:
+Status carries the bucket icon per the operator's `Icons` note *(operator's vault; not shipped with this plugin)*; the legend is restated below so this file is self-contained:
 
 | Icon | Bucket |
 |---|---|
