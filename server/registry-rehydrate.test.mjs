@@ -290,6 +290,16 @@ test('status maps from the ledger mode, so a rehydrated row reads like a spawned
   assert.equal(rehydratedStatus({ mode: 'interactive' }), 'interactive')
   assert.equal(rehydratedStatus({ mode: 'cluster' }), 'cluster')
   assert.equal(rehydratedStatus({ mode: 'headless' }), 'running')
+  // An A2A row re-adopts as its target's name, mirroring cluster; a pre-field record falls back.
+  assert.equal(rehydratedStatus({ mode: 'a2a', target: 'docker' }), 'docker')
+  assert.equal(rehydratedStatus({ mode: 'a2a', target: 'k8s' }), 'k8s')
+  assert.equal(rehydratedStatus({ mode: 'a2a' }), 'running')
+})
+
+test('a re-adopted A2A row keeps its worker id, so the liveness mirror still stamps it', () => {
+  const agent = toAgentRecord({ session_id: 's-1', agent_id: 'agent_1', mode: 'a2a', target: 'docker', worker_id: 'w-1' })
+  assert.equal(agent.status, 'docker')
+  assert.equal(agent.workerId, 'w-1')
 })
 
 test('none of the three rehydrated statuses is terminal — which is why liveness, not the status, decides', () => {
