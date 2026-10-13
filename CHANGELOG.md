@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.137.0
 
 - feat: **the `docker` and `k8s` spawn targets now create a worker instead of refusing.** New `server/a2a-spawn.mjs` holds the path's rules — every argument that names a LOCAL process, window or policy is refused rather than dropped (the controller creates this worker and this server never runs it), the controller is located from `SUPERVISOR_A2A_URL` / `SUPERVISOR_A2A_TOKEN` or an `a2a` config section with **both** sources validated rather than only the winner, and the `create` control call is a ONE-SHOT `SendMessage` carrying a data part. `IMPLEMENTED_SPAWN_TARGETS` gains both names in the same change as the dispatch branch that serves them, which is the rule that list exists to enforce.
 
