@@ -622,6 +622,22 @@ test('a non-2xx list is an error, not an empty list', async () => {
   assert.match(listed.error, /HTTP 503/)
 })
 
+test('a list the controller never answers is aborted at its bound, not awaited forever', async () => {
+  // The poll skips a tick while one is in flight, so an unbounded hang would wedge the mirror for
+  // the process's life. The stub resolves only when its signal aborts — proving the bound fired.
+  // `AbortSignal.timeout`'s timer is unref'd, so the stub holds the loop open with its own.
+  const hang = (_url, { signal }) =>
+    new Promise((_resolve, reject) => {
+      const keepAlive = setTimeout(() => {}, 5_000)
+      signal.addEventListener('abort', () => {
+        clearTimeout(keepAlive)
+        reject(signal.reason)
+      })
+    })
+  const listed = await listWorkersOnController({ endpoint: 'http://127.0.0.1:8080/a2a', token: TOKEN, messageId: 'm', mint: () => 'c', fetchImpl: hang, timeoutMs: 20 })
+  assert.match(listed.error, /could not be made/)
+})
+
 test('a poll stamps every live session and reports them', async () => {
   const stamped = []
   const result = await pollA2A({ records: [a2aRecord()], list: async () => ({ workers: [{ worker_id: 'w-1' }] }), stamp: (id) => stamped.push(id) })

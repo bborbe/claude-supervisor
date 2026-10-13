@@ -641,13 +641,18 @@ export function a2aLiveSessions({ workers, records } = {}) {
 //
 // Mirrors `createWorkerOnController`, and for the same reasons reads the body as TEXT and never
 // logs it: a control reply is parsed by `a2aControlResponseFor`, which takes the raw body.
-export async function listWorkersOnController({ endpoint, token, messageId, contextId, mint, fetchImpl = fetch } = {}) {
+//
+// ⚠️ BOUNDED, unlike a turn send. The poll skips a tick while one is in flight, so a controller
+// that accepts the connection and never answers would otherwise wedge the mirror for the
+// process's whole life. Aborting a `list` is harmless — it starts nothing on the worker.
+export const A2A_LIST_TIMEOUT_MS = 10_000
+export async function listWorkersOnController({ endpoint, token, messageId, contextId, mint, fetchImpl = fetch, timeoutMs = A2A_LIST_TIMEOUT_MS } = {}) {
   const call = a2aListCallFor({ endpoint, token, messageId, contextId, mint })
   if (call.error) return { error: call.error }
 
   let res
   try {
-    res = await fetchImpl(call.url, { method: 'POST', headers: call.headers, body: JSON.stringify(call.body) })
+    res = await fetchImpl(call.url, { method: 'POST', headers: call.headers, body: JSON.stringify(call.body), signal: AbortSignal.timeout(timeoutMs) })
   } catch (cause) {
     return { error: `the list call to ${call.url} could not be made: ${cause?.message ?? cause}` }
   }
