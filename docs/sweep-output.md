@@ -22,7 +22,7 @@ Silence is ambiguous: a quiet loop and a dead loop look identical from the outsi
 
 ## The frame
 
-- **Columns and widths:** Topic / Goal / Task 42 · Session 10 · Status 34 · Phase 9 · Met 17. ⚠️ **These are CONTENT widths, and this line is the only width statement in this spec.** The renderer adds one space of padding each side, so the first column *draws* 44 cells wide and the second 12. A reader who measures the rendered frame and finds every column two wider has measured a different quantity, not caught this line stale.
+- **Columns and widths:** Topic / Goal / Task 42 · Session 10 · Status 34 · Phase 9 · Met 17. ⚠️ **These are CONTENT widths, and this line is the normative width statement in this spec** — the renderer contract below quotes the same values so a caller need not scroll back; where the two ever disagree, **this line wins**. The renderer adds one space of padding each side, so the first column *draws* 44 cells wide and the second 12. A reader who measures the rendered frame and finds every column two wider has measured a different quantity, not caught this line stale.
 - **Header and cells are both left-aligned.**
 - Over-long cells truncate with `…`.
 
