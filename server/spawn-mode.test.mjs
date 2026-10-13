@@ -465,22 +465,28 @@ test('a listed target with no client refuses rather than falling through to loca
     }
   }
   // Both directions, so neither list can drift alone: every implemented target is also a known
-  // target, and the difference between the two lists is exactly the unimplemented set. Listing
-  // it literally is deliberate — a new target appearing here is an edit someone must make on
-  // purpose, not a silent widening.
+  // target, and the difference between the two lists is exactly the unimplemented set.
+  //
+  // ⚠️ THE DIFFERENCE IS EMPTY AS OF 2026-10-13, and that is the point rather than a reason to
+  // delete the guard. `docker` and `k8s` joined `IMPLEMENTED_SPAWN_TARGETS` in the same change
+  // as the dispatch branch that creates their worker, so no known target is unimplemented now —
+  // but the guard is what makes the NEXT target's author do the same, and removing it would
+  // restore the silent fall-through the moment someone widened `SPAWN_TARGETS` alone.
   for (const t of IMPLEMENTED_SPAWN_TARGETS) {
     assert.ok(SPAWN_TARGETS.includes(t), `${t} is implemented but is not a known spawn target`)
   }
   assert.deepEqual(
     SPAWN_TARGETS.filter((t) => !IMPLEMENTED_SPAWN_TARGETS.includes(t)),
-    ['docker', 'k8s'],
+    [],
   )
-  // And the refusal must name the fall-through it is preventing, since that is the whole
-  // hazard — a message that only said "not implemented" would leave the next reader free to
-  // conclude the safe answer was to open a local worker.
-  const docker = spawnTargetImplementationRefusal({ target: 'docker' })
-  assert.match(docker, /not implemented/)
-  assert.match(docker, /falling\s+through to the local path/)
+  // The refusal still fires for a value the list does not carry — the second line of defence
+  // behind `resolveSpawnTarget`, which is what would normally have refused this. Asserted so the
+  // guard is exercised rather than merely present, and because the message must keep naming the
+  // fall-through it prevents: a version that only said "not implemented" would leave the next
+  // reader free to conclude the safe answer was to open a local worker.
+  const refusal = spawnTargetImplementationRefusal({ target: 'some-future-target' })
+  assert.match(refusal, /not implemented/)
+  assert.match(refusal, /falling\s+through to the local path/)
 })
 
 // --- the per-call environment ---------------------------------------------------------

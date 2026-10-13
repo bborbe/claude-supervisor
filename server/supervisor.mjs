@@ -26,6 +26,8 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { randomUUID } from 'node:crypto'
+import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aWorkerRecord, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, resolveA2AControllerTarget } from './a2a-spawn.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
@@ -589,7 +591,16 @@ function writeLedger(agent, patch) {
       // Three answers, not two. A cluster worker is neither a tab nor an in-process query, and
       // folding it into `headless` would file it under a mode whose whole meaning is "a local
       // process that parks its gates on this server" — which is exactly what it is not.
-      mode: agent.status === 'interactive' ? 'interactive' : agent.status === 'cluster' ? 'cluster' : 'headless',
+      // Four answers, not two. An A2A worker is neither a tab, an in-process query, nor the
+      // shared cluster pod: the controller created it and this server reaches it over A2A, so
+      // folding it into `headless` would file it under a mode whose whole meaning is "a local
+      // process that parks its gates on this server". The A2A answer comes from the spawn module
+      // so the mapping has one home and is unit-tested — `buildRecord` THROWS on a mode outside
+      // `MODES`, so a status this derivation did not know would lose the ledger record rather
+      // than mis-file it, and a missing record is indistinguishable from a worker never spawned.
+      mode:
+        ledgerModeForStatus(agent.status) ??
+        (agent.status === 'interactive' ? 'interactive' : agent.status === 'cluster' ? 'cluster' : 'headless'),
       modeSource: agent.modeSource ?? null,
       cwd: agent.cwd,
       launcher: agent.launcher ?? null,
@@ -1157,6 +1168,126 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
   }
 }
 
+// The A2A worker-controller spawn: locate the controller, create one worker for this task, read
+// the worker's own Agent Card, bind the session, write the record — and return WITHOUT a turn.
+//
+// ⚠️ THE TURN IS NOT SENT HERE, AND THAT IS SC5 RATHER THAN AN OMISSION. `spawnClusterWorker`
+// holds its request open until the pod answers and writes a FINISHED `result`, because a cluster
+// turn is over by the time it returns. SC5 requires the opposite here — the send returns in
+// **under 2 s** while the turn runs **over 60 s** — so this call stops once the worker EXISTS and
+// is reachable, and the turn is a separate step. That is why the record it writes carries
+// `result: null` rather than a placeholder: a roster read would take a placeholder for a finished
+// turn that produced nothing, which is the exact silence `clusterTurnResult` exists to remove,
+// arriving from the other direction.
+//
+// ⚠️ EVERY REFUSAL HAPPENS BEFORE `create`, because `create` is the side effect. A container that
+// exists and is then rejected for a missing token is a container nothing reaps. The one thing
+// that cannot be refused first is the worker itself: a `create` whose reply fails AFTER the
+// executor started a container reports FAILED, which is why `createWorkerOnController` returns
+// the controller's own text rather than a "nothing happened" claim.
+async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, windowId, role, operatorNamed, shipping, env, target }) {
+  const refusal = a2aSpawnArgumentRefusal({
+    target,
+    resume,
+    policy: policyPath,
+    interactive,
+    windowId,
+    role,
+    env,
+    shipping,
+    task,
+  })
+  if (refusal) return { error: refusal }
+
+  const limitError = await concurrentLimitError({ operatorNamed })
+  if (limitError) return { error: limitError }
+
+  const minted = newSessionId()
+  if (minted.error) return { error: minted.error }
+
+  const controller = resolveA2AControllerTarget({
+    envUrl: config.a2aUrl,
+    envToken: config.a2aToken,
+    file: config.configFileContents,
+    path: config.configFile,
+  })
+  if (controller.error) return { error: controller.error }
+
+  // Paced after every refusal above, so a call that never reaches the controller does not spend
+  // a rate slot — the same ordering `spawnClusterWorker` uses and for the same reason.
+  const rateError = await reserveStart()
+  if (rateError.error) return { error: rateError.error }
+
+  const created = await createWorkerOnController({
+    endpoint: controller.url,
+    task,
+    token: controller.token,
+    messageId: randomUUID(),
+    mint: () => randomUUID(),
+  })
+  if (created.error) return { error: created.error }
+
+  // ⚠️ THE CARD IS READ BEFORE ANYTHING IS RECORDED. It is what proves the URL the controller
+  // returned actually answers, and it is where the turn's endpoint comes from — rather than
+  // trusting the returned string to be the endpoint as well. A worker whose card cannot be read
+  // is reported WITH ITS ID, because it exists and something has to reap it; that is a different
+  // fact from a create that never ran, and the two must not read alike.
+  const card = await fetchWorkerCard({ a2aUrl: created.worker.a2a_url })
+  if (card.error) {
+    return {
+      error: `worker ${created.worker.worker_id} was created but its Agent Card could not be read, so no turn could reach it: ${card.error}`,
+      worker_id: created.worker.worker_id,
+    }
+  }
+
+  const bound = bindSessionToTask({ task, vault, sessionId: minted.sessionId })
+  if (bound.error) {
+    return {
+      error: `worker ${created.worker.worker_id} was created but binding session ${minted.sessionId} to task "${task}" failed: ${bound.error}`,
+      worker_id: created.worker.worker_id,
+    }
+  }
+
+  const built = a2aWorkerRecord({
+    id,
+    label,
+    prompt,
+    task,
+    target,
+    sessionId: minted.sessionId,
+    workerId: created.worker.worker_id,
+    a2aUrl: card.endpoint,
+    workerToken: created.token,
+    parentSession: parentSessionId({ dir: config.sessionsDir }),
+    createdAt: new Date().toISOString(),
+  })
+  if (built.error) return { error: built.error }
+
+  agents.set(id, built.record)
+  writeLedger(built.record)
+
+  return {
+    agent_id: id,
+    label: built.record.label,
+    status: built.record.status,
+    target,
+    session_id: minted.sessionId,
+    task,
+    vault: bound.vault,
+    // ⚠️ THE URL, AND NOT THE TOKEN. The token authenticates every follow-up turn to this worker
+    // and is held on the agent record; a tool result is a transcript write, so echoing it here
+    // is the exact leak this task's own Definition of Done forbids — the one the sibling session
+    // hit on 2026-10-13 by printing a create response body. A caller that needs a turn sent asks
+    // this server, which already holds the credential.
+    a2a_url: card.endpoint,
+    worker_id: created.worker.worker_id,
+    // Stated rather than left to inference: nothing has been sent, so there is no answer to
+    // report and no turn to have failed. A caller reading a null `answer` without this line
+    // could not tell "not sent yet" from "sent and silent".
+    turn: 'not sent — this spawn returns once the worker exists and is reachable; the first turn is sent separately',
+  }
+}
+
 // `bindSessionToTask` lives in task-binding.mjs — it is no longer a one-line `task set`,
 // and the rule it implements (stamp only when the field is empty, otherwise record the
 // session in `metrics_sessions`) is the kind of thing that needs a test beside it. See that
@@ -1226,6 +1357,29 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     const unsupportedShipping = shippingSupportError({ shipping, cluster: true })
     if (unsupportedShipping) return { error: unsupportedShipping }
     return spawnClusterWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, operatorNamed, env: envOverrides })
+  }
+  // The A2A worker-controller targets, which create their worker somewhere this server does not
+  // run it: a container on this Mac for `docker`, a pod in nuke dev for `k8s`. Both refuse the
+  // arguments that name a LOCAL process, a local window or a local policy — see
+  // `a2aSpawnArgumentRefusal`, which owns that rule and is unit-tested because this file cannot
+  // be imported by a test at all.
+  if (A2A_SPAWN_TARGETS.includes(spawnTarget.target)) {
+    return spawnA2AWorker({
+      id,
+      prompt,
+      label,
+      task,
+      vault,
+      resume,
+      policyPath,
+      interactive,
+      windowId,
+      role,
+      operatorNamed,
+      shipping,
+      env: envOverrides,
+      target: spawnTarget.target,
+    })
   }
 
   // ⚠️ THE LAST GUARD BEFORE THE LOCAL PATH, and it sits here rather than beside
