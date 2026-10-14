@@ -515,5 +515,57 @@ class ReuseTest(Base):
             self.assertIn("scripts/who-needs-me.py:", mechanism)
 
 
+class OperatorAskTest(Base):
+    """A park is a gate only when the operator could actually clear it.
+
+    The shapes the first live run supplied and the suite never did. `gate_class()`
+    returns **C** for any park that is not A/B/D/E, and C is operator-bound — so
+    without an ask test, a session sitting on arbitrary prose reaches `Handover`.
+    Measured 2026-10-15: panes 1557 and 1619 did exactly that while all three
+    instruments agreed they were not gated.
+    """
+
+    def test_a_prose_detail_with_no_closer_line_is_parked_but_not_a_gate(self):
+        # 1557's shape: the transcript holds NO `👤 You:` line, so the closer read is
+        # the record's `detail` — arbitrary assistant prose, not an ask.
+        self.fleet.add("s1", 901, "📌 Conventions: run `/recall` if you feel drifted",
+                       kind="idle",
+                       transcript="📌 Conventions: run `/recall` if you feel drifted\n")
+        sweep = self.fleet.sweep()
+        row = {r["session_id"]: r for r in sweep["parked"]}["s1"]
+        self.assertIsNone(row["gate"])
+        self.assertNotIn("s1", [r["session_id"] for r in h.handover_order(sweep["parked"])])
+
+    def test_a_prose_closer_line_is_recorded_as_not_gated(self):
+        # 1619's shape: a real `👤 You:` line that is prose, not one of the verbs.
+        self.fleet.add("s1", 903, "Session left open, no files touched, no commands run.")
+        out = h.render(self.fleet.sweep())
+        self.assertIn("not gated", out)
+        self.assertNotIn("machine-bound", out)
+
+    def test_a_pick_closer_still_gates_when_its_cause_is_unknown(self):
+        # 1625/1572's shape, and the reason "cause == unknown ⇒ no gate" is wrong:
+        # an answered record makes `is_open_gate()` refuse it, so the cause falls to
+        # `unknown` — yet the closer is unmistakably an ask, and these are the two
+        # rows that legitimately pass DoD 4(a).
+        self.fleet.add("s1", 902,
+                       "pick — 1. realign SC1 to the proven capability · 2. leave it",
+                       kind="question", state="answered")
+        sweep = self.fleet.sweep()
+        row = {r["session_id"]: r for r in sweep["parked"]}["s1"]
+        self.assertEqual(wnm.CAUSE_UNKNOWN, row["cause"])
+        self.assertEqual("C", row["gate"])
+        self.assertIn("s1", [r["session_id"] for r in h.handover_order(sweep["parked"])])
+
+    def test_a_store_item_makes_a_park_a_gate_even_without_an_ask(self):
+        # The second clause of the rule: the store holding an open item is its own
+        # evidence that the operator is being waited on.
+        self.fleet.add("s1", 904, "Session left open, no files touched, no commands run.")
+        self.fleet.records[0]["store_vouched"] = True
+        sweep = self.fleet.sweep()
+        row = {r["session_id"]: r for r in sweep["parked"]}["s1"]
+        self.assertIsNotNone(row["gate"])
+
+
 if __name__ == "__main__":
     unittest.main()
