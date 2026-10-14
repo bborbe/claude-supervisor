@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.145.3
 
 - docs: **SC2's per-file probe now reads 0 on every one of the fifteen files it names — the three remaining hits were comments, not code.** The file-write retirement's own prose spelled the retired path in `server/ledger.mjs`, and the retired path and variable in `server/config.mjs`, and SC2 asserts each accessor with a pinned `git grep -nE 'claude-supervisor/sessions|SUPERVISOR_LEDGER_DIR'` that cannot tell a comment from a call — so a file whose code was already clean still failed the criterion. Both comments are reworded to spell neither literal and now point at `docs/fleet-surface.md`, which carries the operator-facing note. ⚠️ **No code changed** — the previous increment deleted every writer and reader, and this is the criterion it is asserted against. ⚠️ **The process failure is the part worth keeping:** the probe IS the acceptance criterion for the increment, and it was run as a post-merge confirmation instead of as a pre-PR gate, so it failed on `master` rather than on the branch. Run the criterion the increment exists to satisfy BEFORE opening its PR, not after merging it.
 
