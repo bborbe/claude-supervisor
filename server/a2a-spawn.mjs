@@ -333,9 +333,22 @@ export function a2aWorkerRecord({
 // report FAILED. The caller must reconcile against the controller's own `list` — or against
 // `docker ps --filter label=…` — rather than assume nothing happened, which is why this returns
 // the controller's own refusal text rather than a "did not create" claim.
-export async function createWorkerOnController({ endpoint, task, token, messageId, contextId, mint, fetchImpl = fetch } = {}) {
+//
+// `capture`, when given, receives `{ url, body }` — the exact body this call sends, at the send
+// site, which is what SC2 diffs between a `docker` and a `k8s` spawn. ⚠️ NEVER THE HEADERS: the
+// bearer token travels in `Authorization`, so handing the headers to a capture sink would write
+// the credential this task's Definition of Done forbids writing anywhere. A throwing capture
+// never fails the spawn.
+export async function createWorkerOnController({ endpoint, task, token, messageId, contextId, mint, fetchImpl = fetch, capture } = {}) {
   const call = a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint })
   if (call.error) return { error: call.error }
+  if (typeof capture === 'function') {
+    try {
+      capture({ url: call.url, body: call.body })
+    } catch {
+      // A capture is evidence, not part of the spawn — losing it must not lose the worker.
+    }
+  }
 
   let res
   try {

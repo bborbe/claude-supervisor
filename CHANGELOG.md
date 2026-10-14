@@ -8,6 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **an A2A `create` call can now write the exact body it sends, at the send site, when `a2a.captureDir` is set in the supervisor config.** This is SC2's evidence — a `docker` and a `k8s` spawn must send byte-identical calls apart from per-worker values, and that can only be shown by capturing what was actually sent. Off by default; one JSON file per call (`<at>-<target>-create.json`, carrying `at`, `target`, `task`, `url`, `body`). ⚠️ The hook is handed the URL and the body only, never the headers, because the bearer token travels in `Authorization`. A capture that throws never fails the spawn.
+
+- test: the capture receives exactly the body sent and never the token; a throwing capture leaves the spawn intact.
+
 ## v0.141.0
 
 - fix: **the fleet-wide worker cap counts from the session-ledger endpoint, so it reads one store rather than a file tree.** `readLedger` was the last server-side reader of `~/.local/state/claude-supervisor/sessions/`; it now reads the endpoint and keeps its three-state contract exactly — an empty store is `{}` ("nobody has ever been spawned"), a store that cannot be read is `null`, and the two must never collapse, because `null` refuses a spawn and `[]` permits one. ⚠️ **Deploy precondition, and it is not optional:** the endpoint holds only the rows written since `writeLedger` began publishing to it, so switching this reader before SC5's one-time import lands makes the cap UNDER-count a live worker spawned before the migration — the direction that permits an over-spawn. Import first, then deploy.
