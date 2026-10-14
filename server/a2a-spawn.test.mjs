@@ -384,6 +384,49 @@ test('a card that 404s refuses at spawn rather than at the first turn', async ()
   assert.match(result.error, /HTTP 404/)
 })
 
+test('a refused card fetch is retried until the worker listens', async () => {
+  // `create` returns when the container STARTS; its server listens a few seconds later.
+  let calls = 0
+  const fetchImpl = async () => {
+    calls += 1
+    if (calls < 3) throw new Error('fetch failed')
+    return { ok: true, status: 200, json: async () => ({ supportedInterfaces: [{ url: 'http://localhost:9093/a2a' }] }) }
+  }
+  const result = await fetchWorkerCard({ a2aUrl: 'http://localhost:9093/a2a', fetchImpl, sleep: async () => {} })
+  assert.equal(result.endpoint, 'http://localhost:9093/a2a')
+  assert.equal(calls, 3)
+})
+
+test('a card that never listens gives up at its deadline', async () => {
+  let t = 0
+  const result = await fetchWorkerCard({
+    a2aUrl: 'http://localhost:9093/a2a',
+    fetchImpl: async () => {
+      throw new Error('fetch failed')
+    },
+    readyTimeoutMs: 1000,
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms
+    },
+  })
+  assert.match(result.error, /within 1000 ms/)
+})
+
+test('an HTTP answer is final and never retried', async () => {
+  let calls = 0
+  const result = await fetchWorkerCard({
+    a2aUrl: 'http://localhost:9093/a2a',
+    fetchImpl: async (...args) => {
+      calls += 1
+      return stubFetch('not found', { ok: false, status: 404 })(...args)
+    },
+    sleep: async () => {},
+  })
+  assert.match(result.error, /HTTP 404/)
+  assert.equal(calls, 1)
+})
+
 // --- the turn half --------------------------------------------------------------------------
 
 // An SSE body — what a streaming turn actually returns, rather than a JSON object.

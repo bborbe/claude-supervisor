@@ -393,15 +393,40 @@ export async function createWorkerOnController({ endpoint, task, token, messageI
 // returned actually answers, and it is where the endpoint comes from — `supportedInterfaces[0].url`
 // — rather than trusting the returned string to be the endpoint as well. A worker whose card 404s
 // is refused HERE, at spawn, instead of at the first turn.
-export async function fetchWorkerCard({ a2aUrl, fetchImpl = fetch } = {}) {
+//
+// ⚠️ A REFUSED CONNECTION IS RETRIED until `readyTimeoutMs`, and nothing else is. `create` returns
+// once the container is STARTED, not once its server listens — measured 2026-10-13 against
+// a2a-worker-controller v0.4.4: the card fetched the instant `create` returned failed with
+// `fetch failed`, and the same URL answered 200 five seconds later. Without the retry every live
+// spawn lost its worker to that race. An HTTP answer, even a 404, is the worker speaking, so it is
+// final and never retried.
+export const A2A_CARD_READY_TIMEOUT_MS = 30_000
+export const A2A_CARD_RETRY_MS = 500
+export async function fetchWorkerCard({
+  a2aUrl,
+  fetchImpl = fetch,
+  readyTimeoutMs = A2A_CARD_READY_TIMEOUT_MS,
+  retryMs = A2A_CARD_RETRY_MS,
+  now = Date.now,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
   const cardUrl = a2aCardUrlFor({ a2aUrl })
   if (cardUrl.error) return { error: cardUrl.error }
 
+  const deadline = now() + readyTimeoutMs
   let res
-  try {
-    res = await fetchImpl(cardUrl.url, { method: 'GET' })
-  } catch (cause) {
-    return { error: `the worker's Agent Card at ${cardUrl.url} could not be fetched: ${cause?.message ?? cause}` }
+  for (;;) {
+    try {
+      res = await fetchImpl(cardUrl.url, { method: 'GET' })
+      break
+    } catch (cause) {
+      if (now() >= deadline) {
+        return {
+          error: `the worker's Agent Card at ${cardUrl.url} could not be fetched within ${readyTimeoutMs} ms: ${cause?.message ?? cause}`,
+        }
+      }
+      await sleep(retryMs)
+    }
   }
   if (!res.ok) {
     return { error: `the worker's Agent Card at ${cardUrl.url} answered HTTP ${res.status}, so the worker is not reachable.` }
