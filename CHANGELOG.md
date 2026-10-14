@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.144.1
 
 - fix: **§3's "check whether the answer already exists" lever now names the search space, not just the act of searching.** The lever told a session to look for evidence already on disk; it did not say *where*, and one window can hold only half the discriminator — a `200` is ambiguous under quota, while the `429` beside it is not. Observed 2026-10-08: a run read the prod proxy log, saw only `200`s, and published *"quota is disproven; inbound filters are the dropper"* to the Fleet Manager, while the owning task had recorded the same `200` **and the `429`s** three weeks earlier and read it correctly. The retraction cost a handoff and a peer task built on the wrong premise.
 
