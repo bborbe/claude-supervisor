@@ -360,6 +360,21 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // HERE is only that this call site still goes through it rather than re-inlining the loop.
   assert.match(src, /return unionRoster\(agents, fresh\)/)
   assert.ok(!/takenIds/.test(src), 'the union must not be re-inlined in supervisor.mjs')
+  // ⚠️ **The last two ledger READS are pinned for the same reason as the roster above.** The
+  // park read on the resume path and the A2A liveness mirror were the final two
+  // `config.ledgerDir` readers; a revert would leave every behavioural test green while the
+  // store those readers consult is the file again — and the park read is what decides whether
+  // an operator's answer is carried into a resumed worker at all.
+  assert.match(src, /const record = await readSessionLedgerRow\(resume\)/)
+  assert.ok(
+    !/readRecord\(config\.ledgerDir/.test(src),
+    'the resume-path park read must go through the endpoint, never the file',
+  )
+  assert.match(src, /\(\(await readSessionLedger\(\)\) \?\? \[\]\)\.filter\(/)
+  assert.ok(
+    !/listRecords\(config\.ledgerDir\)/.test(src),
+    'the A2A liveness mirror must read the endpoint, never the file',
+  )
   const rehydrateSrc = readFileSync(new URL('./registry-rehydrate.mjs', import.meta.url), 'utf8')
   assert.match(rehydrateSrc, /export function unionRoster\(inProcess, fresh\)/)
   // ⚠️ **A foreign row's id is a function of the ROW ALONE.** Deriving it from `takenIds` —

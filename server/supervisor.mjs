@@ -38,7 +38,7 @@ import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
-import { buildRecord, listRecords, parentSessionId, readRecord, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
+import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
 import { fetchOpenCards } from './open-cards.mjs'
@@ -47,7 +47,7 @@ import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
 import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
 import { liveSessionIds, rehydratableAgents, unionRoster } from './registry-rehydrate.mjs'
-import { postSessionLedger, recordToWire } from './session-ledger.mjs'
+import { postSessionLedger, readSessionLedger, readSessionLedgerRow, recordToWire } from './session-ledger.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -1799,7 +1799,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // would clear it lives in the spawner that died. That is what makes it the durable
     // half of the answer, and why this check reads it rather than the attention store.
     if (decision) {
-      const record = readRecord(config.ledgerDir, resume)
+      // ⚠️ Read from the endpoint, which is where every reader looks now — and `null` means
+      // exactly what `readRecord`'s `null` did: no park to tie this decision to, so the verdict
+      // refuses. ⚠️ `PARK_FIELD` is `parked_permission`, spelled IDENTICALLY on the wire and in
+      // the file record, so the field access below is unchanged rather than renamed — the one
+      // field this path depends on is the one field the two vocabularies agree on.
+      const record = await readSessionLedgerRow(resume)
       const verdict = validateDecision({ decision, parkRecord: record?.[PARK_FIELD] ?? null, sessionId: resume })
       if (!verdict.ok) {
         log(`refusing a decision on resume ${resume}: ${verdict.error}`)
@@ -2637,7 +2642,17 @@ const a2aTimer = setInterval(async () => {
     path: config.configFile,
   })
   if (controller.error) return
-  const records = listRecords(config.ledgerDir).filter((r) => r?.mode === 'a2a' && r.worker_id && !r.ended_at)
+  // ⚠️ Read from the endpoint, which is where every reader looks now — and the filter
+  // transfers UNCHANGED, because `readSessionLedger` returns the store's wire rows verbatim
+  // and `mode`, `worker_id` and `ended_at` are spelled identically on both sides. The only
+  // difference is where the array came from.
+  // ⚠️ `null` (could not read it) becomes `[]` here, which is exactly what `listRecords` did
+  // for a directory it could not read: the tick is skipped and the next one retries. That is
+  // safe because the poll is idempotent — a skipped tick costs a cycle, never a stamp — and
+  // the alternative, refusing the tick loudly, would log every 30 s through a store outage.
+  const records = ((await readSessionLedger()) ?? []).filter(
+    (r) => r?.mode === 'a2a' && r.worker_id && !r.ended_at,
+  )
   if (records.length === 0) return
   a2aPollState.inFlight = true
   try {

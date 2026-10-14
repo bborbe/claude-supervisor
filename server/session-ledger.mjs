@@ -70,6 +70,53 @@ export async function readSessionLedger({
   return body
 }
 
+// One row by session id, or `null` when there is none to read.
+//
+// ⚠️ **`null` covers BOTH "no such row" and "could not read it", and that is a deliberate
+// match to the reader it replaces rather than a lost distinction.** `ledger.mjs`'s
+// `readRecord` catches every failure — a missing file, an unreadable one, malformed JSON —
+// and answers `null`, so a caller written against it already treats "absent" and "unknown" as
+// one answer. Widening that here would smuggle a behaviour change in under a read swap.
+// The one caller, `spawnAgent`'s decision-on-resume check, refuses on `null` — which is the
+// SAFE direction for both readings, because it declines to carry a decision it cannot tie to
+// a park. A caller that genuinely needs the three answers should use the list route, where
+// `readSessionLedger`'s `null`-vs-`[]` split is already preserved.
+//
+// ⚠️ **The per-id route is an EXACT lookup, so a PREFIX is not a row** — it answers 404,
+// which is `null` here, exactly as an absent `<session_id>.json` was. That matters because a
+// manager holds an 8-char prefix, not a full id; the callers of this function pass a full id,
+// and the one that takes a prefix (`send_agent_message`'s roster lookup) goes through the
+// list route.
+export async function readSessionLedgerRow(
+  sessionId,
+  { endpoint, fetchImpl = globalThis.fetch, timeoutMs = SESSION_LEDGER_TIMEOUT_MS } = {},
+) {
+  if (typeof sessionId !== 'string' || !sessionId) return null
+  const base = endpoint === undefined ? config.attentionStoreUrl : endpoint
+  if (!base) return null
+  const url = `${String(base).replace(/\/+$/, '')}${SESSION_LEDGER_PATH}/${encodeURIComponent(sessionId)}`
+  let res
+  try {
+    res = await fetchImpl(url, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch {
+    return null
+  }
+  if (!res || res.status !== 200) return null
+  let body
+  try {
+    body = await res.json()
+  } catch {
+    return null
+  }
+  // A body that is not an object is not a row — an array or a scalar here is the store
+  // answering a different question, never a record to hand a caller that will index into it.
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+  return body
+}
+
 // The wire row for a file-ledger record, or `null` when it has no key to file under.
 //
 // ⚠️ **The two vocabularies differ by exactly two fields, and both are named rather than
