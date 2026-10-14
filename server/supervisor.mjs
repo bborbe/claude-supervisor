@@ -37,6 +37,7 @@ import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
+import { mtimeReloadedConfig } from './config-reload.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, mergeRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
@@ -1059,12 +1060,21 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
 // cap above and in the same split: resolve and count HERE, decide in `managerLimitRefusal`.
 // The count is `managerSessions()` — the fleet board's own manager classification, which sees
 // hand-started managers the spawn ledger never records. See `manager-sessions.mjs`.
+// ⚠️ The limits come from `liveConfig`, NOT `config.configFileContents`. The boot snapshot is
+// frozen for the process's life, so a spawn decided against it ignores every edit until the
+// operator reconnects — observed 2026-10-14, `spawn.maxManagers` raised to 10 and still refused
+// as 5. `liveConfig` re-reads the file when its mtime moves; see `config-reload.mjs`.
+const liveConfig = mtimeReloadedConfig({ path: config.configFile })
+
 async function managerLimitError({ operatorNamed = false } = {}) {
-  const limits = resolveMaxManagers({ file: config.configFileContents, path: config.configFile })
-  const live = limits.error || limits.limit === null ? null : await managerSessions()
+  const limits = resolveMaxManagers({ file: liveConfig.current().file, path: config.configFile })
+  const counted = limits.error || limits.limit === null ? { ids: null, error: null } : await managerSessions()
   return managerLimitRefusal({
     limits,
-    liveCount: live === null ? null : live.length,
+    liveCount: counted.ids === null ? null : counted.ids.length,
+    // The cause travels with the count. Without it the refusal can only say "unknown" beside a
+    // limit, which is what sent the operator to the one value that was already correct.
+    countError: counted.error,
     operatorNamed,
     configFile: config.configFile,
   })

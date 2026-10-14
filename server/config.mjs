@@ -102,7 +102,7 @@ const COST_FIGURES_MEANINGFUL =
 // spawn-mode.mjs, where it can be unit-tested without touching a filesystem.
 const CONFIG_FILE = ENV.SUPERVISOR_CONFIG || join(CONFIG_DIR, 'config.json')
 
-const readConfigFile = (path) => {
+export const readConfigFile = (path) => {
   let raw
   try {
     raw = readFileSync(path, 'utf8')
