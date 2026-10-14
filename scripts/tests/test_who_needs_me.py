@@ -2214,5 +2214,169 @@ class PostedCloserTtlFromEnv(unittest.TestCase):
                 os.environ["ATTENTION_POSTED_CLOSER_TTL"] = original
 
 
+class CauseClassification(unittest.TestCase):
+    """SC1 -- one cause class per parked pane, grounded in BOTH directions.
+
+    The two-directional half is the load-bearing one. An assertion that only
+    checks "operator-gate panes classify `awaiting-operator`" is satisfied by a
+    classifier that labels EVERY pane `awaiting-operator` -- and every criterion
+    downstream of it then ticks on that stub. So each negative case asserts both
+    what the pane IS and what it is NOT.
+    """
+
+    def setUp(self):
+        self._real = wnm.last_assistant_text
+        self.addCleanup(lambda: setattr(wnm, "last_assistant_text", self._real))
+
+    def rec(self, **kw):
+        base = {"session_id": "s1", "pane": "7", "kind": "question",
+                "detail": "approve: /vault-cli:session-close", "ts": 0,
+                "state": "open"}
+        base.update(kw)
+        return base
+
+    def test_open_gate_is_awaiting_operator(self):
+        self.assertEqual(wnm.cause_class(self.rec()), wnm.CAUSE_OPERATOR)
+
+    def test_parked_verb_is_clock_bound_and_not_operator(self):
+        """`later (on <trigger>):` is parked, and not on the operator.
+
+        Both halves matter: `is_open_gate` already excludes it, so classifying it
+        `awaiting-operator` would invent a gate the feed does not list.
+        """
+        rec = self.rec(kind="idle", detail="later (on 2026-10-15): re-run")
+        self.assertEqual(wnm.cause_class(rec), wnm.CAUSE_CLOCK)
+        self.assertNotEqual(wnm.cause_class(rec), wnm.CAUSE_OPERATOR)
+
+    def test_peer_restatement_is_waiting_on_task_and_not_operator(self):
+        """The class exists to NAME what `is_open_gate` suppresses."""
+        rec = self.rec(detail="the approval in pane 42 is yours alone")
+        self.assertEqual(wnm.cause_class(rec, {"42"}), wnm.CAUSE_TASK)
+        self.assertNotEqual(wnm.cause_class(rec, {"42"}), wnm.CAUSE_OPERATOR)
+
+    def test_cap_refusal_on_a_manager_is_cap_blocked(self):
+        wnm.last_assistant_text = lambda _r: "refused: maxManagersHard reached"
+        rec = self.rec(kind="idle", detail="nothing", role="manager")
+        self.assertEqual(wnm.cause_class(rec), wnm.CAUSE_CAP)
+        self.assertNotEqual(wnm.cause_class(rec), wnm.CAUSE_OPERATOR)
+
+    def test_cap_text_on_a_worker_is_not_cap_blocked(self):
+        """Only a MANAGER can be cap-blocked. A worker quoting the string is not."""
+        wnm.last_assistant_text = lambda _r: "refused: maxManagersHard reached"
+        rec = self.rec(kind="idle", detail="nothing", role="agent")
+        self.assertNotEqual(wnm.cause_class(rec), wnm.CAUSE_CAP)
+
+    def test_unmatched_is_unknown(self):
+        wnm.last_assistant_text = lambda _r: ""
+        self.assertEqual(wnm.cause_class(self.rec(kind="idle", detail="nothing")),
+                         wnm.CAUSE_UNKNOWN)
+
+    def test_clock_label_carries_the_trigger(self):
+        rec = {"detail": "later (on 2026-10-15): re-run"}
+        self.assertEqual(wnm.cause_label(rec, wnm.CAUSE_CLOCK),
+                         "waiting-on-clock 2026-10-15")
+
+    def test_unresolvable_parameter_renders_bare(self):
+        """No placeholder: the class is still true without its parameter."""
+        self.assertEqual(wnm.cause_label({"detail": "nothing"}, wnm.CAUSE_CLOCK),
+                         "waiting-on-clock")
+
+
+class BoardFlags(unittest.TestCase):
+    """SC3 -- board hygiene is an ORTHOGONAL flag, and a failed read emits none."""
+
+    def rec(self, **kw):
+        base = {"session_id": "s1", "pane": "7", "kind": "question",
+                "detail": "q", "ts": 0, "state": "open"}
+        base.update(kw)
+        return base
+
+    def test_uncarded_operator_gate_is_missing(self):
+        self.assertEqual(wnm.board_flags(self.rec(), wnm.CAUSE_OPERATOR, set(), True),
+                         [wnm.FLAG_CARD_MISSING])
+
+    def test_previously_posted_card_is_expired_not_missing(self):
+        """The distinction is the whole reason `posted_closer` is consulted."""
+        with mock.patch.object(wnm, "posted_closer", lambda _sid: "approve: x"):
+            self.assertEqual(
+                wnm.board_flags(self.rec(), wnm.CAUSE_OPERATOR, set(), True),
+                [wnm.FLAG_CARD_EXPIRED])
+
+    def test_carded_gate_carries_no_flag(self):
+        self.assertEqual(wnm.board_flags(self.rec(), wnm.CAUSE_OPERATOR, {"s1"}, True),
+                         [])
+
+    def test_failed_store_read_emits_no_flag(self):
+        """pane-reads.md: an outage must not read as 'every card is missing'."""
+        self.assertEqual(wnm.board_flags(self.rec(), wnm.CAUSE_OPERATOR, set(), False),
+                         [])
+
+    def test_non_operator_cause_carries_no_flag(self):
+        self.assertEqual(wnm.board_flags(self.rec(), wnm.CAUSE_CLOCK, set(), True), [])
+
+
+class CauseTally(unittest.TestCase):
+    """SC2 -- the run count rises by exactly 1 per DAY, and the flag is seeded."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "causes.json")
+
+    def test_first_run_increments_by_one(self):
+        state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        self.assertEqual(state["counts"][wnm.CAUSE_OPERATOR], 1)
+
+    def test_second_run_same_day_does_not_increment(self):
+        """Without the dedup the count measures the watcher's poll rate."""
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        self.assertEqual(state["counts"][wnm.CAUSE_OPERATOR], 1)
+
+    def test_a_new_day_increments_again(self):
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-15")
+        self.assertEqual(state["counts"][wnm.CAUSE_OPERATOR], 2)
+
+    def test_seeded_class_at_threshold_with_no_owner_is_flagged(self):
+        state = None
+        for day in ("2026-10-14", "2026-10-15", "2026-10-16"):
+            state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, day)
+        self.assertEqual(wnm.unowned_causes(state), [wnm.CAUSE_OPERATOR])
+
+    def test_class_below_threshold_is_not_flagged(self):
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-15")
+        self.assertEqual(wnm.unowned_causes(state), [])
+
+    def test_mapped_class_is_not_flagged(self):
+        state = None
+        for day in ("2026-10-14", "2026-10-15", "2026-10-16"):
+            state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, day)
+        state["owners"][wnm.CAUSE_OPERATOR] = "Some Task"
+        wnm.write_causes(state, self.path)
+        self.assertEqual(wnm.unowned_causes(wnm.read_causes(self.path)), [])
+
+    def test_corrupt_tally_reads_as_empty_not_as_a_raise(self):
+        """Fails OPEN: a broken counter must not refuse the feed it counts."""
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self.assertEqual(wnm.read_causes(self.path)["counts"], {})
+
+
+class BoardMissingSection(unittest.TestCase):
+    """The uncarded gates are their OWN section, and only when the store answered."""
+
+    def test_no_store_read_means_no_board_missing_section(self):
+        """With the store unreachable EVERY row is store-less by construction, so
+        'no card' would be asserted about every pane on the machine."""
+        with mock.patch.object(wnm, "STORE_OK", False):
+            self.assertEqual(wnm.board_missing_gates([]), [])
+
+    def test_store_session_ids_reads_provenance_not_a_second_read(self):
+        recs = [{"session_id": "a", "store_vouched": True}, {"session_id": "b"}]
+        self.assertEqual(wnm.store_session_ids(recs), {"a"})
+
+
 if __name__ == "__main__":
     unittest.main()
