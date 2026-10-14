@@ -22,6 +22,13 @@ reintroducing the defect the refusal protects against:
     login shell.
   * a bun that cannot be found is reported on stderr with a non-zero exit, rather than
     leaving the client to report an unexplained closed connection.
+  * both tokens resolve from THEIR OWN TeamVault key. One key resolved into both variables is
+    the failure this guards: it reads as configured and fails on one leg only.
+  * an UNRESOLVED token degrades — the server still starts. Exiting here would cost the
+    session every supervisor tool, not only the two spawn targets that consume a token, so a
+    vault outage would take the supervisor away from every session at once.
+  * a value never reaches stderr or stdout, on the success path or the failure one. Only the
+    lookup KEY NAME is logged, and a lookup key is a short identifier rather than a secret.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -30,8 +37,10 @@ import contextlib
 import importlib.util
 import io
 import os
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "mcp-start.py")
@@ -106,6 +115,131 @@ class FindBunTest(unittest.TestCase):
             self.assertIsNone(ms.find_bun(env, which=lambda _: None))
 
 
+class TeamvaultPasswordTest(unittest.TestCase):
+    """One key resolved to one value, with nothing secret on any stream."""
+
+    def _runner(self, *, stdout="", stderr="", code=0, oserror=False):
+        calls = []
+
+        def run(argv, capture_output=True, text=True):
+            calls.append(argv)
+            if oserror:
+                raise FileNotFoundError(2, "No such file or directory", argv[0])
+            return subprocess.CompletedProcess(argv, code, stdout, stderr)
+
+        run.calls = calls
+        return run
+
+    def test_the_lookup_asks_for_the_configured_key_and_config(self):
+        runner = self._runner(stdout="placeholder-x")
+        with contextlib.redirect_stderr(io.StringIO()):
+            value = ms.teamvault_password("VO0Gmw", {"TEAMVAULT_CONFIG": "/etc/tv.json"}, run=runner)
+        self.assertEqual(value, "placeholder-x")
+        self.assertIn("--teamvault-key=VO0Gmw", runner.calls[0])
+        self.assertIn("--teamvault-config=/etc/tv.json", runner.calls[0])
+
+    def test_the_default_config_is_teamvault_clis_own_location(self):
+        runner = self._runner(stdout="placeholder-x")
+        with contextlib.redirect_stderr(io.StringIO()):
+            ms.teamvault_password("VO0Gmw", {"HOME": "/home/example"}, run=runner)
+        self.assertIn(
+            "--teamvault-config=/home/example/.config/teamvault-cli/config.json",
+            runner.calls[0],
+        )
+
+    def test_a_non_zero_exit_degrades_and_names_the_key(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            value = ms.teamvault_password("lO4j5q", {}, run=self._runner(code=1, stderr="no secret"))
+        self.assertIsNone(value)
+        self.assertIn("lO4j5q", stderr.getvalue())
+
+    def test_an_empty_value_degrades(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            value = ms.teamvault_password("VO0Gmw", {}, run=self._runner(stdout="  \n"))
+        self.assertIsNone(value)
+        self.assertIn("VO0Gmw", stderr.getvalue())
+
+    def test_a_missing_binary_degrades_rather_than_raising(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            value = ms.teamvault_password("VO0Gmw", {}, run=self._runner(oserror=True))
+        self.assertIsNone(value)
+        self.assertIn("VO0Gmw", stderr.getvalue())
+
+    def test_the_value_is_returned_but_never_printed(self):
+        stderr, stdout = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+            value = ms.teamvault_password("VO0Gmw", {}, run=self._runner(stdout="placeholder-secret-1a2b"))
+        self.assertEqual(value, "placeholder-secret-1a2b")
+        self.assertNotIn("placeholder-secret-1a2b", stderr.getvalue())
+        self.assertNotIn("placeholder-secret-1a2b", stdout.getvalue())
+
+
+class DeclareTokensTest(unittest.TestCase):
+    """Both tokens, and the case that makes the launcher survive a vault outage.
+
+    The load-bearing case is the DEGRADING one: an unresolved token must leave the server
+    startable, because exiting here costs the session every supervisor tool — not only the two
+    spawn targets that consume a token. A test that only covered the happy path would pass on
+    a launcher that takes the whole fleet down whenever TeamVault blinks.
+    """
+
+    VALUES = {"VO0Gmw": "placeholder-cluster-2f9c41", "lO4j5q": "placeholder-a2a-7b3e08"}
+
+    def _lookup(self, failing=(), seen=None):
+        def lookup(key, env):
+            if seen is not None:
+                seen.append(key)
+            return None if key in failing else self.VALUES[key]
+
+        return lookup
+
+    def test_both_tokens_resolve_from_their_own_key(self):
+        env, seen = {}, []
+        with contextlib.redirect_stderr(io.StringIO()):
+            declared = ms.declare_tokens(env, lookup=self._lookup(seen=seen))
+        self.assertEqual(sorted(seen), ["VO0Gmw", "lO4j5q"])
+        self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
+        self.assertEqual(env["SUPERVISOR_A2A_TOKEN"], self.VALUES["lO4j5q"])
+        # Distinctness: one key resolved into both variables is the failure this guards, and it
+        # is invisible unless the two values are compared.
+        self.assertNotEqual(env["INTERACTIVE_AUTH_TOKEN"], env["SUPERVISOR_A2A_TOKEN"])
+        self.assertEqual(sorted(declared), ["INTERACTIVE_AUTH_TOKEN", "SUPERVISOR_A2A_TOKEN"])
+
+    def test_an_explicit_value_wins_and_its_key_is_not_consulted(self):
+        """config.mjs reads env-first, so a lookup here would spend a vault call to overwrite
+        a deliberate override."""
+        env, seen = {"INTERACTIVE_AUTH_TOKEN": "override-9a1c"}, []
+        with contextlib.redirect_stderr(io.StringIO()):
+            ms.declare_tokens(env, lookup=self._lookup(seen=seen))
+        self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], "override-9a1c")
+        self.assertEqual(seen, ["lO4j5q"])
+
+    def test_an_unresolved_token_degrades_rather_than_raising(self):
+        env, stderr = {}, io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            declared = ms.declare_tokens(env, lookup=self._lookup(failing=["lO4j5q"]))
+        self.assertEqual(declared, ["INTERACTIVE_AUTH_TOKEN"])
+        self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
+        self.assertNotIn("SUPERVISOR_A2A_TOKEN", env)
+        self.assertIn("lO4j5q", stderr.getvalue())
+
+    def test_a_degraded_token_never_reaches_stderr(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            ms.declare_tokens({}, lookup=self._lookup(failing=["VO0Gmw"]))
+        self.assertNotIn(self.VALUES["VO0Gmw"], stderr.getvalue())
+
+    def test_both_unresolved_still_returns_and_declares_nothing(self):
+        env = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            declared = ms.declare_tokens(env, lookup=self._lookup(failing=["VO0Gmw", "lO4j5q"]))
+        self.assertEqual(declared, [])
+        self.assertEqual(env, {})
+
+
 class MainTest(unittest.TestCase):
     def test_missing_bun_is_reported_not_exec_d(self):
         """No bun must be a readable error and a non-zero exit -- an exec-less return is
@@ -120,6 +254,24 @@ class MainTest(unittest.TestCase):
             ms.find_bun = original
         self.assertEqual(code, 1)
         self.assertIn("bun not found", stderr.getvalue())
+
+    def test_an_unresolved_token_does_not_stop_the_server(self):
+        """The degradation at the integration level, and why it is a rule rather than a
+        nicety: this process gates every supervisor tool, so a TeamVault outage that exited
+        here would take the supervisor away from the session entirely — not just the two
+        spawn targets that consume a token."""
+        original = ms.find_bun
+        ms.find_bun = lambda env, which=None: "/stub/bun"
+        captured = {}
+        try:
+            with mock.patch.object(ms.os, "execve", lambda path, args, env: captured.update(env=env)):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    code = ms.main(env={"HOME": "/tmp", "SUPERVISOR_TEAMVAULT_CLI": "/nonexistent/cli"})
+        finally:
+            ms.find_bun = original
+        self.assertEqual(code, 0, "the server must still start")
+        self.assertNotIn("INTERACTIVE_AUTH_TOKEN", captured["env"])
+        self.assertNotIn("SUPERVISOR_A2A_TOKEN", captured["env"])
 
 
 if __name__ == "__main__":
