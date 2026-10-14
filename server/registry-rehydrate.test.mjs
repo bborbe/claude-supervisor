@@ -366,15 +366,26 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // store those readers consult is the file again — and the park read is what decides whether
   // an operator's answer is carried into a resumed worker at all.
   assert.match(src, /const record = await readSessionLedgerRow\(resume\)/)
-  assert.ok(
-    !/readRecord\(config\.ledgerDir/.test(src),
-    'the resume-path park read must go through the endpoint, never the file',
-  )
   assert.match(src, /\(\(await readSessionLedger\(\)\) \?\? \[\]\)\.filter\(/)
+  // ⚠️ **And the FILE LEDGER is gone outright, not merely unused.** The two READS above were its
+  // last readers, so the WRITE went with them: `config.ledgerDir` — the one place the sessions
+  // directory was ever named — must appear nowhere in the supervisor, and neither may the two file
+  // helpers it called. A revert that re-added the write would leave every behavioural test in this
+  // repo green, because nothing else exercises the spawn path's durable half at all.
   assert.ok(
-    !/listRecords\(config\.ledgerDir\)/.test(src),
-    'the A2A liveness mirror must read the endpoint, never the file',
+    !/config\.ledgerDir/.test(src),
+    'the file ledger directory must be gone from the supervisor entirely',
   )
+  assert.ok(
+    !/updateRecord\(|writeRecord\(/.test(src),
+    'the file-ledger write helpers must not come back — the endpoint is the only durable write',
+  )
+  // ⚠️ **The merge source is the in-memory record held on the agent, and the park depends on it.**
+  // The park is written when a gate opens and the result when the turn ends; merging into a re-read
+  // row would reintroduce the read-modify-write window, and merging the PATCH alone would drop the
+  // spawn edge. Both halves are pinned — the call, and the assignment that keeps the record.
+  assert.match(src, /const merged = mergeRecord\(agent\.ledgerRecord, patch\)/)
+  assert.match(src, /agent\.ledgerRecord = record/)
   const rehydrateSrc = readFileSync(new URL('./registry-rehydrate.mjs', import.meta.url), 'utf8')
   assert.match(rehydrateSrc, /export function unionRoster\(inProcess, fresh\)/)
   // ⚠️ **A foreign row's id is a function of the ROW ALONE.** Deriving it from `takenIds` —

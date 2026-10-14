@@ -1,4 +1,4 @@
-// A durable record per spawned worker.
+// The durable record per spawned worker: its SHAPE, and the two derivations that fill it.
 //
 // Two stores already exist and neither answers the question this one does. Claude
 // Code's live registry at `~/.claude/sessions/<pid>.json` is keyed by pid and is
@@ -8,17 +8,22 @@
 // started the session, in what mode, from which manager, or how it ended. Nothing
 // records the spawn edge.
 //
-// So this is keyed by the session uuid — the resume handle, which makes the record
-// useful to the resume path and not only to a process table — and it is written at
-// spawn, so a long-running worker is recorded while it is still running.
+// So the record is keyed by the session uuid — the resume handle, which makes it
+// useful to the resume path and not only to a process table — and it is filed at spawn,
+// so a long-running worker is recorded while it is still running.
 //
-// It is deliberately NOT a second liveness source: an entry here must never be read as
+// ⚠️ **This module no longer reads or writes anything.** It held the file store
+// (`$XDG_STATE_HOME/claude-supervisor/sessions`) until 2026-10-14; the record now lives in
+// attention-controller's session-ledger store, written by `supervisor.mjs`'s `writeLedger` and
+// read by `session-ledger.mjs`. What stays here is what is pure and testable: the row shape, the
+// spawn edge, and the unobserved stamp. The file helpers were DELETED rather than left unused —
+// a dead writer is how a later reader gets re-wired to a store nobody maintains.
+//
+// It is deliberately NOT a second liveness source: a row here must never be read as
 // proof a session is alive. `liveness.mjs` owns that question, and it answers from the
 // session registry plus the server's own in-process record of the workers it spawned.
 
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { readRegistry } from './liveness.mjs'
 
 // ⚠️ Three, not two. `cluster` is a third kind of worker — a session inside the
@@ -197,46 +202,22 @@ export function unobservedPatch({ mode, at = new Date().toISOString() }) {
   }
 }
 
-export function recordPath(dir, sessionId) {
-  return join(dir, `${sessionId}.json`)
-}
-
-// Written via a temporary file and renamed, so a reader never sees a half-written
-// record and reads it as a session with no fields.
-export function writeRecord(dir, record, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
-  const path = recordPath(dir, record.session_id)
-  fs.mkdirSync(dir, { recursive: true })
-  const tmp = `${path}.tmp`
-  fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`)
-  fs.renameSync(tmp, path)
-  return path
-}
-
-export function readRecord(dir, sessionId) {
-  try {
-    return JSON.parse(readFileSync(recordPath(dir, sessionId), 'utf8'))
-  } catch {
-    return null
-  }
-}
-
-// Merge rather than replace: the completion fields arrive long after the spawn fields,
-// and a caller that only knows the outcome must not have to restate the rest.
-export function updateRecord(dir, sessionId, patch, opts = {}) {
-  const current = readRecord(dir, sessionId)
+// Merge a patch into the record the writer already holds.
+//
+// ⚠️ **Merge, never replace, and that is the whole reason this is a function rather than a spread
+// at the call site.** A worker's completion fields arrive minutes after its spawn fields and from
+// a different call site — the terminal patch knows the outcome and nothing else — so a replace
+// would erase the spawn edge, which nothing else records. The same property is what keeps a PARK
+// alive across a later `{result}` patch, and that one is not cosmetic: a dropped park is a
+// resumed worker carrying no decision.
+//
+// ⚠️ **An explicit `null` is a VALUE here, not a deletion.** `clearParkPatch` sends
+// `{ parked_permission: null }` precisely because a finished worker must stop advertising a park
+// nobody holds, and a spread is what makes that expressible.
+//
+// `null` in, `null` out: a writer with no record yet has nothing to merge INTO, and inventing a
+// partial row from the patch alone would file a record missing the spawn edge.
+export function mergeRecord(current, patch) {
   if (!current) return null
-  const next = { ...current, ...patch }
-  writeRecord(dir, next, opts)
-  return next
-}
-
-export function listRecords(dir) {
-  try {
-    return readdirSync(dir)
-      .filter((name) => name.endsWith('.json'))
-      .map((name) => readRecord(dir, name.replace(/\.json$/, '')))
-      .filter(Boolean)
-  } catch {
-    return []
-  }
+  return { ...current, ...patch }
 }
