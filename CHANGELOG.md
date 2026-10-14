@@ -14,6 +14,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - test: the launcher declares the ambient config dir as the server's home, leaves an unset one unset, never overwrites an explicit declaration, resolves bun in the documented order, and reports a missing bun on stderr instead of exec'ing.
 
+## v0.142.1
+
+- fix: **an A2A spawn on k8s now waits for the worker behind the ingress, instead of orphaning it on the ingress's own 404.** Measured 2026-10-14 in the first `spawn_agent(target: 'k8s')` against the nuke-dev controller: the card answered **404** the instant `create` returned (no route while the pod was Pending), **503** once the route existed, and **200** about 45 s after create. The v0.140.2 readiness retry treated any HTTP answer as the worker speaking, so the spawn errored and the worker was orphaned. `fetchWorkerCard` now also retries 404 / 502 / 503 / 504, and the deadline rises from 30 s to **120 s** to cover pod scheduling and start. Any other HTTP answer stays final, and a genuine 404 still fails once the deadline passes.
+
+- test: an ingress 404 then 503 is retried until the worker answers; a 404 past the deadline still refuses; a 401 is final and never retried.
+
 ## v0.142.0
 
 - feat: **an A2A `create` call can now write the exact body it sends, at the send site, when `a2a.captureDir` is set in the supervisor config.** This is SC2's evidence — a `docker` and a `k8s` spawn must send byte-identical calls apart from per-worker values, and that can only be shown by capturing what was actually sent. Off by default; one JSON file per call (`<at>-<target>-create.json`, carrying `at`, `target`, `task`, `url`, `body`). ⚠️ The hook is handed the URL and the body only, never the headers, because the bearer token travels in `Authorization`. A capture that throws never fails the spawn.

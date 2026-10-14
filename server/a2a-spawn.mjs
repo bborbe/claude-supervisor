@@ -411,10 +411,16 @@ export async function createWorkerOnController({ endpoint, task, token, messageI
 // once the container is STARTED, not once its server listens — measured 2026-10-13 against
 // a2a-worker-controller v0.4.4: the card fetched the instant `create` returned failed with
 // `fetch failed`, and the same URL answered 200 five seconds later. Without the retry every live
-// spawn lost its worker to that race. An HTTP answer, even a 404, is the worker speaking, so it is
-// final and never retried.
-export const A2A_CARD_READY_TIMEOUT_MS = 30_000
+// spawn lost its worker to that race.
+//
+// ⚠️ ON k8s THE INGRESS ANSWERS BEFORE THE WORKER DOES, so 404 / 502 / 503 / 504 are retried too.
+// Measured 2026-10-14 against the nuke-dev controller: the card answered 404 the instant `create`
+// returned (no route while the pod was Pending), 503 once the route existed, and 200 ~45 s after
+// create — so a 404 is NOT proof the worker is speaking there, and treating it as final orphaned a
+// worker that was coming up. Any other HTTP answer stays final; the deadline bounds a genuine 404.
+export const A2A_CARD_READY_TIMEOUT_MS = 120_000
 export const A2A_CARD_RETRY_MS = 500
+const A2A_CARD_NOT_READY_STATUSES = new Set([404, 502, 503, 504])
 export async function fetchWorkerCard({
   a2aUrl,
   fetchImpl = fetch,
@@ -431,7 +437,8 @@ export async function fetchWorkerCard({
   for (;;) {
     try {
       res = await fetchImpl(cardUrl.url, { method: 'GET' })
-      break
+      if (!A2A_CARD_NOT_READY_STATUSES.has(res.status) || now() >= deadline) break
+      await sleep(retryMs)
     } catch (cause) {
       if (now() >= deadline) {
         return {
