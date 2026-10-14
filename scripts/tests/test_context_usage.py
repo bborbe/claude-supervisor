@@ -80,8 +80,12 @@ class IsCandidateTest(unittest.TestCase):
         self.assertFalse(cu.is_candidate(row(**{"self": True})))
 
 
-class RenderTest(unittest.TestCase):
-    """End-to-end over a temp state dir: the rendered table is the artifact SC1 reads."""
+class _RenderHarness:
+    """End-to-end over a temp state dir: the rendered table is the artifact SC1 reads.
+
+    Deliberately not a `TestCase` — the harness is shared by two suites, and a
+    `TestCase` base would re-run every one of its tests in each subclass.
+    """
 
     def run_main(self, context, attention, live, argv=None):
         with tempfile.TemporaryDirectory() as ctx, tempfile.TemporaryDirectory() as att:
@@ -98,6 +102,10 @@ class RenderTest(unittest.TestCase):
                  redirect_stdout(buf):
                 cu.main()
             return buf.getvalue()
+
+
+class RenderTest(_RenderHarness, unittest.TestCase):
+    """Pane-liveness rendering — the guard that keeps a phantom pane out of the table."""
 
     def test_phantom_pane_id_never_appears_in_the_table(self):
         out = self.run_main(
@@ -146,6 +154,95 @@ class RenderTest(unittest.TestCase):
             None,
             argv=["--compactable"],
         )
+        self.assertNotIn("Compaction candidates", out)
+
+
+def ctx_row(**kw):
+    """A context record as the statusline writes it."""
+    base = {"session_id": "s1", "used_percentage": 50, "pane": "1039",
+            "session_name": "mgr", "context_window_size": 1000000}
+    return dict(base, **kw)
+
+
+class UsedTokensTest(unittest.TestCase):
+    def test_tokens_from_a_known_window(self):
+        self.assertEqual(
+            cu.used_tokens({"pct": 50.0, "rec": {"context_window_size": 1000000}}), 500000)
+
+    def test_missing_window_is_none_not_zero(self):
+        # The load-bearing case: `or 0` folded this to 0 tokens, which reads as
+        # "under every bound" and drops exactly the sessions a token bound cannot judge.
+        self.assertIsNone(cu.used_tokens({"pct": 50.0, "rec": {}}))
+
+    def test_zero_window_is_none_not_zero(self):
+        self.assertIsNone(cu.used_tokens({"pct": 50.0, "rec": {"context_window_size": 0}}))
+
+
+class BoundVerdictTest(unittest.TestCase):
+    def v(self, pct, size, tokens, threshold=70.0):
+        rec = {} if size is None else {"context_window_size": size}
+        return cu.bound_verdict({"pct": pct, "rec": rec}, threshold, tokens)
+
+    def test_over_by_percentage(self):
+        self.assertIs(self.v(80.0, 1000000, 200000), True)
+
+    def test_over_by_tokens_while_under_the_percentage(self):
+        # 50% of a 1M window is 500k — the percentage gate would never fire here,
+        # which is the whole reason the absolute bound exists on this fleet.
+        self.assertIs(self.v(50.0, 1000000, 200000), True)
+
+    def test_under_both(self):
+        self.assertIs(self.v(15.0, 1000000, 200000), False)
+
+    def test_percentage_is_still_the_floor_on_a_small_window(self):
+        # 75% of 128k is 96k, under a 200k token bound — the percentage must still fire.
+        self.assertIs(self.v(75.0, 128000, 200000), True)
+
+    def test_unknown_window_is_unknown_not_under(self):
+        self.assertIsNone(self.v(15.0, None, 200000))
+
+    def test_unknown_window_without_a_token_bound_is_plainly_under(self):
+        # No token bound in force means nothing needs the window size.
+        self.assertIs(self.v(15.0, None, None), False)
+
+    def test_no_token_bound_preserves_the_previous_behaviour(self):
+        self.assertIs(self.v(50.0, 1000000, None), False)
+        self.assertIs(self.v(70.0, 1000000, None), True)
+
+
+class BoundLabelTest(unittest.TestCase):
+    def test_percentage_only(self):
+        self.assertEqual(cu.bound_label(70.0, None), "70%")
+
+    def test_both_bounds_named(self):
+        self.assertEqual(cu.bound_label(70.0, 200000), "70% or 200k tokens")
+
+
+class TokenBoundRenderTest(_RenderHarness, unittest.TestCase):
+    """SC2's evidence is the gate's OWN output naming the bound in force."""
+
+    def test_the_output_names_the_bound_in_force(self):
+        out = self.run_main({"s1.json": ctx_row()}, {}, {"1039"},
+                            argv=["--threshold-tokens", "200000"])
+        self.assertIn("Bound in force: 70% or 200k tokens", out)
+
+    def test_the_token_bound_fires_where_the_percentage_never_would(self):
+        out = self.run_main({"s1.json": ctx_row(used_percentage=50)}, {}, {"1039"},
+                            argv=["--threshold-tokens", "200000"])
+        self.assertIn("Over 70% or 200k tokens: 1", out)
+
+    def test_unknown_window_is_reported_and_never_read_as_zero_tokens(self):
+        out = self.run_main(
+            {"s1.json": ctx_row(used_percentage=15, context_window_size=None)},
+            {}, {"1039"}, argv=["--threshold-tokens", "200000"])
+        self.assertIn("Window UNKNOWN", out)
+        self.assertIn("window unknown", out)
+        self.assertNotIn("0k/0k", out)
+
+    def test_unknown_window_is_never_offered_for_compaction(self):
+        out = self.run_main(
+            {"s1.json": ctx_row(used_percentage=15, context_window_size=None)},
+            {}, {"1039"}, argv=["--threshold-tokens", "200000", "--compactable"])
         self.assertNotIn("Compaction candidates", out)
 
 
