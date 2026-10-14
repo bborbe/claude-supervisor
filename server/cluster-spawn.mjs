@@ -298,13 +298,33 @@ export function resolveClusterTarget({ envUrl, envToken, file, path = 'the super
   // Each value is validated under its OWN label, so a bad file-sourced value names the file
   // key rather than the env var it never came from — the repo's rule that a refusal names the
   // thing the operator must change.
+  // ⚠️ A plaintext `cluster.token` REFUSES rather than being read, and the refusal IS the
+  // migration. The token reaches the server from TeamVault through the launch wrapper, as
+  // `INTERACTIVE_AUTH_TOKEN`; a copy in this file is the exposure being removed, so reading it
+  // would leave the very thing being deleted working silently. Unconditional by operator
+  // decision (2026-10-14) — the deploy is ordered so this never goes live against a config
+  // that still holds one (see the task's # Sequence).
+  //
+  // `''` is absence, matching `set` below, so an emptied key reads as a deleted key and does
+  // not refuse. The offending VALUE is never echoed: only the key and the file are named.
+  if (section?.token !== undefined && section.token !== null && section.token !== '') {
+    return {
+      error:
+        `"cluster.token" is set in ${path}, and the supervisor no longer reads a cluster token from the ` +
+        'config file. The token now reaches the server from TeamVault through the launch wrapper, as ' +
+        'INTERACTIVE_AUTH_TOKEN (see docs/fleet-surface.md § Spawn a worker item 7). Delete the ' +
+        `"cluster.token" key in ${path}.`,
+    }
+  }
+
   const urlSources = [
     { label: 'SUPERVISOR_CLUSTER_URL', value: envUrl, check: resolveClusterBaseUrl },
     { label: `"cluster.url" in ${path}`, value: section?.url, check: resolveClusterBaseUrl },
   ]
+  // ⚠️ One source, not two: the file's `cluster.token` is refused above, so listing it here
+  // would advertise a source that can never win.
   const tokenSources = [
     { label: 'INTERACTIVE_AUTH_TOKEN', value: envToken, check: resolveAuthToken },
-    { label: `"cluster.token" in ${path}`, value: section?.token, check: resolveAuthToken },
   ]
   // ⚠️ A whitespace-only value counts as SET, deliberately, and the asymmetry with `''` is the
   // point rather than an oversight. `''` is absence — an unset variable that got exported — so
@@ -313,7 +333,7 @@ export function resolveClusterTarget({ envUrl, envToken, file, path = 'the super
   // exactly, so a mis-pasted token would match on this side and stop matching on the other).
   // It therefore wins the source and is refused by resolveAuthToken's whitespace rule, naming
   // the key. The cost is real and worth stating: a trailing newline in an exported env value
-  // shadows a perfectly good `cluster.token`, and the fix is to remove the env value.
+  // is refused rather than trimmed, and the fix is to remove the env value.
   const set = (s) => s.value !== undefined && s.value !== null && s.value !== ''
   for (const { label, value, check } of [...urlSources, ...tokenSources]) {
     if (!set({ value })) continue
@@ -402,12 +422,14 @@ export function resolveAuthToken(raw, label = 'INTERACTIVE_AUTH_TOKEN', configPa
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
-        'the cluster target has no token: neither INTERACTIVE_AUTH_TOKEN nor "cluster.token" is set. ' +
-        'The claude-interactive service requires `Authorization: Bearer <token>` on POST /prompt and refuses ' +
-        'without it, so a spawn would fail as a 401 naming nothing to fix. Set "cluster.token" in the ' +
-        `supervisor config file (${configPath}) — a /mcp Reconnect picks that up, ` +
-        'because the server re-reads the file at its own start — or set INTERACTIVE_AUTH_TOKEN on the server ' +
-        'entry, which needs a NEW session, since an MCP env block is cached at session start.',
+        'the cluster target has no token: INTERACTIVE_AUTH_TOKEN is not set. The claude-interactive ' +
+        'service requires `Authorization: Bearer <token>` on POST /prompt and refuses without it, so a ' +
+        'spawn would fail as a 401 naming nothing to fix. The token is resolved from TeamVault by the ' +
+        'launch wrapper — point the supervisor MCP entry at scripts/supervisor-launch.sh and Reconnect. ' +
+        'Setting INTERACTIVE_AUTH_TOKEN on the server entry also works but needs a NEW session, since an ' +
+        'MCP env block is cached at session start. A "cluster.token" in the supervisor config file ' +
+        `(${configPath}) is NOT a fallback: it is refused, because a plaintext token there is the ` +
+        'exposure this change removes.',
     }
   }
   if (typeof raw !== 'string') {
@@ -534,7 +556,7 @@ export async function startClusterSession({
     // the reader looking at their network for what is a credential mismatch.
     const hint =
       response.status === 401
-        ? ' — the service rejected the credential: check that the token matches the one the service was started with. It comes from INTERACTIVE_AUTH_TOKEN on the server entry or from "cluster.token" in the supervisor config file — and where both are set the env var wins, so a file-sourced token is not the one being sent'
+        ? ' — the service rejected the credential: check that the token matches the one the service was started with. It reaches this process as INTERACTIVE_AUTH_TOKEN, resolved from TeamVault by the launch wrapper — so the two candidates are the TeamVault entry the wrapper reads and the value the service was started with, and a mismatch means one of those two moved'
         : ''
     return {
       error: `the cluster service refused the prompt: HTTP ${response.status}${body.trim() ? ` — ${body.trim()}` : ''}${hint}`,

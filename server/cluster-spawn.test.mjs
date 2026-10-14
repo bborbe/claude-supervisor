@@ -506,37 +506,88 @@ test('a post-delivery connection failure is not retried, because POST /prompt is
 
 // --- resolveClusterTarget: which source each cluster value comes from ----------------------
 
-test('the env var wins over the config file for both cluster values', () => {
+test('the env var wins over the config file for the cluster URL', () => {
   const r = resolveClusterTarget({
     envUrl: 'https://from-env.example',
     envToken: 'env-token',
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    file: { cluster: { url: 'https://from-file.example' } },
   })
   assert.equal(r.url, 'https://from-env.example')
   assert.equal(r.token, 'env-token')
 })
 
-test('the config file supplies a value the env does not', () => {
+test('the config file supplies a URL the env does not', () => {
   const r = resolveClusterTarget({
     envUrl: null,
-    envToken: null,
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example' } },
   })
   assert.equal(r.url, 'https://from-file.example')
-  assert.equal(r.token, 'file-token')
+  assert.equal(r.token, 'env-token')
 })
 
-test('an empty env string falls through to the file rather than counting as set', () => {
+test('an empty env string falls through to the file URL rather than counting as set', () => {
   // resolveClusterBaseUrl and resolveAuthToken both treat '' as unset, so counting it as set
   // here would hand them a value they immediately refuse — a server that reads as configured
   // and refuses every spawn.
   const r = resolveClusterTarget({
     envUrl: '',
-    envToken: '',
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example' } },
   })
   assert.equal(r.url, 'https://from-file.example')
-  assert.equal(r.token, 'file-token')
+  assert.equal(r.token, 'env-token')
+})
+
+// --- the plaintext token the migration removes ----------------------------------------------
+
+test('a plaintext cluster.token REFUSES, naming the key and the file to delete it from', () => {
+  // The refusal IS the migration: reading the file value would leave the plaintext token
+  // working silently, which is the exposure this change exists to remove. Exercised with the
+  // repo's placeholder token, so no real credential is ever needed to reach the path.
+  const r = resolveClusterTarget({
+    envUrl: 'https://x.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://x.example', token: TOKEN } },
+    path: '/etc/sup.json',
+  })
+  assert.match(r.error, /"cluster\.token" is set/)
+  assert.match(r.error, /\/etc\/sup\.json/, 'must name the file to edit')
+  assert.match(r.error, /Delete the "cluster\.token" key/, 'must name the fix')
+  assert.equal(r.token, undefined, 'must not resolve a token at all')
+})
+
+test('the plaintext refusal fires even when the env token is set and would win', () => {
+  // ⚠️ The case that makes this a guard rather than a nicety. Env-first precedence means the
+  // file value never WINS here — so a check placed at the point of use would never see it, and
+  // the plaintext token would sit in the file indefinitely while every spawn kept working.
+  // The refusal is on PRESENCE, not on which source wins.
+  const r = resolveClusterTarget({
+    envUrl: 'https://x.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://x.example', token: TOKEN } },
+  })
+  assert.ok(r.error, 'a plaintext token must refuse even when the env var would win')
+})
+
+test('the plaintext refusal never echoes the token it refuses', () => {
+  const r = resolveClusterTarget({
+    envUrl: 'https://x.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://x.example', token: TOKEN } },
+  })
+  assert.ok(!r.error.includes(TOKEN), 'the refused value must not travel back to the client')
+})
+
+test('an emptied cluster.token is absence, not a plaintext token', () => {
+  // `''` is how this repo spells absence everywhere else (see `set`), so a key emptied rather
+  // than deleted must not refuse — otherwise the refusal has no reachable way out.
+  const r = resolveClusterTarget({
+    envUrl: 'https://x.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://x.example', token: '' } },
+  })
+  assert.equal(r.token, 'env-token')
 })
 
 test('neither source set refuses HERE, naming the config file the server actually read', () => {
@@ -663,33 +714,36 @@ test('the answer bound is the number the spawn slices with', () => {
   assert.equal(CLUSTER_ANSWER_MAX, 4000)
 })
 
-test('url and token resolve INDEPENDENTLY — a mixed pair takes each from its own source', () => {
-  // The whole point of the feature is per-value resolution, and both precedence tests above set
-  // BOTH values from the SAME source — so a future edit routing them through one shared loop
-  // would keep them green. These two cases pin the independence in both directions.
+test('the url and the token resolve INDEPENDENTLY — the url may come from the file, the token may not', () => {
+  // The point of per-value resolution, and both precedence tests above set BOTH values from the
+  // SAME source — so a future edit routing them through one shared loop would keep them green.
+  // ⚠️ Only the url half can come from the file now: a file-sourced TOKEN is refused outright
+  // (see the plaintext-refusal cases below), so the mirror-image case this test used to carry has
+  // no reachable state left to describe.
   const urlFromFile = resolveClusterTarget({
     envUrl: null,
     envToken: 'env-token',
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    file: { cluster: { url: 'https://from-file.example' } },
   })
   assert.equal(urlFromFile.url, 'https://from-file.example')
   assert.equal(urlFromFile.token, 'env-token')
 
-  const tokenFromFile = resolveClusterTarget({
+  const urlFromEnv = resolveClusterTarget({
     envUrl: 'https://from-env.example',
-    envToken: null,
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example' } },
   })
-  assert.equal(tokenFromFile.url, 'https://from-env.example')
-  assert.equal(tokenFromFile.token, 'file-token')
+  assert.equal(urlFromEnv.url, 'https://from-env.example')
+  assert.equal(urlFromEnv.token, 'env-token')
 })
 
-test('a file-sourced bad TOKEN names the token key, not the url key', () => {
-  // The mirror of the bad-URL case above, and unasserted until now: swapping the two `label`
-  // strings in resolveClusterTarget's source arrays kept the suite green.
-  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: { token: 1234567890 } } })
-  assert.match(r.error, /"cluster\.token" in the supervisor config/)
-  assert.ok(!r.error.includes('"cluster.url"'), 'must not name the url key for a token value')
+test('the plaintext refusal names the TOKEN key, not the url key, and echoes no value', () => {
+  // The label-swap guard the old file-sourced-token case carried, restated for the refusal that
+  // replaced it: a refusal naming `cluster.url` here would send the operator to edit the wrong
+  // key while the plaintext token stayed exactly where it is.
+  const r = resolveClusterTarget({ envUrl: null, envToken: 'env-token', file: { cluster: { token: 1234567890 } } })
+  assert.match(r.error, /"cluster\.token" is set/)
+  assert.ok(!r.error.includes('"cluster.url"'), 'must not name the url key for a token problem')
   assert.ok(!r.error.includes('1234567890'), 'and must not echo the value')
 })
 
@@ -699,16 +753,14 @@ test('a credential in a url userinfo is redacted before the refusal echoes it', 
   assert.ok(!r.error.includes('secret'), 'the userinfo must not ride out in the message')
 })
 
-test('a whitespace-only env token WINS and is refused, rather than falling through to the file', () => {
+test('a whitespace-only env token is refused, not trimmed and not treated as unset', () => {
   // The asymmetry with '' is deliberate and argued at length in the source: '' is absence, so it
-  // falls through; ' ' is a value the operator put there, and trimming it would silently repair
-  // a value the service compares exactly. That cost is real — a trailing newline in an exported
-  // env value shadows a perfectly good `cluster.token` — so it is pinned rather than left to the
-  // comment: a future change making whitespace fall through would otherwise stay green.
-  const r = resolveClusterTarget({ envToken: ' ', file: { cluster: { token: 'file-token' } } })
+  // falls through; ' ' is a value the operator put there, and trimming it would silently repair a
+  // value the service compares exactly. Pinned rather than left to the comment: a future change
+  // making whitespace fall through would otherwise stay green.
+  const r = resolveClusterTarget({ envToken: ' ', file: { cluster: { url: 'https://x.example' } } })
   assert.match(r.error, /INTERACTIVE_AUTH_TOKEN/)
   assert.match(r.error, /whitespace/)
-  assert.ok(!r.error.includes('cluster.token'), 'must not fall through to the file value')
 })
 
 test('a non-string token reports its TYPE and never echoes the value', () => {
