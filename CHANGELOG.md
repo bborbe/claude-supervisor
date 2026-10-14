@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.146.0
 
 - feat: **`list_agents` carries every worker's open attention cards, so a manager sees a permission prompt on a worker it did NOT spawn — and a foreign `answer_permission` names the owner instead of refusing anonymously.** Both gaps were in `server/supervisor.mjs`, and both were the same shape: an answer that was true of *this* process and silent about the rest of the fleet. ⚠️ **`list_agents` reads the store ONCE for the whole roster, never once per worker.** A `fetchOpenCards` per agent would be N round-trips against a 3 s timeout each, in front of every manager sweep — so with the store down the roster read would take N × 3 s and stop being a roster read at all. The new `fetchAttentionItems` (`server/open-cards.mjs`) fetches the list once and the already-pure `openCardsOf` does the per-session filter, which is also why the new export is the fetch and not a second filter. ⚠️ **`null` stays distinct from `[]` on every row.** `null` is "the store could not be read"; `[]` is "read, and this worker holds nothing open". Collapsing them reports a parked worker as unblocked whenever the store is down — the exact false negative this field exists to remove, and the reason the null check is written at the call site rather than left to `openCardsOf`, which would answer `[]` for an unreadable store.
 
