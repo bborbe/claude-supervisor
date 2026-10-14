@@ -59,3 +59,18 @@ test('a missing agent is refused rather than throwing', () => {
   assert.ok(resolveMessageChannel(undefined).error)
   assert.ok(resolveMessageChannel(null).error)
 })
+
+test('an A2A worker resolves to its own endpoint, token and conversation', () => {
+  const a = agent({ status: 'docker', paneId: null, a2aUrl: 'http://localhost:9093/a2a', workerToken: 'not-a-real-token', contextId: 'ctx-1' })
+  assert.deepEqual(resolveMessageChannel(a), { channel: 'a2a', endpoint: 'http://localhost:9093/a2a', token: 'not-a-real-token', contextId: 'ctx-1' })
+})
+
+test('a re-adopted A2A row holds no token and is refused, never sent unauthenticated', () => {
+  const { error } = resolveMessageChannel(agent({ status: 'k8s', paneId: null, a2aUrl: 'http://w/a2a', workerToken: undefined, contextId: 'ctx-1' }))
+  assert.match(error, /does not hold/)
+})
+
+test('an A2A worker whose first turn was never sent has no conversation to continue', () => {
+  const { error } = resolveMessageChannel(agent({ status: 'docker', paneId: null, a2aUrl: 'http://w/a2a', workerToken: 't', contextId: undefined }))
+  assert.match(error, /no conversation recorded/)
+})

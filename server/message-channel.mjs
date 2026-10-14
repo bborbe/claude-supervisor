@@ -17,6 +17,8 @@
 // A pure function over the agent record, so it is testable without a server, a pane or a
 // pod. Nothing here reads the filesystem, the environment, or the clock.
 
+import { A2A_SPAWN_TARGETS } from './a2a-spawn.mjs'
+
 export function resolveMessageChannel(agent) {
   if (!agent || typeof agent !== 'object') {
     return { error: 'no agent record to resolve a message channel from' }
@@ -51,6 +53,30 @@ export function resolveMessageChannel(agent) {
       }
     }
     return { channel: 'cluster', sessionId: agent.sessionId }
+  }
+
+  if (A2A_SPAWN_TARGETS.includes(agent.status)) {
+    // An A2A turn goes to the WORKER's own endpoint, never the controller (SC3), on the
+    // conversation the first turn opened. All three handles are held only by the process that
+    // spawned the worker: a REHYDRATED row has no token, because the ledger deliberately never
+    // stores one, so it can be seen live but not driven — refused here rather than sent
+    // unauthenticated.
+    if (!agent.a2aUrl || !agent.workerToken) {
+      return {
+        error:
+          `agent ${id} is an A2A worker (status "${agent.status}") whose endpoint or token this process ` +
+          `does not hold — a row re-adopted after a reconnect carries neither, because the token is ` +
+          `never written to disk. It can be watched, but no follow-up turn can reach it from here.`,
+      }
+    }
+    if (!agent.contextId) {
+      return {
+        error:
+          `agent ${id} is an A2A worker with no conversation recorded yet — its first turn has not ` +
+          `been sent, so there is no context to continue.`,
+      }
+    }
+    return { channel: 'a2a', endpoint: agent.a2aUrl, token: agent.workerToken, contextId: agent.contextId }
   }
 
   return {
