@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.142.0
 
 - feat: **an A2A `create` call can now write the exact body it sends, at the send site, when `a2a.captureDir` is set in the supervisor config.** This is SC2's evidence — a `docker` and a `k8s` spawn must send byte-identical calls apart from per-worker values, and that can only be shown by capturing what was actually sent. Off by default; one JSON file per call (`<at>-<target>-create.json`, carrying `at`, `target`, `task`, `url`, `body`). ⚠️ The hook is handed the URL and the body only, never the headers, because the bearer token travels in `Authorization`. A capture that throws never fails the spawn.
 
