@@ -169,13 +169,32 @@ export function resolveA2AControllerTarget({ envUrl, envToken, file, path = 'the
     }
   }
 
+  // ⚠️ A plaintext `a2a.token` REFUSES rather than being read, mirroring `resolveClusterTarget`.
+  // The control token reaches the server from TeamVault through the launch wrapper, as
+  // `SUPERVISOR_A2A_TOKEN`; a copy in this file is the exposure being removed, so reading it
+  // would leave the very thing being deleted working silently. Unconditional by operator
+  // decision (2026-10-14) — the deploy is ordered so this never goes live against a config
+  // that still holds one (see the task's # Sequence).
+  //
+  // `''` is absence, matching `set` below. The VALUE is never echoed: only the key and the
+  // file are named.
+  if (section?.token !== undefined && section.token !== null && section.token !== '') {
+    return {
+      error:
+        `"a2a.token" is set in ${path}, and the supervisor no longer reads a controller token from the ` +
+        'config file. The token now reaches the server from TeamVault through the launch wrapper, as ' +
+        `SUPERVISOR_A2A_TOKEN. Delete the "a2a.token" key in ${path}.`,
+    }
+  }
+
   const urlSources = [
     { label: 'SUPERVISOR_A2A_URL', value: envUrl },
     { label: `"a2a.url" in ${path}`, value: section?.url },
   ]
+  // ⚠️ One source, not two: the file's `a2a.token` is refused above, so listing it here would
+  // advertise a source that can never win.
   const tokenSources = [
     { label: 'SUPERVISOR_A2A_TOKEN', value: envToken },
-    { label: `"a2a.token" in ${path}`, value: section?.token },
   ]
   const set = (s) => s.value !== undefined && s.value !== null && s.value !== ''
   const pick = (sources) => sources.find(set)?.value ?? null
@@ -198,16 +217,19 @@ export function resolveA2AControllerTarget({ envUrl, envToken, file, path = 'the
   if (token === null) {
     return {
       error:
-        `no controller token is configured — set SUPERVISOR_A2A_TOKEN or "a2a.token" in ${path}. The controller ` +
-        'refuses an unauthenticated control call, so a spawn without one would fail at the controller rather ' +
-        'than here, with nothing on this side naming the missing key.',
+        'no controller token is configured — SUPERVISOR_A2A_TOKEN is not set. The token is resolved from ' +
+        'TeamVault by the launch wrapper, so point the supervisor MCP entry at scripts/supervisor-launch.sh ' +
+        `and Reconnect. An "a2a.token" in ${path} is NOT a fallback: it is refused, because a plaintext ` +
+        'token there is the exposure this change removes. The controller refuses an unauthenticated control ' +
+        'call, so a spawn without one would fail at the controller rather than here, with nothing on this ' +
+        'side naming the missing key.',
     }
   }
   if (typeof token !== 'string' || token.trim() === '') {
     return {
       error:
         'the configured controller token is not a usable string — it is set but empty or non-string. The value ' +
-        'is deliberately not echoed. Check SUPERVISOR_A2A_TOKEN and "a2a.token".',
+        'is deliberately not echoed. Check SUPERVISOR_A2A_TOKEN.',
     }
   }
   return { url, token }
