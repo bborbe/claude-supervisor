@@ -52,6 +52,7 @@ other side.
 | `/supervisor:read-guides` | any | — |
 | `/supervisor:jump` | any | — |
 | `/supervisor:who-needs-me` | any | — |
+| `/supervisor:who-needs-my-help` | any — sweeps every live session and reports; its one outward action is a `SendMessage` per live manager | — |
 | `/supervisor:attention-next` | any — relays the operator's own answer | — |
 | `/supervisor:inbox` | any — the operator's own approval queue; relays their approve / reject / later, and never picks a row itself | — |
 | `/supervisor:ready` | any — readies ONE named task to the spawn bar (audit → repair → re-audit in a sub-agent), then opens it or escalates | — |
