@@ -31,16 +31,40 @@ export function openCardsOf(items, sessionId) {
 // was read and holds nothing open for this session. Collapsing the two would report a
 // blocked worker as unblocked whenever the store is down, which is the false negative this
 // field exists to remove.
-export async function fetchOpenCards({ storeUrl, sessionId, fetchImpl = globalThis.fetch, timeoutMs = 3000 }) {
-  if (!storeUrl || !sessionId) return null
+// The store's whole item list, or `null` when the read could not run.
+//
+// Exported because a caller reading MANY sessions must pay one round-trip, not one per
+// session: `list_agents` maps over the entire roster, so a `fetchOpenCards` per worker
+// would be N sequential requests against a 3 s timeout each — and that read sits in front
+// of every manager sweep. With the store down that is the difference between a slow answer
+// and an unusable one. `openCardsOf` then does the per-session filter, which is pure and
+// already tested on its own.
+//
+// The same `null`-vs-`[]` rule as `fetchOpenCards` holds here, one level up: `null` is "the
+// store could not be read", `[]` is "read, and the fleet holds nothing".
+export async function fetchAttentionItems({ storeUrl, fetchImpl = globalThis.fetch, timeoutMs = 3000 }) {
+  if (!storeUrl) return null
   try {
     const res = await fetchImpl(`${storeUrl}/api/1.0/attention`, { signal: AbortSignal.timeout(timeoutMs) })
     if (!res.ok) return null
     const data = await res.json()
     const items = Array.isArray(data) ? data : data?.items ?? data?.data
     if (!Array.isArray(items)) return null
-    return openCardsOf(items, sessionId)
+    return items
   } catch {
     return null
   }
+}
+
+// `null` means the store could not be read — a different fact from `[]`, which means it
+// was read and holds nothing open for this session. Collapsing the two would report a
+// blocked worker as unblocked whenever the store is down, which is the false negative this
+// field exists to remove.
+export async function fetchOpenCards({ storeUrl, sessionId, fetchImpl = globalThis.fetch, timeoutMs = 3000 }) {
+  if (!storeUrl || !sessionId) return null
+  const items = await fetchAttentionItems({ storeUrl, fetchImpl, timeoutMs })
+  // `null` stays `null` — a failed read must not be laundered into "nothing open for this
+  // session" by `openCardsOf`, which would answer `[]` for an unreadable store.
+  if (items === null) return null
+  return openCardsOf(items, sessionId)
 }

@@ -41,7 +41,8 @@ import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, mergeRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
-import { fetchOpenCards } from './open-cards.mjs'
+import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
+import { foreignParkRefusal } from './park-refusal.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
@@ -2276,7 +2277,7 @@ const TOOLS = [
   },
   {
     name: 'list_agents',
-    description: 'All spawned sessions with status and how many permissions are pending. Each row also carries `current_tool_call` (the call in flight and how long it has been held) and `last_message`, so one sweep says what every worker is doing without a pane.',
+    description: 'All spawned sessions with status and how many permissions are pending. Each row also carries `current_tool_call` (the call in flight and how long it has been held) and `last_message`, so one sweep says what every worker is doing without a pane. Each row also carries `open_cards` — the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`), which is where a worker parked on a permission prompt shows up whoever spawned it, since `pending_permissions` covers only the parks this server holds. The tool name is the card\'s `payload` prefix. Answer one with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) on every row when the store is unreachable or switched off.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -2299,7 +2300,7 @@ const TOOLS = [
   },
   {
     name: 'answer_permission',
-    description: 'Answer a parked permission prompt: allow or deny. This is what unblocks the worker.',
+    description: 'Answer a parked permission prompt: allow or deny. This is what unblocks the worker. ⚠️ Only for a park THIS server holds — a request parked by another manager\'s server is refused, and the refusal names the worker and its spawning session plus the `attention-answer.py answer <item_id> --decision allow|deny` route by which that manager\'s server settles it. A cross-session `answer_permission` cannot release another server\'s park.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2509,11 +2510,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return reply({ agent_id: agent.id, sent: true, tab_id: res.tabId, pane_id: res.paneId })
     }
 
-    case 'list_agents':
+    case 'list_agents': {
       // ⚠️ The request-time roster, not the in-process Map: a worker another manager spawned —
       // or one resumed from a WezTerm pane — is not in this process's Map at all, and reading
       // only the Map is the defect this task exists to close. See `currentRoster`.
-      return reply([...(await currentRoster()).values()].map(agentView))
+      const roster = [...(await currentRoster()).values()]
+      // ⚠️ One store read for the whole roster, fanned out through the pure `openCardsOf` —
+      // never one `fetchOpenCards` per worker. That would be N round-trips, and with the store
+      // down N × the 3 s timeout, in front of every manager sweep.
+      //
+      // `null` (the store could not be read) stays distinct from `[]` (read, nothing open for
+      // this session) on every row: collapsing them reports a parked worker as unblocked, which
+      // is the false negative this field exists to remove.
+      const items = await fetchAttentionItems({ storeUrl: config.attentionStoreUrl })
+      return reply(
+        roster.map((agent) => ({
+          ...agentView(agent),
+          open_cards: items === null ? null : openCardsOf(items, agent.sessionId),
+        })),
+      )
+    }
 
     case 'agent_status': {
       const agent = (await currentRoster()).get(args.agent_id)
@@ -2538,7 +2554,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'answer_permission': {
       const record = pending.get(args.request_id)
       if (!record) {
-        return reply({ error: `no pending permission ${args.request_id} (already answered, or expired)` })
+        // ⚠️ Never the bare `no pending permission <id>`: the commonest reason this misses is
+        // that the park belongs to ANOTHER manager's server, and that caller can act on the
+        // store route. See `park-refusal.mjs`.
+        return reply({
+          error: await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger }),
+        })
       }
       // Record the manager's verdict too: a key the manager allows over and over
       // is the raw material for the next policy rule.
