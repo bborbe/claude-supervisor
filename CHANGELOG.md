@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.149.1
 
 - fix: **the cluster and A2A refusals named a launcher that no longer exists, and prescribed a remedy that does not work.** Both `resolveAuthToken`'s unset-token message (`server/cluster-spawn.mjs`) and `resolveA2AControllerTarget`'s (`server/a2a-spawn.mjs`) told the operator to *"point the supervisor MCP entry at `scripts/supervisor-launch.sh` and Reconnect"* — a bash wrapper that was written, retired and deleted before the release that shipped the string, so the advice named a file no checkout contains. ⚠️ **The remedy was wrong in a second way, and that one is not cosmetic.** A `/mcp` Reconnect does **not** pick up a changed `command`: Claude Code caches the MCP server definition at session start and re-spawns from that cache, so an operator who followed the instruction exactly would edit the config, Reconnect, and still have no token — measured 2026-10-14, `ps` showing every supervisor still running `bun run --cwd … start` after the entry had been repointed at `python3 …/scripts/mcp-start.py`. Both messages now name `scripts/mcp-start.py` and state that a changed `command` needs a **NEW session**; the env-block note that already said as much is folded in beside it, since it is the same caching rule.
 
