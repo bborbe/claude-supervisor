@@ -77,6 +77,14 @@ SITE_LIST = {
     # only fall back to the load-path check, never turn a refusal into an accept.
     ("restart-worker.py", "worker_argv"),
     ("who-needs-me.py", "main"), ("who-needs-me.py", "wezterm_panes"),
+    # added 2026-10-14 — `who-needs-my-help.py`'s pane-viewport read: the
+    # `wezterm cli get-text` the two-channel gate detector needs, and the only
+    # transport read in this repo that takes a pane's VISIBLE SCREEN rather than
+    # its metadata. It returns `None` for a failed read, never `[]` — an unreadable
+    # viewport cannot prove a pane holds no modal, so no caller may read it as "not
+    # gated", which is why it is driven into the three states below rather than
+    # merely listed.
+    ("who-needs-my-help.py", "pane_lines"),
     # in-repo callers that hold no transport call of their own
     ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change
     ("who-needs-me.py", "pane_for"), ("who-needs-me.py", "live_pane_ids"),
@@ -210,6 +218,7 @@ def main():
             ("sp", "stop-probe.py"),
             ("oi", "open-items.py"),
             ("pvc", "plugin-version-census.py"),
+            ("wnmh", "who-needs-my-help.py"),
         )
     }
 
@@ -235,6 +244,10 @@ def main():
         ("fs", "live_processes", ()), ("sp", "gate_processes", ()),
         ("oi", "live_panes", ()),
         ("pvc", "wezterm_panes", ()), ("pvc", "_pid_ttys", ([1],)),
+        # The viewport read takes a pane id; any id reaches the subprocess, and the
+        # three states are what matter — broken must be `None`, and a reachable
+        # transport answering with nothing must not become a failure.
+        ("wnmh", "pane_lines", (1,)),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")
