@@ -118,6 +118,13 @@ SOURCE_NOTE = None
 # holds no card" are different facts and only the second is `board-card-missing`.
 STORE_OK = None
 
+# The event-log records the last `needs_source()` read folded. Held so
+# `board_missing_gates()` can ask which gates the store did NOT carry without a
+# SECOND `load_events()` -- that call globs and reads every session's log, and the
+# two reads could disagree about what is open. `None` when the fallback carried the
+# read, which is also when `board_missing_gates()` returns [].
+STORE_EVENTS = None
+
 # session_id -> enrichment record. One file per session, many items per session.
 _ENRICHED_CACHE = {}
 
@@ -301,11 +308,12 @@ def needs_source():
     print: a fallback that announced nothing would be indistinguishable from a
     healthy store, which is the failure this exists to prevent.
     """
-    global SOURCE_NOTE, STORE_OK
+    global SOURCE_NOTE, STORE_OK, STORE_EVENTS
     try:
         items = store_items()
     except StoreUnreachable:
         STORE_OK = False
+        STORE_EVENTS = None
         SOURCE_NOTE = "store unreachable — reading event log"
         # Stamp every row this fallback produced, so the ROW says where it came from.
         # The note above is printed once, before any row, and every row then renders
@@ -320,7 +328,8 @@ def needs_source():
         return replayed
     SOURCE_NOTE = None
     STORE_OK = True
-    events = {r.get("item_id"): r for r in load_events()}
+    STORE_EVENTS = load_events()
+    events = {r.get("item_id"): r for r in STORE_EVENTS}
     out = []
     for item in items:
         rec = normalize_store_item(item, events)
@@ -1353,7 +1362,7 @@ def board_missing_gates(records, open_panes=frozenset(), task_status=None,
         return []
     carded = store_session_ids(records)
     return sorted(
-        [r for r in load_events()
+        [r for r in (STORE_EVENTS or [])
          if r.get("session_id") not in carded
          and not is_superseded(r, busy_ids, resumed_ids)
          and is_open_gate(r, open_panes=open_panes, task_status=task_status)],
@@ -1424,11 +1433,18 @@ def record_causes(classes, path=None, today=None):
     today = today or time.strftime("%Y-%m-%d")
     state = read_causes(path)
     seen = set(state["days"].get(today) or [])
+    changed = False
     for cause in classes:
         if cause in seen:
             continue
         seen.add(cause)
         state["counts"][cause] = state["counts"].get(cause, 0) + 1
+        changed = True
+    if not changed:
+        # Nothing new today -- skip the write. A manager's attention watcher polls
+        # this command on `--section needs-you`, so an unconditional write would
+        # rewrite the file on every tick to produce byte-identical content.
+        return state
     state["days"][today] = sorted(seen)
     write_causes(state, path)
     return state

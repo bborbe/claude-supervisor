@@ -2363,6 +2363,19 @@ class CauseTally(unittest.TestCase):
             handle.write("{not json")
         self.assertEqual(wnm.read_causes(self.path)["counts"], {})
 
+    def test_unchanged_run_does_not_rewrite_the_file(self):
+        """A manager's attention watcher polls this on `--section needs-you`, so an
+        unconditional write would rewrite the file on every tick to byte-identical
+        content -- a disk write per poll for no change in state."""
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        with open(self.path, "rb") as handle:
+            first = handle.read()
+        before = os.stat(self.path).st_mtime_ns
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        with open(self.path, "rb") as handle:
+            self.assertEqual(handle.read(), first)
+        self.assertEqual(os.stat(self.path).st_mtime_ns, before)
+
 
 class BoardMissingSection(unittest.TestCase):
     """The uncarded gates are their OWN section, and only when the store answered."""
@@ -2376,6 +2389,20 @@ class BoardMissingSection(unittest.TestCase):
     def test_store_session_ids_reads_provenance_not_a_second_read(self):
         recs = [{"session_id": "a", "store_vouched": True}, {"session_id": "b"}]
         self.assertEqual(wnm.store_session_ids(recs), {"a"})
+
+    def test_board_missing_reads_the_held_events_not_a_second_read(self):
+        """`needs_source()` already read the event log; a second `load_events()`
+        would glob and re-read EVERY session's log, and the two reads could
+        disagree about what is open. `load_events` is stubbed to blow up, so this
+        fails the moment the second read comes back."""
+        rec = {"session_id": "a", "pane": "7", "kind": "question", "detail": "q",
+               "ts": 0, "state": "open"}
+        with mock.patch.object(wnm, "STORE_OK", True), \
+                mock.patch.object(wnm, "STORE_EVENTS", [rec]), \
+                mock.patch.object(wnm, "load_events",
+                                  side_effect=AssertionError("second event-log read")):
+            self.assertEqual([r["session_id"] for r in wnm.board_missing_gates([])],
+                             ["a"])
 
 
 if __name__ == "__main__":
