@@ -232,13 +232,18 @@ export const config = Object.freeze({
   // life of the server — the exact staleness the map exists to avoid.
   roleMap: ENV.SUPERVISOR_ROLE_MAP || join(homedir(), '.cache', 'wezterm-role-map.json'),
 
-  // ⚠️ There is deliberately NO `ledgerDir` here any more, and its absence is the change rather
-  // than an omission. The durable spawn ledger is attention-controller's session-ledger store,
-  // reached over HTTP at `attentionStoreUrl` — every reader moved onto it, and the file write
-  // that used to live under `$XDG_STATE_HOME/claude-supervisor/sessions` went with the last of
-  // them. `SUPERVISOR_LEDGER_DIR` is retired rather than repurposed: a variable that still named
-  // a directory no code reads is how an operator points a store at the wrong place and reads the
-  // silence as an empty fleet.
+  // ⚠️ There is deliberately NO ledger-directory field here any more, and its absence is the
+  // change rather than an omission. The durable spawn ledger is attention-controller's
+  // session-ledger store, reached over HTTP at `attentionStoreUrl` — every reader moved onto it,
+  // and the file write that used to sit beside this config went with the last of them. The
+  // variable that named that directory is retired rather than repurposed: one that still named a
+  // path no code reads is how an operator points a store at the wrong place and reads the silence
+  // as an empty fleet.
+  //
+  // ⚠️ Neither the retired path nor the retired variable is spelled here, and that is deliberate:
+  // SC2 of the task that retired the store asserts each accessor with a pinned per-file probe
+  // matching those two literals, so naming them in a comment would fail the probe on a file whose
+  // code is already clean. Both are named in `docs/fleet-surface.md`, where an operator looks.
 
   // The headless-worker heartbeat store: one transient file per live worker, whose mtime is
   // refreshed by the server that owns it and read by any process that must decide whether
