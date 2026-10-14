@@ -38,7 +38,7 @@ import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
-import { buildRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
+import { buildRecord, mergeRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
 import { fetchOpenCards } from './open-cards.mjs'
@@ -658,22 +658,24 @@ function writeLedger(agent, patch) {
     return null
   }
   try {
-    // The patch arm merges into the stored row and hands the MERGED row back, so the endpoint
-    // is published the same row the file holds rather than the patch on its own — a patch-only
-    // POST would blank every field the patch does not name.
+    // ⚠️ **The merge source is this process's OWN in-memory record, not a read-back.** The patch
+    // arm used to merge into the file record, which meant a patch could land only while a file
+    // was still there to merge into — and it made the endpoint row a copy of a copy, so a
+    // vanished file froze that row silently. The record the create arm built is held on the agent
+    // instead: one source for this process's own row, no round trip, and no read-modify-write
+    // window for two in-flight patches to race in.
+    //
+    // ⚠️ The create arm always runs FIRST, for every mode — headless on the SDK's `init` message
+    // (`agent-loop.mjs:58`), and cluster / a2a / interactive inside their own spawn paths — so a
+    // patch that finds no record is a session id that resolved with no spawn behind it, which is
+    // the same "no key to file it under" case the guard above reports.
     if (patch) {
-      const merged = updateRecord(config.ledgerDir, agent.sessionId, patch)
-      // ⚠️ **A `null` here means the FILE record is gone, and it used to be silent.** The
-      // endpoint is now the roster's source, so a worker whose file row has disappeared — a
-      // rotated ledger dir, a migration that moved the files — keeps a STALE endpoint row
-      // forever with nothing anywhere saying so, and the copy that matters is the one not
-      // being updated. ⚠️ The fuller fix is to derive the wire row from the patch plus the
-      // STORED endpoint row (a GET-then-POST) rather than from the file at all; that is the
-      // right shape once the file write is retired, and this warning is what makes the gap
-      // observable until then.
-      if (merged === null) {
-        log(`WARNING: no file ledger record for ${agent.id} (${agent.sessionId}) — the patch was not applied and the endpoint row for it is now STALE`)
+      const merged = mergeRecord(agent.ledgerRecord, patch)
+      if (!merged) {
+        log(`WARNING: no ledger record for ${agent.id} (${agent.sessionId}) — the patch was not applied`)
+        return null
       }
+      agent.ledgerRecord = merged
       publishLedgerRow(merged)
       return merged
     }
@@ -719,7 +721,7 @@ function writeLedger(agent, patch) {
       target: ledgerModeForStatus(agent.status) ? agent.status : null,
       spawnedAt: agent.createdAt,
     })
-    writeRecord(config.ledgerDir, record)
+    agent.ledgerRecord = record
     publishLedgerRow(record)
     return record
   } catch (error) {
@@ -728,18 +730,18 @@ function writeLedger(agent, patch) {
   }
 }
 
-// Publish a record to the session-ledger endpoint, beside the file write.
+// Publish a record to the session-ledger endpoint.
 //
-// ⚠️ **A TRANSITIONAL dual-write, and deliberate rather than an oversight.** The roster reads
-// the endpoint now (see `currentRoster`), so a spawn that wrote only a file would be invisible
-// to every manager — but the file is still what the resume path and the shutdown stamp read, so
-// retiring it is a separate step with its own acceptance criteria. Writing both keeps every
-// reader correct in the meantime; the file write goes when its last reader does.
+// ⚠️ **This is the ONLY durable write now, and that is a change in kind rather than in address.**
+// The endpoint was a second copy beside the file while the readers moved; the file write is gone,
+// so a row that is not published here exists nowhere that outlives the process. A missed POST
+// therefore costs a RECORD, not merely visibility — which is why the shutdown path below waits for
+// the ones already in flight.
 //
-// ⚠️ **Not awaited, on purpose.** A store outage must not turn a spawn that already produced a
-// working worker into a failed spawn, and no ordinary caller has anything to do with a
-// rejection. A failure is logged and nothing else; the endpoint is a second copy here, so a
-// missed POST costs visibility, not durability.
+// ⚠️ **Still not awaited on the ordinary paths, on purpose.** A store outage must not turn a spawn
+// that already produced a working worker into a failed spawn, and no ordinary caller has anything
+// to do with a rejection. The spawn has already succeeded by the time this runs, and a refusal
+// here cannot un-succeed it.
 //
 // ⚠️ **But "not awaited" must not mean "abandoned", and on the shutdown path it did.** Every
 // publish is tracked so the signal handler can wait for the ones already in flight — see

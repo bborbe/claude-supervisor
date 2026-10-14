@@ -1,31 +1,21 @@
-// Unit tests for the durable spawn ledger.
+// Unit tests for the durable spawn ledger's record shape.
 //
-// The load-bearing ones are the merge (a completion patch must not erase the spawn
-// fields — they arrive minutes apart from different call sites) and the atomic write
-// (a reader must never catch a half-written record and read it as a session with no
-// fields, which is the same "reports success while being wrong" shape as the bugs this
-// file's neighbours exist to prevent).
+// The load-bearing one is the merge: a completion patch must not erase the spawn fields, because
+// they arrive minutes apart from different call sites and the caller that knows the outcome does
+// not know the edge. That property used to be exercised through the FILE (`writeRecord` then
+// `updateRecord`); the file store is gone, so it is exercised against `mergeRecord`, which is what
+// `writeLedger` now calls — the same property, one layer in, and still behavioural rather than a
+// regex over source text.
 //
-// These do NOT replace the end-to-end check: that a record survives its session — with
-// the live registry entry gone — is a fact about two stores, which a fixture cannot see.
+// These do NOT replace the end-to-end check: that a row survives its session — with the live
+// registry entry gone — is a fact about two stores, which a fixture cannot see.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { MODES, buildRecord, listRecords, parentSessionId, readRecord, recordPath, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
+import { readFileSync } from 'node:fs'
+import { MODES, buildRecord, mergeRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 
 const SESSION = 'ea363bb5-123a-4d03-bc89-1087a3114bbd'
-
-function withDir(fn) {
-  const dir = mkdtempSync(join(tmpdir(), 'supervisor-ledger-'))
-  try {
-    return fn(dir)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
 
 const spawnRecord = (over = {}) =>
   buildRecord({
@@ -115,58 +105,53 @@ test('buildRecord accepts the third mode, cluster', () => {
 })
 
 test('the record is keyed by the session uuid, which is the resume handle', () => {
-  assert.equal(recordPath('/state/sessions', SESSION), `/state/sessions/${SESSION}.json`)
-})
-
-test('write then read round-trips, creating the directory', () => {
-  withDir((dir) => {
-    const nested = join(dir, 'sessions')
-    writeRecord(nested, spawnRecord())
-    assert.equal(readRecord(nested, SESSION).label, 'drill')
-  })
-})
-
-test('writing leaves no temporary file behind', () => {
-  withDir((dir) => {
-    writeRecord(dir, spawnRecord())
-    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith('.tmp')), [], 'a stray .tmp is a half-written record waiting to be read')
-  })
+  // The key IS the resume handle, which is why the row is useful to the resume path and not only
+  // to a process table. Pinned on the row's own field now that no path derives it from a filename.
+  assert.equal(spawnRecord().session_id, SESSION)
+  assert.equal(buildRecord({ sessionId: SESSION, mode: 'headless' }).session_id, SESSION)
 })
 
 test('a completion patch merges rather than replacing the spawn fields', () => {
-  withDir((dir) => {
-    writeRecord(dir, spawnRecord())
-    const done = updateRecord(dir, SESSION, {
-      status: 'done',
-      ended_at: '2026-09-14T08:00:00.000Z',
-      result: { subtype: 'success', permission_denials: 0 },
-    })
-    assert.equal(done.status, 'done')
-    assert.equal(done.result.subtype, 'success')
-    // The spawn edge must survive: it is what nothing else records, and the caller
-    // that knows the outcome does not know it.
-    assert.equal(done.parent_session, spawnRecord().parent_session)
-    assert.equal(done.mode, 'interactive')
-    assert.equal(done.label, 'drill')
-    assert.equal(done.pane_id, '1711')
-    assert.equal(readRecord(dir, SESSION).status, 'done', 'the merge is persisted, not just returned')
+  const done = mergeRecord(spawnRecord(), {
+    status: 'done',
+    ended_at: '2026-09-14T08:00:00.000Z',
+    result: { subtype: 'success', permission_denials: 0 },
   })
+  assert.equal(done.status, 'done')
+  assert.equal(done.result.subtype, 'success')
+  // The spawn edge must survive: it is what nothing else records, and the caller
+  // that knows the outcome does not know it.
+  assert.equal(done.parent_session, spawnRecord().parent_session)
+  assert.equal(done.mode, 'interactive')
+  assert.equal(done.label, 'drill')
+  assert.equal(done.pane_id, '1711')
 })
 
-test('updating an unknown session reports nothing rather than inventing a record', () => {
-  withDir((dir) => {
-    assert.equal(updateRecord(dir, 'no-such-session', { status: 'done' }), null)
-    assert.equal(existsSync(recordPath(dir, 'no-such-session')), false)
-  })
+test('a park survives a later result patch — the merge carries the whole row', () => {
+  // ⚠️ This is the property that decides whether a resumed worker carries an operator's answer.
+  // The park is written when the gate opens and the result when the turn ends, so a replace rather
+  // than a merge would drop the park in between and nothing else would notice: the resume path
+  // reads the park off the row, and an absent one refuses the decision silently.
+  const parked = mergeRecord(spawnRecord(), { parked_permission: { request_id: 'perm_1', tool: 'Bash' } })
+  const done = mergeRecord(parked, { status: 'done', result: { subtype: 'success' } })
+  assert.equal(done.parked_permission.tool, 'Bash', 'the park must outlive the terminal patch')
+  assert.equal(done.label, 'drill', 'and so must the spawn edge')
 })
 
-test('listRecords tolerates a missing directory and skips what it cannot parse', () => {
-  assert.deepEqual(listRecords('/nonexistent/supervisor/ledger'), [])
-  withDir((dir) => {
-    writeRecord(dir, spawnRecord())
-    writeRecord(dir, spawnRecord({ sessionId: 'other-session' }))
-    assert.equal(listRecords(dir).length, 2)
-  })
+test('clearing a park is an explicit null, not an omitted key', () => {
+  // `clearParkPatch` sends `{ parked_permission: null }` because a spread cannot express a
+  // deletion — an omitted key would leave the row advertising a park nobody holds.
+  const cleared = mergeRecord(mergeRecord(spawnRecord(), { parked_permission: { tool: 'Bash' } }), { parked_permission: null })
+  assert.equal(cleared.parked_permission, null)
+  assert.ok('parked_permission' in cleared, 'the key must still be present — that is what makes it a clear')
+})
+
+test('merging into no record reports nothing rather than inventing one', () => {
+  // A patch that finds no record is a session id that resolved with no spawn behind it. Inventing
+  // a row from the patch alone would file one missing the spawn edge — worse than none, because it
+  // is addressable and wrong.
+  assert.equal(mergeRecord(undefined, { status: 'done' }), null)
+  assert.equal(mergeRecord(null, { status: 'done' }), null)
 })
 
 test('parentSessionId resolves the manager through the live registry', () => {
@@ -260,16 +245,12 @@ test('unobservedPatch refuses a mode it cannot explain', () => {
 })
 
 test('stamping an unobserved worker keeps the spawn fields and drops the claim', () => {
-  withDir((dir) => {
-    writeRecord(dir, spawnRecord())
-    const stamped = updateRecord(dir, SESSION, unobservedPatch({ mode: 'interactive' }))
-    assert.equal(stamped.status, 'unknown', 'running must not survive the server that asserted it')
-    assert.equal(stamped.mode, 'interactive')
-    assert.equal(stamped.label, 'drill')
-    assert.equal(stamped.pane_id, '1711')
-    assert.equal(stamped.parent_session, spawnRecord().parent_session)
-    assert.equal(readRecord(dir, SESSION).status, 'unknown', 'the stamp is persisted, not just returned')
-  })
+  const stamped = mergeRecord(spawnRecord(), unobservedPatch({ mode: 'interactive' }))
+  assert.equal(stamped.status, 'unknown', 'running must not survive the server that asserted it')
+  assert.equal(stamped.mode, 'interactive')
+  assert.equal(stamped.label, 'drill')
+  assert.equal(stamped.pane_id, '1711')
+  assert.equal(stamped.parent_session, spawnRecord().parent_session)
 })
 
 test('an A2A record carries its worker id and target, and never a token', () => {

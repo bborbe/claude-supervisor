@@ -431,7 +431,7 @@ export function concurrentLimitRefusal({ limits, liveCount, operatorNamed = fals
       `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. The ` +
       `spawn ledger, the session registry and the heartbeat store must all be readable, because a ` +
       `channel that cannot be read may be hiding the very session being counted; point ` +
-      `SUPERVISOR_LEDGER_DIR, SUPERVISOR_SESSIONS_DIR and SUPERVISOR_HEARTBEAT_DIR at them if they ` +
+      `ATTENTION_STORE_URL, SUPERVISOR_SESSIONS_DIR and SUPERVISOR_HEARTBEAT_DIR at them if they ` +
       `live elsewhere.`
     )
   }

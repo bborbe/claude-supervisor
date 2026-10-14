@@ -232,12 +232,13 @@ export const config = Object.freeze({
   // life of the server — the exact staleness the map exists to avoid.
   roleMap: ENV.SUPERVISOR_ROLE_MAP || join(homedir(), '.cache', 'wezterm-role-map.json'),
 
-  // The durable spawn ledger: one uuid-keyed record per worker this server spawns,
-  // outliving the session it describes. Deliberately NOT reusing
-  // SUPERVISOR_SESSIONS_DIR — that name already means the live registry above, a
-  // different store with a different lifetime, and one variable meaning two things is
-  // how a reader ends up pointing the ledger at Claude Code's directory.
-  ledgerDir: ENV.SUPERVISOR_LEDGER_DIR || join(STATE_DIR, 'sessions'),
+  // ⚠️ There is deliberately NO `ledgerDir` here any more, and its absence is the change rather
+  // than an omission. The durable spawn ledger is attention-controller's session-ledger store,
+  // reached over HTTP at `attentionStoreUrl` — every reader moved onto it, and the file write
+  // that used to live under `$XDG_STATE_HOME/claude-supervisor/sessions` went with the last of
+  // them. `SUPERVISOR_LEDGER_DIR` is retired rather than repurposed: a variable that still named
+  // a directory no code reads is how an operator points a store at the wrong place and reads the
+  // silence as an empty fleet.
 
   // The headless-worker heartbeat store: one transient file per live worker, whose mtime is
   // refreshed by the server that owns it and read by any process that must decide whether

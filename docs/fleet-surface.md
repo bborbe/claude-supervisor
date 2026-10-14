@@ -688,11 +688,13 @@ LAST-ACTIVE  PROJECT      LIVE SESSION    WORKING ON                            
 - **`SPAWN MODE` and `ATTRIBUTION` come from the spawn ledger**, joined on the session id.
   The ledger is the only store recording the spawn edge, so without it a headless worker and
   a human tab render identically.
-- **Ledger directory:** `SUPERVISOR_LEDGER_DIR`, else `$XDG_STATE_HOME|~/.local/state` +
-  `/claude-supervisor/sessions` — resolved from the writer's own override
-  (`server/config.mjs`), never hardcoded. ⚠️ Deliberately **not** `SUPERVISOR_SESSIONS_DIR`,
-  which names the live registry (`~/.claude/sessions`) — a different store with a different
-  lifetime.
+- **Ledger location:** the attention-controller session-ledger endpoint —
+  `ATTENTION_STORE_URL`, else `http://localhost:18080` — resolved once in `server/config.mjs`
+  and read through `server/session-ledger.mjs`. ⚠️ There is no longer a file store:
+  `SUPERVISOR_LEDGER_DIR` and `$XDG_STATE_HOME/claude-supervisor/sessions` were retired
+  2026-10-14, when the last reader moved and the write followed it. ⚠️ Still deliberately
+  **not** `SUPERVISOR_SESSIONS_DIR`, which names the live registry (`~/.claude/sessions`) — a
+  different store with a different lifetime.
 - **`unknown` is a value, not a blank.** A session with no ledger record was never
   *recorded*, which is a different claim from *not spawned*. Both new cells render the
   literal `unknown`; a blank would collapse the two and read as a value the ledger supplied.
