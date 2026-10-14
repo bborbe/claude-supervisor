@@ -1290,6 +1290,10 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     messageId: randomUUID(),
   })
 
+  // The conversation the first turn opened — what `send_agent_message` continues. Held in memory
+  // only, beside the token: a follow-up is possible only from the process holding both.
+  if (!sent.error) built.record.contextId = sent.contextId
+
   if (sent.error) {
     const patch = { result: null, error: `the first turn could not be sent: ${sent.error}` }
     built.record.error = patch.error
@@ -2096,7 +2100,7 @@ const TOOLS = [
   {
     name: 'send_agent_message',
     description:
-      'Send a follow-up message to a running worker — the send_to_agent this server has never had. TWO transports, chosen from the worker\'s own record. A TAB worker: activates its tab, waits for the input prompt, and types the message, so it STEALS FOCUS; returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. A headless worker has neither a pane nor a cluster session and is refused; answer its parked prompts with `answer_permission` instead.',
+      'Send a follow-up message to a running worker — the send_to_agent this server has never had. TWO transports, chosen from the worker\'s own record. A TAB worker: activates its tab, waits for the input prompt, and types the message, so it STEALS FOCUS; returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. An A2A worker (`docker` / `k8s`): sends one more turn to the WORKER\'s own endpoint on the conversation its first turn opened — the controller is not in the path — and returns once the worker acknowledges, with `send_ms`; the result is collected in the background and read with `agent_status`. A row re-adopted after a reconnect holds no token and is refused. A headless worker has neither a pane nor a cluster session and is refused; answer its parked prompts with `answer_permission` instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2286,6 +2290,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           answer: result.answer,
           outcome: result.outcome,
           truncated: result.truncated,
+        })
+      }
+
+      if (channel.channel === 'a2a') {
+        // A follow-up turn goes to the WORKER's own endpoint on the conversation its first turn
+        // opened — the controller is not in this path (SC3). Sent the same way as the first turn:
+        // the send is awaited, the collection is not (SC5), and `send_ms` is measured here so the
+        // latency is this server's, not a caller's round trip.
+        const t0 = Date.now()
+        const sent = await openWorkerTurn({
+          endpoint: channel.endpoint,
+          contextId: channel.contextId,
+          text: args.message,
+          token: channel.token,
+          messageId: randomUUID(),
+        })
+        const sendMs = Date.now() - t0
+        if (sent.error) return reply({ error: `the turn could not be sent: ${sent.error}`, send_ms: sendMs })
+        void collectWorkerTurn({ res: sent.res ?? sent.pending, sentContextId: sent.contextId })
+          .then((collected) => {
+            const patch = a2aTurnPatch(collected, { at: new Date().toISOString() })
+            agent.result = patch.result
+            agent.error = patch.error
+            writeLedger(agent, patch)
+          })
+          .catch((cause) => {
+            const patch = { result: null, error: `collecting the turn failed: ${cause?.message ?? cause}` }
+            agent.error = patch.error
+            writeLedger(agent, patch)
+          })
+        return reply({
+          agent_id: agent.id,
+          channel: 'a2a',
+          send_ms: sendMs,
+          turn: sent.res
+            ? 'sent — the worker acknowledged; its result is collected in the background'
+            : 'sent, not yet acknowledged — the request is outstanding and its result is collected in the background',
         })
       }
 

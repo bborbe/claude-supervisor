@@ -8,6 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`send_agent_message` now reaches an A2A worker: one more turn goes to the WORKER's own endpoint, on the conversation its first turn opened, and the controller is not in the path.** Before this, a `docker` / `k8s` worker fell through to the headless refusal, so no follow-up turn could reach it at all. The send is awaited and the collection is not, exactly as for the first turn, and the reply carries `send_ms` — this server's own measurement of the send, so a latency claim does not have to be read off a caller's round trip. The conversation id is recorded on the in-memory agent record after the first send, beside the token. ⚠️ A row re-adopted after a reconnect holds no token (the ledger never stores one) and is refused rather than sent unauthenticated.
+
+- test: three `resolveMessageChannel` cases — an A2A worker resolves to its endpoint, token and conversation; a token-less re-adopted row is refused; a worker with no first turn has no conversation to continue.
+
 ## v0.140.2
 
 - fix: **an A2A turn's result is now read from the event shape the SDK actually sends, so a completed turn reports COMPLETED and its reply.** a2a-go v2.6.0 nests a status update's state at `statusUpdate.status.state` and an artifact's parts at `artifactUpdate.artifact.parts`; the collector read both one level too shallow. Measured 2026-10-14 in the first fully successful live `spawn_agent(target: 'docker')`: the worker logged `turn start` and `turn end` 6 s apart, and the supervisor filed the turn as `TASK_STATE_SUBMITTED` with an empty reply. The control-reply parser read a streamed status with the same flat shape and is fixed too. The flat shape is still accepted.
