@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a park is a gate only when the operator could actually clear it.** The sweep handed sessions parked on ordinary assistant prose to the operator, because `gate_class()` returns C — the everything-else bucket, and C is operator-bound — for any park that is not A/B/D/E. A park now counts as a gate only when its closer carries an operator-facing verb (`approve:` / `pick —` / `you run:` / `review:`) **or** the attention store holds an open item for it. The closer is also read from the transcript's own `👤 You:` line rather than falling back to the record's `detail`, which is arbitrary prose rather than an ask. Measured on the first live fleet run: two panes were classified `awaiting-operator` while all three instruments — no open store item, no operator verb, no modal footer — agreed they were not gated. Deriving "no gate" from the *cause* class instead would have dropped the two rows that legitimately gate, since an answered record sends their cause to `unknown` too.
+
 ## v0.151.0
 
 - feat: **add `/supervisor:who-needs-my-help` — one pass over every live session: what it is parked on (runbook gate class A–E) and why (cause class), the operator-bound rows handed over ordered prod-first then closest-to-SC with a jump link and a recommended answer, and the cause classes recurring across two or more distinct calendar days.** Report-only on gates: it answers no gate, drives no modal and relays no approval. The one outward action is a `SendMessage` per live manager asking for its next SC/DoD item and what blocks it. The command is a two-step router rather than a print-verbatim one, because `SendMessage` is an agent tool that a script cannot call — step 1 runs `scripts/who-needs-my-help.py` and prints its output, step 2 sends one message to each manager the script names in its `Managers to query` block.

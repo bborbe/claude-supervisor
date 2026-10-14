@@ -393,6 +393,30 @@ def quoteable(task_text, options):
     return False
 
 
+# The operator-facing verbs `65 Runbooks/Manager Session.md` § Gate triage names as
+# the closer-line instruments — the ones that make a pane's own text the answer to
+# *what is it asking*. A closer that carries none of them is not an ask, however
+# parked the session is.
+ASK_VERBS = ("approve:", "you run:", "review:", "pick —", "pick -", "pick–")
+
+
+def is_operator_ask(rec):
+    """True when the session's closer is an operator-facing ask.
+
+    ⚠️ **Read from `closer_from_transcript`, never `current_closer`.** The latter
+    falls back to the record's `detail` when the transcript holds no `👤 You:` line,
+    and that fallback is arbitrary assistant prose. Measured 2026-10-15 on the first
+    live run: with the fallback consulted, panes 1557 (`📌 Conventions: run /recall …`)
+    and 1619 (*"Session left open, no files touched, no commands run."*) both read as
+    operator gates while all three instruments said otherwise — no open store item,
+    no operator verb, no modal footer. Prose is not an ask.
+    """
+    text = wnm.normalize_closer(wnm.closer_from_transcript(rec))
+    if not text:
+        return False
+    return any(text.startswith(v) for v in ASK_VERBS) or bool(_PICK.search(text))
+
+
 def gate_class(rec, cause, shape, task_text):
     """Which of the runbook's A-E classes this gate is, or `None` for a non-gate.
 
@@ -450,7 +474,7 @@ def with_live_closer(rec):
     A record whose transcript is unreadable keeps its `detail` — `current_closer()`
     already falls back to it, and inventing a closer would be worse than a stale one.
     """
-    text = wnm.current_closer(rec)
+    text = wnm.closer_from_transcript(rec)
     if not text:
         return rec
     out = dict(rec, detail=text)
@@ -550,7 +574,15 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
             "pane": pane,
             "cause": cause,
             "cause_label": wnm.cause_label(rec, cause, peers, pmap, registry),
-            "gate": gate_class(rec, cause, shape, task_text),
+            # ⚠️ A park is a GATE only when the operator could actually clear it —
+            # its closer carries an operator-facing verb, or the store holds an open
+            # item for it. Without this clause `gate_class()` returns C (the
+            # everything-else bucket, and C is operator-bound) for any park at all,
+            # so a session sitting on arbitrary prose is handed to the operator.
+            # Measured 2026-10-15: that is exactly how panes 1557 and 1619 reached
+            # `Handover` while all three instruments agreed they were not gated.
+            "gate": (gate_class(rec, cause, shape, task_text)
+                     if is_operator_ask(rec) or sid in carded else None),
             "flags": flags,
             "wait": wait_reason(rec),
             "watcher": watcher_of(rec),
@@ -632,7 +664,10 @@ def render(sweep):
         if r["gate"]:
             head += f" · gate {r['gate']}"
         else:
-            head += " · machine-bound"
+            # A park with no gate class is recorded as exactly that — never left
+            # blank, which reads as "unclassified" rather than "not gated".
+            head += (" · machine-bound" if r["cause"] == wnm.CAUSE_CLOCK
+                     else " · not gated")
         if r["flags"]:
             head += f" [{' '.join(r['flags'])}]"
         out.append(head)
