@@ -109,7 +109,12 @@ export function toAgentRecord(record, id = record.agent_id) {
     modeSource: record.mode_source ?? null,
     paneId: record.pane_id ?? null,
     launcher: record.launcher ?? null,
-    parentSession: record.parent_session ?? null,
+    // ⚠️ **Both names, because the file and the endpoint spell it differently.** The file
+    // ledger writes `parent_session`; the endpoint serves `spawner_session_id` (one name for
+    // one thing on the wire). The WRITE side already maps one onto the other, so reading only
+    // `parent_session` made every adopted row's `parentSession` null — a silent field loss
+    // introduced by moving the read source, and one-directional by construction.
+    parentSession: record.parent_session ?? record.spawner_session_id ?? null,
     createdAt: record.spawned_at ?? null,
     transcript: [],
     permissions: [],
@@ -227,4 +232,34 @@ export async function rehydratableAgents({
   const live = liveSessionIds({ registryDir, heartbeatDir, now })
   if (live === null) return null
   return agentsFromRecords(ledgerBySessionId(rows), { live, log })
+}
+
+// The roster AS OF NOW, given this process's own workers and a fresh endpoint read.
+//
+// ⚠️ **Extracted so it can be TESTED, and that is the reason rather than tidiness.** It lived
+// inline in `supervisor.mjs`'s `currentRoster`, which cannot be imported (it starts an MCP
+// server at module load), so the heart of this change was pinned only by regexes over the
+// source text — and a regex cannot catch a behavioural regression. One did get through: the
+// foreign row's id was derived from a set seeded by the LOCAL Map, so a spawn landing between
+// a manager's `list_agents` and its `send_agent_message` flipped that row's id and handed the
+// message to the wrong worker, silently. The id is now a function of the ROW ALONE.
+//
+// ⚠️ **This process's own row WINS on a `session_id` collision**, and the direction is
+// deliberate rather than incidental: an in-process agent carries the live transcript, the park
+// queue and the permission rules, while an endpoint row carries identity alone. Letting the
+// fresh row win would replace a working worker's record with a hollow one.
+export function unionRoster(inProcess, fresh) {
+  const roster = new Map(inProcess)
+  const own = new Set([...roster.values()].map((a) => a.sessionId))
+  const takenIds = new Set(roster.keys())
+  for (const agent of fresh) {
+    if (own.has(agent.sessionId)) continue
+    // ⚠️ A function of the ROW ALONE — see the note above. Suffixing EVERY foreign row is what
+    // makes the id stable across calls, so it can never be shadowed by a later local mint.
+    let id = `${agent.id}~${agent.sessionId.slice(0, 8)}`
+    while (takenIds.has(id)) id = `${id}~`
+    takenIds.add(id)
+    roster.set(id, { ...agent, id })
+  }
+  return roster
 }

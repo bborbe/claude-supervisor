@@ -36,12 +36,7 @@ import { join } from 'node:path'
 
 import { stampRecord } from './heartbeat.mjs'
 import { isFinished } from './resume-guard.mjs'
-import {
-  liveSessionIds,
-  rehydratableAgents,
-  rehydratedStatus,
-  toAgentRecord,
-} from './registry-rehydrate.mjs'
+import { liveSessionIds, rehydratableAgents, rehydratedStatus, toAgentRecord, unionRoster } from './registry-rehydrate.mjs'
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'registry-rehydrate-'))
@@ -353,9 +348,28 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // And the union itself: a request-time read, deduped on `session_id`, with this process's own
   // row winning — an endpoint row carries identity alone and must never displace a live one.
   assert.match(src, /async function currentRoster\(\)/)
-  assert.match(src, /if \(own\.has\(agent\.sessionId\)\) continue/)
   assert.match(src, /const fresh = await rehydratableAgents\(\{ log \}\)/)
-  assert.match(src, /if \(fresh === null\) return roster/)
+  // ⚠️ The store-outage branch must BOTH keep the roster AND say so. A bare `return roster` is
+  // indistinguishable from a healthy answer to the manager reading `list_agents`, and it threw
+  // away the `null`-vs-`[]` distinction `readSessionLedger` deliberately preserves.
+  assert.match(src, /if \(fresh === null\) \{[\s\S]{0,700}?log\('WARNING: the ledger endpoint could not be read[\s\S]{0,250}?return new Map\(agents\)/)
+  // ⚠️ **The union itself lives in `registry-rehydrate.mjs`, because it can be TESTED there and
+  // `supervisor.mjs` cannot be imported.** Pinning it by regex over THIS file's text is what let
+  // the id-shadowing defect through: a regex asserts the source's SHAPE, never its behaviour.
+  // The behavioural cases are the `unionRoster` tests at the end of this file; what is asserted
+  // HERE is only that this call site still goes through it rather than re-inlining the loop.
+  assert.match(src, /return unionRoster\(agents, fresh\)/)
+  assert.ok(!/takenIds/.test(src), 'the union must not be re-inlined in supervisor.mjs')
+  const rehydrateSrc = readFileSync(new URL('./registry-rehydrate.mjs', import.meta.url), 'utf8')
+  assert.match(rehydrateSrc, /export function unionRoster\(inProcess, fresh\)/)
+  // ⚠️ **A foreign row's id is a function of the ROW ALONE.** Deriving it from `takenIds` —
+  // seeded from this process's own Map — made an endpoint row answer as bare `agent_1` only
+  // while this process held no such id, so a spawn between a manager's `list_agents` and its
+  // `send_agent_message` flipped that row to `agent_1~<sid8>` and handed `agent_1` to the NEW
+  // local worker: the message reached the WRONG pane, silently. `agent_1` is the common case —
+  // 215 of the 1891 ledger rows claim it.
+  assert.match(rehydrateSrc, /let id = `\$\{agent\.id\}~\$\{agent\.sessionId\.slice\(0, 8\)\}`/)
+  assert.ok(!/if \(takenIds\.has\(id\)\) id = /.test(rehydrateSrc), 'the Map-derived id must not come back')
   // ⚠️ The resume path must PRUNE and then guard on EVERY row — never filter rehydrated rows
   // out. Filtering fixed the dead-worker deadlock by breaking the live case: a rehydrated row
   // whose worker still runs must keep blocking a resume, or two writers land on one
@@ -378,4 +392,57 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // And the marker must REACH a caller: `agentView` is the only surface an MCP client sees,
   // and without this field a boot-time row is indistinguishable from a live one.
   assert.match(src, /rehydrated: a\.rehydrated === true,/)
+})
+
+// The union is the heart of this change and it had no behavioural test at all: it lived inline
+// in `supervisor.mjs`'s `currentRoster`, which cannot be imported (it starts an MCP server at
+// module load), so it was pinned only by regexes over the source text. A regex cannot catch a
+// behavioural regression, and one got through — see the first case below.
+const foreign = (id, sessionId) => ({ id, sessionId, label: id, rehydrated: true })
+const OWN_A1 = { id: 'agent_1', sessionId: 'bbbb2222-0000-0000-0000-000000000000', label: 'mine' }
+const FAR_A1 = 'aaaa1111-0000-0000-0000-000000000000'
+
+test('a foreign row keeps ONE id, whatever this process happens to hold', () => {
+  // ⚠️ THE regression this pins. With the id derived from a set seeded by the LOCAL Map, the
+  // same endpoint row answered as bare `agent_1` on one call and `agent_1~<sid8>` on the next,
+  // so a manager that read `list_agents` and then called `send_agent_message` with an id from
+  // it reached whichever worker happened to hold that id — silently, and in the wrong pane.
+  // `agent_1` is the common case: 215 of the 1891 ledger rows claim it.
+  const alone = unionRoster(new Map(), [foreign('agent_1', FAR_A1)])
+  const afterLocalSpawn = unionRoster(new Map([['agent_1', OWN_A1]]), [foreign('agent_1', FAR_A1)])
+  const idAlone = [...alone.keys()].find((k) => k.startsWith('agent_1'))
+  const idAfter = [...afterLocalSpawn.keys()].find((k) => k.startsWith('agent_1~'))
+  assert.equal(idAlone, 'agent_1~aaaa1111')
+  assert.equal(idAfter, 'agent_1~aaaa1111')
+  // And the local worker still answers under its own bare id.
+  assert.equal(afterLocalSpawn.get('agent_1').sessionId, OWN_A1.sessionId)
+})
+
+test("this process's own row wins on a session_id collision", () => {
+  // An in-process agent carries the live transcript, the park queue and the permission rules;
+  // an endpoint row carries identity alone. The fresh row must never displace it.
+  const roster = unionRoster(new Map([['agent_1', OWN_A1]]), [foreign('agent_9', OWN_A1.sessionId)])
+  assert.equal(roster.size, 1)
+  assert.equal(roster.get('agent_1').label, 'mine')
+})
+
+test('two foreign rows sharing an agent_id are both kept, under distinct ids', () => {
+  // The collapse `agentsFromRecords` refuses within one read, refused here too: dropping a
+  // collision drops live workers.
+  const roster = unionRoster(new Map(), [
+    foreign('agent_1', FAR_A1),
+    foreign('agent_1', 'dddd4444-0000-0000-0000-000000000000'),
+  ])
+  assert.equal(roster.size, 2)
+  assert.deepEqual(
+    [...roster.values()].map((a) => a.sessionId).sort(),
+    [FAR_A1, 'dddd4444-0000-0000-0000-000000000000'],
+  )
+})
+
+test('the in-process map is not mutated', () => {
+  const inProcess = new Map([['agent_1', OWN_A1]])
+  unionRoster(inProcess, [foreign('agent_1', FAR_A1)])
+  assert.equal(inProcess.size, 1)
+  assert.equal(inProcess.get('agent_1').label, 'mine')
 })

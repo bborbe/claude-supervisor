@@ -46,7 +46,7 @@ import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
 import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
-import { liveSessionIds, rehydratableAgents } from './registry-rehydrate.mjs'
+import { liveSessionIds, rehydratableAgents, unionRoster } from './registry-rehydrate.mjs'
 import { postSessionLedger, recordToWire } from './session-ledger.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
@@ -166,6 +166,16 @@ if (config.claudeHomeRefusal) {
     log('WARNING: a store could not be read — the roster starts empty and will not show workers spawned before this process')
   } else {
     for (const agent of rehydrated) agents.set(agent.id, agent)
+    // ⚠️ **An EMPTY store is the loud case, not the quiet one.** `[]` and `null` are
+    // different answers and only one of them is benign: `null` is a store that could not be
+    // read, while `[]` is a store that answered and holds nothing. On a fresh install that
+    // is correct; on a deploy that has not yet run the one-time import it means every
+    // worker spawned before this process is MISSING from the roster — which is worse than
+    // the file ledger this replaced, and used to be indistinguishable from a healthy empty
+    // fleet because the line below reads the same either way.
+    if (rehydrated.length === 0) {
+      log('WARNING: the ledger endpoint answered with NO rows — a fresh install looks like this, but so does a deploy whose one-time import has not run yet, in which case every worker spawned before this process is invisible to the roster')
+    }
     log(`rehydrated ${rehydrated.length} agent(s) from the ledger`)
   }
 }
@@ -214,24 +224,24 @@ async function currentRoster() {
   // Still pruned: an adopted row carries a BOOT-TIME liveness reading, and a worker that died
   // since would otherwise sit in the roster under a status that reads as fine.
   pruneRehydratedAgents()
-  const roster = new Map(agents)
-  const own = new Set([...roster.values()].map((a) => a.sessionId))
-  const takenIds = new Set(roster.keys())
   const fresh = await rehydratableAgents({ log })
-  if (fresh === null) return roster
-  for (const agent of fresh) {
-    if (own.has(agent.sessionId)) continue
-    // ⚠️ An endpoint id shares a namespace with this process's own mints (`agent_${++seq}`),
-    // and the two are minted by different processes, so a collision here is a live worker
-    // answering under an id another live worker holds. Disambiguated rather than dropped —
-    // the same choice, for the same reason, as `agentsFromRecords` makes within one read.
-    let id = agent.id
-    if (takenIds.has(id)) id = `${id}~${agent.sessionId.slice(0, 8)}`
-    while (takenIds.has(id)) id = `${id}~`
-    takenIds.add(id)
-    roster.set(id, { ...agent, id })
+  if (fresh === null) {
+    // ⚠️ **Logged, because the degraded answer is otherwise indistinguishable from the
+    // correct one.** A store outage silently reverts this call to in-process-only — the
+    // exact failure this whole change exists to remove — and the manager reading
+    // `list_agents` has no way to tell. The boot path above already logs its `null`; this
+    // one did not, which threw away the `null`-vs-`[]` distinction `readSessionLedger`
+    // deliberately preserves.
+    log('WARNING: the ledger endpoint could not be read — this roster is this process\'s own workers ONLY, so a worker spawned elsewhere is missing from it until the store answers again')
+    return new Map(agents)
   }
-  return roster
+  // ⚠️ **The union lives in `registry-rehydrate.mjs` so it can be TESTED.** `supervisor.mjs`
+  // cannot be imported — it starts an MCP server at module load — which left the heart of
+  // this change pinned only by regexes over the source text, and a regex cannot catch a
+  // behavioural regression. One did get through: the foreign row's id was derived from a set
+  // seeded by THIS process's Map, so a spawn landing between a manager's `list_agents` and its
+  // `send_agent_message` flipped that row's id and handed the message to the wrong worker.
+  return unionRoster(agents, fresh)
 }
 
 // ── attention-store delivery ────────────────────────────────────────────────
@@ -653,6 +663,17 @@ function writeLedger(agent, patch) {
     // POST would blank every field the patch does not name.
     if (patch) {
       const merged = updateRecord(config.ledgerDir, agent.sessionId, patch)
+      // ⚠️ **A `null` here means the FILE record is gone, and it used to be silent.** The
+      // endpoint is now the roster's source, so a worker whose file row has disappeared — a
+      // rotated ledger dir, a migration that moved the files — keeps a STALE endpoint row
+      // forever with nothing anywhere saying so, and the copy that matters is the one not
+      // being updated. ⚠️ The fuller fix is to derive the wire row from the patch plus the
+      // STORED endpoint row (a GET-then-POST) rather than from the file at all; that is the
+      // right shape once the file write is retired, and this warning is what makes the gap
+      // observable until then.
+      if (merged === null) {
+        log(`WARNING: no file ledger record for ${agent.id} (${agent.sessionId}) — the patch was not applied and the endpoint row for it is now STALE`)
+      }
       publishLedgerRow(merged)
       return merged
     }
@@ -716,17 +737,32 @@ function writeLedger(agent, patch) {
 // reader correct in the meantime; the file write goes when its last reader does.
 //
 // ⚠️ **Not awaited, on purpose.** A store outage must not turn a spawn that already produced a
-// working worker into a failed spawn, and the shutdown path has no caller left to catch a
+// working worker into a failed spawn, and no ordinary caller has anything to do with a
 // rejection. A failure is logged and nothing else; the endpoint is a second copy here, so a
 // missed POST costs visibility, not durability.
+//
+// ⚠️ **But "not awaited" must not mean "abandoned", and on the shutdown path it did.** Every
+// publish is tracked so the signal handler can wait for the ones already in flight — see
+// `SHUTDOWN_PUBLISH_TIMEOUT_MS` below for why that is the one caller where losing the POST is
+// not merely lost visibility.
+const inFlightPublishes = new Set()
+
+// How long the shutdown path waits for in-flight endpoint writes before exiting anyway.
+// Bounded because a wedged store must not hold the process open, and short because the only
+// thing being waited on is a localhost round trip.
+const SHUTDOWN_PUBLISH_TIMEOUT_MS = 2000
+
 function publishLedgerRow(record) {
   const wire = recordToWire(record)
   if (!wire) return
-  postSessionLedger(wire)
+  const pending = postSessionLedger(wire)
     .then((ok) => {
       if (!ok) log(`WARNING: the session-ledger endpoint did not take the row for ${wire.session_id}`)
     })
     .catch(() => {})
+    .finally(() => inFlightPublishes.delete(pending))
+  inFlightPublishes.add(pending)
+  return pending
 }
 
 // The shutdown path: what this server owes the ledger when it goes away.
@@ -773,8 +809,20 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     // OWN session is the same claim and belongs on the same path. `stopSelf` is idempotent, so
     // a server that never had a session id simply clears nothing.
     heartbeat.stopSelf()
-    log(`received ${signal} — stamped ${stamped} unobserved worker(s) as ${UNOBSERVED_STATUS}, then exited`)
-    process.exit(0)
+    // ⚠️ **The exit WAITS for the endpoint writes already in flight.** `writeLedger` publishes
+    // fire-and-forget by design, and `process.exit(0)` in the same tick killed every one of
+    // them — `fetch` cannot complete a round trip synchronously, so this was deterministic
+    // rather than racy. It matters here and nowhere else: the shutdown stamp is the one write
+    // whose whole purpose is to stop a record asserting `running` forever, and the endpoint is
+    // now the roster's source, so losing it left the two stores disagreeing on the one path
+    // where they are guaranteed to diverge. Bounded, so a wedged store still exits.
+    const pending = [...inFlightPublishes]
+    const exit = () => process.exit(0)
+    setTimeout(exit, SHUTDOWN_PUBLISH_TIMEOUT_MS).unref()
+    Promise.allSettled(pending).finally(() => {
+      log(`received ${signal} — stamped ${stamped} unobserved worker(s) as ${UNOBSERVED_STATUS}, after ${pending.length} endpoint write(s) settled`)
+      exit()
+    })
   })
 }
 
