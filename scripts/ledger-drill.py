@@ -9,19 +9,45 @@ checks the RECORDS ON DISK rather than the server's report:
   3. a record outlives its session — the interactive worker's tab is killed, its live
      registry entry goes, and the record is still readable
 """
-import glob, json, os, select, subprocess, sys, time
+import glob, importlib.util, json, os, select, subprocess, sys, time
 
 # The repo root, derived from this file's own location. A hardcoded home path works on
 # exactly one machine and breaks silently everywhere else.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(REPO, "server", "supervisor.mjs")
-LEDGER = os.path.expanduser("~/.local/state/claude-supervisor/sessions")
 REGISTRY = os.path.expanduser("~/.claude/sessions")
+
+_SPAWN_LEDGER = None
+
+
+def _spawn_ledger():
+    """Import `spawn-ledger.py` (hyphenated filename -> importlib) — the ONE ledger reader.
+
+    ⚠️ **The ledger moved to the attention store's endpoint on 2026-10-14.** This drill used to
+    watch `<session_id>.json` files appear in a directory; it watches the store's rows appear
+    now, which is the same claim about the same durable record. ⚠️ The endpoint is what every
+    reader consults, so a drill still watching the file would prove a store nothing reads.
+    """
+    global _SPAWN_LEDGER
+    if _SPAWN_LEDGER is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spawn-ledger.py")
+        spec = importlib.util.spec_from_file_location("spawn_ledger", path)
+        _SPAWN_LEDGER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_SPAWN_LEDGER)
+    return _SPAWN_LEDGER
+
 
 env = dict(os.environ)
 env["ANTHROPIC_BASE_URL"] = env.get("CLAUDE_CODE_ROUTER_URL", "http://127.0.0.1:8788")
 
-before = set(os.path.basename(p) for p in glob.glob(os.path.join(LEDGER, "*.json")))
+# ⚠️ **An unreadable store at the START is FATAL, not an empty `before`.** With an empty set
+# every pre-existing row would read as new, and the drill would "pass" against a store it
+# never read — the false-clean shape this drill exists to rule out.
+before = _spawn_ledger().read_ledger()
+if before is None:
+    print("FAIL: cannot read the session-ledger endpoint at", _spawn_ledger().endpoint_base())
+    sys.exit(1)
+before = set(before)
 
 proc = subprocess.Popen(["node", SERVER], cwd=REPO, env=env, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
@@ -53,16 +79,13 @@ def call(name, args, timeout=180):
 
 
 def records():
-    out = {}
-    for path in glob.glob(os.path.join(LEDGER, "*.json")):
-        name = os.path.basename(path)
-        if name in before:
-            continue
-        try:
-            out[name] = json.load(open(path))
-        except Exception:
-            pass
-    return out
+    """Rows this run created — those whose session id was absent when the drill started.
+
+    ⚠️ Keyed by the ROW'S OWN `session_id`, which is also the only sound join key: `agent_id`
+    is a per-process counter that restarts at 0 on every reconnect.
+    """
+    rows = _spawn_ledger().read_ledger() or {}
+    return {sid: row for sid, row in rows.items() if sid not in before}
 
 
 def wait_for(predicate, seconds=60):
@@ -95,15 +118,19 @@ print("   headless ->", json.dumps({k: head.get(k) for k in ("agent_id", "status
 print("\n2. waiting for two records on disk...")
 found = wait_for(lambda: (r := records()) and len(r) >= 2 and r, 60)
 if not found:
-    print("FAIL: records never appeared at", LEDGER)
+    print("FAIL: rows never appeared at", _spawn_ledger().endpoint_base())
     proc.kill(); sys.exit(1)
 
-for name, rec in sorted(found.items()):
-    print(f"\n   {name}")
-    for key in ("agent_id", "label", "mode", "launcher", "pane_id", "parent_session", "spawned_at", "status"):
-        print(f"     {key:15} {rec.get(key)}")
+for sid, rec in sorted(found.items()):
+    print(f"\n   {sid}")
+    for key in ("agent_id", "label", "mode", "launcher", "pane_id", "spawner_session_id",
+                "spawned_at", "status"):
+        print(f"     {key:19} {rec.get(key)}")
 
-keys_ok = all(name == f"{rec['session_id']}.json" for name, rec in found.items())
+# ⚠️ The claim is unchanged, and it is still a real one: the map's key must BE the row's own
+# `session_id`. It used to compare a FILENAME against the row; it compares the store's key
+# against the row now — the same identity claim, and the one `agent_id` cannot make.
+keys_ok = all(sid == rec.get("session_id") for sid, rec in found.items())
 modes = {r.get("mode") for r in found.values()}
 print(f"\n   keyed by session uuid: {keys_ok}")
 print(f"   modes recorded:        {modes}")
@@ -139,7 +166,9 @@ time.sleep(5)
 still_registered = [json.load(open(p)) for p in glob.glob(os.path.join(REGISTRY, "*.json"))
                     if json.load(open(p)).get("sessionId") == tab_session]
 after = records()
-survived = tab_session in [r.get("session_id") for r in after.values()]
+# ⚠️ `after` is keyed by the row's own session id, so membership IS the claim — the list
+# comprehension this replaces asked the same question through a second shape.
+survived = tab_session in after
 print(f"   the worker's session id:                     {tab_session}")
 print(f"   live registry entries for it now:            {len(still_registered)}  (0 = the session is gone)")
 print(f"   its ledger record still readable:            {survived}")

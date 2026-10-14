@@ -4,10 +4,13 @@
 Covers the logic that decides what a row says about WHERE a session came from.
 Each case guards a defect the view could actually ship:
 
-  * hardcoded ledger path -- the writer resolves its directory from
-    `SUPERVISOR_LEDGER_DIR` and only then falls back to the XDG state dir. A
-    reader that hardcodes either one drifts from the writer silently: it keeps
-    printing `unknown` for every row while looking like a working join.
+  * hardcoded ledger SOURCE -- the store is resolved from `$ATTENTION_STORE_URL` with a
+    localhost default, and a reader that hardcodes either drifts from every other store
+    reader silently: it keeps printing `unknown` for every row while looking like a
+    working join. ⚠️ The same bullet now covers the RETIRED ledger-directory variable,
+    which must NOT be honoured: a caller that sets it would otherwise believe it had
+    redirected a read that still went to the endpoint, and the only visible difference is
+    that the rows are the fleet's rather than the caller's.
   * inferred mode -- `interactive` and `headless` exist only in the ledger. A
     view that guesses from argv or transcript recency reports a mode it never
     measured, which is worse than `unknown` because it reads as a fact.
@@ -27,7 +30,6 @@ import importlib.util
 import io
 import json
 import os
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +39,8 @@ from unittest import mock
 # Imported for its side effect, and deliberately before `fs` is loaded — see its docstring for
 # why one module owns the assignment.
 import fleet_sessions_isolation  # noqa: F401
+import endpoint_fixture  # noqa: E402
+from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "fleet-sessions.py")
@@ -48,46 +52,44 @@ _spec.loader.exec_module(fs)
 SID = "11111111-2222-3333-4444-555555555555"
 
 
-def write_record(directory, session_id, **fields):
-    """Write one ledger record the way the writer does — `<session_id>.json`."""
-    record = {"session_id": session_id, "mode": None, "spawned_at": None, **fields}
-    path = Path(directory) / f"{session_id}.json"
-    path.write_text(json.dumps(record), encoding="utf-8")
-    return path
+# ⚠️ `write_record` is GONE, not moved. It wrote `<session_id>.json` the way the file writer
+# did, and the ledger is the store's now — every case plants `ledger_row(...)` on a
+# `FixtureEndpoint` instead. A helper left here would be a second, unused way to build a
+# ledger fixture, and the next case to use it would assert against a store nobody reads.
 
 
-class LedgerDirResolution(unittest.TestCase):
-    """The reader resolves the directory exactly as the writer does."""
+class LedgerSourceResolution(unittest.TestCase):
+    """The reader resolves the STORE exactly as every other attention-store reader does.
 
-    def test_env_override_wins(self):
-        with mock.patch.dict(os.environ, {"SUPERVISOR_LEDGER_DIR": "/tmp/custom-ledger"}):
-            self.assertEqual(fs.ledger_dir(), Path("/tmp/custom-ledger"))
+    ⚠️ **The resolution MOVED rather than disappeared.** It used to be a directory resolved
+    here from `SUPERVISOR_LEDGER_DIR` / `XDG_STATE_HOME` — a second copy of what
+    `server/config.mjs` and `spawn-ledger.py` also resolved, which is the drift these cases
+    existed to catch. The ledger is the attention store's now, so the one variable every other
+    store reader honours is the one that points at it, and this file delegates that resolution
+    to `spawn-ledger.py` instead of keeping a third copy.
+    """
 
-    def test_xdg_state_home_is_honoured(self):
-        env = {k: v for k, v in os.environ.items() if k != "SUPERVISOR_LEDGER_DIR"}
-        env["XDG_STATE_HOME"] = "/tmp/xdg-state"
+    def test_store_url_override_wins(self):
+        with mock.patch.dict(os.environ, {"ATTENTION_STORE_URL": "http://127.0.0.1:19999"}):
+            self.assertEqual(fs.ledger_source(), "http://127.0.0.1:19999/api/1.0/session-ledger")
+
+    def test_defaults_to_the_local_store(self):
+        env = {k: v for k, v in os.environ.items() if k != "ATTENTION_STORE_URL"}
         with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(fs.ledger_dir(), Path("/tmp/xdg-state/claude-supervisor/sessions"))
+            self.assertEqual(fs.ledger_source(), "http://localhost:18080/api/1.0/session-ledger")
 
-    def test_falls_back_to_local_state(self):
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if k not in ("SUPERVISOR_LEDGER_DIR", "XDG_STATE_HOME")
-        }
-        with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(
-                fs.ledger_dir(), Path.home() / ".local" / "state" / "claude-supervisor" / "sessions"
-            )
-
-    def test_sessions_dir_is_not_the_ledger(self):
-        """`SUPERVISOR_SESSIONS_DIR` names the live registry, a different store."""
+    def test_the_retired_directory_variable_is_not_honoured(self):
+        """⚠️ THE RETIREMENT, pinned — and it is the case that would otherwise read as a
+        working join. A caller that sets the old ledger-directory variable must not believe it
+        has redirected the read: the endpoint still answers, so the only visible difference is
+        that its rows are the fleet's rather than the caller's — which for a fixture looks
+        exactly like a correct empty answer."""
         with mock.patch.dict(
             os.environ,
-            {"SUPERVISOR_SESSIONS_DIR": "/tmp/registry", "XDG_STATE_HOME": "/tmp/xdg-state"},
+            {"SUPERVISOR_LEDGER_DIR": "/tmp/custom-ledger", "XDG_STATE_HOME": "/tmp/xdg-state"},
             clear=True,
         ):
-            self.assertNotIn("registry", str(fs.ledger_dir()))
+            self.assertEqual(fs.ledger_source(), "http://localhost:18080/api/1.0/session-ledger")
 
 
 class AmbientRootsResolvePerCall(unittest.TestCase):
@@ -121,27 +123,32 @@ class AmbientRootsResolvePerCall(unittest.TestCase):
 
 
 class ReadLedger(unittest.TestCase):
-    """A missing or unreadable store degrades the columns; it never aborts."""
+    """A missing or unreadable store degrades the columns; it never aborts.
 
-    def test_missing_directory_reads_empty(self):
-        with mock.patch.dict(os.environ, {"SUPERVISOR_LEDGER_DIR": "/tmp/does-not-exist-xyz"}):
+    ⚠️ **The rows come from a fixture ENDPOINT now, not a directory of files.** A case that
+    still planted `<sid>.json` in a temp dir would assert against a ledger this reader never
+    opens — and `{}` is exactly what a broken fixture produces, so the degrade case below
+    would pass on a reader that had stopped working entirely.
+    """
+
+    def test_an_unreadable_store_reads_empty(self):
+        with mock.patch.dict(os.environ, {"ATTENTION_STORE_URL": dead_url()}):
             self.assertEqual(fs.read_ledger(), {})
 
     def test_records_are_keyed_by_session_id(self):
-        with tempfile.TemporaryDirectory() as d:
-            write_record(d, SID, mode="headless", label="worker")
-            with mock.patch.dict(os.environ, {"SUPERVISOR_LEDGER_DIR": d}):
+        with FixtureEndpoint(ledger_rows=[ledger_row(SID, mode="headless", label="worker")]) as fx:
+            with mock.patch.dict(os.environ, {"ATTENTION_STORE_URL": fx.url}):
                 ledger = fs.read_ledger()
         self.assertIn(SID, ledger)
         self.assertEqual(ledger[SID]["mode"], "headless")
 
-    def test_a_corrupt_record_does_not_abort_the_rest(self):
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "broken.json").write_text("{not json", encoding="utf-8")
-            write_record(d, SID, mode="interactive")
-            with mock.patch.dict(os.environ, {"SUPERVISOR_LEDGER_DIR": d}):
+    def test_a_non_object_row_does_not_abort_the_rest(self):
+        with FixtureEndpoint(
+            ledger_rows=[None, "not-a-row", ledger_row(SID, mode="interactive")]
+        ) as fx:
+            with mock.patch.dict(os.environ, {"ATTENTION_STORE_URL": fx.url}):
                 ledger = fs.read_ledger()
-        self.assertIn(SID, ledger)
+        self.assertEqual(set(ledger), {SID})
 
 
 class ModeIsLedgerSourced(unittest.TestCase):
@@ -229,35 +236,36 @@ class SpawnCounts(unittest.TestCase):
 class Render(unittest.TestCase):
     """End to end: the row carries both new columns from the ledger."""
 
-    def _render(self, ledger_dir_path):
+    def _render(self, store_url):
         out = io.StringIO()
-        with mock.patch.dict(os.environ, {"SUPERVISOR_LEDGER_DIR": ledger_dir_path}):
+        with mock.patch.dict(os.environ, {"ATTENTION_STORE_URL": store_url}):
             with contextlib.redirect_stdout(out):
                 fs.main()
         return out.getvalue()
 
     def test_columns_are_appended_after_the_existing_five(self):
         """Callers parse the first five columns; the new pair must not displace them."""
-        with tempfile.TemporaryDirectory() as d:
-            header = self._render(d).splitlines()[0]
+        with FixtureEndpoint() as fx:
+            header = self._render(fx.url).splitlines()[0]
         self.assertTrue(header.startswith("LAST-ACTIVE"))
         self.assertLess(header.index("SESSION"), header.index("SPAWN MODE"))
         self.assertLess(header.index("WORKING ON"), header.index("SPAWN MODE"))
         self.assertLess(header.index("SPAWN MODE"), header.index("ATTRIBUTION"))
 
     def test_both_counts_are_printed_and_labelled(self):
-        with tempfile.TemporaryDirectory() as d:
-            output = self._render(d)
+        with FixtureEndpoint() as fx:
+            output = self._render(fx.url)
         self.assertIn("spawned today (UTC): ", output)
         self.assertIn("spawned today (local): ", output)
 
     def test_ledger_known_session_renders_its_mode_and_label(self):
         """A row with a record shows what the ledger says, not `unknown`."""
-        with tempfile.TemporaryDirectory() as d:
-            write_record(d, SID, mode="headless", label="audit the parser")
-            # The roster is built from transcripts; a session with no transcript
-            # simply does not appear, so this asserts on the record plumbing.
-            with mock.patch.dict(os.environ, {"SUPERVISOR_LEDGER_DIR": d}):
+        # The roster is built from transcripts; a session with no transcript
+        # simply does not appear, so this asserts on the record plumbing.
+        with FixtureEndpoint(
+            ledger_rows=[ledger_row(SID, mode="headless", label="audit the parser")]
+        ) as fx:
+            with mock.patch.dict(os.environ, {"ATTENTION_STORE_URL": fx.url}):
                 ledger = fs.read_ledger()
         self.assertEqual(fs.spawn_mode(ledger[SID]), "headless")
         self.assertEqual(fs.attribution(ledger[SID]), "audit the parser")
