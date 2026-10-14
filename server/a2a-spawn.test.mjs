@@ -27,6 +27,8 @@ import {
   listWorkersOnController,
   pollA2A,
   resolveA2AControllerTarget,
+  a2aStopCallFor,
+  stopWorkerOnController,
 } from './a2a-spawn.mjs'
 
 const TOKEN = 'token-value-that-must-never-be-echoed'
@@ -792,4 +794,163 @@ test('a failed list stamps nothing and reports not-ok, never "no workers live"',
   const thrown = await pollA2A({ records: [a2aRecord()], list: async () => { throw new Error('ECONNREFUSED') }, stamp: (id) => stamped.push(id) })
   assert.equal(thrown.ok, false)
   assert.match(thrown.reason, /ECONNREFUSED/)
+})
+
+// --- stop: the third control operation, and the one a manager drives ----------------------
+//
+// ⚠️ These pin SC4's discriminating half — that the caller stops a worker BY THE ID IT WAS
+// GIVEN, never by a task name. The builder's own refusals are already covered in
+// `a2a-client.test.mjs`; what is asserted here is the WIRE BODY this caller sends, which is the
+// only place the id the ledger recorded can be shown to reach the controller.
+
+const stopReply = (worker = { ...WORKER, state: 'stopped' }) =>
+  JSON.stringify({
+    result: {
+      id: 'task-1',
+      status: { state: 'TASK_STATE_COMPLETED' },
+      artifacts: [{ parts: [{ data: { operation: 'stop', stop: { worker } } }] }],
+    },
+  })
+
+test('the stop call is a one-shot control call naming the worker, not the task', () => {
+  const call = a2aStopCallFor({ endpoint: 'http://127.0.0.1:8080/a2a', workerId: 'w-1', token: TOKEN, messageId: 'm-1', mint: () => 'ctx-1' })
+  assert.equal(call.error, undefined)
+  assert.equal(call.body.method, 'SendMessage')
+  assert.equal(call.body.params.message.parts[0].data.operation, 'stop')
+  assert.deepEqual(call.body.params.message.parts[0].data.stop, { worker_id: 'w-1' })
+  // ⚠️ The discriminator is `data`, never `text`: the controller reads the ControlRequest from
+  // the message's FIRST DATA part and refuses a text part outright (a2a-client.mjs trap 5).
+  assert.equal(call.body.params.message.parts[0].text, undefined)
+  assert.equal(call.body.params.message.parts[0].data.task, undefined)
+})
+
+test('a stop with no worker id is refused by the builder, never sent', () => {
+  const call = a2aStopCallFor({ endpoint: 'http://127.0.0.1:8080/a2a', token: TOKEN, messageId: 'm-1', mint: () => 'ctx-1' })
+  assert.match(call.error, /non-empty `workerId`/)
+})
+
+test('the stop body carries the worker id the caller was given — the wire half of SC4', async () => {
+  // The caller is handed the id `create` recorded (the ledger's `worker_id`); this asserts that
+  // id — and no task name — is what reaches the controller. A stop keyed on the task would remove
+  // the successor when one task has been spawned twice.
+  let captured
+  let sentBody
+  const fetchImpl = async (_url, init) => {
+    sentBody = init.body
+    return stubFetch(stopReply())()
+  }
+  const result = await stopWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    workerId: 'd8b6e35d2017e4b6',
+    token: TOKEN,
+    messageId: 'm-1',
+    mint: () => 'ctx-1',
+    fetchImpl,
+    capture: (c) => {
+      captured = c
+    },
+  })
+  assert.equal(result.error, undefined)
+  const sent = JSON.parse(sentBody)
+  assert.equal(sent.params.message.parts[0].data.operation, 'stop')
+  assert.equal(sent.params.message.parts[0].data.stop.worker_id, 'd8b6e35d2017e4b6')
+  assert.deepEqual(captured.body, sent)
+})
+
+test('a stop reply reports the stopped worker and the terminal state', async () => {
+  // The shape SC1 checks: `TASK_STATE_COMPLETED` with the worker in `state: "stopped"`.
+  const result = await stopWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    workerId: 'w-1',
+    token: TOKEN,
+    messageId: 'm-1',
+    mint: () => 'ctx-1',
+    fetchImpl: stubFetch(stopReply()),
+  })
+  assert.equal(result.state, 'TASK_STATE_COMPLETED')
+  assert.equal(result.response.operation, 'stop')
+  assert.equal(result.response.stop.worker.state, 'stopped')
+  assert.equal(result.response.stop.worker.worker_id, 'w1')
+})
+
+test('the capture never carries the controller token', async () => {
+  let captured
+  await stopWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    workerId: 'w-1',
+    token: TOKEN,
+    messageId: 'm-1',
+    mint: () => 'ctx-1',
+    fetchImpl: stubFetch(stopReply()),
+    capture: (c) => {
+      captured = c
+    },
+  })
+  assert.deepEqual(Object.keys(captured).sort(), ['body', 'url'])
+  assert.ok(!JSON.stringify(captured).includes(TOKEN), 'the capture must never carry the bearer token')
+})
+
+test('a non-2xx stop is an error, never read as a stopped worker', async () => {
+  const result = await stopWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    workerId: 'w-1',
+    token: TOKEN,
+    messageId: 'm-1',
+    mint: () => 'ctx-1',
+    fetchImpl: stubFetch('no', { ok: false, status: 503 }),
+  })
+  assert.match(result.error, /HTTP 503/)
+})
+
+test('a FAILED stop is reported as an unknown outcome, never as "the worker is still running"', async () => {
+  // The controller reports a store-side failure AFTER the executor has run, so a FAILED stop can
+  // accompany a worker that WAS removed. Reading it as "still running" is the leak, one layer up
+  // from the create case — so the refusal must carry the same reconcile instruction.
+  const failed = JSON.stringify({ result: { id: 't', status: { state: 'TASK_STATE_FAILED' } } })
+  const result = await stopWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    workerId: 'w-1',
+    token: TOKEN,
+    messageId: 'm-1',
+    mint: () => 'ctx-1',
+    fetchImpl: stubFetch(failed),
+  })
+  assert.match(result.error, /FAILED/)
+  assert.match(result.error, /does NOT mean the operation did not happen/)
+  assert.match(result.error, /reconcile/)
+})
+
+test('a stop the controller never answers is aborted at its bound, not awaited forever', async () => {
+  const hang = (_url, { signal }) =>
+    new Promise((_resolve, reject) => {
+      const keepAlive = setTimeout(() => {}, 5_000)
+      signal.addEventListener('abort', () => {
+        clearTimeout(keepAlive)
+        reject(signal.reason)
+      })
+    })
+  const result = await stopWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    workerId: 'w-1',
+    token: TOKEN,
+    messageId: 'm-1',
+    mint: () => 'ctx-1',
+    fetchImpl: hang,
+    timeoutMs: 20,
+  })
+  assert.match(result.error, /could not be made/)
+})
+
+test('a reply naming another operation is refused, not read as this stop\'s answer', async () => {
+  // `sentOperation` is asserted for the same reason `create` and `list` assert it: a reply that
+  // names a different operation is the only client-side observable that the answer is not ours.
+  const result = await stopWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    workerId: 'w-1',
+    token: TOKEN,
+    messageId: 'm-1',
+    mint: () => 'ctx-1',
+    fetchImpl: stubFetch(listReply([{ worker_id: 'w-1', state: 'running' }])),
+  })
+  assert.match(result.error, /does not belong to this call/)
 })

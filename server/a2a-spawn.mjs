@@ -680,6 +680,91 @@ export function a2aListCallFor({ endpoint, token, messageId, contextId, mint } =
   return { ...call, contextId: context.contextId }
 }
 
+// The `stop` control call — `{ url, headers, body, contextId }`, or `{ error }`.
+//
+// ⚠️ IT TAKES THE WORKER ID `create` RECORDED, AND IT IS NEVER RE-DERIVED FROM THE TASK. That is
+// the whole of this task's SC4, and it is a property of the shape rather than of a caller's care:
+// the id is a required argument, so there is no path here that could reconstruct one from a task
+// name — the only other handle a caller holds. `a2aControlRequestFor` refuses a `stop` that names
+// a task, so a caller passing the wrong handle is refused at the builder rather than sending a
+// request the controller cannot honour.
+export function a2aStopCallFor({ endpoint, workerId, token, messageId, contextId, mint } = {}) {
+  const context = a2aContextIdFor({ previous: contextId, mint })
+  if (context.error) return { error: context.error }
+  const control = a2aControlRequestFor({ operation: 'stop', workerId })
+  if (control.error) return { error: control.error }
+  const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId })
+  if (call.error) return { error: call.error }
+  return { ...call, contextId: context.contextId }
+}
+
+// Ask the controller to stop this worker — `{ response, state }`, or `{ error }`.
+//
+// ⚠️ **THE CONTROLLER TOKEN AUTHENTICATES THIS, NEVER A WORKER TOKEN.** That is what makes this a
+// manager-facing act rather than a worker-side one: the caller needs the `worker_id` (durable — the
+// ledger carries it and `toAgentRecord` restores it on rehydrate) and the controller target
+// (resolved per call from config). It does NOT need the worker's own endpoint or token, so a
+// manager can stop an A2A worker it never spawned — the exact row `resolveMessageChannel` refuses
+// for a follow-up turn.
+//
+// ⚠️ Mirrors `listWorkersOnController`, and for the same reasons: the body is read as TEXT because
+// `a2aControlResponseFor` parses the raw body itself, and it is never logged — a control reply can
+// carry worker detail, and this module's rule is that a body printed is a transcript write.
+//
+// ⚠️ BOUNDED, and for a sharper reason than `list`'s. A stop that hangs holds a manager's turn
+// open; aborting it is not free — the request may already have reached the controller — but an
+// unbounded wait is the worse failure, because the caller learns nothing either way. The abort
+// bounds the WAIT, never the stop, so a timeout is reported as an unknown outcome rather than as
+// "nothing happened": the same discipline `A2A_STATE_FAILED` carries, one layer up.
+export const A2A_STOP_TIMEOUT_MS = 10_000
+export async function stopWorkerOnController({
+  endpoint,
+  workerId,
+  token,
+  messageId,
+  contextId,
+  mint,
+  fetchImpl = fetch,
+  timeoutMs = A2A_STOP_TIMEOUT_MS,
+  capture,
+} = {}) {
+  const call = a2aStopCallFor({ endpoint, workerId, token, messageId, contextId, mint })
+  if (call.error) return { error: call.error }
+  // The exact body this call sends, at the send site — what a test (and SC4) diffs to prove the
+  // `worker_id` on the wire is the one the caller was given. ⚠️ NEVER THE HEADERS: the controller
+  // token travels in `Authorization`, so a capture sink that took them would write the credential.
+  if (typeof capture === 'function') {
+    try {
+      capture({ url: call.url, body: call.body })
+    } catch {
+      // A capture is evidence, not part of the stop — losing it must not lose the call.
+    }
+  }
+
+  let res
+  try {
+    res = await fetchImpl(call.url, {
+      method: 'POST',
+      headers: call.headers,
+      body: JSON.stringify(call.body),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (cause) {
+    return { error: `the stop call to ${call.url} could not be made: ${cause?.message ?? cause}` }
+  }
+  if (!res.ok) return { error: `the controller answered HTTP ${res.status} to the stop call at ${call.url}.` }
+
+  let body
+  try {
+    body = await res.text()
+  } catch (cause) {
+    return { error: `the stop reply body could not be read: ${cause?.message ?? cause}` }
+  }
+  // `sentOperation` is asserted, so a reply naming another operation is refused rather than read
+  // as this call's answer — the same check `create` and `list` make, for the same reason.
+  return a2aControlResponseFor(body, { sentOperation: 'stop' })
+}
+
 // Which ledger sessions the controller still runs — `[{ sessionId, workerId }]`.
 //
 // Pure. `records` are ledger records; only an A2A one with a `worker_id` and no `ended_at` can
