@@ -414,12 +414,32 @@ test('a card with no supportedInterfaces refuses — never a top-level url fallb
   assert.match(result.error, /supportedInterfaces/)
 })
 
-test('a card that 404s refuses at spawn rather than at the first turn', async () => {
+test('a card that 404s past its deadline refuses at spawn rather than at the first turn', async () => {
+  let t = 0
   const result = await fetchWorkerCard({
     a2aUrl: 'http://localhost:9093/a2a',
     fetchImpl: stubFetch('not found', { ok: false, status: 404 }),
+    readyTimeoutMs: 1000,
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms
+    },
   })
   assert.match(result.error, /HTTP 404/)
+})
+
+test('an ingress 404 then 503 is retried until the k8s worker answers', async () => {
+  // Measured 2026-10-14 on nuke-dev: 404 while the pod is Pending, 503 while it starts, then 200.
+  const answers = [404, 503, 200]
+  let calls = 0
+  const fetchImpl = async () => {
+    const status = answers[calls++]
+    if (status !== 200) return { ok: false, status, json: async () => ({}) }
+    return { ok: true, status, json: async () => ({ supportedInterfaces: [{ url: 'http://localhost:9093/a2a' }] }) }
+  }
+  const result = await fetchWorkerCard({ a2aUrl: 'http://localhost:9093/a2a', fetchImpl, sleep: async () => {} })
+  assert.equal(result.endpoint, 'http://localhost:9093/a2a')
+  assert.equal(calls, 3)
 })
 
 test('a refused card fetch is retried until the worker listens', async () => {
@@ -451,17 +471,17 @@ test('a card that never listens gives up at its deadline', async () => {
   assert.match(result.error, /within 1000 ms/)
 })
 
-test('an HTTP answer is final and never retried', async () => {
+test('an HTTP answer outside the not-ready set is final and never retried', async () => {
   let calls = 0
   const result = await fetchWorkerCard({
     a2aUrl: 'http://localhost:9093/a2a',
     fetchImpl: async (...args) => {
       calls += 1
-      return stubFetch('not found', { ok: false, status: 404 })(...args)
+      return stubFetch('unauthorized', { ok: false, status: 401 })(...args)
     },
     sleep: async () => {},
   })
-  assert.match(result.error, /HTTP 404/)
+  assert.match(result.error, /HTTP 401/)
   assert.equal(calls, 1)
 })
 
