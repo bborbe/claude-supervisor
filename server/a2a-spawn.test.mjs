@@ -98,9 +98,10 @@ test('the refusal is only defined for an A2A target', () => {
 
 // --- locating the controller ---------------------------------------------------------------
 
-test('the controller URL and token resolve from the file', () => {
+test('the controller URL resolves from the file, the token only from the environment', () => {
   const resolved = resolveA2AControllerTarget({
-    file: { a2a: { url: 'http://127.0.0.1:8080/a2a', token: TOKEN } },
+    envToken: TOKEN,
+    file: { a2a: { url: 'http://127.0.0.1:8080/a2a' } },
   })
   assert.equal(resolved.url, 'http://127.0.0.1:8080/a2a')
   assert.equal(resolved.token, TOKEN)
@@ -110,9 +111,46 @@ test('the environment wins over the file, and a trailing slash is trimmed', () =
   const resolved = resolveA2AControllerTarget({
     envUrl: 'http://127.0.0.1:9099/a2a/',
     envToken: TOKEN,
-    file: { a2a: { url: 'http://elsewhere/a2a', token: 'other' } },
+    file: { a2a: { url: 'http://elsewhere/a2a' } },
   })
   assert.equal(resolved.url, 'http://127.0.0.1:9099/a2a')
+})
+
+// --- the plaintext token the migration removes ----------------------------------------------
+
+test('a plaintext a2a.token REFUSES, naming the key and the file to delete it from', () => {
+  const resolved = resolveA2AControllerTarget({
+    envUrl: 'http://127.0.0.1:8080/a2a',
+    envToken: TOKEN,
+    file: { a2a: { url: 'http://127.0.0.1:8080/a2a', token: 'file-token-3c1a' } },
+    path: '/etc/sup.json',
+  })
+  assert.match(resolved.error, /"a2a\.token" is set/)
+  assert.match(resolved.error, /\/etc\/sup\.json/, 'must name the file to edit')
+  assert.match(resolved.error, /Delete the "a2a\.token" key/, 'must name the fix')
+  assert.equal(resolved.token, undefined, 'must not resolve a token at all')
+})
+
+test('the plaintext refusal fires even when the env token would win, and echoes nothing', () => {
+  // Presence, not precedence: env-first means the file value never WINS, so a check placed at
+  // the point of use would never see it and the plaintext token would sit in the file
+  // indefinitely while every spawn kept working.
+  const resolved = resolveA2AControllerTarget({
+    envUrl: 'http://127.0.0.1:8080/a2a',
+    envToken: TOKEN,
+    file: { a2a: { url: 'http://127.0.0.1:8080/a2a', token: 'file-token-3c1a' } },
+  })
+  assert.ok(resolved.error, 'a plaintext token must refuse even when the env var would win')
+  assert.doesNotMatch(resolved.error, /file-token-3c1a/, 'the refused value must not travel back')
+})
+
+test('an emptied a2a.token is absence, not a plaintext token', () => {
+  const resolved = resolveA2AControllerTarget({
+    envUrl: 'http://127.0.0.1:8080/a2a',
+    envToken: TOKEN,
+    file: { a2a: { url: 'http://127.0.0.1:8080/a2a', token: '' } },
+  })
+  assert.equal(resolved.token, TOKEN)
 })
 
 test('a bad URL in the LOSER still refuses — a dormant value breaks the spawn later', () => {

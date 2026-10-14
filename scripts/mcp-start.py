@@ -36,10 +36,28 @@ BUN IS RESOLVED HERE, NOT ASSUMED ON PATH. `~/.bun/bin` reaches `PATH` only from
 runbook documents. Resolution is `$BUN_INSTALL/bin/bun`, then `$HOME/.bun/bin/bun`, then
 `PATH`. A bun that cannot be found is reported on stderr and exits non-zero, rather than
 leaving the client to report an unexplained closed connection.
+
+TOKENS ARE RESOLVED HERE TOO, FROM TEAMVAULT. The cluster and A2A bearer tokens come from
+`teamvault-cli`, because a plaintext copy in `~/.config/claude-supervisor/config.json` is the
+exposure the lookup removes — `server/cluster-spawn.mjs` and `server/a2a-spawn.mjs` now REFUSE
+a `cluster.token` / `a2a.token` in that file rather than read one. Only the source KEY NAME is
+ever logged: a TeamVault lookup key is a short identifier rather than a secret, and the value
+never reaches any stream.
+
+⚠️ AN UNRESOLVED TOKEN MUST NOT STOP THE SERVER, and this is the one place the launcher
+deliberately does NOT fail closed. This process gates every supervisor tool, not only the two
+spawn targets that consume a token — exiting non-zero here would cost a session `list_agents`,
+`spawn_agent(target="local")` and every manager verb, so a TeamVault outage or a missing
+binary would take the supervisor away from every session at once. The server already refuses a
+cluster or A2A spawn with a sentence naming the missing variable (`resolveAuthToken`,
+`resolveA2AControllerTarget`), which is the right layer for it. A failure is therefore logged
+here and the server starts anyway; a bun that cannot be found still exits non-zero, because
+without it there is no server to start.
 """
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -78,6 +96,82 @@ def find_bun(env, which=shutil.which):
     return which("bun")
 
 
+# The two tokens, and the TeamVault lookup key each resolves from. ⚠️ Distinct keys, and the
+# asymmetry with the server's variable names is deliberate: the cluster token is the same secret
+# the claude-interactive service reads at startup, which is why the supervisor borrows that
+# variable's name (`INTERACTIVE_AUTH_TOKEN`) — one value configures both halves — while the A2A
+# token is the worker controller's own control secret, with no counterparty name to borrow.
+TOKEN_KEYS = (
+    ("INTERACTIVE_AUTH_TOKEN", "VO0Gmw"),
+    ("SUPERVISOR_A2A_TOKEN", "lO4j5q"),
+)
+
+
+def teamvault_config(env):
+    """The teamvault-cli config path, following teamvault-cli's own precedence."""
+    explicit = env.get("SUPERVISOR_TEAMVAULT_CONFIG") or env.get("TEAMVAULT_CONFIG")
+    if explicit:
+        return explicit
+    home = env.get("HOME") or Path.home()
+    return str(Path(home) / ".config" / "teamvault-cli" / "config.json")
+
+
+def teamvault_password(key, env, run=subprocess.run):
+    """The value for `key`, or None. The VALUE is never logged — only the key is.
+
+    A TeamVault lookup key is a short `[A-Za-z0-9]{6,12}` identifier rather than a secret, so
+    naming it is what makes the resolution observable without exposing anything.
+    """
+    cli = env.get("SUPERVISOR_TEAMVAULT_CLI") or "teamvault-cli"
+    argv = [
+        cli,
+        "password",
+        f"--teamvault-config={teamvault_config(env)}",
+        f"--teamvault-key={key}",
+    ]
+    try:
+        result = run(argv, capture_output=True, text=True)
+    except OSError as error:
+        print(f"supervisor: cannot run {cli} for key {key}: {error}", file=sys.stderr)
+        return None
+    if result.returncode != 0:
+        # teamvault-cli's own stderr names the problem and carries no secret; stdout is the
+        # value, and it is not echoed even on the success path.
+        print(
+            f"supervisor: teamvault-cli failed for key {key}: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return None
+    value = result.stdout.strip()
+    if not value:
+        print(f"supervisor: teamvault-cli returned an empty value for key {key}", file=sys.stderr)
+        return None
+    return value
+
+
+def declare_tokens(env, lookup=teamvault_password):
+    """Fill each token from TeamVault, and return the names filled.
+
+    ⚠️ DEGRADES RATHER THAN REFUSES. An unresolved token leaves the server startable and the
+    failure to the spawn that needs it — see the module docstring for why. An explicit value
+    already in the environment is never overwritten, matching `server/config.mjs`'s
+    env-first precedence, so a caller's deliberate override stays an override.
+    """
+    declared = []
+    for name, key in TOKEN_KEYS:
+        if env.get(name):
+            print(f"supervisor: {name} already set; TeamVault key {key} not consulted", file=sys.stderr)
+            continue
+        value = lookup(key, env)
+        if value is None:
+            print(f"supervisor: {name} unresolved (TeamVault key {key}) — starting anyway", file=sys.stderr)
+            continue
+        env[name] = value
+        declared.append(name)
+        print(f"supervisor: {name} resolved from TeamVault key {key}", file=sys.stderr)
+    return declared
+
+
 def main(env=None):
     env = os.environ if env is None else env
     declare_claude_home(env)
@@ -90,6 +184,9 @@ def main(env=None):
             file=sys.stderr,
         )
         return 1
+
+    # After the bun check, so a machine with no bun exits before spending two vault lookups.
+    declare_tokens(env)
 
     args = [bun, "run", "--cwd", str(SERVER_DIR), "--shell=bun", "--silent", "start"]
     try:
