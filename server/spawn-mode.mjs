@@ -525,15 +525,24 @@ export const MANAGER_FLEET_FULL = 'the manager fleet is FULL'
 // Whether a `role: manager` spawn may proceed — a refusal string, or `null` to allow it.
 // Same shape and the same ordering as `concurrentLimitRefusal`, for the same reasons: hard cap
 // first, `liveCount === null` refuses, `operatorNamed` is the caller's assertion.
-export function managerLimitRefusal({ limits, liveCount, operatorNamed = false, configFile }) {
+export function managerLimitRefusal({ limits, liveCount, countError = null, operatorNamed = false, configFile }) {
   if (limits.error) return limits.error
   if (limits.limit === null) return null
 
   if (liveCount === null) {
+    // ⚠️ The failure is NAMED, and the limit is not the headline. Reporting "the limit is set to N"
+    // beside an uncountable fleet sends the operator to the one value that is usually correct —
+    // observed 2026-10-14, where the real cause was a 20 s timeout on a board that needs longer,
+    // and the limit had just been raised. `countError` is the cause; when the caller cannot supply
+    // one, the old pointer is still better than silence.
     return (
-      `the concurrent-manager limit is set to ${limits.limit} but the live-manager count could not be ` +
-      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. The ` +
-      `count comes from scripts/fleet-board.py --json, which must run and parse.`
+      `the live-manager count could not be taken, so it is unknown — refusing rather than opening ` +
+      `past a limit that cannot be counted. ` +
+      (countError
+        ? `The count failed: ${countError}.`
+        : `The count comes from scripts/fleet-board.py --json, which must run and parse.`) +
+      ` The limit now in effect is ${limits.limit} (source: ${limits.source}) — the count is what ` +
+      `failed, not the limit.`
     )
   }
 
