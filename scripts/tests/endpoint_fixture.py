@@ -171,6 +171,21 @@ class FixtureEndpoint:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
+    def add_ledger_row(self, row):
+        """Append one ledger row to the RUNNING store.
+
+        ⚠️ **The list is read per request, so rows may be planted after the server has
+        started.** That is what lets a suite open the fixture ONCE in `setUp` and have each
+        case plant its own records, instead of rebuilding the server per case.
+        `ledger_by_id` is re-synced here deliberately: the per-id route reads that map, so a
+        row present in the list but absent from it would answer 200 on the list route and
+        404 on the per-id one — a disagreement a case that only exercised the list route
+        would never see.
+        """
+        self.ledger_rows.append(row)
+        if isinstance(row, dict) and row.get("session_id"):
+            self.ledger_by_id[row["session_id"]] = row
+
     @property
     def url(self):
         host, port = self.server.server_address[:2]
