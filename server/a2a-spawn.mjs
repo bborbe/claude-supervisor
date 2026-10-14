@@ -218,8 +218,9 @@ export function resolveA2AControllerTarget({ envUrl, envToken, file, path = 'the
     return {
       error:
         'no controller token is configured — SUPERVISOR_A2A_TOKEN is not set. The token is resolved from ' +
-        'TeamVault by the launch wrapper, so point the supervisor MCP entry at scripts/supervisor-launch.sh ' +
-        `and Reconnect. An "a2a.token" in ${path} is NOT a fallback: it is refused, because a plaintext ` +
+        'TeamVault by scripts/mcp-start.py, which the supervisor MCP entry must name as its `command`; ' +
+        'changing that needs a NEW session, since Claude Code caches the server definition at session ' +
+        `start. An "a2a.token" in ${path} is NOT a fallback: it is refused, because a plaintext ` +
         'token there is the exposure this change removes. The controller refuses an unauthenticated control ' +
         'call, so a spawn without one would fail at the controller rather than here, with nothing on this ' +
         'side naming the missing key.',

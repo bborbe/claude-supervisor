@@ -424,10 +424,12 @@ export function resolveAuthToken(raw, label = 'INTERACTIVE_AUTH_TOKEN', configPa
       error:
         'the cluster target has no token: INTERACTIVE_AUTH_TOKEN is not set. The claude-interactive ' +
         'service requires `Authorization: Bearer <token>` on POST /prompt and refuses without it, so a ' +
-        'spawn would fail as a 401 naming nothing to fix. The token is resolved from TeamVault by the ' +
-        'launch wrapper — point the supervisor MCP entry at scripts/supervisor-launch.sh and Reconnect. ' +
-        'Setting INTERACTIVE_AUTH_TOKEN on the server entry also works but needs a NEW session, since an ' +
-        'MCP env block is cached at session start. A "cluster.token" in the supervisor config file ' +
+        'spawn would fail as a 401 naming nothing to fix. The token is resolved from TeamVault by ' +
+        'scripts/mcp-start.py, which the supervisor MCP entry must name as its `command`. ⚠️ Changing ' +
+        'that `command` needs a NEW session: Claude Code caches the server definition at session start, ' +
+        'so a /mcp Reconnect re-spawns from the cached one and never sees the edit. Setting ' +
+        'INTERACTIVE_AUTH_TOKEN on the server entry needs a new session for the same reason. A ' +
+        '"cluster.token" in the supervisor config file ' +
         `(${configPath}) is NOT a fallback: it is refused, because a plaintext token there is the ` +
         'exposure this change removes.',
     }
