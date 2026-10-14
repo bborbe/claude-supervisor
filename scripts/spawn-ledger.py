@@ -75,7 +75,7 @@ def endpoint_base(override=None):
     return (override or os.environ.get("ATTENTION_STORE_URL") or ENDPOINT_DEFAULT).rstrip("/")
 
 
-def _get_json(url, timeout):
+def _get_json(url, timeout=_HTTP_TIMEOUT):
     """`(status, payload)` for one GET — the HTTP status whatever it is, `None` on no answer.
 
     ⚠️ **Duplicated from `session-liveness.py` on purpose, and the duplication is the
@@ -83,8 +83,11 @@ def _get_json(url, timeout):
     importing its helpers back would close the very cycle this module was extracted to
     break, and the cycle is what makes the guard refuse. A shared `attention-endpoint.py`
     is the right home once the remaining readers switch; until then a second copy of
-    fifteen lines beats a cycle. The behaviour is deliberately identical, including that a
-    non-JSON body is a `None` payload rather than an exception.
+    fifteen lines beats a cycle. ⚠️ **The copy is kept BYTE-FOR-BYTE identical to the
+    original, signature included** — a divergence that reads as harmless is what makes a
+    later extraction unsafe, and the first draft of this function did diverge on the
+    `timeout` default. A non-JSON body is a `None` payload rather than an exception, as
+    there.
     """
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
