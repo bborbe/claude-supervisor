@@ -16,7 +16,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -29,9 +29,9 @@ const FIXTURE = 'http://fixture.invalid'
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'worker-sessions-'))
-  const dirs = { root, ledgerDir: join(root, 'ledger') }
-  mkdirSync(dirs.ledgerDir)
-  return dirs
+  // ⚠️ The ledger is the ENDPOINT now, so its fixture is a row array rather than a directory
+  // of files. The suite still dials nothing — both transports are injected.
+  return { root, ledgerRows: [] }
 }
 
 // A store row in the wire shape attention-controller serves: snake_case `session_id`, and
@@ -42,10 +42,14 @@ function row(sessionId, { live = true, source = 'mcp-timer' } = {}) {
   return out
 }
 
-// An injected fetch. `readHeartbeat` is the only caller, and it treats any non-200, a throwing
-// transport, or a body that is not an array as "could not read it".
-function endpoint(rows, { status = 200 } = {}) {
-  return async () => ({ status, json: async () => rows })
+// An injected fetch. TWO readers share this base — `readHeartbeat` and `readSessionLedger` —
+// so the fixture routes by path. Both treat a non-200, a throwing transport, or a body that is
+// not an array as "could not read it".
+function endpoint(rows, { status = 200, ledgerRows } = {}) {
+  return async (url) => ({
+    status,
+    json: async () => (String(url).includes('/session-ledger') ? ledgerRows ?? [] : rows),
+  })
 }
 
 function deadEndpoint() {
@@ -55,14 +59,15 @@ function deadEndpoint() {
 }
 
 function ledger(dir, sessionId, label, extra = {}) {
-  writeFileSync(
-    join(dir.ledgerDir, `${sessionId}.json`),
-    JSON.stringify({ session_id: sessionId, label, mode: 'interactive', ...extra }),
-  )
+  dir.ledgerRows.push({ session_id: sessionId, label, mode: 'interactive', ...extra })
 }
 
 function count(dir, rows, opts = {}) {
-  return workerSessions({ endpoint: FIXTURE, fetchImpl: endpoint(rows), ...dir, ...opts })
+  return workerSessions({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint(rows, { ledgerRows: dir.ledgerRows }),
+    ...opts,
+  })
 }
 
 test('a ledger record with a live endpoint row is a worker', async () => {
@@ -194,30 +199,24 @@ test('status names the store row source', async () => {
   assert.equal(workers[0].status, 'cluster')
 })
 
-// ⚠️ The unreadable-ledger case below points the store at a REGULAR FILE rather than calling
-// `chmod 0o000` on it. A 0o000 directory is still readable by root (`CAP_DAC_OVERRIDE`), so the
-// chmod spelling passes or fails on the euid of whoever runs it — green on CI, red under root.
-// `readdirSync` on a file throws ENOTDIR, which is not ENOENT, so the store reads as unreadable
-// under both.
-function unreadable(path) {
-  rmSync(path, { recursive: true })
-  writeFileSync(path, '')
-}
-
-test('an unreadable ledger returns null, not an empty fleet', async () => {
-  // `null` refuses the spawn and `[]` permits it, so collapsing an I/O error into "nobody is
-  // live" is the one direction that opens past a limit that cannot be counted.
-  const dir = fixture()
-  unreadable(dir.ledgerDir)
-  assert.equal(await count(dir, []), null)
+test('an unreadable ledger store returns null, not an empty fleet', async () => {
+  // `null` refuses the spawn and `[]` permits it, so collapsing a store failure into "nobody is
+  // live" is the one direction that opens past a limit that cannot be counted. ⚠️ The heartbeat
+  // answers normally here — the failure is the LEDGER's alone, so this spec discriminates
+  // rather than passing because both stores happened to be down.
+  const sid = 'aaaaaaaa-0000-0000-0000-000000000009'
+  const fetchImpl = async (url) => {
+    if (String(url).includes('/session-ledger')) throw new Error('connect ECONNREFUSED')
+    return { status: 200, json: async () => [row(sid)] }
+  }
+  assert.equal(await workerSessions({ endpoint: FIXTURE, fetchImpl }), null)
 })
 
-test('an absent ledger directory is an empty fleet, not an error', async () => {
-  // A directory that was never created means nobody has ever been spawned — a different answer
+test('an empty ledger store is an empty fleet, not an error', async () => {
+  // A store that answers an empty array means nobody has ever been spawned — a different answer
   // from "could not read it", and it must not be reported as unknown. The endpoint may hold any
   // number of live rows; with no ledger record they are managers and the operator's own.
   const dir = fixture()
-  rmSync(dir.ledgerDir, { recursive: true })
   const sid = 'aaaaaaaa-0000-0000-0000-000000000003'
   const workers = await count(dir, [row(sid)])
   assert.deepEqual(workers, [])

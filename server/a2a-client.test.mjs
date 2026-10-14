@@ -153,6 +153,30 @@ test('the outcome carries the state, the contextId and the reply text', () => {
   })
 })
 
+test('the SDK\'s NESTED event shape yields the completed state and the reply', () => {
+  // a2a-go v2.6.0: `statusUpdate.status.state` and `artifactUpdate.artifact.parts`. Measured
+  // against a real worker — the flat reading filed a completed turn as SUBMITTED with no reply.
+  const body = sse(
+    { task: { id: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_SUBMITTED' } } },
+    { artifactUpdate: { taskId: 't-1', contextId: 'ctx-1', artifact: { artifactId: 'a-1', parts: [{ text: 'ACK 4242' }] } } },
+    { statusUpdate: { taskId: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_COMPLETED' } } },
+  )
+  const { frames } = a2aFrames(body)
+  assert.deepEqual(a2aOutcome(frames, { sentContextId: 'ctx-1' }), {
+    state: 'TASK_STATE_COMPLETED',
+    contextId: 'ctx-1',
+    reply: 'ACK 4242',
+  })
+})
+
+test('a control reply over the stream reads its FAILED state from the nested status', () => {
+  const body = sse(
+    { task: { id: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_SUBMITTED' } } },
+    { statusUpdate: { taskId: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_FAILED' } } },
+  )
+  assert.match(a2aControlResponseFor(body, { sentOperation: 'create' }).error, /FAILED/)
+})
+
 test('a contextId mismatch is the error, because it is the only client-side observable', () => {
   // ⚠️ A turn that ran under the server's default session returns a contextId just as happily as
   // one that ran where it was asked to, so nothing else on this side reads as wrong.
