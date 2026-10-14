@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.141.0
 
 - feat: **`send_agent_message` now reaches an A2A worker: one more turn goes to the WORKER's own endpoint, on the conversation its first turn opened, and the controller is not in the path.** Before this, a `docker` / `k8s` worker fell through to the headless refusal, so no follow-up turn could reach it at all. The send is awaited and the collection is not, exactly as for the first turn, and the reply carries `send_ms` — this server's own measurement of the send, so a latency claim does not have to be read off a caller's round trip. The conversation id is recorded on the in-memory agent record after the first send, beside the token. ⚠️ A row re-adopted after a reconnect holds no token (the ledger never stores one) and is refused rather than sent unauthenticated.
 
