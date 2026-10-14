@@ -30,7 +30,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
-from endpoint_fixture import FixtureEndpoint, dead_url, row
+from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row, row
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -90,12 +90,13 @@ class SessionLiveness(unittest.TestCase):
         self._prior_heartbeat_env = os.environ.get("SUPERVISOR_HEARTBEAT_DIR")
         os.environ["SUPERVISOR_HEARTBEAT_DIR"] = self.heartbeat
         # The spawn ledger decides WHICH sessions the `--list` guard covers (SC11), so it is
-        # isolated for the same reason as the other three stores: a suite reading the machine's
-        # real ledger would let 1600 real spawn records decide a fixture's verdict.
-        self.ledger = os.path.join(self.tmp.name, "ledger")
-        os.makedirs(self.ledger)
-        self._prior_ledger_env = os.environ.get("SUPERVISOR_LEDGER_DIR")
-        os.environ["SUPERVISOR_LEDGER_DIR"] = self.ledger
+        # isolated for the same reason as the other three stores — but since 2026-10-14 it is
+        # isolated as ROWS rather than as a directory: `spawn-ledger.py` asks the session-ledger
+        # endpoint now, so each case's rows travel into its own `FixtureEndpoint` through
+        # `self.ledger_rows` (see `fixture()`). A suite reading the machine's real ledger would
+        # let 1900 real spawn records decide a fixture's verdict — the isolation rule unchanged,
+        # only its shape.
+        self.ledger_rows = []
 
     def tearDown(self):
         if self._prior_cache_env is None:
@@ -106,10 +107,6 @@ class SessionLiveness(unittest.TestCase):
             os.environ.pop("SUPERVISOR_HEARTBEAT_DIR", None)
         else:
             os.environ["SUPERVISOR_HEARTBEAT_DIR"] = self._prior_heartbeat_env
-        if self._prior_ledger_env is None:
-            os.environ.pop("SUPERVISOR_LEDGER_DIR", None)
-        else:
-            os.environ["SUPERVISOR_LEDGER_DIR"] = self._prior_ledger_env
         self.tmp.cleanup()
 
     def plant(self, session_id, pid=None, name="synth", **extra):
@@ -125,17 +122,30 @@ class SessionLiveness(unittest.TestCase):
             json.dump(rec, fh)
 
     def ledger_entry(self, session_id, label="synth worker", **extra):
-        """A spawn-ledger record — what makes a session one the `--list` guard covers.
+        """A spawn-ledger row — what makes a session one the `--list` guard covers.
 
         ⚠️ **A registry record alone is NOT enough since SC11 (2026-10-09).** The guard's
         population is `registry_live ∩ spawn ledger`, so a case that wants the guard to fire
         must plant BOTH halves; planting only the registry half is now the case that must
         NOT fire, which is its own test below.
+
+        ⚠️ **A row on this case's own list, not a file.** The ledger was a directory until
+        2026-10-14 and this method wrote `<sid>.json` into it; the reader asks the endpoint
+        now, so the row is appended to `self.ledger_rows` and `fixture()` serves it. A case
+        that still wrote a file would assert against a ledger the reader never opens — and
+        would pass on a guard that saw nothing.
         """
-        rec = {"session_id": session_id, "label": label, "mode": "interactive"}
-        rec.update(extra)
-        with open(os.path.join(self.ledger, "%s.json" % session_id), "w", encoding="utf-8") as fh:
-            json.dump(rec, fh)
+        self.ledger_rows.append(ledger_row(session_id, label, **extra))
+
+    def fixture(self, rows=None, **kwargs):
+        """This case's endpoint: the heartbeat rows given, plus the ledger rows planted.
+
+        ⚠️ **One constructor for both stores, deliberately.** The two now share a base URL,
+        so a case that built its own `FixtureEndpoint` without `ledger_rows` would point the
+        ledger reader at an empty store and read the result as "nobody was ever spawned" —
+        the confident-empty-fleet answer this whole guard exists to refuse.
+        """
+        return FixtureEndpoint(rows, ledger_rows=list(self.ledger_rows), **kwargs)
 
     def check(self, session_id, endpoint, directory=None):
         # ⚠️ **`--dir` is not optional here since the ABSENT-licence guard (2026-10-12).** The
@@ -199,7 +209,7 @@ class SessionLiveness(unittest.TestCase):
         # per-id route 404s on a prefix (it is an exact lookup), so a unique prefix must
         # resolve through the list route to the same verdict the full id gets.
         sid = "3fd529af-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             full = self.check(sid, fx.url)
             pref = self.check("3fd529af", fx.url)
         self.assertEqual(full[0], LIVE)
@@ -209,12 +219,12 @@ class SessionLiveness(unittest.TestCase):
     def test_absent_id_differs_from_a_resolving_prefix(self):
         # (b) and (c) must NOT agree, or the probe is a constant-return stub.
         sid = "3fd529af-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             self.assertEqual(self.check("3fd529af", fx.url)[0], LIVE)
             self.assertEqual(self.check("deadbeef", fx.url)[0], ABSENT)
 
     def test_prefix_match_is_case_insensitive(self):
-        with FixtureEndpoint([row("ABCDEF12-1111-2222-3333-444455556666")]) as fx:
+        with self.fixture([row("ABCDEF12-1111-2222-3333-444455556666")]) as fx:
             self.assertEqual(self.check("abcdef12", fx.url)[0], LIVE)
 
     # ---- UNKNOWN vs ABSENT: the dangerous direction -----------------------------------
@@ -225,7 +235,7 @@ class SessionLiveness(unittest.TestCase):
         # ⚠️ The probe must be a WELL-FORMED id (lowercase alphanumerics). A non-id string is now
         # refused as malformed before any verdict, so it can no longer stand in for "an id that
         # matches nothing" — keeping those two apart is the point of the shape guard.
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             rc, out = self.check("doesnotexist", fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
@@ -240,7 +250,7 @@ class SessionLiveness(unittest.TestCase):
     def test_a_non_200_non_404_status_is_unknown_not_absent(self):
         # A 500 from the list route (reached when the per-id route answered 404) is not the
         # store saying "gone" — it is the store failing, which is UNKNOWN.
-        with FixtureEndpoint([], list_status=500) as fx:
+        with self.fixture([], list_status=500) as fx:
             rc, out = self.check("3fd529af", fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
@@ -248,7 +258,7 @@ class SessionLiveness(unittest.TestCase):
     def test_a_stale_row_is_absent_not_live(self):
         # A row the store holds but marks not live — positively reported, so ABSENT is licensed.
         sid = "57a1e111-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid, live=False)]) as fx:
+        with self.fixture([row(sid, live=False)]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
@@ -298,7 +308,7 @@ class SessionLiveness(unittest.TestCase):
         # ⚠️ The falsy-guard half of the fix. `if args.check:` sent `""` past the branch and into
         # the `--list` fall-through, so an empty argument silently changed the command's MODE and
         # a caller reading the roster as a verdict saw a non-empty result.
-        with FixtureEndpoint([row("3fd529af-1111-2222-3333-444455556666")]) as fx:
+        with self.fixture([row("3fd529af-1111-2222-3333-444455556666")]) as fx:
             rc, out, err = self.check_streams("", fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("no session id given", err)
@@ -306,7 +316,7 @@ class SessionLiveness(unittest.TestCase):
 
     def test_a_well_formed_non_matching_id_is_still_absent(self):
         # The unchanged control: the guard rejects non-ids, never ids that simply match nothing.
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             rc, out, err = self.check_streams("zzzzzzzz", fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT — no session id matches zzzzzzzz", err)
@@ -319,7 +329,7 @@ class SessionLiveness(unittest.TestCase):
         # demanding exactly 8 characters would refuse the instruction it had just printed, and
         # would narrow `prefix matching` that the verdict machinery is documented to leave alone.
         sid = "3fd529af-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             rc, _, _ = self.check_streams("3fd529af-111", fx.url)
         self.assertNotEqual(rc, MALFORMED)
         self.assertEqual(rc, LIVE)
@@ -327,7 +337,7 @@ class SessionLiveness(unittest.TestCase):
     def test_a_longer_prefix_of_a_real_id_is_not_malformed(self):
         # Any prefix length resolves, not only 8 and not only the UUID's own separators.
         sid = "3fd529af-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             rc, _, _ = self.check_streams("3fd529af-1111-2222", fx.url)
         self.assertEqual(rc, LIVE)
 
@@ -335,14 +345,14 @@ class SessionLiveness(unittest.TestCase):
         # `_check` folds case, so the guard must fold too — a literal-lowercase rule would turn
         # an id that resolves today into an input error.
         sid = "abcdef12-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             rc, _, _ = self.check_streams("ABCDEF12", fx.url)
         self.assertEqual(rc, LIVE)
 
     def test_a_list_is_unaffected_by_the_guard(self):
         # The branch the empty case used to fall through to still works when it is ASKED for.
         sid = "3fd529af-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertIn("3fd529af", out)
@@ -353,7 +363,7 @@ class SessionLiveness(unittest.TestCase):
         sid = "n0f1a600-1111-2222-3333-444455556666"
         bad = row(sid)
         bad["live"] = None
-        with FixtureEndpoint([bad]) as fx:
+        with self.fixture([bad]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("no usable `live` flag", out)
@@ -365,7 +375,7 @@ class SessionLiveness(unittest.TestCase):
         # the same "a store this reader does not understand" rule the non-boolean `live` gets.
         bad = row("12345678-1111-2222-3333-444455556666")
         bad["session_id"] = 12345678
-        with FixtureEndpoint([bad]) as fx:
+        with self.fixture([bad]) as fx:
             rc, out = self.check("12345678", fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
@@ -397,20 +407,20 @@ class SessionLiveness(unittest.TestCase):
         ]
 
     def test_ambiguous_prefix_refuses_rather_than_guesses(self):
-        with FixtureEndpoint(self.colliding_pair()) as fx:
+        with self.fixture(self.colliding_pair()) as fx:
             rc, out = self.check("abc12345", fx.url)
         self.assertEqual(rc, AMBIGUOUS)
         self.assertIn("pass a longer id", out)
 
     def test_ambiguous_candidates_are_distinguishable(self):
         # Echoing 8 chars back hands the caller two identical strings and no way to choose.
-        with FixtureEndpoint(self.colliding_pair()) as fx:
+        with self.fixture(self.colliding_pair()) as fx:
             _, out = self.check("abc12345", fx.url)
         self.assertIn("abc12345-111", out)
         self.assertIn("abc12345-999", out)
 
     def test_a_longer_prefix_disambiguates(self):
-        with FixtureEndpoint(self.colliding_pair()) as fx:
+        with self.fixture(self.colliding_pair()) as fx:
             self.assertEqual(self.check("abc12345-1111", fx.url)[0], LIVE)
             self.assertEqual(self.check("abc12345-9999", fx.url)[0], LIVE)
 
@@ -423,7 +433,7 @@ class SessionLiveness(unittest.TestCase):
         # the cluster — so this row may be a worker alive behind a network fault, and ABSENT
         # would authorise a resume onto it.
         sid = "c1u57e00-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid, live=False, source="cluster")]) as fx:
+        with self.fixture([row(sid, live=False, source="cluster")]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
@@ -433,7 +443,7 @@ class SessionLiveness(unittest.TestCase):
         # death case and ABSENT is licensed.
         open(os.path.join(self.heartbeat, "_cluster-reachability.json"), "w").close()
         sid = "c1u57e00-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid, live=False, source="cluster")]) as fx:
+        with self.fixture([row(sid, live=False, source="cluster")]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
@@ -441,7 +451,7 @@ class SessionLiveness(unittest.TestCase):
     def test_a_not_live_non_cluster_row_is_absent_even_with_a_stale_marker(self):
         # The marker is consulted ONLY for a cluster row: a local stale row keeps its ABSENT.
         sid = "10ca1500-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid, live=False, source="mcp-timer")]) as fx:
+        with self.fixture([row(sid, live=False, source="mcp-timer")]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("ABSENT", out)
@@ -449,7 +459,7 @@ class SessionLiveness(unittest.TestCase):
     def test_a_live_cluster_row_is_live(self):
         # The marker governs only the not-live arm — a live cluster row is LIVE regardless.
         sid = "11vec1u5-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid, source="cluster")]) as fx:
+        with self.fixture([row(sid, source="cluster")]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, LIVE)
 
@@ -460,7 +470,7 @@ class SessionLiveness(unittest.TestCase):
         # i.e. permission to resume onto a cluster worker that may be alive behind a fault.
         mod = load_from(self.tmp.name)  # the copy sits alone: no sibling live-workers.py
         sid = "c1u57e00-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid, live=False, source="cluster")]) as fx:
+        with self.fixture([row(sid, live=False, source="cluster")]) as fx:
             out, err = io.StringIO(), io.StringIO()
             with redirect_stdout(out), redirect_stderr(err):
                 rc = mod.main(["--check", sid, "--endpoint", fx.url])
@@ -489,7 +499,7 @@ class SessionLiveness(unittest.TestCase):
 
         self.m._get_json = spy
         try:
-            with FixtureEndpoint([]) as fx:
+            with self.fixture([]) as fx:
                 for hostile in ("../etc/passwd", "abc?live=true", "abc%2fdef"):
                     # Layer 1 — the argument boundary refuses it, and never as a verdict.
                     rc_main, _, err = self.check_streams(hostile, fx.url)
@@ -515,7 +525,7 @@ class SessionLiveness(unittest.TestCase):
             row("aaaa1111-1111-2222-3333-444455556666"),
             row("bbbb2222-1111-2222-3333-444455556666", live=False),
         ]
-        with FixtureEndpoint(rows) as fx:
+        with self.fixture(rows) as fx:
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertIn("Alive", out)
@@ -525,7 +535,7 @@ class SessionLiveness(unittest.TestCase):
         # A headless or cluster worker holds a heartbeat row and no registry entry; it must
         # still appear, with an empty name rather than being dropped.
         sid = "11571e57-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertIn(sid, out)
@@ -538,7 +548,7 @@ class SessionLiveness(unittest.TestCase):
     def test_list_on_an_unreadable_registry_is_unknown(self):
         # The names half is load-bearing: a names-less list makes `/supervisor:open`'s
         # topic->manager join match nothing and spawn a SECOND manager onto a live topic.
-        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+        with self.fixture([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
             rc, out = self.listing(fx.url, directory=os.path.join(self.tmp.name, "does-not-exist"))
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
@@ -550,14 +560,14 @@ class SessionLiveness(unittest.TestCase):
         # presented as complete. It pays the same coverage precondition ABSENT pays.
         self.plant("aaaa1111-1111-2222-3333-444455556666")
         self.ledger_entry("aaaa1111-1111-2222-3333-444455556666")
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
 
     def test_empty_list_is_live_when_the_fleet_is_genuinely_idle(self):
         # Endpoint empty AND registry empty: coverage is complete, so the empty list is honest.
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             rc, rows = self.json_listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertEqual(rows, [])
@@ -574,7 +584,7 @@ class SessionLiveness(unittest.TestCase):
         self.plant("bbbb2222-1111-2222-3333-444455556666")
         self.ledger_entry("aaaa1111-1111-2222-3333-444455556666")
         self.ledger_entry("bbbb2222-1111-2222-3333-444455556666")
-        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+        with self.fixture([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
@@ -592,7 +602,7 @@ class SessionLiveness(unittest.TestCase):
         """
         sid = "aaaa1111-1111-2222-3333-444455556666"
         self.plant("bbbb2222-1111-2222-3333-444455556666", name="Fleet Manager")
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             rc, rows = self.json_listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertEqual([r["sessionId"] for r in rows], [sid])
@@ -608,7 +618,7 @@ class SessionLiveness(unittest.TestCase):
         sid = "aaaa1111-1111-2222-3333-444455556666"
         self.plant(sid, name="Stamping Worker")
         self.ledger_entry(sid)
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
@@ -621,13 +631,14 @@ class SessionLiveness(unittest.TestCase):
         collapse the endpoint and registry reads already refuse.
         """
         self.plant("aaaa1111-1111-2222-3333-444455556666")
-        # A path that exists as a FILE: `os.listdir` raises NotADirectoryError (an OSError),
-        # which is the "could not read it" arm rather than the missing-directory `{}` arm.
-        not_a_dir = os.path.join(self.tmp.name, "ledger-is-a-file")
-        with open(not_a_dir, "w", encoding="utf-8") as fh:
-            fh.write("")
-        os.environ["SUPERVISOR_LEDGER_DIR"] = not_a_dir
-        with FixtureEndpoint([row("bbbb2222-1111-2222-3333-444455556666")]) as fx:
+        # ⚠️ **A non-200 on the ledger route, not a chmodded path.** The old spelling made a
+        # directory unreadable and relied on `os.listdir` raising; the store's equivalent is a
+        # route answering something other than 200, which `spawn-ledger.py` turns into `None`.
+        # The distinction from an empty store is the whole contract: a 500 REFUSES, `200 []`
+        # permits.
+        with self.fixture(
+            [row("bbbb2222-1111-2222-3333-444455556666")], ledger_status=500
+        ) as fx:
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
@@ -649,7 +660,7 @@ class SessionLiveness(unittest.TestCase):
             out.write(text)
         mod = load_from(alone)
         self.plant("aaaa1111-1111-2222-3333-444455556666")
-        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+        with self.fixture([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
             out_s, err = io.StringIO(), io.StringIO()
             with redirect_stdout(out_s), redirect_stderr(err):
                 rc = mod.main(["--list", "--endpoint", fx.url, "--dir", self.registry])
@@ -662,7 +673,7 @@ class SessionLiveness(unittest.TestCase):
         # "never list anything" and still pass.
         sid = "aaaa1111-1111-2222-3333-444455556666"
         self.plant(sid)
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             rc, rows = self.json_listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertEqual(len(rows), 1)
@@ -680,7 +691,7 @@ class SessionLiveness(unittest.TestCase):
             cwd="/Users/bborbe/Documents/workspaces/thing",
             nameSource="user",
         )
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             rc, rows = self.json_listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertEqual(len(rows), 1)
@@ -691,12 +702,12 @@ class SessionLiveness(unittest.TestCase):
 
     def test_json_listing_marks_the_source(self):
         sid = "bea70001-1111-2222-3333-444455556666"
-        with FixtureEndpoint([row(sid, source="cluster")]) as fx:
+        with self.fixture([row(sid, source="cluster")]) as fx:
             _, rows = self.json_listing(fx.url)
         self.assertEqual([r["source"] for r in rows], ["cluster"])
 
     def test_json_listing_omits_a_stale_row(self):
-        with FixtureEndpoint([row("deadp1d0-1111-2222-3333-444455556666", live=False)]) as fx:
+        with self.fixture([row("deadp1d0-1111-2222-3333-444455556666", live=False)]) as fx:
             _, rows = self.json_listing(fx.url)
         self.assertEqual(rows, [])
 
@@ -707,7 +718,7 @@ class SessionLiveness(unittest.TestCase):
         # (`alive` is `None`, not `False`), so it must be stamped at the endpoint.
         sid = "c0ve2a6e-1111-2222-3333-444455556666"
         self.plant(sid)
-        with FixtureEndpoint([row(sid)]) as fx:
+        with self.fixture([row(sid)]) as fx:
             rc, line = self.coverage(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertIn("endpoint_live=1 registry_live=1 missing=0", line)
@@ -716,7 +727,7 @@ class SessionLiveness(unittest.TestCase):
         # The state in which ABSENT is unsafe: a session the registry holds live with no live
         # endpoint row. Non-zero exit is the whole point.
         self.plant("aaaa1111-1111-2222-3333-444455556666")
-        with FixtureEndpoint([row("bbbb2222-1111-2222-3333-444455556666")]) as fx:
+        with self.fixture([row("bbbb2222-1111-2222-3333-444455556666")]) as fx:
             rc, line = self.coverage(fx.url)
         self.assertEqual(rc, ABSENT)
         self.assertIn("missing=1", line)
@@ -728,7 +739,7 @@ class SessionLiveness(unittest.TestCase):
         self.assertIn("UNKNOWN", line)
 
     def test_coverage_on_an_unreadable_registry_is_unknown(self):
-        with FixtureEndpoint([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+        with self.fixture([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
             rc, line = self.coverage(fx.url, directory=os.path.join(self.tmp.name, "nope"))
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", line)
@@ -748,7 +759,7 @@ class SessionLiveness(unittest.TestCase):
         # Pre-fix this answered ABSENT — the message the incident recorded verbatim.
         sid = "bf00c554-b829-44eb-813b-437fe2f45322"
         self.plant(sid)
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("coverage of live sessions is", out)
@@ -759,7 +770,7 @@ class SessionLiveness(unittest.TestCase):
         # unmatched id would erase the death verdict the whole instrument exists to give — the
         # failure mode in the opposite direction from the incident.
         self.plant("aaaa1111-1111-2222-3333-444455556666")
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             # ⚠️ **A WELL-FORMED id that matches nothing — never a prose string.** Since #277
             # (`is_session_id`), a value with no session-id shape is refused as `MALFORMED`
             # (exit 4) at the argument boundary and never reaches the licence path at all, so
@@ -776,7 +787,7 @@ class SessionLiveness(unittest.TestCase):
         # fix that widened to every ABSENT would lose the death verdict.
         sid = "57a1e111-1111-2222-3333-444455556666"
         self.plant(sid)
-        with FixtureEndpoint([row(sid, live=False)]) as fx:
+        with self.fixture([row(sid, live=False)]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
 
@@ -785,7 +796,7 @@ class SessionLiveness(unittest.TestCase):
         # returns `None` for a missing directory — distinct from `{}` — and folding it into
         # ABSENT re-opens the hole on a host where the registry is unreadable rather than merely
         # incomplete. Same rule `coverage()` carries at exit 2.
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             # ⚠️ Well-formed id, for the reason stated on the unmatched-id control above: a prose
             # string exits 4 at the argument boundary and never reaches the registry read this
             # case is about.
@@ -803,7 +814,7 @@ class SessionLiveness(unittest.TestCase):
         # the false ABSENT the guard exists to remove.
         sid = "bf00c554-b829-44eb-813b-437fe2f45322"
         self.plant(sid)
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             rc, out = self.check("bf00c554", fx.url)
         self.assertEqual(rc, UNKNOWN)
 
@@ -813,7 +824,7 @@ class SessionLiveness(unittest.TestCase):
         # rule and cannot disagree about the same fixture.
         sid = "bf00c554-b829-44eb-813b-437fe2f45322"
         self.plant(sid)
-        with FixtureEndpoint([]) as fx:
+        with self.fixture([]) as fx:
             cov_rc, line = self.coverage(fx.url)
             chk_rc, _ = self.check(sid, fx.url)
         self.assertEqual(cov_rc, ABSENT)
