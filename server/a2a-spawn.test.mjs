@@ -294,6 +294,44 @@ test('create returns the worker and its token, and never logs either', async () 
   assert.equal(result.contextId, 'ctx-1')
 })
 
+test('the capture hook receives the exact body sent, and never the headers that carry the token', async () => {
+  let captured
+  let sentBody
+  const fetchImpl = async (_url, init) => {
+    sentBody = init.body
+    return stubFetch(createReply())()
+  }
+  await createWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 'some task',
+    token: TOKEN,
+    messageId: 'msg-1',
+    mint: () => 'ctx-1',
+    fetchImpl,
+    capture: (c) => {
+      captured = c
+    },
+  })
+  assert.deepEqual(Object.keys(captured).sort(), ['body', 'url'])
+  assert.equal(JSON.stringify(captured.body), sentBody)
+  assert.ok(!JSON.stringify(captured).includes(TOKEN), 'the capture must never carry the bearer token')
+})
+
+test('a throwing capture never fails the spawn', async () => {
+  const result = await createWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 'some task',
+    token: TOKEN,
+    messageId: 'msg-1',
+    mint: () => 'ctx-1',
+    fetchImpl: stubFetch(createReply()),
+    capture: () => {
+      throw new Error('disk full')
+    },
+  })
+  assert.equal(result.worker.worker_id, 'w1')
+})
+
 test('a FAILED create is reported as an unknown outcome, never as "no worker was created"', async () => {
   // ⚠️ The store copy fails AFTER the executor has run, so a FAILED status can accompany a
   // container that WAS started. A caller that read this as "nothing happened" would leak it.

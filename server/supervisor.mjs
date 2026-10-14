@@ -10,7 +10,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk'
-import { appendFileSync, mkdirSync, readFileSync } from 'fs'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { isAbsolute, join } from 'path'
 import { realpathSync } from 'fs'
@@ -1222,12 +1222,26 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   const rateError = await reserveStart()
   if (rateError.error) return { error: rateError.error }
 
+  // SC2's evidence: the exact `create` body, written at the send site when the operator sets
+  // `a2a.captureDir` in the supervisor config. Off by default — nothing is written otherwise. The
+  // body carries no credential (the token rides in a header the hook is never given).
+  const captureDir = config.configFileContents?.a2a?.captureDir
   const created = await createWorkerOnController({
     endpoint: controller.url,
     task,
     token: controller.token,
     messageId: randomUUID(),
     mint: () => randomUUID(),
+    capture: captureDir
+      ? ({ url, body }) => {
+          mkdirSync(captureDir, { recursive: true })
+          const at = new Date().toISOString()
+          writeFileSync(
+            join(captureDir, `${at.replace(/[:.]/g, '-')}-${target}-create.json`),
+            `${JSON.stringify({ at, target, task, url, body }, null, 2)}\n`,
+          )
+        }
+      : undefined,
   })
   if (created.error) return { error: created.error }
 

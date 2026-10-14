@@ -8,6 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **an A2A `create` call can now write the exact body it sends, at the send site, when `a2a.captureDir` is set in the supervisor config.** This is SC2's evidence — a `docker` and a `k8s` spawn must send byte-identical calls apart from per-worker values, and that can only be shown by capturing what was actually sent. Off by default; one JSON file per call (`<at>-<target>-create.json`, carrying `at`, `target`, `task`, `url`, `body`). ⚠️ The hook is handed the URL and the body only, never the headers, because the bearer token travels in `Authorization`. A capture that throws never fails the spawn.
+
+- test: the capture receives exactly the body sent and never the token; a throwing capture leaves the spawn intact.
+
 ## v0.141.0
 
 - feat: **`send_agent_message` now reaches an A2A worker: one more turn goes to the WORKER's own endpoint, on the conversation its first turn opened, and the controller is not in the path.** Before this, a `docker` / `k8s` worker fell through to the headless refusal, so no follow-up turn could reach it at all. The send is awaited and the collection is not, exactly as for the first turn, and the reply carries `send_ms` — this server's own measurement of the send, so a latency claim does not have to be read off a caller's round trip. The conversation id is recorded on the in-memory agent record after the first send, beside the token. ⚠️ A row re-adopted after a reconnect holds no token (the ledger never stores one) and is refused rather than sent unauthenticated.
