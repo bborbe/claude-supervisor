@@ -19,8 +19,11 @@ Ownership is resolvable without guessing, through four hops:
      resolves producer liveness server-side, but carries no `pane`; the reader
      joins it to this log on `dedup_key` for the event-time fields.
 
-  2. SESSION -> SPAWNER  `parent_session` in the spawn ledger
-     (`~/.local/state/claude-supervisor/sessions/<sid>.json`).
+  2. SESSION -> SPAWNER  the spawn ledger's row for that session, read from the
+     attention store's `GET /api/1.0/session-ledger`. ⚠️ The field is
+     `spawner_session_id` on the wire and was `parent_session` in the file
+     record; `evaluate` accepts both, so a reader asking for one name does not
+     silently get `None`.
 
   3. SPAWNER IS A MANAGER  when it has NO ledger record of its own, OR when its
      record declares `role: "manager"`. The first arm is the common one -- a
@@ -173,6 +176,7 @@ as "nothing to filter" rather than "the filter is broken".
 import argparse
 import glob
 import hashlib
+import importlib.util
 import json
 import os
 import shlex
@@ -181,7 +185,6 @@ import sys
 import time
 
 STATE = os.path.expanduser("~/.claude/state/attention")
-LEDGER = os.path.expanduser("~/.local/state/claude-supervisor/sessions")
 REGISTRY = os.path.expanduser("~/.claude/sessions")
 # Same env override the writer (`ownership-claim.py`) honours, deliberately: a
 # writer pointed at one file while every reader reads another is a SILENT
@@ -270,30 +273,56 @@ FEED_STATE_DIR = os.environ.get("GATE_FEED_STATE_DIR") or os.path.expanduser(
 REEMIT_SECONDS = int(os.environ.get("GATE_FEED_REEMIT_SECONDS") or 3600)
 
 
-def load_ledger(ledger_dir=LEDGER):
-    """Spawn records keyed by session id, or {} when the directory is unreadable.
+_SPAWN_LEDGER = None
+
+
+def _spawn_ledger():
+    """Import `spawn-ledger.py` (hyphenated filename -> importlib) — the ONE ledger reader.
+
+    ⚠️ **The ledger moved to the attention store's endpoint on 2026-10-14, and this file
+    DELEGATES rather than reading the store itself.** `spawn-ledger.py` was extracted so
+    `worker-sessions.py` and `session-liveness.py` could share one reader; this file was one
+    of the five that kept its own, and writing a second endpoint client here would recreate
+    exactly the drift the extraction removed. What this file does NOT adopt is that module's
+    `None`-on-unreadable answer — see `load_ledger_checked` for why the two callers need
+    different ones.
+    """
+    global _SPAWN_LEDGER
+    if _SPAWN_LEDGER is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spawn-ledger.py")
+        spec = importlib.util.spec_from_file_location("spawn_ledger", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SPAWN_LEDGER = mod
+    return _SPAWN_LEDGER
+
+
+def load_ledger_checked(endpoint=None):
+    """Spawn records keyed by session id, or None when the store could not be read.
+
+    ⚠️ **`{}` and `None` are different answers and the two callers need different ones.**
+    `{}` is "read it, nobody is recorded"; `None` is "could not read it" — an unreachable
+    controller, a non-200, or a body that is not a row array. `load_ledger` COLLAPSES them,
+    because this module must fail OPEN (an unreadable ledger resolves every spawner as a
+    manager, and keeping every gate is the safe direction there). `adopt-orphans.py` must
+    NOT collapse them: it refuses on an unreadable store, because adopting on the strength
+    of spawn edges it could not read would hand one manager's workers to another.
+    """
+    return _spawn_ledger().read_ledger(endpoint)
+
+
+def load_ledger(endpoint=None):
+    """Spawn records keyed by session id, or {} when the store is unreadable.
 
     An unreadable ledger is NOT an empty one -- it means every spawner resolves
     as a manager, which would drop the whole fleet. The caller must treat {}
     as unknown and fail open (keep everything) rather than as "no spawns".
+
+    ⚠️ **The collapse is deliberate and is this function's whole job**, not an oversight:
+    it is the fail-open rule stated above, applied. A caller that needs to tell the two
+    apart calls `load_ledger_checked` instead.
     """
-    out = {}
-    for path in glob.glob(os.path.join(ledger_dir, "*.json")):
-        try:
-            with open(path, encoding="utf-8") as handle:
-                rec = json.load(handle)
-            # Valid JSON is not necessarily a record: `null`, a list or a scalar parses
-            # cleanly and then has no `.get`, so the guard belongs INSIDE the `try` beside
-            # the parse that produced it. Skipping matches the corrupt-record convention
-            # the rest of this module uses -- and the docstring's fail-open rule, since a
-            # record dropped here resolves its session as unknown rather than as a worker.
-            if not isinstance(rec, dict):
-                continue
-        except (OSError, ValueError):
-            continue
-        sid = rec.get("session_id") or os.path.basename(path)[: -len(".json")]
-        out[sid] = rec
-    return out
+    return load_ledger_checked(endpoint) or {}
 
 
 def load_claims(path=CLAIMS):
@@ -666,7 +695,16 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None):
 def evaluate(pane, ledger, live, items, self_id, claims=None):
     """(verdict, reason, session_id, spawner) for one pane."""
     session_id = session_for_pane(pane, items)
-    spawner = (ledger.get(session_id) or {}).get("parent_session") if session_id else None
+    # ⚠️ **Two spellings, one field, and only one of them is on the wire.** The file record
+    # called the spawn edge `parent_session`; the endpoint's row calls it
+    # `spawner_session_id`. The read accepts BOTH rather than the wire name alone, matching
+    # `server/registry-rehydrate.mjs`'s `toAgentRecord`, which made the same move and reads
+    # `record.parent_session ?? record.spawner_session_id`. ⚠️ Asking for only one name gets
+    # `None` rather than an error, and `None` here is not a missing field — it is the
+    # "no spawner" answer that decides whether a gate is emitted at all, so a wrong name
+    # would silently drop the whole fleet's gates.
+    record = ledger.get(session_id) or {}
+    spawner = (record.get("spawner_session_id") or record.get("parent_session")) if session_id else None
     call, reason = verdict(session_id, spawner, ledger, live, self_id, claims)
     return call, reason, session_id, spawner
 
@@ -999,7 +1037,7 @@ def poll(args, items):
         # non-zero on that path as well.
         rows = evaluate_panes(
             feed_rows(lines),
-            load_ledger(args.ledger_dir),
+            load_ledger(args.endpoint),
             live_ids(args.registry_dir),
             items,
             args.self_id,
@@ -1056,7 +1094,8 @@ def main():
     parser.add_argument("--feed", action="store_true", help="read who-needs-me.py output on stdin")
     parser.add_argument("--explain", action="store_true", help="print the reason for every verdict")
     parser.add_argument("--json", action="store_true", help="emit JSON")
-    parser.add_argument("--ledger-dir", default=LEDGER)
+    parser.add_argument("--endpoint", default=None, help="override the attention store base URL")
+    parser.add_argument("--ledger-dir", default=None, help="ACCEPTED AND IGNORED — the ledger comes from the endpoint")
     parser.add_argument("--registry-dir", default=REGISTRY)
     parser.add_argument("--state-dir", default=STATE)
     parser.add_argument("--claims-file", default=CLAIMS)
@@ -1102,7 +1141,18 @@ def main():
     )
     args = parser.parse_args()
 
-    ledger = load_ledger(args.ledger_dir)
+    # ⚠️ `--ledger-dir` is kept and IGNORED rather than removed, the same call
+    # `worker-sessions.py` made for `--dir` / `--heartbeat-dir`: callers and tests pass it, so
+    # removing it breaks them, while accepting it in silence would let a caller believe it had
+    # redirected a read that still went to the endpoint.
+    if args.ledger_dir:
+        print(
+            "warning: --ledger-dir is accepted and IGNORED — the ledger is read from the "
+            "session-ledger endpoint; use --endpoint to point at the store",
+            file=sys.stderr,
+        )
+
+    ledger = load_ledger(args.endpoint)
     live = live_ids(args.registry_dir)
     items = log_items(args.state_dir)
     claims = load_claims(args.claims_file)

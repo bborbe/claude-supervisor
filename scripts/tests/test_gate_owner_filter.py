@@ -40,6 +40,9 @@ import sys
 import tempfile
 import unittest
 
+import endpoint_fixture  # noqa: E402
+from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row  # noqa: E402
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "gate-owner-filter.py")
 
@@ -427,8 +430,14 @@ class UnreadableSourcesAreUnknown(unittest.TestCase):
     reasoning error that produced the wrong conclusion at Manager Session:517.
     """
 
-    def test_missing_ledger_dir_is_empty_dict(self):
-        self.assertEqual(gf.load_ledger("/nonexistent/ledger"), {})
+    def test_unreadable_ledger_store_is_empty_dict(self):
+        """⚠️ **The collapse is this module's contract, not an oversight.** The filter fails
+        OPEN, so an unreadable store and an empty one both answer `{}` and every gate is kept
+        — the safe direction, since an unreadable ledger resolves every spawner as a manager.
+        `load_ledger_checked` is where the distinction survives, and `adopt-orphans.py` calls
+        that one precisely because it must REFUSE rather than fail open.
+        """
+        self.assertEqual(gf.load_ledger(dead_url()), {})
 
     def test_missing_registry_dir_is_none_not_empty_set(self):
         self.assertIsNone(gf.live_ids("/nonexistent/registry"))
@@ -440,16 +449,19 @@ class UnreadableSourcesAreUnknown(unittest.TestCase):
 
 class LoadLedger(unittest.TestCase):
     def test_keys_by_session_id(self):
-        with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, "s.json"), "w", encoding="utf-8") as handle:
-                json.dump({"session_id": "abc", "parent_session": "mgr"}, handle)
-            self.assertEqual(gf.load_ledger(d)["abc"]["parent_session"], "mgr")
+        """⚠️ Keyed by the row's own `session_id`, never `agent_id` — that field is a
+        per-process counter that restarts at 0 on every reconnect, and 215 of the 1891 ledger
+        rows claim `agent_1`, so a map keyed on it would keep one row and drop the rest."""
+        with FixtureEndpoint(ledger_rows=[ledger_row("abc", spawner_session_id="mgr")]) as fx:
+            self.assertEqual(gf.load_ledger(fx.url)["abc"]["spawner_session_id"], "mgr")
 
-    def test_malformed_record_is_skipped(self):
-        with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, "bad.json"), "w", encoding="utf-8") as handle:
-                handle.write("{not json")
-            self.assertEqual(gf.load_ledger(d), {})
+    def test_a_non_object_row_is_skipped(self):
+        """`null`, a list and a scalar are all valid JSON, so the store can serve one and the
+        reader must skip it rather than raise on the next `.get`. ⚠️ Served as ROWS, which is
+        the only shape the endpoint has — the file-era version of this case wrote a malformed
+        `.json` file, and that fixture no longer reaches the reader at all."""
+        with FixtureEndpoint(ledger_rows=[None, "not-a-row", 7]) as fx:
+            self.assertEqual(gf.load_ledger(fx.url), {})
 
 
 class CorruptRecordsFailOpen(unittest.TestCase):
@@ -470,8 +482,10 @@ class CorruptRecordsFailOpen(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        # ⚠️ The ledger half is a fixture ENDPOINT; only the registry is still a directory.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
         with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
             handle.write(json.dumps({
@@ -486,21 +500,21 @@ class CorruptRecordsFailOpen(unittest.TestCase):
         return subprocess.run(
             [sys.executable, _SCRIPT, "--pane", "372", "--self", ME, "--explain",
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger],
+             "--endpoint", self.endpoint.url],
             capture_output=True, text=True,
         )
 
-    def test_a_null_ledger_record_exits_zero(self):
-        """SC3's probe, end to end: pointed at a fixture ledger containing `null`, the
-        filter exits 0 and omits that record rather than raising `AttributeError`."""
-        self.write(self.ledger, "null.json", "null")
+    def test_a_null_ledger_row_exits_zero(self):
+        """SC3's probe, end to end: pointed at a store serving `null` as a row, the filter
+        exits 0 and omits that record rather than raising `AttributeError`."""
+        self.endpoint.add_ledger_row(None)
         result = self.run_filter()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("AttributeError", result.stderr)
 
-    def test_a_null_ledger_record_is_omitted(self):
-        self.write(self.ledger, "null.json", "null")
-        self.assertEqual(gf.load_ledger(self.ledger), {})
+    def test_a_null_ledger_row_is_omitted(self):
+        self.endpoint.add_ledger_row(None)
+        self.assertEqual(gf.load_ledger(self.endpoint.url), {})
 
     def test_a_null_registry_entry_is_skipped(self):
         """The registry is Claude Code's own file, not ours, so a shape this reader did
@@ -736,6 +750,12 @@ class ClaimsFilePath(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
+        # ⚠️ An EMPTY fixture store, deliberately — not the real one. The file-era version
+        # pointed `--ledger-dir` at a path that did not exist, which read as an empty ledger;
+        # switching to the endpoint without this would make these cases read the MACHINE's
+        # fleet, and the verdicts below would then depend on whoever happens to be running.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
         os.makedirs(self.state)
         os.makedirs(self.registry)
         with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
@@ -754,7 +774,7 @@ class ClaimsFilePath(unittest.TestCase):
         return subprocess.run(
             [sys.executable, _SCRIPT, "--pane", "372", "--self", ME, "--explain",
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", os.path.join(self.dir, "ledger"), *extra],
+             "--endpoint", self.endpoint.url, *extra],
             capture_output=True, text=True, env=env,
         )
 
@@ -797,15 +817,16 @@ class FeedEmitCarriesTheReplayMark(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
 
     def emit(self, feed):
         return subprocess.run(
             [sys.executable, _SCRIPT, "--feed", "--self", ME,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json")],
             input=feed, capture_output=True, text=True,
         )
@@ -849,8 +870,13 @@ class SummaryLine(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        # ⚠️ **The ledger is a fixture ENDPOINT now, not a directory.** `spawn-ledger.py`
+        # reads `GET /api/1.0/session-ledger`, so a directory-shaped fixture would leave this
+        # run with an EMPTY ledger — and hop 3b's branch would then cover both panes, which
+        # reads as `dropped(peer-manager-own): 2` and still looks like a working filter.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
         # Two panes off one live manager: its OWN gate (no ledger record at all,
         # so hop 3b's branch) and its worker's (a ledger record, so hop 3's).
@@ -863,14 +889,13 @@ class SummaryLine(unittest.TestCase):
             ) + "\n")
         with open(os.path.join(self.registry, "p.json"), "w", encoding="utf-8") as handle:
             json.dump({"sessionId": "own-mgr"}, handle)
-        with open(os.path.join(self.ledger, "w1.json"), "w", encoding="utf-8") as handle:
-            json.dump({"session_id": "w1", "parent_session": "own-mgr"}, handle)
+        self.endpoint.add_ledger_row(ledger_row("w1", spawner_session_id="own-mgr"))
 
     def test_each_drop_bucket_is_counted_under_its_own_reason(self):
         result = subprocess.run(
             [sys.executable, _SCRIPT, "--pane", "10", "--pane", "11", "--self", ME,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json")],
             capture_output=True, text=True,
         )
@@ -912,15 +937,16 @@ class EmptyFeedIsNotAUsageError(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
 
     def invoke(self, *argv, feed=None):
         return subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
             input=feed, capture_output=True, text=True,
         )
@@ -989,15 +1015,16 @@ class UpstreamRefusalFailsLoudly(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
 
     def invoke(self, *argv, feed=None):
         return subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
             input=feed, capture_output=True, text=True,
         )
@@ -1092,8 +1119,9 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
         self.counter = os.path.join(self.dir, "count")
 
@@ -1143,7 +1171,7 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         return subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--feed-state-dir", os.path.join(self.dir, "feed-state"),
              "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
             capture_output=True, text=True,
@@ -1325,7 +1353,7 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json"),
              "--feed", "--self", ME],
             input=self.ONE, capture_output=True, text=True,
@@ -1368,9 +1396,14 @@ class FeedStateSurvivesTheReArm(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
+        # ⚠️ The ledger half is a fixture ENDPOINT now; only the registry is still a
+        # directory. An empty store is the right default here — the gates in these cases are
+        # decided by the feed state and the registry, and reading the MACHINE's fleet instead
+        # would make every verdict depend on whoever happens to be running.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
         self.feed_state = os.path.join(self.dir, "feed-state")
-        for path in (self.state, self.registry, self.ledger):
+        for path in (self.state, self.registry):
             os.makedirs(path)
         self.arm = 0
         self.ts = 0
@@ -1423,7 +1456,7 @@ class FeedStateSurvivesTheReArm(unittest.TestCase):
         return subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--feed-state-dir", feed_state_dir or self.feed_state,
              "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
             input=stdin_text, capture_output=True, text=True,
