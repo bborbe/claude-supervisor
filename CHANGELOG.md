@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.140.2
 
 - fix: **an A2A turn's result is now read from the event shape the SDK actually sends, so a completed turn reports COMPLETED and its reply.** a2a-go v2.6.0 nests a status update's state at `statusUpdate.status.state` and an artifact's parts at `artifactUpdate.artifact.parts`; the collector read both one level too shallow. Measured 2026-10-14 in the first fully successful live `spawn_agent(target: 'docker')`: the worker logged `turn start` and `turn end` 6 s apart, and the supervisor filed the turn as `TASK_STATE_SUBMITTED` with an empty reply. The control-reply parser read a streamed status with the same flat shape and is fixed too. The flat shape is still accepted.
 
