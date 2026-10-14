@@ -340,7 +340,11 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // `agents.values()`/`agents.get()` would restore the exact defect this change closes while
   // every other assertion here stayed green. The Map-only shape is asserted ABSENT for that
   // reason, not for tidiness.
-  assert.match(src, /case 'list_agents':[\s\S]{0,400}?return reply\(\[\.\.\.\(await currentRoster\(\)\)\.values\(\)\]\.map\(agentView\)\)/)
+  // ⚠️ The property is that the roster is built from `currentRoster()`; the exact expression
+  // moved when `list_agents` gained `open_cards`, so this tracks the binding rather than the
+  // single-line return it used to be. Pinning the old literal would have made a legitimate
+  // feature look like a revert.
+  assert.match(src, /case 'list_agents': \{[\s\S]{0,400}?const roster = \[\.\.\.\(await currentRoster\(\)\)\.values\(\)\]/)
   assert.match(src, /case 'agent_status': \{[\s\S]{0,400}?const agent = \(await currentRoster\(\)\)\.get\(args\.agent_id\)/)
   assert.match(src, /case 'send_agent_message': \{[\s\S]{0,900}?const agent = \(await currentRoster\(\)\)\.get\(args\.agent_id\)/)
   assert.ok(!/case 'list_agents':\n\s+pruneRehydratedAgents\(\)/.test(src), 'the Map-only list_agents must not come back')
