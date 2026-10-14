@@ -3,7 +3,9 @@ description: Sweep every live session, say what is blocking each one, hand the o
 allowed-tools:
   - Bash(python3:*)
   - SendMessage
-argument-hint: "[--stuck-min N]"
+# No `argument-hint`: the sweep takes no tunable. `--stuck-min` is accepted by the
+# script for parity with the sibling and ignored by it, so advertising it in the UI
+# would promise a threshold this command does not honour.
 ---
 
 Two steps. Do both, in order, and add nothing else.
