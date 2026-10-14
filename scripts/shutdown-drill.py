@@ -17,22 +17,48 @@ told to sleep, and the drill refuses to draw a conclusion unless its record is s
 `running` when the signal is sent.
 
 SAFETY: the signal goes to this script's own child by pid, never to a live supervisor.
-The ledger directory is SHARED with the live fleet, so every assertion is scoped to
-records absent from the pre-run listing — pre-existing records are never read as
+The ledger STORE is SHARED with the live fleet, so every assertion is scoped to
+rows absent from the pre-run listing — pre-existing rows are never read as
 evidence and never written.
 """
-import glob, json, os, select, signal, subprocess, sys, time
+import importlib.util, json, os, select, signal, subprocess, sys, time
 
 # The repo root, derived from this file's own location. A hardcoded home path works on
 # exactly one machine and breaks silently everywhere else.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(REPO, "server", "supervisor.mjs")
-LEDGER = os.path.expanduser("~/.local/state/claude-supervisor/sessions")
+
+_SPAWN_LEDGER = None
+
+
+def _spawn_ledger():
+    """Import `spawn-ledger.py` (hyphenated filename -> importlib) — the ONE ledger reader.
+
+    ⚠️ **The ledger moved to the attention store's endpoint on 2026-10-14.** This drill used to
+    watch `<session_id>.json` files appear in a directory; it watches the store's rows appear
+    now, which is the same claim about the same durable record — and the endpoint is what
+    every reader consults, so a drill still watching the file would prove a store nothing reads.
+    """
+    global _SPAWN_LEDGER
+    if _SPAWN_LEDGER is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spawn-ledger.py")
+        spec = importlib.util.spec_from_file_location("spawn_ledger", path)
+        _SPAWN_LEDGER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_SPAWN_LEDGER)
+    return _SPAWN_LEDGER
+
 
 env = dict(os.environ)
 env["ANTHROPIC_BASE_URL"] = env.get("CLAUDE_CODE_ROUTER_URL", "http://127.0.0.1:8788")
 
-before = set(os.path.basename(p) for p in glob.glob(os.path.join(LEDGER, "*.json")))
+# ⚠️ **An unreadable store at the START is FATAL, not an empty `before`.** With an empty set
+# every pre-existing row would read as new, and the drill would "pass" against a store it
+# never read — the false-clean shape this drill exists to rule out.
+before = _spawn_ledger().read_ledger()
+if before is None:
+    print("FAIL: cannot read the session-ledger endpoint at", _spawn_ledger().endpoint_base())
+    sys.exit(1)
+before = set(before)
 
 # The labels that identify this drill's own records, so a sibling session's concurrent
 # spawn cannot be mistaken for one of ours. See records().
@@ -78,18 +104,12 @@ def records():
     `running`; asserting `unknown` over them would fail the drill for a reason that has
     nothing to do with the shutdown path. Snapshot-diffing alone is not enough.
     """
-    out = {}
-    for path in glob.glob(os.path.join(LEDGER, "*.json")):
-        name = os.path.basename(path)
-        if name in before:
-            continue
-        try:
-            rec = json.load(open(path))
-        except Exception:
-            continue
-        if rec.get("label") in (TAB_LABEL, HEAD_LABEL):
-            out[name] = rec
-    return out
+    rows = _spawn_ledger().read_ledger() or {}
+    return {
+        sid: rec
+        for sid, rec in rows.items()
+        if sid not in before and rec.get("label") in (TAB_LABEL, HEAD_LABEL)
+    }
 
 
 def wait_for(predicate, seconds=60):
@@ -124,7 +144,7 @@ print("   headless ->", json.dumps({k: head.get(k) for k in ("agent_id", "status
 print("\n2. waiting for two records on disk...")
 found = wait_for(lambda: (r := records()) and len(r) >= 2 and r, 60)
 if not found:
-    print("FAIL: records never appeared at", LEDGER)
+    print("FAIL: rows never appeared at", _spawn_ledger().endpoint_base())
     proc.kill()
     sys.exit(1)
 
