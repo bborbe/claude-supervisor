@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.151.2
 
 - docs: **drop the `--stuck-min` hint from `/supervisor:who-needs-my-help`.** The sweep accepts the flag for parity with `who-needs-me` and ignores it, so the UI hint promised a threshold this command does not honour — found by the command's own `/coding:audit-slash-command` re-audit (8/10, no criticals).
 
