@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.151.0
 
 - feat: **add `/supervisor:who-needs-my-help` — one pass over every live session: what it is parked on (runbook gate class A–E) and why (cause class), the operator-bound rows handed over ordered prod-first then closest-to-SC with a jump link and a recommended answer, and the cause classes recurring across two or more distinct calendar days.** Report-only on gates: it answers no gate, drives no modal and relays no approval. The one outward action is a `SendMessage` per live manager asking for its next SC/DoD item and what blocks it. The command is a two-step router rather than a print-verbatim one, because `SendMessage` is an agent tool that a script cannot call — step 1 runs `scripts/who-needs-my-help.py` and prints its output, step 2 sends one message to each manager the script names in its `Managers to query` block.
 
