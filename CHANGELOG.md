@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.144.0
 
 - fix: **every `scripts/` reader of the spawn ledger now reads the attention store's endpoint, so the fleet-wide worker cap sees the whole ledger rather than this machine's file tree.** `spawn-ledger.py` — the one module `worker-sessions.py`, `session-liveness.py` and `adopt-orphans.py` reach the ledger through, so switching it satisfies four of the named accessors at once — asks `GET /api/1.0/session-ledger` instead of walking `<session_id>.json` files, and the three-state contract is unchanged: an empty store is `{}` ("nobody has ever been spawned"), an unreadable one is `None`, and the two must never collapse, because `None` REFUSES a spawn and `{}` permits one. ⚠️ **A 404 is `None`, and that is the deploy-order hazard made explicit rather than silent:** a controller older than the session-ledger route answers 404, which the cap reads as "count could not be taken", where an empty store permits a spawn. ⚠️ **The retired `SUPERVISOR_LEDGER_DIR` override is dropped rather than honoured.** The ledger now lives in the attention store beside the heartbeat, so `$ATTENTION_STORE_URL` is what points at it; honouring the old directory variable would be worse than removing it, because a caller that set it would believe it had redirected a read that still went to the endpoint. `worker-sessions.py` keeps `--ledger-dir` as accepted-and-ignored with a warning, the same call it already made for `--dir` and `--heartbeat-dir`.
 
