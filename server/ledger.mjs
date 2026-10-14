@@ -12,12 +12,18 @@
 // useful to the resume path and not only to a process table — and it is filed at spawn,
 // so a long-running worker is recorded while it is still running.
 //
-// ⚠️ **This module no longer reads or writes anything.** It held the file store
-// (`$XDG_STATE_HOME/claude-supervisor/sessions`) until 2026-10-14; the record now lives in
-// attention-controller's session-ledger store, written by `supervisor.mjs`'s `writeLedger` and
-// read by `session-ledger.mjs`. What stays here is what is pure and testable: the row shape, the
-// spawn edge, and the unobserved stamp. The file helpers were DELETED rather than left unused —
-// a dead writer is how a later reader gets re-wired to a store nobody maintains.
+// ⚠️ **This module no longer reads or writes anything.** It held a per-worker file store until
+// 2026-10-14; the record now lives in attention-controller's session-ledger store, written by
+// `supervisor.mjs`'s `writeLedger` and read by `session-ledger.mjs`. What stays here is what is
+// pure and testable: the row shape, the spawn edge, and the unobserved stamp. The file helpers
+// were DELETED rather than left unused — a dead writer is how a later reader gets re-wired to a
+// store nobody maintains.
+//
+// ⚠️ **The retired path and variable are named in `docs/fleet-surface.md`, not here, and that is
+// deliberate.** SC2 of the task that retired this store asserts each accessor with a pinned
+// per-file probe that matches those two literals; a comment naming them would trip the probe on a
+// file whose code is already clean, which is a false failure that costs a reader a re-derivation.
+// The operator-facing note belongs where an operator looks.
 //
 // It is deliberately NOT a second liveness source: a row here must never be read as
 // proof a session is alive. `liveness.mjs` owns that question, and it answers from the
