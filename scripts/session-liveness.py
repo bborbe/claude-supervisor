@@ -163,7 +163,10 @@ def _spawn_ledger():
     Lazy and cached, and here the laziness matters for a different reason than the two
     above: the ledger is read ONLY by `unstamped()`, which is reached only by the two
     `--list` paths. A caller that asks `--check <id>` — the verdict path every resume
-    decision goes through — must not pay to open 1600 ledger files it will not read.
+    decision goes through — must not pay for a whole-ledger read it will not use. The
+    read was 1600 files until 2026-10-14 and is one request to the session-ledger
+    endpoint now; the laziness is kept because the cost is smaller, not because it went
+    away.
 
     ⚠️ **Why the ledger is a separate module and not `worker-sessions.py`.** That file
     already held this reader, but it loads *this* file through `_load` to reach
@@ -645,9 +648,9 @@ def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
     rather than liveness.
 
     Exit codes: 0 complete, 1 a ledger worker is registry-live with no row, 2 the
-    measurement could not be taken — an unreadable endpoint, registry **or ledger**, never
-    a fabricated `0`, because "could not measure" and "measured complete" are different
-    facts. The line carries `ledger_workers`, the narrowed denominator, so a reader can
+    measurement could not be taken — an unreadable heartbeat endpoint, session-ledger
+    endpoint or registry, never a fabricated `0`, because "could not measure" and
+    "measured complete" are different facts. The line carries `ledger_workers`, the narrowed denominator, so a reader can
     see what the guard now covers rather than having to infer it.
     """
     rows = read_endpoint(endpoint, timeout)
@@ -659,9 +662,9 @@ def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
     # ⚠️ An unreadable ledger is UNKNOWN, never a pass. `{}` (nobody recorded) and None
     # (could not read) are different answers, and folding the second into the first would
     # let a failed read satisfy the guard — the resume-authorising direction.
-    ledger = _spawn_ledger().read_ledger()
+    ledger = _spawn_ledger().read_ledger(endpoint)
     if ledger is None:
-        return UNKNOWN, "UNKNOWN — cannot read the spawn ledger (%s)" % _spawn_ledger().ledger_dir()
+        return UNKNOWN, "UNKNOWN — cannot read the session-ledger endpoint at %s" % _spawn_ledger().endpoint_base(endpoint)
     stamped = {
         r["session_id"]
         for r in rows

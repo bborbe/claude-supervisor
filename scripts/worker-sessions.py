@@ -15,8 +15,8 @@ for in-process workers (`server/supervisor.mjs` writes `mode: 'headless'`, from
 **The definition takes one identity store and one liveness source.** A worker session is one
 that is
 
-  (a) present in the **supervisor spawn ledger** (`~/.local/state/claude-supervisor/sessions/`)
-      — which is what makes it a session the supervisor opened, rather than a manager or one
+  (a) present in the **supervisor spawn ledger**, which the **session-ledger endpoint**
+      serves — what makes it a session the supervisor opened, rather than a manager or one
       of the operator's own; and
   (b) **live**, which the **session-heartbeat endpoint** answers.
 
@@ -54,8 +54,9 @@ would flip every pre-field worker into a manager and shrink the population the c
 bound. Managers started by hand — `/supervisor:open` in a plain wezterm tab — write no record
 at all.
 
-⚠️ **An unreadable store is UNKNOWN, never 0.** The ledger and the endpoint are read before any
-verdict, and either failing exits 2 with its message on **stderr** — so `$(… --count)` captures
+⚠️ **An unreadable store is UNKNOWN, never 0.** The ledger endpoint and the heartbeat endpoint
+are both read before any verdict — and since 2026-10-14 both are the SAME attention store, so one
+unreachable controller fails both reads and there is no longer a half-answer to fall back on. Either failing exits 2 with its message on **stderr** — so `$(… --count)` captures
 nothing and a caller must consult the exit code. Folding an I/O error into "no workers" is how
 a broken instrument reads as an idle fleet, which is the failure this file exists to correct.
 """
@@ -171,27 +172,36 @@ def main(argv=None):
     parser.add_argument("--list", action="store_true", help="print every live worker session")
     parser.add_argument("--count", action="store_true", help="print only the number of live worker sessions")
     parser.add_argument("--endpoint", default=None, help="override the attention store base URL")
-    parser.add_argument("--ledger-dir", default=None, help="override the spawn-ledger path")
+    parser.add_argument("--ledger-dir", default=None, help="ACCEPTED AND IGNORED — the ledger comes from the endpoint")
     parser.add_argument("--dir", default=None, help="ACCEPTED AND IGNORED — the registry left the liveness path")
     parser.add_argument("--heartbeat-dir", default=None, help="ACCEPTED AND IGNORED — the endpoint computes freshness")
     args = parser.parse_args(argv)
 
-    # ⚠️ Both flags are kept and ignored rather than removed, the same call `session-liveness.py`
-    # made: callers pass them (`approved-not-started.py` passes one), so removing them breaks
-    # those callers, while accepting them in silence would let a reader believe a path or a
-    # window is in force when neither is.
-    for flag, value in (("--dir", args.dir), ("--heartbeat-dir", args.heartbeat_dir)):
+    # ⚠️ All three flags are kept and ignored rather than removed, the same call
+    # `session-liveness.py` made: callers pass them (`approved-not-started.py` passes one), so
+    # removing them breaks those callers, while accepting them in silence would let a reader
+    # believe a path or a window is in force when neither is. `--ledger-dir` joins them for the
+    # same reason — the ledger is the attention store's now, and a caller that set the directory
+    # would otherwise believe it had redirected a read that still went to the endpoint.
+    for flag, value, reason in (
+        ("--ledger-dir", args.ledger_dir, "the ledger is read from the session-ledger endpoint"),
+        ("--dir", args.dir, "liveness comes from the session-heartbeat endpoint, which resolves the registry"),
+        (
+            "--heartbeat-dir",
+            args.heartbeat_dir,
+            "liveness comes from the session-heartbeat endpoint, which resolves the store and its own window",
+        ),
+    ):
         if value:
-            print(
-                f"warning: {flag} is accepted and IGNORED — liveness comes from the "
-                "session-heartbeat endpoint, which resolves the store and its own window",
-                file=sys.stderr,
-            )
+            print(f"warning: {flag} is accepted and IGNORED — {reason}", file=sys.stderr)
 
-    directory = args.ledger_dir or _ledger().ledger_dir()
-    ledger = _ledger().read_ledger(directory)
+    ledger = _ledger().read_ledger(args.endpoint)
     if ledger is None:
-        print(f"UNKNOWN — cannot read the spawn ledger at {directory}", file=sys.stderr)
+        print(
+            "UNKNOWN — cannot read the session-ledger endpoint at %s"
+            % _ledger().endpoint_base(args.endpoint),
+            file=sys.stderr,
+        )
         return 2
 
     workers = live_workers(args.endpoint, ledger)
