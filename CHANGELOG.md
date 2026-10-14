@@ -8,6 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **an A2A turn's result is now read from the event shape the SDK actually sends, so a completed turn reports COMPLETED and its reply.** a2a-go v2.6.0 nests a status update's state at `statusUpdate.status.state` and an artifact's parts at `artifactUpdate.artifact.parts`; the collector read both one level too shallow. Measured 2026-10-14 in the first fully successful live `spawn_agent(target: 'docker')`: the worker logged `turn start` and `turn end` 6 s apart, and the supervisor filed the turn as `TASK_STATE_SUBMITTED` with an empty reply. The control-reply parser read a streamed status with the same flat shape and is fixed too. The flat shape is still accepted.
+
+- test: the SDK's nested event shape must yield `COMPLETED` and the reply, and a streamed control reply must read `FAILED` from the nested status — both fail on the pre-fix code.
+
 ## v0.140.1
 
 - fix: **`make precommit` now names a missing `server/node_modules` instead of reporting it as three broken tests.** With that directory absent, `node --test` emits one `ERR_MODULE_NOT_FOUND` per module it cannot load — `undici` for `cluster-spawn.test.mjs`; the Agent SDK for `mode.test.mjs` and, through the dynamic `await import('./mode.mjs')` at `shipping-settings.test.mjs:45`, for that file too — and then aborts before running a single test. Three module errors read as three broken tests, which is how they were read on 2026-10-14: a worker concluded `origin/master` was red and filed a task against a repo that was green. A `check-server-deps` guard now runs as a prerequisite of `test`, so `make test` and `make precommit` alike print the install command and its directory and stop before the suite. ⚠️ It installs nothing, deliberately: a check that reaches the network fails for reasons that are not about the tree, and an `npm install` there would drop an untracked `server/package-lock.json` into every worktree that ran it. The `Makefile`'s own prerequisite note is unchanged — a comment is not what `make` prints.

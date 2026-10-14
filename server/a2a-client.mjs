@@ -181,6 +181,15 @@ export function a2aFrames(sseBody) {
 // session returns a `contextId` just as happily as one that ran where it was asked to, so a
 // mismatch is the ONLY client-side observable that the conversation is not the one intended —
 // and it surfaces here rather than as unexplained memory loss two turns later.
+// The state a `statusUpdate` frame carries. ⚠️ It is NESTED — `{ status: { state } }`, a2a-go
+// v2.6.0 `TaskStatusUpdateEvent` — and the parts of an `artifactUpdate` sit one level down too, at
+// `artifact.parts`. Measured 2026-10-13 against a real worker: reading both one level too shallow
+// found no status update and no reply, so a turn that ran to completion was filed as SUBMITTED
+// with an empty reply. The flat `{ state }` shape is still accepted.
+export function a2aEventState(update) {
+  return update?.status?.state ?? update?.state ?? null
+}
+
 export function a2aOutcome(frames, { sentContextId } = {}) {
   if (!Array.isArray(frames) || frames.length === 0) {
     return { error: 'the turn produced no frames — nothing executed.' }
@@ -199,7 +208,7 @@ export function a2aOutcome(frames, { sentContextId } = {}) {
     }
   }
   const reply = frames
-    .map((f) => f?.artifactUpdate ?? f?.artifact ?? f)
+    .map((f) => f?.artifactUpdate?.artifact ?? f?.artifactUpdate ?? f?.artifact ?? f)
     .flatMap((f) => f?.parts ?? [])
     .map((p) => p?.text ?? '')
     .filter((t) => t !== '')
@@ -208,8 +217,8 @@ export function a2aOutcome(frames, { sentContextId } = {}) {
   // `task(SUBMITTED)` → `artifactUpdate` → `statusUpdate(COMPLETED)`, so the `task` frame is the
   // FIRST one and it carries a status too — reading `task.status.state` therefore reports
   // SUBMITTED on a turn that completed. Measured by this module's own test before it shipped.
-  const statusUpdates = frames.map((f) => f?.statusUpdate).filter((s) => s?.state)
-  const state = statusUpdates.at(-1)?.state ?? task.status?.state
+  const statusUpdates = frames.map((f) => a2aEventState(f?.statusUpdate)).filter(Boolean)
+  const state = statusUpdates.at(-1) ?? task.status?.state
   return { state, contextId, reply }
 }
 
@@ -408,8 +417,8 @@ export function a2aControlResponseFor(body, { sentOperation } = {}) {
   // ⚠️ THE STATUS IS READ BEFORE THE PAYLOAD, and the order is load-bearing: a backend failure
   // yields `TASK_STATE_FAILED` with NO artifact, so a client that hunted for the data part first
   // would find none and have to invent a reason, while the status states the real one.
-  const statusUpdates = frames.map((f) => f?.statusUpdate).filter((s) => s?.state)
-  const state = statusUpdates.at(-1)?.state ?? task?.status?.state
+  const statusUpdates = frames.map((f) => a2aEventState(f?.statusUpdate)).filter(Boolean)
+  const state = statusUpdates.at(-1) ?? task?.status?.state
 
   if (state === A2A_STATE_FAILED) {
     return {
