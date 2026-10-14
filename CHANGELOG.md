@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.149.2
 
 - docs: **the fleet surface and the README now say where the cluster and A2A tokens actually come from, and name the trap that cost a session to find.** `docs/fleet-surface.md` § Spawn a worker item 7 claimed both values resolve *"from either of two sources, env first: `SUPERVISOR_CLUSTER_URL` / `INTERACTIVE_AUTH_TOKEN` on the server entry, or a `cluster` object in the supervisor config file"* — true when written, false since the migration: the TOKEN has no file source at all now, and `"cluster.token"` is refused rather than read. The README's config block repeated the claim and framed a token in the file as a permissions question (`chmod 600`) rather than an error. ⚠️ **Both files now also record the caching trap as it applies to `command`, not only to an `env` block.** Item 7 already warned that an MCP `env` block is cached at session start; measured 2026-10-14, so is the `command` itself — `ps` showed every supervisor still running `bun run --cwd … start` after its entry had been repointed at `python3 …/scripts/mcp-start.py`, so a Reconnect silently kept the old launcher and resolved no tokens at all. **A changed `command` needs a NEW session.** The A2A pair — `SUPERVISOR_A2A_URL` / `SUPERVISOR_A2A_TOKEN`, previously undocumented in both files — is now stated alongside.
 
