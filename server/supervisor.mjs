@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, resolveA2AControllerTarget } from './a2a-spawn.mjs'
+import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
@@ -2214,7 +2214,7 @@ const TOOLS = [
           type: 'string',
           enum: ['local', 'cluster', 'docker', 'k8s'],
           description:
-            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. `cluster` starts a session in the `claude-interactive` service in nuke dev instead, which requires `task` and a configured SUPERVISOR_CLUSTER_URL. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the cluster is a second option rather than the fleet default — a config value able to default the whole fleet into the cluster is exactly what that split forecloses. A value that is neither `local` nor `cluster` REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. ⚠️ With `target: "cluster"` the local-only arguments `interactive`, `resume` and `policy` are REFUSED rather than ignored: the cluster path can honour none of them, and a dropped `resume` would look like a resume while opening a fresh session. Omit all three on a cluster call. ⚠️ `docker` and `k8s` are the A2A worker-controller targets: `docker` asks the controller for one container per task on this Mac, `k8s` for one pod per task in nuke dev, and both then talk to the worker DIRECTLY over A2A. They are currently ACCEPTED BY THIS SCHEMA BUT REFUSED BY THE SPAWN — the A2A client has not shipped, and the spawn refuses rather than falling through to the local path, because a `docker` call that quietly opened a local worker would look exactly like a working call. Both are PER-CALL ONLY for the same reason `cluster` is. They are distinct from `cluster`, which is the shared long-lived `claude-interactive` pod and is untouched by them.',
+            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. `cluster` starts a session in the `claude-interactive` service in nuke dev instead, which requires `task` and a configured SUPERVISOR_CLUSTER_URL. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the cluster is a second option rather than the fleet default — a config value able to default the whole fleet into the cluster is exactly what that split forecloses. A value that is neither `local` nor `cluster` REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. ⚠️ With `target: "cluster"` the local-only arguments `interactive`, `resume` and `policy` are REFUSED rather than ignored: the cluster path can honour none of them, and a dropped `resume` would look like a resume while opening a fresh session. Omit all three on a cluster call. `docker` and `k8s` are the A2A worker-controller targets: `docker` asks the controller for one container per task on this Mac, `k8s` for one pod per task in nuke dev, and both then talk to the worker DIRECTLY over A2A. Both are PER-CALL ONLY for the same reason `cluster` is, and both are distinct from `cluster`, which is the shared long-lived `claude-interactive` pod and is untouched by them. ⚠️ A worker created this way is stopped with `stop_agent`, never with `send_agent_message` — the two are different planes (see that tool).',
         },
         task: {
           type: 'string',
@@ -2283,6 +2283,18 @@ const TOOLS = [
         message: { type: 'string', description: 'The message to type into its input box and submit.' },
       },
       required: ['agent_id', 'message'],
+    },
+  },
+  {
+    name: 'stop_agent',
+    description:
+      'Stop an A2A worker (`docker` / `k8s`) — the one manager-facing way to remove a worker this fleet spawned, and the third of the controller\'s `create` / `list` / `stop` operations to be reachable from here. It calls the A2A worker controller\'s `stop` on the worker id `create` recorded, so the container (docker) or the pod and its `Config` CR (k8s) are removed. ⚠️ KEYED ON THE WORKER ID, NEVER A TASK NAME: one task can be spawned again after its first worker died, and a task-keyed stop would remove the successor. The id is read from the worker\'s own ledger record — pass `agent_id`, and the id is resolved for you. ⚠️ THIS IS A CONTROL-PLANE CALL TO THE CONTROLLER, authenticated with the controller token this server already holds — it is NOT a turn to the worker, so it needs no worker token. That is what makes it work on a row this process never spawned, including one re-adopted after a reconnect: those can be seen but not messaged, and they CAN be stopped. ⚠️ It applies to A2A workers only. A tab worker has no controller worker to stop (close its tab), and a cluster worker is the shared long-lived pod — out of scope here. ⚠️ A `TASK_STATE_FAILED` reply does NOT mean the worker is still running: the controller reports a store-side failure the same way, so reconcile against `list_agents` / the controller\'s own `list` rather than assuming the stop did not happen.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent_id: { type: 'string', description: 'The A2A worker to stop — the id `spawn_agent` returned, or one from `list_agents`.' },
+      },
+      required: ['agent_id'],
     },
   },
   {
@@ -2518,6 +2530,70 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       agent.messages = [...(agent.messages ?? []), { at: new Date().toISOString(), text: args.message }]
       log(`sent a follow-up message to ${agent.id} (pane ${channel.paneId}, tab ${res.tabId})`)
       return reply({ agent_id: agent.id, sent: true, tab_id: res.tabId, pane_id: res.paneId })
+    }
+
+    case 'stop_agent': {
+      // The request-time roster, for the same reason `send_agent_message` reads it: the worker a
+      // manager stops is often the one it did NOT spawn. ⚠️ Unlike a message, a stop needs no
+      // worker-side handle — the controller token authenticates it and the worker id comes off the
+      // row — so a re-adopted row this process cannot MESSAGE is still stoppable, and the refusal
+      // below is scoped to what stop actually requires rather than to what a turn would.
+      const agent = (await currentRoster()).get(args.agent_id)
+      if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
+
+      // Only an A2A worker has a controller worker behind it. Refused with the reason per kind
+      // rather than a bare "not supported", so a caller told no is told what to do instead.
+      if (!A2A_SPAWN_TARGETS.includes(agent.status)) {
+        return reply({
+          error:
+            `agent ${agent.id} is not an A2A worker (status "${agent.status}"), so there is no controller worker ` +
+            'to stop. A tab worker is closed in its own tab; a cluster worker is the shared long-lived pod and is ' +
+            'out of this tool\'s scope. Only the `docker` and `k8s` targets are stopped here.',
+        })
+      }
+      // ⚠️ THE WORKER ID COMES OFF THE RECORD, NEVER FROM A TASK. It is the id `create` recorded
+      // (`ledger.mjs` `worker_id`), restored on rehydrate by `toAgentRecord` — so a row that was
+      // re-adopted still carries it. A row without one is refused rather than stopped by a
+      // re-derived handle: one task can be spawned again, and a task-keyed stop removes the successor.
+      if (typeof agent.workerId !== 'string' || agent.workerId === '') {
+        return reply({
+          error:
+            `agent ${agent.id} is an A2A worker with no worker id on its record, so there is no worker to name in a ` +
+            'stop. The id is written at spawn; a row missing it cannot be stopped by task name, because one task ' +
+            'can be spawned again and the stop would remove the successor.',
+        })
+      }
+
+      // Resolved per call, never cached on the agent record — the config file is the only source
+      // that reaches an already-running server, and a value cached at spawn would keep presenting
+      // a token the operator has since rotated.
+      const target = resolveA2AControllerTarget({
+        envUrl: config.a2aUrl,
+        envToken: config.a2aToken,
+        file: config.configFileContents,
+        path: config.configFile,
+      })
+      if (target.error) return reply({ error: target.error })
+
+      const stopped = await stopWorkerOnController({
+        endpoint: target.url,
+        workerId: agent.workerId,
+        token: target.token,
+        messageId: randomUUID(),
+        mint: () => randomUUID(),
+      })
+      if (stopped.error) return reply({ error: stopped.error, agent_id: agent.id, worker_id: agent.workerId })
+
+      // ⚠️ The response is echoed as a whole rather than projected: it names the operation and the
+      // worker's resulting state, which is what a caller checks — and it carries no credential
+      // (the controller token rides in a header, never in the reply body).
+      return reply({
+        agent_id: agent.id,
+        worker_id: agent.workerId,
+        target: agent.status,
+        state: stopped.state,
+        response: stopped.response,
+      })
     }
 
     case 'list_agents': {
