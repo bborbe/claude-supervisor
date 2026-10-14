@@ -21,6 +21,7 @@ import {
   ledgerBySessionId,
   postSessionLedger,
   readSessionLedger,
+  readSessionLedgerRow,
   recordToWire,
   SESSION_LEDGER_PATH,
 } from './session-ledger.mjs'
@@ -96,6 +97,84 @@ test('an explicitly-off endpoint is null and dials nothing', async () => {
     return { status: 200, json: async () => [] }
   }
   assert.equal(await readSessionLedger({ endpoint: null, fetchImpl }), null)
+  assert.equal(called, false)
+})
+
+// ---- readSessionLedgerRow: one row, `null` for BOTH "absent" and "unreadable" ------------
+
+test('a 200 with an object is the row', async () => {
+  const row = { session_id: 'a', parked_permission: { tool: 'Bash' } }
+  assert.deepEqual(await readSessionLedgerRow('a', { endpoint: FIXTURE, fetchImpl: serving(row) }), row)
+})
+
+test('the single-row read goes to the per-id route, URL-encoded', async () => {
+  let seen = null
+  await readSessionLedgerRow('a b/c', {
+    endpoint: FIXTURE,
+    fetchImpl: serving({ session_id: 'x' }, { onUrl: (u) => (seen = u) }),
+  })
+  assert.equal(seen, `${FIXTURE}${SESSION_LEDGER_PATH}/a%20b%2Fc`)
+})
+
+test('a 404 is null — "no such row", which is exactly what an absent file answered', async () => {
+  assert.equal(
+    await readSessionLedgerRow('a', { endpoint: FIXTURE, fetchImpl: serving(null, { status: 404 }) }),
+    null,
+  )
+})
+
+test('a 500 is null — the store declining to answer is not a row', async () => {
+  assert.equal(
+    await readSessionLedgerRow('a', { endpoint: FIXTURE, fetchImpl: serving(null, { status: 500 }) }),
+    null,
+  )
+})
+
+test('a throwing transport is null, never a throw', async () => {
+  const fetchImpl = async () => {
+    throw new Error('boom')
+  }
+  assert.equal(await readSessionLedgerRow('a', { endpoint: FIXTURE, fetchImpl }), null)
+})
+
+test('a body that is not an object is null — an array or a scalar answers another question', async () => {
+  for (const body of [[], 'row', 7, null]) {
+    assert.equal(
+      await readSessionLedgerRow('a', { endpoint: FIXTURE, fetchImpl: serving(body) }),
+      null,
+      `${JSON.stringify(body)} is not a row`,
+    )
+  }
+})
+
+test('a body that is not JSON is null', async () => {
+  const fetchImpl = async () => ({
+    status: 200,
+    json: async () => {
+      throw new Error('bad json')
+    },
+  })
+  assert.equal(await readSessionLedgerRow('a', { endpoint: FIXTURE, fetchImpl }), null)
+})
+
+test('an empty or missing session id dials nothing', async () => {
+  let called = false
+  const fetchImpl = async () => {
+    called = true
+    return { status: 200, json: async () => ({}) }
+  }
+  assert.equal(await readSessionLedgerRow('', { endpoint: FIXTURE, fetchImpl }), null)
+  assert.equal(await readSessionLedgerRow(undefined, { endpoint: FIXTURE, fetchImpl }), null)
+  assert.equal(called, false)
+})
+
+test('an explicitly-off endpoint is null and dials nothing', async () => {
+  let called = false
+  const fetchImpl = async () => {
+    called = true
+    return { status: 200, json: async () => ({}) }
+  }
+  assert.equal(await readSessionLedgerRow('a', { endpoint: null, fetchImpl }), null)
   assert.equal(called, false)
 })
 
