@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`/supervisor:who-needs-my-help` reads a manager's next SC/DoD item off the page it is anchored to, so the `Managers to query` block carries content for every manager instead of an empty `next:` line.** A manager session is anchored to a goal or topic PAGE, never to a task file, so `next_item()` — which read the anchored task file — returned nothing for all four live managers when measured 2026-10-15. For a session `is_manager()` accepts the sweep now resolves the subject through source 1 of `docs/subject-resolution.md` (`~/.claude/state/worker-manager/<session-id>.json`) and reads the page that subject names; anything else keeps the task-file read. A subject that no longer resolves is a silent miss that falls back to the task file, never an error, and the `vault` value is compared case-insensitively because state files written before 2026-09-23 may carry display case. Prod and closeness still read the item's own task file — SC8 pins both to it. The rendered `next:` line is bounded at 120 characters, matching the `blocked by:` line, because a goal's SC/DoD row runs to hundreds of characters where a task row did not.
+
 ## v0.151.2
 
 - docs: **drop the `--stuck-min` hint from `/supervisor:who-needs-my-help`.** The sweep accepts the flag for parity with `who-needs-me` and ignores it, so the UI hint promised a threshold this command does not honour — found by the command's own `/coding:audit-slash-command` re-audit (8/10, no criticals).
