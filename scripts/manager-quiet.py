@@ -82,19 +82,32 @@ EXIT_UNREADABLE = 2
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+_PREDISPATCH = None
+
+
 def load_predispatch():
-    """`manager-predispatch.py`, loaded by path.
+    """`manager-predispatch.py`, loaded by path and memoized.
 
     Its filename is hyphenated, so it is not importable as a module name — the same
     reason `scripts/tests/*` load these by `spec_from_file_location`. Importing runs
     only module-level constants; every reader this uses is a pure function.
+
+    ⚠️ **The memo is load-bearing, not a micro-optimization.** `exec_module` re-executes
+    the module body on every call — unlike a normal `import`, which caches in
+    `sys.modules` — and `classify` calls this **once per tracked task**, so an
+    unmemoized loader re-parsed `manager-predispatch.py` once per row per tick. It also
+    reset that module's own module-level state on every call, so two readers within one
+    tick could in principle observe different constants.
     """
-    spec = importlib.util.spec_from_file_location(
-        "manager_predispatch", os.path.join(_HERE, "manager-predispatch.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    global _PREDISPATCH
+    if _PREDISPATCH is None:
+        spec = importlib.util.spec_from_file_location(
+            "manager_predispatch", os.path.join(_HERE, "manager-predispatch.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _PREDISPATCH = mod
+    return _PREDISPATCH
 
 
 def slug(subject: str) -> str:

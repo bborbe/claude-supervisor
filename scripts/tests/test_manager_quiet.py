@@ -237,6 +237,41 @@ class TestFailTowardArmed(Base):
         self.assertEqual(self.m.read_quiet_count("agoal", self.state), 0)
 
 
+class TestLoaderMemoized(Base):
+    """The sibling module must be loaded ONCE, not re-executed per call.
+
+    `classify` calls `load_predispatch()` once per tracked task, and `exec_module`
+    re-runs the module body on every call — unlike a normal `import`, which caches in
+    `sys.modules`. Without the memo, a ten-row subject re-parsed
+    `manager-predispatch.py` eleven times per tick and reset its module-level state
+    between rows.
+    """
+
+    def test_load_predispatch_returns_the_same_module_object(self):
+        self.assertIs(self.m.load_predispatch(), self.m.load_predispatch())
+
+    def test_a_tick_shares_one_module_across_every_task(self):
+        for i in range(5):
+            self.task("Row%d" % i, status="next")
+        seen = []
+        real = self.m.load_predispatch
+
+        def spy():
+            mod = real()
+            seen.append(id(mod))
+            return mod
+
+        self.m.load_predispatch = spy
+        try:
+            self.tick()
+        finally:
+            self.m.load_predispatch = real
+        # It IS called per task (so the test cannot pass by the call sites vanishing)…
+        self.assertGreater(len(seen), 1)
+        # …but every call resolves to the one loaded object.
+        self.assertEqual(len(set(seen)), 1)
+
+
 class TestSlugAgreesWithLiveness(Base):
     """Property 5 — the two readers must name the same file."""
 
