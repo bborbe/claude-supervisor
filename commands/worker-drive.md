@@ -575,6 +575,14 @@ Every rule above still applies to the fallback text.
 
 **Never describe speech you did not send.** Writing "spoken now" or narrating the utterance in the reply is not the channel — if the tool was not called, the user hears nothing and the text is simply false. This command is the likeliest place for that failure: the spoken verdict is owed on every run, and the intent to speak gets written down instead of executed. Call the tool, or say nothing about speaking.
 
+### Close with one modal — this run's only ask
+
+**The run ends with exactly ONE `AskUserQuestion`, and it is the run's only one.** Everything this run wants a decision on goes into it: at most **4 options**, each **reversible**, each carrying the pick you recommend, and **every pick is executed in the same turn** the answer arrives. A run that ends on a report with its decisions scattered through the prose has handed the operator a reading task and called it a decision.
+
+- **Production-touching, irreversible and criterion-rewording items never enter this modal.** They go as separate `approve:` lines, on a card this session posted itself (`attention-ask.py post`), with the consent token named on the line — a modal is a multi-select over cheap reversible work, and a blast radius is not a checkbox.
+- ⚠️ **Never a second modal, and never one earlier in the run.** A question that arises mid-turn waits for the close; two modals in one run is the shape this command exists to remove.
+- **Nothing to ask → no modal.** A run whose rows are all blocked, or all done, prints its report and stops. An empty modal is an interruption, not a closer.
+- ⚠️ **Why a modal here and a card on the manager tier is not an inconsistency.** Measured 2026-10-15: a one-shot cron due while a modal was open did **not** fire — it was deferred until the turn ended, and the control leg showed the same job firing the instant the session went idle. A *worker* ends its turn on the answer, so a modal costs it nothing. A *manager* round sits inside a loop whose next tick is a scheduled wakeup, so a modal there stalls its own schedule — which is why that tier posts to the attention board instead (`commands/steps/manager-gates.md`) and why this is the one place the modal shape is correct.
 
 ## Rules
 
