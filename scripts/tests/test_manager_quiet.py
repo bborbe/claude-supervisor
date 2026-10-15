@@ -22,7 +22,9 @@ The load-bearing properties, in the order the criterion grades them:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
@@ -270,6 +272,65 @@ class TestLoaderMemoized(Base):
         self.assertGreater(len(seen), 1)
         # …but every call resolves to the one loaded object.
         self.assertEqual(len(set(seen)), 1)
+
+
+class TestReopenTrigger(Base):
+    """SC3 — the line must name the ACTUAL trigger, not merely carry a prefix.
+
+    The criterion's probe asserts the trigger's *content* for exactly this reason: a
+    probe matching only `reopen on` would be satisfied by an empty tail, which is also
+    what a broken computation prints.
+    """
+
+    def test_the_earliest_defer_date_wins(self):
+        self.task("Late", extra='defer_date: "2026-11-30"\n')
+        self.task("Soon", extra='defer_date: "2026-10-22"\n')
+        self.assertEqual(self.tick()["trigger"], "2026-10-22")
+
+    def test_a_defer_date_beats_a_blocker(self):
+        # A date the subject reaches on its own outranks an edge someone else must cut.
+        self.task("Blocker")
+        self.task("Waiting", extra="blocked_by:\n    - '[[Blocker]]'\n")
+        self.task("Later", extra='defer_date: "2026-10-22"\n')
+        self.assertEqual(self.tick()["trigger"], "2026-10-22")
+
+    def test_a_blocked_row_names_the_blocker_not_the_blocked_row(self):
+        self.task("Blocker")
+        self.task("Waiting", extra="blocked_by:\n    - '[[Blocker]]'\n")
+        self.assertEqual(self.tick()["trigger"], "blocked by Blocker")
+
+    def test_several_blockers_are_all_named_and_deduped(self):
+        self.task("B1")
+        self.task("B2")
+        self.task("W1", extra="blocked_by:\n    - '[[B1]]'\n")
+        self.task("W2", extra="blocked_by:\n    - '[[B1]]'\n    - '[[B2]]'\n")
+        self.assertEqual(self.tick()["trigger"], "blocked by B1, B2")
+
+    def test_no_quiet_row_names_no_trigger_explicitly(self):
+        self.task("Done", status="completed")
+        self.assertEqual(self.tick()["trigger"], "no named trigger")
+
+    def _argv(self):
+        return ["--subject", "AGoal", "--vault", self.vault,
+                "--today", "2026-10-15", "--state-dir", self.state]
+
+    def test_the_cli_prints_the_sc3_line_on_stand_down(self):
+        self.task("Done", status="completed")
+        self.tick()                                   # tick 1 — armed
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.m.main(self._argv())                 # tick 2 — stood down
+        self.assertIn(
+            "Stood down: zero runnable tasks; reopen on no named trigger",
+            out.getvalue(),
+        )
+
+    def test_the_cli_does_not_print_the_sc3_line_while_armed(self):
+        self.task("Live")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.m.main(self._argv())
+        self.assertNotIn("Stood down:", out.getvalue())
 
 
 class TestSlugAgreesWithLiveness(Base):
