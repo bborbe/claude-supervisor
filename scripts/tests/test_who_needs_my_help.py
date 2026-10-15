@@ -26,6 +26,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 """
 
 import importlib.util
+import json
 import os
 import shutil
 import tempfile
@@ -88,6 +89,20 @@ class Fleet:
             f.write(body)
         return rel
 
+    def state(self, sid, subject, *, vault="private-personal", branch="goal"):
+        """A manager's `worker-manager/<sid>.json` — its declared subject.
+
+        Source 1 of `docs/subject-resolution.md`. Written by the manager itself
+        when it resolves a goal or topic, which is why a manager session has one
+        and a worker does not.
+        """
+        d = os.path.join(self.root, "worker-manager")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"{sid}.json"), "w", encoding="utf-8") as f:
+            json.dump({"subject": subject, "vault": vault, "branch": branch,
+                       "resolved_at": "2026-10-15T00:00:00+02:00"}, f)
+        return sid
+
     def add(self, sid, pane, closer, *, status="waiting", name=None, role=None,
             task=None, kind="question", state="open", ts=1000, event=None,
             transcript=None):
@@ -139,6 +154,8 @@ class Base(unittest.TestCase):
             mock.patch.object(wnm, "STORE_OK", True),
             mock.patch.object(wnm, "SOURCE_NOTE", None),
             mock.patch.object(h, "PERSONAL_VAULT", self.fleet.vault),
+            mock.patch.object(h, "WM_STATE_DIR",
+                              os.path.join(self.root, "worker-manager")),
             mock.patch.object(h.subprocess, "run", side_effect=_run),
         ]
         for p in patches:
@@ -407,6 +424,114 @@ class ManagerQueryTest(Base):
         for argv in self.calls:
             for token in banned:
                 self.assertNotIn(token, " ".join(argv))
+
+
+class ManagerSubjectTest(Base):
+    """SC7 — a manager's next item is read off the page it is ANCHORED to.
+
+    The live shape no other fixture in this suite can reach: a manager carrying a
+    `worker-manager` state file and a goal page, and **no `📌 Task:` line** in its
+    transcript. Every other fixture hands its manager a task, so the subject path
+    is the one branch the suite could not exercise — measured 2026-10-15 on the
+    live fleet, where all four managers rendered no `next:` at all for exactly
+    this reason.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The checked row above the open one is load-bearing: a reader that took
+        # the page's FIRST row rather than its first OPEN row returns "already
+        # met" and fails the assertion below.
+        self.fleet.task("24 Goals/Alpha Goal",
+                        "# Success Criteria\n"
+                        "- [x] SC1: already met\n"
+                        "- [ ] SC2: the census of parked panes is complete\n"
+                        "# Tasks\n- [ ] a later row that must not win\n")
+        self.fleet.state("m9", "Alpha Goal")
+        self.fleet.add("m9", 901, "pick — 1. keep going · 2. stop",
+                       name="Alpha Manager",
+                       transcript="👤 You: pick — 1. keep going · 2. stop\n")
+        self.sweep = self.fleet.sweep()
+        self.out = h.render(self.sweep)
+
+    def _block(self, name, out=None):
+        return (out or self.out).split(f"  {name}  [")[1].split("Question:")[0]
+
+    def test_a_managers_next_item_comes_from_its_subject_page(self):
+        self.assertIn("next: SC2: the census of parked panes is complete",
+                      self._block("Alpha Manager"))
+
+    def test_the_first_OPEN_row_is_taken_not_the_first_row(self):
+        self.assertNotIn("already met", self._block("Alpha Manager"))
+
+    def test_the_page_is_read_through_the_subject_not_the_transcript(self):
+        # The transcript names no task at all, so a task-file read cannot have
+        # produced the row above — the state file is the only source it has.
+        self.assertNotIn("📌 Task:", self.fleet.records[0]["_transcript"])
+
+    def test_the_vault_name_is_compared_case_insensitively(self):
+        # State files written before 2026-09-23 may carry display case while the
+        # vault-cli config name is lowercase; a strict match silently drops them.
+        self.fleet.state("m10", "Alpha Goal", vault="Private-Personal")
+        self.fleet.add("m10", 902, "pick — 1. keep going · 2. stop",
+                       name="Beta Manager",
+                       transcript="👤 You: pick — 1. keep going · 2. stop\n")
+        out = h.render(self.fleet.sweep())
+        self.assertIn("next: SC2: the census of parked panes is complete",
+                      self._block("Beta Manager", out))
+
+    def test_an_unresolvable_subject_falls_back_to_the_task_file(self):
+        # A silent miss, never an error: a manager whose goal was renamed or
+        # completed is an ordinary fleet event. It must be reported exactly as it
+        # was before this rule existed, not lose its line and not raise.
+        self.fleet.task("25 Tasks/Gone", "# Tasks\n- [ ] the task's own next row\n")
+        self.fleet.state("m11", "A Goal That Was Renamed Away")
+        self.fleet.add("m11", 903, "pick — 1. keep going · 2. stop",
+                       name="Gamma Manager", task="25 Tasks/Gone",
+                       transcript="📌 Task: [T](obsidian://open?vault=private-personal"
+                                  "&file=25 Tasks/Gone)\n"
+                                  "👤 You: pick — 1. keep going · 2. stop\n")
+        out = h.render(self.fleet.sweep())
+        self.assertIn("next: the task's own next row", self._block("Gamma Manager", out))
+
+    def test_a_topic_subject_resolves_in_the_topics_folder(self):
+        # The `branch: topic` half of the page test, which no live manager
+        # exercises — all four measured on 2026-10-15 carry `branch: goal`, so
+        # without this the topic folder is a path nothing covers.
+        self.fleet.task("23 Topics/Beta Topic",
+                        "# Tasks\n- [ ] the topic's next open row\n")
+        self.fleet.state("m12", "Beta Topic", branch="topic")
+        self.fleet.add("m12", 905, "pick — 1. keep going · 2. stop",
+                       name="Delta Manager",
+                       transcript="👤 You: pick — 1. keep going · 2. stop\n")
+        out = h.render(self.fleet.sweep())
+        self.assertIn("next: the topic's next open row", self._block("Delta Manager", out))
+
+    def test_a_long_page_row_is_bounded_like_the_blocker_line(self):
+        # A goal's SC/DoD rows run to hundreds of characters; the task rows this
+        # line used to carry did not, so a manager's block would swamp the
+        # four-section report it sits in.
+        self.fleet.task("24 Goals/Long Goal", "# Tasks\n- [ ] " + "x" * 400 + "\n")
+        self.fleet.state("m13", "Long Goal")
+        self.fleet.add("m13", 906, "pick — 1. keep going · 2. stop",
+                       name="Epsilon Manager",
+                       transcript="👤 You: pick — 1. keep going · 2. stop\n")
+        block = self._block("Epsilon Manager", h.render(self.fleet.sweep()))
+        line = [ln for ln in block.splitlines() if ln.strip().startswith("next:")][0]
+        self.assertEqual(len("         next: ") + 120, len(line))
+
+    def test_a_worker_is_never_subject_resolved(self):
+        # The same state file that resolves for a manager must NOT redirect a
+        # worker's next item: a worker is anchored to its task, and a subject read
+        # for it would report a goal's row as the worker's own. Read off the row
+        # rather than the render, because a worker is never listed in the
+        # `Managers to query` block at all.
+        self.fleet.task("25 Tasks/W", "# Tasks\n- [ ] the worker's own next row\n")
+        self.fleet.state("w9", "Alpha Goal")
+        self.fleet.add("w9", 904, "pick — 1. keep going · 2. stop",
+                       name="Some Worker", task="25 Tasks/W")
+        rows = {r["name"]: r for r in self.fleet.sweep()["parked"]}
+        self.assertEqual("the worker's own next row", rows["Some Worker"]["next_item"])
 
 
 class OrderingTest(Base):
