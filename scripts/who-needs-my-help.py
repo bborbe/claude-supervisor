@@ -236,7 +236,7 @@ def pane_shape(pane_id):
 # --- The two-channel parked predicate ---------------------------------------
 
 
-def parked(rec, reg_record):
+def parked(rec, reg_record, resumed_ids=frozenset()):
     """The registry's two-limb verdict — verbatim from `manager-attention-watch.py`.
 
     Both limbs are load-bearing. The registry alone under-reports: a worker idle
@@ -246,12 +246,48 @@ def parked(rec, reg_record):
 
     The pane NEVER decides liveness — that is the whole point of reading the two
     channels from different places.
+
+    ⚠️ **`shell` is a shell HELD, not a turn running, and it takes the closer limb
+    with a stricter test than `idle` does.** The harness stamps `shell` when a shell
+    is spawned — a `run_in_background` child keeps one open for the child's whole
+    life — and never resets it to `idle` when the turn ends. Measured 2026-10-15:
+    every one of the six `shell` sessions in a 23-session registry held a long-lived
+    shell child, and no session without one read `shell`; pane 1642's worker
+    (`c0c691a1`) had read `shell` for 9h27m from the moment it backgrounded its own
+    `dark-factory daemon`, with its turn already ended. Under `status != "idle"` that
+    row is `not parked`, so an operator gate behind it is invisible to every sweep.
+
+    The stricter test is what keeps the opposite error out. A session genuinely
+    mid-turn also reads `shell` for the duration of any Bash call, and its last
+    assistant text is then the *previous* turn's closer — so the limb adds two
+    clauses the `idle` limb does not need:
+
+      * **the turn ended** — no user or tool turn after the closer, the shipped
+        `turn_after_closer()` read that already tells a live closer from a
+        superseded one; and
+      * **the closer came from a `👤 You:` line, and it is an ask** — read through
+        `closer_from_transcript()` so the arbitrary-prose `detail` fallback inside
+        `current_closer()` is never consulted (that function's docstring carries the
+        measured panes 1557/1619, where prose read as a gate while all three
+        instruments disagreed), then admitted only for an operator verb or a
+        `later (on <trigger>):` machine-bound park.
+
+    The two clauses are not redundant: the first excludes a session that took a new
+    turn after its closer, the second one whose `👤 You:` line is prose. Together
+    they give the limb `idle`'s coverage — an operator ask or a machine-bound wait —
+    without its mid-turn false positive.
     """
     status = ((reg_record or {}).get("status") or "").strip().lower()
     if status == "waiting":
         return True
-    if status != "idle":
+    if status not in ("idle", "shell"):
         return False
+    if status == "shell":
+        if rec.get("session_id") in resumed_ids:
+            return False
+        text = wnm.normalize_closer(wnm.closer_from_transcript(rec))
+        return (bool(text) and not text.startswith("nothing")
+                and (is_operator_ask(rec) or wnm.is_parked_verb(text)))
     text = wnm.normalize_closer(wnm.current_closer(rec))
     # `nothing` is a turn that ended with nothing to ask, not a park — the exclusion
     # `reclassify_idle()` already applies. A `later (on <trigger>):` closer IS a park
@@ -625,11 +661,20 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
     for rec in fresh:
         groups.setdefault(rec.get("session_id"), []).append(rec)
 
+    # The `shell` limb of `parked()` is the only consumer of the supersession read,
+    # so it is paid once, and only when a `shell` session exists to need it.
+    # `resumed_session_ids` dedupes internally — one tail read per session, not per
+    # item — and an unreadable transcript returns `False`, which keeps the row.
+    resumed_ids = frozenset()
+    if any(((reg_records.get(sid) or {}).get("status") or "").strip().lower() == "shell"
+           for sid in groups):
+        resumed_ids = wnm.resumed_session_ids(fresh)
+
     parked_rows, not_parked = [], []
     for sid, recs in groups.items():
         rec = representative(recs)
         name = wnm.name_of(rec, pmap, registry)
-        if not parked(rec, reg_records.get(sid)):
+        if not parked(rec, reg_records.get(sid), resumed_ids):
             pane = rec.get("pane")
             manager = is_manager(rec, registry)
             not_parked.append({"session_id": sid, "name": name,

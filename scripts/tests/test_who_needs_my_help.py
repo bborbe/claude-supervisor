@@ -242,6 +242,50 @@ class TwoChannelTest(Base):
         self.assertNotIn("Idle Nothing", parked)
 
 
+class ParkedWithShellTest(Base):
+    """SC2 — a `shell` session whose turn ended on a `👤 You:` ask is parked.
+
+    `shell` is a shell HELD, not a turn running: the harness stamps it when a
+    background child opens one and never clears it at turn end. Read as "not
+    parked" — which `status != "idle"` did — every gate behind a background child
+    goes invisible to the sweep. Each case below pins one clause of the widened
+    limb, and the three negatives pin the two guards that keep a mid-turn `shell`
+    and a prose `👤 You:` line out.
+    """
+
+    def names(self, *, resumed=False):
+        with mock.patch.object(wnm, "turn_after_closer", return_value=resumed):
+            return [r["name"] for r in self.fleet.sweep()["parked"]]
+
+    def test_a_shell_session_parked_on_an_operator_ask_is_parked(self):
+        self.fleet.add("s1", 300, "approve: restart vault-ui in the background",
+                       status="shell", name="Shell Ask")
+        self.assertIn("Shell Ask", self.names())
+
+    def test_a_shell_session_parked_on_a_machine_bound_wait_is_parked(self):
+        self.fleet.add("s1", 300, CLOSER_CLOCK, status="shell", name="Shell Clock")
+        self.assertIn("Shell Clock", self.names())
+
+    def test_a_shell_session_that_took_a_turn_after_its_closer_is_not_parked(self):
+        self.fleet.add("s1", 300, "approve: restart vault-ui in the background",
+                       status="shell", name="Shell Moved")
+        self.assertEqual([], self.names(resumed=True))
+
+    def test_a_shell_session_whose_closer_is_prose_is_not_parked(self):
+        self.fleet.add("s1", 300, "Session left open, no files touched.",
+                       status="shell", name="Shell Prose")
+        self.assertEqual([], self.names())
+
+    def test_a_shell_session_with_nothing_to_ask_is_not_parked(self):
+        self.fleet.add("s1", 300, "nothing", status="shell", name="Shell Nothing")
+        self.assertEqual([], self.names())
+
+    def test_a_busy_session_is_still_never_parked(self):
+        self.fleet.add("s1", 300, "approve: restart vault-ui in the background",
+                       status="busy", name="Busy Ask")
+        self.assertEqual([], self.names())
+
+
 class SpokenLineTest(Base):
     """SC3 — the count is the C/D/E set, pinned by two fixtures, and has no `?`."""
 
