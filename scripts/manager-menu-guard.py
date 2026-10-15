@@ -100,7 +100,50 @@ CONTRACT. Block = `exit 2` with the reason on **stderr**. The session id comes f
 the hook's stdin `session_id`, falling back to `$CLAUDE_CODE_SESSION_ID` —
 **never `$$`**, which is the hook process's own pid and names no session.
 
-Kill switch: `SUPERVISOR_MANAGER_MENU_GUARD=off` makes the hook exit at once.
+THE PER-INVOCATION RECORD. Every invocation appends one JSON object, as a line, to
+
+    ~/.claude/state/manager-menu-guard/<session_id>.jsonl
+
+(`SUPERVISOR_MANAGER_MENU_GUARD_STATE_DIR` overrides the directory; a session with no
+readable id — the malformed-stdin path — lands in `unknown-session.jsonl`.) ⚠️ **The
+path and the shape are fixed: a reader depends on both, and the shape is pinned by a
+test.** The fields, exactly:
+
+    ts           ISO-8601 timestamp with an offset, UTC
+    session_id   the session, or null when stdin could not be parsed
+    decision     "allow" | "deny"
+    reason       "manager-owned-action" (deny) · "no-manager-action" · "non-manager" ·
+                 "kill-switch" · "fail-open: <cause>"
+    manager      true | false | null — null when the verdict was never evaluated,
+                 which is a different answer from "evaluated, and it was false"
+    manager_arm  "root" | "name" | "colour" | null — WHICH arm of rule 1 answered
+    verbs        the manager-owned verbs the options named, in label order; [] otherwise
+
+⚠️ **Written on EVERY invocation — allow and deny, kill switch and fail-open alike —
+because an absent record has to mean "the hook did not run".** A guard that recorded
+only its denies could not be told from a guard that never fired, which is the defect
+this file exists to remove one layer up. A `deny` record with `reason:
+manager-owned-action` and its `verbs` is what makes the denial provable after the fact
+without parsing prose.
+
+⚠️ **The write is fail-open and CANNOT change the verdict.** It runs after the decision
+is fixed, every failure inside it is swallowed, and its result is never consulted by the
+decision path: an unwritable directory, a failed append or a failed trim all leave the
+hook exiting with the code it computed. **A lost record is preferred to a wrong
+verdict** — the record is evidence, never a gate.
+
+⚠️ **Growth is bounded by a trim, not by hope.** A session's file is trimmed back to its
+most recent `RECORD_KEEP` (200) lines once it passes either bound — 256 KB
+(`RECORD_CAP_BYTES`) or 200 lines, whichever the record size makes bind first (~38 KB at
+the measured ~190 B per record, so the line count is the ceiling a reader can rely on).
+The trim is written through a temporary file and `os.replace`d, so a kill mid-trim
+cannot leave a partial file a reader would mistake for a record that was never written.
+A record is the cheapest thing to lose here; the alternative, an unbounded append before
+every `AskUserQuestion`, is a slow disk leak.
+
+Kill switch: `SUPERVISOR_MANAGER_MENU_GUARD=off` makes the hook allow at once. ⚠️ It
+still writes its `kill-switch` record — one line on a rare event, and it is what lets a
+reader tell a guard the operator switched off from one that broke.
 
 KNOWN RESIDUALS, named rather than implied. The predicate asks whether an option
 **names a manager-owned action**, so the residues are all in the allow direction:
@@ -115,6 +158,7 @@ No CLI surface — it reads one JSON document on stdin and exits.
 
 Exit codes: 0 allow (including every fail-open path) · 2 deny.
 """
+import datetime
 import glob
 import json
 import os
@@ -241,10 +285,71 @@ KILL_SWITCH_ENV = "SUPERVISOR_MANAGER_MENU_GUARD"
 # rather than only at this gate.
 RULE_HOMES = "commands/manager-loop.md § Manager contract; commands/steps/manager-drive.md § Drive"
 
+# --- the per-invocation record ------------------------------------------------
+#
+# ⚠️ **The record is what makes "the guard DENIED" provable rather than merely "the
+# guard ran".** A gate that leaves no trace is indistinguishable from one that is
+# broken or absent, and a live check that has only the guard's exit code cannot tell a
+# quiet window from a dead hook.
+#
+# One JSONL file PER SESSION, addressed by session id, under `STATE_DIR_ENV`'s
+# directory. ⚠️ **Per-session rather than one shared file, because the reader's question
+# is always "what did the guard do for THIS session"** — a per-session path answers it
+# with one `open`, no scan and no filter, which is also what bounds the file (below).
+#
+# The record is written on EVERY invocation, allow and deny alike, including the
+# kill-switch and fail-open paths — that is what makes an absent record mean "the hook
+# did not run" rather than "nothing happened".
+STATE_DIR_ENV = "SUPERVISOR_MANAGER_MENU_GUARD_STATE_DIR"
+STATE_SUBDIR = "manager-menu-guard"
+UNKNOWN_SESSION = "unknown-session"
+
+# ⚠️ **The growth bound, and why it is a trim rather than an unbounded append.** This
+# fires before every `AskUserQuestion` in every manager session, so an unbounded JSONL
+# is a slow disk leak. Once a session's file passes EITHER bound it is trimmed back to
+# its most recent `RECORD_KEEP` lines, through a temporary file and `os.replace` — so a
+# kill mid-trim cannot leave a partial file a reader would mistake for a record that was
+# never written.
+#
+# ⚠️ **The file is bounded by the LARGER of the two, and both are named so that is
+# visible rather than implied:** `RECORD_KEEP` lines (~38 KB at the measured ~190 B per
+# record) is what actually binds in practice, and `RECORD_CAP_BYTES` catches a
+# pathologically large record before the line count would. Either way the file stops
+# growing — the line count is the ceiling a reader can rely on.
+RECORD_CAP_BYTES = 262144
+RECORD_KEEP = 200
+
+# The decision and reason vocabulary — a fixed set, so a reader never parses prose.
+DECISION_ALLOW, DECISION_DENY = "allow", "deny"
+REASON_MANAGER_OWNED = "manager-owned-action"   # deny: an option names a manager-owned action
+REASON_NO_ACTION = "no-manager-action"          # allow: no option names one
+REASON_NON_MANAGER = "non-manager"              # allow: one is named, the session is not a manager
+REASON_KILL_SWITCH = "kill-switch"              # allow: the guard is switched off
+# Fail-open reasons are `fail-open: <cause>`; the causes are the arms below.
+FAIL_OPEN_MALFORMED_STDIN = "fail-open: malformed-stdin"
+FAIL_OPEN_NON_OBJECT = "fail-open: non-object-payload"
+FAIL_OPEN_NO_SESSION = "fail-open: no-session-id"
+FAIL_OPEN_UNKNOWN_SESSION = "fail-open: unknown-session"
+FAIL_OPEN_NO_VAULT = "fail-open: unresolvable-vault"
+FAIL_OPEN_INTERNAL = "fail-open: internal-error"
+
+# The record's exact shape — pinned by a test, because a reader depends on it.
+RECORD_FIELDS = ("ts", "session_id", "decision", "reason", "manager", "manager_arm", "verbs")
+
+# Which arm of rule 1 answered, named in the record so a reader can tell a name-detected
+# manager from a colour-only one without re-deriving the classification.
+ARM_ROOT, ARM_NAME, ARM_COLOUR = "root", "name", "colour"
+
 
 def sessions_dir():
     """The session registry's directory, read at call time so a test can point it elsewhere."""
     return os.environ.get("CLAUDE_SESSIONS_DIR") or os.path.expanduser("~/.claude/sessions")
+
+
+def state_dir():
+    """The record's directory, read at call time for the same reason."""
+    return (os.environ.get(STATE_DIR_ENV)
+            or os.path.expanduser(os.path.join("~/.claude/state", STATE_SUBDIR)))
 
 
 def projects_dir():
@@ -401,20 +506,35 @@ def last_colour(path, window=COLOUR_WINDOW, cap=COLOUR_CAP):
     return None
 
 
+def manager_arm(entry, topics, goals):
+    """Which arm of rule 1 made this session a manager — `root` / `name` / `colour` / `None`.
+
+    ⚠️ The ARM is returned rather than a bare boolean because the record has to say
+    which one answered: measured 2026-10-16, two of the four live managers are detected
+    by colour alone, and a reader that cannot see the arm cannot tell a name-resolved
+    manager from one whose name resolves to no page at all.
+
+    Every unreadable input falls through to the next arm rather than raising, so a
+    session this cannot classify is not a manager.
+    """
+    name = (entry.get("name") or "").strip()
+    if name and name == ROOT_NAME:
+        return ARM_ROOT
+    if manager_subject(name, topics, goals):
+        return ARM_NAME
+    colour = last_colour(transcript_path(entry) or "")
+    if (colour or "").strip().lower() == MANAGER_COLOUR:
+        return ARM_COLOUR
+    return None
+
+
 def is_manager(entry, topics, goals):
     """`fleet-board.py`'s rule 1 for ONE session, computed locally.
 
     Name resolves to a topic/goal page, **or** the session is the root, **or** its
-    colour is orange. Every unreadable input falls through to the next arm rather than
-    raising, so a session this cannot classify is not a manager.
+    colour is orange. A thin wrapper over `manager_arm`, which names the arm.
     """
-    name = (entry.get("name") or "").strip()
-    if name and name == ROOT_NAME:
-        return True
-    if manager_subject(name, topics, goals):
-        return True
-    colour = last_colour(transcript_path(entry) or "")
-    return (colour or "").strip().lower() == MANAGER_COLOUR
+    return manager_arm(entry, topics, goals) is not None
 
 
 def option_labels(tool_input):
@@ -545,49 +665,150 @@ def session_id_from(payload, environ=None):
             .get("CLAUDE_CODE_SESSION_ID") or "").strip()
 
 
-def decide(payload, environ=None):
-    """`(exit_code, reason)` for one hook invocation. Every unproven path answers `(0, "")`."""
-    if ((environ if environ is not None else os.environ)
-            .get(KILL_SWITCH_ENV) or "").strip().lower() == "off":
-        return 0, ""
+def evaluate(payload, environ=None):
+    """The whole verdict for one invocation: `(exit_code, stderr_text, record)`.
+
+    ⚠️ **Every path returns a record, including every fail-open one**, because the
+    record's job is to distinguish "the guard allowed this" from "the guard never ran".
+    An allow that returned no record would be indistinguishable from a dead hook — the
+    exact blindness the record exists to remove.
+
+    ⚠️ `manager` is `None` on the paths that short-circuit before the registry read (a
+    menu that does not lead with one of the five verbs, and the kill switch): the verdict
+    was not evaluated, which is a different answer from "evaluated, and it was false",
+    and the record says so rather than guessing.
+    """
+    env = environ if environ is not None else os.environ
+    session_id = session_id_from(payload, environ)
+
+    def verdict(code, reason, manager=None, arm=None, verbs=(), text=""):
+        return code, text, {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "session_id": session_id or None,
+            "decision": DECISION_DENY if code else DECISION_ALLOW,
+            "reason": reason,
+            "manager": manager,
+            "manager_arm": arm,
+            "verbs": list(verbs),
+        }
+
+    if (env.get(KILL_SWITCH_ENV) or "").strip().lower() == "off":
+        return verdict(0, REASON_KILL_SWITCH)
     tool_input = (payload or {}).get("tool_input")
     # ⚠️ The cheap half of the predicate runs first, so a menu that does not even LEAD
     # with one of the five verbs costs no vault read and no transcript read. Only a
     # payload that clears it pays for the object test's page titles.
     if not any(leading_manager_verb(label) for label in option_labels(tool_input)):
-        return 0, ""
-    session_id = session_id_from(payload, environ)
+        return verdict(0, REASON_NO_ACTION)
     if not session_id:
-        return 0, ""
+        return verdict(0, FAIL_OPEN_NO_SESSION)
     entry = registry_entry(session_id)
     if not entry:
-        return 0, ""
+        return verdict(0, FAIL_OPEN_UNKNOWN_SESSION)
     topics, goals = vault_page_names()
     if not topics and not goals:
-        return 0, ""
+        return verdict(0, FAIL_OPEN_NO_VAULT)
     verbs = manager_owned_actions_in(tool_input, tuple(topics.values()) + tuple(goals.values()))
+    arm = manager_arm(entry, topics, goals)
     if not verbs:
-        return 0, ""
-    if not is_manager(entry, topics, goals):
-        return 0, ""
-    return 2, deny_reason((entry.get("name") or session_id).strip(), verbs)
+        # The session's manager verdict is still recorded — it was paid for to get here.
+        return verdict(0, REASON_NO_ACTION, manager=arm is not None, arm=arm)
+    if not arm:
+        # A worker offering a manager-owned menu. Allowed — this hook's scope is
+        # managers — but the verbs are recorded, so the occurrence is visible.
+        return verdict(0, REASON_NON_MANAGER, manager=False, verbs=verbs)
+    name = (entry.get("name") or session_id).strip()
+    return verdict(2, REASON_MANAGER_OWNED, manager=True, arm=arm, verbs=verbs,
+                   text=deny_reason(name, verbs))
+
+
+def decide(payload, environ=None):
+    """`(exit_code, stderr_text)` — `evaluate` without the record, for a direct caller."""
+    code, text, _ = evaluate(payload, environ)
+    return code, text
+
+
+def record_path(session_id, directory=None):
+    """The record's path for one session. ⚠️ Fixed and documented: a reader depends on it."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(session_id or UNKNOWN_SESSION)) or UNKNOWN_SESSION
+    return os.path.join(directory or state_dir(), f"{safe}.jsonl")
+
+
+def trim_records(path, cap=RECORD_CAP_BYTES, keep=RECORD_KEEP):
+    """Keep the most recent `keep` lines once `path` passes `cap` bytes. Never raises.
+
+    ⚠️ Written through a temporary file and `os.replace`d, so a kill mid-trim leaves
+    either the old file or the new one — never a half-written one, which a reader could
+    not tell from a record that was never written.
+    """
+    try:
+        if os.path.getsize(path) <= cap:
+            return
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.writelines(lines[-keep:])
+        os.replace(tmp, path)
+    except Exception:
+        return
+
+
+def write_record(record, directory=None):
+    """Append one record. ⚠️ **Never raises, and never touches the decision.**
+
+    A lost record is preferred to a wrong verdict: if the directory is unwritable, the
+    append fails, or the trim fails, the caller still exits with the code it computed.
+    This is called AFTER the verdict is fixed, and its return value is never consulted
+    by the decision path.
+    """
+    try:
+        os.makedirs(directory or state_dir(), exist_ok=True)
+        path = record_path(record.get("session_id"), directory)
+        line = json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n"
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line)
+        # ⚠️ The bound is passed at the CALL SITE, not left to `trim_records`' defaults:
+        # a default argument is bound at definition time, so a caller (or a test) that
+        # changes `RECORD_CAP_BYTES` would otherwise be silently ignored.
+        trim_records(path, cap=RECORD_CAP_BYTES, keep=RECORD_KEEP)
+        return path
+    except Exception:
+        return None
 
 
 def main():
     try:
         payload = json.load(sys.stdin)
     except Exception:
+        write_record(_bare_record(FAIL_OPEN_MALFORMED_STDIN))
         return 0
     if not isinstance(payload, dict):
+        write_record(_bare_record(FAIL_OPEN_NON_OBJECT))
         return 0
     try:
-        code, reason = decide(payload)
+        code, text, record = evaluate(payload)
     except Exception:
+        # An internal error is a fail-open path like any other — and it is RECORDED,
+        # so a guard that is crashing is visible instead of merely quiet.
+        write_record(_bare_record(FAIL_OPEN_INTERNAL))
         return 0
+    write_record(record)
     if code == 0:
         return 0
-    sys.stderr.write(reason)
+    sys.stderr.write(text)
     return code
+
+
+def _bare_record(reason):
+    """A record for a path that failed before a payload could be parsed.
+
+    ⚠️ `session_id` is `None` here — the stdin document that would have carried it is
+    exactly what could not be read — so these land in the `unknown-session` file.
+    """
+    return {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "session_id": None, "decision": DECISION_ALLOW, "reason": reason,
+            "manager": None, "manager_arm": None, "verbs": []}
 
 
 if __name__ == "__main__":

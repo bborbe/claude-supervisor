@@ -116,11 +116,12 @@ class Base(unittest.TestCase):
         self.obsidian = os.path.join(self.tmp, "obsidian")
         self.vault = os.path.join(self.obsidian, "Personal")
         self.projects = os.path.join(self.tmp, "projects")
+        self.state = os.path.join(self.tmp, "state")
         self.cwd = "/tmp/fixture-cwd"
         self.escaped = self.cwd.replace("/", "-").replace(".", "-")
         for d in (self.sessions, os.path.join(self.vault, "23 Topics"),
                   os.path.join(self.vault, "24 Goals"),
-                  os.path.join(self.projects, self.escaped)):
+                  os.path.join(self.projects, self.escaped), self.state):
             os.makedirs(d, exist_ok=True)
         # The topic page the manager's name resolves to. `Sentry Agent Manager` -> the
         # ` Manager` suffix is stripped, so the page is `Sentry Agent`, not the full name.
@@ -142,6 +143,9 @@ class Base(unittest.TestCase):
         env["CLAUDE_SESSIONS_DIR"] = self.sessions
         env["OBSIDIAN_DIR"] = self.obsidian
         env["CLAUDE_PROJECTS_DIR"] = self.projects
+        # ⚠️ The record's directory is redirected for EVERY case, so no test can write
+        # into the operator's real ~/.claude/state/manager-menu-guard/.
+        env["SUPERVISOR_MANAGER_MENU_GUARD_STATE_DIR"] = self.state
         env.pop("CLAUDE_CODE_SESSION_ID", None)
         env.pop("SUPERVISOR_MANAGER_MENU_GUARD", None)
         env.update(overrides)
@@ -154,6 +158,19 @@ class Base(unittest.TestCase):
             capture_output=True, text=True, timeout=60,
         )
         return proc.returncode, proc.stderr
+
+    def records(self, session_id):
+        """Every record written for one session, oldest first — the reader's own path."""
+        path = os.path.join(self.state, f"{session_id}.jsonl")
+        if not os.path.isfile(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def last_record(self, session_id):
+        found = self.records(session_id)
+        self.assertTrue(found, f"no record was written for {session_id!r}")
+        return found[-1]
 
     @staticmethod
     def payload(session_id, labels):
@@ -216,6 +233,233 @@ class TestGradedCases(Base):
         code, err = self.run_guard(self.payload("worker-1", list(NATURAL_ACTION_LABELS.values())))
         self.assertEqual(code, 0, f"a worker's menu must keep working; stderr={err!r}")
         self.assertEqual(err, "")
+
+
+class TestRecord(Base):
+    """The per-invocation record — what makes "the guard DENIED" provable.
+
+    ⚠️ Without a producer these cases have nothing to read: a guard whose only output is
+    an exit code cannot be told from one that never ran, so the live check that asks
+    "did the guard deny this manager-owned attempt" has no evidence to read at all.
+    """
+
+    def test_a_deny_writes_a_deny_record(self):
+        self.run_guard(self.payload("manager-1", ["Open the approved row"]))
+        rec = self.last_record("manager-1")
+        self.assertEqual(rec["decision"], "deny")
+        self.assertEqual(rec["reason"], "manager-owned-action")
+        self.assertIs(rec["manager"], True)
+        self.assertEqual(rec["manager_arm"], "name")
+        self.assertEqual(rec["verbs"], ["open"])
+
+    def test_an_allow_writes_an_allow_record(self):
+        # ⚠️ The requirement is BOTH, and the allow half is the one that makes a quiet
+        # window distinguishable from a broken guard.
+        self.run_guard(self.payload("worker-1", ["Open the approved row"]))
+        rec = self.last_record("worker-1")
+        self.assertEqual(rec["decision"], "allow")
+        self.assertEqual(rec["reason"], "non-manager")
+        self.assertIs(rec["manager"], False)
+        self.assertEqual(rec["verbs"], ["open"])
+
+    def test_an_operator_only_menu_writes_an_allow_record(self):
+        # ⚠️ None of these labels even LEADS with a manager-owned verb, so the cheap
+        # pre-filter answers and the manager verdict is never evaluated — recorded as
+        # `null`, which is a different answer from `false`.
+        self.run_guard(self.payload("manager-1", list(OPERATOR_ONLY_LABELS)))
+        rec = self.last_record("manager-1")
+        self.assertEqual(rec["decision"], "allow")
+        self.assertEqual(rec["reason"], "no-manager-action")
+        self.assertEqual(rec["verbs"], [])
+        self.assertIsNone(rec["manager"])
+        self.assertIsNone(rec["manager_arm"])
+
+    def test_a_leading_verb_with_no_owned_object_records_the_manager_verdict(self):
+        # `resume tomorrow` leads with a manager-owned verb, so the payload clears the
+        # pre-filter and the registry IS read — the verdict is evaluated and recorded,
+        # even though no option ended up naming an action.
+        self.run_guard(self.payload("manager-1", ["Keep working", "resume tomorrow"]))
+        rec = self.last_record("manager-1")
+        self.assertEqual(rec["reason"], "no-manager-action")
+        self.assertEqual(rec["verbs"], [])
+        self.assertIs(rec["manager"], True)
+        self.assertEqual(rec["manager_arm"], "name")
+
+    def test_the_record_is_addressable_by_session_id(self):
+        # The reader's own path, spelled out rather than via the helper: `<dir>/<sid>.jsonl`.
+        self.run_guard(self.payload("manager-1", ["Open the approved row"]))
+        path = os.path.join(self.state, "manager-1.jsonl")
+        self.assertTrue(os.path.isfile(path), f"expected a per-session file at {path}")
+        with open(path, encoding="utf-8") as fh:
+            line = json.loads(fh.readline())
+        self.assertEqual(line["session_id"], "manager-1")
+
+    def test_each_session_gets_its_own_file(self):
+        self.run_guard(self.payload("manager-1", ["Open the approved row"]))
+        self.run_guard(self.payload("worker-1", ["Open the approved row"]))
+        self.assertEqual([r["session_id"] for r in self.records("manager-1")], ["manager-1"])
+        self.assertEqual([r["session_id"] for r in self.records("worker-1")], ["worker-1"])
+
+    def test_the_shape_is_exactly_what_is_documented(self):
+        # ⚠️ Pinned against a LITERAL, not against the module's constant: a field added
+        # or renamed without the docstring moving is exactly what breaks a reader.
+        self.run_guard(self.payload("manager-1", ["Open the approved row"]))
+        self.assertEqual(set(self.last_record("manager-1")),
+                         {"ts", "session_id", "decision", "reason", "manager",
+                          "manager_arm", "verbs"})
+        guard = load_guard()
+        self.assertEqual(set(guard.RECORD_FIELDS),
+                         {"ts", "session_id", "decision", "reason", "manager",
+                          "manager_arm", "verbs"})
+
+    def test_the_timestamp_is_iso8601_with_an_offset(self):
+        import datetime
+        self.run_guard(self.payload("manager-1", ["Open the approved row"]))
+        ts = self.last_record("manager-1")["ts"]
+        parsed = datetime.datetime.fromisoformat(ts)
+        self.assertIsNotNone(parsed.tzinfo, f"{ts!r} must carry an offset")
+        self.assertEqual(parsed.utcoffset(), datetime.timedelta(0))
+
+    def test_every_decision_is_from_the_fixed_vocabulary(self):
+        guard = load_guard()
+        self.run_guard(self.payload("manager-1", ["Open the approved row"]))       # deny
+        self.run_guard(self.payload("worker-1", ["Open the approved row"]))        # non-manager
+        self.run_guard(self.payload("manager-1", ["Keep working"]))                # no action
+        self.run_guard(self.payload("manager-1", ["Open the approved row"]),
+                       SUPERVISOR_MANAGER_MENU_GUARD="off")                        # kill switch
+        reasons = {r["reason"] for sid in ("manager-1", "worker-1")
+                   for r in self.records(sid)}
+        self.assertEqual(reasons, {"manager-owned-action", "non-manager",
+                                   "no-manager-action", "kill-switch"})
+        for sid in ("manager-1", "worker-1"):
+            for rec in self.records(sid):
+                self.assertIn(rec["decision"], (guard.DECISION_ALLOW, guard.DECISION_DENY))
+
+    def test_the_colour_arm_is_named_in_the_record(self):
+        # The record has to say WHICH arm answered — two of the four live managers are
+        # colour-only, and a reader that cannot see the arm cannot tell them apart.
+        self.run_guard(self.payload("colour-1", ["Resume the row"]))
+        rec = self.last_record("colour-1")
+        self.assertEqual(rec["decision"], "deny")
+        self.assertEqual(rec["manager_arm"], "colour")
+
+    def test_the_root_arm_is_named_in_the_record(self):
+        self.register(5, "root-1", "Fleet Manager", "pink")
+        self.run_guard(self.payload("root-1", ["Ready the row"]))
+        rec = self.last_record("root-1")
+        self.assertEqual(rec["manager_arm"], "root")
+
+    def test_the_kill_switch_records_its_own_line(self):
+        self.run_guard(self.payload("manager-1", ["Open the approved row"]),
+                       SUPERVISOR_MANAGER_MENU_GUARD="off")
+        rec = self.last_record("manager-1")
+        self.assertEqual(rec["decision"], "allow")
+        self.assertEqual(rec["reason"], "kill-switch")
+
+    def test_a_fail_open_path_records_its_cause(self):
+        # ⚠️ The record is what separates "the guard allowed this" from "the guard never
+        # ran", so a fail-open path has to leave a trace too. Malformed stdin cannot
+        # carry a session id, so it lands in the unknown-session file.
+        self.run_guard("{not json at all")
+        rec = self.last_record("unknown-session")
+        self.assertEqual(rec["decision"], "allow")
+        self.assertEqual(rec["reason"], "fail-open: malformed-stdin")
+        self.assertIsNone(rec["session_id"])
+
+    def test_an_unknown_session_records_its_cause(self):
+        self.run_guard(self.payload("no-such-session", ["Open the approved row"]))
+        self.assertEqual(self.last_record("no-such-session")["reason"],
+                         "fail-open: unknown-session")
+
+    def test_consecutive_invocations_append_in_order(self):
+        self.run_guard(self.payload("manager-1", ["Open the approved row"]))
+        self.run_guard(self.payload("manager-1", ["Keep working"]))
+        self.assertEqual([r["decision"] for r in self.records("manager-1")],
+                         ["deny", "allow"])
+
+
+class TestRecordFailOpen(Base):
+    """⚠️ The write can never change the verdict — a lost record beats a wrong verdict."""
+
+    def unwritable_state_dir(self):
+        """A state dir whose parent is a regular FILE — unwritable for any user."""
+        blocker = os.path.join(self.tmp, "not-a-directory")
+        with open(blocker, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        return os.path.join(blocker, "state")
+
+    def test_a_deny_survives_an_unwritable_state_dir(self):
+        code, err = self.run_guard(self.payload("manager-1", ["Open the approved row"]),
+                                   SUPERVISOR_MANAGER_MENU_GUARD_STATE_DIR=self.unwritable_state_dir())
+        self.assertEqual(code, 2, f"a lost record must never flip a deny; stderr={err!r}")
+        self.assertIn("DENIED", err)
+
+    def test_an_allow_survives_an_unwritable_state_dir(self):
+        code, err = self.run_guard(self.payload("worker-1", ["Open the approved row"]),
+                                   SUPERVISOR_MANAGER_MENU_GUARD_STATE_DIR=self.unwritable_state_dir())
+        self.assertEqual(code, 0, f"a lost record must never flip an allow; stderr={err!r}")
+
+    def test_write_record_returns_none_rather_than_raising(self):
+        guard = load_guard()
+        record = {"ts": "x", "session_id": "s", "decision": "deny", "reason": "r",
+                  "manager": True, "manager_arm": "name", "verbs": ["open"]}
+        self.assertIsNone(guard.write_record(record, directory=self.unwritable_state_dir()))
+
+
+class TestRecordBound(Base):
+    """⚠️ An unbounded append before every `AskUserQuestion` is a slow disk leak."""
+
+    def test_the_file_is_trimmed_to_the_kept_tail(self):
+        guard = load_guard()
+        path = os.path.join(self.state, "bound.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            for i in range(500):
+                fh.write(json.dumps({"i": i}) + "\n")
+        guard.trim_records(path, cap=1000, keep=5)
+        with open(path, encoding="utf-8") as fh:
+            lines = [json.loads(line) for line in fh if line.strip()]
+        self.assertEqual(len(lines), 5)
+        self.assertEqual(lines[-1]["i"], 499, "the trim must keep the MOST RECENT lines")
+
+    def test_a_file_under_the_cap_is_left_alone(self):
+        guard = load_guard()
+        path = os.path.join(self.state, "small.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"i": 1}) + "\n")
+        before = os.path.getsize(path)
+        guard.trim_records(path, cap=guard.RECORD_CAP_BYTES, keep=5)
+        self.assertEqual(os.path.getsize(path), before)
+
+    def test_a_missing_file_is_not_an_error(self):
+        guard = load_guard()
+        guard.trim_records(os.path.join(self.state, "never-written.jsonl"))
+
+    def test_the_bound_holds_across_repeated_writes(self):
+        # The integration, not just the unit: through the real `write_record` path, the
+        # file stabilises instead of growing with every write. ⚠️ In-process rather than
+        # through `run_guard`, because a subprocess re-imports the module and would not
+        # see the patched constants.
+        #
+        # ⚠️ BOTH bounds are patched, because the file is bounded by the LARGER of them:
+        # the trim keeps `keep` lines, so patching only the byte cap would leave a file
+        # that grows to `keep` lines before anything is dropped — which is correct
+        # behaviour, and not what this case is testing.
+        guard = load_guard()
+        original_cap, original_keep = guard.RECORD_CAP_BYTES, guard.RECORD_KEEP
+        try:
+            guard.RECORD_CAP_BYTES, guard.RECORD_KEEP = 600, 5
+            for _ in range(30):
+                guard.write_record({"ts": "2026-10-16T00:00:00+00:00", "session_id": "s-1",
+                                    "decision": "deny", "reason": "manager-owned-action",
+                                    "manager": True, "manager_arm": "name", "verbs": ["open"]},
+                                   directory=self.state)
+        finally:
+            guard.RECORD_CAP_BYTES, guard.RECORD_KEEP = original_cap, original_keep
+        lines = self.records("s-1")
+        self.assertGreater(len(lines), 0)
+        self.assertLessEqual(len(lines), 6, "the trim must keep the file at `keep` lines")
+        self.assertEqual(lines[-1]["decision"], "deny", "the trim must keep the NEWEST lines")
+        self.assertLessEqual(os.path.getsize(os.path.join(self.state, "s-1.jsonl")), 1200)
 
 
 class TestColourArm(Base):
