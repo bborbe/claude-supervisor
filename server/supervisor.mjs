@@ -1366,8 +1366,9 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   if (minted.error) return { error: minted.error }
 
   const controller = resolveA2AControllerTarget({
-    envUrl: config.a2aUrl,
-    envToken: config.a2aToken,
+    target,
+    envUrl: config.a2aUrls[target],
+    envToken: config.a2aTokens[target],
     file: config.configFileContents,
     path: config.configFile,
   })
@@ -2567,16 +2568,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Resolved per call, never cached on the agent record — the config file is the only source
       // that reaches an already-running server, and a value cached at spawn would keep presenting
       // a token the operator has since rotated.
-      const target = resolveA2AControllerTarget({
-        envUrl: config.a2aUrl,
-        envToken: config.a2aToken,
+      // ⚠️ `agent.status` IS the target for an A2A row — the roster stores the spawn target there,
+      // which is why the guard above reads it as one. So a stop resolves the same controller the
+      // spawn did, from the record rather than from the caller's memory.
+      const controller = resolveA2AControllerTarget({
+        target: agent.status,
+        envUrl: config.a2aUrls[agent.status],
+        envToken: config.a2aTokens[agent.status],
         file: config.configFileContents,
         path: config.configFile,
       })
-      if (target.error) return reply({ error: target.error })
+      if (controller.error) return reply({ error: controller.error })
 
       const stopped = await stopWorkerOnController({
-        endpoint: target.url,
+        endpoint: controller.url,
         workerId: agent.workerId,
         token: target.token,
         messageId: randomUUID(),
@@ -2738,19 +2743,34 @@ clusterTimer.unref?.()
 // being killed (SC7). See `pollA2A` in a2a-spawn.mjs for why there is no reachability marker.
 //
 // ⚠️ SILENT WHEN NO CONTROLLER IS CONFIGURED, and that is the common case rather than a fault: most
-// servers never spawn an A2A worker, and logging a missing `SUPERVISOR_A2A_URL` every 30 s would
-// bury the signal. The ledger is read from disk each tick, never from the in-memory map, so a
-// reconnected server keeps stamping workers a previous process spawned.
+// servers never spawn an A2A worker, and logging a missing `SUPERVISOR_A2A_URL_<TARGET>` every
+// 30 s would bury the signal. The ledger is read from disk each tick, never from the in-memory
+// map, so a reconnected server keeps stamping workers a previous process spawned.
 const a2aPollState = { ok: null, inFlight: false }
 const a2aTimer = setInterval(async () => {
   if (a2aPollState.inFlight) return
-  const controller = resolveA2AControllerTarget({
-    envUrl: config.a2aUrl,
-    envToken: config.a2aToken,
-    file: config.configFileContents,
-    path: config.configFile,
-  })
-  if (controller.error) return
+  // ⚠️ ONE POLL PER CONFIGURED TARGET, NOT ONE POLL. The docker controller runs on this Mac and
+  // the k8s controller in nuke dev, behind separate URLs, so a single list call can only ever see
+  // half the fleet. That matters here and nowhere else on this path: `pollA2A` STAMPS what it
+  // lists and never un-stamps what it does not, so a one-controller poll would leave the other
+  // target's workers unstamped — reading as dead while they run.
+  //
+  // Fanning out is safe for exactly that reason: an unlisted session is left alone, never marked
+  // stopped. A target whose controller is unreachable contributes `ok: false` rather than a false
+  // "no workers", so the caller's existing warning still fires.
+  const controllers = A2A_SPAWN_TARGETS.map((t) =>
+    resolveA2AControllerTarget({
+      target: t,
+      envUrl: config.a2aUrls[t],
+      envToken: config.a2aTokens[t],
+      file: config.configFileContents,
+      path: config.configFile,
+    }),
+  ).filter((c) => !c.error)
+  // Silent when NO target is configured, and that is the common case rather than a fault: most
+  // servers never spawn an A2A worker, and logging a missing `SUPERVISOR_A2A_URL_*` every 30 s
+  // would bury the signal.
+  if (controllers.length === 0) return
   // ⚠️ Read from the endpoint, which is where every reader looks now — and the filter
   // transfers UNCHANGED, because `readSessionLedger` returns the store's wire rows verbatim
   // and `mode`, `worker_id` and `ended_at` are spelled identically on both sides. The only
@@ -2765,23 +2785,35 @@ const a2aTimer = setInterval(async () => {
   if (records.length === 0) return
   a2aPollState.inFlight = true
   try {
-    const result = await pollA2A({
-      records,
-      list: () =>
-        listWorkersOnController({
-          endpoint: controller.url,
-          token: controller.token,
-          messageId: randomUUID(),
-          mint: () => randomUUID(),
+    const results = []
+    for (const controller of controllers) {
+      results.push(
+        await pollA2A({
+          records,
+          list: () =>
+            listWorkersOnController({
+              endpoint: controller.url,
+              token: controller.token,
+              messageId: randomUUID(),
+              mint: () => randomUUID(),
+            }),
+          stamp: (sessionId) => stampRecord(heartbeatDir, { sessionId, pid: null, mode: 'a2a', source: 'a2a' }),
         }),
-      stamp: (sessionId) => stampRecord(heartbeatDir, { sessionId, pid: null, mode: 'a2a', source: 'a2a' }),
-    })
-    if (!result.ok && a2aPollState.ok !== false) {
-      log(`a2a heartbeat: ${result.reason} — A2A stamps will go stale until it clears`)
-    } else if (result.ok && a2aPollState.ok === false) {
-      log(`a2a heartbeat: controller reachable again (${result.stamped.length} stamped)`)
+      )
     }
-    a2aPollState.ok = result.ok
+    // ⚠️ `every`, not the last result: a target that went unreachable must still warn even when
+    // the other answered. The warning names stamps going stale, and half the fleet going stale is
+    // exactly that condition — reading only the final result would silence it whenever the k8s
+    // controller happened to be the one that answered last.
+    const ok = results.every((r) => r.ok)
+    const stamped = results.flatMap((r) => r.stamped)
+    const failed = results.find((r) => !r.ok)
+    if (!ok && a2aPollState.ok !== false) {
+      log(`a2a heartbeat: ${failed.reason} — A2A stamps will go stale until it clears`)
+    } else if (ok && a2aPollState.ok === false) {
+      log(`a2a heartbeat: controller reachable again (${stamped.length} stamped)`)
+    }
+    a2aPollState.ok = ok
   } catch (error) {
     if (a2aPollState.ok !== false) log(`a2a heartbeat: poll failed: ${error?.message ?? error}`)
     a2aPollState.ok = false

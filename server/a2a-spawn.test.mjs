@@ -100,31 +100,81 @@ test('the refusal is only defined for an A2A target', () => {
 
 // --- locating the controller ---------------------------------------------------------------
 
-test('the controller URL resolves from the file, the token only from the environment', () => {
+test('the controller URL resolves per target from the file, the token only from the environment', () => {
   const resolved = resolveA2AControllerTarget({
+    target: 'docker',
     envToken: TOKEN,
-    file: { a2a: { url: 'http://127.0.0.1:8080/a2a' } },
+    file: { a2a: { url: { docker: 'http://127.0.0.1:8080/a2a' } } },
   })
   assert.equal(resolved.url, 'http://127.0.0.1:8080/a2a')
   assert.equal(resolved.token, TOKEN)
 })
 
+test('each target resolves its OWN url from one map — the 2026-10-14 divergence in one assertion', () => {
+  // The defect this split closes: a `docker` spawn must not reach the k8s controller's address,
+  // and a `k8s` spawn must not reach the Mac's. One URL cannot be right for both, so the map is
+  // read per target rather than once.
+  const file = {
+    a2a: { url: { docker: 'http://127.0.0.1:8080/a2a', k8s: 'https://nuke.example/a2a' } },
+  }
+  assert.equal(
+    resolveA2AControllerTarget({ target: 'docker', envToken: TOKEN, file }).url,
+    'http://127.0.0.1:8080/a2a',
+  )
+  assert.equal(
+    resolveA2AControllerTarget({ target: 'k8s', envToken: TOKEN, file }).url,
+    'https://nuke.example/a2a',
+  )
+})
+
+test('configuring one target does not configure the other', () => {
+  // The failure this must keep: a map that names only `docker` leaves `k8s` unconfigured, and a
+  // k8s spawn has to refuse rather than fall back to the docker address.
+  const file = { a2a: { url: { docker: 'http://127.0.0.1:8080/a2a' } } }
+  const resolved = resolveA2AControllerTarget({ target: 'k8s', envToken: TOKEN, file })
+  assert.match(resolved.error, /SUPERVISOR_A2A_URL_K8S/, 'must name the key the operator has to set')
+  // Asserted on the RESULT, not on the message: the refusal's own "e.g." hint carries an example
+  // address, so a message-matching assertion here would fail on the hint rather than on a fallback.
+  assert.equal(resolved.url, undefined, 'must not fall back to the other target')
+})
+
 test('the environment wins over the file, and a trailing slash is trimmed', () => {
   const resolved = resolveA2AControllerTarget({
+    target: 'docker',
     envUrl: 'http://127.0.0.1:9099/a2a/',
     envToken: TOKEN,
-    file: { a2a: { url: 'http://elsewhere/a2a' } },
+    file: { a2a: { url: { docker: 'http://elsewhere/a2a' } } },
   })
   assert.equal(resolved.url, 'http://127.0.0.1:9099/a2a')
+})
+
+test('a bare-string a2a.url REFUSES, naming the map that replaces it', () => {
+  // The shape that made the bug reachable. Refusing turns a silent mis-route into an error that
+  // names the key to change, which is the whole point of not accepting the legacy value.
+  const resolved = resolveA2AControllerTarget({
+    target: 'docker',
+    envToken: TOKEN,
+    file: { a2a: { url: 'http://127.0.0.1:8080/a2a' } },
+  })
+  assert.match(resolved.error, /is a single string/)
+  assert.match(resolved.error, /per-target map/, 'must name the shape to use instead')
+  assert.equal(resolved.url, undefined, 'must not resolve a url at all')
+})
+
+test('an unknown target refuses, naming the targets that exist', () => {
+  const resolved = resolveA2AControllerTarget({ target: 'local', envToken: TOKEN, file: {} })
+  assert.match(resolved.error, /is not an A2A spawn target/)
+  assert.match(resolved.error, /"docker" or "k8s"/)
 })
 
 // --- the plaintext token the migration removes ----------------------------------------------
 
 test('a plaintext a2a.token REFUSES, naming the key and the file to delete it from', () => {
   const resolved = resolveA2AControllerTarget({
+    target: 'docker',
     envUrl: 'http://127.0.0.1:8080/a2a',
     envToken: TOKEN,
-    file: { a2a: { url: 'http://127.0.0.1:8080/a2a', token: 'file-token-3c1a' } },
+    file: { a2a: { url: { docker: 'http://127.0.0.1:8080/a2a' }, token: 'file-token-3c1a' } },
     path: '/etc/sup.json',
   })
   assert.match(resolved.error, /"a2a\.token" is set/)
@@ -138,9 +188,10 @@ test('the plaintext refusal fires even when the env token would win, and echoes 
   // the point of use would never see it and the plaintext token would sit in the file
   // indefinitely while every spawn kept working.
   const resolved = resolveA2AControllerTarget({
+    target: 'docker',
     envUrl: 'http://127.0.0.1:8080/a2a',
     envToken: TOKEN,
-    file: { a2a: { url: 'http://127.0.0.1:8080/a2a', token: 'file-token-3c1a' } },
+    file: { a2a: { url: { docker: 'http://127.0.0.1:8080/a2a' }, token: 'file-token-3c1a' } },
   })
   assert.ok(resolved.error, 'a plaintext token must refuse even when the env var would win')
   assert.doesNotMatch(resolved.error, /file-token-3c1a/, 'the refused value must not travel back')
@@ -148,34 +199,39 @@ test('the plaintext refusal fires even when the env token would win, and echoes 
 
 test('an emptied a2a.token is absence, not a plaintext token', () => {
   const resolved = resolveA2AControllerTarget({
+    target: 'docker',
     envUrl: 'http://127.0.0.1:8080/a2a',
     envToken: TOKEN,
-    file: { a2a: { url: 'http://127.0.0.1:8080/a2a', token: '' } },
+    file: { a2a: { url: { docker: 'http://127.0.0.1:8080/a2a' }, token: '' } },
   })
   assert.equal(resolved.token, TOKEN)
 })
 
 test('a bad URL in the LOSER still refuses — a dormant value breaks the spawn later', () => {
   const resolved = resolveA2AControllerTarget({
+    target: 'docker',
     envUrl: 'http://127.0.0.1:9099/a2a',
     envToken: TOKEN,
-    file: { a2a: { url: 'not-a-url' } },
+    file: { a2a: { url: { docker: 'not-a-url' } } },
   })
-  assert.match(resolved.error, /"a2a\.url" in/)
+  assert.match(resolved.error, /"a2a\.url\.docker" in/)
 })
 
 test('an unset controller refuses rather than defaulting to a guessed address', () => {
-  const resolved = resolveA2AControllerTarget({ file: {} })
-  assert.match(resolved.error, /SUPERVISOR_A2A_URL/)
+  const resolved = resolveA2AControllerTarget({ target: 'docker', file: {} })
+  assert.match(resolved.error, /SUPERVISOR_A2A_URL_DOCKER/)
 })
 
 test('a missing token refuses, and the refusal names the key rather than a value', () => {
-  const resolved = resolveA2AControllerTarget({ file: { a2a: { url: 'http://127.0.0.1:8080/a2a' } } })
-  assert.match(resolved.error, /SUPERVISOR_A2A_TOKEN/)
+  const resolved = resolveA2AControllerTarget({
+    target: 'docker',
+    file: { a2a: { url: { docker: 'http://127.0.0.1:8080/a2a' } } },
+  })
+  assert.match(resolved.error, /SUPERVISOR_A2A_TOKEN_DOCKER/)
 })
 
 test('a non-object a2a section refuses without echoing it', () => {
-  const resolved = resolveA2AControllerTarget({ file: { a2a: TOKEN } })
+  const resolved = resolveA2AControllerTarget({ target: 'docker', file: { a2a: TOKEN } })
   assert.match(resolved.error, /is not an object/)
   assert.doesNotMatch(resolved.error, new RegExp(TOKEN))
 })
