@@ -27,6 +27,7 @@ import {
   listLive,
   readLive,
   readState,
+  selfStampRefusal,
   stampPath,
   stampRecord,
   startSelfStamp,
@@ -351,6 +352,73 @@ test('the self-stamp is re-written on each tick, picking up a changed activity',
       'the next tick must carry the new activity',
     )
     self.stop()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// One session id, TWO writers — the defect these tests exist for.
+//
+// A headless worker's session inherits the `supervisor` MCP server from its launcher, so the
+// worker's own session starts a server that runs the self-stamp, while the server that SPAWNED
+// the worker stamps the same id from outside. Both target one file. Measured 2026-10-15 on
+// session `4d0f1d11`: the ledger read `status: done` with an `ended_at` at 12:14:50.538Z while the
+// self-stamp re-created the owner's deleted stamp at 12:15:10 and 12:15:40 — so `checkLiveness`,
+// the store's endpoint and an operator were all told a finished worker was still running.
+//
+// ⚠️ The ordering is what is asserted, not the functions: owner stamps → the turn ends and the
+// owner CLEARS → the self-stamp's next tick → read. Every shape but standing down passes a
+// same-process round trip and still fails here.
+
+test('selfStampRefusal stands down for a headless worker and only for one', () => {
+  assert.match(selfStampRefusal({ workerMode: 'headless' }), /headless worker/)
+  // ⚠️ A tab worker's session is stamped by nobody else — `heartbeat.start` is reached from
+  // `agent-loop.mjs` alone — so standing down there would make every tab worker read dead.
+  assert.equal(selfStampRefusal({ workerMode: 'interactive' }), null)
+  // ⚠️ An absent value is not "a worker": it is the operator's own session, or a path-B resume
+  // that goes through no server. That is the case the self-stamp exists for.
+  assert.equal(selfStampRefusal({}), null)
+  assert.equal(selfStampRefusal(), null)
+  assert.equal(selfStampRefusal({ workerMode: null }), null)
+})
+
+test('startSelfStamp writes nothing at all for a headless worker', () => {
+  withDir((dir) => {
+    assert.equal(
+      startSelfStamp(SESSION, { dir, workerMode: 'headless', intervalMs: 60_000 }),
+      null,
+      'the stamp belongs to the server that spawned the worker',
+    )
+    assert.deepEqual(listLive({ dir }), [], 'standing down must write no file, not merely an unused one')
+  })
+})
+
+test('the owner’s stamp and its clear outlive the self-stamp timer', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hb-test-'))
+  try {
+    // The self-stamp is started exactly as `supervisor.mjs` starts it, timer included — so on a
+    // build without the guard the ticks below really do fire.
+    const self = startSelfStamp(SESSION, { dir, workerMode: 'headless', intervalMs: 10 })
+    // 1. The owning server stamps the worker it just spawned.
+    stampRecord(dir, { sessionId: SESSION, pid: process.pid, mode: 'headless' })
+    // 2. Several self-stamp ticks pass while the worker runs.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(
+      JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8')).mode,
+      'headless',
+      'a tick must not overwrite the owner’s mode with `local` — that is what left no reader able to find a live headless worker',
+    )
+    assert.equal(readLive(SESSION, { dir }).live, true, 'the owner’s stamp is the live one')
+    // 3. The turn ends and the owning server clears the stamp.
+    clearStamp(SESSION, { dir })
+    // 4. The tick that used to re-create it.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(
+      readLive(SESSION, { dir }).live,
+      false,
+      'the clear must be final — a finished worker must not read live again',
+    )
+    self?.stop()
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
