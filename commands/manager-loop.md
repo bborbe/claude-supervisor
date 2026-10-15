@@ -88,7 +88,7 @@ The manager **manages; it does not build**. It never performs the topic's *work*
 - **Never widen past the boundary.** A task-file write is management only while it changes *tracking state* (status, phase, dates, stamps, scope). If it needs the code read, a root cause judged, or a runtime fact verified, it is work — delegate it.
 - ⚠️ **Carve-out — a dependency-condition read is management, not work.** The prose-blocker check (clause (2) in `agents/manager-drive.md`) reads whether *a dependency the row itself names has shipped* — `gh pr view <n> --json mergedAt,mergeCommit`, `git tag --list <tag>`, or a running artifact's version. That is a **read-only eligibility lookup on the row's own declared condition**: it judges no code, reproduces no defect, opens no PR and fixes nothing. **Do not read the "no repo/PR/k8s verification" line above as forbidding it.**
 - **No worker → spawn one.** Ready-to-start / unowned / orphaned-restart work is started as a new Claude Code session via the Spawn mechanics below — never done in-line by the manager.
-- **Task/goal anchored, always.** No work is delegated or spawned without a task (or goal) anchoring it; an unanchored request is not work. Read-only manager business (sweep, table, TTS) needs no anchor; anything else gets a task first (`/vault-cli:create-task "<title>"`).
+- **Task/goal anchored, always.** No work is delegated or spawned without a task (or goal) anchoring it; an unanchored request is not work. Read-only manager business (sweep, table, TTS) needs no anchor; anything else gets a task first (`/vault-cli:create-task "<title>"` **passing `--docs-only` or `--code`** — the route you already know; passing it is what stops `create-task` asking).
 
 ## Arguments
 
