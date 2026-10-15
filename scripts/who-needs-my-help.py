@@ -52,6 +52,7 @@ Closer-Line Gate]].
 import argparse
 import glob
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -142,6 +143,19 @@ _UNCHECKED = re.compile(r"^\s*-\s*\[\s\]\s*(.+)$", re.M)
 # A Personal-vault convention: an item whose task file lives in any other vault
 # carries no marker and counts as non-prod. Stated rather than left to fall out.
 PERSONAL_VAULT = os.path.expanduser("~/Documents/Obsidian/private-personal")
+
+# Where a manager session records the goal/topic it manages — source 1 of
+# `docs/subject-resolution.md`. A manager is anchored to a PAGE, not to a task
+# file, which is why its next item cannot be read the way a worker's is.
+WM_STATE_DIR = os.path.expanduser("~/.claude/state/worker-manager")
+
+# The page test's two folders (`docs/subject-resolution.md` § The page test): an
+# exact basename inside the folder, the folder being the discriminator. The
+# state file's own `branch` picks which one to look in, so the goal/topic
+# ambiguity that doc forbids guessing at is resolved by the record rather than
+# by a preference.
+GOAL_DIR = "24 Goals"
+TOPIC_DIR = "23 Topics"
 
 # The pane viewport's line-start anchors. `Tab to amend` is the discriminator
 # WITHIN the permission line, never an anchor of its own.
@@ -306,6 +320,70 @@ def next_item(task_text):
     """
     m = _UNCHECKED.search(task_text or "")
     return m.group(1).strip() if m else ""
+
+
+def manager_subject_page(session_id):
+    """The goal/topic page a manager's subject names, or `None`.
+
+    Source 1 of `docs/subject-resolution.md`: the session's own state file. A
+    manager session is anchored to a PAGE, never to a task file, so this is the
+    only thing that can answer "what is your next item" for it — read off the
+    goal it declared rather than off whatever task its transcript last named.
+
+    ⚠️ **Two traps the doc names, both honoured here.** The `vault` is compared
+    **case-insensitively**, because state files written before 2026-09-23 may
+    carry display case while the vault-cli config name is lowercase, and a strict
+    match drops every one of them to a lower-priority source. And a subject that
+    no longer resolves to a page is a **silent miss** — this returns `None` and
+    the caller falls through, never errors: a manager whose goal was renamed or
+    completed is an ordinary fleet event, not a defect.
+
+    The state file's own `branch` picks the folder, so the goal-vs-topic
+    ambiguity the page test forbids guessing at is settled by the record. A
+    record carrying no branch probes both and takes an exact match in either —
+    never a substring glob, which a topic's member goals would satisfy in both
+    folders at once.
+    """
+    try:
+        with open(os.path.join(WM_STATE_DIR, f"{session_id}.json"),
+                  encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception:
+        return None
+    subject = (state.get("subject") or "").strip()
+    if not subject:
+        return None
+    want_vault = (state.get("vault") or "").strip().lower()
+    branch = (state.get("branch") or "").strip().lower()
+    folders = {"goal": (GOAL_DIR,), "topic": (TOPIC_DIR,)}.get(
+        branch, (GOAL_DIR, TOPIC_DIR))
+    want_file = subject.lower() + ".md"
+    for vault in sorted(glob.glob(os.path.join(wnm.OBSIDIAN, "*"))):
+        if want_vault and os.path.basename(vault).lower() != want_vault:
+            continue
+        for folder in folders:
+            d = os.path.join(vault, folder)
+            if not os.path.isdir(d):
+                continue
+            for entry in sorted(os.listdir(d)):
+                if entry.lower() == want_file:
+                    return os.path.join(d, entry)
+    return None
+
+
+def anchor_page(rec, manager):
+    """The page a session's next item is read off.
+
+    A manager is anchored to its SUBJECT page; anything else to its own task
+    file. A manager whose subject no longer resolves falls back to the task file,
+    so it is reported exactly as it was before this rule existed rather than
+    losing the line entirely.
+    """
+    if manager:
+        page = manager_subject_page(rec.get("session_id"))
+        if page:
+            return page
+    return task_path_of(rec)
 
 
 # --- Answer extraction -------------------------------------------------------
@@ -553,10 +631,11 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
         name = wnm.name_of(rec, pmap, registry)
         if not parked(rec, reg_records.get(sid)):
             pane = rec.get("pane")
+            manager = is_manager(rec, registry)
             not_parked.append({"session_id": sid, "name": name,
                                "pane": pane,
-                               "manager": is_manager(rec, registry),
-                               "next_item": next_item(read_task(task_path_of(rec))),
+                               "manager": manager,
+                               "next_item": next_item(read_task(anchor_page(rec, manager))),
                                "wait": "",
                                "jump": link_of(pane) if pane else ""})
             continue
@@ -567,6 +646,12 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
         shape = shape_of(pane) if pane else None
         task_path = task_path_of(rec)
         task_text = read_task(task_path)
+        manager = is_manager(rec, registry)
+        # SC8 pins prod and closeness to the item's OWN task file, so `task_text`
+        # stays that file; only the next item moves to the page the session is
+        # anchored to. For a manager that page is its subject, not a task — read
+        # off the anchored task file it came back empty on every live manager.
+        next_text = read_task(anchor_page(rec, manager)) if manager else task_text
         options, recommended = options_of(wnm.current_closer(rec))
         parked_rows.append({
             "session_id": sid,
@@ -593,8 +678,8 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
             "prod": is_prod(task_path, task_text),
             "open_boxes": open_boxes(task_text),
             "task_path": task_path,
-            "manager": is_manager(rec, registry),
-            "next_item": next_item(task_text),
+            "manager": manager,
+            "next_item": next_item(next_text),
             "shape": shape,
         })
 

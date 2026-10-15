@@ -4,6 +4,8 @@ The rule four commands share: `/supervisor:manager-loop`, `/supervisor:manager-s
 
 **Why this is one file now.** The block was copied into all four, with a keep-in-sync sentence in each naming the others. Three commands that resolve a subject differently will disagree about which tree is being reported, and the disagreement is silent — so the copy was the liability, not the guarantee. Written out 2026-09-25, when `manager-verify` was extracted into a command+agent pair and the fourth copy would otherwise have been rewritten for the third time.
 
+⚠️ **A fifth reader, and it is not a command.** `scripts/who-needs-my-help.py` reads **source 1 and only source 1** to answer a manager's "what is your next SC/DoD item": a manager session is anchored to a goal or topic page rather than to a task file, so the sweep resolves the subject and reads that page. It stops at source 1 deliberately — sources 2–4 exist to resolve *the caller's own* subject, and the sweep is resolving *another session's*, which it can only do from that session's own state file. So this file's `{"subject","vault","branch"}` shape has a second consumer, and changing it changes the sweep's `Managers to query` block. Added 2026-10-15, after all four live managers rendered an empty `next:` line for exactly this reason.
+
 ## Resolve the vault first
 
 **From the session's cwd, never a default.** A session in `~/Documents/Obsidian/other-vault` named *Sample Task* must resolve `other-vault/23 Topics/Sample Task.md`, not the primary vault's.
