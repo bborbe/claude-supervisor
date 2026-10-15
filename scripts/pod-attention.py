@@ -55,12 +55,18 @@ unauthenticated remote store lets anything that can reach the port read every ca
 release every gate, which is strictly worse than the gap this arm closes. The refusal is
 what stops an unauthenticated localhost default being read later as the shipped shape.
 
-Run: python3 pod-attention.py ask  --dedup-key KEY --payload "..." [--option L]... [--recommend L]
-     python3 pod-attention.py gate --dedup-key KEY --payload "..." [--timeout 900]
+Run: python3 pod-attention.py ask  --dedup-key KEY --payload "..." [--option L]... [--recommend L] [--expires-at RFC3339]
+     python3 pod-attention.py gate --dedup-key KEY --payload "..." [--timeout 900] [--expires-at RFC3339]
      python3 pod-attention.py poll ITEM_ID
+
+⚠️ **Every card this arm posts is bounded.** Both arms default `liveness_ref` to `owner:`
+(see `LIVENESS_MODEL`) and send an `expires_at` (`_expires_at_or_default`); neither half
+works without the other — `owner:` alone would leave a dead pod's card on the board
+forever, and a bound alone would leave the card pruned before anyone saw it.
 """
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 import os
@@ -102,17 +108,53 @@ DECISIONS = ("allow", "deny")
 
 # ⚠️ **Both of these are validated against a closed enum by the store, and an unknown
 # value is rejected with a 400 naming the field.** A pod is a long-lived Claude Code
-# session, so it is `session` for both — there is no `pod` member, and inventing one
-# fails every push, which is exactly what the first e2e run found.
-#   producer_kind: session | agent | cron | dark-factory
+# session, so its `producer_kind` is `session` — there is no `pod` member, and inventing
+# one fails every push, which is exactly what the first e2e run found.
+#   producer_kind: session | manager | agent | cron | dark-factory
 #   liveness_ref:  <session|heartbeat|owner>:<value>
 # Read from `attention-controller` `pkg/producer-kind.go` and `pkg/liveness-ref.go`, and
 # confirmed against the running store.
 PRODUCER_KIND = "session"
-LIVENESS_MODEL = "session"
+
+# ⚠️ **`owner:`, NOT `session:` — and this is deliberately NOT the same choice as
+# `producer_kind` above.** The two fields answer different questions, and reading the
+# first bullet as covering both is the defect this default fixes.
+#
+# The store resolves `session:<id>` against the **host-local** registry
+# `~/.claude/sessions` (`attention-controller` `pkg/session-liveness-checker.go`: `IsLive`
+# and `list`, which reads that one directory and nothing else). A pod runs in a container
+# and — as this module's own docstring says above — *"has neither a registry entry nor a
+# spawner"*, so its session id can never appear in the store host's registry. `IsLive`
+# therefore answers false, and the store's read path prunes the card as a dead asker's
+# (`pkg/attention-store-impl.go` `classifyForRead`: `isAsked` + `!live` → `remove`) on the
+# very first list read. The card is accepted with a 201 and deleted before the operator can
+# ever see it; `cmd_gate` then polls a 404 until its deadline and exits `NO_DECISION:`,
+# which is the 900 s block this default caused.
+#
+# `owner:` is the model built for exactly this case: `isProducerLiveWith` returns true for
+# it unconditionally and deliberately, because a human owner's absence cannot be read from
+# the session registry — a never-registered owner and an exited one produce the same
+# signal, so reading either as gone prunes a gate the operator can still answer. Every card
+# this arm posts is answered by the OPERATOR, so the operator's liveness is the honest
+# subject and the pod's is not. `attention-ask.py` reached the same conclusion first and
+# moved its own default to `owner:` (`_producer_or_refuse`); this arm follows it.
+#
+# ⚠️ **`owner:` probes NOTHING, so the card MUST be bounded — hence
+# `_expires_at_or_default` below, which every posting arm calls.** An `owner:` card is
+# exempt from the liveness prune by design and carries no implicit deadline, so without an
+# `expires_at` a pod that dies mid-gate leaves its card on the operator's board forever.
+# The default and the bound are ONE change for that reason: either alone is a defect, and
+# the bound alone would trade a card that vanishes for one that never does.
+LIVENESS_MODEL = "owner"
 
 DEFAULT_GATE_TIMEOUT = 900.0
 DEFAULT_GATE_INTERVAL = 2.0
+
+# How long an `owner:`-liveness card stays on the board when the caller sets no
+# `--expires-at`. `attention-ask.py`'s `DEFAULT_ASK_TTL_HOURS` is the precedent: a question
+# the operator answers after the poster has gone. The `gate` arm does NOT use this — it
+# bounds its own card by its wait window, the deadline it actually observes.
+DEFAULT_ASK_TTL_HOURS = 24.0
 
 # Hosts for which "no token" is a safe, intended configuration. Anything else is remote by
 # construction and must be authenticated — see the module docstring.
@@ -175,6 +217,65 @@ def build_options(labels, recommended):
     return options
 
 
+def _validated_expires_at(raw):
+    """The caller's `--expires-at`, refused when it cannot be a usable deadline.
+
+    ⚠️ Mirrors `attention-ask.py`'s validator rather than re-deriving the rule, so the two
+    arms cannot drift on what counts as a deadline. The already-past case is the one that
+    matters: the store removes an expired item on its first read, so a past deadline
+    recreates this change's own defect — a card accepted with a 201 and gone before
+    anyone saw it.
+    """
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"--expires-at {raw!r} is not an RFC3339 timestamp.") from None
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"--expires-at {raw!r} carries no timezone offset, so it cannot be "
+            f"compared against the store's clock."
+        )
+    if parsed <= datetime.now(timezone.utc):
+        raise ValueError(
+            f"--expires-at {raw!r} is already in the past, so the store would "
+            f"remove the card on its first read."
+        )
+    return raw
+
+
+def _ask_ttl_seconds():
+    """The ask arm's default TTL in seconds, overridable from the environment."""
+    raw = os.environ.get("POD_ATTENTION_ASK_TTL_HOURS", "")
+    if not raw:
+        return DEFAULT_ASK_TTL_HOURS * 3600.0
+    try:
+        hours = float(raw)
+    except ValueError:
+        raise ValueError(f"POD_ATTENTION_ASK_TTL_HOURS {raw!r} is not a number.") from None
+    if not 0 < hours < float("inf"):
+        raise ValueError(
+            f"POD_ATTENTION_ASK_TTL_HOURS {raw!r} must be a positive, finite number of "
+            f"hours; a non-positive value yields an `expires_at` of now, which the store "
+            f"removes on its first read."
+        )
+    return hours * 3600.0
+
+
+def _expires_at_or_default(args, default_seconds):
+    """The `expires_at` to send: the caller's, or now + `default_seconds`.
+
+    ⚠️ **Every posting arm must call this**, because `owner:` cards are exempt from the
+    store's liveness prune and this is the only bound they get. The two arms pass
+    different windows on purpose: `gate` passes its own `--timeout`, so the card lives
+    exactly as long as the pod is willing to wait for it, and `ask` passes a TTL, because
+    that arm returns immediately and the operator answers later.
+    """
+    raw = getattr(args, "expires_at", "") or ""
+    if raw:
+        return _validated_expires_at(raw)
+    return (datetime.now(timezone.utc) + timedelta(seconds=default_seconds)).isoformat()
+
+
 def post_item(
     mechanism,
     producer_id,
@@ -183,6 +284,7 @@ def post_item(
     options=None,
     interrupt_class="pick",
     liveness_ref="",
+    expires_at="",
 ):
     """POST one item and return the store's response.
 
@@ -193,7 +295,15 @@ def post_item(
     The store prunes an open item whose producer is not live and that *asked* rather than
     reported (`attention-store-impl.go` `classifyForRead`: `isAsked` + `!live` →
     `remove`). So a card posted by a producer the store cannot see live is created with a
-    201 and removed on the very first board read — it never reaches the operator.
+    201 and removed on the very first board read — it never reaches the operator. That is
+    why the default is `owner:`; see `LIVENESS_MODEL`.
+
+    ⚠️ **`expires_at` is the other half of that choice, and it is not optional.** `owner:`
+    is exempt from the liveness prune, so `expires_at` is the ONLY thing that ever removes
+    the card. An absent field means no deadline, and the store's `isExpired` then never
+    fires — the card is permanent. Every caller passes `_expires_at_or_default(...)`; a
+    caller that passes nothing gets an unbounded card, which is the state the pairing
+    exists to prevent.
     """
     body = {
         "producer_id": producer_id,
@@ -204,6 +314,8 @@ def post_item(
         "payload": payload,
         "answer_mechanism": mechanism,
     }
+    if expires_at:
+        body["expires_at"] = expires_at
     if options:
         body["options"] = options
     req = urllib.request.Request(
@@ -339,6 +451,7 @@ def cmd_ask(args, out=sys.stdout):
         return 2
     try:
         options = build_options(args.option, args.recommend)
+        expires_at = _expires_at_or_default(args, _ask_ttl_seconds())
     except ValueError as err:
         print(f"REFUSED: {err}", file=out)
         return 2
@@ -351,6 +464,7 @@ def cmd_ask(args, out=sys.stdout):
             options,
             args.interrupt_class,
             args.liveness_ref,
+            expires_at,
         )
     except urllib.error.HTTPError as err:
         # The store's own explanation is carried through: a bare "returned 400" names no
@@ -378,12 +492,18 @@ def cmd_gate(args, out=sys.stdout, sleep=time.sleep, clock=time.monotonic):
     if producer_id is None:
         return 2
     try:
+        expires_at = _expires_at_or_default(args, args.timeout)
+    except ValueError as err:
+        print(f"REFUSED: {err}", file=out)
+        return 2
+    try:
         item = post_item(
             "permission",
             producer_id,
             args.dedup_key,
             args.payload,
             liveness_ref=args.liveness_ref,
+            expires_at=expires_at,
         )
     except urllib.error.HTTPError as err:
         # The store's own explanation is carried through: a bare "returned 400" names no
@@ -431,26 +551,32 @@ def main(argv=None):
     ask.add_argument("--recommend", default="")
     ask.add_argument("--producer-id", default="")
     ask.add_argument("--interrupt-class", default="pick")
-    # How the store is to see this producer as live. Defaults to `session:<producer-id>`,
-    # which is right for anything the local session registry can resolve. A pod that
-    # cannot be resolved that way must declare its own — `heartbeat:<path>` — or its card
-    # is pruned on the first read.
+    # How the store is to see this producer as live. Defaults to `owner:<producer-id>`
+    # (see `LIVENESS_MODEL`) because the pod cannot be resolved against the store's
+    # host-local registry — a `session:` ref has the card pruned on its first read. A
+    # caller that knows better may still pass an explicit ref.
     #
-    # ⚠️ `session:` is kept HERE while `attention-ask.py` moved its default to `owner:`,
-    # and the difference is the producer rather than an oversight — do not "fix" the
-    # inconsistency without reading this. A pod's `gate` blocks on its own item, so the
-    # pod is alive for as long as the gate matters and its exit makes the gate moot: that
-    # is exactly what `session:` expresses, and it is why a pod needs no `owner:` model.
-    # `attention-ask.py` posts cards the OPERATOR answers after the asking session has
-    # ended its turn, which is what `owner:` expresses. Swapping this default would make
-    # a dead pod's gate outlive the pod for no one's benefit.
+    # ⚠️ **This default is a REVERSAL, and the reasoning it replaces is kept here because
+    # it was plausible and wrong.** It read: "`session:` is kept HERE while
+    # `attention-ask.py` moved its default to `owner:` — a pod's `gate` blocks on its own
+    # item, so the pod is alive for as long as the gate matters and its exit makes the gate
+    # moot: that is exactly what `session:` expresses." Every clause of that is true about
+    # the pod and false about the store: the store never observes the pod, so it can never
+    # agree the pod is alive, and the card is pruned while the gate still matters. The
+    # premise required the store to see the pod; it cannot. See `LIVENESS_MODEL`.
     ask.add_argument("--liveness-ref", default="")
+    # The bound on the card. `owner:` is exempt from the store's liveness prune, so this is
+    # the only thing that ever removes it — see `_expires_at_or_default`.
+    ask.add_argument("--expires-at", default="")
 
     gate = sub.add_parser("gate")
     gate.add_argument("--dedup-key", required=True)
     gate.add_argument("--payload", required=True)
     gate.add_argument("--producer-id", default="")
     gate.add_argument("--liveness-ref", default="")
+    # The bound on the card. Left empty, the gate arm bounds it by its own `--timeout`, so
+    # the card lives exactly as long as the pod is willing to wait for it.
+    gate.add_argument("--expires-at", default="")
     gate.add_argument("--timeout", type=float, default=DEFAULT_GATE_TIMEOUT)
     gate.add_argument("--interval", type=float, default=DEFAULT_GATE_INTERVAL)
 
