@@ -2583,7 +2583,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const stopped = await stopWorkerOnController({
         endpoint: controller.url,
         workerId: agent.workerId,
-        token: target.token,
+        token: controller.token,
         messageId: randomUUID(),
         mint: () => randomUUID(),
       })
