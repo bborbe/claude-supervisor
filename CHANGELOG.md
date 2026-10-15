@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.155.1
 
 - fix: a spawn for a task that already has a worker now reaps that worker and retries the create once, instead of failing outright. ⚠️ The controller refuses a repeat `create` for a task that already has a worker, and its refusal names that worker — but a backend failure reaches this side as a bare `TASK_STATE_FAILED` with **no detail attached**, so the refusal is indistinguishable from a transport failure by its text and the id it names never arrives. `list` is what tells the two apart: it is the only client-side read that answers whether this task already has a worker, and when it does, that worker is what the create was refused over. ⚠️ **`none` is not a failure** — a create that failed for its own reasons (an unreachable controller, a rejected token) has no worker to reap, and the ORIGINAL error is reported rather than a reaping failure invented for it. ⚠️ The retry is **bounded to one**: a second create for a task whose worker was just stopped either succeeds or fails for a reason a third attempt cannot fix, and an unbounded loop would mint and reap workers forever against a controller that keeps refusing. New `reapExistingWorkerForTask` in `server/a2a-spawn.mjs`, called from `spawnA2AWorker`. Change set: `server/a2a-spawn.mjs`, `server/supervisor.mjs`, `server/a2a-spawn.test.mjs`, `CHANGELOG.md`.
 
