@@ -1434,7 +1434,12 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   // ⚠️ AND THE ORIGINAL ERROR IS WHAT IS REPORTED WHEN NOTHING MATCHED. A create that failed for
   // its own reasons — an unreachable controller, a rejected token — has no worker to reap, and
   // reporting a reaping failure there would hide the real one.
-  if (created.error) {
+  // ⚠️ ONLY A CALL THE CONTROLLER ANSWERED AND REFUSED IS RECOVERED. A create that failed before
+  // reaching it — an argument refusal here, a transport failure — carries no `controllerFailed`,
+  // and running the reap for one would stop a healthy worker for a task whose create failed for
+  // an unrelated reason. The refusal is the only failure the reap can actually resolve, so it is
+  // the only one it is allowed to act on.
+  if (created.error && created.controllerFailed) {
     const refusal = created.error
     const reaped = await reapExistingWorkerForTask({
       endpoint: controller.url,
@@ -1443,7 +1448,13 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       messageId: randomUUID(),
       mint: () => randomUUID(),
     })
-    if (reaped.error) return { error: reaped.error }
+    if (reaped.error) {
+      // ⚠️ THE ORIGINAL ERROR STAYS PRIMARY. A failed `list` does not establish that a worker
+      // existed — the create may have failed for its own reasons — so reporting the reaping
+      // failure alone would replace a real diagnosis with an invented one. It is carried as
+      // context instead, because it is what stopped the recovery from being attempted.
+      return { error: `${refusal} ⚠️ The recovery could not run: ${reaped.error}` }
+    }
     if (reaped.none) return { error: refusal }
 
     created = await createOnce()
@@ -1455,6 +1466,11 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       }
     }
   }
+
+  // ⚠️ A FAILURE THAT NEVER REACHED THE CONTROLLER HAS NO RECOVERY TO ATTEMPT. Returning here
+  // rather than falling through is load-bearing: the card read below dereferences
+  // `created.worker`, so a create error carried past this point would throw instead of reporting.
+  if (created.error) return { error: created.error }
 
   // ⚠️ THE CARD IS READ BEFORE ANYTHING IS RECORDED. It is what proves the URL the controller
   // returned actually answers, and it is where the turn's endpoint comes from — rather than

@@ -435,7 +435,9 @@ export async function createWorkerOnController({ endpoint, task, token, messageI
   }
 
   const parsed = a2aControlResponseFor(body, { sentOperation: 'create' })
-  if (parsed.error) return { error: parsed.error }
+  // `controllerFailed` is carried through, not swallowed: the caller's recovery applies only to a
+  // call the controller actually answered and refused, never to one that never arrived.
+  if (parsed.error) return { error: parsed.error, controllerFailed: parsed.controllerFailed === true }
 
   const created = parsed.response?.create
   const worker = created?.worker
@@ -886,7 +888,10 @@ export async function reapExistingWorkerForTask({
 } = {}) {
   const listed = await listWorkers({ endpoint, token, messageId, mint, fetchImpl })
   if (listed.error) {
-    return { error: `the workers could not be listed, so the one this task already has could not be reaped: ${listed.error}` }
+    // ⚠️ THIS DOES NOT CLAIM A WORKER EXISTS. A failed list establishes nothing about whether
+    // this task has one, so the text says what was lost — the question went unanswered — rather
+    // than asserting a worker that was never observed.
+    return { error: `the workers could not be listed, so whether this task already has one could not be determined: ${listed.error}` }
   }
 
   const existing = (listed.workers ?? []).find((w) => w?.task === task)

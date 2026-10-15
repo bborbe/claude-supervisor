@@ -422,6 +422,11 @@ export function a2aControlResponseFor(body, { sentOperation } = {}) {
 
   if (state === A2A_STATE_FAILED) {
     return {
+      // ⚠️ THE FLAG IS WHAT LETS A CALLER BRANCH ON THIS WITHOUT PARSING THE MESSAGE. A call that
+      // reached the controller and was refused is a different fact from one that never arrived,
+      // and the supervisor's recovery keys on exactly that difference — matching on the error
+      // text instead would break the first time this sentence is reworded.
+      controllerFailed: true,
       error:
         'the controller reported the control call FAILED. It returns no detail on this path — the ' +
         'error is logged controller-side and never sent — so this status is all the caller gets. ' +
