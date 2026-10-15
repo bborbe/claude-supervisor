@@ -287,6 +287,22 @@ export const config = Object.freeze({
   // The caller treats `null` as "no self-stamp", which is the honest answer.
   sessionId: ENV.CLAUDE_CODE_SESSION_ID || null,
 
+  // The mode the SERVER THAT SPAWNED THIS SESSION declared for it — `headless`, `interactive`,
+  // or absent when no server spawned it (the operator's own session, a session opened by hand,
+  // a path-B resume that goes through no server).
+  //
+  // ⚠️ Read here rather than in `heartbeat.mjs`, which owns the stamp and must not consult
+  // ambient process state: this module owns the server's whole environment surface, so a second
+  // reader of `process.env` is what `config.test.mjs` fails the build on.
+  //
+  // ⚠️ The value is the spawn's OWN handover (`workerEnvFor` in `spawn-mode.mjs` sets
+  // `SUPERVISOR_WORKER_MODE` on both the SDK and the tab path), inherited by this server because
+  // the worker's session starts it. So a server running inside a headless worker knows that fact
+  // locally — no ledger, no registry and no store read, none of which may sit on the liveness
+  // path. `heartbeat.mjs` uses it to decide whether this server stamps the session at all; see
+  // `selfStampRefusal` there for the defect that makes it stand down.
+  workerMode: ENV.SUPERVISOR_WORKER_MODE || null,
+
   // Raw and deliberately unvalidated here: the allowed-mode list and the warning that
   // names a bad value both belong to the server's own logger, not to this module.
   permissionMode: ENV.SUPERVISOR_PERMISSION_MODE || null,

@@ -75,6 +75,9 @@ test('the config object is a frozen, complete surface', () => {
     'heartbeatDir',
     'heartbeatStateDir',
     'sessionId',
+    // ⚠️ The spawn's own handover, read here so `heartbeat.mjs` need not consult the environment:
+    // a server running inside a headless worker stands its self-stamp down on this value.
+    'workerMode',
   ]) {
     assert.ok(key in config, `config.${key} is missing — the surface must be enumerable`)
   }

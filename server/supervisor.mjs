@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord, startSelfStamp } from './heartbeat.mjs'
+import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
@@ -103,7 +103,18 @@ const heartbeat = {
   // deliberately omitted, and the activity starts at `idle`.
   startSelf(sessionId) {
     this.stopSelf()
+    // ⚠️ Standing down is LOGGED rather than silent, because "this session has no self-stamp" is
+    // otherwise indistinguishable from a stamp that failed to write — and only one of those is
+    // intended. `config.workerMode` is the spawn's own handover, so a server running inside a
+    // headless worker knows the stamp belongs to the server that spawned that worker; see
+    // `selfStampRefusal` for the measured defect this removes.
+    const refusal = selfStampRefusal({ workerMode: config.workerMode })
+    if (refusal) {
+      log(`no self-stamp for ${sessionId ?? 'this server'}: ${refusal}`)
+      return false
+    }
     this.self = startSelfStamp(sessionId, {
+      workerMode: config.workerMode,
       // Same reasoning as `stamp` above: the session still runs, and a manager's verdict
       // degrades to "could not tell" rather than the server failing to start.
       onError: (error) => log(`WARNING: cannot stamp own heartbeat for ${sessionId}: ${error.message}`),
