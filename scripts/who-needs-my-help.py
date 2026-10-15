@@ -806,7 +806,11 @@ def render(sweep):
     for r in sorted(sweep["managers"], key=lambda r: r["name"]):
         out.append(f"  {r['name']}  [{r['pane'] or '?'}]")
         if r.get("next_item"):
-            out.append(f"         next: {r['next_item']}")
+            # Bounded like `wait_reason`'s 120. A task row is short; a goal's
+            # SC/DoD row runs to hundreds of characters, so a manager's block
+            # would otherwise swamp the four-section report it sits in. Applied
+            # at the render, not in `next_item()` — the value stays whole.
+            out.append(f"         next: {r['next_item'][:120]}")
         if r.get("wait"):
             out.append(f"         blocked by: {r['wait']}")
         if r["jump"]:

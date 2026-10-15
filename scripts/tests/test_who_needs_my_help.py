@@ -507,6 +507,19 @@ class ManagerSubjectTest(Base):
         out = h.render(self.fleet.sweep())
         self.assertIn("next: the topic's next open row", self._block("Delta Manager", out))
 
+    def test_a_long_page_row_is_bounded_like_the_blocker_line(self):
+        # A goal's SC/DoD rows run to hundreds of characters; the task rows this
+        # line used to carry did not, so a manager's block would swamp the
+        # four-section report it sits in.
+        self.fleet.task("24 Goals/Long Goal", "# Tasks\n- [ ] " + "x" * 400 + "\n")
+        self.fleet.state("m13", "Long Goal")
+        self.fleet.add("m13", 906, "pick — 1. keep going · 2. stop",
+                       name="Epsilon Manager",
+                       transcript="👤 You: pick — 1. keep going · 2. stop\n")
+        block = self._block("Epsilon Manager", h.render(self.fleet.sweep()))
+        line = [ln for ln in block.splitlines() if ln.strip().startswith("next:")][0]
+        self.assertEqual(len("         next: ") + 120, len(line))
+
     def test_a_worker_is_never_subject_resolved(self):
         # The same state file that resolves for a manager must NOT redirect a
         # worker's next item: a worker is anchored to its task, and a subject read
