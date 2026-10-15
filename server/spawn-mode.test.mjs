@@ -442,10 +442,32 @@ test('the published tool schema lists exactly the spawn targets, so the two cann
   // at import, so it cannot be imported behaviourally. Same remedy, same reason, as
   // `cluster-spawn.test.mjs` and `attention-poll.test.mjs`.
   const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
-  // Anchored on the `target:` property, not a bare `enum: [` — the file carries four enums
-  // (`role`, the target, and two `behavior` pairs), so an unanchored match silently reads the
-  // wrong one and passes while asserting nothing about the surface a caller sees.
-  const enumMatch = src.match(/target: \{\s*type: 'string',(?:[^\n]*\n\s*)*?enum: \[([^\]]+)\]/)
+  // Two steps, and the split is what keeps this from failing for the wrong reason.
+  //
+  // 1. Slice out the `target:` PROPERTY OBJECT, brace-balanced, so the `enum` is read from the
+  //    right place. The file carries four enums (`role`, the target, and two `behavior` pairs),
+  //    so an unanchored `enum: [` silently reads the wrong one and passes while asserting nothing
+  //    about the surface a caller sees — which is how this test first shipped broken.
+  const open = src.indexOf('target: {')
+  assert.ok(open > 0, 'the target property must exist in the tool schema')
+  let depth = 0
+  let end = -1
+  for (let i = src.indexOf('{', open); i < src.length; i += 1) {
+    if (src[i] === '{') depth += 1
+    else if (src[i] === '}') {
+      depth -= 1
+      if (depth === 0) { end = i; break }
+    }
+  }
+  assert.ok(end > open, 'the target property object must be brace-balanced')
+  const targetBlock = src.slice(open, end)
+  // 2. Read the enum from inside it WITHOUT coupling to the surrounding property order. An
+  //    earlier version required `type: 'string',` to be the immediately-following property and
+  //    tolerated only intervening comment LINES — so adding a `required:`, reordering the keys,
+  //    or moving a comment would have made the match null and failed with "the target enum must
+  //    exist", a message that reads as "the schema was deleted" rather than "the test is brittle".
+  //    Matching the literal only is the contract this assertion actually needs.
+  const enumMatch = targetBlock.match(/enum: \[([^\]]+)\]/)
   assert.ok(enumMatch, 'the target enum must exist in the tool schema')
   const published = enumMatch[1].split(',').map((v) => v.trim().replace(/^['"]|['"]$/g, ''))
   assert.deepEqual(
