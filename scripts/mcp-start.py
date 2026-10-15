@@ -105,12 +105,12 @@ def find_bun(env, which=shutil.which):
 # ⚠️ ONE A2A TOKEN PER SPAWN TARGET, because the two controllers are separate deployments — the
 # docker controller runs on this Mac, the k8s controller in nuke dev. One shared variable would
 # force both deployments to carry the same secret, a constraint the single-token shape imposed
-# silently. The docker controller's secret does not exist yet (that controller is not deployed),
-# so its entry is absent and a `docker` spawn refuses by NAME until it is added here — which is
-# the intended failure, not a gap.
+# silently. Each entry names the key its own controller was started with, so a target with no
+# entry here refuses by NAME — which is the intended failure, not a gap.
 TOKEN_KEYS = (
     ("INTERACTIVE_AUTH_TOKEN", "VO0Gmw"),
     ("SUPERVISOR_A2A_TOKEN_K8S", "lO4j5q"),
+    ("SUPERVISOR_A2A_TOKEN_DOCKER", "pLv8Mw"),
 )
 
 
