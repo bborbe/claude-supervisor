@@ -66,6 +66,7 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |
+| agent `worker-drive-reader` | the read half of a worker-drive round — the session diagnosis and the drive table, computed in a sub-agent so the reading instructions never re-inject on every run |
 | `/supervisor:worker-restart` | restart ONE named worker in one verb — kill, resume, and tell it what changed only when that is safe |
 | `/supervisor:open` | resolve a task, goal or topic by name, then jump to its live session, resume its recorded one, or spawn a new one (manager-only; needs `vault-cli`) |
 | `/supervisor:ready` | ready ONE named task to the spawn bar — audit → repair → re-audit inside a sub-agent — then open it or escalate naming the gap (cross-tier; needs `vault-cli`) |
