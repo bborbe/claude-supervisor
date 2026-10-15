@@ -22,7 +22,7 @@ reintroducing the defect the refusal protects against:
     login shell.
   * a bun that cannot be found is reported on stderr with a non-zero exit, rather than
     leaving the client to report an unexplained closed connection.
-  * both tokens resolve from THEIR OWN TeamVault key. One key resolved into both variables is
+  * each token resolves from ITS OWN TeamVault key. One key resolved into two variables is
     the failure this guards: it reads as configured and fails on one leg only.
   * an UNRESOLVED token degrades — the server still starts. Exiting here would cost the
     session every supervisor tool, not only the two spawn targets that consume a token, so a
@@ -186,7 +186,11 @@ class DeclareTokensTest(unittest.TestCase):
     a launcher that takes the whole fleet down whenever TeamVault blinks.
     """
 
-    VALUES = {"VO0Gmw": "placeholder-cluster-2f9c41", "lO4j5q": "placeholder-a2a-7b3e08"}
+    VALUES = {
+        "VO0Gmw": "placeholder-cluster-2f9c41",
+        "lO4j5q": "placeholder-a2a-k8s-7b3e08",
+        "pLv8Mw": "placeholder-a2a-docker-4d1a92",
+    }
 
     def _lookup(self, failing=(), seen=None):
         def lookup(key, env):
@@ -196,21 +200,30 @@ class DeclareTokensTest(unittest.TestCase):
 
         return lookup
 
-    def test_both_tokens_resolve_from_their_own_key(self):
+    def test_every_token_resolves_from_its_own_key(self):
         env, seen = {}, []
         with contextlib.redirect_stderr(io.StringIO()):
             declared = ms.declare_tokens(env, lookup=self._lookup(seen=seen))
-        self.assertEqual(sorted(seen), ["VO0Gmw", "lO4j5q"])
+        self.assertEqual(sorted(seen), ["VO0Gmw", "lO4j5q", "pLv8Mw"])
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
         # ⚠️ The A2A token is PER TARGET — the docker controller runs on this Mac and the k8s
         # controller in nuke dev, so one shared secret would force both deployments to carry the
-        # same value. Only the k8s entry is configured today; the docker controller is not
-        # deployed yet, so its entry is absent and a `docker` spawn refuses by name.
+        # same value. Each target carries the entry its own controller was started with, and a
+        # target with no entry refuses by name.
         self.assertEqual(env["SUPERVISOR_A2A_TOKEN_K8S"], self.VALUES["lO4j5q"])
-        # Distinctness: one key resolved into both variables is the failure this guards, and it
-        # is invisible unless the two values are compared.
+        self.assertEqual(env["SUPERVISOR_A2A_TOKEN_DOCKER"], self.VALUES["pLv8Mw"])
+        # Distinctness: one key resolved into several variables is the failure this guards, and
+        # it is invisible unless the values are compared.
         self.assertNotEqual(env["INTERACTIVE_AUTH_TOKEN"], env["SUPERVISOR_A2A_TOKEN_K8S"])
-        self.assertEqual(sorted(declared), ["INTERACTIVE_AUTH_TOKEN", "SUPERVISOR_A2A_TOKEN_K8S"])
+        self.assertNotEqual(env["SUPERVISOR_A2A_TOKEN_K8S"], env["SUPERVISOR_A2A_TOKEN_DOCKER"])
+        self.assertEqual(
+            sorted(declared),
+            [
+                "INTERACTIVE_AUTH_TOKEN",
+                "SUPERVISOR_A2A_TOKEN_DOCKER",
+                "SUPERVISOR_A2A_TOKEN_K8S",
+            ],
+        )
 
     def test_an_explicit_value_wins_and_its_key_is_not_consulted(self):
         """config.mjs reads env-first, so a lookup here would spend a vault call to overwrite
@@ -219,15 +232,18 @@ class DeclareTokensTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             ms.declare_tokens(env, lookup=self._lookup(seen=seen))
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], "override-9a1c")
-        self.assertEqual(seen, ["lO4j5q"])
+        self.assertEqual(seen, ["lO4j5q", "pLv8Mw"])
 
     def test_an_unresolved_token_degrades_rather_than_raising(self):
         env, stderr = {}, io.StringIO()
         with contextlib.redirect_stderr(stderr):
             declared = ms.declare_tokens(env, lookup=self._lookup(failing=["lO4j5q"]))
-        self.assertEqual(declared, ["INTERACTIVE_AUTH_TOKEN"])
+        # The FAILING target is absent and every other target still resolves — that split is
+        # the degradation the module docstring promises, not a whole-launcher failure.
+        self.assertEqual(declared, ["INTERACTIVE_AUTH_TOKEN", "SUPERVISOR_A2A_TOKEN_DOCKER"])
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
         self.assertNotIn("SUPERVISOR_A2A_TOKEN_K8S", env)
+        self.assertEqual(env["SUPERVISOR_A2A_TOKEN_DOCKER"], self.VALUES["pLv8Mw"])
         self.assertIn("lO4j5q", stderr.getvalue())
 
     def test_a_degraded_token_never_reaches_stderr(self):
@@ -236,10 +252,12 @@ class DeclareTokensTest(unittest.TestCase):
             ms.declare_tokens({}, lookup=self._lookup(failing=["VO0Gmw"]))
         self.assertNotIn(self.VALUES["VO0Gmw"], stderr.getvalue())
 
-    def test_both_unresolved_still_returns_and_declares_nothing(self):
+    def test_all_unresolved_still_returns_and_declares_nothing(self):
         env = {}
         with contextlib.redirect_stderr(io.StringIO()):
-            declared = ms.declare_tokens(env, lookup=self._lookup(failing=["VO0Gmw", "lO4j5q"]))
+            declared = ms.declare_tokens(
+                env, lookup=self._lookup(failing=["VO0Gmw", "lO4j5q", "pLv8Mw"])
+            )
         self.assertEqual(declared, [])
         self.assertEqual(env, {})
 
