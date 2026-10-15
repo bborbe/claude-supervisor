@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.153.0
 
 - fix: **the `## Unreleased` section is restored after a merge folded its entry into the already-cut `v0.152.4`.** PR #331 merged at 16:34 after the release bot had cut `v0.152.4` at 16:03 from a master whose `## Unreleased` held only PR #332's fix; GitHub merged the branch into master-at-`f9029744`, and the three-way merge placed the docker bullet **inside** the released section while dropping the `## Unreleased` heading. ⚠️ **The tag settles which way to repair, not the merge:** `git tag --contains 0964d19c` returns nothing while `git tag --contains f9029744` returns `v0.152.4`, so the work is in no tag and the bullet moves back out. The consequence of leaving it was concrete rather than cosmetic — with no `## Unreleased` left, the release watcher had nothing to cut, so the change would never have been released at all. Change set: `CHANGELOG.md`.
 
