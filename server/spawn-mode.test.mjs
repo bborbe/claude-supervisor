@@ -402,7 +402,6 @@ test('a spawn with no target is local', () => {
 })
 
 test('an explicit target is taken from the argument', () => {
-  assert.deepEqual(resolveSpawnTarget({ target: 'cluster' }), { target: 'cluster', source: 'argument' })
   assert.deepEqual(resolveSpawnTarget({ target: 'local' }), { target: 'local', source: 'argument' })
   // The A2A worker-controller targets. Listing them here is what makes the CALL well-formed;
   // whether the spawn can be CARRIED OUT is `IMPLEMENTED_SPAWN_TARGETS`' question, asserted
@@ -410,6 +409,80 @@ test('an explicit target is taken from the argument', () => {
   // spawn target" for a target that is one, which names the wrong problem.
   assert.deepEqual(resolveSpawnTarget({ target: 'docker' }), { target: 'docker', source: 'argument' })
   assert.deepEqual(resolveSpawnTarget({ target: 'k8s' }), { target: 'k8s', source: 'argument' })
+})
+
+test('the retired `cluster` target is refused by name, and the refusal lists the survivors', () => {
+  // ⚠️ The refusal's TEXT is asserted here rather than at a live call site, and that is a
+  // consequence of retiring the target rather than a shortcut: `cluster` is gone from the
+  // `spawn_agent` tool schema's enum too, so a live call is rejected CLIENT-SIDE by Claude Code
+  // and never reaches this server — there is no server-side refusal string left to read from a
+  // live probe. This assertion is what carries the wording.
+  //
+  // ⚠️ A bare `assert.ok(error)` does NOT satisfy this. It passes while the message says nothing
+  // about `cluster` or about which targets survive, which is exactly the state a botched
+  // retirement produces: the target refuses, but the caller is told nothing actionable. Both
+  // clauses below are load-bearing — the first pins that the rejected VALUE is named, the second
+  // that the caller is pointed at the targets that still work.
+  const { error } = resolveSpawnTarget({ target: 'cluster' })
+  assert.ok(error, 'cluster must be refused once retired')
+  assert.match(error, /"cluster"/, 'the refusal must name the rejected value')
+  assert.match(error, /Valid values: local, docker, k8s/, 'the refusal must list the surviving targets')
+  assert.ok(!/cluster/.test(error.replace(/"cluster"/g, '')), 'cluster must not appear as a valid value')
+})
+
+test('the published tool schema lists exactly the spawn targets, so the two cannot drift', () => {
+  // ⚠️ THIS IS THE DEFECT THE RETIREMENT NEARLY SHIPPED WITH. The `spawn_agent` tool schema
+  // carries its own HARDCODED `enum` — `supervisor.mjs` imports only `A2A_SPAWN_TARGETS`, never
+  // `SPAWN_TARGETS` — so removing `cluster` from the list alone would have left the published
+  // surface still OFFERING a target the server refuses, while every other test in this file
+  // stayed green. A caller reading the schema is the population that matters and nothing else
+  // in the suite reads it.
+  //
+  // Pinned by reading supervisor.mjs's text rather than importing it: it starts an MCP server
+  // at import, so it cannot be imported behaviourally. Same remedy, same reason, as
+  // `cluster-spawn.test.mjs` and `attention-poll.test.mjs`.
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  // Two steps, and the split is what keeps this from failing for the wrong reason.
+  //
+  // 1. Slice out the `target:` PROPERTY OBJECT, brace-balanced, so the `enum` is read from the
+  //    right place. The file carries four enums (`role`, the target, and two `behavior` pairs),
+  //    so an unanchored `enum: [` silently reads the wrong one and passes while asserting nothing
+  //    about the surface a caller sees — which is how this test first shipped broken.
+  const open = src.indexOf('target: {')
+  assert.ok(open > 0, 'the target property must exist in the tool schema')
+  let depth = 0
+  let end = -1
+  for (let i = src.indexOf('{', open); i < src.length; i += 1) {
+    if (src[i] === '{') depth += 1
+    else if (src[i] === '}') {
+      depth -= 1
+      if (depth === 0) { end = i; break }
+    }
+  }
+  assert.ok(end > open, 'the target property object must be brace-balanced')
+  const targetBlock = src.slice(open, end)
+  // 2. Read the enum from inside it WITHOUT coupling to the surrounding property order. An
+  //    earlier version required `type: 'string',` to be the immediately-following property and
+  //    tolerated only intervening comment LINES — so adding a `required:`, reordering the keys,
+  //    or moving a comment would have made the match null and failed with "the target enum must
+  //    exist", a message that reads as "the schema was deleted" rather than "the test is brittle".
+  //    Matching the literal only is the contract this assertion actually needs.
+  const enumMatch = targetBlock.match(/enum: \[([^\]]+)\]/)
+  assert.ok(enumMatch, 'the target enum must exist in the tool schema')
+  const published = enumMatch[1].split(',').map((v) => v.trim().replace(/^['"]|['"]$/g, ''))
+  assert.deepEqual(
+    published,
+    SPAWN_TARGETS,
+    'the tool schema enum and SPAWN_TARGETS have drifted — a caller can ask for a target the server refuses',
+  )
+  // And the retired target must not survive in the description either, which is the other half
+  // of the surface a caller reads. `local` appears there legitimately (it is the default), so
+  // this asserts on the retired name alone.
+  const descStart = src.indexOf("'WHERE the worker is created.")
+  assert.ok(descStart > 0, 'the target description must exist')
+  const desc = src.slice(descStart, src.indexOf("',\n", descStart))
+  assert.match(desc, /`cluster` was RETIRED/, 'the description must record the retirement')
+  assert.ok(!/target: "cluster"` (starts|is|requires)/.test(desc), 'the description must not present cluster as usable')
 })
 
 test('cluster is NOT a SPAWN_MODES value', () => {
@@ -420,7 +493,11 @@ test('cluster is NOT a SPAWN_MODES value', () => {
   // not in that list, so a config of `cluster` is refused loudly today; this test is what
   // keeps that true after someone "helpfully" adds the third mode.
   assert.ok(!SPAWN_MODES.includes('cluster'))
-  assert.ok(SPAWN_TARGETS.includes('cluster'))
+  // ⚠️ `cluster` is ALSO no longer a spawn target as of 2026-10-15 — retired, because the
+  // deferral that held it (the goal's `# Non-goals`: *"retirement is a follow-up once SC3 is
+  // proven"*) expired when SC3 was met on 2026-10-14. Asserted here so a later reader cannot
+  // re-add it to the target list on the strength of the SPAWN_MODES argument alone.
+  assert.ok(!SPAWN_TARGETS.includes('cluster'))
   assert.match(resolveSpawnMode({ env: 'cluster' }).error, /not a spawn mode/)
   assert.match(resolveSpawnMode({ file: { spawn: { mode: 'cluster' } } }).error, /not a spawn mode/)
 })
@@ -451,9 +528,9 @@ test('an unknown target refuses rather than falling back to local', () => {
 
 test('a listed target with no client refuses rather than falling through to local', () => {
   // ⚠️ The load-bearing guard, and the reason `IMPLEMENTED_SPAWN_TARGETS` exists at all.
-  // `supervisor.mjs` dispatches `cluster` and then falls through to the LOCAL path for
-  // everything else — so a target present in `SPAWN_TARGETS` with no dispatch branch of its own
-  // would open an ordinary local worker and report success. A `docker` call answered by a local
+  // `supervisor.mjs` dispatches each target with a client and then falls through to the LOCAL
+  // path for everything else — so a target present in `SPAWN_TARGETS` with no dispatch branch of
+  // its own would open an ordinary local worker and report success. A `docker` call answered by a local
   // tab is precisely the "looks exactly like a working call" failure this module refuses an
   // UNKNOWN target to avoid; this asserts the same refusal for a KNOWN one.
   for (const t of SPAWN_TARGETS) {
