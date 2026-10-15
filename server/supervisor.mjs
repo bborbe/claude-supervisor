@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, reapExistingWorkerForTask, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
@@ -1394,24 +1394,67 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   // `a2a.captureDir` in the supervisor config. Off by default — nothing is written otherwise. The
   // body carries no credential (the token rides in a header the hook is never given).
   const captureDir = config.configFileContents?.a2a?.captureDir
-  const created = await createWorkerOnController({
-    endpoint: controller.url,
-    task,
-    token: controller.token,
-    messageId: randomUUID(),
-    mint: () => randomUUID(),
-    capture: captureDir
-      ? ({ url, body }) => {
-          mkdirSync(captureDir, { recursive: true })
-          const at = new Date().toISOString()
-          writeFileSync(
-            join(captureDir, `${at.replace(/[:.]/g, '-')}-${target}-create.json`),
-            `${JSON.stringify({ at, target, task, url, body }, null, 2)}\n`,
-          )
-        }
-      : undefined,
-  })
-  if (created.error) return { error: created.error }
+  const capture = captureDir
+    ? ({ url, body }) => {
+        mkdirSync(captureDir, { recursive: true })
+        const at = new Date().toISOString()
+        writeFileSync(
+          join(captureDir, `${at.replace(/[:.]/g, '-')}-${target}-create.json`),
+          `${JSON.stringify({ at, target, task, url, body }, null, 2)}\n`,
+        )
+      }
+    : undefined
+
+  // A fresh `messageId` and `contextId` per attempt: a retry is a NEW turn on the controller's
+  // conversation, and reusing the first attempt's ids would make it read as a duplicate of the
+  // call that just failed.
+  const createOnce = () =>
+    createWorkerOnController({
+      endpoint: controller.url,
+      task,
+      token: controller.token,
+      messageId: randomUUID(),
+      mint: () => randomUUID(),
+      capture,
+    })
+
+  let created = await createOnce()
+
+  // ⚠️ A FAILED CREATE MAY HAVE A WORKER BEHIND IT, AND THE ERROR DOES NOT SAY SO. The controller
+  // refuses a repeat create for a task that already has a worker, but a backend failure reaches
+  // here as a bare `TASK_STATE_FAILED` with no detail attached — so the refusal cannot be told from
+  // a transport failure by its text, and the worker id it names never arrives. `list` is what tells
+  // the two apart: it is the only client-side read that answers whether this task already has a
+  // worker, and when it does, that worker is what the create was refused over.
+  //
+  // ⚠️ THE RETRY IS BOUNDED TO ONE. A second create for a task whose worker was just stopped either
+  // succeeds or fails for a reason a third attempt cannot fix, and an unbounded loop here would
+  // mint and reap workers forever against a controller that keeps refusing.
+  //
+  // ⚠️ AND THE ORIGINAL ERROR IS WHAT IS REPORTED WHEN NOTHING MATCHED. A create that failed for
+  // its own reasons — an unreachable controller, a rejected token — has no worker to reap, and
+  // reporting a reaping failure there would hide the real one.
+  if (created.error) {
+    const refusal = created.error
+    const reaped = await reapExistingWorkerForTask({
+      endpoint: controller.url,
+      task,
+      token: controller.token,
+      messageId: randomUUID(),
+      mint: () => randomUUID(),
+    })
+    if (reaped.error) return { error: reaped.error }
+    if (reaped.none) return { error: refusal }
+
+    created = await createOnce()
+    if (created.error) {
+      return {
+        error:
+          `worker ${reaped.stoppedWorkerId} already served task ${JSON.stringify(task)} and was ` +
+          `stopped, but the create that followed it also failed: ${created.error}`,
+      }
+    }
+  }
 
   // ⚠️ THE CARD IS READ BEFORE ANYTHING IS RECORDED. It is what proves the URL the controller
   // returned actually answers, and it is where the turn's endpoint comes from — rather than

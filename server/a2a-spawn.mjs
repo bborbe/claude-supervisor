@@ -858,6 +858,58 @@ export async function listWorkersOnController({ endpoint, token, messageId, cont
   return a2aWorkerList(parsed.response)
 }
 
+// Stop the worker a failed `create` was refused over — `{ stoppedWorkerId }`, `{ none: true }`, or
+// `{ error }`.
+//
+// ⚠️ THE ID IS NOT IN THE ERROR, WHICH IS WHY THIS EXISTS. The controller refuses a repeat create
+// for a task that already has a worker, and its refusal names that worker — but a backend failure
+// reaches this side as a bare `TASK_STATE_FAILED` with no detail attached, so neither the refusal
+// nor the id it carries is legible here. `list` is the only client-side read that answers the
+// question the error cannot: does this task already have a worker? When it does, that worker is
+// what the create was refused over.
+//
+// ⚠️ `{ none: true }` IS NOT A FAILURE. A create can fail for reasons that have nothing to do with
+// a duplicate — an unreachable controller, a rejected token, a refused argument — and in those
+// cases no worker matches the task. Returning `none` rather than an error is what lets the caller
+// report the ORIGINAL failure instead of a reaping failure it invented.
+//
+// `listWorkers` and `stopWorker` are injected, so this is tested without a controller.
+export async function reapExistingWorkerForTask({
+  endpoint,
+  task,
+  token,
+  messageId,
+  mint,
+  fetchImpl = fetch,
+  listWorkers = listWorkersOnController,
+  stopWorker = stopWorkerOnController,
+} = {}) {
+  const listed = await listWorkers({ endpoint, token, messageId, mint, fetchImpl })
+  if (listed.error) {
+    return { error: `the workers could not be listed, so the one this task already has could not be reaped: ${listed.error}` }
+  }
+
+  const existing = (listed.workers ?? []).find((w) => w?.task === task)
+  if (!existing) return { none: true }
+
+  const stopped = await stopWorker({
+    endpoint,
+    workerId: existing.worker_id,
+    token,
+    messageId,
+    mint,
+    fetchImpl,
+  })
+  if (stopped.error) {
+    return {
+      error:
+        `worker ${existing.worker_id} already serves task ${JSON.stringify(task)} but could not be ` +
+        `stopped: ${stopped.error}`,
+    }
+  }
+  return { stoppedWorkerId: existing.worker_id }
+}
+
 // One liveness poll: list the controller's workers and stamp every ledger session it still runs.
 // Resolves to `{ ok, reason?, stamped }`; `ok: false` means the controller was not read, and the
 // caller must not treat that as "no A2A worker is live" — see the KNOWN LIMIT above.

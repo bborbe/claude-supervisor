@@ -26,6 +26,7 @@ import {
   a2aLiveSessions,
   listWorkersOnController,
   pollA2A,
+  reapExistingWorkerForTask,
   resolveA2AControllerTarget,
   a2aStopCallFor,
   stopWorkerOnController,
@@ -1009,4 +1010,98 @@ test('a reply naming another operation is refused, not read as this stop\'s answ
     fetchImpl: stubFetch(listReply([{ worker_id: 'w-1', state: 'running' }])),
   })
   assert.match(result.error, /does not belong to this call/)
+})
+
+// --- reapExistingWorkerForTask ----------------------------------------------------------------
+//
+// ⚠️ These pin the distinction the caller depends on: a create that failed over a DUPLICATE has a
+// worker to reap, and one that failed for its own reasons does not. Collapsing the two would hide
+// the real error behind an invented one — reporting a reaping failure for a transport failure, or
+// reporting `none` as though it were a success.
+
+const reapArgs = {
+  endpoint: 'http://127.0.0.1:8080/a2a',
+  task: 'task-a',
+  token: TOKEN,
+  messageId: 'm-1',
+  mint: () => 'ctx-1',
+}
+
+test('reapExistingWorkerForTask stops the worker whose task matches', async () => {
+  const stopped = []
+  const result = await reapExistingWorkerForTask({
+    ...reapArgs,
+    listWorkers: async () => ({
+      workers: [{ worker_id: 'w-other', task: 'task-b' }, { worker_id: 'w-1', task: 'task-a' }],
+    }),
+    stopWorker: async ({ workerId }) => {
+      stopped.push(workerId)
+      return { worker: { worker_id: workerId } }
+    },
+  })
+
+  assert.deepEqual(result, { stoppedWorkerId: 'w-1' })
+  assert.deepEqual(stopped, ['w-1'])
+})
+
+test('reapExistingWorkerForTask reports none when no worker serves the task', async () => {
+  let stopCalls = 0
+  const result = await reapExistingWorkerForTask({
+    ...reapArgs,
+    listWorkers: async () => ({ workers: [{ worker_id: 'w-other', task: 'task-b' }] }),
+    stopWorker: async () => {
+      stopCalls += 1
+      return {}
+    },
+  })
+
+  // ⚠️ `none`, NOT an error, and nothing is stopped. The caller reports the ORIGINAL create
+  // failure; a reaping failure invented here would replace a real diagnosis with a wrong one.
+  assert.deepEqual(result, { none: true })
+  assert.equal(stopCalls, 0)
+})
+
+test('reapExistingWorkerForTask reports none for an empty and for a null worker list', async () => {
+  // gob does not transmit zero values, so an empty list round-trips as `null` rather than `[]`.
+  // a2aWorkerList normalises that, and this asserts the caller does not throw on either shape.
+  for (const workers of [[], null]) {
+    const result = await reapExistingWorkerForTask({
+      ...reapArgs,
+      listWorkers: async () => ({ workers }),
+      stopWorker: async () => ({}),
+    })
+    assert.deepEqual(result, { none: true })
+  }
+})
+
+test('reapExistingWorkerForTask refuses rather than reporting success when the stop fails', async () => {
+  const result = await reapExistingWorkerForTask({
+    ...reapArgs,
+    listWorkers: async () => ({ workers: [{ worker_id: 'w-1', task: 'task-a' }] }),
+    stopWorker: async () => ({ error: 'the controller answered HTTP 500' }),
+  })
+
+  // The id is named because a caller reading this has to know WHICH worker is still running.
+  assert.match(result.error, /w-1/)
+  assert.match(result.error, /could not be stopped/)
+})
+
+test('reapExistingWorkerForTask refuses when the list itself fails', async () => {
+  const result = await reapExistingWorkerForTask({
+    ...reapArgs,
+    listWorkers: async () => ({ error: 'the list call could not be made' }),
+    stopWorker: async () => ({}),
+  })
+
+  assert.match(result.error, /could not be listed/)
+})
+
+test('reapExistingWorkerForTask never echoes the token', async () => {
+  const result = await reapExistingWorkerForTask({
+    ...reapArgs,
+    listWorkers: async () => ({ workers: [{ worker_id: 'w-1', task: 'task-a' }] }),
+    stopWorker: async () => ({ worker: { worker_id: 'w-1' } }),
+  })
+
+  assert.equal(JSON.stringify(result).includes(TOKEN), false)
 })
