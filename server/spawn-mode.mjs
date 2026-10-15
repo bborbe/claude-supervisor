@@ -163,7 +163,25 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
 // refuses: a spawn that ignored the caller's target would create the worker somewhere the
 // caller did not ask for, and where a worker was created is otherwise discovered only by
 // noticing it. Falling back to `local` would look exactly like a working call.
-export const SPAWN_TARGETS = ['local', 'cluster', 'docker', 'k8s']
+// ⚠️ `cluster` was RETIRED on 2026-10-15 — the shared long-lived `claude-interactive` pod in
+// nuke dev, reached over `POST /prompt`, is no longer a spawn target. The deferral that held it
+// was the goal's own `# Non-goals` (*"retirement is a follow-up once SC3 is proven"*), and SC3
+// was met 2026-10-14: a per-task k3s pod carried a real vault task to done over two A2A turns on
+// one `contextId`, then `stop` removed the pod and its `Config` CR. So `k8s` is the route to a
+// worker in that cluster now, and `cluster` refuses here like any other unknown value.
+//
+// ⚠️ REMOVING THE ENTRY IS WHAT RETIRES THE TARGET, and the comment two paragraphs down about
+// `IMPLEMENTED_SPAWN_TARGETS` still holds for the general case — but note the direction it does
+// NOT cover: a target removed from HERE is refused by `resolveSpawnTarget` before the dispatch
+// is ever consulted, so it cannot silently reroute to `local`. The silent-fall-through risk is
+// a target present here and absent from the implemented list, never the reverse.
+//
+// ⚠️ The `cluster` dispatch branch in `supervisor.mjs` and the `cluster` entry that used to sit
+// here are deliberately NOT both removed: the branch is left in place, unreachable from this
+// list, because `cluster-spawn.mjs` also backs the `status: 'cluster'` roster value, the
+// cluster arm of `message-channel.mjs` and `cluster-heartbeat.mjs` — all of which still serve
+// workers spawned BEFORE this retirement. Retiring the TARGET does not retire the BACKEND.
+export const SPAWN_TARGETS = ['local', 'docker', 'k8s']
 
 // The target this spawn runs under, plus the source that decided it — or `{error}` for a
 // value that is not a known target.
@@ -205,7 +223,7 @@ export function resolveSpawnTarget({ target } = {}) {
 // HOLE. A backend ships as two edits in one change: the branch that creates the worker, and
 // the entry here. Removing an entry is never a way to retire a backend — it would silently
 // reroute that target to `local` rather than refusing it.
-export const IMPLEMENTED_SPAWN_TARGETS = ['local', 'cluster', 'docker', 'k8s']
+export const IMPLEMENTED_SPAWN_TARGETS = ['local', 'docker', 'k8s']
 
 // Whether a resolved target can be carried out — a refusal string, or `null` to allow it.
 //
@@ -224,7 +242,7 @@ export function spawnTargetImplementationRefusal({ target } = {}) {
     `worker-controller path is not implemented, so this spawn is REFUSED rather than falling ` +
     `through to the local path, which would open an ordinary local worker under a call that ` +
     `asked for a container or a pod and would look exactly like a working call. Use ` +
-    `target: "local" or target: "cluster" until the controller ships.`
+    `target: "local" until the controller ships.`
   )
 }
 
