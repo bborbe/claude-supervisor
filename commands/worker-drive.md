@@ -217,11 +217,25 @@ sed -n '/^# Progress/,$p' "<vault>/<tasks_dir>/<task>.md" | tail -40  # what ALR
 
 Every unchecked `[ ]` / `[/]` in Success Criteria, Tasks, and Definition of Done is a row. Add rows for work established in conversation but not yet written to the file (that gap is itself a row, and it is almost always doable now).
 
-Then build the triad — **one row per open item, three questions each**:
+**Rate the closure boxes with the coverage mode — dispatch it, do not re-derive it.** Before the table, run the one reverse map that answers *which subtask drives each Success-Criterion / DoD box, and what evidence backs it*:
 
-| # | Open item | Blocked by | Unlock lever | Owner | Now? |
-|---|---|---|---|---|---|
-| 1 | <the unchecked item, verbatim> | <specific blocker, or `nothing`> | <the exact action that clears it> | mine / other session / external / user | ✅ / ⛔ |
+```
+Task tool with:
+  subagent_type: 'vault-cli:task-manager-agent'
+  prompt: 'Action: coverage. TASK_PATH: <absolute path to the anchored task file>. MODE: tool.'
+```
+
+It returns one row per closure box — `<box> | <driving subtask or none> | <evidence: measured(<source>) | asserted | none> | <proposal>` — plus a reconciliation line. Two things it buys this step, neither reachable from the checkboxes alone: a box with **no driving subtask**, which is the §5 *unfinishable by construction* signal caught before a run is spent on it, and a box whose evidence is `asserted` rather than `measured(<source>)` — precisely the met-looking box this table previously had no column for.
+
+⚠️ **It is read-only, and it is the only coverage implementation.** Copy its ratings verbatim; never re-rate a box by eye, and never carry a local copy of this map into a manager command — `commands/steps/manager-coverage.md` routes the manager's call to the same agent, so the rule keeps one home.
+
+Then build the drive table — **one row per open item, four questions each**:
+
+| # | Open item | Evidence | Blocked by | Unlock lever | Owner | Now? |
+|---|---|---|---|---|---|---|
+| 1 | <the unchecked item, verbatim> | <coverage rating, copied verbatim> | <specific blocker, or `nothing`> | <the exact action that clears it> | mine / other session / external / user | ✅ / ⛔ |
+
+**The `Evidence` cell is read, never judged.** Fill it from the coverage dispatch above — `measured(<source>)` / `asserted` / `none`, copied rather than decided. A box that looks met and a box that is genuinely driven read identically from the checkbox alone; the coverage mode is the only thing that separates them, and hand-rating the column recreates the guess it exists to remove.
 
 Rules for the table — each exists because its absence produced a stuck session:
 
