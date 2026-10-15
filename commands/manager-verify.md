@@ -54,10 +54,17 @@ Probe with the resolved `$SUBJECT`, never the raw argument (under detection the 
 
 3. **Call the branch's instrument** — the topic branch's `verify-topic`, or the goal branch's `/vault-cli:verify-goal`, with the subject. ⚠️ The independent-checks branch is **NOT TAKEN**: both verifiers landed, so this command calls them; forking would duplicate and drift. `verify-topic` is still vault-local (tracked by *a separate task*); in a vault without it, pass no instrument output and let the agent report step 1 as `UNKNOWN`.
 
-4. **Dispatch the agent.**
+4. **Dispatch the coverage mode — check 3's instrument, and the reason it no longer reports `GAP`.** The criterion-coverage check had no instrument of its own: `agents/manager-verify.md` check 3 read `GAP` by hand. It now consumes the same reverse map the drive rounds use. ⚠️ **The dispatch is this command's act and never the agent's** — that agent holds **no `Task` grant** (`agents/manager-verify.md:5`, `tools: Read, Bash`) and its own contract at `:69` says so outright, so a dispatch written into the agent would be a promise it cannot keep. One call per closure-box owner, the same split `commands/steps/manager-coverage.md` uses:
 
-   `Task(subagent_type: "supervisor:manager-verify", prompt: <subject + resolution source + branch + the instrument's output + vault + timestamp>)`
+   - a tracked task's boxes → `Task(subagent_type: "vault-cli:task-manager-agent", prompt: "Action: coverage. TASK_PATH: <absolute path to the task file>. MODE: tool.")`
+   - the subject page's own boxes → `Task(subagent_type: "vault-cli:goal-manager-agent", prompt: "Action: coverage. TASK_PATH: <absolute path to the subject page>. MODE: tool.")`
+
+   ⚠️ **The row format, the evidence rating rule and the reconciliation line are not restated here** — they have one home in the agent. Pass the output to step 5 and let check 3 read it there.
+
+5. **Dispatch the agent.**
+
+   `Task(subagent_type: "supervisor:manager-verify", prompt: <subject + resolution source + branch + the instrument's output + the coverage output + vault + timestamp>)`
 
    The **`supervisor:` prefix is required** — a bare `manager-verify` resolves to a personal `~/.claude/agents/` copy, never the plugin agent. Its rules — the seven steps, the per-branch forks, the two-dispositions rule, the report frame — live in `agents/manager-verify.md` and are not restated here.
 
-5. **Print what came back, verbatim.** Reproduce the agent's frame, its `Issues` block and its numbered fix list. If it returns a `Route:` line, that line is the subject's manager's to send — **do not** restate it as an `approve:` line for the operator.
+6. **Print what came back, verbatim.** Reproduce the agent's frame, its `Issues` block and its numbered fix list. If it returns a `Route:` line, that line is the subject's manager's to send — **do not** restate it as an `approve:` line for the operator.
