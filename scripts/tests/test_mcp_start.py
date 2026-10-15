@@ -202,11 +202,15 @@ class DeclareTokensTest(unittest.TestCase):
             declared = ms.declare_tokens(env, lookup=self._lookup(seen=seen))
         self.assertEqual(sorted(seen), ["VO0Gmw", "lO4j5q"])
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
-        self.assertEqual(env["SUPERVISOR_A2A_TOKEN"], self.VALUES["lO4j5q"])
+        # ⚠️ The A2A token is PER TARGET — the docker controller runs on this Mac and the k8s
+        # controller in nuke dev, so one shared secret would force both deployments to carry the
+        # same value. Only the k8s entry is configured today; the docker controller is not
+        # deployed yet, so its entry is absent and a `docker` spawn refuses by name.
+        self.assertEqual(env["SUPERVISOR_A2A_TOKEN_K8S"], self.VALUES["lO4j5q"])
         # Distinctness: one key resolved into both variables is the failure this guards, and it
         # is invisible unless the two values are compared.
-        self.assertNotEqual(env["INTERACTIVE_AUTH_TOKEN"], env["SUPERVISOR_A2A_TOKEN"])
-        self.assertEqual(sorted(declared), ["INTERACTIVE_AUTH_TOKEN", "SUPERVISOR_A2A_TOKEN"])
+        self.assertNotEqual(env["INTERACTIVE_AUTH_TOKEN"], env["SUPERVISOR_A2A_TOKEN_K8S"])
+        self.assertEqual(sorted(declared), ["INTERACTIVE_AUTH_TOKEN", "SUPERVISOR_A2A_TOKEN_K8S"])
 
     def test_an_explicit_value_wins_and_its_key_is_not_consulted(self):
         """config.mjs reads env-first, so a lookup here would spend a vault call to overwrite
@@ -223,7 +227,7 @@ class DeclareTokensTest(unittest.TestCase):
             declared = ms.declare_tokens(env, lookup=self._lookup(failing=["lO4j5q"]))
         self.assertEqual(declared, ["INTERACTIVE_AUTH_TOKEN"])
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
-        self.assertNotIn("SUPERVISOR_A2A_TOKEN", env)
+        self.assertNotIn("SUPERVISOR_A2A_TOKEN_K8S", env)
         self.assertIn("lO4j5q", stderr.getvalue())
 
     def test_a_degraded_token_never_reaches_stderr(self):

@@ -150,7 +150,15 @@ function checkControllerUrl(value, label) {
   return { url: value.replace(/\/+$/, '') }
 }
 
-// The controller's base URL and the token this server presents to it — or `{ error }`.
+// The controller's base URL and the token this server presents to it, FOR ONE TARGET — or
+// `{ error }`.
+//
+// ⚠️ `target` is required, and there is deliberately no target-agnostic fallback. The controller
+// runs on this Mac for `docker` and in nuke dev for `k8s`: two separate deployments, with separate
+// control secrets, and no address that is right for both. So a single `a2a.url` is not a default —
+// it is a value that is wrong for one target whichever one it holds. Measured 2026-10-14: a
+// `target: "docker"` spawn against the one configured URL created a k8s pod, because that URL was
+// the nuke-dev ingress.
 //
 // BOTH sources are validated, not only the winner, matching `resolveClusterTarget`: a bad value
 // in the loser sits dormant until the winner is removed, and then the spawn breaks with an error
@@ -158,21 +166,42 @@ function checkControllerUrl(value, label) {
 //
 // ⚠️ The TOKEN's value is never echoed, here or anywhere else on this path — not in a refusal,
 // not in a log line, not in a tool result. `resolveClusterTarget` redacts a URL's userinfo for
-// the same reason, and the refusal below names the KEY rather than repeating what it held.
-export function resolveA2AControllerTarget({ envUrl, envToken, file, path = 'the supervisor config' } = {}) {
+// the same reason, and the refusals below name the KEY rather than repeating what it held.
+export function resolveA2AControllerTarget({ target, envUrl, envToken, file, path = 'the supervisor config' } = {}) {
+  if (!A2A_SPAWN_TARGETS.includes(target)) {
+    return {
+      error:
+        `${JSON.stringify(target)} is not an A2A spawn target, so no controller can be resolved for it. ` +
+        `Expected ${A2A_SPAWN_TARGETS.map((t) => `"${t}"`).join(' or ')}.`,
+    }
+  }
+
   const section = file == null ? null : file.a2a
   if (section != null && (typeof section !== 'object' || Array.isArray(section))) {
     return {
       error:
         `"a2a" in ${path} is not an object — refusing rather than guessing, since a half-read controller ` +
-        'target is discovered only by noticing it. Expected {"url": "…", "token": "…"}.',
+        'target is discovered only by noticing it. Expected {"url": {"docker": "…", "k8s": "…"}}.',
+    }
+  }
+
+  // ⚠️ A bare-string `a2a.url` REFUSES rather than being read as both targets. That shape is what
+  // made the 2026-10-14 divergence reachable: one address cannot serve a local container and a
+  // remote pod, so whichever target read it, the other silently got the wrong controller. Refusing
+  // turns a mis-route into a startup-visible error naming the key to change.
+  if (typeof section?.url === 'string') {
+    return {
+      error:
+        `"a2a.url" in ${path} is a single string, and one controller URL cannot serve both spawn targets — ` +
+        'the docker controller runs on this Mac and the k8s controller in nuke dev. Replace it with a ' +
+        `per-target map, e.g. {"url": {"docker": "http://127.0.0.1:8080/a2a", "k8s": "https://…/a2a"}}.`,
     }
   }
 
   // ⚠️ A plaintext `a2a.token` REFUSES rather than being read, mirroring `resolveClusterTarget`.
   // The control token reaches the server from TeamVault through the launch wrapper, as
-  // `SUPERVISOR_A2A_TOKEN`; a copy in this file is the exposure being removed, so reading it
-  // would leave the very thing being deleted working silently. Unconditional by operator
+  // `SUPERVISOR_A2A_TOKEN_<TARGET>`; a copy in this file is the exposure being removed, so reading
+  // it would leave the very thing being deleted working silently. Unconditional by operator
   // decision (2026-10-14) — the deploy is ordered so this never goes live against a config
   // that still holds one (see the task's # Sequence).
   //
@@ -183,18 +212,25 @@ export function resolveA2AControllerTarget({ envUrl, envToken, file, path = 'the
       error:
         `"a2a.token" is set in ${path}, and the supervisor no longer reads a controller token from the ` +
         'config file. The token now reaches the server from TeamVault through the launch wrapper, as ' +
-        `SUPERVISOR_A2A_TOKEN. Delete the "a2a.token" key in ${path}.`,
+        `SUPERVISOR_A2A_TOKEN_<TARGET>. Delete the "a2a.token" key in ${path}.`,
     }
   }
 
+  const upper = target.toUpperCase()
+  const envUrlLabel = `SUPERVISOR_A2A_URL_${upper}`
+  const envTokenLabel = `SUPERVISOR_A2A_TOKEN_${upper}`
+  const fileUrlLabel = `"a2a.url.${target}" in ${path}`
+
   const urlSources = [
-    { label: 'SUPERVISOR_A2A_URL', value: envUrl },
-    { label: `"a2a.url" in ${path}`, value: section?.url },
+    { label: envUrlLabel, value: envUrl },
+    { label: fileUrlLabel, value: section?.url?.[target] },
   ]
   // ⚠️ One source, not two: the file's `a2a.token` is refused above, so listing it here would
-  // advertise a source that can never win.
+  // advertise a source that can never win. A per-target token has no file shape at all — the
+  // migration removed plaintext tokens from the file, and re-adding one per target would restore
+  // exactly the exposure it removed.
   const tokenSources = [
-    { label: 'SUPERVISOR_A2A_TOKEN', value: envToken },
+    { label: envTokenLabel, value: envToken },
   ]
   const set = (s) => s.value !== undefined && s.value !== null && s.value !== ''
   const pick = (sources) => sources.find(set)?.value ?? null
@@ -209,7 +245,7 @@ export function resolveA2AControllerTarget({ envUrl, envToken, file, path = 'the
     if (url === null) url = checked.url
   }
   if (url === null) {
-    const checked = checkControllerUrl(undefined, `SUPERVISOR_A2A_URL (or "a2a.url" in ${path})`)
+    const checked = checkControllerUrl(undefined, `${envUrlLabel} (or ${fileUrlLabel})`)
     if (checked.error) return { error: checked.error }
   }
 
@@ -217,10 +253,10 @@ export function resolveA2AControllerTarget({ envUrl, envToken, file, path = 'the
   if (token === null) {
     return {
       error:
-        'no controller token is configured — SUPERVISOR_A2A_TOKEN is not set. The token is resolved from ' +
-        'TeamVault by scripts/mcp-start.py, which the supervisor MCP entry must name as its `command`; ' +
-        'changing that needs a NEW session, since Claude Code caches the server definition at session ' +
-        `start. An "a2a.token" in ${path} is NOT a fallback: it is refused, because a plaintext ` +
+        `no controller token is configured for the "${target}" target — ${envTokenLabel} is not set. The token ` +
+        'is resolved from TeamVault by scripts/mcp-start.py, which the supervisor MCP entry must name as its ' +
+        '`command`; changing that needs a NEW session, since Claude Code caches the server definition at ' +
+        `session start. An "a2a.token" in ${path} is NOT a fallback: it is refused, because a plaintext ` +
         'token there is the exposure this change removes. The controller refuses an unauthenticated control ' +
         'call, so a spawn without one would fail at the controller rather than here, with nothing on this ' +
         'side naming the missing key.',
@@ -230,7 +266,7 @@ export function resolveA2AControllerTarget({ envUrl, envToken, file, path = 'the
     return {
       error:
         'the configured controller token is not a usable string — it is set but empty or non-string. The value ' +
-        'is deliberately not echoed. Check SUPERVISOR_A2A_TOKEN.',
+        `is deliberately not echoed. Check ${envTokenLabel}.`,
     }
   }
   return { url, token }

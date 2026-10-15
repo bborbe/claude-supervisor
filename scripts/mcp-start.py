@@ -96,14 +96,21 @@ def find_bun(env, which=shutil.which):
     return which("bun")
 
 
-# The two tokens, and the TeamVault lookup key each resolves from. ⚠️ Distinct keys, and the
+# The tokens, and the TeamVault lookup key each resolves from. ⚠️ Distinct keys, and the
 # asymmetry with the server's variable names is deliberate: the cluster token is the same secret
 # the claude-interactive service reads at startup, which is why the supervisor borrows that
-# variable's name (`INTERACTIVE_AUTH_TOKEN`) — one value configures both halves — while the A2A
-# token is the worker controller's own control secret, with no counterparty name to borrow.
+# variable's name (`INTERACTIVE_AUTH_TOKEN`) — one value configures both halves — while each A2A
+# token is a worker controller's own control secret, with no counterparty name to borrow.
+#
+# ⚠️ ONE A2A TOKEN PER SPAWN TARGET, because the two controllers are separate deployments — the
+# docker controller runs on this Mac, the k8s controller in nuke dev. One shared variable would
+# force both deployments to carry the same secret, a constraint the single-token shape imposed
+# silently. The docker controller's secret does not exist yet (that controller is not deployed),
+# so its entry is absent and a `docker` spawn refuses by NAME until it is added here — which is
+# the intended failure, not a gap.
 TOKEN_KEYS = (
     ("INTERACTIVE_AUTH_TOKEN", "VO0Gmw"),
-    ("SUPERVISOR_A2A_TOKEN", "lO4j5q"),
+    ("SUPERVISOR_A2A_TOKEN_K8S", "lO4j5q"),
 )
 
 

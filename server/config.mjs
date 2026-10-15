@@ -201,14 +201,28 @@ export const config = Object.freeze({
   // each turn and its own control token is a separate secret with no counterparty name to borrow,
   // so these are the supervisor's own keys and appear under `a2a` in the config file.
   //
-  // Unset means "the A2A targets are not configured here", and such a spawn REFUSES rather than
+  // ⚠️ PER TARGET, and there is deliberately no target-agnostic variable. The controller runs on
+  // this Mac for `docker` and in nuke dev for `k8s` — two deployments, two control secrets, and no
+  // address or token that is right for both. A single `SUPERVISOR_A2A_URL` is not a default; it is
+  // a value that is wrong for one target whichever one it holds (measured 2026-10-14: a
+  // `target: "docker"` spawn against the one configured URL created a k8s pod).
+  //
+  // The file carries the same split, as a target-keyed map under `a2a.url`; the environment wins.
+  //
+  // Unset means "that target is not configured here", and such a spawn REFUSES rather than
   // reaching for a default — see `resolveA2AControllerTarget`, which owns both the shape rules
   // and the refusals so they can be tested without an environment.
   //
-  // ⚠️ The token is never logged, echoed or written. Nothing in this module prints it, and the
-  // record that holds it is an allowlisted projection away from every read surface.
-  a2aUrl: ENV.SUPERVISOR_A2A_URL || null,
-  a2aToken: ENV.SUPERVISOR_A2A_TOKEN || null,
+  // ⚠️ Neither token is ever logged, echoed or written. Nothing in this module prints them, and
+  // the record that holds one is an allowlisted projection away from every read surface.
+  a2aUrls: {
+    docker: ENV.SUPERVISOR_A2A_URL_DOCKER || null,
+    k8s: ENV.SUPERVISOR_A2A_URL_K8S || null,
+  },
+  a2aTokens: {
+    docker: ENV.SUPERVISOR_A2A_TOKEN_DOCKER || null,
+    k8s: ENV.SUPERVISOR_A2A_TOKEN_K8S || null,
+  },
 
   // Whether a reported cost figure describes the traffic that actually ran. See the
   // note above the resolution — this is a property of the deployment, not of a turn.
