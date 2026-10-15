@@ -435,7 +435,9 @@ export async function createWorkerOnController({ endpoint, task, token, messageI
   }
 
   const parsed = a2aControlResponseFor(body, { sentOperation: 'create' })
-  if (parsed.error) return { error: parsed.error }
+  // `controllerFailed` is carried through, not swallowed: the caller's recovery applies only to a
+  // call the controller actually answered and refused, never to one that never arrived.
+  if (parsed.error) return { error: parsed.error, controllerFailed: parsed.controllerFailed === true }
 
   const created = parsed.response?.create
   const worker = created?.worker
@@ -856,6 +858,61 @@ export async function listWorkersOnController({ endpoint, token, messageId, cont
   const parsed = a2aControlResponseFor(body, { sentOperation: 'list' })
   if (parsed.error) return { error: parsed.error }
   return a2aWorkerList(parsed.response)
+}
+
+// Stop the worker a failed `create` was refused over — `{ stoppedWorkerId }`, `{ none: true }`, or
+// `{ error }`.
+//
+// ⚠️ THE ID IS NOT IN THE ERROR, WHICH IS WHY THIS EXISTS. The controller refuses a repeat create
+// for a task that already has a worker, and its refusal names that worker — but a backend failure
+// reaches this side as a bare `TASK_STATE_FAILED` with no detail attached, so neither the refusal
+// nor the id it carries is legible here. `list` is the only client-side read that answers the
+// question the error cannot: does this task already have a worker? When it does, that worker is
+// what the create was refused over.
+//
+// ⚠️ `{ none: true }` IS NOT A FAILURE. A create can fail for reasons that have nothing to do with
+// a duplicate — an unreachable controller, a rejected token, a refused argument — and in those
+// cases no worker matches the task. Returning `none` rather than an error is what lets the caller
+// report the ORIGINAL failure instead of a reaping failure it invented.
+//
+// `listWorkers` and `stopWorker` are injected, so this is tested without a controller.
+export async function reapExistingWorkerForTask({
+  endpoint,
+  task,
+  token,
+  messageId,
+  mint,
+  fetchImpl = fetch,
+  listWorkers = listWorkersOnController,
+  stopWorker = stopWorkerOnController,
+} = {}) {
+  const listed = await listWorkers({ endpoint, token, messageId, mint, fetchImpl })
+  if (listed.error) {
+    // ⚠️ THIS DOES NOT CLAIM A WORKER EXISTS. A failed list establishes nothing about whether
+    // this task has one, so the text says what was lost — the question went unanswered — rather
+    // than asserting a worker that was never observed.
+    return { error: `the workers could not be listed, so whether this task already has one could not be determined: ${listed.error}` }
+  }
+
+  const existing = (listed.workers ?? []).find((w) => w?.task === task)
+  if (!existing) return { none: true }
+
+  const stopped = await stopWorker({
+    endpoint,
+    workerId: existing.worker_id,
+    token,
+    messageId,
+    mint,
+    fetchImpl,
+  })
+  if (stopped.error) {
+    return {
+      error:
+        `worker ${existing.worker_id} already serves task ${JSON.stringify(task)} but could not be ` +
+        `stopped: ${stopped.error}`,
+    }
+  }
+  return { stoppedWorkerId: existing.worker_id }
 }
 
 // One liveness poll: list the controller's workers and stamp every ledger session it still runs.
