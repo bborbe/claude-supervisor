@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.161.4
 
 - fix: **a manager no longer stands itself down a tick early when it reads its subject twice in one tick.** `scripts/manager-quiet.py` counted **invocations, not ticks** — its own docstring assumed *"a tick is one process"*, and a manager that inspected its subject twice advanced the counter twice. **That is the unsafe direction:** the rule is *fail toward ARMED*, and early is the one failure that loses work silently, since a manager left armed costs a model call while one stood down on live work stops driving it and nothing announces the loss. A tick is now identified by **`<slug>.cadence`'s mtime** — the arm the manager performs at the head of every round — and the counter records which tick it belongs to, so a **second read of the same tick is inert**. A counter written by an older version (a bare integer, with no tick key) still counts rather than being discarded; it simply cannot tell a re-read from a new tick. Found 2026-10-16 by a goal manager that read its subject twice in one tick and watched the counter go 1 → 2 → 3. ⚠️ **The tests encoded the same false assumption** — `Base.tick()` simulated a tick by calling the function, so every multi-tick case would have passed against a counter that never looked at the arm; the helper now arms first, as a real round does, and five new tests pin the distinction. Change set: `scripts/manager-quiet.py`, `scripts/tests/test_manager_quiet.py`, `CHANGELOG.md`.
 
