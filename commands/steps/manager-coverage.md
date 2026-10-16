@@ -10,7 +10,24 @@ When: every tick, before the drive leg
 
 Rationale and incident history: the Manager Session runbook § Command rationale — maintained.
 
-- **Map every closure box to its driving subtask and its evidence rating — dispatch the coverage mode, never re-derive it.** The round's job is to report which Success Criterion moved; a table of busy sessions answers a different question. One dispatch per closure-box owner:
+- ⚠️ **Ask the gate first — it decides how many dispatches this tick warrants, and on a no-change tick the answer is none.** Run it before any dispatch:
+
+```
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-coverage-gate.py \
+  --tracked "<the tracked-set path step 2 wrote>" \
+  --delta "<the sweep's own delta verdict, verbatim>" \
+  --changed "<the names the sweep reports as moved, comma-separated>" \
+  --subject "<absolute path to the subject page>"
+```
+
+  - **Exit 0, nothing on stdout → dispatch nothing and skip the rest of this step.** The sweep already answered the question this map exists to answer; re-deriving it buys the same answer again at subagent prices.
+  - **Exit 10 → one owner path per line on stdout: dispatch exactly one agent per line**, as below. That is the whole contract — the line count IS the dispatch count.
+  - **Exit 2 → the gate could not read the tracked set.** Fall back to the round's own tracked set and dispatch every owner. Fail open, never fail quiet: a coverage map silently skipped on a tick that moved leaves the round reporting a stale table as current, and nothing announces the loss.
+  - ⚠️ **`--changed` is comma- or newline-separated, NEVER whitespace-separated.** Task names contain spaces, so a whitespace split shreds every name, none resolves, and the gate falls open on every call — the saving gone while every fail-open assertion still passes. This suite caught exactly that on its first run.
+  - ⚠️ **The delta is the sweep's, passed in — never recomputed here.** `agents/manager-sweep-reader.md` step 1 item 3 already computes it against the prior snapshot, and this step is not a second classifier (see the read-only clause below).
+  - Measured 2026-10-16 on the Recurring Operator Gates manager, session `beac5fd0`: a tick whose sweep reported `Delta: no change` dispatched 15 coverage agents — 14 `task-manager-agent` plus 1 `goal-manager-agent` — at 17,516 output tokens and 770,459 counting cache reads. Making that tick dispatch 0 is this gate's whole job.
+
+- **Map every closure box to its driving subtask and its evidence rating — dispatch the coverage mode, never re-derive it.** The round's job is to report which Success Criterion moved; a table of busy sessions answers a different question. One dispatch per owner the gate emits:
 
 ```
 Task tool with:
@@ -36,4 +53,4 @@ Coverage: {boxes} boxes · driving: {driven} driven · {undriven} none · eviden
 
 - ⚠️ **Read-only, and never a second classifier.** The mode reports; it never ticks, re-links, edits or reclassifies — the sweep owns the buckets and the drive leg owns the acts. Do not widen this step to act on what it finds.
 
-- ⚠️ **This is the manager tier's only copy of the dispatch.** The worker tier dispatches the same mode in `commands/worker-drive.md` and the verify leg in `commands/manager-verify.md`; all three call the one agent implementation, so the coverage rule has a single home rather than a copy per tier.
+- ⚠️ **This is the manager tier's only copy of the dispatch.** The worker tier dispatches the same mode in `commands/worker-drive.md` and the verify leg in `commands/manager-verify.md`; all three call the one agent implementation, so the coverage rule has a single home rather than a copy per tier. ⚠️ **The gate above belongs to THIS site alone.** It saves a dispatch that a *repeating* round would otherwise buy every tick; the worker tier dispatches once per run and the verify leg once per verify, so neither has a repetition to suppress and neither should gain a no-op gate.
