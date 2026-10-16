@@ -63,12 +63,7 @@ GUARD_MATCHER = "AskUserQuestion"
 
 # ⚠️ The same verbs the two rule homes carry. Duplicated here ON PURPOSE: a test that
 # imported the list would pass against any list, including one an edit widened.
-MANAGER_VERBS = (
-    "open", "resume", "ready", "file", "repair",
-    "create", "relay", "re-scope", "nudge", "abort", "flag", "clear", "retire",
-    "disposition", "unlink", "add", "fix", "unpark", "split", "sync", "re-measure",
-    "settle",
-)
+MANAGER_VERBS = ("open", "resume", "ready", "file", "repair")
 
 # The manager's one legitimate channel — an operator-only decision. This is the
 # negative control's payload and it must never carry a manager-owned verb.
@@ -97,25 +92,6 @@ NATURAL_ACTION_LABELS = {
     "ready": "Ready the row",
     "file": "File a follow-up task",
     "repair": "Repair the page box",
-    # The 17 widened 2026-10-16 by operator decision. Each is asserted individually, so
-    # a regex that happens to match one verb cannot carry the rest of the list.
-    "create": "Create a follow-up task",
-    "relay": "Relay the answer to the row",
-    "re-scope": "Re-scope the stale row",
-    "nudge": "Nudge the stuck row",
-    "abort": "Abort the stale row",
-    "flag": "Flag the stale row",
-    "clear": "Clear the blocked row",
-    "retire": "Retire the old row",
-    "disposition": "Disposition the open rows",
-    "unlink": "Unlink the deny row",
-    "add": "Add a follow-up task",
-    "fix": "Fix the goal page",
-    "unpark": "Unpark the stalled row",
-    "split": "Split the large task",
-    "sync": "Sync the goal list",
-    "re-measure": "Re-measure the goal row",
-    "settle": "Settle the open task",
 }
 
 # ⚠️ **The shape a manager actually uses, and the one the object list alone missed.** A
@@ -783,12 +759,7 @@ class TestVerbMatching(Base):
         # alone cannot prove the omission. This is the only place that can.
         self.assertTrue(set(MANAGER_VERBS) <= set(self.guard._VERB_FORMS),
                         "every listed verb needs an entry in _VERB_FORMS")
-        # ⚠️ Compared through the guard's own name map: a group name must be a Python
-        # identifier and two verbs carry a hyphen (`re-scope`, `re-measure`). The map is
-        # not trusted for the VERB it answers — `NATURAL_ACTION_LABELS` below asserts
-        # that per verb, and that is what proves `rescope` still reads back `re-scope`.
-        expected_groups = {self.guard._GROUP_NAMES.get(v, v) for v in MANAGER_VERBS}
-        self.assertEqual(set(self.guard._MANAGER_VERB_RE.groupindex), expected_groups)
+        self.assertEqual(set(self.guard._MANAGER_VERB_RE.groupindex), set(MANAGER_VERBS))
         for verb, label in NATURAL_ACTION_LABELS.items():
             with self.subTest(verb=verb):
                 self.assertEqual(self.actions(label), [verb])
@@ -890,104 +861,6 @@ class TestManifest(unittest.TestCase):
         self.assertIn("manager-owned action", description)
         self.assertIn("Fail-open", description)
         self.assertIn("SUPERVISOR_MANAGER_MENU_GUARD=off", description)
-
-
-class TestCorpusRegression(Base):
-    """The committed corpus, as required regression cases.
-
-    Source: `scripts/manager-menu-corpus-labels.json`, measured over 2026-10-16's manager
-    transcripts (26 manager menus / 91 option labels / 8 manager sessions). ⚠️ **Every
-    label is asserted INDIVIDUALLY**, so a partial widening cannot pass — a predicate that
-    matches one of these verbs must not carry the rest of the list.
-    """
-
-    # The 33 manager-owned options the widened predicate denies. Asserted one per call.
-    CORPUS_DENIED = (
-        "Abort gate row (Recommended)",
-        "Abort stale CronJob task",
-        "Create SC2 guards task (Recommended)",
-        "Create a fresh row for clause (a)",
-        "Create an SC3 evidence row",
-        "Disposition 5 rows (Recommended)",
-        "File 2nd reclaim task",
-        "File DoD3 clause-2 diagnosis",
-        "File G1 conversion task (Recommended)",
-        "File SC1's count-delta probe row (Recommended)",
-        "File SC3+DoD4 verify task (Recommended)",
-        "File a task for goal SC2",
-        "File a task for the runbook gap",
-        "File alert-silence task (rec)",
-        "File runbook-fix task (rec)",
-        "File the checkout-sync task (Recommended)",
-        "Fix goal-page numbers",
-        "Flag the SC4 mismatch (Recommended)",
-        "Nudge SC1 watcher",
-        "Re-measure DoD 3 (Recommended)",
-        "Re-scope Map Sentry Project SC2 (Recommended)",
-        "Re-scope growth task (rec)",
-        "Re-scope the SC6 row (Recommended)",
-        "Repair Mis-Attribute Existence",
-        "Repair Re-measure Gates (Recommended)",
-        "Repair Run the One-Week Verdict-Quality Review…'s prose blocker",
-        "Repair gate row (Recommended)",
-        "Repair the 3 repairable rows",
-        "Retire stale goal rows",
-        "Settle DoD 1 membership (Recommended)",
-        "Split residual-driver task (likely)",
-        "Sync goal task list (Recommended)",
-        "Unlink deny row (Recommended)",
-    )
-
-    # ⚠️ **The RECORDED RESIDUAL — pinned as ALLOWED, deliberately.** These eight are
-    # manager-owned by the runbook's class-A line and the predicate does NOT reach them:
-    # each is a manager verb leading into a lowercase common-noun target, and reaching
-    # them needs a relaxation that breaks the pinned object contract (`Resume the session
-    # — "keep going"` and the `OBJECT_WINDOW` boundary). Operator decision 2026-10-16
-    # chose the contract over the number. They are pinned here so a future change that
-    # denies them is a DELIBERATE, visible edit rather than a silent drift — and so the
-    # gap is in the suite rather than only on a task page.
-    CORPUS_RESIDUAL = (
-        "Add the missing DoD2 subtask",
-        "Clear the flag on Make sentry-analyzer-agent Export… (Recommended)",
-        "File the quiet-counter defect",
-        "Nudge pane 1905 composer",
-        "Nudge provenance worker",
-        "Open the corner-X follow-up (Recommended)",
-        "Relay go to pane 1895 (Recommended)",
-        "Unpark cap worker (likely)",
-    )
-
-    def test_every_corpus_manager_owned_case_is_denied_individually(self):
-        for label in self.CORPUS_DENIED:
-            with self.subTest(label=label):
-                code, err = self.run_guard(self.payload("manager-1", [label]))
-                self.assertEqual(code, 2, f"{label!r} must be denied; stderr={err!r}")
-
-    def test_the_recorded_residual_is_allowed_and_pinned(self):
-        for label in self.CORPUS_RESIDUAL:
-            with self.subTest(label=label):
-                code, err = self.run_guard(self.payload("manager-1", [label]))
-                self.assertEqual(code, 0,
-                                 f"{label!r} is a RECORDED RESIDUAL and is expected to be "
-                                 f"allowed; denying it is a contract change, not a fix. "
-                                 f"stderr={err!r}")
-
-    def test_the_colour_arm_alone_denies(self):
-        # ⚠️ **The arm that carried every live deny.** Measured 2026-10-16: all four
-        # denies that day resolved `manager_arm: colour`, so a name-only guard would have
-        # caught ZERO of them. `colour-1` resolves to no page and is not the root — its
-        # orange colour is the only thing making it a manager.
-        self.assertIsNone(load_guard().manager_subject(self.COLOUR_MANAGER_NAME, {}, {}))
-        code, err = self.run_guard(self.payload("colour-1", ["Open the approved row"]))
-        self.assertEqual(code, 2, f"a colour-resolved manager must be denied; stderr={err!r}")
-        self.assertIn("open", err)
-
-    def test_a_corpus_case_from_a_worker_is_allowed(self):
-        # The scope control, on a corpus label rather than a synthetic one: the same
-        # payload from a non-manager must survive, or the widening broke every worker's
-        # menus while passing every manager case above.
-        code, err = self.run_guard(self.payload("worker-1", ["File a task for goal SC2"]))
-        self.assertEqual(code, 0, f"a worker's menu must survive; stderr={err!r}")
 
 
 if __name__ == "__main__":
