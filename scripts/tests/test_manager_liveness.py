@@ -233,3 +233,65 @@ class StateVerb(unittest.TestCase):
         with redirect_stdout(out):
             self.m.check()
         self.assertNotIn("STOPPED", out.getvalue())
+
+
+class StoodDownVersusLapsed(unittest.TestCase):
+    """SC4's fixture: one stood-down manager and one lapsed one, told apart.
+
+    The predicate is mechanical (`--state`); the labels are the classification
+    table's. The point of the fixture is that the two must NOT collapse into a
+    single verdict -- a correct stand-down and a dead loop look identical on
+    every signal the sweep had before this change, which is why a stood-down
+    manager used to render as a fault and invite a hand nudge.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def state(self, topic):
+        out, old = io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", "--state", "--topic", topic]
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                self.m.main()
+        finally:
+            sys.argv = old
+        return out.getvalue().split("\t")[0]
+
+    def test_a_stand_down_and_a_lapse_are_told_apart(self):
+        # Stood down: cadence frozen AND a marker saying so, deliberately.
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Stood Down Manager", 900)
+            self.m.stop("Stood Down Manager")
+        # Lapsed: the same frozen cadence, no marker -- nothing said it stopped.
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Lapsed Manager", 900)
+        p = self.m.path(self.m.slug("Lapsed Manager"), "cadence")
+        t = time.time() - 100000
+        os.utime(p, (t, t))
+
+        stood_down, lapsed = self.state("Stood Down Manager"), self.state("Lapsed Manager")
+        self.assertEqual(stood_down, "STOPPED")
+        self.assertEqual(lapsed, "STALE")
+        self.assertNotEqual(stood_down, lapsed)
+
+    def test_the_shipped_table_maps_each_state_to_its_own_label(self):
+        # The labels are prose in the reader's classification table, so pin the
+        # mapping there: both states present, both labels present, and each
+        # label sitting after its own state so the pairing cannot be swapped.
+        root = os.path.dirname(os.path.dirname(_HERE))
+        table = io.open(
+            os.path.join(root, "agents", "fleet-sweep-reader.md"), encoding="utf-8"
+        ).read()
+        row = [l for l in table.split("\n") if l.startswith("   | manager subject reads **`STOPPED`**")]
+        self.assertEqual(len(row), 1, "the stood-down/lapsed row is missing from the table")
+        row = row[0]
+        for token in ("STOPPED", "STALE", "stood-down", "lapsed"):
+            self.assertIn(token, row, token)
+        self.assertLess(row.index("STOPPED"), row.index("stood-down"))
+        self.assertLess(row.index("STALE"), row.index("lapsed"))
