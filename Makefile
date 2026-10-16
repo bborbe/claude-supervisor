@@ -67,6 +67,9 @@ check-round-overlap:
 check-drive-ledger-writes:
 	@python3 scripts/check-drive-ledger-writes.py
 
+check-drive-audit-budget:
+	@python3 scripts/check-drive-audit-budget.py
+
 check:
 	@for f in server/*.mjs scripts/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server + scripts modules parse"
 	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json']]" && echo "  manifests parse"
@@ -115,6 +118,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-ledger-writes test
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-ledger-writes check-drive-audit-budget test
 
-.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check check-server-deps test precommit
+.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-audit-budget check check-server-deps test precommit
