@@ -33,6 +33,7 @@ Covers the two decisions that make an answer safe to route:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import http.client
 import importlib.util
 import io
 import json
@@ -207,6 +208,34 @@ class AnswerGateTest(unittest.TestCase):
         self.assertIn("LOST:", out)
         self.assertNotIn("ITEM_CLOSED:", out)
         self.assertNotIn("ALREADY_ANSWERED:", out)
+
+    def test_non_object_body_falls_back_to_the_generic_line(self):
+        # `{"error": ...}` is the store's shape, but nothing guarantees a proxy or
+        # a future store keeps it, so a list or a string body must not raise.
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        err = urllib.error.HTTPError(
+            "u", 409, "conflict", {}, io.BytesIO(b'["not", "an", "object"]')
+        )
+        rc, out, _ = self._run(item, post=err)
+        self.assertEqual(rc, 1)
+        self.assertIn("LOST:", out)
+
+    def test_truncated_body_falls_back_instead_of_raising(self):
+        # A 409 whose body is cut short against its Content-Length is what a proxy
+        # or a mid-body reset produces. http.client.IncompleteRead is neither a
+        # ValueError nor an OSError, so without it in the handler's tuple the arm
+        # raises where the caller expects a label -- a path the pre-fix arm could
+        # not reach at all, because it never read the 409 body.
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+
+        class _Truncated(io.BytesIO):
+            def read(self, *args, **kwargs):
+                raise http.client.IncompleteRead(b'{"error":')
+
+        err = urllib.error.HTTPError("u", 409, "conflict", {}, _Truncated())
+        rc, out, _ = self._run(item, post=err)
+        self.assertEqual(rc, 1)
+        self.assertIn("LOST:", out)
 
     def test_item_closed_on_a_permission_card_never_delivers(self):
         item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}

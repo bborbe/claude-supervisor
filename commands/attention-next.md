@@ -28,8 +28,8 @@ Print the output verbatim, then stop. Each item shows its `item_id`, its questio
    - `ANSWERED:` then `DELIVERY: supervisor poll` → do **not** send anything. Report: the verdict is recorded and the spawning supervisor server will settle the parked prompt. **There is no session to message here**, and messaging one would be a relay — a session cannot release another session's parked gate.
    - `ANSWERED:` then `UNDELIVERABLE: <reason>` → do **not** send. Report: the item is answered in the store, but the answer was not delivered — `<reason>`.
    - `ALREADY_ANSWERED:` → do **not** send; another arm's verdict landed first. Report it.
-   - `ITEM_CLOSED:` → do **not** send. The card left the queue before this answer arrived (the board cleared it), so **no arm can answer it now and no verdict was recorded** — the gate was **not** released. Report it.
-   - `LOST:` → do **not** send; the store refused the write with a 409 whose body carried no code this arm could read, so which of the two above happened is **unknown**. Report it.
+   - `ITEM_CLOSED:` → do **not** send. The card left the queue before this answer arrived (the board cleared it, or its producer exited), so **no arm can answer it now and no verdict was recorded** — the gate was **not** released. Report it.
+   - `LOST:` → do **not** send; the store refused the write with a 409 whose body carried no code this arm could read, **or none it knows**, so which of the two above happened is **unknown**. Report it.
    - `REFUSED:` / `FAILED:` → report the line verbatim; do not send.
 
 3. **Record the attempt — this command is the arm that ATTEMPTS delivery, so this is where the trail is written.** Run exactly:

@@ -53,6 +53,7 @@ Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision al
 
 import argparse
 import glob
+import http.client
 import json
 import os
 import sys
@@ -151,8 +152,8 @@ def post_answer(item_id, answered_by, resolved_by="", decision=""):
 # alone cannot tell them apart -- only the `error.code` in the body can. The two
 # this arm can meet are different facts about the gate, so each gets its own
 # line: ITEM_CLOSED means the card left the queue before the answer arrived (the
-# board cleared it) and no arm can answer it now; ALREADY_ANSWERED means another
-# arm's verdict landed first. Neither is a retry.
+# board cleared it, or its producer exited) and no arm can answer it now;
+# ALREADY_ANSWERED means another arm's verdict landed first. Neither is a retry.
 STORE_CODE_ITEM_CLOSED = "ITEM_CLOSED"
 STORE_CODE_ALREADY_ANSWERED = "ALREADY_ANSWERED"
 
@@ -163,11 +164,18 @@ def store_error_code(err):
     Returns "" rather than a guess. A body this arm cannot read is not evidence
     of either failure, and naming one would report a cleared card as a lost race
     or the reverse -- exactly the conflation reading the body exists to end. A
-    pre-code store and a body a proxy stripped both land here.
+    pre-code store, a body a proxy stripped, and a body carrying a code this arm
+    does not know all land here.
+
+    ⚠️ `http.client.IncompleteRead` is in the tuple because it is neither a
+    ValueError nor an OSError -- a 409 whose body is truncated against its
+    Content-Length is what a proxy or a mid-body reset produces, and it would
+    otherwise escape as a traceback where the caller expects a label. Before this
+    read existed the arm never touched the 409 body and could not fail here.
     """
     try:
         return json.load(err).get("error", {}).get("code", "")
-    except (ValueError, OSError, AttributeError):
+    except (ValueError, OSError, AttributeError, http.client.HTTPException):
         return ""
 
 
@@ -184,8 +192,9 @@ def answer_conflict_line(item_id, err, verb):
     code = store_error_code(err)
     if code == STORE_CODE_ITEM_CLOSED:
         return (
-            f"ITEM_CLOSED: {item_id} left the queue when the card was cleared -- no arm "
-            f"can answer it now and no verdict was recorded; do not {verb}"
+            f"ITEM_CLOSED: {item_id} left the queue before this answer arrived -- the card "
+            f"was cleared, or its producer exited; no arm can answer it now and no verdict "
+            f"was recorded; do not {verb}"
         )
     if code == STORE_CODE_ALREADY_ANSWERED:
         return (
