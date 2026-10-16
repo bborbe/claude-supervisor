@@ -7,7 +7,7 @@ signal. Nothing a peer session can probe (`ListAgents`, sockets, `ps`, transcrip
 mtime) tells a lapsed manager from a healthy one between ticks, so the manager leaves
 evidence on disk itself. This script writes that evidence and checks it.
 
-Three verbs, one file each, all in the sweep-gate state dir:
+Four verbs, one file each, all in the sweep-gate state dir:
 
   --arm   --topic T --interval S   <slug>.cadence = "<S>\\n" and an epoch appended to
                                     <slug>.arms; clears <slug>.stopped. Run by the
@@ -32,6 +32,16 @@ Three verbs, one file each, all in the sweep-gate state dir:
                                     turned stale, else 0. The notified set lives in
                                     liveness-notified.json, so one lapse notifies
                                     once, not on every poll.
+  --state --topic T                ONE topic's state, as `<STATE>\t<slug>\t<detail>`.
+                                    `--check` structurally cannot answer this: it prints
+                                    only the topics that TURNED stale, so STOPPED -- the
+                                    state a deliberate stand-down produces -- is invisible
+                                    to it by construction. A reader that must tell a
+                                    stood-down manager from a lapsed one asks about the
+                                    subject directly, which is what this verb is for.
+                                    Exits 0 whatever the state: the state IS the answer,
+                                    and a non-zero exit would make a stood-down manager
+                                    read as a failure to every `if` that wraps it.
 
 `--check` reads files only: no model, no network. A host loop (launchd) runs it and
 turns exit 10 into a push.
@@ -173,11 +183,23 @@ def main() -> int:
     mode.add_argument("--arm", action="store_true", help="record a re-arm (manager, every tick)")
     mode.add_argument("--stop", action="store_true", help="mark a deliberate stand-down")
     mode.add_argument("--check", action="store_true", help="report topics that turned stale")
+    mode.add_argument(
+        "--state",
+        action="store_true",
+        help="print ONE topic's state: OK / STALE / STOPPED / INVALID",
+    )
     ap.add_argument("--topic")
     ap.add_argument("--interval", type=int, help="the ScheduleWakeup delay just armed, seconds")
     a = ap.parse_args()
     if a.check:
         return check()
+    if a.state:
+        if not a.topic:
+            ap.error("--state requires --topic")
+        s = slug(a.topic)
+        state, detail = classify(s, time.time())
+        print(f"{state}\t{s}\t{detail}")
+        return 0
     if not a.topic:
         ap.error("--topic is required with --arm/--stop")
     if a.arm:

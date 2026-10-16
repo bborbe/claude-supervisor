@@ -11,10 +11,11 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import io
 import os
+import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -154,3 +155,81 @@ class Liveness(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StateVerb(unittest.TestCase):
+    """The per-subject read the fleet sweep uses to tell stood-down from lapsed.
+
+    `--check` cannot serve here, and the reason is structural rather than a
+    preference: it prints only the topics that TURNED stale, so STOPPED -- the
+    state a deliberate stand-down produces -- is absent from its output by
+    construction. A reader that asked it, saw nothing and concluded the manager
+    was fine has it exactly backwards. These tests pin the verb that can answer.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def state(self, *argv):
+        """Run main() as the CLI would, capturing stdout/stderr and the exit code."""
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def test_stopped_marker_reads_stopped(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", 300)
+            self.m.stop("Manager Layer")
+        rc, out = self.state("--state", "--topic", "Manager Layer")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("STOPPED\t"), out)
+
+    def test_stale_cadence_reads_stale(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", 300)
+        p = self.m.path(self.m.slug("Manager Layer"), "cadence")
+        t = time.time() - 100000
+        os.utime(p, (t, t))
+        rc, out = self.state("--state", "--topic", "Manager Layer")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("STALE\t"), out)
+
+    def test_fresh_cadence_reads_ok(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", 300)
+        rc, out = self.state("--state", "--topic", "Manager Layer")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("OK\t"), out)
+
+    def test_state_exits_zero_for_every_state(self):
+        # The state IS the answer. A non-zero exit would make a stood-down
+        # manager read as a failure to anything wrapping the call, which is the
+        # opposite of what STOPPED means.
+        for topic in ("Nothing Here",):
+            rc, _ = self.state("--state", "--topic", topic)
+            self.assertEqual(rc, 0, topic)
+
+    def test_state_requires_a_topic(self):
+        with self.assertRaises(SystemExit):
+            self.state("--state")
+
+    def test_check_still_never_prints_stopped(self):
+        # The property the new verb exists for, pinned so a later change to
+        # --check cannot quietly make the two agree and hide the distinction.
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", 300)
+            self.m.stop("Manager Layer")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.m.check()
+        self.assertNotIn("STOPPED", out.getvalue())
