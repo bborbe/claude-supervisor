@@ -43,7 +43,10 @@ Three de-dup axes, and this script owns the second and third:
     what managers actually read, and it already carries `producer_id`. The ledger is
     gone rather than kept alongside, because two writers for one mark drift; the
     accepted cost is that a gate with **no resolvable store item** loses cross-layer
-    dedup, which is reported as `unresolved` rather than silently absorbed.
+    dedup, which is reported as `unresolved` rather than silently absorbed. A gate
+    whose session holds **2+** items that the tiebreak cannot pick between is a
+    different cause with the same cost, and is reported as `ambiguous` -- keeping the
+    two apart is the point, because only one of them is the accepted cost.
 
     The join is `producer_id == <the gate's subject session>`, and it is the only one
     available: the store's `item_id` is written by the store, the watcher's dedup key
@@ -569,8 +572,8 @@ def store_items():
     return payload
 
 
-def gate_item(gate, items):
-    """The store item this gate is about, or None when none can be resolved.
+def gate_candidates(gate, items):
+    """Every open store item this gate could be about, in store order.
 
     The join is `producer_id == <the gate's subject session>`, and it is the only one
     available: the store owns `item_id`, and the watcher's dedup key is the HOOK LOG's
@@ -581,18 +584,37 @@ def gate_item(gate, items):
     will do: `owner` is a pane id in live stamps, and the escalating session is the
     manager itself, recorded on the stamp rather than used to find the item.
 
-    When a session has more than one open item, the gate `text` is matched against the
-    item `payload` as a TIEBREAK ONLY, and a weak one: the manager paraphrases the
-    gate while `payload` is the hook's own `detail`. So a tiebreak matching nothing
-    returns None -- the same answer as no item at all -- rather than falling back to
-    the first or to all of them. A tiebreak that quietly picks wrong is worse than one
-    that reports it could not pick, which is the rule the schema's silence 7 already
-    sets for every other unresolvable value in this stack.
+    Split out of `gate_item()` so the caller can tell a session holding NO item from
+    one holding SEVERAL. `gate_item()` answers `None` to both, and reading the second
+    as the first is the defect the `ambiguous` report exists to remove.
     """
     session = normalise(gate.get("session") or "")
     if not session:
-        return None
-    mine = [item for item in items if item.get("producer_id") == session]
+        return []
+    return [item for item in items if item.get("producer_id") == session]
+
+
+def gate_item(gate, items):
+    """The store item this gate is about, or None when none can be resolved.
+
+    ⚠️ `None` covers TWO different situations, and the caller must separate them by
+    asking `gate_candidates()`: no item at all, and 2+ items whose tiebreak could not
+    pick one. Reading the second as the first is what made a session holding two open
+    cards report as item-less, losing cross-layer de-dup without saying so.
+
+    When a session has more than one open item, the gate `text` is matched against the
+    item `payload` as a TIEBREAK ONLY, and a weak one: the manager paraphrases the
+    gate while `payload` is the hook's own `detail`. So a tiebreak matching nothing
+    returns None -- rather than falling back to the first or to all of them. A
+    tiebreak that quietly picks wrong is worse than one that reports it could not
+    pick, which is the rule the schema's silence 7 already sets for every other
+    unresolvable value in this stack.
+
+    The return is deliberately UNCHANGED by the `ambiguous` report: the ambiguity is
+    named by the caller, never resolved here. Resolving it would be the silent pick
+    this docstring forbids.
+    """
+    mine = gate_candidates(gate, items)
     if not mine:
         return None
     if len(mine) == 1:
@@ -827,6 +849,7 @@ def publish_round(now, gates):
     # output rather than folded into a cadence count.
     suppressed = {}
     unresolved = []
+    ambiguous = []
     item_ids = {}
     for key in list(current):
         if items is None:
@@ -834,10 +857,18 @@ def publish_round(now, gates):
         gate = current[key]
         item = gate_item(gate, items)
         if item is None:
-            # No item, so no stamp can be READ and none can be WRITTEN. The retired
-            # ledger covered this case; naming it out loud is the point of having
-            # retired it rather than a gap this change quietly introduced.
-            unresolved.append((key, gate))
+            # `None` is TWO situations and they are not the same report. No item at
+            # all is a genuine absence -- the retired ledger covered this case, and
+            # naming it out loud is the point of having retired it rather than a gap
+            # this change quietly introduced. 2+ items whose tiebreak could not pick
+            # one is a session that DOES hold items, and reporting that as an absence
+            # is the defect: the operator reading the feed cannot tell the two apart,
+            # so a de-dup loss caused by ambiguity reads as a clean item-less gate.
+            mine = gate_candidates(gate, items)
+            if len(mine) > 1:
+                ambiguous.append((key, gate, mine))
+            else:
+                unresolved.append((key, gate))
             continue
         item_ids[key] = item.get("item_id") or ""
         stamp = store_stamp_of(item, me)
@@ -854,14 +885,25 @@ def publish_round(now, gates):
     # reported as having none. Resolving it matters past the message: an unresolved gate
     # has no `item_ids` entry, so it would be published WITHOUT a stamp and the other
     # layer left free to raise it a second time -- the de-dup loss this branch names.
-    if unresolved:
+    #
+    # `ambiguous` is refreshed here for the same reason and one more: a snapshot can also
+    # make a gate look MORE ambiguous than it is, so an item closing between the two
+    # reads leaves one candidate and the gate resolves. The refresh therefore RE-CLASSIFIES
+    # rather than only re-resolving -- a gate can move between the two buckets in either
+    # direction, and pinning its bucket to the first read would report a stale cause.
+    if unresolved or ambiguous:
         refreshed = store_items()
         if refreshed is not None:
             still_unresolved = []
-            for key, gate in unresolved:
+            still_ambiguous = []
+            for key, gate in unresolved + [(k, g) for k, g, _ in ambiguous]:
                 item = gate_item(gate, refreshed)
                 if item is None:
-                    still_unresolved.append((key, gate))
+                    mine = gate_candidates(gate, refreshed)
+                    if len(mine) > 1:
+                        still_ambiguous.append((key, gate, mine))
+                    else:
+                        still_unresolved.append((key, gate))
                     continue
                 item_ids[key] = item.get("item_id") or ""
                 stamp = store_stamp_of(item, me)
@@ -869,6 +911,7 @@ def publish_round(now, gates):
                     suppressed[key] = dict(stamp, text=gate.get("text") or "")
                     current.pop(key, None)
             unresolved = still_unresolved
+            ambiguous = still_ambiguous
 
     due = [
         (key, gate) for key, gate in current.items() if decide(ledger.get(key), now)
@@ -891,6 +934,20 @@ def publish_round(now, gates):
             f"{normalise(gate.get('session') or '')[:8]} carries an operator hold; "
             "not published"
         )
+    # A gate whose session holds 2+ items and whose tiebreak could not pick one is NOT
+    # item-less, and must not be reported as though it were. Reported under its own
+    # name, because the two causes need different readers: an absence is the accepted
+    # cost of retiring the ledger, an ambiguity is a defect in this join. The de-dup
+    # loss is common to both and is stated in each line, so a reader acting on one
+    # sees it there rather than having to know the other case exists.
+    for _, gate, mine in ambiguous:
+        print(
+            f"notify-gate: ambiguous '{normalise(gate.get('text') or '')[:60]}' -- "
+            f"session {normalise(gate.get('session') or '')} holds {len(mine)} open "
+            f"item(s) and the tiebreak could not pick one "
+            f"({', '.join(item.get('item_id') or 'unknown' for item in mine)}); "
+            "cross-layer de-dup is NOT in force for this gate"
+        )
     # A gate with no resolvable item has NO cross-layer de-dup, and that is a real loss
     # rather than a clean skip: two layers can now both send it. Named per gate, because
     # silence here is indistinguishable from a gate that was deduped correctly -- and
@@ -911,7 +968,12 @@ def publish_round(now, gates):
 
     if not due:
         commit(ledger, current, {}, me)
-        lost = f", {len(unresolved)} unresolved" if unresolved else ""
+        lost = "".join(
+            [
+                f", {len(unresolved)} unresolved" if unresolved else "",
+                f", {len(ambiguous)} ambiguous" if ambiguous else "",
+            ]
+        )
         print(
             f"notify-gate: {len(current) + len(suppressed)} open, "
             f"{len(suppressed)} suppressed{lost}, 0 due"
@@ -972,7 +1034,12 @@ def publish_round(now, gates):
         # fails, and A lands on the phone a second time.
         commit(ledger, current, updates, me)
     tail = f", {len(suppressed)} suppressed" if suppressed else ""
-    tail += f", {len(unresolved)} unresolved" if unresolved else ""
+    tail += "".join(
+        [
+            f", {len(unresolved)} unresolved" if unresolved else "",
+            f", {len(ambiguous)} ambiguous" if ambiguous else "",
+        ]
+    )
     print(
         f"notify-gate: env={env} type={notification_type} "
         f"delivered {len(delivered)}{tail} -- " + "; ".join(delivered)
