@@ -11,10 +11,11 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import io
 import os
+import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -154,3 +155,143 @@ class Liveness(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StateVerb(unittest.TestCase):
+    """The per-subject read the fleet sweep uses to tell stood-down from lapsed.
+
+    `--check` cannot serve here, and the reason is structural rather than a
+    preference: it prints only the topics that TURNED stale, so STOPPED -- the
+    state a deliberate stand-down produces -- is absent from its output by
+    construction. A reader that asked it, saw nothing and concluded the manager
+    was fine has it exactly backwards. These tests pin the verb that can answer.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def state(self, *argv):
+        """Run main() as the CLI would, capturing stdout/stderr and the exit code."""
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def test_stopped_marker_reads_stopped(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", 300)
+            self.m.stop("Manager Layer")
+        rc, out = self.state("--state", "--topic", "Manager Layer")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("STOPPED\t"), out)
+
+    def test_stale_cadence_reads_stale(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", 300)
+        p = self.m.path(self.m.slug("Manager Layer"), "cadence")
+        t = time.time() - 100000
+        os.utime(p, (t, t))
+        rc, out = self.state("--state", "--topic", "Manager Layer")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("STALE\t"), out)
+
+    def test_fresh_cadence_reads_ok(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", 300)
+        rc, out = self.state("--state", "--topic", "Manager Layer")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("OK\t"), out)
+
+    def test_state_exits_zero_for_every_state(self):
+        # The state IS the answer. A non-zero exit would make a stood-down
+        # manager read as a failure to anything wrapping the call, which is the
+        # opposite of what STOPPED means.
+        for topic in ("Nothing Here",):
+            rc, _ = self.state("--state", "--topic", topic)
+            self.assertEqual(rc, 0, topic)
+
+    def test_state_requires_a_topic(self):
+        with self.assertRaises(SystemExit):
+            self.state("--state")
+
+    def test_check_still_never_prints_stopped(self):
+        # The property the new verb exists for, pinned so a later change to
+        # --check cannot quietly make the two agree and hide the distinction.
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", 300)
+            self.m.stop("Manager Layer")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.m.check()
+        self.assertNotIn("STOPPED", out.getvalue())
+
+
+class StoodDownVersusLapsed(unittest.TestCase):
+    """SC4's fixture: one stood-down manager and one lapsed one, told apart.
+
+    The predicate is mechanical (`--state`); the labels are the classification
+    table's. The point of the fixture is that the two must NOT collapse into a
+    single verdict -- a correct stand-down and a dead loop look identical on
+    every signal the sweep had before this change, which is why a stood-down
+    manager used to render as a fault and invite a hand nudge.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def state(self, topic):
+        out, old = io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", "--state", "--topic", topic]
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                self.m.main()
+        finally:
+            sys.argv = old
+        return out.getvalue().split("\t")[0]
+
+    def test_a_stand_down_and_a_lapse_are_told_apart(self):
+        # Stood down: cadence frozen AND a marker saying so, deliberately.
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Stood Down Manager", 900)
+            self.m.stop("Stood Down Manager")
+        # Lapsed: the same frozen cadence, no marker -- nothing said it stopped.
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Lapsed Manager", 900)
+        p = self.m.path(self.m.slug("Lapsed Manager"), "cadence")
+        t = time.time() - 100000
+        os.utime(p, (t, t))
+
+        stood_down, lapsed = self.state("Stood Down Manager"), self.state("Lapsed Manager")
+        self.assertEqual(stood_down, "STOPPED")
+        self.assertEqual(lapsed, "STALE")
+        self.assertNotEqual(stood_down, lapsed)
+
+    def test_the_shipped_table_maps_each_state_to_its_own_label(self):
+        # The labels are prose in the reader's classification table, so pin the
+        # mapping there: both states present, both labels present, and each
+        # label sitting after its own state so the pairing cannot be swapped.
+        root = os.path.dirname(os.path.dirname(_HERE))
+        table = io.open(
+            os.path.join(root, "agents", "fleet-sweep-reader.md"), encoding="utf-8"
+        ).read()
+        row = [l for l in table.split("\n") if l.startswith("   | manager subject reads **`STOPPED`**")]
+        self.assertEqual(len(row), 1, "the stood-down/lapsed row is missing from the table")
+        row = row[0]
+        for token in ("STOPPED", "STALE", "stood-down", "lapsed"):
+            self.assertIn(token, row, token)
+        self.assertLess(row.index("STOPPED"), row.index("stood-down"))
+        self.assertLess(row.index("STALE"), row.index("lapsed"))
