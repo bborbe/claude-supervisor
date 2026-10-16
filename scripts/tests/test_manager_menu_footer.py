@@ -75,8 +75,12 @@ class TestFooterDetector(unittest.TestCase):
         # of the tool in flight, so it is present on panes holding no modal. Measured
         # 2026-10-16 15:01:28: this exact string produced a false FOOTER report while the
         # guard's own record held no deny.
-        self.assertIn(footer.NEVER_A_TOKEN, footer.FOOTER_TOKENS[0] + footer.NEVER_A_TOKEN,
-                      "the negative control must name the token that caused the false report")
+        # ⚠️ Never `assertIn(token, other + token)` — that is true for ANY token, because a
+        # string contains itself, so it pins nothing. Assert the literal, then the behaviour.
+        self.assertEqual(footer.NEVER_A_TOKEN, "AskUserQuestion",
+                         "the negative control must name the exact token that caused the false report")
+        self.assertFalse(footer.footer_in_lines([footer.NEVER_A_TOKEN]),
+                         "the bare tool name alone must not be reported as a footer")
         for name, lines in NOT_FOOTERS:
             with self.subTest(fixture=name):
                 self.assertFalse(footer.footer_in_lines(lines),
