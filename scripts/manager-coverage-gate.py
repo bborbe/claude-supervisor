@@ -24,7 +24,8 @@ Contract
   --tracked FILE   one owner path per line. Blank lines and `#` comments are skipped. The
                    owners are the round's closure-box owners: the tracked task files plus
                    the subject page.
-  --delta VERDICT  the sweep's own delta, as the sweep reader rendered it. Recognised as
+  --delta VERDICT  the sweep's own delta, as the sweep reader rendered it: the whole
+                   `Delta: …` line, its leading clause, or the bare token. Recognised as
                    NO CHANGE: `no-change`, `no change`, `unchanged`, `nochange`. As CHANGE:
                    `change`, `changed`. Anything else — including an absent flag — fails
                    open.
@@ -66,10 +67,17 @@ stdout would be counted as a row.
 It does not prove the round then dispatches exactly those — the dispatch is the caller's act
 — and it does not prove the delta was computed correctly, which is the sweep reader's
 contract, not this script's.
+
+⚠️ **Only the no-change rendering is normalised.** The sweep reader renders a change as
+prose (`Delta: <what moved>`) and renders `uncomputable` in the same shape, so both stay
+unrecognised and fail open. Deciding between them is the sweep reader's contract, not a
+string this gate may guess at — and guessing wrong would narrow the dispatch while the gate
+believed it had read the delta.
 """
 
 import argparse
 import os
+import re
 import sys
 
 EXIT_NOCHANGE = 0
@@ -82,6 +90,27 @@ NO_CHANGE = {"no-change", "no change", "unchanged", "nochange"}
 CHANGE = {"change", "changed"}
 
 NO_CHANGE_MARKER = "no change since the last sweep"
+
+
+def normalise_delta(raw):
+    """Reduce the sweep reader's rendered delta to the verdict token it leads with.
+
+    `agents/manager-sweep-reader.md` renders `Delta: <what moved, or "no change">`, usually
+    with a trailing clause explaining the verdict — measured 2026-10-16:
+    `Delta: no change — all 14 rows' status/phase/met/progress_hash match the frozen
+    snapshot (recorded_at …)`. The coverage step tells the caller to pass that verdict
+    verbatim, so the rendered form is what this has to accept; a bare token still works.
+
+    ⚠️ **Only the leading clause is compared, and only exactly.** A change description that
+    happens to mention "no change" somewhere inside its prose must not read as a no-change
+    verdict: failing open over-dispatches and costs tokens, while a wrong NO-CHANGE skips
+    coverage silently — and only that direction is unsafe.
+    """
+    text = (raw or "").strip()
+    text = re.sub(r"^delta\s*:\s*", "", text, flags=re.IGNORECASE)
+    for separator in ("\n", "—", "–", " - "):
+        text = text.split(separator, 1)[0]
+    return text.strip().strip("\"'").strip().lower()
 
 
 def read_owners(path):
@@ -163,7 +192,10 @@ def main(argv):
     parser.add_argument(
         "--delta",
         default=None,
-        help="the sweep's own delta verdict: no-change | change (anything else fails open)",
+        help=(
+            "the sweep's own delta as rendered (the `Delta: …` line, its leading clause, "
+            "or the bare token): no-change | change (anything else fails open)"
+        ),
     )
     parser.add_argument(
         "--changed",
@@ -182,7 +214,7 @@ def main(argv):
         print(f"manager-coverage-gate: {error}", file=sys.stderr)
         return EXIT_USAGE
 
-    verdict = (args.delta or "").strip().lower()
+    verdict = normalise_delta(args.delta)
 
     if verdict in NO_CHANGE:
         print(f"⏸ {NO_CHANGE_MARKER} — 0 coverage dispatches", file=sys.stderr)

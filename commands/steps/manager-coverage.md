@@ -15,7 +15,7 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 ```
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-coverage-gate.py \
   --tracked "<the tracked-set path step 2 wrote>" \
-  --delta "<the sweep's own delta verdict, verbatim>" \
+  --delta "<the sweep's own delta, as the sweep reader rendered it>" \
   --changed "<the names the sweep reports as moved, comma-separated>" \
   --subject "<absolute path to the subject page>"
 ```
@@ -24,6 +24,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-coverage-gate.py \
   - **Exit 10 → one owner path per line on stdout: dispatch exactly one agent per line**, as below. That is the whole contract — the line count IS the dispatch count.
   - **Exit 2 → the gate could not read the tracked set.** Fall back to the round's own tracked set and dispatch every owner. Fail open, never fail quiet: a coverage map silently skipped on a tick that moved leaves the round reporting a stale table as current, and nothing announces the loss.
   - ⚠️ **`--changed` is comma- or newline-separated, NEVER whitespace-separated.** Task names contain spaces, so a whitespace split shreds every name, none resolves, and the gate falls open on every call — the saving gone while every fail-open assertion still passes. This suite caught exactly that on its first run.
+  - ⚠️ **`--delta` takes the sweep's own rendering — pass it as it stands.** The gate accepts the whole `Delta: …` line, its leading clause, or the bare token: `no-change` / `no change` / `unchanged` / `nochange` read as NO CHANGE, `change` / `changed` as CHANGE. ⚠️ **Only the no-change rendering is decided for you.** The sweep reader renders a *change* as prose (`Delta: <what moved>`) and renders `uncomputable` in the same shape, so the gate fails open on both rather than guess between them — pass the literal `change` on a moving tick, or pay for every owner. Measured 2026-10-16: passing the rendered `Delta: no change` line verbatim fell open and dispatched every owner, because the gate accepted bare tokens only — the saving gone on exactly the tick it exists for.
   - ⚠️ **The delta is the sweep's, passed in — never recomputed here.** `agents/manager-sweep-reader.md` step 1 item 3 already computes it against the prior snapshot, and this step is not a second classifier (see the read-only clause below).
   - Measured 2026-10-16 on the Recurring Operator Gates manager, session `beac5fd0`: a tick whose sweep reported `Delta: no change` dispatched 15 coverage agents — 14 `task-manager-agent` plus 1 `goal-manager-agent` — at 17,516 output tokens and 770,459 counting cache reads. Making that tick dispatch 0 is this gate's whole job.
 
