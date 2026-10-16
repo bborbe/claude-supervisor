@@ -10,7 +10,9 @@ news". This script is that check.
 
 **It is a COUNTER, not a verdict.** One quiet tick is ordinary — a round may land
 between two writes. Only `QUIET_TICKS_TO_STAND_DOWN` consecutive quiet ticks mean the
-subject has gone quiet, and the count lives on disk because a tick is one process:
+subject has gone quiet, and the count lives on disk because ticks outlive the process.
+⚠️ **A tick is identified by `<slug>.cadence`'s mtime, never by the call** — the count
+records which tick it belongs to, so a second read of the same tick is inert:
 `<slug>.quiet` in the liveness state dir, beside the `<slug>.cadence` / `<slug>.arms` /
 `<slug>.stopped` files `manager-liveness.py` already owns. Same namespace, same
 `slug()` — deliberately, so the two readers cannot disagree about which subject a file
@@ -59,6 +61,7 @@ a counter toward a stand-down.
 """
 import argparse
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -126,26 +129,64 @@ def quiet_path(s: str, state_dir: str | None = None) -> str:
     return os.path.join(state_dir or STATE_DIR, f"{s}.quiet")
 
 
-def read_quiet_count(s: str, state_dir: str | None = None) -> int:
-    """The persisted consecutive-quiet-tick count; 0 when absent or unreadable.
+def cadence_path(s: str, state_dir: str | None = None) -> str:
+    return os.path.join(state_dir or STATE_DIR, f"{s}.cadence")
+
+
+def tick_key(s: str, state_dir: str | None = None) -> int | None:
+    """The identity of the CURRENT tick: the mtime of `<slug>.cadence`.
+
+    The manager arms at the head of every round, so that file's mtime marks the tick a
+    call belongs to — which is what makes a second read of the same tick recognisable.
+    `None` when there is no cadence file: a subject with no loop has no tick to be
+    counted against, and the caller falls back rather than inventing one.
+    """
+    try:
+        return int(os.path.getmtime(cadence_path(s, state_dir)))
+    except OSError:
+        return None
+
+
+def read_quiet_state(s: str, state_dir: str | None = None) -> tuple:
+    """`(count, tick)` for one subject; `(0, None)` when absent or unreadable.
 
     Unreadable reads as 0, never as a large number: a corrupt counter must restart the
-    count, not hand the caller a stand-down it did not earn.
+    count, not hand the caller a stand-down it did not earn. A bare integer is the
+    pre-tick-key format and reads as `tick = None`, so a counter written by an older
+    version still counts — it simply cannot tell a re-read from a new tick.
     """
     try:
         with open(quiet_path(s, state_dir), encoding="utf-8") as fh:
-            return max(0, int(fh.read().strip()))
-    except (OSError, ValueError):
-        return 0
+            raw = fh.read().strip()
+    except OSError:
+        return 0, None
+    try:
+        return max(0, int(raw)), None
+    except ValueError:
+        pass
+    try:
+        d = json.loads(raw)
+        return max(0, int(d["count"])), int(d["tick"])
+    except (ValueError, KeyError, TypeError):
+        return 0, None
 
 
-def write_quiet_count(s: str, n: int, state_dir: str | None = None) -> None:
+def read_quiet_count(s: str, state_dir: str | None = None) -> int:
+    """The persisted consecutive-quiet-tick count; 0 when absent or unreadable."""
+    return read_quiet_state(s, state_dir)[0]
+
+
+def write_quiet_state(s: str, n: int, tick: int, state_dir: str | None = None) -> None:
     p = quiet_path(s, state_dir)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(f"{n}\n")
+        fh.write(json.dumps({"tick": int(tick), "count": int(n)}) + "\n")
     os.replace(tmp, p)
+
+
+def write_quiet_count(s: str, n: int, state_dir: str | None = None) -> None:
+    write_quiet_state(s, n, 0, state_dir)
 
 
 def parse_date(value: str):
@@ -267,6 +308,10 @@ def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> d
     A runnable task resets the counter to 0 — the reset is what makes the count
     *consecutive*, and a counter that only ever incremented would stand a subject down
     two ticks after its last quiet one, however much work arrived in between.
+
+    **A tick is identified by `<slug>.cadence`'s mtime, not by the call.** A manager
+    that reads its subject twice in one tick must not count two ticks: see the counter
+    block below.
     """
     pd = load_predispatch()
     bad_vault = pd.vault_root_error(vault)
@@ -282,11 +327,22 @@ def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> d
         return {"error": str(exc)}
     s = slug(subject)
     seen = survey(vault, members, today_key)
+    prior, prior_tick = read_quiet_state(s, state_dir)
+    key = tick_key(s, state_dir)
     if seen["runnable"]:
         count = 0
+    elif key is not None and key == prior_tick:
+        # A SECOND read of the SAME tick. The count already reflects this tick, so this
+        # read is INERT — never an extra tick. Counting invocations instead of ticks
+        # stands a subject down EARLY, and early is the one direction that loses work
+        # silently: the rule's whole asymmetry is that a manager left armed costs a model
+        # call, while one stood down on live work stops driving it and nothing announces
+        # the loss. Found 2026-10-16 by a goal manager that read its subject twice in one
+        # tick and watched the counter go 1 -> 2 -> 3.
+        count = prior
     else:
-        count = read_quiet_count(s, state_dir) + 1
-    write_quiet_count(s, count, state_dir)
+        count = prior + 1
+    write_quiet_state(s, count, key if key is not None else (prior_tick or 0), state_dir)
     return {
         "subject": subject,
         "slug": s,
