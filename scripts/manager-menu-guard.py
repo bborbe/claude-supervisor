@@ -171,7 +171,17 @@ import unicodedata
 # ⚠️ ONE home, and it may not be widened here. See the module docstring: the list is
 # the two rule homes' own vocabulary, and the Manager Session runbook's § Gate triage
 # class A is a closed list whose widening is an operator decision.
-MANAGER_VERBS = ("open", "resume", "ready", "file", "repair")
+MANAGER_VERBS = (
+    "open", "resume", "ready", "file", "repair",
+    # Widened 2026-10-16 by OPERATOR DECISION (attention card
+    # `b925b3605ffcca4fe6ff0c48d4be48cc`, answer read back from the store). The five
+    # above were the two rule homes' own vocabulary; these are the verbs a measured
+    # corpus of 26 manager menus used and the five missed. ⚠️ The list is still the
+    # operator's to widen, not the guard's — see the docstring.
+    "create", "relay", "re-scope", "nudge", "abort", "flag", "clear", "retire",
+    "disposition", "unlink", "add", "fix", "unpark", "split", "sync", "re-measure",
+    "settle",
+)
 
 # ⚠️ Word boundaries, so `profile` / `OpenClaw` / `filament` are not read as the verb —
 # `\bfil(?:e|es|ed|ing)\b` cannot match inside `filament` because `a` is a word character.
@@ -200,10 +210,40 @@ _VERB_FORMS = {
     "ready": r"read(?:y|ies|ied|ying)",
     "file": r"fil(?:e|es|ed|ing)",
     "repair": r"repair(?:s|ed|ing)?",
+    "create": r"creat(?:e|es|ed|ing)",
+    "relay": r"relay(?:s|ed|ing)?",
+    "re-scope": r"re-?scop(?:e|es|ed|ing)",
+    "nudge": r"nudg(?:e|es|ed|ing)",
+    "abort": r"abort(?:s|ed|ing)?",
+    "flag": r"flag(?:s|ged|ging)?",
+    "clear": r"clear(?:s|ed|ing)?",
+    "retire": r"retir(?:e|es|ed|ing)",
+    "disposition": r"disposition(?:s|ed|ing)?",
+    "unlink": r"unlink(?:s|ed|ing)?",
+    "add": r"add(?:s|ed|ing)?",
+    "fix": r"fix(?:es|ed|ing)?",
+    "unpark": r"unpark(?:s|ed|ing)?",
+    "split": r"split(?:s|ting)?",
+    "sync": r"sync(?:s|ed|ing)?",
+    "re-measure": r"re-?measur(?:e|es|ed|ing)",
+    "settle": r"settl(?:e|es|ed|ing)",
 }
+
+# ⚠️ **A group name must be a Python identifier, and two widened verbs carry a hyphen.**
+# The map is what lets `MANAGER_VERBS` keep the canonical spelling — the value a deny and
+# the record read back — while the regex gets a name it can compile. Without it
+# `(?P<re-scope>…)` raises at import, which is the one failure direction this file is
+# built never to take.
+_GROUP_NAMES = {
+    "re-scope": "rescope",
+    "re-measure": "remeasure",
+}
+_CANONICAL = {group: verb for verb, group in _GROUP_NAMES.items()}
+
 _MANAGER_VERB_RE = re.compile(
     r"\b(?:" + "|".join(
-        f"(?P<{v}>{_VERB_FORMS.get(v, re.escape(v))})" for v in MANAGER_VERBS
+        f"(?P<{_GROUP_NAMES.get(v, v)}>{_VERB_FORMS.get(v, re.escape(v))})"
+        for v in MANAGER_VERBS
     ) + r")\b",
     re.IGNORECASE,
 )
@@ -257,6 +297,82 @@ _MANAGER_QUOTED_HEAD_RE = re.compile(
     r"[\"'“”‘’][^\"'“”‘’]"
 )
 
+# ⚠️ **The proper-noun head — the object source that carries most of the widened reach,
+# and it is FREE.** A manager verb that leads into a CAPITALISED name is offering to act
+# on a named thing. Measured 2026-10-16 over the 36 manager-owned options the five-verb
+# guard allowed: the name is usually a row's own title in a SHORTENED form —
+# `Repair Re-measure Gates` for *"Re-measure Gates per Finished Task After SC2-SC5…"* —
+# which the full-title source below cannot see because the option is shorter than the
+# title, not longer.
+#
+# ⚠️ **It stays out of all THREE pinned operator-only shapes**, which is why it is safe
+# where a bare object-less match was measured wrong: `keep the session open` never leads
+# with a verb at all; `resume tomorrow` and `Open questions about Attention Board Polish`
+# both lead into a LOWERCASE head, and this source does not accept one.
+_PROPER_NOUN_HEAD_RE = re.compile(r"[A-Z]")
+
+# ⚠️ **The two exclusions that let a manager verb lead into a LOWERCASE head.**
+# Operator decision 2026-10-16 (attention card `a32ed1b0324c73ea25cd5362298e8471`, read
+# back from the store). Measured on the corpus: eight manager-owned options were still
+# allowed because their target is a lowercase common noun (`Nudge provenance worker`,
+# `Unpark cap worker`, `File the quiet-counter defect`), and accepting every such head
+# would deny two of the three pinned operator-only shapes — so the exclusions are what
+# buy the reach without paying for it.
+#
+# A head that names a TIME is a when, not a what: `resume tomorrow` offers a schedule.
+# A head that opens a QUESTION is an ask, not an action: `Open questions about Attention
+# Board Polish` is an operator-only option that merely mentions a topic. Neither is the
+# manager offering to act on a thing.
+_TIME_WORDS = frozenset((
+    "today", "tomorrow", "tonight", "yesterday", "now", "later", "soon",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "week", "weekend", "month", "quarter", "year",
+))
+_QUESTION_WORDS = frozenset((
+    "question", "questions", "how", "what", "which", "whether",
+    "who", "whom", "whose", "when", "where", "why",
+))
+# ⚠️ **The THIRD exclusion, and the pinned contract is what forced it.** `plan-task`'s
+# predicate pins three operator-only shapes in `test_both_halves_are_required` — a
+# manager verb leading with NO owned object. Relaxing to a lowercase head denied two of
+# them, and the fix is not to rewrite the pins: they ARE the contract, and the predicate
+# has to meet them. Measured over the eight manager-owned lowercase heads the corpus
+# still allowed, against those two pins, the first word separates the classes exactly:
+# every manager-owned head opens with a NOUN, a VERB or an article (`provenance worker`,
+# `go to pane 1895`, `the flag on …`), and both pins open with a PREPOSITION (`for`) or a
+# PRONOUN (`it`). An option that leads its verb into `for …` or `it …` is not acting on a
+# thing, it is saying *how* or *what about* one.
+_PREPOSITION_WORDS = frozenset((
+    "about", "above", "across", "after", "against", "along", "among", "around", "as",
+    "at", "before", "behind", "below", "beneath", "beside", "between", "beyond", "by",
+    "down", "during", "except", "for", "from", "in", "inside", "into", "like", "near",
+    "of", "off", "on", "onto", "out", "outside", "over", "past", "since", "through",
+    "throughout", "to", "toward", "towards", "under", "underneath", "until", "up",
+    "upon", "with", "within", "without",
+))
+_PRONOUN_WORDS = frozenset((
+    "i", "me", "my", "mine", "we", "us", "our", "ours", "you", "your", "yours",
+    "he", "him", "his", "she", "her", "hers", "it", "its", "they", "them", "their",
+    "theirs", "this", "that", "these", "those", "something", "anything", "nothing",
+    "everything", "someone", "anyone", "nobody",
+))
+_HEAD_WORD_RE = re.compile(r"[a-z][a-z'-]*")
+
+
+def _non_object_head(head):
+    """Whether `head` names a TIME, introduces a QUESTION, or opens with a function word.
+
+    ⚠️ Only the head's FIRST word decides. `Resume tomorrow and open the row` leads into
+    a time and is excluded — the safe direction: the option is still an ask, and scanning
+    the whole window for a time word would deny a real action that merely mentions one.
+    """
+    words = _HEAD_WORD_RE.findall((head or "").casefold())
+    if not words:
+        return False
+    first = re.sub(r"'s$", "", words[0])
+    return (first in _TIME_WORDS or first in _QUESTION_WORDS
+            or first in _PREPOSITION_WORDS or first in _PRONOUN_WORDS)
+
 # How far past the verb its object may sit. 40 characters carries every natural phrasing
 # measured (`Resume the paused Sentry row` = 21, `Open the approved row` = 9, `Repair the
 # page box` = 8) and stops the window reaching an unrelated noun in a long option.
@@ -280,6 +396,10 @@ _LEADING_DECORATION_RE = re.compile(
 # vault keeps its pages.
 TOPIC_SUBDIRS = ("23 Topics",)
 GOAL_SUBDIRS = ("24 Goals", "23 Goals")
+# ⚠️ Both generations, for the same reason GOAL_SUBDIRS lists two: the 2026-09-13
+# renumbering (`24 Tasks` -> `25 Tasks`) left older vaults on the previous name, and one
+# reader must not disagree with another about where a vault keeps its rows.
+TASK_SUBDIRS = ("25 Tasks", "24 Tasks")
 
 # The root of the tree, whose name resolves to no page and is matched exactly.
 ROOT_NAME = "Fleet Manager"
@@ -443,6 +563,82 @@ def vault_page_names():
     return topics, goals
 
 
+# ⚠️ **Listed LAZILY, and the laziness is the whole design.** `25 Tasks` measured
+# **16,389 pages / 28.0 ms** across the vaults on 2026-10-16, against **2.4 ms** for
+# topics+goals — roughly 12x this hook's current cost, paid before every
+# `AskUserQuestion` in every session that loads the plugin. So it is consulted only from
+# the LAST object source, after a label has already led with a manager-owned verb and the
+# three cheap sources all missed: a menu of ordinary operator-only options never reaches
+# it. Cached per process, so the second option in one payload is free.
+_TASK_TITLES = None
+
+
+def task_page_titles():
+    """Every vault's task page titles, lowercased -> title. `{}` when none can be read.
+
+    ⚠️ A missing or unreadable vault degrades to `{}` rather than raising, for the same
+    reason `vault_page_names` does: the caller reads an empty map as "no title source",
+    which allows the call, and a gate that failed closed here would block every
+    `AskUserQuestion` in every session that loads this plugin.
+    """
+    global _TASK_TITLES
+    if _TASK_TITLES is not None:
+        return _TASK_TITLES
+    titles = {}
+    root = os.path.expanduser(os.environ.get("OBSIDIAN_DIR", "~/Documents/Obsidian"))
+    try:
+        vaults = [os.path.join(root, d) for d in sorted(os.listdir(root))
+                  if os.path.isdir(os.path.join(root, d))]
+    except OSError:
+        _TASK_TITLES = titles
+        return titles
+    for vault in vaults:
+        for sub in TASK_SUBDIRS:
+            directory = os.path.join(vault, sub)
+            if not os.path.isdir(directory):
+                continue
+            for path in glob.glob(os.path.join(directory, "*.md")):
+                title = os.path.basename(path)[:-3]
+                titles[title.lower()] = title
+    _TASK_TITLES = titles
+    return titles
+
+
+# ⚠️ The index is what keeps a linear scan off the hot path: 16,389 titles tested per
+# option would cost more than the listing itself, and a menu with four leading verbs pays
+# it four times. Bucketing by first word leaves a handful of candidates per lookup.
+_TASK_TITLE_INDEX = None
+
+
+def _task_title_index():
+    """`first word -> [titles]`, built once from `task_page_titles`."""
+    global _TASK_TITLE_INDEX
+    if _TASK_TITLE_INDEX is None:
+        index = {}
+        for title in task_page_titles():
+            first = title.split()[0] if title.split() else ""
+            index.setdefault(first, []).append(title)
+        _TASK_TITLE_INDEX = index
+    return _TASK_TITLE_INDEX
+
+
+def task_title_at_head(head):
+    """Whether `head` BEGINS with one of the vaults' task page titles.
+
+    ⚠️ Head-anchored, exactly as sources 2 and 3 are. A title merely *mentioned* later in
+    the option is not the thing being acted on — `Repair the 3 repairable rows` must not
+    become a deny because some page happens to be named `repairable rows`.
+    """
+    if not head:
+        return False
+    lowered = head.casefold()
+    words = lowered.split()
+    for title in _task_title_index().get(words[0] if words else "", ()):
+        if lowered.startswith(title):
+            return True
+    return False
+
+
 def manager_subject(name, topics, goals):
     """`('topic'|'goal', title)` when `name` names a page, else `None`.
 
@@ -598,7 +794,10 @@ def leading_manager_verb(label):
     match = _MANAGER_VERB_RE.match(text)
     if not match:
         return None
-    return match.lastgroup, text[match.end():]
+    # ⚠️ Mapped back through `_CANONICAL`: the group name is a legal identifier
+    # (`rescope`), the value returned is the rule's own vocabulary (`re-scope`), so a
+    # deny reads as the list member rather than as the regex's internal name.
+    return _CANONICAL.get(match.lastgroup, match.lastgroup), text[match.end():]
 
 
 def names_manager_owned_action(label, page_titles=()):
@@ -645,6 +844,37 @@ def names_manager_owned_action(label, page_titles=()):
     for title in page_titles:
         if title and head.casefold().startswith(title.casefold()):
             return verb
+    # ⚠️ **The exclusion runs BEFORE sources 4-6, and it is what they are built around.**
+    # A head that names a TIME or opens a QUESTION is not a thing, so no object source
+    # may answer on it. See `_non_object_head`.
+    if _non_object_head(head):
+        return None
+    # Source 4 — a PROPER-NOUN head. Free: `Repair Re-measure Gates` names a real row in
+    # a shortened form the full-title source below cannot match.
+    if _PROPER_NOUN_HEAD_RE.match(head):
+        return verb
+    # Source 5 — an UNQUOTED task title at the head. ⚠️ Consulted here rather than last
+    # because it is the only source that costs a directory listing (16,389 pages /
+    # 28.0 ms) and source 6 below would otherwise answer first and pay nothing — see the
+    # note in source 6, which records that this source now adds reach only for a title
+    # whose own first word is a time word.
+    if task_title_at_head(head):
+        return verb
+    # ⚠️ **A "source 6 — any head" relaxation was BUILT, MEASURED and WITHDRAWN; this note
+    # is the record, so it is not proposed again as though untried.** Operator decision
+    # 2026-10-16 (card `a32ed1b0324c73ea25cd5362298e8471`) chose to relax the object half
+    # to a lowercase head. Implemented, it reached **0 of 41** manager-owned options
+    # allowed — SC1's target exactly — and broke TWO pinned operator-only cases:
+    #   * `Resume the session — "keep going"`, pinned allowed because the quote is LATE
+    #     and is not the verb's object; "any head" denies it on `session — …` alone.
+    #   * the `OBJECT_WINDOW` boundary case, where an object past 40 characters must not
+    #     match; "any head" makes the window meaningless.
+    # So the reach was real and the cost was the contract. The exclusions above are what
+    # survives: they guard sources 4 and 5 (they are what keeps sentence-case
+    # `Resume Tomorrow` out), and the eight lowercase-head options the corpus still shows
+    # are recorded on the task page as a MEASURED RESIDUAL. The predicate does not reach
+    # them without breaking the contract, and rewriting the contract is an operator
+    # decision, not this file's.
     return None
 
 
