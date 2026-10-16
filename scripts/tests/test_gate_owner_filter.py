@@ -54,6 +54,12 @@ ME = "92de43c3-bd91-409d-a33e-824a61e5706a"
 PEER = "64b4a415-906d-457f-81f9-48a842007b88"
 GATED = "33333333-3333-4333-8333-333333333333"
 
+# A one-row feed carrying pane 372, in `who-needs-me.py`'s own render. `--pane` filters
+# the feed rather than manufacturing a gate, so every test that names a pane supplies
+# one -- and supplying it explicitly is also what keeps the suite off the live store,
+# since a bare `--pane` produces the feed by running the real producer.
+FEED_372 = "[ 372]  3m  ⚙ some task — awaiting-operator\n"
+
 # Distinct from None, which is a MEANINGFUL value here (unknown liveness).
 _UNSET = object()
 
@@ -497,11 +503,14 @@ class CorruptRecordsFailOpen(unittest.TestCase):
             handle.write(text)
 
     def run_filter(self):
+        # `--pane` FILTERS the feed, so it needs one: a call naming a pane the feed does
+        # not carry now yields no gate at all. Passing the feed explicitly also keeps the
+        # suite off the live store -- `--pane` alone produces the feed itself.
         return subprocess.run(
-            [sys.executable, _SCRIPT, "--pane", "372", "--self", ME, "--explain",
+            [sys.executable, _SCRIPT, "--feed", "--pane", "372", "--self", ME, "--explain",
              "--state-dir", self.state, "--registry-dir", self.registry,
              "--endpoint", self.endpoint.url],
-            capture_output=True, text=True,
+            input=FEED_372, capture_output=True, text=True,
         )
 
     def test_a_null_ledger_row_exits_zero(self):
@@ -771,11 +780,12 @@ class ClaimsFilePath(unittest.TestCase):
             json.dump({"claims": {GATED: {"session": GATED, "manager": PEER}}}, handle)
 
     def run_filter(self, *extra, env=None):
+        # See the sibling helper above: `--pane` filters a feed, so the feed is passed.
         return subprocess.run(
-            [sys.executable, _SCRIPT, "--pane", "372", "--self", ME, "--explain",
+            [sys.executable, _SCRIPT, "--feed", "--pane", "372", "--self", ME, "--explain",
              "--state-dir", self.state, "--registry-dir", self.registry,
              "--endpoint", self.endpoint.url, *extra],
-            capture_output=True, text=True, env=env,
+            input=FEED_372, capture_output=True, text=True, env=env,
         )
 
     def test_claims_file_flag_drops_a_claimed_pane(self):
@@ -893,10 +903,13 @@ class SummaryLine(unittest.TestCase):
 
     def test_each_drop_bucket_is_counted_under_its_own_reason(self):
         result = subprocess.run(
-            [sys.executable, _SCRIPT, "--pane", "10", "--pane", "11", "--self", ME,
+            [sys.executable, _SCRIPT, "--feed", "--pane", "10", "--pane", "11",
+             "--self", ME,
              "--state-dir", self.state, "--registry-dir", self.registry,
              "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json")],
+            input="[ 10]  3m  ⚙ task a — awaiting-operator\n"
+                  "[ 11]  4m  ⚙ task b — awaiting-operator\n",
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -941,6 +954,12 @@ class EmptyFeedIsNotAUsageError(unittest.TestCase):
         self.addCleanup(self.endpoint.__exit__, None, None, None)
         for path in (self.state, self.registry):
             os.makedirs(path)
+        # A stand-in for `who-needs-me.py`, so a bare `--pane` (which now produces the
+        # feed itself) is exercised without reaching the operator's live store.
+        self.producer_script = os.path.join(self.dir, "feed.py")
+        with open(self.producer_script, "w", encoding="utf-8") as handle:
+            handle.write("import sys\nsys.stdout.write(%r)\n" % FEED_372)
+        self.producer = f"{sys.executable} {self.producer_script}"
 
     def invoke(self, *argv, feed=None):
         return subprocess.run(
@@ -975,11 +994,35 @@ class EmptyFeedIsNotAUsageError(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertIn("pass --pane, --feed, or both", result.stderr)
 
-    def test_pane_alone_is_still_a_source(self):
-        """`--pane` is the guard's other half and must keep working."""
-        result = self.invoke("--pane", "372", "--self", ME)
+    def test_pane_alone_is_still_a_source_and_now_reads_the_feed(self):
+        """`--pane` is the guard's other half, and it now FILTERS rather than invents.
+
+        Measured 2026-10-16: `--self beac5fd0 --pane 1832 --explain` read `gates: 1
+        emit: 1  reason: own-worker` while the authoritative path over the same pane
+        read `gates: 0  emit: 0`. The flag still stands alone as a source -- the guard
+        is unchanged -- but the panes now come from the feed it consults.
+        """
+        result = self.invoke(
+            "--pane", "372", "--self", ME, "--explain", "--producer", self.producer
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("gates: 1", result.stderr, result.stderr)
+        self.assertNotIn("no feed gate", result.stdout)
+
+    def test_a_named_pane_absent_from_the_feed_yields_no_gate(self):
+        """The defect this flag carried: `--explain` answered "yes" for ANY pane.
+
+        A named pane the feed does not carry now yields nothing and says so, which is
+        what makes "the feed does not carry it" distinguishable from "the feed was
+        never consulted" -- a distinction the manufacturing build could not express.
+        """
+        result = self.invoke(
+            "--pane", "999", "--self", ME, "--explain", "--producer", self.producer
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gates: 0", result.stderr, result.stderr)
+        self.assertIn("emit: 0", result.stderr, result.stderr)
+        self.assertIn("no feed gate for pane 999", result.stdout)
 
 
 class UpstreamRefusalFailsLoudly(unittest.TestCase):

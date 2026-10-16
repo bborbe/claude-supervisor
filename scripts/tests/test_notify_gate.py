@@ -784,6 +784,44 @@ class Stamp(_Harness):
         self.assertIn("unresolved", self.last_stdout())
         self.assertIn("cross-layer de-dup is NOT in force", self.last_stdout())
 
+    def test_an_item_created_after_the_snapshot_is_not_reported_unresolved(self):
+        """The store read is a SNAPSHOT, and a gate's item can be created after it.
+
+        Measured 2026-10-16: two items appeared in a 75-second window, so a gate raised
+        in that window read as item-less for the whole round -- reported `unresolved`,
+        published WITHOUT a stamp, and the other layer left free to raise it again.
+        The re-read before the report resolves it instead, which is the point: the
+        gate is not item-less, the snapshot merely predates its item.
+        """
+        sent = self.ok()
+        reads = [[], [self.item("subject-1", item_id="item-late")]]
+        self.mod.store_items = lambda: reads.pop(0) if reads else []
+        self.feed_as("session-a", layer="worker")
+        self.assertNotIn(
+            "unresolved", self.last_stdout(), "a late item is not an absence"
+        )
+        self.assertEqual(
+            self.stamped,
+            [("item-late", "session-a")],
+            "and the late item is stamped, so the other layer suppresses it",
+        )
+        self.assertEqual(len(sent), 1, "the gate still escalates exactly once")
+
+    def test_a_re_read_that_still_finds_no_item_stays_unresolved(self):
+        """The re-read must not swallow a genuine absence -- its negative half.
+
+        The two cases differ only in what the SECOND read returns, so a re-read that
+        resolved regardless of its result would pass the test above and fail here.
+        """
+        sent = self.ok()
+        reads = [[], []]
+        self.mod.store_items = lambda: reads.pop(0) if reads else []
+        self.feed_as("session-a", layer="worker")
+        self.assertIn("unresolved", self.last_stdout())
+        self.assertIn("cross-layer de-dup is NOT in force", self.last_stdout())
+        self.assertEqual(self.stamped, [], "no item, so nothing to stamp")
+        self.assertEqual(len(sent), 1, "an unresolvable gate still escalates")
+
     def test_an_ambiguous_session_with_no_text_match_is_unresolved(self):
         """The tiebreak must never silently pick -- the Fleet Manager's condition.
 

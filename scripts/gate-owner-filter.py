@@ -925,10 +925,21 @@ def counts_line(rows):
     )
 
 
-def one_shot(panes, args, ledger, live, items, claims):
-    """Read once, print, exit — the original contract, unchanged."""
+def one_shot(panes, args, ledger, live, items, claims, missing=()):
+    """Read once, print, exit — the original contract, unchanged.
+
+    `missing` names the panes `--pane` asked for that the feed did not carry. Under
+    `--explain` each is named, because the alternative is indistinguishable from a
+    filter that silently matched nothing: a `--pane 1832` run printing no row and
+    `gates: 0` reads as "this pane is fine" whether or not the pane was ever in the
+    feed. Naming it separates "the feed does not carry it" from "the feed was never
+    consulted" — the defect this flag carried.
+    """
     rows = evaluate_panes(panes, ledger, live, items, args.self_id, claims)
     render(rows, args)
+    if args.explain:
+        for pane in missing:
+            print(f"no feed gate for pane {pane}")
     print(counts_line(rows), file=sys.stderr)
     return 0
 
@@ -1174,7 +1185,16 @@ def main():
     # synthetic empty feed on stdin. Do not restore the derived-set test: it is
     # the same shape as the padding defect `feed_rows` documents above -- a
     # correct extractor whose empty result the caller misreads as a bad call.
-    panes = [(pane, False) for pane in args.pane]
+    # ⚠️ `--pane` FILTERS the feed; it never manufactures a gate. Building the list
+    # from the flag made every named pane a gate its caller owned, with the feed never
+    # consulted at all: measured 2026-10-16, `--self beac5fd0 --pane 1832 --explain`
+    # read `gates: 1  emit: 1  reason: own-worker` while the authoritative path over the
+    # same pane (`who-needs-me.py --section needs-you | gate-owner-filter.py --feed
+    # --self beac5fd0`) read `gates: 0  emit: 0`. `--explain` reads as a diagnostic, so
+    # a manager checking "is this pane blocked?" got a confident affirmative for a pane
+    # that needed nothing -- the one direction that fails by INVENTING a gate rather
+    # than dropping one. `wanted` is the filter; the feed read below supplies the set.
+    wanted = [str(pane).strip() for pane in args.pane]
     if args.interval is not None and args.pane:
         parser.error("--interval polls the feed; it cannot be combined with --pane")
     if args.interval is not None and not args.feed:
@@ -1227,7 +1247,33 @@ def main():
         refusal = feed_refusal(lines)
         if refusal:
             return refusal_exit(refusal)
-        panes += feed_rows(lines)
+        feed = feed_rows(lines)
+    elif wanted:
+        # `--pane` WITHOUT `--feed` still has to ask the feed, or the filter has nothing
+        # to filter and the flag reverts to manufacturing the very gate this change
+        # removes. Produced once, with the same refusal / failed-producer handling the
+        # poll loop uses: a producer that died and a quiet fleet leave the same rows on
+        # the wire, and only one of them is a measurement.
+        proc = subprocess.run(
+            shlex.split(args.producer), capture_output=True, text=True
+        )
+        lines = proc.stdout.splitlines(keepends=True)
+        refusal = feed_refusal(lines)
+        if refusal:
+            return refusal_exit(refusal)
+        if proc.returncode != 0:
+            return producer_exit(args.producer, proc.returncode)
+        feed = feed_rows(lines)
+    else:
+        feed = []
+
+    if wanted:
+        seen = {pane for pane, _ in feed}
+        panes = [(pane, replayed) for pane, replayed in feed if pane in wanted]
+        missing = [pane for pane in wanted if pane not in seen]
+    else:
+        panes, missing = feed, []
+
     if not args.pane and not args.feed:
         parser.error("pass --pane, --feed, or both")
 
@@ -1236,7 +1282,7 @@ def main():
         # glob is handed over, because it is the one source whose cost makes a
         # per-poll read a real trade rather than a free one.
         return poll(args, items)
-    return one_shot(panes, args, ledger, live, items, claims)
+    return one_shot(panes, args, ledger, live, items, claims, missing=missing)
 
 if __name__ == "__main__":
     sys.exit(main())
