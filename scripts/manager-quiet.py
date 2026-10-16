@@ -175,8 +175,19 @@ def _date_key(value: str):
     return (t.tm_year, t.tm_mon, t.tm_mday) if t else None
 
 
-def classify(fm: str, tasks_dir: str, index, today_key) -> str:
-    """`terminal` | `quiet` | `runnable` for one task's frontmatter.
+def _date_text(value: str) -> str:
+    """The `YYYY-MM-DD` form a reader is shown, or `""` when the scalar is not a date."""
+    t = parse_date(value)
+    return f"{t.tm_year:04d}-{t.tm_mon:02d}-{t.tm_mday:02d}" if t else ""
+
+
+def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
+    """`{"kind", "defer", "blocked"}` for one task's frontmatter.
+
+    `kind` is `terminal` | `quiet` | `runnable`. `defer` carries the row's future
+    `defer_date` when that is *why* it is quiet, and `blocked` its unmet blocker names —
+    both exist so the reopen trigger can be named from the **same read that decided the
+    verdict**, rather than re-derived later from a second one that could disagree.
 
     ⚠️ **Every branch below reads a field; none infers.** An absent or unparseable
     value falls through to `runnable` — see the module docstring on failing toward
@@ -185,28 +196,31 @@ def classify(fm: str, tasks_dir: str, index, today_key) -> str:
     pd = load_predispatch()
     status = (pd.fm_scalar(fm, "status") or "").strip().lower()
     if status in TERMINAL_STATUSES:
-        return "terminal"
+        return {"kind": "terminal", "defer": None, "blocked": []}
     if status in UNSURFACED_STATUSES:
-        return "quiet"
-    due = _date_key(pd.fm_scalar(fm, "defer_date"))
+        return {"kind": "quiet", "defer": None, "blocked": []}
+    raw_due = pd.fm_scalar(fm, "defer_date")
+    due = _date_key(raw_due)
     if due is not None and today_key is not None and due > today_key:
-        return "quiet"
-    if pd.blocked_by_verdict(fm, tasks_dir, index)["blocked"]:
-        return "quiet"
-    return "runnable"
+        return {"kind": "quiet", "defer": _date_text(raw_due), "blocked": []}
+    verdict = pd.blocked_by_verdict(fm, tasks_dir, index)
+    if verdict["blocked"]:
+        return {"kind": "quiet", "defer": None, "blocked": list(verdict["unmet"])}
+    return {"kind": "runnable", "defer": None, "blocked": []}
 
 
 def survey(vault: str, members: list, today_key) -> dict:
-    """`{"runnable": [...], "quiet": [...], "terminal": [...]}` for one subject's set.
+    """`{"runnable", "quiet", "terminal", "defer", "blocked"}` for one subject's set.
 
     The task set is `manager-predispatch.py`'s `resolve_tracked` — a member may be a
     goal (admits tasks whose `goals:` name it) or a task named directly — so this check
-    and the sweep see the same rows.
+    and the sweep see the same rows. `defer` and `blocked` are keyed by task name and
+    carry only the rows that are quiet *for that reason*.
     """
     pd = load_predispatch()
     tasks_dir = os.path.join(vault, pd.TASKS_DIRNAME)
     index = pd.task_index(tasks_dir)
-    out = {"runnable": [], "quiet": [], "terminal": []}
+    out = {"runnable": [], "quiet": [], "terminal": [], "defer": {}, "blocked": {}}
     for task in pd.resolve_tracked(vault, members):
         path = os.path.join(tasks_dir, task["name"] + ".md")
         try:
@@ -216,8 +230,35 @@ def survey(vault: str, members: list, today_key) -> dict:
             # An unreadable row is work this check cannot rule out -> runnable.
             out["runnable"].append(task["name"])
             continue
-        out[classify(fm or "", tasks_dir, index, today_key)].append(task["name"])
+        verdict = classify(fm or "", tasks_dir, index, today_key)
+        out[verdict["kind"]].append(task["name"])
+        if verdict["defer"]:
+            out["defer"][task["name"]] = verdict["defer"]
+        if verdict["blocked"]:
+            out["blocked"][task["name"]] = verdict["blocked"]
     return out
+
+
+def reopen_trigger(seen: dict) -> str:
+    """What would make this subject live again — the line SC3 requires.
+
+    The **earliest** future `defer_date` when any quiet row carries one, because that is
+    the first date the subject can change on its own; otherwise the blocking task names;
+    otherwise an explicit `no named trigger`. ⚠️ **The no-trigger case says so in words
+    rather than returning `""`** — an empty tail would satisfy SC3's literal probe while
+    naming nothing, and a reader cannot tell "no trigger exists" from "the trigger
+    failed to compute".
+    """
+    dates = sorted(d for d in seen["defer"].values() if d)
+    if dates:
+        return dates[0]
+    if seen["blocked"]:
+        # The BLOCKERS, never the blocked rows: the subject reopens when a blocker
+        # completes, so naming the row that is waiting would name the wrong end of the
+        # edge — and a reader acting on it would go and look at a task that is fine.
+        names = sorted({b for blockers in seen["blocked"].values() for b in blockers})
+        return "blocked by " + ", ".join(names)
+    return "no named trigger"
 
 
 def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> dict:
@@ -254,6 +295,7 @@ def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> d
         "terminal": seen["terminal"],
         "consecutive_quiet": count,
         "verdict": "stood-down" if count >= QUIET_TICKS_TO_STAND_DOWN else "armed",
+        "trigger": reopen_trigger(seen),
     }
 
 
@@ -279,6 +321,11 @@ def main(argv: list) -> int:
         f"{result['verdict']}\t{len(result['runnable'])}\t"
         f"{len(result['quiet'])}\t{result['consecutive_quiet']}"
     )
+    if result["verdict"] == "stood-down":
+        # SC3's line. Emitted HERE rather than by the caller so the trigger and the
+        # verdict come from one read of the tree — a step that recomputed the trigger
+        # could name a different date than the one the stand-down was decided on.
+        print(f"Stood down: zero runnable tasks; reopen on {result['trigger']}")
     if result["runnable"]:
         # The reason a subject is still armed is the row that kept it armed; a bare
         # count would send a reader looking for which task it was.
