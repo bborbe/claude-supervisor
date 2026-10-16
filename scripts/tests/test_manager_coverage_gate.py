@@ -74,6 +74,73 @@ class CoverageGateTest(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertIn("0 coverage dispatches", err)
 
+    def test_the_rendered_no_change_line_dispatches_nothing(self):
+        """The sweep reader's own rendering, passed verbatim as the step instructs.
+
+        Regression: the gate accepted only bare tokens, so the rendered `Delta: no change`
+        line failed open and dispatched every owner — the saving gone, silently, on exactly
+        the tick this feature exists to make free. Measured 2026-10-16 on a live round.
+        """
+        rendered = (
+            "Delta: no change — all 14 rows' status/phase/met/progress_hash match the "
+            "frozen snapshot (recorded_at 2026-10-16T10:47:25+02:00)"
+        )
+        rc, rows, _ = run("--tracked", self.tracked, "--delta", rendered)
+        self.assertEqual(rows, [], "the rendered no-change line must dispatch no owner")
+        self.assertEqual(rc, 0)
+
+    def test_the_rendered_change_token_selects_the_changed_rows(self):
+        """The same rendering shape on a change tick, so the fix is not a no-change-only branch."""
+        rc, rows, _ = run(
+            "--tracked", self.tracked,
+            "--delta", "Delta: change — 3 rows moved",
+            "--changed", "Alpha Row",
+        )
+        self.assertEqual(rows, [TASKS[0]])
+        self.assertEqual(rc, 10)
+
+    def test_a_prose_change_rendering_fails_open_rather_than_narrow(self):
+        """⚠️ The boundary this fix deliberately does not cross, pinned so it stays visible.
+
+        The sweep reader renders a *change* as prose — `Delta: <what moved>` — never as a
+        token, and it renders `uncomputable` in the same shape. Mapping arbitrary prose to
+        CHANGE is therefore a semantics decision, not a normalisation: a mis-read would
+        narrow the dispatch to a subset while the gate believed it had read the delta. The
+        gate keeps failing open there, so the caller passes the token or pays for every
+        owner. Only the no-change rendering is unambiguous enough to decide here.
+        """
+        rc, rows, _ = run(
+            "--tracked", self.tracked,
+            "--delta", "Delta: 3 rows moved",
+            "--changed", "Alpha Row",
+        )
+        self.assertEqual(rows, TASKS + [SUBJECT])
+
+    def test_a_change_prose_mentioning_no_change_is_not_a_no_change_verdict(self):
+        """⚠️ The unsafe direction, pinned.
+
+        Failing open over-dispatches; reading a change as NO CHANGE skips coverage. So the
+        comparison is the leading clause only — prose that says "no change" later in the
+        sentence must not collapse the dispatch to nothing.
+        """
+        rc, rows, _ = run(
+            "--tracked", self.tracked,
+            "--delta", "Delta: 3 rows moved — no change to the remaining 11",
+            "--changed", "Alpha Row",
+        )
+        self.assertEqual(
+            rows, TASKS + [SUBJECT],
+            "a change whose prose mentions 'no change' must fail open, never read as no-change",
+        )
+
+    def test_an_uncomputable_rendering_still_fails_open(self):
+        """The sweep reader's own no-baseline rendering keeps the fail-open contract."""
+        rc, rows, _ = run(
+            "--tracked", self.tracked,
+            "--delta", "uncomputable: no prior snapshot was passed this run",
+        )
+        self.assertEqual(rows, TASKS + [SUBJECT])
+
     def test_changed_delta_dispatches_only_the_changed_rows(self):
         """SC3, and the positive control for test 1: the gate CAN emit rows."""
         rc, rows, _ = run(
