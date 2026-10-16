@@ -236,6 +236,27 @@ _MANAGER_OBJECT_RE = re.compile(
     r"\b(?:" + "|".join(MANAGER_OBJECTS) + r")s?\b", re.IGNORECASE
 )
 
+# ⚠️ **A named target in quotes is an object source too, and it is the one that catches
+# the canonical manager menu.** Measured 2026-10-16 by `scripts/manager-menu-probe.py`:
+# `Resume "Sentry Agent - Retire the Legacy Gate"` was ALLOWED, because a real task title
+# carries no manager-owned noun — the object list above answers only the phrasings that
+# happen to say "row" or "task", and a manager quoting the row's own title says neither.
+# That is the shape the rule exists for: a manager offering to open or resume a NAMED
+# thing is offering its own work whatever the name is.
+#
+# ⚠️ **Head-only, mirroring the page-title rule below.** `Resume the session — "keep
+# going"` puts the quote late and stays operator-only; only a quote the verb takes as its
+# direct object counts. Without the position test this source would deny any operator-only
+# option that happened to quote something.
+#
+# ⚠️ **Cheap by construction, which is why it is preferred to listing `25 Tasks`** — the
+# guard's own docstring on `names_manager_owned_action` records that listing that
+# directory is 51,285 files / 47.7 ms, and this costs a regex match on a 40-character
+# window already in hand.
+_MANAGER_QUOTED_HEAD_RE = re.compile(
+    r"[\"'“”‘’][^\"'“”‘’]"
+)
+
 # How far past the verb its object may sit. 40 characters carries every natural phrasing
 # measured (`Resume the paused Sentry row` = 21, `Open the approved row` = 9, `Repair the
 # page box` = 8) and stops the window reaching an unrelated noun in a long option.
@@ -587,18 +608,25 @@ def names_manager_owned_action(label, page_titles=()):
     that follows it. See the predicate's comment block for the two operator-only menus a
     single-half predicate was measured denying on 2026-10-16.
 
-    The object is a manager-owned noun (`row` / `task` / `page` / `box` / `goal`), or one
-    of the vault's own topic and goal page titles — those are the subjects a manager
-    opens, resumes and readies, and they are already in hand because rule 1 needs them.
-    A title is accepted only when it sits at the head of the window (after an optional
+    Three object sources, any one of which answers:
+
+    1. a manager-owned noun (`row` / `task` / `page` / `box` / `goal`);
+    2. a **quoted** named target at the head of the window — `Resume "<anything>"`, the
+       shape a manager uses when it quotes the row's own title; or
+    3. one of the vault's own topic and goal page titles — the subjects a manager opens,
+       resumes and readies, already in hand because rule 1 needs them.
+
+    Sources 2 and 3 are accepted only at the head of the window (after an optional
     article), which is what keeps `Open questions about Attention Board Polish` — an
     operator-only option that merely mentions a topic — out of the deny.
 
-    ⚠️ **Task titles are deliberately NOT an object source.** They would be a second
+    ⚠️ **Task titles are deliberately NOT an object source.** They would be a fourth
     signal, but `25 Tasks` is **51,285 files / 47.7 ms** to list here (measured
-    2026-10-16), which would triple this hook's cost before every `AskUserQuestion`; the
-    named residual is that an option naming a bare task title with no object noun
-    (`Open A Docker Spawn's Create Reply …`) is allowed.
+    2026-10-16), which would triple this hook's cost before every `AskUserQuestion`.
+    Source 2 is what covers that gap instead: a manager naming a row quotes its title,
+    and the quote is free where the listing is not. The named residual is now only an
+    option that names a bare task title with **no** quoting and no object noun
+    (`Open A Docker Spawn's Create Reply …`), which no measured menu has used.
     """
     lead = leading_manager_verb(label)
     if not lead:
@@ -612,6 +640,8 @@ def names_manager_owned_action(label, page_titles=()):
         if head.casefold().startswith(article):
             head = head[len(article):]
             break
+    if _MANAGER_QUOTED_HEAD_RE.match(head):
+        return verb
     for title in page_titles:
         if title and head.casefold().startswith(title.casefold()):
             return verb

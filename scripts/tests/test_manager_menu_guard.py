@@ -94,6 +94,28 @@ NATURAL_ACTION_LABELS = {
     "repair": "Repair the page box",
 }
 
+# ⚠️ **The shape a manager actually uses, and the one the object list alone missed.** A
+# manager offering its own work quotes the row's own title — and a real task title carries
+# no manager-owned noun (`row` / `task` / `page` / `box` / `goal`), so the object list
+# answers none of these. Measured 2026-10-16 by `scripts/manager-menu-probe.py`:
+# `Resume "Sentry Agent - Retire the Legacy Gate"` was ALLOWED before the quoted-head
+# object source existed — the canonical manager menu, through the gate. The titles are
+# fixture-shaped on purpose: what matters is that each is bare.
+BARE_TITLE_LABELS = (
+    'Resume "Sentry Agent - Retire the Legacy Gate"',
+    'Open "Sentry Agent - Adopt the New Menu Rule"',
+    'Ready "A Manager Offers Its Own Work"',
+)
+
+# The other half of that source. A quote the verb does NOT take as its direct object is
+# not a named target, so these stay operator-only — without the head-position test the
+# quoted-head source would deny every operator-only option that happened to quote
+# something, which is the same class of false positive the overlap cases below record.
+QUOTED_BUT_NOT_A_TARGET_LABELS = (
+    ('Resume the session — "keep going"', "Stop for today"),
+    ('Open questions about "Attention Board Polish"', "Leave it unchanged"),
+)
+
 
 def load_guard():
     spec = importlib.util.spec_from_file_location("manager_menu_guard", SCRIPT)
@@ -233,6 +255,48 @@ class TestGradedCases(Base):
         code, err = self.run_guard(self.payload("worker-1", list(NATURAL_ACTION_LABELS.values())))
         self.assertEqual(code, 0, f"a worker's menu must keep working; stderr={err!r}")
         self.assertEqual(err, "")
+
+
+class TestQuotedTitleObjectSource(Base):
+    """The object source that catches a manager quoting a row's own title.
+
+    ⚠️ Every label in the positive half carries NO manager-owned noun, so the object list
+    cannot answer any of them — that is what makes this class the source's own test rather
+    than a restatement of the graded cases above. All three were ALLOWED before the source
+    existed, and `scripts/manager-menu-probe.py` is what found them.
+    """
+
+    def test_a_manager_quoting_a_bare_title_is_denied(self):
+        for label in BARE_TITLE_LABELS:
+            with self.subTest(label=label):
+                code, err = self.run_guard(
+                    self.payload("manager-1", [label, "Leave it closed"]))
+                self.assertEqual(code, 2,
+                                 f"{label!r} names a manager-owned action; stderr={err!r}")
+                self.assertIn("DENIED", err)
+
+    def test_a_quote_the_verb_does_not_take_as_its_object_stays_operator_only(self):
+        for labels in QUOTED_BUT_NOT_A_TARGET_LABELS:
+            with self.subTest(labels=labels):
+                code, err = self.run_guard(self.payload("manager-1", list(labels)))
+                self.assertEqual(code, 0,
+                                 f"{labels} is an operator-only menu; stderr={err!r}")
+                self.assertEqual(err, "")
+
+    def test_the_same_quoted_title_from_a_non_manager_is_allowed(self):
+        # ⚠️ The SAME label as the positive half, deliberately — a scope control with a
+        # different payload would pass against a guard that keyed on the payload.
+        code, err = self.run_guard(self.payload("worker-1", [BARE_TITLE_LABELS[0]]))
+        self.assertEqual(code, 0, f"a worker's menu must keep working; stderr={err!r}")
+        self.assertEqual(err, "")
+
+    def test_the_record_names_the_verb_for_a_quoted_title(self):
+        # The record is what SC4 reads, so the new source has to reach it too — a deny that
+        # wrote no verb would leave the live check unable to say what was attempted.
+        self.run_guard(self.payload("manager-1", [BARE_TITLE_LABELS[0]]))
+        record = self.last_record("manager-1")
+        self.assertEqual(record["decision"], "deny")
+        self.assertEqual(record["verbs"], ["resume"])
 
 
 class TestRecord(Base):
