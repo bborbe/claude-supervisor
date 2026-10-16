@@ -1,5 +1,5 @@
 {
-  "description": "Two hook groups. (1) PermissionRequest: carry an attention-store answer into a live permission prompt, so a manager can relay the operator's decision without the operator opening the worker's tab. Fail-open: an unanswered prompt stays for the human. Kill switch: SUPERVISOR_PERMISSION_POLL=off. (2) UserPromptSubmit / Stop / Notification / SessionEnd: record what the session is doing, so the heartbeat timer can carry it onto the stamp the attention store reads. Fail-open: a missed write costs a stale state for up to one 30 s tick. Kill switch: SUPERVISOR_HEARTBEAT_STATE=off — without one, the only way to stop four python3 spawns per turn on every session on the machine is to edit this manifest. NOTE: the Notification mapping is ANY notification -> waiting-on-operator, not a 1:1 park mapping — Claude Code also emits notifications for non-park events (idle-prompt nudges, task completion). Over-reporting a park is the safe direction, and the state is only read as a description rather than as a gate. NOTE: SessionEnd CLEARS the record rather than writing one, because this fires for every session on the machine and nothing else unlinks a record; a SIGKILLed session still leaves one behind, which is a known and accepted gap.",
+  "description": "Three hook groups. (1) PermissionRequest: carry an attention-store answer into a live permission prompt, so a manager can relay the operator's decision without the operator opening the worker's tab. Fail-open: an unanswered prompt stays for the human. Kill switch: SUPERVISOR_PERMISSION_POLL=off. (2) PreToolUse on AskUserQuestion: deny a MANAGER session's menu when an option offers a manager-owned action (open / resume / ready / file / repair) as a choice, naming the action to execute instead — a rule relayed by SendMessage does not hold (measured 2026-10-15: a manager reverted to a menu within ~2 hours of being told), so only a deny keeps the gate. Scoped to managers by fleet-board.py's rule 1 (name resolves to a 23 Topics / 24 Goals page, or colour is orange), computed locally — never by calling fleet-board.py, whose measured 14-73 s per call would stall the very tool this polices. Fail-open: any parse error, a missing session_id, an unreadable registry entry, an unresolvable vault or a non-manager session allows the call — a gate that failed closed on a parse error would block every AskUserQuestion in every session that loads this plugin. Record: every invocation appends one JSON line to ~/.claude/state/manager-menu-guard/<session_id>.jsonl (SUPERVISOR_MANAGER_MENU_GUARD_STATE_DIR overrides the dir), with the fixed fields ts (ISO-8601), session_id, decision (allow|deny), reason (manager-owned-action | no-manager-action | non-manager | kill-switch | fail-open: <cause>), manager (true|false|null), manager_arm (root|name|colour|null) and verbs — written on ALLOW and DENY alike, so an absent record means the hook did not run rather than that nothing happened; the write is fail-open and can never change the verdict (a lost record is preferred to a wrong verdict), and a session's file is trimmed to its most recent 200 lines past 256 KB so an unbounded append cannot leak disk. Kill switch: SUPERVISOR_MANAGER_MENU_GUARD=off, which still records its own kill-switch line. (3) UserPromptSubmit / Stop / Notification / SessionEnd: record what the session is doing, so the heartbeat timer can carry it onto the stamp the attention store reads. Fail-open: a missed write costs a stale state for up to one 30 s tick. Kill switch: SUPERVISOR_HEARTBEAT_STATE=off — without one, the only way to stop four python3 spawns per turn on every session on the machine is to edit this manifest. NOTE: the Notification mapping is ANY notification -> waiting-on-operator, not a 1:1 park mapping — Claude Code also emits notifications for non-park events (idle-prompt nudges, task completion). Over-reporting a park is the safe direction, and the state is only read as a description rather than as a gate. NOTE: SessionEnd CLEARS the record rather than writing one, because this fires for every session on the machine and nothing else unlinks a record; a SIGKILLed session still leaves one behind, which is a known and accepted gap.",
   "hooks": {
     "PermissionRequest": [
       {
@@ -9,6 +9,19 @@
             "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/permission-answer-poll.py"],
             "timeout": 590
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/manager-menu-guard.py"],
+            "timeout": 5
           }
         ]
       }
