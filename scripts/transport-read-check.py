@@ -85,6 +85,15 @@ SITE_LIST = {
     # gated", which is why it is driven into the three states below rather than
     # merely listed.
     ("who-needs-my-help.py", "pane_lines"),
+    # added 2026-10-16 — `manager-menu-footer.py`'s two reads: the pane map
+    # (`wezterm_panes`, which joins a manager session's registry name to its pane) and the
+    # pane viewport (`pane_lines`, the same `wezterm cli get-text` read the sibling takes,
+    # kept as its own function because this file must not import a whole report). ⚠️ Both
+    # return `None` for a failed read, never `{}` / `[]`: this instrument's entire output
+    # is a COUNT of manager panes carrying a modal footer, so a collapsed read would print
+    # `0 footers` from a mux socket that never answered — precisely the false green it
+    # exists to prevent. Both are driven into the three states below rather than listed.
+    ("manager-menu-footer.py", "wezterm_panes"), ("manager-menu-footer.py", "pane_lines"),
     # in-repo callers that hold no transport call of their own
     ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change
     ("who-needs-me.py", "pane_for"), ("who-needs-me.py", "live_pane_ids"),
