@@ -53,6 +53,7 @@ Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision al
 
 import argparse
 import glob
+import http.client
 import json
 import os
 import sys
@@ -147,6 +148,62 @@ def post_answer(item_id, answered_by, resolved_by="", decision=""):
         return json.load(resp)
 
 
+# The answer endpoint returns HTTP 409 for more than one failure, and the status
+# alone cannot tell them apart -- only the `error.code` in the body can. The two
+# this arm can meet are different facts about the gate, so each gets its own
+# line: ITEM_CLOSED means the card left the queue before the answer arrived (the
+# board cleared it, or its producer exited) and no arm can answer it now;
+# ALREADY_ANSWERED means another arm's verdict landed first. Neither is a retry.
+STORE_CODE_ITEM_CLOSED = "ITEM_CLOSED"
+STORE_CODE_ALREADY_ANSWERED = "ALREADY_ANSWERED"
+
+
+def store_error_code(err):
+    """The store's `error.code` from a failed response, or "" when unreadable.
+
+    Returns "" rather than a guess. A body this arm cannot read is not evidence
+    of either failure, and naming one would report a cleared card as a lost race
+    or the reverse -- exactly the conflation reading the body exists to end. A
+    pre-code store, a body a proxy stripped, and a body carrying a code this arm
+    does not know all land here.
+
+    ⚠️ `http.client.IncompleteRead` is in the tuple because it is neither a
+    ValueError nor an OSError -- a 409 whose body is truncated against its
+    Content-Length is what a proxy or a mid-body reset produces, and it would
+    otherwise escape as a traceback where the caller expects a label. Before this
+    read existed the arm never touched the 409 body and could not fail here.
+    """
+    try:
+        return json.load(err).get("error", {}).get("code", "")
+    except (ValueError, OSError, AttributeError, http.client.HTTPException):
+        return ""
+
+
+def answer_conflict_line(item_id, err, verb):
+    """The line for a 409 on an answer, named by the store's own code.
+
+    `verb` is the act this branch must not take next -- "send" for a message
+    item, "deliver" for a permission one -- so each branch keeps its own word for
+    what it is refusing. An unreadable or unknown code falls back to the generic
+    line rather than to either named one: a code this arm cannot read is not
+    evidence of which failure happened, and the two named lines claim a specific
+    cause.
+    """
+    code = store_error_code(err)
+    if code == STORE_CODE_ITEM_CLOSED:
+        return (
+            f"ITEM_CLOSED: {item_id} left the queue before this answer arrived -- the card "
+            f"was cleared, or its producer exited; no arm can answer it now and no verdict "
+            f"was recorded; do not {verb}"
+        )
+    if code == STORE_CODE_ALREADY_ANSWERED:
+        return (
+            f"ALREADY_ANSWERED: {item_id} already has a verdict from another arm; "
+            f"do not {verb}"
+        )
+    return f"LOST: {item_id} already answered or no longer open -- do not {verb}"
+
+
 def cmd_next(registry, out=sys.stdout):
     items = fetch_open()
     if not items:
@@ -182,9 +239,9 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
         answered = post_answer(item_id, answered_by, resolved_by)
     except urllib.error.HTTPError as err:
         if err.code == 409:
-            # 409 covers both a lost compare-and-set and an item no longer open;
-            # either way this arm did not win, so it must not route.
-            print(f"LOST: {item_id} already answered or no longer open -- do not send", file=out)
+            # 409 covers more than one failure; only the body's code says which,
+            # and either way this arm did not win, so it must not route.
+            print(answer_conflict_line(item_id, err, "send"), file=out)
         else:
             print(f"FAILED: store returned {err.code} for {item_id}", file=out)
         return 1
@@ -220,7 +277,7 @@ def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdo
         answered = post_answer(item_id, answered_by, resolved_by, decision)
     except urllib.error.HTTPError as err:
         if err.code == 409:
-            print(f"LOST: {item_id} already answered or no longer open -- do not deliver", file=out)
+            print(answer_conflict_line(item_id, err, "deliver"), file=out)
         else:
             print(f"FAILED: store returned {err.code} for {item_id}", file=out)
         return 1
