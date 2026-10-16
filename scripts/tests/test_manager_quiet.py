@@ -27,6 +27,7 @@ import importlib.util
 import io
 import os
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -89,7 +90,24 @@ class Base(unittest.TestCase):
     def task(self, name, status="in_progress", extra=""):
         self.write("25 Tasks/%s.md" % name, TASK.format(status=status, extra=extra))
 
-    def tick(self, subject="AGoal"):
+    def arm(self, subject="AGoal"):
+        """Simulate the manager's head-of-round arm — which is what marks a NEW tick.
+
+        A round arms before it reads, so `<slug>.cadence`'s mtime is the tick identity.
+        Without advancing it, a second `tick()` call is a *re-read of the same tick* —
+        exactly what the counter must not count twice. The mtime is stepped explicitly
+        because the key is whole seconds and two arms in one second would collide.
+        """
+        self._seq = getattr(self, "_seq", 0) + 1
+        p = os.path.join(self.state, "%s.cadence" % self.m.slug(subject))
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("900\n")
+        t = time.time() + self._seq
+        os.utime(p, (t, t))
+
+    def tick(self, subject="AGoal", arm=True):
+        if arm:
+            self.arm(subject)
         return self.m.tick(subject, self.vault, TODAY, self.state)
 
     def verdicts(self, n, subject="AGoal"):
@@ -317,6 +335,7 @@ class TestReopenTrigger(Base):
     def test_the_cli_prints_the_sc3_line_on_stand_down(self):
         self.task("Done", status="completed")
         self.tick()                                   # tick 1 — armed
+        self.arm()                                    # the next round arms before it reads
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.m.main(self._argv())                 # tick 2 — stood down
@@ -354,3 +373,55 @@ class TestSlugAgreesWithLiveness(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneTickIsNotOneCall(Base):
+    """A tick is identified by the ARM, not by the call.
+
+    Found 2026-10-16 by a goal manager that read its subject twice in one tick and
+    watched the counter go 1 -> 2 -> 3: it stood itself down a tick early. Early is the
+    unsafe direction — a manager left armed costs a model call, while one stood down on
+    live work stops driving it and nothing announces the loss.
+    """
+
+    def test_two_reads_in_one_tick_count_once(self):
+        self.arm()
+        first, second = self.tick(arm=False), self.tick(arm=False)
+        self.assertEqual(first["consecutive_quiet"], 1)
+        self.assertEqual(second["consecutive_quiet"], 1)
+        self.assertEqual(second["verdict"], "armed")
+
+    def test_reading_three_times_in_one_tick_still_does_not_stand_down(self):
+        self.arm()
+        r = None
+        for _ in range(3):
+            r = self.tick(arm=False)
+        self.assertEqual(r["consecutive_quiet"], 1)
+        self.assertEqual(r["verdict"], "armed")
+
+    def test_a_new_arm_is_a_new_tick(self):
+        self.arm()
+        self.tick(arm=False)
+        self.arm()
+        r = self.tick(arm=False)
+        self.assertEqual(r["consecutive_quiet"], 2)
+        self.assertEqual(r["verdict"], "stood-down")
+
+    def test_a_runnable_row_still_resets_within_one_tick(self):
+        self.arm()
+        self.tick(arm=False)
+        self.task("Work")
+        r = self.tick(arm=False)
+        self.assertEqual(r["consecutive_quiet"], 0)
+        self.assertEqual(r["verdict"], "armed")
+
+    def test_a_legacy_bare_integer_counter_still_counts(self):
+        # A counter written by an older version has no tick key, so it cannot tell a
+        # re-read from a new tick — it must still count rather than be discarded.
+        p = os.path.join(self.state, "%s.quiet" % self.m.slug("AGoal"))
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("1\n")
+        self.arm()
+        r = self.tick(arm=False)
+        self.assertEqual(r["consecutive_quiet"], 2)
+        self.assertEqual(r["verdict"], "stood-down")
