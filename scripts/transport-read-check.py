@@ -85,6 +85,15 @@ SITE_LIST = {
     # gated", which is why it is driven into the three states below rather than
     # merely listed.
     ("who-needs-my-help.py", "pane_lines"),
+    # added 2026-10-16 — `manager-menu-footer.py`'s two reads: the pane map
+    # (`wezterm_panes`, which joins a manager session's registry name to its pane) and the
+    # pane viewport (`pane_lines`, the same `wezterm cli get-text` read the sibling takes,
+    # kept as its own function because this file must not import a whole report). ⚠️ Both
+    # return `None` for a failed read, never `{}` / `[]`: this instrument's entire output
+    # is a COUNT of manager panes carrying a modal footer, so a collapsed read would print
+    # `0 footers` from a mux socket that never answered — precisely the false green it
+    # exists to prevent. Both are driven into the three states below rather than listed.
+    ("manager-menu-footer.py", "wezterm_panes"), ("manager-menu-footer.py", "pane_lines"),
     # in-repo callers that hold no transport call of their own
     ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change
     ("who-needs-me.py", "pane_for"), ("who-needs-me.py", "live_pane_ids"),
@@ -147,6 +156,8 @@ POPULATED = {
     ("oi", "live_panes"): '[{"pane_id": "204", "title": "t"}]',
     ("pvc", "wezterm_panes"): '[{"pane_id": "204", "tty_name": "/dev/ttys001"}]',
     ("pvc", "_pid_ttys"): "101 ttys001",
+    ("mmf", "wezterm_panes"): '[{"pane_id": "204", "title": "t"}]',
+    ("mmf", "pane_lines"): "context\nEnter to select",
 }
 
 
@@ -219,6 +230,7 @@ def main():
             ("oi", "open-items.py"),
             ("pvc", "plugin-version-census.py"),
             ("wnmh", "who-needs-my-help.py"),
+            ("mmf", "manager-menu-footer.py"),
         )
     }
 
@@ -248,6 +260,11 @@ def main():
         # three states are what matter — broken must be `None`, and a reachable
         # transport answering with nothing must not become a failure.
         ("wnmh", "pane_lines", (1,)),
+        # added 2026-10-16 — the two reads SITE_LIST promises to drive. ⚠️ They were
+        # listed and NOT driven, so this check reported 41/41 while never exercising
+        # the sites the change added: an enumeration entry nothing reaches is a false
+        # green for exactly the read it claims to protect. Found by review.
+        ("mmf", "wezterm_panes", ()), ("mmf", "pane_lines", (1,)),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")
@@ -383,6 +400,16 @@ def main():
             not outside,
             f"derived {outside!r} — the mechanism and the enumeration disagree",
         )
+
+        # ⚠️ One-directional BY DESIGN, and the gap it leaves is real: the assertion
+        # above reads `derived ⊆ SITE_LIST`, never `SITE_LIST ⊆ driven`. An entry
+        # listed here but absent from `accessors` is never exercised and this check
+        # stays green — which is exactly how `manager-menu-footer.py`'s two reads
+        # passed 41/41 while being driven by nothing (found by review 2026-10-16,
+        # driven now). Closing it needs an explicit not-driven set carrying a reason
+        # per entry, because most of SITE_LIST is deliberately not driven: transport
+        # ACTIONS (`reload_pane`), callers holding no read of their own, and wrappers
+        # this audit deleted.
 
         # And the caller shape specifically: a consumer holding no transport call of
         # its own, which a call-site-only search cannot reach at any depth.
