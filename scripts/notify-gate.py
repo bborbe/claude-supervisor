@@ -837,13 +837,38 @@ def publish_round(now, gates):
             # No item, so no stamp can be READ and none can be WRITTEN. The retired
             # ledger covered this case; naming it out loud is the point of having
             # retired it rather than a gap this change quietly introduced.
-            unresolved.append(gate)
+            unresolved.append((key, gate))
             continue
         item_ids[key] = item.get("item_id") or ""
         stamp = store_stamp_of(item, me)
         if stamp is not None:
             suppressed[key] = dict(stamp, text=gate.get("text") or "")
             del current[key]
+
+    # `items` above is a SNAPSHOT taken at one instant, and a gate's item can be created
+    # AFTER it -- the hook writes the item in the same round that raises the gate, and
+    # another layer can create one mid-round. Measured 2026-10-16: two items appeared in a
+    # 75-second window, so a gate raised in that window reads as item-less for the whole
+    # round. Such a gate is NOT unresolved: it has an item, the snapshot merely predates
+    # it. Re-read ONCE here, before `due` is computed, so it resolves rather than being
+    # reported as having none. Resolving it matters past the message: an unresolved gate
+    # has no `item_ids` entry, so it would be published WITHOUT a stamp and the other
+    # layer left free to raise it a second time -- the de-dup loss this branch names.
+    if unresolved:
+        refreshed = store_items()
+        if refreshed is not None:
+            still_unresolved = []
+            for key, gate in unresolved:
+                item = gate_item(gate, refreshed)
+                if item is None:
+                    still_unresolved.append((key, gate))
+                    continue
+                item_ids[key] = item.get("item_id") or ""
+                stamp = store_stamp_of(item, me)
+                if stamp is not None:
+                    suppressed[key] = dict(stamp, text=gate.get("text") or "")
+                    current.pop(key, None)
+            unresolved = still_unresolved
 
     due = [
         (key, gate) for key, gate in current.items() if decide(ledger.get(key), now)
@@ -870,7 +895,7 @@ def publish_round(now, gates):
     # rather than a clean skip: two layers can now both send it. Named per gate, because
     # silence here is indistinguishable from a gate that was deduped correctly -- and
     # this is precisely the case the retired ledger used to cover.
-    for gate in unresolved:
+    for _, gate in unresolved:
         print(
             f"notify-gate: unresolved '{normalise(gate.get('text') or '')[:60]}' -- "
             f"no open store item for session {normalise(gate.get('session') or '')}; "
