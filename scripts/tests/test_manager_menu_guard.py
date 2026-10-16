@@ -63,7 +63,12 @@ GUARD_MATCHER = "AskUserQuestion"
 
 # ⚠️ The same verbs the two rule homes carry. Duplicated here ON PURPOSE: a test that
 # imported the list would pass against any list, including one an edit widened.
-MANAGER_VERBS = ("open", "resume", "ready", "file", "repair")
+MANAGER_VERBS = (
+    "open", "resume", "ready", "file", "repair",
+    "create", "relay", "re-scope", "nudge", "abort", "flag", "clear", "retire",
+    "disposition", "unlink", "add", "fix", "unpark", "split", "sync", "re-measure",
+    "settle",
+)
 
 # The manager's one legitimate channel — an operator-only decision. This is the
 # negative control's payload and it must never carry a manager-owned verb.
@@ -92,6 +97,25 @@ NATURAL_ACTION_LABELS = {
     "ready": "Ready the row",
     "file": "File a follow-up task",
     "repair": "Repair the page box",
+    # The 17 widened 2026-10-16 by operator decision. Each is asserted individually, so
+    # a regex that happens to match one verb cannot carry the rest of the list.
+    "create": "Create a follow-up task",
+    "relay": "Relay the answer to the row",
+    "re-scope": "Re-scope the stale row",
+    "nudge": "Nudge the stuck row",
+    "abort": "Abort the stale row",
+    "flag": "Flag the stale row",
+    "clear": "Clear the blocked row",
+    "retire": "Retire the old row",
+    "disposition": "Disposition the open rows",
+    "unlink": "Unlink the deny row",
+    "add": "Add a follow-up task",
+    "fix": "Fix the goal page",
+    "unpark": "Unpark the stalled row",
+    "split": "Split the large task",
+    "sync": "Sync the goal list",
+    "re-measure": "Re-measure the goal row",
+    "settle": "Settle the open task",
 }
 
 # ⚠️ **The shape a manager actually uses, and the one the object list alone missed.** A
@@ -759,7 +783,12 @@ class TestVerbMatching(Base):
         # alone cannot prove the omission. This is the only place that can.
         self.assertTrue(set(MANAGER_VERBS) <= set(self.guard._VERB_FORMS),
                         "every listed verb needs an entry in _VERB_FORMS")
-        self.assertEqual(set(self.guard._MANAGER_VERB_RE.groupindex), set(MANAGER_VERBS))
+        # ⚠️ Compared through the guard's own name map: a group name must be a Python
+        # identifier and two verbs carry a hyphen (`re-scope`, `re-measure`). The map is
+        # not trusted for the VERB it answers — `NATURAL_ACTION_LABELS` below asserts
+        # that per verb, and that is what proves `rescope` still reads back `re-scope`.
+        expected_groups = {self.guard._GROUP_NAMES.get(v, v) for v in MANAGER_VERBS}
+        self.assertEqual(set(self.guard._MANAGER_VERB_RE.groupindex), expected_groups)
         for verb, label in NATURAL_ACTION_LABELS.items():
             with self.subTest(verb=verb):
                 self.assertEqual(self.actions(label), [verb])
