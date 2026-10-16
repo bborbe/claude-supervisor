@@ -9,6 +9,12 @@ Covers the two decisions that make an answer safe to route:
   * the answer gate -- only the arm that wins the store's compare-and-set may
     print a TARGET. A 409 must never be followed by a route, and an `ack` item
     must be refused before the store is written at all.
+  * the 409 itself -- the status covers more than one failure, so the body's
+    `error.code` names which: ITEM_CLOSED (the card was cleared and left the
+    queue, so no arm can answer it) must read differently from ALREADY_ANSWERED
+    (another arm's verdict landed first). A code the arm cannot read falls back
+    to the generic line, because a body it cannot parse is not evidence of
+    either, and both named lines claim a specific cause.
   * the permission branch -- a permission-class item needs an explicit
     --decision. Without one it is refused rather than defaulted, because
     neither an implicit allow nor an implicit deny is safe; with one it prints
@@ -47,6 +53,19 @@ _spec.loader.exec_module(aa)
 
 def _session(sid, name):
     return {"sessionId": sid, "name": name}
+
+
+def _conflict(code=None):
+    """A 409 the way the store sends one, with `code` in the body.
+
+    `code=None` builds the body-less shape (an empty body, `fp=None`), which is
+    kept reachable on purpose: a body this arm cannot read must fall back to the
+    generic line rather than to one of the named ones.
+    """
+    body = {} if code is None else {"error": {"code": code}}
+    return urllib.error.HTTPError(
+        "u", 409, "conflict", {}, io.BytesIO(json.dumps(body).encode())
+    )
 
 
 class ResolveTargetTest(unittest.TestCase):
@@ -149,6 +168,60 @@ class AnswerGateTest(unittest.TestCase):
         rc, out, _ = self._run(item, post=err, decision="allow")
         self.assertEqual(rc, 1)
         self.assertIn("LOST:", out)
+        self.assertNotIn("DELIVERY", out)
+
+    def test_item_closed_names_the_cleared_card(self):
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("ITEM_CLOSED"))
+        self.assertEqual(rc, 1)
+        self.assertIn("ITEM_CLOSED:", out)
+        self.assertNotIn("LOST:", out)
+        # The whole point of the split: a reader who sees only this line must
+        # learn the card was cleared and no verdict was recorded, which is a
+        # different fact about the gate from a lost race.
+        self.assertIn("cleared", out)
+        self.assertIn("no verdict was recorded", out)
+        self.assertNotIn("TARGET", out)
+
+    def test_already_answered_names_the_lost_race(self):
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("ALREADY_ANSWERED"))
+        self.assertEqual(rc, 1)
+        self.assertIn("ALREADY_ANSWERED:", out)
+        self.assertNotIn("LOST:", out)
+        self.assertIn("verdict from another arm", out)
+        self.assertNotIn("TARGET", out)
+
+    def test_body_less_409_falls_back_to_the_generic_line(self):
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict())
+        self.assertEqual(rc, 1)
+        self.assertIn("LOST:", out)
+        self.assertNotIn("ITEM_CLOSED:", out)
+        self.assertNotIn("ALREADY_ANSWERED:", out)
+
+    def test_unknown_code_falls_back_to_the_generic_line(self):
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("VALIDATION_ERROR"))
+        self.assertEqual(rc, 1)
+        self.assertIn("LOST:", out)
+        self.assertNotIn("ITEM_CLOSED:", out)
+        self.assertNotIn("ALREADY_ANSWERED:", out)
+
+    def test_item_closed_on_a_permission_card_never_delivers(self):
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("ITEM_CLOSED"), decision="allow")
+        self.assertEqual(rc, 1)
+        self.assertIn("ITEM_CLOSED:", out)
+        self.assertIn("do not deliver", out)
+        self.assertNotIn("DELIVERY", out)
+
+    def test_already_answered_on_a_permission_card_never_delivers(self):
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("ALREADY_ANSWERED"), decision="allow")
+        self.assertEqual(rc, 1)
+        self.assertIn("ALREADY_ANSWERED:", out)
+        self.assertIn("do not deliver", out)
         self.assertNotIn("DELIVERY", out)
 
     def test_ack_item_is_still_refused(self):
