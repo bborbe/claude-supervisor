@@ -1405,7 +1405,7 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 // that cannot be refused first is the worker itself: a `create` whose reply fails AFTER the
 // executor started a container reports FAILED, which is why `createWorkerOnController` returns
 // the controller's own text rather than a "nothing happened" claim.
-async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, windowId, role, operatorNamed, shipping, env, target }) {
+async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, windowId, role, operatorNamed, shipping, env, mounts, secrets, target }) {
   const refusal = a2aSpawnArgumentRefusal({
     target,
     resume,
@@ -1464,6 +1464,12 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       token: controller.token,
       messageId: randomUUID(),
       mint: () => randomUUID(),
+      // Forwarded verbatim: this path's job for them is to carry the caller's declaration to the
+      // controller, which is the only party that can allow a path or resolve a key. A retry re-sends
+      // them because a retry is a fresh `create` — dropping them would silently create a worker
+      // WITHOUT the access the caller asked for, which is the failure this whole path refuses to make.
+      mounts,
+      secrets,
       capture,
     })
 
@@ -1642,7 +1648,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
 // session in `metrics_sessions`) is the kind of thing that needs a test beside it. See that
 // module's header for why displacing an existing owner is the defect it exists to prevent.
 
-async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed, shipping, env }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed, shipping, env, mounts, secrets }) {
   // ⚠️ `seq` is per-process and restarts at 0 on every reconnect, while `agents` may already
   // hold rows adopted from the ledger whose ids a PREVIOUS process minted from this same
   // counter. Minting straight to `agent_${++seq}` would then land on an adopted id, and the
@@ -1727,6 +1733,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       operatorNamed,
       shipping,
       env: envOverrides,
+      // ⚠️ NOT filtered through `resolveEnvOverrides`, and not the same kind of value. `env` is a
+      // raw map this server would have to transmit; these are a host path the CONTROLLER checks
+      // against its own allowlist and a TeamVault KEY the CONTROLLER resolves — so nothing here is
+      // a credential and the value of a secret never reaches this server at all. They are handed
+      // through unchanged; the shape is validated in `declaredCreateArguments`, which is what puts
+      // bytes on the wire.
+      mounts,
+      secrets,
       target: spawnTarget.target,
     })
   }
@@ -2382,6 +2396,16 @@ const TOOLS = [
           description:
             'Environment variables for THIS worker only — a per-call override of the ambient environment, so one session can be launched against a non-production backend without redirecting every session in a vault. Keys are shell variable names; values are strings (a number or boolean is stringified). They are layered ON TOP of the environment this server already passes through, so a key given here WINS over the inherited one and every key NOT given here is inherited unchanged — PATH, HOME and ANTHROPIC_BASE_URL among them. Honoured on BOTH local paths: a tab worker gets them exported into the tab\'s own command line, a headless worker gets them set on the SDK process. ⚠️ **On the TAB path the VALUES are visible in the host process table** (`ps`, `/proc/<pid>/cmdline`) for the life of the pane — exporting into a command line is the only mechanism a tab worker has, so a credential passed here is exposed to every local user on the machine; the headless path has no such exposure, because the SDK sets the child environment directly. Pass a credential only if you accept that. The spawn response echoes the NAMES back as `env: {keys: [...]}` — never the values, since a caller may pass a credential and this response gets quoted into ledger records and PR bodies — so a caller can tell the parameter was received rather than accepted-and-dropped. ⚠️ REFUSED with target:"cluster": that path creates no local process, so there is no environment here to set. An illegal variable name, or a value that is not a string/number/boolean, REFUSES the spawn rather than silently dropping the key.',
         },
+        mounts: {
+          type: 'array',
+          description:
+            'Host paths to make visible inside a `docker` or `k8s` worker, passed through to the controller\'s `create` unchanged. Each entry is `{host_path, container_path, read_only?}`. ⚠️ THE CONTROLLER DECIDES, NOT THIS SERVER: it checks `host_path` against its own allowlist (`MOUNT_ALLOW` on the local docker controller) and REFUSES anything outside it with `mount_not_allowed: <path>`, creating no worker — so declaring a mount is a request, never a grant. A declared mount is WRITABLE unless you set `read_only: true`. ⚠️ A named `volume` is refused rather than accepted: the allowlist governs host paths only, so a volume would be an ungoverned surface. ⚠️ This is the sanctioned route to what the raw `env` argument cannot give you — `env` stays refused on these targets, and a mount carries a FILE rather than a value, so no credential travels from here. Ignored on the local paths, which have no controller.',
+        },
+        secrets: {
+          type: 'array',
+          description:
+            'Secrets to deliver to a `docker` or `k8s` worker, passed through to the controller\'s `create` unchanged. Each entry is `{name, teamvault_key}` — ⚠️ A TEAMVAULT KEY, NEVER A VALUE: the controller resolves the key against TeamVault itself, so the secret\'s value never travels from this server, never appears in a tool result, and is never written to a ledger record. Delivery differs by backend and the value is protected in both: docker writes it to a 0600 host file bind-mounted READ-ONLY at `/run/secrets/<name>` (never an env var, so it is absent from `docker inspect` Config.Env), and k8s adds the key to the worker\'s own Secret object, which the pod already consumes via `envFrom`. The controller refuses a key it cannot resolve, creating no worker. ⚠️ This is the sanctioned route to what the raw `env` argument cannot give you — `env` stays refused on these targets precisely because a value passed that way would be ungoverned. Ignored on the local paths, which have no controller.',
+        },
         operator_named: {
           type: 'boolean',
           description:
@@ -2539,6 +2563,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // and the refusal message — the same split as the mode, the target and the role
           // above. A value that is not an object of string-ish values refuses there.
           env: args.env,
+          // ⚠️ UNLIKE `env` ABOVE, THESE ARE NOT REFUSED ON THE A2A TARGETS — they are the
+          // sanctioned route to what `env` cannot provide. Passed through raw; the shape is
+          // validated in `declaredCreateArguments` (a2a-client.mjs), which is what puts bytes on
+          // the wire, so a malformed entry is refused at the builder rather than reaching the
+          // controller. A caller cannot pass a secret's VALUE through `secrets`: the entry names a
+          // TeamVault key, and the controller resolves it.
+          mounts: args.mounts,
+          secrets: args.secrets,
           // Passed through raw and validated in role-map.mjs, which owns the legal values
           // and the refusal message — the same split as the spawn mode below.
           role: args.role,
