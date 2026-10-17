@@ -55,7 +55,22 @@ MODE_ANCHOR = "Spawn a worker item 6"
 #: moved *out* of the agent and into its caller, so the command that executes the hand-off
 #: rows is now a spawn site and must carry the binding.
 SPAWN_SITES = (
-    "commands/open.md",
+    # ⚠️ **`commands/open.md` LEFT this set on 2026-10-17, when its CREATE branch began
+    # routing through the a2a-worker-controller and delegating its dispatch to
+    # `commands/open-a2a.md` § Step 2.** It now fails BOTH tests this file applies to a spawn
+    # site, and the failure is the change rather than a drift: it carries **no**
+    # `spawn_agent(` call at all (the call shape is described in prose and executed from
+    # `open-a2a.md`), and neither arm of its create branch can carry `interactive` — the
+    # `docker` / `k8s` arm refuses the argument whenever it is present, and the controller's
+    # `local` create carries `task` alone. Keeping it here would demand a both-ways binding
+    # line that cannot honestly be written, which is the shape that gets a check disabled
+    # rather than satisfied. It stays covered by the GRANT dimension below — it grants
+    # `mcp__supervisor__spawn_agent` for the arm `open-a2a.md` executes, so it must carry the
+    # anchor to the rule's home, and it does.
+    # ⚠️ **The mode decision did not move out of reach; it moved to `commands/open-a2a.md`**,
+    # which is the file that now executes the spawn and is checked both ways below. A reader
+    # following `open.md` reaches the rule through the anchor plus that reference, which is
+    # exactly the route the grant dimension exists to require.
     # ⚠️ `commands/open-a2a.md` joined on 2026-10-17: it is `open.md`'s parallel, so it is a
     # spawn site for the same reason `open.md` is — it decides which way a worker opens. Its
     # `local` branch reaches the controller's own backend rather than `spawn_agent`, but the

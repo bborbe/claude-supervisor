@@ -15,6 +15,7 @@ allowed-tools:
   - Read
   - TodoWrite
   - Agent
+  - mcp__supervisor__spawn_agent
 ---
 
 Open whatever a name refers to, in one verb. Replaces `/open-session` (task-only, and it stopped instead of jumping when a session already existed).
@@ -23,7 +24,7 @@ The command **resolves** and **dispatches**. It never does the work, never runs 
 
 ```
 /supervisor:open <name>
-  ├─ task   → live pane? jump · live but no pane (cluster worker)? refuse · has claude_session_id? resume · else spawn gates (Step 1.5: approval, then readiness) → spawn
+  ├─ task   → live pane? jump · live but no pane (cluster worker)? refuse · has claude_session_id? resume · else spawn gates (Step 1.5: approval, then readiness) → create on the a2a-worker-controller (the row's `target:` picks the backend; absent = local)
   ├─ goal   → resolve to its active task, then the task branch
   └─ topic  → live manager-loop? jump · else spawn /supervisor:manager-loop
 
@@ -209,7 +210,7 @@ vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 
 Writing them is the point, not a side effect. The next batch reads the fields instead of re-deciding, so one task cannot be classified one way today and the other way tomorrow. It also makes the call reviewable — a wrong value is visible on disk and the operator corrects it with that same one-line command.
 
-**`mode` is consumed, not merely recorded** — Step 3 passes `interactive=false` to `spawn_agent` only when the field reads `headless` (absent field → the argument is omitted and the fleet config decides; see § 535).
+**`mode` is still written, and it is now reported rather than passed.** Step 0.6 writes the field so the next batch reads it instead of re-deciding; the create branch then **reads and reports** it. ⚠️ **Neither arm of that branch can carry `interactive`** — Step 3 states why — so the value is visible in the report and on disk rather than in the call. The rule that *produces* it keeps its single home in `docs/fleet-surface.md` § Spawn a worker item 6.
 
 ⚠️ **A machine-written role is indistinguishable from an operator-written one on disk.** Nothing in the frontmatter records who decided. So **print every auto-filled row distinctly** (`🏷️ filled now`) instead of folding it into the opened count. That report line is the only provenance this decision has, and it exists for exactly one read — the first one, while objecting is still cheap.
 
@@ -279,7 +280,7 @@ vault-cli --vault "<vault>" task set "<task>" phase planning
 
 **Readiness-gate every CREATE-bound row first, concurrently.** For each CREATE-bound row (`role: agent`, no live pane, no `claude_session_id`), dispatch Step 1.5's readiness sub-agent — **all in ONE message**, one `Agent` call per row. Resume/jump-bound, `role: human` (→ DIRECT) and `task_type:` pipeline rows are not gated. `readiness` column: `✅ ready <score>/10`; `⚠️ opened <score>/10` (operator-flagged, below threshold — gap bullets under the row); `⛔ NOT READY` (still below after the improvement pass); `— (resume/jump/direct)`. A not-ready row is **held, never opened** — **except an operator-flagged row below the ladder's open threshold, which opens with its gaps** (§ Step 1.5 Gate 2); held rows go in the footer (`… · not ready R (readiness)`). ⚠️ **Gate 1 does not refuse this batch** (`flag: true` on a `todo` row **is** the approval for `--flagged`). The batch runs **Gate 2 only** — ⚠️ **Gate 3 still runs at the spawn.**
 
-**Loop the eligible rows in the printed stable order**, delegating each to this command's own single-task path. Per row, invoke `/supervisor:open "<task>"` — with `--first-step "<gap bullets>"` only when the row opened below the readiness ladder's open threshold. Never reimplement jump / resume / spawn here; never pass a mode override to the fleet. ⚠️ **The per-row delegation IS the guard — no shortcut keeps it.** ⚠️ **The batch is paced by delegation, never by a counter of its own** (rule home: `docs/fleet-surface.md` § Spawn a worker item 5).
+**Loop the eligible rows in the printed stable order**, delegating each to this command's own single-task path. Per row, invoke `/supervisor:open "<task>"` — with `--first-step "<gap bullets>"` only when the row opened below the readiness ladder's open threshold. Never reimplement jump / resume / create here; never pass a mode override to the fleet. ⚠️ **The per-row delegation IS the guard — no shortcut keeps it.** ⚠️ **The batch is paced by delegation, never by a counter of its own** (rule home: `docs/fleet-surface.md` § Spawn a worker item 5).
 
 **Skip every `⛔ HOLD` row and report the skip with its blockers** — a blocked task is one whose prerequisites have not finished, so opening it is the failure the batch exists to prevent. Never open a blocked row because it appeared in the table: appearing in the selector is not the same as having its prerequisites met. Report each row's outcome, and every skip with its stated reason.
 
@@ -372,6 +373,10 @@ Agent(subagent_type='vault-cli:task-auditor', description='Readiness: <task>',
 
 **Runs last, at the spawn itself, because it is the only gate whose answer depends on the fleet's live count.** The thresholds, their defaults and the marker's definition have **one home** — `docs/fleet-surface.md` § Spawn a worker item 5 — so read them there and **never restate a number here**. Orientation only: **below the soft cap everything opens; between the soft and hard caps only an operator-named task opens; at the hard cap nothing opens and a card is posted.**
 
+⚠️ **This gate binds only the `docker` / `k8s` arm of the create branch.** It is a `spawn_agent`-side check, and § 2.2's controller `local` create opens a tab directly without passing through the supervisor's cap — so on that arm the gate is **not** applied and no `operator_named` marker is passed. The asymmetry is stated at Step 2A branch 3 and at Step 3; **changing it is out of scope here**, and the report names which arm ran.
+
+⚠️ **The start-rate limit is bypassed on that arm too, and that is the sharper half of the same asymmetry.** § Spawn a worker item 5 enforces the rate on **both** spawn paths — the server in `spawnAgent` / `spawnClusterWorker`, and § 3.1's wezterm `--resume` branch through `scripts/start-rate.mjs` — but a controller `local` create reaches **neither**, so a `--flagged` batch of local rows opens its tabs unpaced. The incident the key exists for was 22 sessions in 2.8 minutes, and a population cap is structurally blind to an arrival burst. **Stated, not fixed** — the create branch's dispatch is `open-a2a.md` § Step 2's and closing this belongs in a follow-up rather than in this change.
+
 **Resolve the marker before you spawn.** Read the row's own flag provenance — the same two fields § Step 0.5 already filters on:
 
 ```bash
@@ -456,9 +461,9 @@ Then take exactly one branch:
 
 **Jump via `/supervisor:jump`, never a raw `wezterm cli activate-tab` line**. `activate-tab` **cannot cross windows**: called from another window it succeeds and nothing visibly moves. `/supervisor:jump` resolves the coordinate at run time from `wezterm cli list`, prints the window id, and takes a **pane id**. Neither namespace survives a WezTerm restart — re-resolve after one.
 2. **No live pane, `PRIOR_SID` present → RESUME** in a new tab (Step 3).
-3. **Neither → CREATE**, then resume in a new tab — **only after Step 1.5's spawn gates clear: Gate 1 (approval), Gate 2 (readiness), Gate 3 (the fleet cap and the operator-named marker)** (the `--flagged` batch pre-clears Gates 1–2 only — ⚠️ **Gate 3 still runs here**). A `phase: todo` row stops at Gate 1 (`⛔ NOT APPROVED`); a Gate-2 failure prints its gaps; either way STOP, no spawn. ⚠️ **Gate 3 is the only site passing `operator_named: true`** — a spawn without it is refused at the soft cap.
+3. **Neither → CREATE**, routed through the a2a-worker-controller (Step 3's create branch) — **only after Step 1.5's spawn gates clear: Gate 1 (approval), Gate 2 (readiness), Gate 3 (the fleet cap and the operator-named marker)** (the `--flagged` batch pre-clears Gates 1–2 only — ⚠️ **Gate 3 still runs here**). A `phase: todo` row stops at Gate 1 (`⛔ NOT APPROVED`); a Gate-2 failure prints its gaps; either way STOP, no create. ⚠️ **Gate 3 binds only the `docker` / `k8s` arm** — it is a `spawn_agent`-side check, while § 2.2's controller `local` create opens a tab directly and never passes through the supervisor's cap, so it is **not** applied there; say in the report which arm ran. ⚠️ **Gate 3 is the only site passing `operator_named: true`** — a `spawn_agent` call without it is refused at the soft cap.
 
-**The caller mints nothing.** Spawn via Step 3's create branch, which hands the work prompt to the worker as an *argument* — the **worker runs its own planning turn and creates its own session**. The caller returns as soon as the spawn returns.
+**The caller mints nothing.** Create via Step 3's create branch — on the `spawn_agent` arms the work prompt rides as an *argument*, and on § 2.2's controller `local` arm the create carries `task` alone — and either way the **worker runs its own planning turn and creates its own session**. The caller returns as soon as the call returns.
 
    Step 3 carries the recipe and its rationale — read it there rather than restating it here. Once the spawn returns, continue with Step 4 (verify + report) and Step 4.1 (bind the task explicitly).
 
@@ -507,7 +512,7 @@ The goal branch **resolves and delegates**; it reimplements nothing. A worker ta
 
 **The colour is a role signal, not decoration** — a topic manager comes up `orange` so it can never be read as a worker, which stays `pink` (Step 3.1 and the `--color` default). Keep the two distinct.
 
-## Step 3 — Spawn the tab (resume/create branches)
+## Step 3 — Create the worker, or resume in a tab
 
 Resolve the vault's launcher and dir from config — **never hardcode them**:
 
@@ -517,19 +522,15 @@ vault-cli config list --output json      # → claude_script, session_project_di
 
 Effective dir = the vault's `session_project_dir`, else no `cd`.
 
-⚠️ **Pass `role`, not `window_id`.** `spawn_agent` takes an optional `role` (`manager` / `agent` / `human`, default `agent`) and resolves **both** the colour and the window from the published map **in-process**, so pass § 3.0's resolved role here. The older `window_id` argument still works but is no longer how a role is routed. The response reports the resolved `role` and `window_id` — **check those fields**.
+⚠️ **No path in this command passes `role` to `spawn_agent` any more, and that is the route-through's consequence rather than a dropped step.** `role` was the argument that routed a worker's colour and window in-process; the create branch's `docker` / `k8s` arm drops it (`§ Spawn a worker` item 7 refuses it), its `local` arm carries `task` alone, and the tab paths take `--window-id` / `/color` instead (§ 3.0). The argument still exists on a bare `spawn_agent` call made outside this command — do not read its absence here as the argument having been removed.
 
-**Create branch — `spawn_agent`, which takes the work prompt as an *argument*.** Call shape: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) — prompt `/vault-cli:work-on-task "<task>"`, `vault <vault>`, **`task <task>`**, label `<task>`, role `<role>` (§ 3.0), `[target <target>]`. ⚠️ **`task` binds the worker to the vault; `label` is NOT a substitute.** ⚠️ **Pass `vault`, not `cwd`** — one of the two is **required**; rule and refusals: `§ Spawn a worker` **item 8**. **With `--first-step <text>`, the prompt is `<text>`, a blank line, then `/vault-cli:work-on-task "<task>"`**; otherwise the bare work command.
+**Create branch — the worker is created by the a2a-worker-controller, never by a local tab.** ⚠️ **Do not hand-build this dispatch: read `${CLAUDE_PLUGIN_ROOT}/commands/open-a2a.md` § Step 2 and execute it as written** — § 2.1 reads the row's `target:`, § 2.2 creates on the controller's `local` backend when the field is absent, § 2.3 passes `docker` / `k8s` to `spawn_agent` **verbatim**, § 2.4 passes anything else verbatim so the server refuses it there. § Step 3 there addresses the worker by `worker_id` and reads its `session_id` from a later `list`; § Step 4 is the report shape. ⚠️ **The `spawn_agent` shape below is the § 2.3 / § 2.4 arm only** — on those arms `role` is refused and dropped, and `target` is passed verbatim rather than resolved here. Call shape for that arm: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) — prompt `/vault-cli:work-on-task "<task>"`, `vault <vault>`, **`task <task>`**, label `<task>`, `[target <target>]`. ⚠️ **`task` binds the worker to the vault; `label` is NOT a substitute.** ⚠️ **Pass `vault`, not `cwd`** — one of the two is **required**; rule and refusals: `§ Spawn a worker` **item 8**. **With `--first-step <text>`, the prompt is `<text>`, a blank line, then `/vault-cli:work-on-task "<task>"`**; otherwise the bare work command.
 
-**Read `target:` and pass `target="<value>"` when the field is present, omitting it when absent** (absent = `local`; `docs/fleet-surface.md` § Spawn a worker item 7 is the single home for the field, its default and the `docker` / `k8s` argument contract). Pass the value **verbatim** — an unknown value reaches the server and is refused there, never defaulted or lower-cased here. ⚠️ **Then check ELIGIBILITY — a separate question from which target, read from the same item.** When the row carries a disqualifier, **print a warning naming it** before spawning (`⚠️ target "<t>" is not eligible for "<task>": needs <disqualifier>`). ⚠️ **Advisory, never a refusal** — print it and leave the decision here; never silently drop the `target`, never rewrite the row's frontmatter, never refuse the spawn on this ground. The disqualifier list has its single home in item 7 — **read it there and never restate it here.** ⚠️ **On a `docker` / `k8s` row the argument contract changes and the `role` above is dropped** — item 7 carries that branch; never hand-build it from this line.
+**`target:` is read by § 2.1 and decides the arm; an ABSENT field never reaches `spawn_agent` at all.** Absent takes § 2.2's controller `local` create — ⚠️ **a different thing from `spawn_agent`'s local path**, which is what this command used before the route-through. A `docker` / `k8s` value is passed to `spawn_agent` **verbatim**; an unknown value is likewise passed verbatim so the server refuses it there, never defaulted or lower-cased here. `docs/fleet-surface.md` § Spawn a worker item 7 is the single home for the field, its default and the `docker` / `k8s` argument contract. ⚠️ **Then check ELIGIBILITY — a separate question from which target, read from the same item.** When the row carries a disqualifier, **print a warning naming it** before spawning (`⚠️ target "<t>" is not eligible for "<task>": needs <disqualifier>`). ⚠️ **Advisory, never a refusal** — print it and leave the decision here; never silently drop the `target`, never rewrite the row's frontmatter, never refuse the spawn on this ground. The disqualifier list has its single home in item 7 — **read it there and never restate it here.** ⚠️ **On a `docker` / `k8s` row the argument contract changes and the `role` above is dropped** — item 7 carries that branch; never hand-build it from this line.
 
-**Do NOT pass `interactive` here — unless the task file itself declares `mode:`; otherwise the fleet default decides, and it lives in a file.** The server resolves `SUPERVISOR_SPAWN_MODE`, then `spawn.mode` in `~/.config/claude-supervisor/config.json`, then its built-in `interactive`. The response reports `mode_source` (`argument`/`env`/`config`/`default`).
+⚠️ **On the create branch the `mode:` carve-out is no longer consumable, and that follows from the route-through rather than being an omission.** Neither arm can carry `interactive`: the `docker` / `k8s` arm refuses that argument whenever it is present (`§ Spawn a worker` item 7), and § 2.2's controller `local` create carries `task` alone. The row's `mode:` is therefore **read and reported, never passed** — say so in the report rather than implying it was consumed. `open-a2a.md` § 2.3 carries the same statement for its own branches, so the fact is stated in one place and this is a pointer to it.
 
-**The carve-out is both-ways: pass the argument whenever the task's frontmatter declares a `mode:`, and omit it only when the field is absent.** `mode: headless` → `interactive=false`; `mode: interactive` → `interactive=true`. An absent `mode:` still means *omit the argument entirely*, not *pass interactive*. ⚠️ **Local rows only** — on a `docker` / `k8s` row this carve-out does not apply; `§ Spawn a worker` item 7 carries that branch.
-
-⚠️ **The interactive half is load-bearing, not a saving.** A `mode:` the spawn honours in only one direction is inert in the other — the field must be consumed both ways.
-
-The rule that *produces* the value is not restated here — it has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6; this line is only the consumption.
+The rule that *produces* the value is not restated here — it has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6.
 
 ⚠️ **Writing `mode: headless` today opens a worker into a mechanism with two known, measured defects** — its gates park with the spawning session's server and no one else can answer them, and the resume guard does not guard. Until prompts and questions can be answered remotely, `headless` should be rare and never a guess.
 
@@ -537,19 +538,15 @@ The rule that *produces* the value is not restated here — it has its single ho
 
 **Do NOT add `policy` while `defaultMode` is `auto`.** `auto` is in `POLICY_UNREACHABLE_MODES`, so `spawn_agent` **refuses** a named policy (*"policy would never be consulted"*) and the spawn fails. Omit it; the overlay is usable only under `acceptEdits`.
 
-**`interactive` is the debug escape hatch, and it works in both directions.** Pass `interactive=true` when a worker's own screen must be watched live. Pass `interactive=false` to force one headless worker while the fleet runs in tabs. Either way it overrides the fleet default for that one spawn only. The colour applies only on the tab path. ⚠️ **Local rows only** (§ Spawn a worker item 7).
+⚠️ **The `interactive` debug escape hatch is no longer reachable from this command's create branch.** It was passed here to force one headless worker or one watched tab; neither arm above can carry it, so the paragraph that documented it is gone rather than left describing an argument nothing sends. The fleet's standing mode likewise no longer decides anything here — it is still readable at `~/.config/claude-supervisor/config.json`, and it still governs a **direct** `spawn_agent` call made outside this command.
 
-**The fleet's current mode is not recorded here — read the file.** `cat ~/.config/claude-supervisor/config.json` is the answer; the standing mode is `interactive`.
+Requires `mcp__supervisor__*` in **this** session — see the recipe's precondition, which fails silently. ⚠️ **On the `local` arm it is not needed at all** (§ 2.2's create is a `python3` call), so a vault whose launcher config omits `supervisor` still opens rows — it just cannot reach the `docker` / `k8s` arm.
 
-Requires `mcp__supervisor__*` in **this** session — see the recipe's precondition, which fails silently.
-
-**Fallback when `mcp__supervisor__*` is unavailable.** Every `cc-*` launcher passes `--strict-mcp-config`, which turns its config file into an allowlist — plugin-provided servers are never loaded, so a vault whose `~/.claude/mcp-obsidian-<vault>.json` does not itself name `supervisor` carries no supervisor tools at all. Then spawn the wezterm way and send the work command afterwards.
-
-⚠️ **The fallback cannot produce a headless worker — a wezterm spawn is a tab by construction.** `supervisor` is named in the **private-personal** and **brogrammers** launcher configs only. Opening into a vault whose workers must be managed, add the entry there first.
+⚠️ **The wezterm fallback that used to sit here is gone, and its removal is part of this change rather than an omission.** It existed to open a tab when `mcp__supervisor__*` was unavailable — but the create branch is now defined by *not* opening a local tab, so a wezterm spawn can no longer stand in for a create. On a vault whose launcher config omits `supervisor`, a create is therefore **unavailable rather than downgraded**, and the report must say which arm could not be reached. The **resume** branch (§ 3.1) still opens a tab and is unaffected.
 
 ### 3.0 Resolve the session's role → window + colour
 
-**Before either spawn path**, resolve the role from the task's frontmatter and read the window/chip pair from the role map. This stops a human-only task coming up as a pink agent tab in whatever window the caller happened to be in.
+**Before any path that opens a tab** — the resume branch and the topic-manager spawn — resolve the role from the task's frontmatter and read the window/chip pair from the role map. This stops a human-only task coming up as a pink agent tab in whatever window the caller happened to be in. ⚠️ **The create branch no longer consumes this**: neither arm carries `role` (§ 2.3 refuses it on `docker` / `k8s`, and § 2.2's `local` create carries `task` alone), so a create reports the row's `role` rather than applying it.
 
 ```bash
 ROLE=$(vault-cli task get "<task>" role 2>/dev/null || echo "")
@@ -572,12 +569,12 @@ CHIP=$(jq -r --arg r "${ROLE:-agent}" '
 
 ⚠️ **If `$MAP` is missing or `WINDOW_ID` comes back empty, fall back to today's behaviour and SAY SO in the report** — spawn into the caller's window with `pink`. Do **not** silently proceed as if routing worked.
 
-Then pass the pair to whichever spawn path runs:
+Then pass the pair to whichever tab-opening path runs (the resume branch, or the topic-manager spawn):
 
-- **wezterm path (§ 3.1 / resume):** add `--window-id "$WINDOW_ID"` to the `wezterm cli spawn` call when it is non-empty, and replace the hardcoded `"/color pink"` with `"/color $CHIP"`.
-- **`spawn_agent` path (§ 3):** pass `role` — the server resolves the window **and** the colour from the published map in-process, so this path needs no `--window-id` and no separate colour step. It reports the resolved `role` and `window_id` back, so check those rather than the landing window alone.
+- **wezterm path (§ 3.1 resume, and the topic-manager spawn):** add `--window-id "$WINDOW_ID"` to the `wezterm cli spawn` call when it is non-empty, and replace the hardcoded `"/color pink"` with `"/color $CHIP"`.
+- ⚠️ **The create branch consumes neither half any more.** Its `docker` / `k8s` arm drops `role` (§ 2.3 refuses it), and its `local` arm carries `task` alone — so a create **reports** the row's `role` rather than applying it, and the `spawn_agent` `role` argument this bullet used to describe is not sent from this command at all.
 
-### 3.1 Spawn — the wezterm path (fallback, and always the resume branch)
+### 3.1 Resume — the wezterm path (the resume branch)
 
 ```bash
 # Pace the start FIRST, and never skip this line on this branch. The resume branch bypasses
@@ -616,9 +613,9 @@ The trailing `"/color $CHIP"` is the initial prompt — Claude executes it at st
 - the **`unset` prefix** — kept, but its peer-registration *reason* is **refuted**; the recipe records the measurement. Do not restate the socket story as its justification.
 - the **`/color`-as-spawn-prompt split** — Claude Code parses one submitted message as one command and `/color` takes the entire trimmed argument, so the colour cannot ride inside a larger prompt.
 
-### 3.2 Send the work command — **wezterm fallback path only**
+### 3.2 Send the work command — **the wezterm resume path only**
 
-**Skip this section entirely on the `spawn_agent` path** — there the work prompt *is* the spawn argument, so nothing needs sending. This applies only when 3.1's wezterm shape was used.
+**Skip this section entirely on the create branch** — on the `spawn_agent` arms the work prompt *is* the spawn argument, and on § 2.2's `local` arm the controller starts the worker itself, so nothing needs sending either way. This applies only when 3.1's wezterm shape was used, which is now only the resume branch.
 
 The colour already ran as the spawn prompt, so the session is idle and the work command submits on the first try:
 
@@ -639,8 +636,8 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 
 ## Step 4 — Verify and report
 
-- `wezterm cli list` shows the new tab (spawn branches), or the jump target was activated (jump branch)
-- the task's `claude_session_id` matches the session now running
+- CREATE: the controller's `list` shows the new worker with its `worker_id` (`open-a2a.md` § Step 3) — ⚠️ **that is the authoritative read, not this command's own spawn**; the local backend's tab is the controller's to open and its pane id arrives on the create reply. JUMP: the jump target was activated. RESUME: `wezterm cli list` shows the new tab
+- the task's `claude_session_id` matches the session now running — ⚠️ **on the `local` arm the id comes from a later controller `list`, never from the create reply**
 - **the spawned session owns its name** — check the record, do not trust the tab title alone:
 
   ```bash
@@ -649,20 +646,22 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
   ```
 
   `nameSource: user` → correct. `nameSource: peer` → the `unset` prefix was missing or ineffective; the session is named after its spawner and the title-match session-connect cannot resolve it (see below).
-- state the branch taken in one line: `↪️ jumped` / `♻️ resumed <sid-prefix>` / `🆕 created <sid-prefix>` — plus the resolved type **and the resolved vault**, so a mis-resolution is visible immediately
-- **the worker runs where you asked, under that vault's launcher** — read `vault`, `launcher` and `model` back from the spawn response: `launcher` must equal the launcher the task resolves to (its `launcher:` frontmatter, else its goal's, else the vault `claude_script`; `launcher_source` names which — rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8); the returned `cwd` must **not** be the `claude-supervisor` repo, and `model` must be the one that launcher sets.
+- state the branch taken in one line: `↪️ jumped` / `♻️ resumed <sid-prefix>` / and for CREATE the **controller's own shape**, which `open-a2a.md` § Step 4 owns and this file does not restate — plus the resolved type **and the resolved vault**, so a mis-resolution is visible immediately
+- **on the `spawn_agent` arms, the worker runs where you asked, under that vault's launcher** — read `vault`, `launcher` and `model` back from the spawn response: `launcher` must equal the launcher the task resolves to (its `launcher:` frontmatter, else its goal's, else the vault `claude_script`; `launcher_source` names which — rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8); the returned `cwd` must **not** be the `claude-supervisor` repo, and `model` must be the one that launcher sets. ⚠️ **On § 2.2's `local` arm none of this is readable, because the create carries `task` alone** — no `vault` and no `cwd` ride the call, so the worker's directory is the controller's. That is the eligibility rule's own consequence (`§ Spawn a worker` item 7) and it is why the check exists; report it as *not applicable on this arm* rather than as passed.
 
 ### 4.1 Bind the task explicitly — `-n` does not self-link
 
 **`-n` sets the session record's `name` but writes NO `custom-title` line into the transcript.** `work-on-task`'s session-connect resolves by scanning transcripts for `customTitle`, so it finds nothing and the task stays unlinked.
 
-⚠️ **On the tab path the server already wrote it — verify the `bind` field, and do NOT write it yourself.** Because the spawn above passes `task`, `spawn_agent` binds the session through `task-binding.mjs`'s ownership rule and reports the outcome as `bind` on its response:
+⚠️ **On the `spawn_agent` arms the server already wrote it — verify the `bind` field, and do NOT write it yourself.** Because those calls pass `task`, `spawn_agent` binds the session through `task-binding.mjs`'s ownership rule and reports the outcome as `bind` on its response:
 
 - `bind.action == "stamped"` — the task's `claude_session_id` was EMPTY and now names this session.
 - `bind.action == "appended"` — the task was already owned; this session was appended to `metrics_sessions` and the owner was left intact.
 - `bind.error` — the session is live but the vault record failed. Reconcile by hand; see below.
 - `bind == null` — no `task` was passed, so nothing was bound. On this path that means the spawn was malformed.
-- **the key is ABSENT entirely** — the spawn took the local **headless** path, which does not bind. Step 3 sends `interactive=false` for every row whose `mode:` reads `headless`, so this is ordinary for those rows. Bind it by hand if the row must be resolvable.
+- **the key is ABSENT entirely** — the spawn took the local **headless** path, which does not bind. Bind it by hand if the row must be resolvable.
+
+⚠️ **On § 2.2's `local` arm there is no spawn response at all, so `bind` cannot be read here.** That arm makes a `python3` controller call, not a `spawn_agent` call, so no `bind` field exists to check — and its absence means "not applicable on this arm", never "the bind failed". The worker connects itself when its own `/vault-cli:work-on-task` turn runs, which is the same session-connect path every worker uses. Verify by reading the task's `claude_session_id` back **after** the worker has started, rather than looking for a field this arm never produces.
 
 ⚠️ **A manual `vault-cli task set "<task>" claude_session_id "<uuid>"` is a SECOND writer with no ownership rule.** Use it **only** when `bind.error` is set or the headless path was taken, then reconcile rather than overwrite: read the current owner first, and prefer `vault-cli task append-metrics-session "<task>" "<uuid>"` when the field already holds an owner.
 
@@ -685,3 +684,4 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 
   The mirror-image failure is just as easy: reading the generated `CLAUDE.md` shows *that* a string is stale but never *where it lives* — the text is in `.claude/claude-md-rules/`, and a regeneration carries stale sources forward unchanged while looking like a fix. Two sibling sessions hit that side of it the same day.
 - **Invoked as `/supervisor:open`.** The spawn call shape is referenced from `docs/fleet-surface.md` § Spawn a worker, not restated.
+- **The CREATE branch routes through the a2a-worker-controller**, and its dispatch is `open-a2a.md` § Step 2's — referenced, never copied, so the two commands cannot drift apart. JUMP and RESUME keep their tab behaviour: only the create half moved. Consequence worth carrying: **an absent `target:` now means the controller's `local` backend, which is not `spawn_agent`'s local path** — so the `mode:` carve-out, `role`, `interactive` and the `bind` field no longer apply on that arm, and each says so where it is defined rather than silently going inert.
