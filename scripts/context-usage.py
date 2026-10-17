@@ -22,19 +22,20 @@ success and does nothing.
   context-usage.py --over 70       only sessions at/over 70%
   context-usage.py --compactable   over the threshold AND neither blocked nor in a tool call
   context-usage.py --threshold 60  set the percentage threshold (default 70)
-  context-usage.py --threshold-tokens 200000
-                                   add an absolute bound: over at/above 200k tokens used
+  context-usage.py --threshold-tokens 500000
+                                   set the absolute bound: over at/above 500k tokens used
 
-The two bounds are ORed — over means at/over the percentage OR at/over the token
-count — so adding a token bound can only move a compaction earlier, never retire
-one the percentage already offered. Every run prints the bound in force, so a
-gate's own output states which bound it actually applied rather than leaving the
-reader to infer it from a compaction line both bounds emit identically.
+A token bound is a PRECONDITION, not an alternative to the percentage: a session
+below it is under the bound however full its window is. That is load-bearing on a
+small window, where the percentage alone is far below the floor — 70% of 128k is
+90k — and an ORed bound let the percentage fire there on its own. The percentage
+is therefore consulted only when no token bound is given, and the run prints the
+single bound in force so a gate's output names what it actually applied.
 
-The absolute bound is the one that fires first on this fleet: the sessions here run
-1M-token windows, so 70% is 700k tokens and the percentage gate is unreachable in
-practice (measured 2026-10-13: 85 sessions live in 24h, all 1M windows, 380k–620k
-used, none near 70%).
+The absolute bound is what this fleet runs on: the sessions here use 1M-token
+windows, so 70% is 700k tokens and the percentage gate is unreachable in practice
+(measured 2026-10-13: 85 sessions live in 24h, all 1M windows, 380k–620k used,
+none near 70%).
 
 A record whose `context_window_size` is absent cannot be judged against a token
 bound at all. It is reported as UNKNOWN and withheld from the candidate list —
@@ -143,24 +144,33 @@ def used_tokens(r):
 def bound_verdict(r, threshold, tokens):
     """`True` over, `False` under, `None` when the record cannot be evaluated.
 
-    The bounds are ORed: over means at/over the percentage OR at/over the token
-    count. The percentage is kept as the floor for a small window and is never a
-    ceiling over the token bound — on a 1M window 70% is 700k tokens, so the
-    absolute bound is the one that fires first.
+    A token bound is a PRECONDITION, not an alternative. The two bounds used to
+    be ORed, which let the percentage fire on its own at 70% of a 128k window —
+    90k, far below the 500k floor that must hold on every path. A session below
+    the token bound is therefore under the bound however full its window is, and
+    the percentage is consulted only when no token bound is given.
+
+    `None` is preserved as its own answer: a record with no window size cannot
+    be judged against a token bound, and must not read as "under" it.
     """
-    if r["pct"] >= threshold:
-        return True
     if tokens is None:
-        return False
+        return r["pct"] >= threshold
     used = used_tokens(r)
     return None if used is None else used >= tokens
 
 
 def bound_label(threshold, tokens):
-    """The bound as printed — the in-force bound a gate's own output carries."""
+    """The bound as printed — the in-force bound a gate's own output carries.
+
+    Only the bound that can actually fire is named. Printing "70% or 200k
+    tokens" while the percentage cannot fire below the token bound would
+    describe a gate this code does not have — the same defect the label was
+    added to prevent, since a reader would check the percentage half and find
+    it inert.
+    """
     if tokens is None:
         return f"{threshold:.0f}%"
-    return f"{threshold:.0f}% or {tokens / 1000:.0f}k tokens"
+    return f"{tokens / 1000:.0f}k tokens"
 
 
 def main():
@@ -220,7 +230,7 @@ def main():
         print("⚠️  `wezterm cli list` unreadable — pane ids withheld. A pane that cannot "
               "be checked is UNKNOWN: not live, and not gone either.")
     print(f"Context usage ({len(shown)} of {len(rows)} sessions, highest first)")
-    print(f"Bound in force: {bound_label(a.threshold, a.threshold_tokens)} — whichever fires first")
+    print(f"Bound in force: {bound_label(a.threshold, a.threshold_tokens)}")
     for r in shown:
         name = (r["rec"].get("session_name") or r["sid"][:8])[:34]
         used = used_tokens(r)
