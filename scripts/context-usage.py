@@ -20,8 +20,9 @@ success and does nothing.
 
   context-usage.py                 all sessions, highest usage first
   context-usage.py --over 70       only sessions at/over 70%
-  context-usage.py --compactable   over the threshold AND neither blocked nor in a tool call
-  context-usage.py --threshold 60  set the percentage threshold (default 70)
+  context-usage.py --compactable   over the bound AND neither blocked nor in a tool call
+  context-usage.py --threshold 60  set the percentage threshold (default 70; inert
+                                   whenever --threshold-tokens is given)
   context-usage.py --threshold-tokens 500000
                                    set the absolute bound: over at/above 500k tokens used
 
@@ -180,7 +181,7 @@ def main():
                     help="absolute bound — over at/above N tokens used")
     ap.add_argument("--over", type=float, metavar="PCT", help="only at/over PCT")
     ap.add_argument("--compactable", action="store_true",
-                    help="over threshold AND not blocked AND not in a tool call")
+                    help="over the bound AND not blocked AND not in a tool call")
     a = ap.parse_args()
 
     ctx = load(CONTEXT, "")
