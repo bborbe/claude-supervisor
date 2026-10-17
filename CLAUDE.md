@@ -144,6 +144,7 @@ docs/sweep-output.md                             the manager sweep's output fram
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the four manager commands share
 docs/voice-asks.md                               a voiced question is also a board card — rule + detector (canonical)
+docs/orphan-recovery.md                          stop + recreate a remote worker whose container or pod is gone (canonical)
 scripts/voice-ask-pairing.py                     flags question `say`s with no `attention-ask.py post` within 60 s
 scripts/manager-predispatch.py                   the pre-dispatch gate both manager commands run first (state: ~/.claude/state/manager-predispatch/)
 scripts/plugin-version-census.py                 the fleet reading of the plugin-install probe — who is stale, and `--reload` the lever that moves them

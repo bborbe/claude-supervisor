@@ -256,6 +256,7 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 - [Subject resolution](docs/subject-resolution.md) — the four-source subject chain the manager commands share
 - [Pane reads](docs/pane-reads.md) — reading a worker's pane
 - [Restart a worker](docs/restart-worker.md) — the kill-and-resume procedure
+- [Orphan recovery](docs/orphan-recovery.md) — stop + recreate a remote worker whose container or pod is gone (canonical)
 
 Architecture, the spawn ledger and the known gaps are documented in [CLAUDE.md](CLAUDE.md) — that file is for agents working in the tree, not for using the plugin.
 
