@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.169.0
 
 - feat: **`scripts/check-spawn-target.py` — the third spawn gate, and the one half of the routing pair that could silently rot.** `scripts/check-spawn-mode.py` has guarded the `mode:` decision since it shipped; the `target:` decision had no equivalent, so the eligibility rule in `docs/fleet-surface.md` § Spawn a worker item 7 was **prose only** — nothing failed if a citation, the binding, or a whole call site disappeared. The gate asserts each registered site cites item 7 rather than restating it, carries both halves of the advisory binding (the warning naming the disqualifier, and the `Advisory, never a refusal` clause that stops a site refusing the spawn), and **discovers citing sites rather than trusting its own list** — so a fourth site fails until it is registered. Wired into `precommit` beside its sibling.
 - fix: **item 7 said "the two call sites that read `target:`" while three did.** `commands/open-a2a.md` landed 2026-10-17 reading the field itself in its § 2.1, and the rule's own closing sentence was stale from that day — the doc and the tree disagreed with no error on either side. The sentence now names three and points at the gate that keeps the two in step.
