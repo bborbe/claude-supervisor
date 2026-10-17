@@ -56,6 +56,12 @@ MODE_ANCHOR = "Spawn a worker item 6"
 #: rows is now a spawn site and must carry the binding.
 SPAWN_SITES = (
     "commands/open.md",
+    # ⚠️ `commands/open-a2a.md` joined on 2026-10-17: it is `open.md`'s parallel, so it is a
+    # spawn site for the same reason `open.md` is — it decides which way a worker opens. Its
+    # `local` branch reaches the controller's own backend rather than `spawn_agent`, but the
+    # `docker` / `k8s` branch calls the tool, and the mode rule has to be reachable from the
+    # file either way.
+    "commands/open-a2a.md",
     # ⚠️ `commands/manager-loop.md` left this set on 2026-10-11: the spawn moved OUT of the
     # arm and into its per-round step file when the loop was restructured into a router.
     # The arm still grants the tool, so it carries the anchor pointer below — a grant with

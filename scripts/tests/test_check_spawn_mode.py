@@ -11,6 +11,7 @@ prompt too — `spawn_agent(prompt="<the answer>", resume="<session-id>", intera
 in `commands/fleet-loop.md` — so a check keyed on `prompt=` alone would demand the mode
 decision of a resume. That is the one way this check could be plausibly wrong.
 """
+import importlib.util
 import pathlib
 import shutil
 import subprocess
@@ -19,6 +20,22 @@ import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-spawn-mode.py"
+
+
+def spawn_sites():
+    """The checker's own `SPAWN_SITES`, loaded from it rather than copied.
+
+    ⚠️ **Derived, never hand-listed.** A second copy of the site list is exactly the drift the
+    checker exists to catch, and this fixture held one until 2026-10-17: `commands/open-a2a.md`
+    joined `SPAWN_SITES` and the fixture still listed the old five, so the checker reported the
+    new site as "listed but does not exist" — and the failure surfaced as three tests asserting
+    the CHECKER was wrong. The fixture's job is to build a tree the checker accepts, so it must
+    agree with the checker by construction rather than by a list someone remembers to update.
+    """
+    spec = importlib.util.spec_from_file_location("check_spawn_mode", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.SPAWN_SITES
 
 #: A wired site: references the home AND carries the binding in both directions.
 SITE = (
@@ -70,8 +87,7 @@ class CheckSpawnModeTest(unittest.TestCase):
         (pathlib.Path(self.dir) / "scripts").mkdir()
         shutil.copy(SCRIPT, pathlib.Path(self.dir) / "scripts" / "check-spawn-mode.py")
         self.write("docs/fleet-surface.md", HOME)
-        for site in ("commands/open.md", "commands/steps/manager-spawn.md", "commands/manager-spawn.md",
-                     "commands/manager-drive.md", "agents/manager-drive.md"):
+        for site in spawn_sites():
             self.write(site, SITE)
 
     def write(self, relpath, text):

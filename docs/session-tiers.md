@@ -47,6 +47,7 @@ other side.
 | `/supervisor:stop` | manager — stands down *this* session's manager loop | worker (it has no loop to stop) |
 | `/supervisor:reset` | manager — re-discovers *this* manager's state | worker |
 | `/supervisor:open` | manager — resolves a name, then jumps, resumes or spawns | worker — workers never open sessions |
+| `/supervisor:open-a2a` | manager — resolves a name, then creates the worker on the a2a-worker-controller (the backend chosen by the row's `target:`) | worker — workers never open sessions |
 | `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `manager-drive`, never by driving a task itself |
 | `/supervisor:worker-restart` | fleet manager, manager — **the one exception to the prefix rule: `worker-` names the TARGET, not the invoker** | worker — it cannot restart itself (the script refuses `busy-target`, and a session running the command is mid-turn) |
 | `/supervisor:read-guides` | any | — |
@@ -62,8 +63,10 @@ no command file, is a defect. Check it with:
 
 ```bash
 diff <(ls commands/*.md | sed 's|commands/||;s|\.md$||' | sort) \
-     <(grep -oE '^\| `/supervisor:[a-z-]+`' docs/session-tiers.md | sed 's|.*:||;s|`||' | sort)
+     <(grep -oE '^\| `/supervisor:[a-z0-9-]+`' docs/session-tiers.md | sed 's|.*:||;s|`||' | sort)
 ```
+
+⚠️ **The character class carries digits, and that is load-bearing rather than tidy.** It read `[a-z-]+` until 2026-10-17, which matched every command name then in the table — until `/supervisor:open-a2a`, whose `2` the class cannot match. The row was added, the pattern returned nothing for it, and the diff above reported a command file with no row *because of the checker's own regex* — a false failure whose remedy a reader would look for in the wrong file. Any future name with a digit needs this class, not a new special case.
 
 Empty output is a pass.
 
