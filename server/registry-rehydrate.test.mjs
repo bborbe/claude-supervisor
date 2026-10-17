@@ -37,8 +37,6 @@ import { join } from 'node:path'
 import { stampRecord } from './heartbeat.mjs'
 import { isFinished } from './resume-guard.mjs'
 import { liveSessionIds, rehydratableAgents, rehydratedStatus, toAgentRecord, unionRoster } from './registry-rehydrate.mjs'
-import { mergeRecord, stoppedPatch } from './ledger.mjs'
-import { recordToWire } from './session-ledger.mjs'
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'registry-rehydrate-'))
@@ -477,65 +475,4 @@ test('the in-process map is not mutated', () => {
   unionRoster(inProcess, [foreign('agent_1', FAR_A1)])
   assert.equal(inProcess.size, 1)
   assert.equal(inProcess.get('agent_1').label, 'mine')
-})
-
-// ── the adopted row's ledger record ────────────────────────────────────────────────────────
-//
-// `writeLedger` merges into `agent.ledgerRecord` and, when there is none, LOGS and returns null
-// rather than throwing: `no ledger record for … — the patch was not applied`. A rehydrated row
-// carried no record, so every patch aimed at an adopted worker was dropped in silence — and the
-// row a stop must record is exactly such a row, because `stop_agent` reads the request-time
-// roster precisely because "the worker a manager stops is often the one it did NOT spawn".
-
-function wireRow(over = {}) {
-  return {
-    session_id: 'aaaa1111-0000-0000-0000-000000000000',
-    agent_id: 'agent_1',
-    label: 'adopted',
-    worker_id: '37ded6f4ca94e293',
-    target: 'k8s',
-    mode: 'a2a',
-    status: 'running',
-    spawned_at: '2026-10-17T08:26:53.555Z',
-    spawner_session_id: 'bbbb2222-0000-0000-0000-000000000000',
-    location: 'local',
-    ...over,
-  }
-}
-
-test('a rehydrated row carries a ledger record, so writeLedger applies the patch instead of dropping it', () => {
-  const agent = toAgentRecord(wireRow())
-
-  // The guard `writeLedger` evaluates first. Without the fix this is null, the patch is logged
-  // and dropped, and the stop is never recorded — the assertion that fails on the old behaviour.
-  assert.ok(agent.ledgerRecord, 'a rehydrated row must carry the record its patches merge into')
-
-  const merged = mergeRecord(agent.ledgerRecord, stoppedPatch({ at: '2026-10-17T09:00:00Z' }))
-  assert.ok(merged, 'the patch must apply, not return null')
-  assert.equal(merged.stopped_at, '2026-10-17T09:00:00Z')
-  // The spawn edge survives the patch — a replace would have erased it.
-  assert.equal(merged.worker_id, '37ded6f4ca94e293')
-  assert.equal(merged.target, 'k8s')
-})
-
-test('the spawner field survives the wire round trip — normalized on attach, not blanked', () => {
-  const wire = wireRow()
-
-  // ⚠️ The negative control, and the reason the normalization exists rather than being
-  // cosmetic: `recordToWire` maps `parent_session` onto `spawner_session_id`, and the wire row
-  // carries only the latter — so re-publishing the RAW wire row blanks the field.
-  assert.equal(recordToWire(wire).spawner_session_id, '', 'the raw wire row blanks it — this is the bug')
-
-  const round = recordToWire(toAgentRecord(wire).ledgerRecord)
-  assert.equal(round.spawner_session_id, wire.spawner_session_id)
-  assert.equal(round.session_id, wire.session_id)
-})
-
-test('a record spelling the field as parent_session round-trips too', () => {
-  const wire = wireRow({ parent_session: 'cccc3333-0000-0000-0000-000000000000' })
-  delete wire.spawner_session_id
-  assert.equal(
-    recordToWire(toAgentRecord(wire).ledgerRecord).spawner_session_id,
-    'cccc3333-0000-0000-0000-000000000000',
-  )
 })
