@@ -74,6 +74,7 @@ test('the config object is a frozen, complete surface', () => {
     'workerColor',
     'heartbeatDir',
     'heartbeatStateDir',
+    'stopFile',
     'sessionId',
     // ⚠️ The spawn's own handover, read here so `heartbeat.mjs` need not consult the environment:
     // a server running inside a headless worker stands its self-stamp down on this value.

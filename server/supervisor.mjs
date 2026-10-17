@@ -40,6 +40,7 @@ import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
+import { appendStop } from './stop-file.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
@@ -2667,11 +2668,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ⚠️ **The stop is RECORDED, not merely echoed — and the reply alone is not a record.**
       // The controller reports `stopped` only in the reply to the stop that removed it; `list`
       // never returns it. So a supervisor that returns the reply and files nothing leaves the
-      // durable row silent, and the manager sweep then reads a deliberately stopped worker
+      // durable record silent, and the manager sweep then reads a deliberately stopped worker
       // exactly as it reads a dead one — an orphan candidate, which the drive leg would
-      // stop+recreate, resurrecting work someone ended on purpose. `stoppedPatch` is applied
-      // only on the success path: a stop the controller refused is not a stop.
+      // stop+recreate, resurrecting work someone ended on purpose.
+      //
+      // ⚠️ **Two records, because they cover different rows, and neither is redundant.**
+      // `writeLedger` covers only the row THIS server spawned: it refuses a rehydrated agent
+      // (the single-writer guarantee, `writeLedger`'s own guard). Since the worker a manager
+      // stops is often the one it did NOT spawn, the stop file carries exactly the case the
+      // ledger cannot — keyed on `worker_id`, so a later respawn of the same task is not read as
+      // stopped. Both are applied on the success path only: a stop the controller refused is not
+      // a stop.
       writeLedger(agent, stoppedPatch())
+      appendStop({ workerId: agent.workerId, task: agent.label, session: agent.sessionId })
 
       // ⚠️ The response is echoed as a whole rather than projected: it names the operation and the
       // worker's resulting state, which is what a caller checks — and it carries no credential
