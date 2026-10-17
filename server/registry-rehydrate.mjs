@@ -97,9 +97,30 @@ export function liveSessionIds(opts = {}) {
 // rehydrated row for a worker that was spawned under `SHIPPING_PERMISSION_MODE` therefore
 // reports `shipping: false` while that worker really is running in shipping mode. Nothing
 // here can fix that; it is named so a reader does not take the `false` for a measurement.
+// The file-ledger record the wire row came from, normalized for the round trip.
+//
+// ⚠️ **Attached so `writeLedger` works on an ADOPTED row — which, without this, it silently is
+// not.** `writeLedger` merges into `agent.ledgerRecord`, and a rehydrated agent had none, so
+// every patch aimed at one hit the writer's own guard, logged `no ledger record for … — the
+// patch was not applied`, and returned null. The case is not exotic: `stop_agent` reads the
+// request-time roster precisely because "the worker a manager stops is often the one it did NOT
+// spawn", so the row a stop must record is exactly the row this field was missing from.
+//
+// ⚠️ **The two spellings are normalized HERE, explicitly, and that is load-bearing.** The wire
+// row carries `spawner_session_id`; the file record says `parent_session`; `recordToWire` maps
+// the latter onto the former. A record carrying only the wire spelling therefore round-trips to
+// `spawner_session_id: ''` — blanked, silently, on the first patch. Normalizing on attach keeps
+// that mapping one-directional and the field intact.
+export function ledgerRecordFor(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null
+  const { spawner_session_id: spawner, ...rest } = record
+  return { ...rest, parent_session: record.parent_session ?? spawner ?? '' }
+}
+
 export function toAgentRecord(record, id = record.agent_id) {
   return {
     id,
+    ledgerRecord: ledgerRecordFor(record),
     label: record.label ?? record.agent_id,
     cwd: record.cwd ?? null,
     status: rehydratedStatus(record),

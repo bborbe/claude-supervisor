@@ -39,7 +39,7 @@ import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
-import { buildRecord, mergeRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
+import { buildRecord, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
@@ -2663,6 +2663,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         mint: () => randomUUID(),
       })
       if (stopped.error) return reply({ error: stopped.error, agent_id: agent.id, worker_id: agent.workerId })
+
+      // ⚠️ **The stop is RECORDED, not merely echoed — and the reply alone is not a record.**
+      // The controller reports `stopped` only in the reply to the stop that removed it; `list`
+      // never returns it. So a supervisor that returns the reply and files nothing leaves the
+      // durable row silent, and the manager sweep then reads a deliberately stopped worker
+      // exactly as it reads a dead one — an orphan candidate, which the drive leg would
+      // stop+recreate, resurrecting work someone ended on purpose. `stoppedPatch` is applied
+      // only on the success path: a stop the controller refused is not a stop.
+      writeLedger(agent, stoppedPatch())
 
       // ⚠️ The response is echoed as a whole rather than projected: it names the operation and the
       // worker's resulting state, which is what a caller checks — and it carries no credential

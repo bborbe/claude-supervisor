@@ -208,6 +208,29 @@ export function unobservedPatch({ mode, at = new Date().toISOString() }) {
   }
 }
 
+// The field a deliberate stop is recorded under, and the patch that writes it.
+//
+// ⚠️ **Its own field, deliberately, and neither of the two candidates beside it would do.**
+// `status` is not available: a ledger row is permanent by contract, and `session-ledger.mjs`
+// records 1480 legacy rows still saying `running` for workers long dead, so a reader filtering on
+// it "would resurrect the whole fleet". `ended_at` is worse than unavailable — it is already
+// load-bearing elsewhere: `a2a-spawn.mjs:823` skips any record carrying it and
+// `supervisor.mjs:2858` treats `!record.ended_at` as still-live, so setting it here would change
+// the spawn-dedupe and mirror paths as a side effect of recording a stop. A new field changes
+// exactly one thing.
+//
+// ⚠️ **Written by `stop_agent` because the reply is not a record.** The controller reports
+// `stopped` only in the reply to the stop that removed it — `list` never returns it — so a
+// supervisor that echoes the reply and files nothing leaves the durable row silent, and the sweep
+// then reads a deliberately stopped worker exactly as it reads a dead one. That is the defect
+// this field exists to close: without it an ended worker reads as an orphan candidate and the
+// drive leg stop+recreates it, resurrecting work someone ended on purpose.
+export const STOPPED_AT_FIELD = 'stopped_at'
+
+export function stoppedPatch({ at = new Date().toISOString() } = {}) {
+  return { [STOPPED_AT_FIELD]: at }
+}
+
 // Merge a patch into the record the writer already holds.
 //
 // ⚠️ **Merge, never replace, and that is the whole reason this is a function rather than a spread
