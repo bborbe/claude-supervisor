@@ -129,6 +129,19 @@ export const config = Object.freeze({
   stateDir: STATE_DIR,
   claudeHome: CLAUDE_HOME,
 
+  // The machine-wide A2A stop file — one JSON line per deliberate stop, appended by `stop_agent`.
+  // It exists because `writeLedger` refuses a rehydrated agent (the single-writer guarantee), so
+  // a stop on a worker this server did NOT spawn has nowhere else to go; see `stop-file.mjs`.
+  //
+  // ⚠️ **`homedir()` + `.claude/state`, NOT `CLAUDE_HOME` and NOT `STATE_DIR`** — and both
+  // exclusions are deliberate. The readers of this file are the plugin's Python scripts, and
+  // every one of them resolves its state under `~/.claude/state/` (`asked-ledger.json`,
+  // `worker-manager/`, `sweep-gate/`), so a writer on any other root would be unreadable to them
+  // by construction. `CLAUDE_HOME` follows `CLAUDE_CONFIG_DIR`, which the resolution above
+  // documents as a variable a parent can hand the server by accident; the readers do not follow
+  // it, so this must not either — the two ends have to name the same file.
+  stopFile: ENV.A2A_STOP_FILE || join(homedir(), '.claude', 'state', 'a2a-stops.jsonl'),
+
   // Non-null means this server must NOT start — see the resolution above for the defect it
   // prevents. Surfaced rather than thrown here so the whole surface stays enumerable and
   // testable; `supervisor.mjs` is what acts on it, at boot.
