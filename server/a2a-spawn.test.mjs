@@ -95,6 +95,33 @@ test('an empty env object is not a refusal — it sets nothing', () => {
   assert.equal(a2aSpawnArgumentRefusal({ target: 'docker', task: 't', env: {} }), null)
 })
 
+test('mounts and secrets are NOT refused — they are the sanctioned route env cannot provide', () => {
+  // The asymmetry is the point: `env` is refused because a raw map is an ungoverned surface, while
+  // a mount is checked by the controller against its own allowlist and a secret is a TeamVault KEY
+  // the controller resolves itself. Refusing these too would leave a caller no route to a file or a
+  // credential except a local spawn, which is the outcome the refusal exists to avoid.
+  for (const target of ['docker', 'k8s']) {
+    assert.equal(
+      a2aSpawnArgumentRefusal({
+        target,
+        task: 't',
+        mounts: [{ host_path: '/srv/vault', container_path: '/vault' }],
+        secrets: [{ name: 'N', teamvault_key: 'k' }],
+      }),
+      null,
+    )
+  }
+})
+
+test('the env refusal names the declared route, so a caller is not left at "no"', () => {
+  // A refusal that only says "not supported" is what sends a caller to a local spawn to get what a
+  // declared secret already gives — so the message names both arguments rather than stopping.
+  const refusal = a2aSpawnArgumentRefusal({ target: 'docker', task: 't', env: { A: '1' } })
+  assert.match(refusal, /env is not supported with target/)
+  assert.match(refusal, /`mounts`/)
+  assert.match(refusal, /`secrets`/)
+})
+
 test('the refusal is only defined for an A2A target', () => {
   assert.match(a2aSpawnArgumentRefusal({ target: 'local', task: 't' }), /not an A2A target/)
 })
@@ -389,6 +416,32 @@ test('create returns the worker and its token, and never logs either', async () 
   assert.equal(result.worker.worker_id, 'w1')
   assert.equal(result.token, TOKEN)
   assert.equal(result.contextId, 'ctx-1')
+})
+
+test('declared mounts and secrets reach the wire, unchanged and in the create payload', async () => {
+  // Asserted on the ACTUAL SENT BODY rather than on the builder's return, because the failure this
+  // guards against is a pass-through that is wired at the builder and dropped one layer down — a
+  // worker then starts WITHOUT the access the caller asked for, which reads as a working spawn.
+  let sentBody
+  const fetchImpl = async (_url, init) => {
+    sentBody = JSON.parse(init.body)
+    return stubFetch(createReply())()
+  }
+  await createWorkerOnController({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    task: 'some task',
+    token: TOKEN,
+    messageId: 'msg-1',
+    mint: () => 'ctx-1',
+    mounts: [{ host_path: '/srv/vault', container_path: '/vault', read_only: true }],
+    secrets: [{ name: 'GATEWAY_SECRET', teamvault_key: '9L6eMO' }],
+    fetchImpl,
+  })
+  const create = sentBody.params.message.parts[0].data.create
+  assert.deepEqual(create.mounts, [{ host_path: '/srv/vault', container_path: '/vault', read_only: true }])
+  assert.deepEqual(create.secrets, [{ name: 'GATEWAY_SECRET', teamvault_key: '9L6eMO' }])
+  // The key travels; the value is not in the body, because it is not expressible in the argument.
+  assert.equal(JSON.stringify(sentBody).includes('9L6eMO'), true)
 })
 
 test('the capture hook receives the exact body sent, and never the headers that carry the token', async () => {

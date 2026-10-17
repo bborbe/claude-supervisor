@@ -71,11 +71,20 @@ export function a2aSpawnArgumentRefusal({ target, resume, policy, interactive, w
   if (!A2A_SPAWN_TARGETS.includes(target)) {
     return `a2aSpawnArgumentRefusal was called for target ${JSON.stringify(target) ?? 'undefined'}, which is not an A2A target (${A2A_SPAWN_TARGETS.join(', ')}).`
   }
+  // ⚠️ `env` STAYS REFUSED, AND IT IS THE ONLY ONE OF THE THREE THAT DOES. A raw map is an
+  // ungoverned surface: nothing here can tell a harmless variable from a credential, and the value
+  // would travel from this server to the controller as plaintext. `mounts` and `secrets` are the
+  // sanctioned route to the same need and are NOT refused — a mount is checked against the
+  // controller's own host-path allowlist, and a secret is a TeamVault KEY the controller resolves
+  // itself, so the caller never holds or transmits the value. The refusal names them, because a
+  // caller told only "no" would reach for a local spawn to get what a declared secret already gives.
   if (env && Object.keys(env).length > 0) {
     return (
       `env is not supported with target "${target}": the controller creates this worker and this server ` +
       'never runs it, so there is no local process here to set an environment on. Pass the environment to ' +
-      "the worker's own image, or spawn locally."
+      "the worker's own image, or spawn locally. To give the worker a FILE or a CREDENTIAL, declare " +
+      '`mounts` (a host path the controller checks against its allowlist) or `secrets` (a TeamVault key ' +
+      'the controller resolves itself) instead — neither of those travels as a value from here.'
     )
   }
   if (resume) {
@@ -279,10 +288,14 @@ export function resolveA2AControllerTarget({ target, envUrl, envToken, file, pat
 // control API on a route that answers a single object, and asking it for a stream reads as a call
 // that produced no frames. The turn that follows goes to the WORKER, over the streaming spelling
 // — two different routes, and conflating them is the mistake this split exists to prevent.
-export function a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint } = {}) {
+export function a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint, mounts, secrets } = {}) {
   const context = a2aContextIdFor({ previous: contextId, mint })
   if (context.error) return { error: context.error }
-  const control = a2aControlRequestFor({ operation: 'create', task })
+  // `mounts` / `secrets` are forwarded UNCHANGED — this path's whole job for them is to carry a
+  // caller's declaration to the controller, which is the only party that can allow or resolve it.
+  // Validating them here as well as in the builder would be a second opinion that can disagree
+  // with the first, and the builder is what puts bytes on the wire.
+  const control = a2aControlRequestFor({ operation: 'create', task, mounts, secrets })
   if (control.error) return { error: control.error }
   const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId })
   if (call.error) return { error: call.error }
@@ -398,8 +411,8 @@ export function a2aWorkerRecord({
 // bearer token travels in `Authorization`, so handing the headers to a capture sink would write
 // the credential this task's Definition of Done forbids writing anywhere. A throwing capture
 // never fails the spawn.
-export async function createWorkerOnController({ endpoint, task, token, messageId, contextId, mint, fetchImpl = fetch, capture } = {}) {
-  const call = a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint })
+export async function createWorkerOnController({ endpoint, task, token, messageId, contextId, mint, mounts, secrets, fetchImpl = fetch, capture } = {}) {
+  const call = a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint, mounts, secrets })
   if (call.error) return { error: call.error }
   if (typeof capture === 'function') {
     try {
