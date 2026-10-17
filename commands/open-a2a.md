@@ -102,7 +102,7 @@ A value that is neither absent nor `docker` / `k8s` is not this command's to int
 
 ## Step 3 — address the worker, and read its session id
 
-A controller-created worker is addressed by its **`worker_id`** — ⚠️ **never by a `pane_id`**, which names nothing here: the worker holds no local pane.
+A controller-created worker is addressed by its **`worker_id`** — always, on every backend. ⚠️ **A `pane_id` is not an alternative to it, and it exists on only one backend.** The controller populates `pane_id` for a worker that runs in a WezTerm tab — the `local` backend — and leaves it **empty** for `docker` / `k8s`, whose workers answer at their own `a2a_url`. So the field is the local worker's jump handle and nothing at all elsewhere; address by `worker_id` regardless, and read `pane_id` only to hand the operator a way into a local worker's tab.
 
 ⚠️ **The `session_id` comes from a later `list`, never from the create reply.** The create reply's job is the `worker_id` and the redacted record; the session id is read back from the fleet the controller reports:
 
@@ -116,11 +116,11 @@ One worker per line — `<worker_id>  session_id=<id>` — and a worker the cont
 
 State the branch taken in one line, plus the resolved type and the resolved vault, so a mis-resolution is visible immediately:
 
-- local backend → `🆕 created (local) · worker <worker_id> · session <sid-prefix>`
+- local backend → `🆕 created (local) · worker <worker_id> · pane <pane_id> · session <sid-prefix>`
 - `docker` / `k8s` → `🆕 created (<target>) · worker <agent_id>` — read the `target` back from the response rather than assuming it.
 - unknown `target:` → the server's refusal, verbatim.
 
-⚠️ **Never report a `pane_id` for a controller-created worker.** It has none, and a pane id printed here reads as a handle to a session that cannot be jumped to.
+⚠️ **Report a `pane_id` for a `local` worker, and never in place of the `worker_id`.** Local is the one backend that populates it — the worker runs in a WezTerm tab, so the pane is the operator's way in. For `docker` / `k8s` the field is empty, and a pane id printed there reads as a handle to a session that cannot be jumped to.
 
 ## Notes
 
