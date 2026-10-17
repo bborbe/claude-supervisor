@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.168.1
 
 - docs: **orphan recovery gets its own home — `docs/orphan-recovery.md`.** The recovery procedure for a remote worker whose container or pod is gone was a single clause inside `docs/fleet-surface.md` item 7's eligibility list, which is a statement about *why a row is ineligible* and cannot also carry the steps. The new file is the single home for the procedure: the `resume` refusal on both A2A targets (`server/a2a-spawn.mjs:81`), `stop_agent` keyed on the **worker id** and never the task name, the repeat-create refusal and the remedy its own message names (`pkg/docker.go:256`), the 120 s card-ready window and why a create inside it must not be retried, and the finished-vs-orphan split with the 60 s heartbeat lag that delays an `ORPHAN` verdict after a kill. Item 7's bullet keeps the eligibility statement and points at the new file rather than restating it — a second copy of the procedure is the defect the single-home rule forbids. Registered in `README.md` § Documentation and `CLAUDE.md` § Layout.
 
