@@ -22,6 +22,9 @@ changelog-archive:
 check-spawn-mode:
 	@python3 scripts/check-spawn-mode.py
 
+check-spawn-target:
+	@python3 scripts/check-spawn-target.py
+
 check-worker-target:
 	@python3 scripts/check-worker-target.py
 
@@ -118,6 +121,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-ledger-writes check-drive-audit-budget test
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-target check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-ledger-writes check-drive-audit-budget test
 
-.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-audit-budget check check-server-deps test precommit
+.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-spawn-target check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-audit-budget check check-server-deps test precommit
