@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.168.2
 
 - docs: **orphan recovery gains the `stop_agent` FAILED-reply reconcile — and why it matters more than it looks.** `docs/orphan-recovery.md` told a reader *"A stop the controller refused is not a stop"*, which is true of a genuine refusal and misleading about the case the live exercise actually hit: `stop_agent` can return the controller's `TASK_STATE_FAILED` while the stop **succeeded**. Measured 2026-10-17 — the reply was the controller's `UNKNOWN`/`FAILED` and the controller's own `list` came back **empty**, so the worker was gone. ⚠️ The consequence is the load-bearing half: the ledger's `stopped_at` marker is written on `stop_agent`'s **success** path only, so a stop that succeeded behind a FAILED reply leaves **no stop record**, and the row then reads as an **`ORPHAN`** — the one verdict that authorises another stop + recreate. The doc now states the one-call reconcile against `list`, the missing-marker consequence, and how a true refusal differs (the reconcile still shows the worker). Found by this task's own exercise rather than by review, which is the point of running it.
 
