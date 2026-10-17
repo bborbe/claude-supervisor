@@ -46,7 +46,7 @@ other side.
 | `/supervisor:manager-drain` | manager | worker |
 | `/supervisor:stop` | manager — stands down *this* session's manager loop | worker (it has no loop to stop) |
 | `/supervisor:reset` | manager — re-discovers *this* manager's state | worker |
-| `/supervisor:open` | manager — resolves a name, then jumps, resumes or spawns | worker — workers never open sessions |
+| `/supervisor:open` | manager — resolves a name, then jumps, resumes, or creates the worker on the a2a-worker-controller (the backend chosen by the row's `target:`) | worker — workers never open sessions |
 | `/supervisor:open-a2a` | manager — resolves a name, then creates the worker on the a2a-worker-controller (the backend chosen by the row's `target:`) | worker — workers never open sessions |
 | `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `manager-drive`, never by driving a task itself |
 | `/supervisor:worker-restart` | fleet manager, manager — **the one exception to the prefix rule: `worker-` names the TARGET, not the invoker** | worker — it cannot restart itself (the script refuses `busy-target`, and a session running the command is mid-turn) |
