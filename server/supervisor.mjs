@@ -39,8 +39,7 @@ import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
-import { buildRecord, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
-import { appendStop } from './stop-file.mjs'
+import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
@@ -50,7 +49,7 @@ import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
 import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
 import { liveSessionIds, rehydratableAgents, unionRoster } from './registry-rehydrate.mjs'
-import { postSessionLedger, readSessionLedger, readSessionLedgerRow, recordToWire } from './session-ledger.mjs'
+import { patchSessionLedgerRow, postSessionLedger, readSessionLedger, readSessionLedgerRow, recordToWire } from './session-ledger.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -647,29 +646,54 @@ function transcriptDirFor(cwd) {
 // worker that was never spawned. A worker whose session id never resolved gets no
 // record at all rather than one filed under a key that would never be looked up.
 function writeLedger(agent, patch) {
-  if (!agent.sessionId) {
-    log(`WARNING: no ledger record for ${agent.id} — its session id never resolved, so there is no key to file it under`)
-    return null
-  }
-  // ⚠️ **THE SINGLE-WRITER GUARANTEE, and it is structural here rather than a comment at each
-  // call site.** A rehydrated row was adopted from the endpoint, so its ledger record belongs
-  // to the server that SPAWNED that worker — which may still be running and driving it. Since
-  // the endpoint's `Post` REPLACES a whole row rather than merging a patch, a write from a
+  // ⚠️ **THE SINGLE-WRITER GUARANTEE, and the DECISION lives in `ledgerWriteRoute` rather than
+  // here.** It is a pure function in `ledger.mjs` so the one thing that must be right — an
+  // adopted row takes a MERGE and never a REPLACE — is unit-tested, rather than pinned by
+  // matching this file's source text from a test (which is what it took while the decision was
+  // inline: `supervisor.mjs` cannot be imported, because it starts an MCP server). What stays
+  // here is the execution and the logging.
+  //
+  // The rule: a rehydrated row was adopted from the endpoint, so its ledger record belongs to
+  // the server that SPAWNED that worker — which may still be running and driving it. The
+  // endpoint's `Post` REPLACES a whole row rather than merging a patch, so a CREATE from a
   // second server would not merely lose one field: it would rebuild the record from a row that
-  // carries identity alone and blank everything the owner had written.
+  // carries identity alone and blank everything the owner had written. A `PATCH` is the one
+  // write that is safe from a second server, because the store merges the fields the caller
+  // names and leaves every other field exactly as the owner wrote it.
+  //
+  // ⚠️ **Refusing both was the shape this had while the endpoint had no merge, and it cost
+  // precisely the case the stop path exists for** — the worker a manager stops is usually the
+  // one it did NOT spawn. The stop then went unrecorded on the durable half, and the sweep read
+  // a deliberately stopped worker exactly as it reads a dead one: an orphan candidate, which the
+  // drive leg would stop+recreate.
   //
   // ⚠️ **This is reachable, not hypothetical.** `send_agent_message` looks an agent up in
   // `currentRoster()` — which is the point, because the worker a manager messages is the one it
-  // did not spawn — and the cluster arm of that handler writes `{ result }` onto it. Before this
+  // did not spawn — and the cluster arm of that handler writes `{ result }` onto it. Before the
   // guard, a manager messaging another server's cluster worker erased that worker's row.
   //
   // The refusal is logged rather than silent: the turn's `result` genuinely goes unrecorded for
   // a cluster worker this process does not own, and that loss must be readable rather than
   // discovered. `stampUnobservedWorkers` already skips these rows for the same reason; the
   // guard is what makes that one site's discipline a property of the writer.
-  if (agent.rehydrated) {
+  const route = ledgerWriteRoute(agent, patch)
+  if (route === 'no-session-id') {
+    log(`WARNING: no ledger record for ${agent.id} — its session id never resolved, so there is no key to file it under`)
+    return null
+  }
+  if (route === 'refuse') {
     log(`WARNING: refusing to write the ledger row for ${agent.id} — it was adopted from the endpoint, so its record belongs to the server that spawned it`)
     return null
+  }
+  if (route === 'patch') {
+    // ⚠️ **`agent.ledgerRecord` is deliberately NOT set here, and the patch is returned rather
+    // than a merged row.** This process holds no copy of an adopted row — that is what "adopted"
+    // means — so a local record built from the patch alone would be a PARTIAL row, and the next
+    // wholesale publish of it would blank the owner's fields: the exact damage this branch
+    // exists to avoid, deferred by one write rather than prevented. The merge lives in the
+    // store, and a caller that needs the merged row reads it back.
+    publishLedgerPatch(agent.sessionId, patch)
+    return patch
   }
   try {
     // ⚠️ **The merge source is this process's OWN in-memory record, not a read-back.** The patch
@@ -774,6 +798,30 @@ function publishLedgerRow(record) {
   const pending = postSessionLedger(wire)
     .then((ok) => {
       if (!ok) log(`WARNING: the session-ledger endpoint did not take the row for ${wire.session_id}`)
+    })
+    .catch(() => {})
+    .finally(() => inFlightPublishes.delete(pending))
+  inFlightPublishes.add(pending)
+  return pending
+}
+
+// Merge a patch into ONE endpoint row, from a server that did not spawn it.
+//
+// ⚠️ **Separate from `publishLedgerRow` because it writes a different SHAPE to a different
+// ROUTE.** That one sends a whole record to the collection route; this one sends only the named
+// fields to the per-id route and lets the store merge. Routing an adopted agent's patch through
+// `recordToWire` would send a partial record to the REPLACING route — the destructive write the
+// guard in `writeLedger` exists to prevent — so the two must not share a function however alike
+// their plumbing looks.
+//
+// ⚠️ **The in-flight tracking is shared deliberately.** `inFlightPublishes` is what the shutdown
+// path waits on, and a stop issued moments before the process exits is exactly the write whose
+// loss matters: it is the difference between the sweep reading a worker as deliberately stopped
+// and reading it as dead.
+function publishLedgerPatch(sessionId, patch) {
+  const pending = patchSessionLedgerRow(sessionId, patch)
+    .then((ok) => {
+      if (!ok) log(`WARNING: the session-ledger endpoint did not take the patch for ${sessionId}`)
     })
     .catch(() => {})
     .finally(() => inFlightPublishes.delete(pending))
@@ -2672,15 +2720,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // exactly as it reads a dead one — an orphan candidate, which the drive leg would
       // stop+recreate, resurrecting work someone ended on purpose.
       //
-      // ⚠️ **Two records, because they cover different rows, and neither is redundant.**
-      // `writeLedger` covers only the row THIS server spawned: it refuses a rehydrated agent
-      // (the single-writer guarantee, `writeLedger`'s own guard). Since the worker a manager
-      // stops is often the one it did NOT spawn, the stop file carries exactly the case the
-      // ledger cannot — keyed on `worker_id`, so a later respawn of the same task is not read as
-      // stopped. Both are applied on the success path only: a stop the controller refused is not
-      // a stop.
+      // ⚠️ **ONE record now, and it is the ledger row.** There used to be two: `writeLedger`
+      // refused an adopted row outright, so a stop on a worker this server did NOT spawn reached
+      // no durable store at all, and a machine-wide stop file carried exactly that case. It now
+      // routes such a stop through the endpoint's PATCH, which MERGES where `Post` would blank
+      // the owner's fields (see its guard), so the row is written for every stop and the file —
+      // with the `worker_id` join that existed only to read it — is gone. Applied on the success
+      // path only: a stop the controller refused is not a stop.
       writeLedger(agent, stoppedPatch())
-      appendStop({ workerId: agent.workerId, task: agent.label, session: agent.sessionId })
 
       // ⚠️ The response is echoed as a whole rather than projected: it names the operation and the
       // worker's resulting state, which is what a caller checks — and it carries no credential

@@ -250,3 +250,36 @@ export function mergeRecord(current, patch) {
   if (!current) return null
   return { ...current, ...patch }
 }
+
+// Which write one ledger update must take — the single-writer guarantee, as a pure decision.
+//
+// ⚠️ **Extracted because the guarantee has to be TESTABLE, and the writer is not.** `writeLedger`
+// lives in `supervisor.mjs`, which cannot be imported (it starts an MCP server), so the guarantee
+// was pinned by matching the guard's SOURCE TEXT in a test — a shape that a refactor can change
+// while leaving the behaviour wrong, and the behaviour here is what decides whether a stop is
+// recorded or silently dropped. The decision is pure, so it lives where a test can hand it an
+// adopted agent and a stop patch and assert the answer.
+//
+// Four answers, each naming the write it authorises:
+//
+//   'no-session-id' — nothing to key on. A session id that never resolved has no row to write.
+//   'refuse'        — an adopted row's CREATE. The endpoint's `Post` REPLACES a whole row, so a
+//                     server that did not spawn the worker would rebuild it from identity alone
+//                     and blank every field the owner wrote.
+//   'patch'         — an adopted row's PATCH. The store MERGES the named fields, so the owner's
+//                     fields survive and the write is safe from a second server. This is the
+//                     answer that makes a stop on a worker this server did NOT spawn reachable
+//                     at all — the case `stop_agent` exists for, since it looks its agent up in
+//                     the request-time roster.
+//   'post'          — this process's OWN row, which it holds in full, so a replace loses nothing.
+//
+// ⚠️ **The guarantee is a property of the WRITE, not of the caller.** That is why an adopted row
+// answers `patch` rather than a blanket refusal: `Post` is destructive from a second server and
+// `PATCH` is not, so refusing both cost exactly the case the stop path exists for — a stop on an
+// adopted worker went unrecorded, and the sweep then read a deliberately stopped worker exactly
+// as it reads a dead one.
+export function ledgerWriteRoute(agent, patch) {
+  if (!agent?.sessionId) return 'no-session-id'
+  if (agent.rehydrated) return patch ? 'patch' : 'refuse'
+  return 'post'
+}
