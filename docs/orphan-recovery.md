@@ -50,7 +50,27 @@ fields (`server/a2a-spawn.mjs:826`), so an id read off a session row is the wron
 The controller removes rather than halts: `Stop` runs `docker stop` and then `docker rm`
 (`a2a-worker-controller` `pkg/docker.go:310-331`), and it resolves ownership from the
 container's own labels, so a stop can never touch a container this controller did not
-create. A stop the controller *refused* is not a stop — do not record it as one.
+create.
+
+⚠️ **A `FAILED` reply from `stop_agent` does not mean the stop failed — reconcile against
+`list` before concluding anything.** The controller reports a store-side failure with the
+same `TASK_STATE_FAILED` a genuine refusal carries, so the reply alone cannot tell you
+which happened. Measured 2026-10-17: `stop_agent` returned the controller's `UNKNOWN` /
+`FAILED`, while the controller's own `list` came back **empty** — the worker was gone and
+the stop had taken effect. The reconcile is one call: read `list` and ask whether that
+worker id is still there. Do not re-issue the stop on the strength of the reply.
+
+⚠️ **And a stop that succeeded behind a `FAILED` reply leaves NO stop record — expect that
+row to read as an orphan.** The ledger's `stopped_at` marker is written on `stop_agent`'s
+**success** path only, so the reconciled case above leaves no marker behind, and the next
+sweep reads the row as **`ORPHAN`** — the one verdict that authorises another stop +
+recreate. Hold both facts at once: the worker is genuinely gone (so do not stop it again),
+*and* the row will look orphaned (so expect the sweep to say so, and do not act on it a
+second time). This is the case where "the reply was a failure" and "the stop did not
+happen" come apart.
+
+A stop the controller genuinely *refused* — the id is not one it owns — is a different
+outcome: nothing was removed, and the `list` reconcile will still show the worker.
 
 ### 2. Create a fresh worker for the same task
 
