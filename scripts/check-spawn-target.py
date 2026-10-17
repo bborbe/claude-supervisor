@@ -49,10 +49,10 @@ HOME_ITEM = re.compile(r"^7\. \*\*Decide the TARGET", re.M)
 #: The two markers the binding is made of, and they are deliberately different sentences: a
 #: single marker read for both would let one satisfy the check for the other.
 #:
-#: ⚠️ **The anchor's own citation was dropped from this list on purpose.** `docs/fleet-surface.md`
-#: item 7's closing sentence says "the two call sites that read `target:`" — but "Spawn a worker
-#: item 7" is not a string the home carries at all, so a marker keyed on it would pass on a site
-#: that only *mentions* the item in passing.
+#: ⚠️ **Neither marker is the anchor string, and that separation is the point.** A site can cite
+#: item 7 in passing and carry no binding at all — which is precisely the shape this check exists
+#: to reject — so (a) the citation and (b)/(c) the two markers are asserted independently, and
+#: neither satisfies the other.
 DISQUALIFIER_MARKER = "is not eligible for"
 ADVISORY_MARKER = "Advisory, never a refusal"
 
