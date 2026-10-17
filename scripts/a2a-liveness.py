@@ -58,18 +58,23 @@ HERE = Path(__file__).resolve().parent
 ENDPOINT_DEFAULT = "http://localhost:18080"
 LEDGER_PATH = "/api/1.0/session-ledger"
 
-# The machine-wide stop file `stop_agent` appends to (one JSON line per stop), and the field the
-# resolver joins on. ⚠️ **The join is `worker_id`, never the task** — one task can be spawned
-# again after its first worker stopped, and a task-keyed join would read the successor as stopped.
-# The same rule the stop call itself keeps: `a2aStopCallFor` takes the worker id `create` recorded
-# and refuses a task.
-STOP_FILE_DEFAULT = str(Path.home() / ".claude" / "state" / "a2a-stops.jsonl")
-STOP_WORKER_FIELD = "worker_id"
-
 # The A2A spawn targets. A row carrying one of these is the row this rule owns.
 REMOTE_TARGETS = ("docker", "k8s")
 
 # The field `stop_agent` writes. Named here once; the reader and the writer must agree.
+#
+# ⚠️ **The ledger row is the ONLY stop source since 2026-10-17.** A machine-wide stop file used to
+# be read beside it, because `writeLedger` refused every write on an agent adopted from another
+# server: a stop on a worker this server did not spawn reached no durable store at all, and the
+# file carried exactly that case. The supervisor now records such a stop through the endpoint's
+# PATCH, which MERGES where `Post` would blank the owner's fields, so the row is written for every
+# stop and the file's whole reason is gone.
+#
+# ⚠️ **The property the file also carried survives without it.** It was keyed on `worker_id` so a
+# task respawned after a stop would not read its SUCCESSOR as stopped. This resolver matches rows
+# by `session_id` against the task's CURRENT ids, and a respawn is a new session with a new row —
+# so a stale stop is on a row nothing here selects, which is the same outcome by a different
+# route. That is why dropping the file is a simplification rather than a lost guarantee.
 STOP_FIELD = "stopped_at"
 
 TIMEOUT_SECONDS = 10
@@ -130,44 +135,6 @@ def read_ledger(endpoint: str, timeout: float = TIMEOUT_SECONDS) -> list | None:
     return parse_ledger_rows(body)
 
 
-def stop_file_path() -> str:
-    return os.environ.get("A2A_STOP_FILE") or STOP_FILE_DEFAULT
-
-
-def read_stops(path: str) -> set | None:
-    """The worker ids recorded as deliberately stopped, or `None` when the file could not be read.
-
-    ⚠️ **A MISSING file is an empty set, not an unreadable one.** Nothing writes it until the
-    first stop on this host, so absence is the ordinary initial state — folding it into `None`
-    would report every remote row UNVERIFIED on a machine that has simply never stopped a worker.
-    ⚠️ **A present-but-unreadable file IS `None`**, because there the absence of an entry proves
-    nothing: the file exists, so something stopped, and a read that fails cannot license ORPHAN.
-    ⚠️ **A malformed line is skipped, not fatal** — one bad append must not blind the resolver to
-    every stop recorded beside it.
-    """
-    try:
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except FileNotFoundError:
-        return set()
-    except OSError:
-        return None
-    stops = set()
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(entry, dict):
-            worker = entry.get(STOP_WORKER_FIELD)
-            if isinstance(worker, str) and worker:
-                stops.add(worker)
-    return stops
-
-
 def session_ids_for(task_file: str) -> list[str] | None:
     """The task's whole id set, read by the shipped reader, or `None` when it could not run.
 
@@ -216,21 +183,19 @@ def remote_rows(rows: list, ids: list[str]) -> list:
     ]
 
 
-def stop_state(row: dict, stops: set) -> str:
-    """`stopped` / `none` / `malformed` for one ledger row, from the row AND the stop file.
+def stopped_state(row: dict) -> str:
+    """`stopped` / `none` / `malformed` for one ledger row, from the row's own `stopped_at`.
 
-    ⚠️ **Two sources, and they cover different rows.** The row's own `stopped_at` is written only
-    for a worker THIS server spawned — `writeLedger` refuses a rehydrated agent, so a stop on a
-    worker adopted from another server never reaches the ledger. The stop file carries exactly
-    that case, keyed on `worker_id`. Either one means finished.
+    ⚠️ **One source, where there used to be two.** The row is written for every stop now: the
+    supervisor routes a stop on a worker it did not spawn through the endpoint's PATCH, which
+    MERGES, so `writeLedger`'s old blanket refusal of an adopted row is gone and the machine-wide
+    stop file this consulted beside the row is gone with it — along with the `worker_id` join that
+    existed only to read it.
 
-    A malformed stamp is refused rather than read as a stop: `True`, `0` and `{}` are all
+    ⚠️ **A malformed stamp is refused rather than read as a stop.** `True`, `0` and `{}` are all
     truthy-or-present, and reading any of them as "deliberately stopped" is the direction that
     reports a dead worker as finished and suppresses its recovery.
     """
-    worker = row.get(STOP_WORKER_FIELD)
-    if isinstance(worker, str) and worker and worker in stops:
-        return "stopped"
     if STOP_FIELD not in row:
         return "none"
     value = row.get(STOP_FIELD)
@@ -241,7 +206,7 @@ def stop_state(row: dict, stops: set) -> str:
     return "stopped"
 
 
-def verdict(rows: list | None, ids: list[str], liveness: dict, stops: set | None = None) -> str:
+def verdict(rows: list | None, ids: list[str], liveness: dict) -> str:
     """The verdict for one task's row, from the ledger and the per-id liveness codes.
 
     `liveness` maps id -> exit code (or `None` when that probe could not run).
@@ -254,7 +219,7 @@ def verdict(rows: list | None, ids: list[str], liveness: dict, stops: set | None
     worker as an orphan resurrects work someone ended on purpose, and that is the defect this
     file exists to fix. Every remaining path fails to UNVERIFIED, never to ORPHAN.
     """
-    if rows is None or not ids or stops is None:
+    if rows is None or not ids:
         return UNVERIFIED
 
     remote = remote_rows(rows, ids)
@@ -267,7 +232,7 @@ def verdict(rows: list | None, ids: list[str], liveness: dict, stops: set | None
     if LIVENESS_LIVE in codes:
         return LIVE
 
-    states = {stop_state(row, stops) for row in remote}
+    states = {stopped_state(row) for row in remote}
     if "malformed" in states:
         return UNVERIFIED
     if "stopped" in states:
@@ -291,9 +256,8 @@ def main(argv=None) -> int:
         return EXIT[UNVERIFIED]
 
     rows = read_ledger(endpoint_for(args.endpoint))
-    stops = read_stops(stop_file_path())
     liveness = {one: liveness_of(one) for one in ids}
-    result = verdict(rows, ids, liveness, stops)
+    result = verdict(rows, ids, liveness)
     print(f"{result} — {args.task}")
     return EXIT[result]
 

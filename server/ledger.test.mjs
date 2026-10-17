@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { MODES, buildRecord, mergeRecord, parentSessionId, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
+import { MODES, buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 
 const SESSION = 'ea363bb5-123a-4d03-bc89-1087a3114bbd'
 
@@ -265,4 +265,49 @@ test('a local record leaves the A2A fields null', () => {
   const record = buildRecord({ sessionId: SESSION, agentId: 'agent_1', mode: 'headless', cwd: '/tmp', spawnedAt: '2026-10-13T00:00:00.000Z' })
   assert.equal(record.worker_id, null)
   assert.equal(record.target, null)
+})
+
+// ---- ledgerWriteRoute: the single-writer guarantee, asserted rather than grepped -------------
+
+// ⚠️ **This is the assertion the whole feature turns on, and it is why the decision is a pure
+// function.** The supervisor that stops a worker is usually NOT the one that spawned it —
+// `stop_agent` resolves its agent from the request-time roster, so an adopted row is the normal
+// case rather than an edge one. While the endpoint had no merge, every write to such a row was
+// refused, so the stop was recorded nowhere durable and the sweep read a deliberately stopped
+// worker exactly as it reads a dead one. The route below is what lets the stop land.
+test('an adopted row takes a MERGE, never the replacing route', () => {
+  const adopted = { id: 'agent_7', sessionId: SESSION, rehydrated: true }
+  assert.equal(ledgerWriteRoute(adopted, stoppedPatch()), 'patch')
+  assert.notEqual(ledgerWriteRoute(adopted, stoppedPatch()), 'post')
+})
+
+test('an adopted row refuses a CREATE — that is the write that would blank the owner', () => {
+  // No patch means the create arm: a record built from identity alone and POSTed over a row whose
+  // fields belong to another server. That refusal is the original guarantee and it stays.
+  const adopted = { id: 'agent_7', sessionId: SESSION, rehydrated: true }
+  assert.equal(ledgerWriteRoute(adopted, undefined), 'refuse')
+  assert.equal(ledgerWriteRoute(adopted, null), 'refuse')
+})
+
+test('an owned row is replaced, with or without a patch', () => {
+  // A row this server spawned is held in full in memory, so a replace loses nothing — and the
+  // patch arm merges locally (`mergeRecord`) before publishing the whole record.
+  const owned = { id: 'agent_1', sessionId: SESSION }
+  assert.equal(ledgerWriteRoute(owned, undefined), 'post')
+  assert.equal(ledgerWriteRoute(owned, stoppedPatch()), 'post')
+})
+
+test('a session id that never resolved has no route at all', () => {
+  // Not even an adopted row can be written without a key: the per-id route needs the id, and a
+  // row filed under a synthesised one is addressable but meaningless.
+  assert.equal(ledgerWriteRoute({ id: 'agent_1' }, stoppedPatch()), 'no-session-id')
+  assert.equal(ledgerWriteRoute({ id: 'agent_1', sessionId: '', rehydrated: true }, stoppedPatch()), 'no-session-id')
+  assert.equal(ledgerWriteRoute(undefined, stoppedPatch()), 'no-session-id')
+})
+
+test('an adopted stop carries only the stop field, because the merge is the store job', () => {
+  // ⚠️ The patch is what crosses the wire, so it must name nothing but the field being changed —
+  // anything else would be a claim about fields this server has never read.
+  assert.deepEqual(stoppedPatch({ at: '2026-10-17T14:05:00.000Z' }), { stopped_at: '2026-10-17T14:05:00.000Z' })
+  assert.deepEqual(Object.keys(stoppedPatch()), ['stopped_at'])
 })

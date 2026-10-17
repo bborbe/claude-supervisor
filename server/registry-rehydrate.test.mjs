@@ -408,13 +408,28 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   assert.ok(!/findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')
   // Not stamped on shutdown — that record belongs to the server that spawned the worker.
   assert.match(src, /if \(agent\.rehydrated\) continue/)
-  // ⚠️ And the WRITER refuses an adopted row outright, so the single-writer guarantee is a
-  // property of `writeLedger` rather than a `continue` each call site has to remember. This is
+  // ⚠️ And the WRITER routes every write through the DECISION, so the single-writer guarantee is
+  // a property of `writeLedger` rather than a `continue` each call site has to remember. This is
   // load-bearing now that `send_agent_message` looks its agent up in `currentRoster()`: the
   // cluster arm writes `{ result }` onto whatever it found, and the endpoint's `Post` REPLACES
   // a row rather than merging one, so an unguarded write from a second server would blank the
   // owner's row rather than lose a single field.
-  assert.match(src, /if \(agent\.rehydrated\) \{\n\s+log\(`WARNING: refusing to write the ledger row/)
+  //
+  // ⚠️ **The DECISION itself moved out of this file on 2026-10-17 and is tested directly** — see
+  // `ledger.test.mjs`'s `ledgerWriteRoute` cases, which assert the behaviour rather than this
+  // shape. What is pinned HERE is that the writer still consults it: a revert that inlined the
+  // guard again would leave every behavioural test green while the routing silently reverted, and
+  // a wrong route is a dropped stop rather than an error.
+  assert.match(src, /const route = ledgerWriteRoute\(agent, patch\)/)
+  assert.match(src, /publishLedgerPatch\(agent\.sessionId, patch\)/)
+  // ⚠️ And an adopted row must NOT gain a local record on the way through. This process holds no
+  // copy of one, so a record built from the patch alone would be PARTIAL — and the next wholesale
+  // publish of it would blank the owner's fields, which is the exact damage the route exists to
+  // avoid, deferred by one write instead of prevented.
+  assert.ok(
+    !/if \(route === 'patch'\) \{[^}]*agent\.ledgerRecord =/.test(src),
+    'an adopted row must not be stored locally — a partial record would be published wholesale later',
+  )
   // ⚠️ The MINT must never land on an adopted id. `seq` restarts at 0 on every reconnect, so
   // without this loop the first spawn_agent after a reconnect overwrites a live worker's
   // rehydrated row — reproducing the exact `unknown agent` symptom this PR closes.

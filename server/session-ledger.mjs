@@ -165,6 +165,48 @@ export async function postSessionLedger(
   }
 }
 
+// Merge fields into ONE row on the endpoint. Answers whether the store took it; NEVER throws.
+//
+// ⚠️ **This is the write a server that did NOT spawn the row can make, and it is the whole
+// reason the endpoint grew a PATCH.** `postSessionLedger` above REPLACES a row: that is correct
+// for the server that spawned the worker, which holds the complete record in memory, and
+// destructive for any other server, which holds a row carrying identity alone — so a stop
+// recorded through it would rebuild the row and blank everything the owner had written. The
+// store merges instead, so every field this caller does not name survives untouched.
+//
+// ⚠️ **The merge happens SERVER-side, so the caller needs no local copy of the row.** That is
+// what makes it usable for a rehydrated agent, whose record lives in the supervisor that
+// spawned it and is not in this process at all — a client-side merge would have nothing to
+// merge into.
+//
+// ⚠️ **A `404` is `false`, not an error.** It is the store's "no such row" — a stop on a session
+// the ledger never recorded, which is a real state for a worker spawned before the ledger
+// existed. The caller logs it and carries on, exactly as for a store outage, so the two are one
+// answer here on purpose. Same boolean-not-throw contract as `postSessionLedger`, and for the
+// same reason: the caller is on a path that must not fail on a store outage.
+export async function patchSessionLedgerRow(
+  sessionId,
+  patch,
+  { endpoint, fetchImpl = globalThis.fetch, timeoutMs = SESSION_LEDGER_TIMEOUT_MS } = {},
+) {
+  if (typeof sessionId !== 'string' || !sessionId) return false
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return false
+  const base = endpoint === undefined ? config.attentionStoreUrl : endpoint
+  if (!base) return false
+  const url = `${String(base).replace(/\/+$/, '')}${SESSION_LEDGER_PATH}/${encodeURIComponent(sessionId)}`
+  try {
+    const res = await fetchImpl(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    return Boolean(res && res.ok)
+  } catch {
+    return false
+  }
+}
+
 // The rows as a `Map<sessionId, row>`, keyed the way every reader joins them.
 //
 // ⚠️ **`session_id` is the identity and the only sound key.** `agent_id` is a per-process
