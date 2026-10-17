@@ -61,13 +61,23 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-# The local backend's address: `--endpoint`, then `$SUPERVISOR_A2A_URL_LOCAL`, then localhost.
+# The local backend's endpoint: `--endpoint`, then `$SUPERVISOR_A2A_URL_LOCAL`, then localhost.
+#
+# ⚠️ THE URL CARRIES THE `/a2a` PATH, and the default below is the whole endpoint rather than an
+# origin. The controller mounts its JSON-RPC handler at `pkg/a2a.go`'s `A2APath` (`/a2a`), so a POST
+# to the bare origin answers `404 page not found` — measured 2026-10-17 on the first live SC3 probe,
+# where every local row failed until `/a2a` was appended. ⚠️ **Do not "fix" a caller-supplied URL by
+# appending the path here**: every sibling spells the endpoint in full (`a2a-spawn.mjs` documents
+# `http://127.0.0.1:8080/a2a`, and the k8s builder returns `"https://" + host + "/a2a"`), so an
+# append would turn a correct `…/a2a` into `…/a2a/a2a`. The shape is the caller's contract; only the
+# default was wrong. `scripts/tests/test_a2a_local_control.py` pins it.
+#
 # ⚠️ THE LOCAL BACKEND GETS ITS OWN VARIABLE, and reusing the `docker` one would be a live bug
 # rather than a shortcut: the two controllers are separate deployments on THIS Mac — the local one
 # on :8092, the docker one on :8090 — so `SUPERVISOR_A2A_URL_DOCKER` names a DIFFERENT service, and
 # reading it here would send a local create to the docker backend the moment it is set. `config.mjs`
 # keeps the same split under `a2a.url` (`{docker, k8s}`), which is why no `local` key exists there.
-ENDPOINT_DEFAULT = "http://localhost:8092"
+ENDPOINT_DEFAULT = "http://localhost:8092/a2a"
 ENDPOINT_ENV = "SUPERVISOR_A2A_URL_LOCAL"
 
 # The token: the wrapper's own exported name first, then the TeamVault key `mcp-start.py` resolves
@@ -388,7 +398,7 @@ def main(argv=None) -> int:
     # `default=None` there overwrites a value already parsed on the root side, so `--endpoint X
     # list` would silently fall back to the default — the classic argparse subparser gotcha, and
     # why the flag is spelled twice rather than shared through a `parents=[…]` container.
-    endpoint_help = f"the local controller's base URL (default {ENDPOINT_DEFAULT})"
+    endpoint_help = f"the controller's JSON-RPC endpoint, path included (default {ENDPOINT_DEFAULT})"
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--endpoint", default=None, help=endpoint_help)
     commands = parser.add_subparsers(dest="command", required=True)
