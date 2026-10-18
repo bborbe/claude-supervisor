@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""`restart-worker.py` — restart ONE stale idle worker session, registry-guarded.
+"""`restart-worker.py` — restart ONE stale idle session, worker or manager, registry-guarded.
 
 A manager's standing mandate (`65 Runbooks/Manager Session.md` § Gate triage class A)
-covers killing and restarting a live WORKER whose loaded code is stale. This script is
+covers killing and restarting a live session whose loaded code is stale. This script is
 the narrow, allowlistable way to exercise it: one session id in, one pid killed, the
 same session resumed — never a broad `kill` rule.
+
+⚠️ The filename says `worker`, and the target set no longer stops there — the same
+`worker-` naming that made `/supervisor:worker-restart` an exception to the tier prefix
+rule (`docs/session-tiers.md`). A manager is restarted by this script too, in its own
+colour, with a re-arm note; the name is kept because it is fixed by the shipped
+`commands/worker-restart.md`, `docs/restart-worker.md` and their allowlist rules.
 
 Seven refusals, each exit 1 with a stable reason token as the first line of output:
 
@@ -19,13 +25,25 @@ Seven refusals, each exit 1 with a stable reason token as the first line of outp
                       loses the in-flight work.
   headless-target     the target is not `interactive`. A headless worker has no reliable
                       resume guard, so its liveness stays undetermined.
-  manager-target      the target resolves as a manager. A manager is NEVER restarted.
+  held-session        the operator holds this session (`/supervisor:hold`). Only they
+                      release it, and restarting is exactly the act the hold prevents.
   role-undetermined   no role signal could be read. Fail closed; never assume worker.
   stale-load-path     nothing would load differently: no load-path copy, no MCP config
                       file and no launcher script is newer than the session's own
                       start, so restarting it buys nothing.
 
 Exit codes: 0 success, 1 refusal, 2 usage error.
+
+⚠️ **A manager IS restarted — there is no `manager-target` refusal.** The role predicate
+still runs, but it now selects the resume colour and the re-arm note rather than a
+refusal: a manager comes back in the manager colour and is told to re-arm its loop, a
+worker in its own chip and told what changed underneath it. The caller decides whether
+to type that note at all — a gate the target holds is never answered by a restart
+(`commands/restart.md` Step 4).
+
+The restart also reports which tree the session's supervisor MCP server LAUNCHES from
+and warns when that tree's version differs from the installed plugin's — a restart onto
+a stale workspace checkout reloads the old server code and reads as a no-op.
 
 The role predicate is NOT reimplemented here. It calls `fleet-board.py`'s own
 `vault_index()`, `loop_slugs()`, `manager_subject()` and `colour_census()` through the
@@ -182,6 +200,96 @@ def newest_load_path():
         return None, None
     _, best, mtime = max(candidates, key=lambda candidate: candidate[0])
     return best, mtime
+
+
+# The supervisor MCP server's entry point, as the launch config names it. Matching on the
+# basename keeps this independent of which checkout a config points at.
+MCP_ENTRY = "mcp-start.py"
+
+
+def plugin_version(root):
+    """The `version` in `<root>/.claude-plugin/plugin.json`, or `None` when unreadable.
+
+    A plain file read — deliberately not `git describe` or any `git -C`: the question is
+    what the tree on disk says it is, and a checkout mid-pull has no useful git answer.
+    """
+    try:
+        with open(
+            os.path.join(root, ".claude-plugin", "plugin.json"), encoding="utf-8"
+        ) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return str(version).strip() or None if version else None
+
+
+def mcp_source(argv):
+    """`(source_root, source_version, installed_version)` for the supervisor MCP server.
+
+    A restart refreshes a session's MCP server only if the tree that server LAUNCHES from
+    is current. `~/.claude/mcp-<vault>.json` may point the `supervisor` server at a
+    workspace checkout (`~/Documents/workspaces/claude-supervisor/scripts/mcp-start.py`)
+    rather than the plugin cache, and a checkout lags the release until someone pulls it —
+    so a restart onto a stale checkout brings back the same server code and reads as a
+    no-op. Measured 2026-10-17: `spawn_agent` still lacked `mounts`/`secrets` after a
+    fresh process, because the launched checkout was behind.
+
+    The source comes from the session's own `--mcp-config` argv; both versions are read
+    live — the checkout's `.claude-plugin/plugin.json` against the newest installed copy
+    under `LOAD_PATH_ROOT` — never hardcoded, so a printed version is evidence rather
+    than a claim. `source_root` is `None` when no config, no supervisor entry or no
+    readable entry point is found: an unknown source must never be reported as a
+    matching one, which is also why the warning is keyed on the two versions being
+    known AND equal.
+    """
+    load_path, _ = newest_load_path()
+    installed = os.path.basename(load_path.rstrip(os.sep)) if load_path else None
+    for path in mcp_config_paths(argv):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        servers = data.get("mcpServers") if isinstance(data, dict) else None
+        if not isinstance(servers, dict):
+            continue
+        for config in servers.values():
+            if not isinstance(config, dict):
+                continue
+            tokens = [str(config.get("command") or "")]
+            tokens += [str(arg) for arg in (config.get("args") or [])]
+            for token in tokens:
+                if not token.endswith(MCP_ENTRY):
+                    continue
+                entry = os.path.abspath(os.path.expanduser(token))
+                root = os.path.dirname(os.path.dirname(entry))
+                return root, plugin_version(root), installed
+    return None, None, installed
+
+
+def describe_source(source_root, source_version, installed_version):
+    """`[(line, is_warning)]` for the MCP-source report — one line, plus a warning when stale.
+
+    The warning is emitted only when BOTH versions are known and differ. A source whose
+    version cannot be read is reported as unreadable, never as current: the failure this
+    report exists to catch is a restart that reloads stale server code while reading as a
+    success, so an unreadable version must not be silent.
+    """
+    if source_root is None:
+        return [("   MCP source: unknown (no supervisor entry in the session's --mcp-config)", False)]
+    shown = source_version or "unreadable"
+    line = f"   MCP source: {source_root} ({shown}) · installed {installed_version or 'unknown'}"
+    if source_version and installed_version and source_version != installed_version:
+        return [
+            (line, False),
+            (
+                f"   ⚠️ MCP source version {source_version} ≠ installed {installed_version} — "
+                f"a restart reloads {source_root}; pull it or the server code stays stale",
+                True,
+            ),
+        ]
+    return [(line, False)]
 
 
 def worker_argv(pid):
@@ -501,7 +609,7 @@ def held_reason(session_id):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Restart one stale idle worker session, registry-guarded.",
+        description="Restart one stale idle session — worker or manager — registry-guarded.",
     )
     ap.add_argument("session_id", help="the session id to restart")
     ap.add_argument("--dry-run", action="store_true", help="check everything, kill nothing")
@@ -533,9 +641,8 @@ def main():
     if path is None:
         return refuse("unknown-session-id", f"no registry entry carries session id {sid}")
 
-    # ⚠️ A held session is never restarted -- an EIGHTH refusal, alongside the seven
-    # this module documents. Checked BEFORE the status and kind gates because a hold is
-    # the stronger statement: `busy` says the moment is wrong, a hold says the session
+    # ⚠️ A held session is never restarted. Checked BEFORE the status and kind gates
+    # because a hold is the stronger statement: `busy` says the moment is wrong, a hold says the session
     # is not yours to touch at all, and it outranks every other consideration here.
     # Restarting is exactly the act the operator held the session to prevent.
     held = held_reason(sid)
@@ -583,11 +690,10 @@ def main():
             f"no role signal could be read for session {sid} (name {name!r}); "
             "refusing rather than assuming worker",
         )
-    if role == "manager":
-        return refuse(
-            "manager-target",
-            f"session {sid} ({name!r}) resolves as a manager; a manager is never restarted",
-        )
+    # A manager is restarted like a worker: the role is not a gate, it selects the resume
+    # colour and the re-arm note below. It used to refuse here (`manager-target`);
+    # `role-undetermined` is now the only role-based stop, because a role that cannot be
+    # read still cannot be defaulted.
 
     # Precondition 4 — something must actually load differently. Three inputs are
     # compared against the session's own start: the newest load-path copy, the MCP
@@ -625,10 +731,12 @@ def main():
         f"{' · dry-run' if args.dry_run else ''}"
     )
     print(
-        f"   role: worker · status: {status} · load path: "
+        f"   role: {role} · status: {status} · load path: "
         f"{os.path.basename(load_path) if load_path else 'none'}"
     )
     print(f"   changed: {describe_changed(changed)}")
+    for line, _ in describe_source(*mcp_source(argv)):
+        print(line)
 
     # The cwd the session must resume INTO. Read here, before the kill: a session
     # resumed without its own cwd lands in wezterm's default working directory and
@@ -678,7 +786,11 @@ def main():
         return 1
 
     title = name or sid[:8]
-    chip = (colours.get(sid) or "pink").strip().lower() or "pink"
+    # The fallback chip is role-aware. A manager's own colour is the fleet's only role
+    # cue, so a restarted manager coming back pink is exactly the mis-colouring that
+    # nearly got a manager relaunched as a worker on 2026-09-18.
+    fallback_chip = fb.MANAGER_COLOUR if role == "manager" else "pink"
+    chip = (colours.get(sid) or fallback_chip).strip().lower() or fallback_chip
     # Both resume-failure paths below return 1 via `refuse()`. There is deliberately
     # no fall-through to the success `return 0` at the end of main(): a killed pid
     # whose session was NOT resumed must never read as a successful restart, because
@@ -701,9 +813,16 @@ def main():
         f"   ✅ killed pid {pid}; resumed session {sid} in a new tab "
         f"(pane {pane[-1] if pane else '?'})"
     )
-    print(
-        f"   ↪ tell the resumed session it was restarted, and what changed: {describe_changed(changed)}"
-    )
+    if role == "manager":
+        print(
+            "   ↪ manager: tell the resumed session it was restarted and must RE-ARM its "
+            "loop (`/supervisor:manager-loop <subject>`, or `/supervisor:fleet-loop`) — a "
+            f"killed session's scheduled jobs die with it. Changed: {describe_changed(changed)}"
+        )
+    else:
+        print(
+            f"   ↪ tell the resumed session it was restarted, and what changed: {describe_changed(changed)}"
+        )
     return 0
 
 

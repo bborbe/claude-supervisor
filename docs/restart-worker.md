@@ -1,11 +1,18 @@
 # restart-worker.py
 
-Restart ONE stale idle worker session under a narrow allow rule.
+Restart ONE stale idle session — worker **or manager** — under a narrow allow rule.
 
 A manager's standing mandate (`65 Runbooks/Manager Session.md` § Gate triage class A)
-covers killing and restarting a live WORKER whose loaded code is stale. This script is
+covers killing and restarting a live session whose loaded code is stale. This script is
 the narrow, allowlistable way to exercise it: one session id in, one registry pid killed,
 the same session resumed in a new tab — never a broad `kill` rule.
+
+⚠️ **The target set is workers AND managers.** Until 2026-10-18 a manager was refused with
+`manager-target`. That refusal is gone: the class-A judgement applies to a manager whose
+loaded code is stale exactly as it does to a worker's, and a manager was never exempt — it
+was merely not covered. Role is still derived (see § *How role is decided*), but it now
+selects the **resume colour** and the **re-arm note** rather than a refusal, and
+`role-undetermined` is the only role-based stop left.
 
 ## Usage
 
@@ -41,7 +48,7 @@ anything is signalled, so no code path reaches `os.kill` on a target it has not 
 | `ambiguous-pid` | More than one registry pid claims that session id, or the entry carries no integer pid. | The pid must be unique. Killing one of two claimants is a coin flip on someone else's work. |
 | `busy-target` | `status` is not `idle`. | A mid-turn kill loses the in-flight work. |
 | `headless-target` | `kind` is not `interactive`. | A headless worker has no reliable resume guard, so its liveness stays undetermined — see `a separate task`. |
-| `manager-target` | The target resolves as a manager. | A manager is NEVER restarted. The mandate is class A for workers only. |
+| `held-session` | The session carries an operator hold (`~/.claude/state/session-holds.json`, written by `/supervisor:hold`). | A hold says the session is not yours to touch at all, which outranks `busy-target`'s "the moment is wrong". Restarting is exactly the act the hold prevents, and only the operator releases it. |
 | `role-undetermined` | No role signal could be read. | Fail closed. An unreadable index proves nothing about a role; never assume worker. |
 | `stale-load-path` | None of the three inputs — newest load-path copy, the worker's MCP config file(s), the launcher script — is newer than the session's own start, or the session carries no parseable start time. | Nothing would load differently — the restart buys nothing. |
 
@@ -108,6 +115,38 @@ the last `agent-color` record in the session **transcript** — *not* from
 `~/.cache/wezterm-role-map.json`, which is read at spawn time by `server/config.mjs` and is
 what *sets* a manager's colour in the first place.
 
+## The MCP launch-source report
+
+A restart refreshes a session's supervisor MCP server only if the tree that server
+**launches from** is current. `~/.claude/mcp-<vault>.json` may point the `supervisor`
+server at a workspace checkout rather than the plugin cache, and a checkout lags the
+release until someone pulls it — so a restart onto a stale checkout brings the session
+back with the same old server code and reads as a success. Measured 2026-10-17:
+`spawn_agent` still lacked `mounts`/`secrets` after a fresh process, because the launched
+checkout was behind.
+
+The report names the tree and **both versions, read live** — the checkout's
+`.claude-plugin/plugin.json` against the newest installed copy under the load path. A
+plain file read, deliberately not `git -C` / `git describe`: the question is what the tree
+on disk says it is, and a checkout mid-pull has no useful git answer.
+
+```
+   MCP source: /Users/…/workspaces/claude-supervisor (0.171.1) · installed 0.171.1
+```
+
+When both versions are known and differ, a second line warns:
+
+```
+   ⚠️ MCP source version 0.170.0 ≠ installed 0.171.1 — a restart reloads /Users/…/workspaces/claude-supervisor; pull it or the server code stays stale
+```
+
+**The warning is keyed on the two versions being known AND unequal**, so a hardcoded
+warning cannot pass: equal versions print the source line alone, and that is the control
+case. A source whose version cannot be read is reported `unreadable` and never as current
+— the failure this report exists to catch is a restart that reloads stale code while
+reading as a success, so an unreadable version must not be silent. `unknown` is printed
+when the session's `--mcp-config` carries no supervisor entry.
+
 ## The allow rule to add
 
 Scope the rule to this script's path only. Never allow bare `kill` / `killall` / `pkill` —
@@ -133,10 +172,10 @@ jq -r '.permissions.allow[]' ~/.claude/settings.json | grep -E 'Bash\([^)]*p?kil
 
 ## What this script does NOT do
 
-- **It never restarts a manager.** Class A is a closed list, and adding to it is an
-  operator decision, not a manager one.
+- **It never restarts a held session.** Class A covers a stale session; it does not
+  override an operator hold, and adding a hold to that list is an operator decision.
 - **It does not fix the headless resume guard.** Headless workers are refused, not handled.
-- **It is not the orchestrator.** `commands/worker-restart.md` collapses kill → resume →
+- **It is not the orchestrator.** `commands/restart.md` collapses kill → resume →
   re-orient into one verb and calls THIS script for the kill+resume leg rather than
   reimplementing it, so exactly one kill+resume mechanism exists. Its read-only pre-kill
   probe is the sibling `scripts/restart-precheck.py`, which owns the worktree check and the
