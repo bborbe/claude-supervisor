@@ -288,6 +288,27 @@ class TestTicks(Case):
                          [("tick", "worktree", ["SC1"])])
         self.assertEqual(report["verdict"], "PROGRESSING")
 
+    def test_coverage_row_with_a_backtick_and_a_pipe_in_the_box_still_rates_it(self):
+        dod = "make precommit green, installed version from `ls -dt … | head -1`"
+        self.env.commit_anchor(anchor_text(dod=("[ ] " + dod,)), at(-50))
+        self.env.commit_anchor(anchor_text(dod=("[x] " + dod,)), at(5))
+        path = self.env.root / "coverage-pipe.txt"
+        path.write_text("- [x] %s | none | measured(PR #12) | create\n" % dod, encoding="utf-8")
+        report = self.ok(self.env.run(coverage=path))
+        self.assertEqual([(o["grade"], o["boxes"]) for o in report["moved"]], [("A", ["DoD1"])])
+
+    def test_claim_picks_its_own_box_among_several_uncommitted_ticks(self):
+        self.env.anchor.write_text(anchor_text(sc=("[x] SC1: first criterion", "[x] SC2: second criterion")),
+                                   encoding="utf-8")
+        stamp = (UNTIL - datetime.timedelta(minutes=1)).timestamp()
+        os.utime(self.env.anchor, (stamp, stamp))
+        report = self.ok(self.env.run(claim={"box": "SC2", "kind": "tick", "ref": "worktree"},
+                                      coverage=self.env.coverage(SC1="measured(PR #12)", SC2="measured(PR #12)")))
+        self.assertEqual(len(report["moved"]), 2)
+        self.assertEqual(report["claim"]["result"], "backed")
+        self.assertEqual(report["claim"]["grade"], "A")
+        self.assertTrue(report["short_path"])
+
     def test_summary_only_task_commit_is_c(self):
         self.env.commit_anchor(anchor_text(summary="Summary reworded."), at(5))
         self.env.bash("cat notes.md", at(6))
