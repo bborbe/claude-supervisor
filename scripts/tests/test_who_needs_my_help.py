@@ -807,7 +807,7 @@ class FourStateTest(Base):
         self.fleet.add("s-unc-askslot", 312, "",
                        name="Ask In Watcher Slot",
                        transcript="👤 You: Orienting on the task — assistant is searching the vault.\n"
-                                  "⏰ Ends: ` your reply — I run the three commands in `~/.claude`\n")
+                                  "⏰ Ends: ` your reply — I run the three commands\n")
         # working — a busy record, and a busy session with no attention record
         self.fleet.add("s-wrk-record", 305, "", status="busy", name="Working Record")
         self.fleet.registry["s-wrk-bare"] = "Working Bare"
