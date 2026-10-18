@@ -94,7 +94,15 @@ counts every event twice.
 ⚠️ **The worktree is derived, never read from `cwd`.** A transcript record's `cwd` is where the
 session was launched — a vault, `~/Documents/workspaces` — not the feature worktree it edits.
 The roots to probe are `git rev-parse --show-toplevel` of each path an Edit / Write /
-NotebookEdit call touched in the window.
+NotebookEdit call touched in the session up to the window's end — a session that edited an
+hour ago and commits now still has its root probed; the commit is still counted by its own
+timestamp.
+
+⚠️ **A written root can be shared, so a commit counts only when it touches a file this session
+wrote.** Measured 2026-10-18 on the first live run: `~/.claude` was a written root (a checkpoint
+write), and a sibling session's commit there read as this session's B. A commit touching no file
+at all (`--allow-empty`) is kept and graded C; the vault repo holding the anchor is read only
+for the anchor file, because obsidian-git autocommits every session's pages.
 
 ⚠️ **Grade A for a box tick needs the coverage rating, and the script does not derive it.** The
 drive command already dispatches the coverage agent; it passes that output in. Without it a tick
