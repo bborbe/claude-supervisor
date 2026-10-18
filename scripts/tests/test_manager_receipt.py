@@ -253,6 +253,31 @@ class Receipt(unittest.TestCase):
                 text = fh.read()
         self.assertTrue(self.m.sweep_shape(text), text[:200])
 
+    def test_sweep_shape_accepts_a_marker_prefixed_payload(self):
+        # The tick's output leads with its liveness marker and hangs the frame two
+        # spaces under it (`docs/sweep-output.md` § Print the full table on every
+        # tick), so a payload captured from a tick carries BOTH. Measured 2026-10-18/19:
+        # consecutive rounds twenty minutes apart produced one payload of each shape on
+        # the same install, so a predicate matching only the bare frame flaps. This is
+        # the second shape, run through the same producer chain as the first.
+        rendered = render_table(["Topic", "Status"], [["Recurring Operator Gates", "ok"]])
+        marker = "2026-10-19T00:15:00+02:00 ✓ Recurring Operator Gates — 4 tasks · 1 ⌛"
+        tick = marker + "\n" + "\n".join("  " + ln for ln in rendered.splitlines())
+        with tempfile.TemporaryDirectory() as state, tempfile.TemporaryDirectory() as vault:
+            os.makedirs(os.path.join(vault, "24 Goals"))
+            r = subprocess.run(
+                [sys.executable, PREDISPATCH, "--write-payload",
+                 "--subject", "Recurring Operator Gates", "--vault", vault],
+                input=tick, capture_output=True, text=True,
+                env=dict(os.environ, MANAGER_PREDISPATCH_STATE_DIR=state),
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            stored = os.path.join(state, "recurring-operator-gates.table")
+            with open(stored, encoding="utf-8") as fh:
+                text = fh.read()
+        self.assertTrue(text.startswith(marker), text[:200])
+        self.assertTrue(self.m.sweep_shape(text), text[:200])
+
     def test_sweep_shape_rejects_json_empty_and_truncated(self):
         # (a) the JSON the old predicate demanded — the shape no producer writes.
         self.assertFalse(self.m.sweep_shape(json.dumps({"header": ["Topic"], "rows": []})))
@@ -261,6 +286,13 @@ class Receipt(unittest.TestCase):
         frame = render_table(["Topic"], [["row"]])
         lines = [ln for ln in frame.splitlines() if ln.strip()]
         self.assertFalse(self.m.sweep_shape("\n".join(lines[:-1])), "bottom rule dropped")
+        # (c) a marker with no frame under it, and a marker-prefixed frame that lost
+        # its bottom rule — the marker must not become a way to smuggle a stub in.
+        marker = "2026-10-19T00:15:00+02:00 ✓ Recurring Operator Gates — 4 tasks"
+        self.assertFalse(self.m.sweep_shape(marker), "marker alone")
+        self.assertFalse(self.m.sweep_shape(marker + "\n" + "\n".join(lines[:-1])))
+        # (d) arbitrary prose ahead of a real frame is not the producer's marker.
+        self.assertFalse(self.m.sweep_shape("stub\n" + frame))
         # A `return True` stub fails every line above; so does one that only looks for
         # `│` anywhere, which a truncated frame still carries.
 
