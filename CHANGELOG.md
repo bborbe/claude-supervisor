@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the receive path now marks its own entries, so a reader can tell a pushed status from one the spawner synthesised for itself.** Every stored entry gains `source: 'push'`, written only here — which is the whole point of it: `a2aTurnPatch`, which files the turn the spawner collected on its own, never sets that field, so an entry carrying it can only have arrived through the receive endpoint. The entry also carries `messageId`, the worker's own message id read from `status.message.messageId` — the same message the entry's text is read from, so the two cannot disagree about which message they describe. It is `null` rather than absent when the event carries no message at all, which the terminal completion currently does (`NewStatusUpdateEvent(ctx, a2a.TaskStateCompleted, nil)`), so `null` reads as "this event had no message" rather than "the receive path dropped it" — the same distinction `last_status` draws between `null` and an empty object. Change set: `server/a2a-receive.mjs`, `server/a2a-receive.test.mjs`, `CHANGELOG.md`.
+
 ## v0.174.1
 
 - docs: **`docs/fleet-surface.md` § the cause-of-death classifier now names `/supervisor:restart` itself, not only its command file.** The v0.173.0 rename updated the *path* on that line (`commands/worker-restart.md` → `commands/restart.md`) but left the prose naming a file, so the one page that owns the restart contract described the mechanism without ever naming the verb — and a reader grepping the docs for `/supervisor:restart` got no hit there, while `docs/session-tiers.md` had four. Change set: `docs/fleet-surface.md`, `CHANGELOG.md`.
