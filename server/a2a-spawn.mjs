@@ -24,7 +24,9 @@ import {
   a2aOutcome,
   a2aSendRequestFor,
   a2aStreamRequestFor,
+  a2aTaskIdOf,
   a2aWorkerList,
+  createSseFrameReader,
   resolveA2AEndpoint,
 } from './a2a-client.mjs'
 
@@ -625,13 +627,40 @@ export async function openWorkerTurn({
   return { res: raced.res, contextId }
 }
 
+// Register the push callback against a task the WORKER already holds — `{ registered: true }`, or
+// `{ error }`.
+//
+// ⚠️ AGAINST THE WORKER, NEVER THE CONTROLLER, and this is the correction the whole design turned
+// on. The controller creates the worker but never sees a task — the SPAWNER's first turn is what
+// creates it, on the worker's own A2A server — so a callback URL sent to the controller would be a
+// field nothing could act on. See `a2aPushConfigCallFor` for the wire shape and its two traps.
+//
+// ⚠️ THE FAILURE IS RETURNED, NOT THROWN, and the caller is expected to treat it as non-fatal. The
+// channel is reporting-only: a worker whose registration was refused still runs its turn and still
+// files an outcome, and failing the spawn over it would lose a live container to an optional
+// transport. The refusal is surfaced so the caller can record it rather than swallow it.
+export async function registerPushCallbackOnWorker({ endpoint, taskId, push, token, fetchImpl = fetch } = {}) {
+  const call = a2aPushConfigCallFor({ endpoint, taskId, push, token })
+  if (call.error) return { error: call.error }
+  let res
+  try {
+    res = await fetchImpl(call.url, { method: 'POST', headers: call.headers, body: JSON.stringify(call.body) })
+  } catch (cause) {
+    return { error: `the push registration to ${call.url} could not be made: ${cause?.message ?? cause}` }
+  }
+  if (!res.ok) {
+    return { error: `the worker answered HTTP ${res.status} to the push registration.` }
+  }
+  return { registered: true }
+}
+
 // Consume the turn's stream — THE COLLECTION. `{ state, contextId, reply }`, or `{ error }`.
 //
 // `res` may be a settled response OR the still-pending promise `openWorkerTurn` returned as
 // `pending`. `await` is the same expression for both, so the collector never has to know which
 // case it is in — and that is the point: the two differ only in WHEN they resolve, and a
 // collector that cared would be re-deriving a distinction the sender had already made.
-export async function collectWorkerTurn({ res, sentContextId } = {}) {
+export async function collectWorkerTurn({ res, sentContextId, onTaskId } = {}) {
   if (!res) return { error: 'collectWorkerTurn was given no response to collect from.' }
 
   let settled
@@ -642,6 +671,15 @@ export async function collectWorkerTurn({ res, sentContextId } = {}) {
   }
   if (!settled || typeof settled !== 'object') return { error: 'the turn produced no response object.' }
   if (settled.ok === false) return { error: `the worker answered HTTP ${settled.status} to the turn.` }
+
+  // ⚠️ INCREMENTAL WHEN ASKED FOR AND POSSIBLE; the whole-body path below stays the reference. A
+  // caller wanting the task id EARLY — to register a push callback before the mid-turn event fires
+  // ~10 s in — passes `onTaskId`, and the stream is then consumed chunk by chunk. Every other
+  // caller keeps `.text()`, and that path is what the existing tests stub; the reader's own
+  // split-point test is what keeps the two from drifting apart.
+  if (typeof onTaskId === 'function' && settled.body && typeof settled.body.getReader === 'function') {
+    return collectTurnIncrementally({ body: settled.body, sentContextId, onTaskId })
+  }
 
   // ⚠️ `text()`, NOT `json()`, for the reason `createWorkerOnController` gives: the frames arrive
   // as an SSE body and `a2aFrames` takes the RAW string. `json()` here would throw on the first
@@ -656,6 +694,50 @@ export async function collectWorkerTurn({ res, sentContextId } = {}) {
   const parsed = a2aFrames(body)
   if (parsed.error) return { error: parsed.error }
   return a2aOutcome(parsed.frames, { sentContextId })
+}
+
+// Consume a turn's stream chunk by chunk — `{ state, contextId, reply }`, or `{ error }`.
+//
+// ⚠️ `onTaskId` IS AWAITED BEFORE THE NEXT CHUNK IS READ, and that ordering IS the feature rather
+// than an implementation detail. The callback registers the push config, and the event it must be
+// armed for fires a fixed ~10 s into the turn; letting the read run ahead would let the mid-turn
+// status be emitted and dropped before the registration landed — the silent failure this whole
+// path exists to prevent, and one that leaves a completed turn and a perfectly good outcome behind
+// it. A callback that throws does not fail the collection: the turn's outcome is still the turn's.
+async function collectTurnIncrementally({ body, sentContextId, onTaskId }) {
+  const reader = createSseFrameReader()
+  // ⚠️ `{ stream: true }`, so a multi-byte character split across a chunk boundary is held rather
+  // than decoded as two replacement characters — which would corrupt a frame's JSON and read as a
+  // malformed stream.
+  const decoder = new TextDecoder()
+  let announced = false
+  const stream = body.getReader()
+  try {
+    for (;;) {
+      const { done, value } = await stream.read()
+      if (done) break
+      reader.push(decoder.decode(value, { stream: true }))
+      if (announced || reader.error !== null) continue
+      const taskId = a2aTaskIdOf(reader.frames)
+      if (taskId !== null) {
+        announced = true
+        // ⚠️ SWALLOWED, AND `announced` IS SET FIRST. Letting the callback throw would land it in
+        // the catch below and be reported as "the turn's stream could not be read" — a channel
+        // failure dressed as a worker failure, on a turn that ran fine. Setting the flag before
+        // the call also means a throwing callback is not retried on every later chunk.
+        try {
+          await onTaskId(taskId)
+        } catch {
+          // The caller owns reporting a registration failure; the turn's outcome is not it.
+        }
+      }
+    }
+  } catch (cause) {
+    return { error: `the turn's stream could not be read: ${cause?.message ?? cause}` }
+  }
+  reader.end()
+  if (reader.error) return { error: reader.error }
+  return a2aOutcome(reader.frames, { sentContextId })
 }
 
 // The ledger patch a collected turn produces — `{ result, error }`, both always present.

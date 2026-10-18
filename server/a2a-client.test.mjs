@@ -16,11 +16,15 @@ import {
   a2aControlRequestFor,
   a2aControlResponseFor,
   a2aDataPart,
+  a2aFrameFor,
   a2aFrames,
   a2aOutcome,
+  a2aPushConfigCallFor,
+  a2aPushRefusal,
   a2aSendRequestFor,
   a2aStreamRequestFor,
   a2aWorkerList,
+  createSseFrameReader,
   declaredCreateArguments,
   resolveA2AEndpoint,
 } from './a2a-client.mjs'
@@ -220,6 +224,68 @@ test('each operation builds its own ControlRequest, and exactly one field', () =
     assert.equal(a2aControlRequestFor(args).error !== undefined, true, JSON.stringify(args))
   }
   assert.deepEqual(A2A_CONTROL_OPERATIONS, ['create', 'list', 'stop'])
+})
+
+test('the push registration carries FLAT params, never the v0 wrapper', () => {
+  const call = a2aPushConfigCallFor({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    taskId: 'task-1',
+    push: { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-alpha' },
+    token: 'worker-token',
+  })
+  assert.equal(call.body.method, 'CreateTaskPushNotificationConfig')
+  assert.deepEqual(call.body.params, {
+    taskId: 'task-1',
+    url: 'http://host.docker.internal:41234/a2a/push',
+    token: 'tok-alpha',
+  })
+  // ⚠️ The wrapper is the v0 compat transport's shape. A body carrying it is well-formed JSON that
+  // the handler refuses as an unmarshal error, so it must be asserted ABSENT rather than merely
+  // "not required" — this is the assertion that would have caught it.
+  assert.equal(Object.hasOwn(call.body.params, 'pushNotificationConfig'), false)
+  assert.equal(Object.hasOwn(call.body.params, 'config'), false)
+
+  // ⚠️ The bearer is the WORKER's credential; `params.token` is the RECEIVER's. Both are on one
+  // call, and swapping them still returns a 200 — so the distinction is asserted, not assumed.
+  assert.equal(call.headers.authorization, 'Bearer worker-token')
+  assert.equal(call.body.params.token, 'tok-alpha')
+  assert.notEqual(call.headers.authorization, `Bearer ${call.body.params.token}`)
+})
+
+test('the push registration refuses a missing field or an unusable descriptor', () => {
+  const base = {
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    taskId: 'task-1',
+    push: { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-alpha' },
+    token: 'worker-token',
+  }
+  for (const over of [{ endpoint: '' }, { taskId: '' }, { token: '' }, { push: undefined }, { push: { url: 'http://h/p' } }]) {
+    assert.equal(a2aPushConfigCallFor({ ...base, ...over }).error !== undefined, true, JSON.stringify(over))
+  }
+  // Positive control in the same run: the complete call builds, so the refusals above are refusals
+  // and not a builder that rejects everything.
+  assert.equal(a2aPushConfigCallFor(base).error, undefined)
+})
+
+test('a push descriptor is refused when either half is missing or unusable', () => {
+  for (const push of [
+    null,
+    'http://host/p',
+    [],
+    {},
+    { url: 'http://host/p' },
+    { token: 'tok' },
+    { url: '', token: 'tok' },
+    { url: 'not a url', token: 'tok' },
+    { url: 'ftp://host/p', token: 'tok' },
+    { url: 'http://host/p', token: '' },
+    { url: 'http://host/p', token: 7 },
+  ]) {
+    assert.equal(a2aPushRefusal({ push }) !== null, true, JSON.stringify(push))
+  }
+  // Positive control in the same run: a complete descriptor passes, so the refusals above are
+  // refusals and not a validator that rejects everything.
+  assert.equal(a2aPushRefusal({ push: { url: 'https://host.example/a2a/push', token: 'tok' } }), null)
 })
 
 // --- the controller-facing half: the data part -----------------------------------------------
@@ -423,6 +489,75 @@ test('a list result that is not a list refuses rather than being read as empty',
   assert.match(a2aWorkerList({ operation: 'list', list: { workers: 'w-1' } }).error, /must be an array or null/)
   assert.match(a2aWorkerList('raw body').error, /`ControlResponse` object/)
   assert.match(a2aWorkerList(undefined).error, /`ControlResponse` object/)
+})
+
+// --- the incremental frame reader ------------------------------------------------------------
+//
+// ⚠️ These tests exist because the reader is the difference between a status channel that arms in
+// time and one that arms after the turn it was meant to observe. The whole-body parser is the
+// reference implementation; the reader is what the live turn uses, and the two must not drift.
+
+test('the reader yields a frame before the stream has ended', () => {
+  const reader = createSseFrameReader()
+  // The FIRST frame only. This is the entire point of the reader: the task id is available here,
+  // seconds before the turn ends, which is what makes registering the callback in time possible.
+  reader.push(sse({ task: { id: 'task-1' } }).slice(0, -1))
+  assert.equal(reader.frames.length, 1)
+  assert.equal(reader.frames[0].task.id, 'task-1')
+  assert.equal(reader.error, null)
+})
+
+test('a frame split across a chunk boundary is not corrupted', () => {
+  const reader = createSseFrameReader()
+  const body = sse({ task: { id: 'task-1' } })
+  // ⚠️ The split is placed INSIDE the JSON, which is where a per-chunk parse fails. Where the
+  // network breaks a chunk is arbitrary, so this is the ordinary case rather than an edge case.
+  reader.push(body.slice(0, 20))
+  reader.push(body.slice(20))
+  reader.end()
+  assert.equal(reader.frames.length, 1)
+  assert.equal(reader.frames[0].task.id, 'task-1')
+})
+
+test('the reader and the whole-body parser agree at EVERY split point', () => {
+  const body = sse({ task: { id: 't-1' } }, { statusUpdate: { taskId: 't-1', status: { state: 'working' } } }, { statusUpdate: { taskId: 't-1', status: { state: 'completed' } } })
+  const whole = a2aFrames(body)
+  assert.equal(whole.frames.length, 3)
+
+  // Every cut, not a sampled few: a boundary bug is invisible at most split points, and the one
+  // that matters is exactly the one a sample would miss.
+  for (let cut = 1; cut < body.length; cut++) {
+    const reader = createSseFrameReader()
+    reader.push(body.slice(0, cut))
+    reader.push(body.slice(cut))
+    reader.end()
+    assert.equal(reader.error, null, `cut ${cut}`)
+    assert.deepEqual(reader.frames, whole.frames, `cut ${cut}`)
+  }
+})
+
+test('end() flushes a trailing frame that never received a newline', () => {
+  const reader = createSseFrameReader()
+  // The terminal completion often arrives exactly so — no trailing newline — so dropping it would
+  // lose the one event the completion criterion asserts on.
+  reader.push(sse({ statusUpdate: { taskId: 't-1', status: { state: 'completed' } } }).trimEnd())
+  assert.equal(reader.frames.length, 0, 'still incomplete until the flush')
+  reader.end()
+  assert.equal(reader.frames.length, 1)
+  assert.equal(reader.frames[0].statusUpdate.status.state, 'completed')
+})
+
+test('an error frame stops the reader and is reported, never yielded as data', () => {
+  const reader = createSseFrameReader()
+  reader.push(sse({ task: { id: 't-1' } }))
+  reader.push(`data: ${JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'invalid params' } })}\n\n`)
+  assert.notEqual(reader.error, null)
+  assert.match(reader.error, /refused the turn/)
+  // The frames before the refusal are kept — the caller may still want the task id — but nothing
+  // after it is appended to a run already known to have failed.
+  assert.equal(reader.frames.length, 1)
+  reader.push(sse({ statusUpdate: { taskId: 't-1', status: { state: 'completed' } } }))
+  assert.equal(reader.frames.length, 1)
 })
 
 // ── declared mounts / secrets ───────────────────────────────────────────────
