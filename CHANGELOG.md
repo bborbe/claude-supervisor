@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.178.0
 
 - feat: **`read_push_config` reads a worker's registered A2A push config back from the worker itself.** `push_registration.state === "attempted-ok"` proves only that the worker ACCEPTED a registration, not that it HOLDS one — an accepted-then-dropped config is indistinguishable from a working one until something reads it back. The tool issues the A2A `GetTaskPushNotificationConfig` JSON-RPC call against the worker, addressed by task id only (never re-sending `url`/`token`, which would make a get into a second registration), gated on an `attempted-ok` registration already existing and refusing rather than reading an unregistered task. It returns the CONFIG — the url and notification token the worker stores — and never the worker's bearer token, which authenticates the call and is never projected; that keeps "the token is memory-only" true for everything except this one deliberate, named, read-only call. Change set: `server/a2a-client.mjs`, `server/a2a-client.test.mjs`, `server/a2a-spawn.mjs`, `server/a2a-spawn.test.mjs`, `server/supervisor.mjs`, `CHANGELOG.md`.
 
