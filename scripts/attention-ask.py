@@ -384,6 +384,102 @@ def build_options(labels, recommended):
     return options
 
 
+GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "manager-menu-guard.py")
+# ⚠️ `manager-menu-corpus.py` carries a `_load(module_name, filename)` helper for
+# this same guard. Kept separate rather than shared: both are standalone scripts,
+# and importing one from the other drags its argparse into this path.
+
+
+def _warn(msg):
+    """Record a fail-open on stderr. stdout carries ITEM_ID / REFUSED only."""
+    print(f"attention-ask: {msg}", file=sys.stderr)
+
+
+def manager_guard():
+    """The canonical predicate module, or None when it cannot be loaded.
+
+    Loaded, never mirrored. `manager-menu-guard.py`'s docstring records that the
+    naive ONE-CLAUSE predicate — a bare word-boundary match on any option label —
+    was MEASURED WRONG on 2026-10-16, and that its two-clause
+    `names_manager_owned_action` is the corrected form. The corrected form is
+    what is loaded here.
+    """
+    try:
+        spec = importlib.util.spec_from_file_location("manager_menu_guard", GUARD)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod if hasattr(mod, "names_manager_owned_action") else None
+    except Exception as err:
+        _warn(f"manager guard unavailable ({err}) — manager-owned check skipped")
+        return None
+
+
+def is_manager_session(guard, producer_id):
+    """True when `producer_id` is a manager arm, by the guard's own rule.
+
+    ⚠️ **Load-bearing scope, and the first draft of this rule got it wrong.** The
+    guard's `evaluate()` refuses a manager-owned menu ONLY for a session that is
+    a manager; a worker offering one is explicitly allowed (`REASON_NON_MANAGER`,
+    verbs recorded so the occurrence stays visible), because a worker cannot take
+    the action itself. Refusing a worker's card would tell it to do something it
+    is not allowed to do.
+    """
+    if not producer_id:
+        return False
+    try:
+        entry = guard.registry_entry(producer_id)
+        if not entry:
+            return False
+        topics, goals = guard.vault_page_names()
+        return guard.manager_arm(entry, topics, goals) is not None
+    except Exception as err:
+        _warn(f"manager scoping failed ({err}) — card allowed")
+        return False
+
+
+def manager_settleable_only(options, producer_id=""):
+    """True when EVERY option names a manager-owned action AND the asker is a manager.
+
+    The board-noise task's **class 2**: a card whose every choice is a move the
+    asking session could have taken itself is a decision already made, and the
+    operator spends a click ratifying it.
+
+    ⚠️ Distinct from `~/.claude/hooks/attention-log.py`'s `manager_settleable`,
+    which judges only the RECOMMENDED option. There an operator-owned
+    alternative may still sit beside it, so the card is a real question. Here
+    there is none.
+
+    ⚠️ **`all`, not `any`.** The guard has one-option false positives — its
+    proper-noun fallback makes `Open IntelliJ` manager-owned. With `any`, one
+    misclassification would refuse a card that carries a genuine operator
+    option; with `all`, it cannot.
+
+    ⚠️ **Fails OPEN everywhere.** No guard, no registry entry, no manager arm, or
+    any raise all return False, so the card posts — and every one of those paths
+    writes a stderr line, because a rule that dies silently reads exactly like a
+    rule that is working. Refusing a real question strands the asking session,
+    which is strictly worse than one low-value card: the same trade the
+    `Stop`-closer rule already refuses to make.
+
+    ⚠️ An option-less card is never settleable: it carries no recommendation to
+    judge, and `kind: text` is a legitimate answer shape for it.
+    """
+    labels = [o.get("label") or "" for o in (options or []) if isinstance(o, dict)]
+    if not labels:
+        return False
+    guard = manager_guard()
+    if guard is None:
+        return False
+    if not is_manager_session(guard, producer_id):
+        return False
+    try:
+        return all(guard.names_manager_owned_action(label) for label in labels)
+    except Exception as err:
+        _warn(f"manager-owned check raised ({err}) — card allowed")
+        return False
+
+
 def build_batch_payload(tasks):
     """Return the ONE batched card's payload, or raise ValueError naming the bad input.
 
@@ -741,6 +837,21 @@ def cmd_post(args, out=sys.stdout):
     except ValueError as err:
         print(f"REFUSED: {err}", file=out)
         return 2
+    # Class 2 of the board-noise task: every choice is a manager-owned action, so
+    # the card asks the operator to ratify a decision already made. Refused by
+    # default for a MANAGER asker only (see `is_manager_session`); `--force`
+    # keeps a deliberate card postable.
+    if not getattr(args, "force", False) and manager_settleable_only(
+            options, producer[0]):
+        print(
+            "REFUSED: every --option names a manager-owned action, so this card "
+            "asks the operator to ratify a decision the asking session could "
+            "have taken itself. Take the action; if you need the operator to "
+            "CHOOSE between manager-owned actions (a priority call), post it "
+            "with no --option and let the answer be free text; or re-run with "
+            "--force if the card is deliberate.",
+            file=out)
+        return 2
     return _post_and_report(args, *producer, args.payload, options, out)
 
 
@@ -855,6 +966,13 @@ def main(argv=None):
     post.add_argument("--context", default="")
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
+    post.add_argument(
+        "--force",
+        action="store_true",
+        help="post even when every --option names a manager-owned action "
+             "(refused by default: such a card asks the operator to ratify a "
+             "decision the asking session could have taken itself)",
+    )
     post.add_argument(
         "--producer-id",
         default="",
