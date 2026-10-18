@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.171.1
 
 - fix: **the three sites prescribing the ownership-scoped attention arm now warn never to append `2>&1`, which turns the arm's own heartbeat into a wake per poll.** `gate-owner-filter.py --interval` writes a `LIVENESS  <counts>  new: <n>  change|no change` line to **stderr** on every poll by design — it is what separates a quiet arm from a dead one — while `Monitor`'s generic guidance (*"merge stderr with `2>&1` so its failures reach your filter"*) is written for a one-shot command, so a manager following it arms a watcher that fires on that heartbeat. Measured 2026-10-17 (attention-controller goal manager `956f6f82`): an arm carrying `2>&1` produced **28 notifications in one 30-minute arm**, every one `no change`, each a full manager turn over the session's cached context. ⚠️ **Stated at all three prescribing sites, not only the rule's home** — `commands/steps/manager-tail.md` (beside the arm command it is copied from), `commands/steps/attention-watcher.md` (the arm's rule home) and `commands/fleet-drive.md` § 13 — because the defect is a reader copying the arm from whichever file they are in, and a pointer does not travel with a copy. Change set: `commands/steps/manager-tail.md`, `commands/steps/attention-watcher.md`, `commands/fleet-drive.md`, `CHANGELOG.md`.
 
