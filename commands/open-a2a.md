@@ -72,6 +72,10 @@ It prints `worker_id: <id>`, then the reply, redacted. The backend is served at 
 
 ⚠️ **The create call carries `task` alone.** Neither `vault` nor `cwd` is sent, so the worker's directory is the controller's — which is why the eligibility check above exists, and that rule is item 7's, not this file's.
 
+⚠️ **The reply carries `launcher` and `launcher_source`, because this backend resolves the launcher itself.** The controller applies the same rule as `spawn_agent` — the task's `launcher:` frontmatter, else its goal's, else the vault's `claude_script` (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8) — and `launcher_source` names which of `task` / `goal` / `vault` won. So a local create is not launcher-blind: read both fields back and check them as you would on the `spawn_agent` arms.
+
+⚠️ **A `launcher:` that is not an executable file is refused before any tab is opened**, which is stricter than the `spawn_agent` arms — those validate the value's shape only, because a bad launcher there surfaces as an unreadable `model: null`, an observable this arm does not have (`wezterm cli spawn` reports success for a tab whose `exec` then fails). ⚠️ **The refusal reason is not on the reply:** the FAILED path carries no detail, so a create that fails for this reason reports only that it failed — the named error is in the controller's own log. Reconcile against `list` (§ Step 3) as with any other FAILED outcome.
+
 ⚠️ **Exit 2 (`CONTROLLER_FAILED`) is an UNKNOWN outcome, not a failed one.** The failure can land in the controller's task store *after* the executor ran, so a create that reads FAILED may still have started a worker. Reconcile against `list` (§ Step 3) before anything else; never retry blindly.
 
 ⚠️ **The other exits are the call's own, and none of them means a worker was created:** `1` TRANSPORT (unreachable, or a non-200), `3` UNREADABLE (the reply was not a readable control response for the operation sent), `4` NO_TOKEN (no control token could be resolved). Report which one and stop.
