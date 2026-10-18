@@ -619,7 +619,7 @@ def is_machine_bound(closer):
 
 
 def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
-             readable, is_parked, closer=""):
+             readable, is_parked, closer="", alive=None):
     """The four-state label, or `unclassified` with the reason. Pure.
 
     Order is load-bearing. A decision outranks everything else: a session asking
@@ -632,6 +632,15 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
     last assistant text is then the PREVIOUS turn's panel, so a stale `⏰ Next:`
     line would otherwise report a running session as `external`. `parked()` is
     the two-channel verdict that already refuses that inference.
+
+    `alive` is the registry's three-state identity verdict for this session
+    (`True` / `False` / `None`, `session-identity.py`). It exists because a
+    registry `status: shell` is NOT evidence of death: measured 2026-10-18, nine
+    live panes carried `status=shell` with `alive=True`, and the sweep handed
+    them to the operator as `bare shell` — the label a close-the-exited-tabs
+    action reads as safe. So the shell limb fires only on `alive is False`, and
+    `None` (pid occupied, identity unprovable) falls through with the other
+    unknown-liveness rows rather than being read as death.
 
     `unclassified` is a first-class answer, never a fallback that hides a bug, and
     it always carries the reason that produced it. A permission modal is class D only when the session's own
@@ -678,7 +687,11 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
         return STATE_WORKING, ""
     if task_status in TERMINAL_TASK:
         return STATE_CLOSED, ""
-    if reg_status == "shell":
+    # A registry `status: shell` alone is not death (see the `alive` note above):
+    # only `alive is False` proves the process is gone. `None` is "cannot tell",
+    # so it falls through to `idle with no ask` like any other live-but-quiet
+    # session rather than being read as death.
+    if reg_status == "shell" and alive is False:
         return STATE_UNCLASSIFIED, "bare shell"
     return STATE_UNCLASSIFIED, "idle with no ask"
 
@@ -797,13 +810,20 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
     for sid, recs in groups.items():
         rec = representative(recs)
         name = wnm.name_of(rec, pmap, registry)
-        reg_status = ((reg_records.get(sid) or {}).get("status") or "").strip().lower()
+        reg_record = reg_records.get(sid) or {}
+        reg_status = (reg_record.get("status") or "").strip().lower()
+        # The registry's identity verdict, not just its status: `status: shell`
+        # describes the pane the hook last saw, `alive` describes whether THIS
+        # session's process is still running. Only the second can tell a bare
+        # shell from a live session whose status has gone stale.
+        alive = reg_record.get("alive")
         if not parked(rec, reg_records.get(sid), resumed_ids):
             pane = rec.get("pane")
             manager = is_manager(rec, registry)
             task_status = wnm.task_status_from_closer(rec)
             state, reason = state_of(reg_status, None, None, "", "", task_status,
-                                     None, bool(wnm.last_assistant_text(rec)), False)
+                                     None, bool(wnm.last_assistant_text(rec)), False,
+                                     alive=alive)
             not_parked.append({"session_id": sid, "name": name,
                                "pane": pane,
                                "manager": manager,
@@ -839,7 +859,7 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
         task_status = wnm.task_status_from_closer(rec)
         state, reason = state_of(reg_status, cause, gate, watcher, eta, task_status,
                                  shape, bool(wnm.last_assistant_text(rec)), True,
-                                 wnm.current_closer(rec))
+                                 wnm.current_closer(rec), alive=alive)
         parked_rows.append({
             "session_id": sid,
             "name": name,

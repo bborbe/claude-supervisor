@@ -79,6 +79,11 @@ class Fleet:
         self.records = []
         self.registry = {}
         self.status = {}
+        # The registry's three-state identity verdict, kept beside `status`
+        # because they answer different questions: `status` is what the pane
+        # last looked like, `alive` is whether THIS session's process still
+        # runs. A fixture that does not say otherwise is a live session.
+        self.alive = {}
         self.shapes = {}
         self.posted = set()
 
@@ -105,7 +110,7 @@ class Fleet:
 
     def add(self, sid, pane, closer, *, status="waiting", name=None, role=None,
             task=None, kind="question", state="open", ts=1000, event=None,
-            transcript=None):
+            transcript=None, alive=True):
         text = _transcript(closer, task) if transcript is None else transcript
         self.records.append({
             "session_id": sid, "pane": str(pane), "kind": kind,
@@ -115,6 +120,7 @@ class Fleet:
         })
         self.registry[sid] = name or ""
         self.status[sid] = status
+        self.alive[sid] = alive
         return sid
 
     def pmap(self):
@@ -122,7 +128,8 @@ class Fleet:
                 for r in self.records}
 
     def reg_records(self):
-        return {sid: {"status": st, "name": self.registry.get(sid, "")}
+        return {sid: {"status": st, "name": self.registry.get(sid, ""),
+                      "alive": self.alive.get(sid, True)}
                 for sid, st in self.status.items()}
 
     def sweep(self, causes=None):
@@ -820,7 +827,10 @@ class FourStateTest(Base):
         # unclassified — a settings ask rule and a bare shell
         self.fleet.add("s-unc-perm", 308, "", name="Ask Rule Worker")
         self.fleet.shapes["308"] = "permission"
-        self.fleet.add("s-unc-shell", 309, "", status="shell", name="Bare Shell")
+        # a DEAD shell — `alive: False` is what makes it a bare shell at all;
+        # a `status: shell` on a live process is stale metadata, not a verdict
+        self.fleet.add("s-unc-shell", 309, "", status="shell", alive=False,
+                       name="Bare Shell")
         self.sweep = self._sweep_with_registry_only()
 
     def _sweep_with_registry_only(self):
@@ -888,6 +898,55 @@ class FourStateTest(Base):
         row = {r["name"]: r for r in self.sweep["not_parked"]}["Bare Shell"]
         self.assertEqual(h.STATE_UNCLASSIFIED, row["state"])
         self.assertEqual("bare shell", row["state_reason"])
+
+    def _row(self, name, sweep=None):
+        sweep = sweep if sweep is not None else self.fleet.sweep()
+        for r in sweep["parked"] + sweep["not_parked"]:
+            if r["name"] == name:
+                return r
+        self.fail(f"{name} rendered no row at all")
+
+    def test_a_live_shell_session_classifies_exactly_as_an_idle_one(self):
+        # The differential, and the reason a rename cannot satisfy this suite:
+        # the SAME pane is rendered twice, once with `status: shell` and once
+        # with `status: idle`, and the two rows must agree. Both are live, so
+        # the registry status is stale metadata and must not move the label.
+        #
+        # The empty closer matters: `parked()`'s shell limb takes a stricter
+        # closer test than its idle limb, so a closer-bearing fixture could be
+        # parked under one status and not the other — that confound would fail
+        # a correct fix. With no closer both limbs agree the pane is unparked,
+        # which isolates the label.
+        #
+        # Measured 2026-10-18: nine live panes carried `status=shell, alive=True`
+        # and were handed to the operator as `bare shell`.
+        self.fleet.add("s-shell-live", 320, "", status="shell", alive=True,
+                       name="Live Shell")
+        shell_row = self._row("Live Shell")
+        self.fleet.status["s-shell-live"] = "idle"
+        idle_row = self._row("Live Shell")
+        self.assertEqual((idle_row["state"], idle_row["state_reason"]),
+                         (shell_row["state"], shell_row["state_reason"]))
+
+    def test_a_dead_shell_session_is_still_a_bare_shell(self):
+        # The negative arm. Without it, deleting the shell branch outright
+        # satisfies every other criterion while silently dropping real close
+        # candidates from the report.
+        self.fleet.add("s-shell-dead", 321, "", status="shell", alive=False,
+                       name="Dead Shell")
+        row = self._row("Dead Shell")
+        self.assertEqual(h.STATE_UNCLASSIFIED, row["state"])
+        self.assertEqual("bare shell", row["state_reason"])
+
+    def test_an_unprovable_shell_session_is_not_a_bare_shell(self):
+        # `alive: None` is "cannot tell" — the pid is occupied but the record
+        # carries no usable `procStart`, so identity cannot be established. That
+        # is never death (`session-liveness.py`: UNKNOWN != ABSENT), so the row
+        # must not be handed to the operator as a close candidate.
+        self.fleet.add("s-shell-unknown", 322, "", status="shell", alive=None,
+                       name="Unknown Shell")
+        row = self._row("Unknown Shell")
+        self.assertNotEqual("bare shell", row["state_reason"])
 
     def test_a_machine_bound_wait_is_external_and_names_its_watcher(self):
         row = {r["name"]: r for r in self.sweep["parked"]}["External Watch"]
