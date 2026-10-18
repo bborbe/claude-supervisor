@@ -107,6 +107,11 @@ def post_args(**overrides):
         risk="",
         expires_at="",
         closer="",
+        # ⚠️ Explicit, never inherited from the Mock. `getattr(mock, "force")`
+        # returns a TRUTHY child Mock, which would silently skip the
+        # manager-owned refusal in every `cmd_post` test — the same trap this
+        # file already documents for `closer` (a Mock is TRUTHY).
+        force=False,
     )
     defaults.update(overrides)
     return mock.Mock(**defaults)
@@ -260,6 +265,98 @@ class BuildOptionsTest(unittest.TestCase):
     def test_empty_label_is_refused(self):
         with self.assertRaises(ValueError):
             ask.build_options(["a", "  "], "")
+
+
+class ManagerSettleableOnlyTest(unittest.TestCase):
+    """Class 2 of the board-noise task: a card with no operator-owned option.
+
+    The rule is deliberately `all`, not `any`. `attention-log.py`'s
+    `manager_settleable` judges the RECOMMENDED option and lets an
+    operator-owned alternative sit beside it, so that card is a real question.
+    Here there is no alternative anywhere on the card, so nothing on it asks the
+    operator for anything a manager cannot do itself.
+    """
+
+    def setUp(self):
+        # Scoping is exercised on its own below; every other case is about the
+        # option set, so pin "the asker is a manager" rather than depending on
+        # this machine's registry.
+        self._is_manager = ask.is_manager_session
+        ask.is_manager_session = lambda guard, pid: True
+        self.addCleanup(setattr, ask, "is_manager_session", self._is_manager)
+
+    def opts(self, *labels):
+        return [{"label": l, "recommended": i == 0} for i, l in enumerate(labels)]
+
+    def test_every_option_manager_owned_is_settleable(self):
+        self.assertTrue(ask.manager_settleable_only(
+            self.opts("open the row", "file the task"), "s1"))
+
+    def test_one_operator_owned_option_makes_it_a_real_question(self):
+        # The boundary the rule must not cross. A card carrying an
+        # operator-owned choice stays a real question even when the other
+        # option is manager-owned, and refusing it takes the decision away.
+        self.assertFalse(ask.manager_settleable_only(
+            self.opts("open the row", "leave it held"), "s1"))
+
+    def test_no_options_is_not_settleable(self):
+        # The option-less card is the free-text ask; there is no recommendation
+        # to judge, and `kind: text` is a legitimate answer shape for it.
+        self.assertFalse(ask.manager_settleable_only([], "s1"))
+
+    def test_a_worker_is_never_settleable(self):
+        # The guard's own rule: a worker offering a manager-owned menu is
+        # ALLOWED (`REASON_NON_MANAGER`), because it cannot take the action
+        # itself. Refusing its card would tell it to do something it may not do.
+        ask.is_manager_session = lambda guard, pid: False
+        self.assertFalse(ask.manager_settleable_only(
+            self.opts("open the row", "file the task"), "worker-1"))
+
+    def test_fails_open_when_the_guard_is_missing(self):
+        # Refusing a real question strands the asking session — strictly worse
+        # than one low-value card, the same trade the Stop-closer rule refuses.
+        original = ask.GUARD
+        ask.GUARD = "/nonexistent/manager-menu-guard.py"
+        try:
+            self.assertFalse(ask.manager_settleable_only(
+                self.opts("open the row", "file the task"), "s1"))
+        finally:
+            ask.GUARD = original
+
+
+class PostRefusalTest(unittest.TestCase):
+    """`cmd_post` refuses a manager-settleable card unless `--force` is passed.
+
+    ⚠️ `post_args` carries an explicit `force=False`. Inherited from the Mock it
+    would be a truthy child Mock, and every case here would pass while the
+    refusal never ran.
+    """
+
+    def setUp(self):
+        self._pred = ask.manager_settleable_only
+        self._post = ask._post_and_report
+        ask.manager_settleable_only = lambda opts, pid="": True
+        self.posted = []
+        ask._post_and_report = lambda *a, **k: self.posted.append(a) or 0
+        self.addCleanup(setattr, ask, "manager_settleable_only", self._pred)
+        self.addCleanup(setattr, ask, "_post_and_report", self._post)
+
+    def test_refuses_and_posts_nothing(self):
+        out = io.StringIO()
+        rc = ask.cmd_post(post_args(option=["open the row"]), out)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED", out.getvalue())
+        # The remedy for the priority case must be named: "include one option
+        # the operator owns" is impossible when every option is manager-owned.
+        self.assertIn("free text", out.getvalue())
+        self.assertEqual(self.posted, [])
+
+    def test_force_posts_anyway(self):
+        out = io.StringIO()
+        rc = ask.cmd_post(post_args(option=["open the row"], force=True), out)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("REFUSED", out.getvalue())
+        self.assertEqual(len(self.posted), 1)
 
 
 class ProducerKindTest(unittest.TestCase):
