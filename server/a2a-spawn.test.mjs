@@ -374,6 +374,27 @@ test('the token is held on the record, and the record is the ONLY place it lives
   assert.equal(record.workerToken, TOKEN)
 })
 
+test('the record seeds the push registration as NOT-ATTEMPTED, never absent', () => {
+  // ⚠️ This field exists to separate two failures that `status_messages: []` cannot tell apart:
+  // no registration was ever sent, versus one was sent and refused. Seeding it explicitly is what
+  // makes an empty channel diagnosable — a missing field would put the first case back in the
+  // undiagnosable class this whole change removes.
+  const { record } = a2aWorkerRecord({
+    id: 'agent_1',
+    prompt: 'p',
+    task: 't',
+    target: 'docker',
+    sessionId: 's',
+    workerId: 'w',
+    a2aUrl: 'http://localhost:9093/a2a',
+    workerToken: TOKEN,
+    createdAt: '2026-10-13T00:00:00.000Z',
+  })
+  assert.equal(record.pushRegistration.state, 'not-attempted')
+  assert.match(record.pushRegistration.reason, /has not yet named a task/)
+  assert.ok(!('error' in record.pushRegistration), 'no error until one is attempted')
+})
+
 test('the record refuses a target this path does not own', () => {
   const { error } = a2aWorkerRecord({ target: 'cluster', sessionId: 's' })
   assert.match(error, /not an A2A target/)
