@@ -183,17 +183,15 @@ MANAGER_QUESTION = (
 
 # --- The four states ---------------------------------------------------------
 #
-# Operator ask 2026-10-18: "each session could have one of the following states -
-# waiting for my decision. - waiting for something external like pull request
-# review - working - closed. maybe create a slash command to analyse every worker
-# session, check what of the 4 states are, or analyse why not".
-#
+# Every live session is labelled `decision`, `external`, `working` or `closed`.
 # The label is a PROJECTION over what this script already computes — `parked()`,
 # the registry's status, `cause_class()`, `gate_class()`, `watcher_of()` and
-# `eta_of()` — never a second classifier. The fifth label exists because the ask
-# ends "or analyse why not": a session fitting none prints `unclassified` WITH THE
-# REASON, and the reason is the whole value of that row. Forcing such a session
-# into one of the four would be a silent lie about the fleet.
+# `eta_of()` — never a second classifier.
+#
+# `unclassified` is a first-class answer, not a fallback that hides a bug. A
+# session the four states cannot describe is a session whose reason is the only
+# useful thing to report about it, and forcing it into a bucket would be a silent
+# lie about the fleet.
 STATE_DECISION = "decision"
 STATE_EXTERNAL = "external"
 STATE_WORKING = "working"
@@ -605,9 +603,8 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
     line would otherwise report a running session as `external`. `parked()` is
     the two-channel verdict that already refuses that inference.
 
-    `unclassified` is not a fallback that hides a bug — it is the answer the ask
-    explicitly requested ("or analyse why not"), and it always carries the reason
-    that produced it. A permission modal is class D only when the session's own
+    `unclassified` is a first-class answer, never a fallback that hides a bug, and
+    it always carries the reason that produced it. A permission modal is class D only when the session's own
     closer is an operator ask; a modal raised by a SETTINGS ASK RULE has no
     closer verb, so `is_operator_ask()` is False and `build()` leaves `gate` as
     None. That is the fifth state the operator named, and it is reported as
