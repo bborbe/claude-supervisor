@@ -22,6 +22,7 @@ import {
   fetchWorkerCard,
   ledgerModeForStatus,
   openWorkerTurn,
+  pushDiagnosticPatch,
   a2aListCallFor,
   a2aLiveSessions,
   listWorkersOnController,
@@ -797,6 +798,26 @@ test('a whole-body collection reports that the task-id callback was never wired'
   })
   assert.equal(collected.error, undefined, 'the turn itself still collects normally')
   assert.deepEqual(seen, [{ path: 'whole-body' }])
+})
+
+test('the incremental ANNOUNCEMENT patches nothing — it must not be read as whole-body', () => {
+  // ⚠️ This is the regression the shipped diagnostic had. The incremental branch announces itself
+  // with `{path:'incremental'}` and NO `taskIdFound` key, so a `taskIdFound === false ? … : …`
+  // test sent the announcement down the whole-body arm and reported "collected whole-body" for
+  // every incremental run that found no task id — mislabelling the very failure the field exists
+  // to name. The announcement must write nothing at all.
+  assert.equal(pushDiagnosticPatch({ path: 'incremental' }), null)
+})
+
+test('a whole-body diagnostic names the fallback, and an id-less incremental one names the frames', () => {
+  assert.match(
+    pushDiagnosticPatch({ path: 'whole-body' }).reason,
+    /collected whole-body/,
+  )
+  const incremental = pushDiagnosticPatch({ path: 'incremental', taskIdFound: false, frames: 7 })
+  assert.match(incremental.reason, /incrementally/)
+  assert.match(incremental.reason, /7 frame\(s\)/)
+  assert.equal(incremental.state, 'not-attempted')
 })
 
 test('a non-2xx answer is reported rather than read as frames', async () => {

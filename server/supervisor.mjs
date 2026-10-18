@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, pushDiagnosticPatch, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
@@ -1705,15 +1705,13 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       // and a diagnostic arriving afterwards must not undo it — hence the early return.
       onDiagnostic: (d) => {
         if (built.record.pushRegistration?.state !== 'not-attempted') return
-        built.record.pushRegistration = d.taskIdFound === false
-          ? {
-              state: 'not-attempted',
-              reason: `the turn's stream was read incrementally but no frame named a task (${d.frames} frame(s))`,
-            }
-          : {
-              state: 'not-attempted',
-              reason: 'the turn was collected whole-body, so the task-id callback was never wired',
-            }
+        // ⚠️ THE BRANCH LIVES IN `pushDiagnosticPatch`, AND THAT IS THE FIX. Deciding it here on
+        // `d.taskIdFound === false` mislabelled every incremental run that found no task id as
+        // "whole-body" — the announcement carries no `taskIdFound` key at all. A pure function is
+        // where that can be tested; inline, it looked right and was wrong.
+        const patch = pushDiagnosticPatch(d)
+        if (!patch) return
+        built.record.pushRegistration = patch
         writeLedger(built.record)
       },
     })
