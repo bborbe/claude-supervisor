@@ -23,7 +23,7 @@ import {
   a2aFrames,
   a2aOutcome,
   a2aPushConfigCallFor,
-  a2aPushConfigGetCallFor,
+  a2aPushConfigListCallFor,
   a2aSendRequestFor,
   a2aStreamRequestFor,
   a2aTaskIdOf,
@@ -739,7 +739,7 @@ export async function readPushCallbackFromWorker({
   fetchImpl = fetch,
   timeoutMs = A2A_REGISTER_TIMEOUT_MS,
 } = {}) {
-  const call = a2aPushConfigGetCallFor({ endpoint, taskId, token })
+  const call = a2aPushConfigListCallFor({ endpoint, taskId, token })
   if (call.error) return { error: call.error }
   const signal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
   let res
@@ -770,7 +770,9 @@ export async function readPushCallbackFromWorker({
       error: `the worker refused the push-config read-back: ${body.error?.message ?? JSON.stringify(body.error)}`,
     }
   }
-  return { config: body?.result ?? null }
+  // ⚠️ AN EMPTY LIST IS A RESULT, NOT AN ERROR. It says the worker holds no config for this task,
+  // which is a different fact from a refused call — and the caller must be able to tell them apart.
+  return { configs: body?.result?.configs ?? [] }
 }
 
 // The record patch a collection diagnostic produces — the new `pushRegistration`, or `null` when

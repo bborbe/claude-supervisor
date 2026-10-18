@@ -592,14 +592,22 @@ export function a2aPushConfigCallFor({ endpoint, taskId, push, token, requestId 
   }
 }
 
-export const A2A_PUSH_CONFIG_GET_METHOD = 'GetTaskPushNotificationConfig'
+export const A2A_PUSH_CONFIG_LIST_METHOD = 'ListTaskPushNotificationConfigs'
 
 // The read-back half of the round trip — `{ url, headers, body }`, or `{ error }`.
+//
+// ⚠️ LIST, NOT GET, AND THAT IS A MEASURED CORRECTION RATHER THAN A PREFERENCE. The first version
+// of this read-back used `GetTaskPushNotificationConfig` with `params: {taskId}` and every call
+// returned "push config not found" against a worker whose pushes were demonstrably arriving. The
+// cause is in the SDK: the handler reads `h.pushConfigStore.Get(ctx, req.TaskID, req.ID)`
+// (`a2asrv/handler.go:419`) — the store is keyed by task id **and config id** — and the set path
+// never sends a config `id`, so a get looks up an empty one and can never match. `List` is keyed by
+// `taskId` alone and returns `{configs: […]}`.
 //
 // ⚠️ `CreateTaskPushNotificationConfig` IS ONLY EVIDENCE THAT THE WORKER ACCEPTED A REGISTRATION.
 // It says nothing about what the worker then stored, and an accepted-then-dropped config is
 // indistinguishable from a working one until something reads it back. This builder is that read.
-export function a2aPushConfigGetCallFor({ endpoint, taskId, token, requestId = 1 } = {}) {
+export function a2aPushConfigListCallFor({ endpoint, taskId, token, requestId = 1 } = {}) {
   for (const [name, value] of Object.entries({ endpoint, taskId, token })) {
     if (typeof value !== 'string' || value === '') {
       return { error: `\`${name}\` is required to read a push callback back over A2A.` }
@@ -614,7 +622,7 @@ export function a2aPushConfigGetCallFor({ endpoint, taskId, token, requestId = 1
     body: {
       jsonrpc: '2.0',
       id: requestId,
-      method: A2A_PUSH_CONFIG_GET_METHOD,
+      method: A2A_PUSH_CONFIG_LIST_METHOD,
       params: { taskId },
     },
   }

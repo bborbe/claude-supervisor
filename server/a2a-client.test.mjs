@@ -20,7 +20,7 @@ import {
   a2aFrames,
   a2aOutcome,
   a2aPushConfigCallFor,
-  a2aPushConfigGetCallFor,
+  a2aPushConfigListCallFor,
   a2aPushRefusal,
   a2aSendRequestFor,
   a2aStreamRequestFor,
@@ -268,22 +268,25 @@ test('the push registration refuses a missing field or an unusable descriptor', 
   assert.equal(a2aPushConfigCallFor(base).error, undefined)
 })
 
-test('the push-config read-back asks for the task, and never re-sends the config', () => {
-  const call = a2aPushConfigGetCallFor({
+test('the push-config read-back LISTS the task, and never re-sends the config', () => {
+  const call = a2aPushConfigListCallFor({
     endpoint: 'http://127.0.0.1:8080/a2a',
     taskId: 'task-1',
     token: 'worker-token',
   })
-  assert.equal(call.body.method, 'GetTaskPushNotificationConfig')
+  // ⚠️ LIST, NOT GET — a measured correction, not a preference. The SDK's get is
+  // `pushConfigStore.Get(ctx, taskID, req.ID)` and the set path never sends a config `id`, so a get
+  // looks up an empty id and reports "push config not found" against a worker whose pushes arrive.
+  assert.equal(call.body.method, 'ListTaskPushNotificationConfigs')
   // ⚠️ THE READ IS ADDRESSED BY TASK AND NOTHING ELSE. Sending `url`/`token` back would make it a
-  // second registration wearing a get's name, and a worker that merged the params would overwrite
+  // second registration wearing a read's name, and a worker that merged the params would overwrite
   // the config this call exists to observe.
   assert.deepEqual(call.body.params, { taskId: 'task-1' })
   assert.equal(call.headers.authorization, 'Bearer worker-token')
 
   for (const over of [{ endpoint: '' }, { taskId: '' }, { token: '' }]) {
     const base = { endpoint: 'http://127.0.0.1:8080/a2a', taskId: 'task-1', token: 'worker-token' }
-    assert.equal(a2aPushConfigGetCallFor({ ...base, ...over }).error !== undefined, true, JSON.stringify(over))
+    assert.equal(a2aPushConfigListCallFor({ ...base, ...over }).error !== undefined, true, JSON.stringify(over))
   }
 })
 

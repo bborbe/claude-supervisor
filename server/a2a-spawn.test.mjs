@@ -484,7 +484,7 @@ test('pushDiagnosticPatch turns a thrown registration into attempted-error', () 
   assert.match(patch.error, /boom/)
 })
 
-test('the push config round-trips: what set registers, get reads back', async () => {
+test('the push config round-trips: what set registers, list reads back', async () => {
   // ⚠️ THE READ-BACK IS THE ONLY EVIDENCE THE WORKER STORED WHAT IT ACCEPTED. `{registered: true}`
   // proves a 200, not a held config, and the two are indistinguishable until something reads it.
   const store = new Map()
@@ -496,11 +496,12 @@ test('the push config round-trips: what set registers, get reads back', async ()
       store.set(body.params.taskId, { url: body.params.url, token: body.params.token })
       return { ok: true, status: 200, json: async () => ({ jsonrpc: '2.0', id: 1, result: {} }) }
     }
-    if (body.method === 'GetTaskPushNotificationConfig') {
+    if (body.method === 'ListTaskPushNotificationConfigs') {
+      const held = store.get(body.params.taskId)
       return {
         ok: true,
         status: 200,
-        json: async () => ({ jsonrpc: '2.0', id: 1, result: store.get(body.params.taskId) ?? null }),
+        json: async () => ({ jsonrpc: '2.0', id: 1, result: { configs: held ? [held] : [] } }),
       }
     }
     return { ok: false, status: 400, json: async () => ({}) }
@@ -521,8 +522,8 @@ test('the push config round-trips: what set registers, get reads back', async ()
     token: 'worker-token',
     fetchImpl,
   })
-  assert.deepEqual(read, { config: push }, 'the read returns what the set registered')
-  assert.deepEqual(seen, ['CreateTaskPushNotificationConfig', 'GetTaskPushNotificationConfig'])
+  assert.deepEqual(read, { configs: [push] }, 'the read returns what the set registered')
+  assert.deepEqual(seen, ['CreateTaskPushNotificationConfig', 'ListTaskPushNotificationConfigs'])
 })
 
 test('a refused push-config read-back is reported, not returned as an empty config', async () => {
@@ -539,7 +540,7 @@ test('a refused push-config read-back is reported, not returned as an empty conf
   assert.match(out.error, /task not found/)
   // ⚠️ A refusal must not read as "the worker holds no config" — those are different facts, and
   // collapsing them is the same class of mislabelling this channel has already paid for.
-  assert.equal('config' in out, false)
+  assert.equal('configs' in out, false)
 })
 
 test('the record refuses a target this path does not own', () => {
