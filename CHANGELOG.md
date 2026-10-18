@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.176.1
 
 - fix: **`scripts/progress-window.py` now rates a box whose coverage row carries a pipe or a leading backtick, and matches a claim to its own box among several uncommitted ticks.** Found by the first live `/supervisor:worker-drive` run on v0.175.0: the coverage agent rated a DoD box `measured`, yet the tick read `rating unavailable` — the box's own text carried `| head -1`, shifting the pipe-split columns, and the cell strip cut a leading backtick so the text never matched; and because every uncommitted tick shares the ref `worktree`, a claim on DoD2 matched DoD1's tick and came back `rejected:asserted`. Columns are now read from the right (`proposal`, then `evidence`), the box text keeps its backticks and matches by prefix, and the claimed box ranks the match. Both errors fell on the safe side — an A read as B, a backable claim rejected — so the one live lever never fired wrongly. A fixture each, both failing on v0.175.0. Change set: `scripts/progress-window.py`, `scripts/tests/test_progress_window.py`, `CHANGELOG.md`.
 
