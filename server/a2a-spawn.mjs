@@ -381,6 +381,16 @@ export function a2aWorkerRecord({
       error: null,
       task,
       createdAt,
+      // ── the status channel's registration outcome ─────────────────────────────────────────
+      // ⚠️ THREE STATES, NOT TWO, and each names a different failure. `not-attempted` means no
+      // registration was ever sent, and `reason` says why (the receiver never bound, or the turn
+      // never named a task before collection ended); `attempted-ok` means one was accepted;
+      // `attempted-error` carries the refusal. A boolean would collapse the first two — which is
+      // exactly how a whole docker e2e reported an empty `status_messages` with no way to tell
+      // "never registered" from "registered and refused". Projected by `agentView`, and it holds
+      // no credential: `taskId` is the task's own id, never the token.
+      pushRegistration: { state: 'not-attempted', reason: 'the turn has not yet named a task' },
+
       // ⚠️ The three fields this path adds, and the three `agentView` and `buildRecord` must
       // never project. Both are explicit allowlists of named fields with no spread, so a token
       // held HERE is invisible to `list_agents` / `agent_status` and is never written to the
