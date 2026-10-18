@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.177.2
 
 - fix: **`/supervisor:who-needs-my-help` no longer promotes a session to `external` on a watcher line that asks the operator.** `watcher_of()` reads the last assistant text, so a session that wrote its ask into the `⏰ Ends:` slot instead of the `👤 You:` closer carried a non-empty watcher and was labelled `external` while it was waiting on the operator — the forced-bucket failure the fifth state exists to prevent. Measured on the first live run (2026-10-18, pane 449): `⏰ Ends: \` your reply — I run the three commands…` classified `external`. A watcher is now evidence only when it names a machine — the closer is a `later (on …)` park or opens with the panel's `⏰ Ends:` / `⏰ Next:` marker, or the watcher text is not an operator reply — and the row otherwise prints `unclassified · watcher asks the operator, not a machine`. A pane whose closer genuinely names a background agent (`⏰ Ends: orientation assistant returns`) stays `external`; two fixtures pin both directions. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
 
