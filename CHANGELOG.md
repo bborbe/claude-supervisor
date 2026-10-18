@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.177.6
 
 - fix: **`progress-window.py` reads a window with a Moved box as `PROGRESSING` even while a tool call is in flight.** `TOOL-RUNNING` ranked above `PROGRESSING`, and a productive session is nearly always mid-call, so the short path was close to unreachable: measured 2026-10-18 on the SC4 exercise, both progressing windows read `TOOL-RUNNING` — one of them with a grade-A `SC4` tick and a `backed` claim. `TOOL-RUNNING` now ranks below `DONE-CANDIDATE` and `PROGRESSING`, so it shields only the no-move verdicts it exists for (never read an in-flight call as stuck). On that window the fixed script reads `PROGRESSING`, `short_path: true`. One fixture pins a measured tick plus a young trailing call; it fails on the old order. Change set: `scripts/progress-window.py`, `scripts/tests/test_progress_window.py`, `docs/session-progress.md`, `CHANGELOG.md`.
 
