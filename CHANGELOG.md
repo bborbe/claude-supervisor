@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.177.3
 
 - fix: **`progress-window.py` rates a coverage row labelled by box id.** The vault-cli coverage mode labels a row either by its checkbox (`[x] …`) or by its box id (`[DoD1] …`); `load_coverage` stripped only the checkbox form, so a bracketed id matched neither the id token nor the box-text prefix and every rating read as unavailable. Measured on the SC4 exercise (2026-10-18, session `6fbbd4f6`): `coverage.rows: 0` from an 11-row coverage output, now `11`. One fixture pins the bracketed form. Change set: `scripts/progress-window.py`, `scripts/tests/test_progress_window.py`, `CHANGELOG.md`.
 
