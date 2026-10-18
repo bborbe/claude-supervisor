@@ -558,6 +558,7 @@ test('an error frame stops the reader and is reported, never yielded as data', (
   assert.equal(reader.frames.length, 1)
   reader.push(sse({ statusUpdate: { taskId: 't-1', status: { state: 'completed' } } }))
   assert.equal(reader.frames.length, 1)
+})
 
 // ── declared mounts / secrets ───────────────────────────────────────────────
 //
