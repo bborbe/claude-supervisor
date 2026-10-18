@@ -2,9 +2,9 @@
 
 The defect this guards: `/supervisor:worker-drive` took "last progress" from a
 `session_digest` the session wrote about itself, so a session going in circles read
-healthy. `docs/session-progress.md` replaces that account with artifacts on disk, and the
-task's SC1 lists the fixtures pinned here -- each class with its expected verdict, grade
-or claim result.
+healthy. `docs/session-progress.md` replaces that account with artifacts on disk; this file pins
+one fixture per class it defines -- each with its expected verdict, grade or claim
+result.
 
 Every fixture is built from real git repositories and a real transcript file in a temp
 dir: commit timestamps are set through `GIT_COMMITTER_DATE`, so the window is decided by

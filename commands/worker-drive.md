@@ -95,17 +95,17 @@ Verdict words: **ACT** — something is mine to do now; **WAIT** — a verified-
 
 Your sense of what you achieved is a claim, not an input; `docs/session-progress.md` owns the grades, verdicts and claim classes.
 
-1. Dispatch §1's coverage mode (once per run); write its output verbatim to `COV=~/.claude/state/worker-drive-handback/<SID>.coverage`.
-2. If a closure box moved since the last drive, file **one** claim — `{"box":"SC<n>|DoD<n>","kind":"tick|commit|progress-entry","ref":"<sha | Progress-line text>"}`, never prose; else none.
+1. Dispatch §1's coverage mode (once); write it verbatim to `COV=~/.claude/state/worker-drive-handback/<SID>.coverage`.
+2. If a closure box moved since the last drive, file **one** claim — `{"box":"SC<n>|DoD<n>","kind":"tick|commit|progress-entry","ref":"<sha | quote-free Progress-line substring>"}`, never prose; else none.
 3. Run the script before Step 8 rewrites `last_run` (`--since` defaults to it):
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-WIN=~/.claude/state/worker-drive-handback/<SID>.window.json
+WIN=~/.claude/state/worker-drive-handback/<SID>.window.json; mkdir -p "${WIN%/*}"
 python3 "$P/progress-window.py" --session <SID> --anchor "<task file>" --coverage "$COV" [--claim '<json>'] --json > "$WIN"; echo "exit=$?"
 ```
 
-Exit 2 is `UNKNOWN`: name the stderr source, take no lever from it, drive on. **`short_path: true` is the one live lever** — skip the reader and §1's inventory and drive the next open box; any other value only adds the ⏱ block (`block` field) to §8.
+Exit 2 is `UNKNOWN`: name the stderr source, drive on. **`short_path: true` is the one live lever** — skip the reader and §1's inventory and drive the next open box; any other value only adds the ⏱ block (`block` field) to §8.
 
 ### Dispatch the read half
 
