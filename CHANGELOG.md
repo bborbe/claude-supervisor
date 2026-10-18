@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.177.1
 
 - fix: **the A2A collection diagnostic no longer mislabels an incremental run as whole-body.** The previous release branched on `d.taskIdFound === false`, but the incremental branch announces itself with `{path: 'incremental'}` and **no `taskIdFound` key** — so the announcement fell to the whole-body arm and reported *"the turn was collected whole-body"* for every incremental run that found no task id, which is precisely the failure the field exists to name. The decision now lives in a pure `pushDiagnosticPatch` that branches on `path`: the announcement returns `null` and writes nothing, `{path: 'whole-body'}` names the fallback, and `{path: 'incremental', taskIdFound: false, frames: N}` names the frame count. ⚠️ **Measured consequence, and why it mattered**: the first instrumented probe reported "whole-body" and was read as the fallback branch. A local probe then showed `fetch` returns `getReader = function` for JSON, SSE **and** a 500-with-body under node — only a 204 no-body yields `undefined` — so the fallback is unreachable for any turn that produced a reply, and the real state was incremental-with-no-id. The bad label inverted the diagnosis. Change set: `server/a2a-spawn.mjs`, `server/a2a-spawn.test.mjs`, `server/supervisor.mjs`, `CHANGELOG.md`.
 
