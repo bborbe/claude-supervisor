@@ -28,6 +28,7 @@ import {
   a2aLiveSessions,
   listWorkersOnController,
   pollA2A,
+  readPushCallbackFromWorker,
   reapExistingWorkerForTask,
   registerPushCallbackOnWorker,
   resolveA2AControllerTarget,
@@ -481,6 +482,64 @@ test('pushDiagnosticPatch turns a thrown registration into attempted-error', () 
   const patch = pushDiagnosticPatch({ path: 'incremental', taskIdFound: true, error: 'boom' })
   assert.equal(patch.state, 'attempted-error')
   assert.match(patch.error, /boom/)
+})
+
+test('the push config round-trips: what set registers, get reads back', async () => {
+  // ⚠️ THE READ-BACK IS THE ONLY EVIDENCE THE WORKER STORED WHAT IT ACCEPTED. `{registered: true}`
+  // proves a 200, not a held config, and the two are indistinguishable until something reads it.
+  const store = new Map()
+  const seen = []
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body)
+    seen.push(body.method)
+    if (body.method === 'CreateTaskPushNotificationConfig') {
+      store.set(body.params.taskId, { url: body.params.url, token: body.params.token })
+      return { ok: true, status: 200, json: async () => ({ jsonrpc: '2.0', id: 1, result: {} }) }
+    }
+    if (body.method === 'GetTaskPushNotificationConfig') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ jsonrpc: '2.0', id: 1, result: store.get(body.params.taskId) ?? null }),
+      }
+    }
+    return { ok: false, status: 400, json: async () => ({}) }
+  }
+  const push = { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-alpha' }
+  const registered = await registerPushCallbackOnWorker({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    taskId: 'task-1',
+    push,
+    token: 'worker-token',
+    fetchImpl,
+  })
+  assert.deepEqual(registered, { registered: true })
+
+  const read = await readPushCallbackFromWorker({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    taskId: 'task-1',
+    token: 'worker-token',
+    fetchImpl,
+  })
+  assert.deepEqual(read, { config: push }, 'the read returns what the set registered')
+  assert.deepEqual(seen, ['CreateTaskPushNotificationConfig', 'GetTaskPushNotificationConfig'])
+})
+
+test('a refused push-config read-back is reported, not returned as an empty config', async () => {
+  const out = await readPushCallbackFromWorker({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    taskId: 'task-1',
+    token: 'worker-token',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ jsonrpc: '2.0', id: 1, error: { code: -32001, message: 'task not found' } }),
+    }),
+  })
+  assert.match(out.error, /task not found/)
+  // ⚠️ A refusal must not read as "the worker holds no config" — those are different facts, and
+  // collapsing them is the same class of mislabelling this channel has already paid for.
+  assert.equal('config' in out, false)
 })
 
 test('the record refuses a target this path does not own', () => {

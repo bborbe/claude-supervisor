@@ -592,6 +592,34 @@ export function a2aPushConfigCallFor({ endpoint, taskId, push, token, requestId 
   }
 }
 
+export const A2A_PUSH_CONFIG_GET_METHOD = 'GetTaskPushNotificationConfig'
+
+// The read-back half of the round trip — `{ url, headers, body }`, or `{ error }`.
+//
+// ⚠️ `CreateTaskPushNotificationConfig` IS ONLY EVIDENCE THAT THE WORKER ACCEPTED A REGISTRATION.
+// It says nothing about what the worker then stored, and an accepted-then-dropped config is
+// indistinguishable from a working one until something reads it back. This builder is that read.
+export function a2aPushConfigGetCallFor({ endpoint, taskId, token, requestId = 1 } = {}) {
+  for (const [name, value] of Object.entries({ endpoint, taskId, token })) {
+    if (typeof value !== 'string' || value === '') {
+      return { error: `\`${name}\` is required to read a push callback back over A2A.` }
+    }
+  }
+  return {
+    url: endpoint,
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${token}`,
+    },
+    body: {
+      jsonrpc: '2.0',
+      id: requestId,
+      method: A2A_PUSH_CONFIG_GET_METHOD,
+      params: { taskId },
+    },
+  }
+}
+
 // The JSON-RPC request for one control call — `{ url, headers, body }`, or `{ error }`.
 //
 // ⚠️ ONE-SHOT, NOT STREAMING — see trap 6. No `accept: text/event-stream`: a one-shot route

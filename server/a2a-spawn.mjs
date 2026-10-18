@@ -23,6 +23,7 @@ import {
   a2aFrames,
   a2aOutcome,
   a2aPushConfigCallFor,
+  a2aPushConfigGetCallFor,
   a2aSendRequestFor,
   a2aStreamRequestFor,
   a2aTaskIdOf,
@@ -718,6 +719,58 @@ export async function registerPushCallbackOnWorker({
     return { error: `the worker answered HTTP ${res.status} to the push registration.` }
   }
   return { registered: true }
+}
+
+// Read a registered push config back from the worker — `{ config }`, or `{ error }`.
+//
+// ⚠️ THE ONLY EVIDENCE THAT THE WORKER STORED WHAT IT ACCEPTED. `registerPushCallbackOnWorker`
+// returning `{registered: true}` proves the worker answered 200, not that the config is held; this
+// is the read that closes that gap, and it is the half the channel's "genuinely A2A" criterion asks
+// for.
+//
+// ⚠️ IT RETURNS THE CONFIG, NEVER THE WORKER'S BEARER TOKEN. `token` authenticates the call and is
+// used for nothing else; what comes back is the worker's own view of `{url, token}` for the task.
+// The supervisor deliberately never projects that bearer token, and this path does not change that
+// — the deliberate exception is one named, read-only call, not a widening.
+export async function readPushCallbackFromWorker({
+  endpoint,
+  taskId,
+  token,
+  fetchImpl = fetch,
+  timeoutMs = A2A_REGISTER_TIMEOUT_MS,
+} = {}) {
+  const call = a2aPushConfigGetCallFor({ endpoint, taskId, token })
+  if (call.error) return { error: call.error }
+  const signal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
+  let res
+  try {
+    res = await fetchImpl(call.url, {
+      method: 'POST',
+      headers: call.headers,
+      body: JSON.stringify(call.body),
+      ...(signal ? { signal } : {}),
+    })
+  } catch (cause) {
+    if (cause?.name === 'TimeoutError' || cause?.name === 'AbortError') {
+      return {
+        error: `the push-config read-back to ${call.url} did not answer within ${Math.round(timeoutMs / 1000)}s`,
+      }
+    }
+    return { error: `the push-config read-back to ${call.url} could not be made: ${cause?.message ?? cause}` }
+  }
+  if (!res.ok) return { error: `the worker answered HTTP ${res.status} to the push-config read-back.` }
+  let body
+  try {
+    body = await res.json()
+  } catch (cause) {
+    return { error: `the push-config read-back body was not JSON: ${cause?.message ?? cause}` }
+  }
+  if (body?.error) {
+    return {
+      error: `the worker refused the push-config read-back: ${body.error?.message ?? JSON.stringify(body.error)}`,
+    }
+  }
+  return { config: body?.result ?? null }
 }
 
 // The record patch a collection diagnostic produces — the new `pushRegistration`, or `null` when
