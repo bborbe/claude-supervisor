@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- docs: **`docs/fleet-surface.md` § the cause-of-death classifier now names `/supervisor:restart` itself, not only its command file.** The v0.173.0 rename updated the *path* on that line (`commands/worker-restart.md` → `commands/restart.md`) but left the prose naming a file, so the one page that owns the restart contract described the mechanism without ever naming the verb — and a reader grepping the docs for `/supervisor:restart` got no hit there, while `docs/session-tiers.md` had four. Caught by the restart-verb task's SC4 probe, which requires a hit in *each* file. Change set: `docs/fleet-surface.md`, `CHANGELOG.md`.
+- docs: **`docs/fleet-surface.md` § the cause-of-death classifier now names `/supervisor:restart` itself, not only its command file.** The v0.173.0 rename updated the *path* on that line (`commands/worker-restart.md` → `commands/restart.md`) but left the prose naming a file, so the one page that owns the restart contract described the mechanism without ever naming the verb — and a reader grepping the docs for `/supervisor:restart` got no hit there, while `docs/session-tiers.md` had four. Change set: `docs/fleet-surface.md`, `CHANGELOG.md`.
 
 ## v0.174.0
 
