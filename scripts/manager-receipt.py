@@ -176,16 +176,46 @@ def needs_you_shape(text: str) -> bool:
     return body.startswith("Needs you (") or "Nothing needs you." in body
 
 
+def _frame_top(line: str) -> bool:
+    return line.startswith("┌") and line.endswith("┐")
+
+
+def _frame_bottom(line: str) -> bool:
+    return line.startswith("└") and line.endswith("┘")
+
+
+def _liveness_marker(line: str) -> bool:
+    """The tick's leading liveness marker: timestamp + `✓` + topic + counts.
+
+    `docs/sweep-output.md` § Print the full table on every tick mandates it as
+    "always the first line of the tick's output" and calls it "part of the frame,
+    not decoration". The `✓` is the glyph that spec names as the marker's
+    distinguishing shape, so it is the test here rather than "any leading line" —
+    a stub that prepends arbitrary prose must still fail.
+    """
+    return "✓" in line
+
+
 def sweep_shape(text: str) -> bool:
     """The sweep reader's payload: the RENDERED box-table `--write-payload` stores.
 
     `--write-payload` (`manager-predispatch.py`) does `table = sys.stdin.read()` and
-    writes what it was handed — the frame `box-table.py` rendered — so `--save` can
-    read the table back and the operator can see it. It is not JSON, and never was:
-    the predicate this replaced required `"header" in json.loads(text)`, which no
-    artifact the producer writes can satisfy, so every round reported
-    `skipped: sweep` whether or not the leg ran (measured 2026-10-18, round
-    19:49–20:05 on goal manager session `beac5fd0`).
+    writes what it was handed, so `--save` can read the table back and the operator
+    can see it. It is not JSON, and never was: the predicate this replaced required
+    `"header" in json.loads(text)`, which no artifact the producer writes can
+    satisfy, so every round reported `skipped: sweep` whether or not the leg ran
+    (measured 2026-10-18, round 19:49–20:05 on goal manager session `beac5fd0`).
+
+    **Two payload shapes are real, and both are accepted.** The tick's output is a
+    liveness marker followed by the frame — "The marker leads, and the box hangs two
+    spaces under it" (`docs/sweep-output.md`) — so a payload captured from a tick
+    starts with the marker, while one captured from the frame alone does not.
+    Measured 2026-10-18/19 on consecutive rounds twenty minutes apart: same code,
+    same install, one payload of each shape. A predicate requiring the frame at
+    line 0 flaps between green and red on rounds identical in substance, which is
+    the defect this predicate exists to close. The marker is accepted only as
+    line 0 and only with a real frame starting on the next line; stripping it is
+    deliberately the producer's business, not this predicate's.
 
     The frame's own contract is `box-table.py:render()`: a top rule opening `┌` and
     closing `┐`, `│`-framed rows, and a bottom rule opening `└` and closing `┘`.
@@ -194,12 +224,13 @@ def sweep_shape(text: str) -> bool:
     catch, while accepting every real payload.
     """
     lines = [ln.strip() for ln in OSC8_RE.sub("", text).splitlines() if ln.strip()]
+    if len(lines) >= 2 and _liveness_marker(lines[0]) and _frame_top(lines[1]):
+        lines = lines[1:]
     if len(lines) < 4:
         return False
-    top, bottom = lines[0], lines[-1]
-    if not (top.startswith("┌") and top.endswith("┐")):
+    if not _frame_top(lines[0]):
         return False
-    if not (bottom.startswith("└") and bottom.endswith("┘")):
+    if not _frame_bottom(lines[-1]):
         return False
     return any(ln.startswith("│") and ln.endswith("│") for ln in lines[1:-1])
 
