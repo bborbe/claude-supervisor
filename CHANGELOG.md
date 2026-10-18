@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.174.1
 
 - docs: **`docs/fleet-surface.md` § the cause-of-death classifier now names `/supervisor:restart` itself, not only its command file.** The v0.173.0 rename updated the *path* on that line (`commands/worker-restart.md` → `commands/restart.md`) but left the prose naming a file, so the one page that owns the restart contract described the mechanism without ever naming the verb — and a reader grepping the docs for `/supervisor:restart` got no hit there, while `docs/session-tiers.md` had four. Change set: `docs/fleet-surface.md`, `CHANGELOG.md`.
 
