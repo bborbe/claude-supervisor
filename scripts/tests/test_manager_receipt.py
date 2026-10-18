@@ -211,6 +211,66 @@ class Receipt(unittest.TestCase):
         self.assertEqual(rc, self.m.EXIT_SKIPPED)
         self.assertIn("skipped: watcher", out)
 
+    def test_watcher_empty_log_is_flagged(self):
+        # The arm armed but never appended: the file exists and its mtime is fresh,
+        # so an existence-or-recency check passes while nothing ever polled. Only
+        # the absent RECORD tells this apart from a live arm.
+        self.start()
+        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
+        sw = self.artifact("sweep.json", SWEEP_OK)
+        ev = self.artifact("events.jsonl", "")
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+            self.record(step, p)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: watcher", out)
+
+    def test_watcher_malformed_records_do_not_mask_a_live_one(self):
+        # A torn line must be SKIPPED, not fatal: the arm appends while the manager
+        # reads, so a half-flushed record is an ordinary state and must not hide the
+        # good record beside it.
+        self.start()
+        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
+        sw = self.artifact("sweep.json", SWEEP_OK)
+        ev = os.path.join(self.arts.name, "events.jsonl")
+        with open(ev, "w", encoding="utf-8") as fh:
+            fh.write('{"kind": "LIVENESS", "ts": \n')  # torn write
+            fh.write("not json at all\n")              # garbage
+            fh.write("\n")                             # blank line
+            fh.write(json.dumps({"kind": "LIVENESS", "ts": time.time()}) + "\n")
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+            self.record(step, p)
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+
+    def test_watcher_log_of_only_malformed_records_is_flagged(self):
+        self.start()
+        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
+        sw = self.artifact("sweep.json", SWEEP_OK)
+        ev = os.path.join(self.arts.name, "events.jsonl")
+        with open(ev, "w", encoding="utf-8") as fh:
+            fh.write('{"kind": "LIVENESS", "ts": \n')          # torn write
+            fh.write('{"kind": "LIVENESS"}\n')                 # no ts at all
+            fh.write('{"kind": "LIVENESS", "ts": "soon"}\n')   # non-numeric ts
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+            self.record(step, p)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: watcher", out)
+
+    def test_watcher_future_record_is_not_in_the_window(self):
+        # Clock skew, or a hand-written record: a ts AFTER `now` is not evidence the
+        # arm polled during this round.
+        self.start()
+        ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
+        sw = self.artifact("sweep.json", SWEEP_OK)
+        ev = self.events_log("events.jsonl", [time.time() + 3600])
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+            self.record(step, p)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: watcher", out)
+
     # --- the round window and receipt lifecycle --------------------------------
 
     def test_a_receipt_cannot_inherit_the_previous_rounds_artifacts(self):
