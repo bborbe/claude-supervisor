@@ -2620,7 +2620,7 @@ const TOOLS = [
   {
     name: 'read_push_config',
     description:
-      'Read a worker\'s registered A2A push config back FROM THE WORKER — `{ config }` or `{ error }`. This is the read half of the push round trip: `push_registration.state === "attempted-ok"` proves only that the worker ACCEPTED a registration, not that it holds one, and this call is the only thing that separates those two. ⚠️ It requires an accepted registration to exist for that agent and refuses otherwise, rather than reading an unregistered task. ⚠️ It returns the CONFIG — the url and notification token the worker stores — never the worker\'s bearer token, which authenticates the call and is never projected. ⚠️ Read-only: nothing on the worker changes.',
+      'Read a worker\'s registered A2A push config back FROM THE WORKER — `{ configs }` (a list, empty when the worker holds none) or `{ error }`. It lists rather than gets: the SDK\'s get is keyed by task id AND a config id the registration never sends, so a get can never match. This is the read half of the push round trip: `push_registration.state === "attempted-ok"` proves only that the worker ACCEPTED a registration, not that it holds one, and this call is the only thing that separates those two. ⚠️ It requires an accepted registration to exist for that agent and refuses otherwise, rather than reading an unregistered task. ⚠️ It returns the CONFIG — the url and notification token the worker stores — never the worker\'s bearer token, which authenticates the call and is never projected. ⚠️ Read-only: nothing on the worker changes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3073,7 +3073,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         token: agent.workerToken,
       })
       if (out.error) return reply({ error: out.error, task_id: reg.taskId })
-      return reply({ agent_id: agent.id, task_id: reg.taskId, config: out.config })
+      return reply({ agent_id: agent.id, task_id: reg.taskId, configs: out.configs })
     }
 
     case 'pending_permissions':
