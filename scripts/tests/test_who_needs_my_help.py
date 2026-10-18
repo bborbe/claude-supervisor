@@ -736,5 +736,197 @@ class OperatorAskTest(Base):
         self.assertIsNotNone(row["gate"])
 
 
+class NotParkedManagerTest(Base):
+    """A manager between rounds is NOT parked, and must still be queryable.
+
+    `build()` builds the Managers section from `parked_rows + not_parked`, so a
+    manager sitting `busy` between rounds has to carry `next_item` on the
+    not-parked path too. Measured while adding the four-state label: that key was
+    dropped from the not-parked row and no fixture noticed, because every manager
+    fixture in this suite was parked. This is that fixture.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.fleet.task("25 Tasks/M1", "# Tasks\n- [ ] land the ordering fix\n")
+        self.fleet.add("m1", 701, "", status="busy",
+                       name="Between Rounds Manager", role="manager",
+                       task="25 Tasks/M1")
+        self.sweep = self.fleet.sweep()
+        self.out = h.render(self.sweep)
+
+    def test_a_busy_manager_is_listed_with_its_next_item(self):
+        self.assertEqual(["Between Rounds Manager"],
+                         [r["name"] for r in self.sweep["managers"]])
+        self.assertIn("land the ordering fix", self.out)
+
+    def test_its_state_is_working_not_parked(self):
+        self.assertEqual([], self.sweep["parked"])
+        self.assertEqual(h.STATE_WORKING, self.sweep["managers"][0]["state"])
+
+
+CLOSER_WATCH = "nothing\n⏰ Ends: the PR review landing (github-pr-watch, #312)"
+
+
+class FourStateTest(Base):
+    """SC1 / SC2 / SC3 — one state per session, or `unclassified` with a reason.
+
+    TWO FIXTURES PER BUCKET, and their input signals differ: `decision` from a
+    pick-menu closer and from a `you run:` closer; `external` from an `⏰ Ends:`
+    watcher and from a `later (on …)` clock; `working` from a `busy` record and
+    from a `busy` session the attention store never covered; `closed` from a
+    `completed` task and from an `aborted` one. One fixture per bucket would pass
+    on a classifier that returned a constant, which is the whole reason this
+    suite's standard is two.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.fleet.task("25 Tasks/open item",
+                        "---\nstatus: in_progress\n---\n# Tasks\n- [ ] something else entirely\n")
+        self.fleet.task("25 Tasks/done item",
+                        "---\nstatus: completed\n---\n# Tasks\n- [x] shipped\n")
+        self.fleet.task("25 Tasks/aborted item",
+                        "---\nstatus: aborted\n---\n# Tasks\n- [x] abandoned\n")
+        # decision — two closers, two different gate classes
+        self.fleet.add("s-dec-pick", 301, CLOSER_C, name="Decision Pick",
+                       task="25 Tasks/open item")
+        self.fleet.add("s-dec-run", 302, CLOSER_D, name="Decision Run",
+                       task="25 Tasks/open item")
+        # external — a watcher line and a clock line
+        self.fleet.add("s-ext-watch", 303, CLOSER_WATCH, name="External Watch")
+        self.fleet.add("s-ext-clock", 304, CLOSER_CLOCK, name="External Clock")
+        # working — a busy record, and a busy session with no attention record
+        self.fleet.add("s-wrk-record", 305, "", status="busy", name="Working Record")
+        self.fleet.registry["s-wrk-bare"] = "Working Bare"
+        self.fleet.status["s-wrk-bare"] = "busy"
+        # closed — a completed task and an aborted one, both idle with nothing to say
+        self.fleet.add("s-cls-done", 306, "nothing", status="idle",
+                       name="Closed Done", task="25 Tasks/done item")
+        self.fleet.add("s-cls-abort", 307, "nothing", status="idle",
+                       name="Closed Aborted", task="25 Tasks/aborted item")
+        # unclassified — a settings ask rule and a bare shell
+        self.fleet.add("s-unc-perm", 308, "", name="Ask Rule Worker")
+        self.fleet.shapes["308"] = "permission"
+        self.fleet.add("s-unc-shell", 309, "", status="shell", name="Bare Shell")
+        self.sweep = self._sweep_with_registry_only()
+
+    def _sweep_with_registry_only(self):
+        """`Fleet.sweep()` over records PLUS the registry-only session.
+
+        The supplement itself lives in `sweep_live()`; here it is applied by hand
+        so `build()`'s classification is testable without the live readers. The
+        `sweep_live()` path is pinned separately by `PopulationTest`.
+        """
+        records = list(self.fleet.records)
+        records.append({"session_id": "s-wrk-bare", "pane": "310",
+                        "detail": "", "kind": "idle", "ts": 0,
+                        "_transcript": ""})
+        self.fleet.records = records
+        return self.fleet.sweep()
+
+    def _state(self, name):
+        for r in self.sweep["parked"] + self.sweep["not_parked"]:
+            if r["name"] == name:
+                return r["state"]
+        self.fail(f"{name} rendered no row at all")
+
+    def test_each_bucket_is_reached_by_two_differing_fixtures(self):
+        expected = {
+            "Decision Pick": h.STATE_DECISION,
+            "Decision Run": h.STATE_DECISION,
+            "External Watch": h.STATE_EXTERNAL,
+            "External Clock": h.STATE_EXTERNAL,
+            "Working Record": h.STATE_WORKING,
+            "Working Bare": h.STATE_WORKING,
+            "Closed Done": h.STATE_CLOSED,
+            "Closed Aborted": h.STATE_CLOSED,
+            "Ask Rule Worker": h.STATE_UNCLASSIFIED,
+            "Bare Shell": h.STATE_UNCLASSIFIED,
+        }
+        self.assertEqual(expected, {n: self._state(n) for n in expected})
+
+    def test_a_constant_label_cannot_pass(self):
+        # The guard the two-fixture rule exists for: the label set is not one value.
+        seen = {self._state(n) for n in
+                ("Decision Pick", "External Watch", "Working Record", "Closed Done")}
+        self.assertEqual(4, len(seen))
+
+    def test_the_ask_rule_worker_is_unclassified_with_its_own_reason(self):
+        row = {r["name"]: r for r in self.sweep["parked"]}["Ask Rule Worker"]
+        self.assertEqual(h.STATE_UNCLASSIFIED, row["state"])
+        self.assertEqual("permission prompt (ask rule)", row["state_reason"])
+
+    def test_a_bare_shell_is_unclassified_with_a_different_reason(self):
+        row = {r["name"]: r for r in self.sweep["not_parked"]}["Bare Shell"]
+        self.assertEqual(h.STATE_UNCLASSIFIED, row["state"])
+        self.assertEqual("bare shell", row["state_reason"])
+
+    def test_a_machine_bound_wait_is_external_and_names_its_watcher(self):
+        row = {r["name"]: r for r in self.sweep["parked"]}["External Watch"]
+        self.assertEqual(h.STATE_EXTERNAL, row["state"])
+        self.assertIn("PR review landing", row["watcher"])
+
+    def test_the_render_tallies_every_state_it_printed(self):
+        out = h.render(self.sweep)
+        for state in (h.STATE_DECISION, h.STATE_EXTERNAL, h.STATE_WORKING,
+                      h.STATE_CLOSED, h.STATE_UNCLASSIFIED):
+            self.assertIn(state, out)
+        self.assertIn("decision 2", out)
+
+
+class PopulationTest(Base):
+    """SC1 — the population is every live session, not only the ones that posted.
+
+    The attention store holds a row only for a session with something to report,
+    so a sweep fed by it alone omits every session that is simply working or
+    finished. `sweep_live()` supplements the registry, and this pins that the
+    supplement survives `is_live()`'s pane filter.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.fleet.add("s-posted", 401, CLOSER_C, name="Posted Worker")
+        self.fleet.registry["s-silent"] = "Silent Worker"
+        self.fleet.status["s-silent"] = "busy"
+
+    def _sweep_live(self):
+        pmap = {"401": {"title": "Posted Worker"}, "402": {"title": "Silent Worker"}}
+        patches = [
+            mock.patch.object(wnm, "wezterm_panes", return_value=pmap),
+            mock.patch.object(wnm, "read_registry",
+                              return_value=dict(self.fleet.registry)),
+            mock.patch.object(wnm, "registry_records",
+                              return_value=self.fleet.reg_records()),
+            mock.patch.object(wnm, "load",
+                              side_effect=lambda suffix: list(self.fleet.records)),
+            mock.patch.object(wnm, "read_causes", return_value=dict(EMPTY_STATE)),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return h.sweep_live(shape_of=lambda p: None,
+                            link_of=lambda p: f"/supervisor:jump {p}")
+
+    def test_a_session_with_no_attention_record_still_renders(self):
+        sweep = self._sweep_live()
+        names = [r["name"] for r in sweep["parked"] + sweep["not_parked"]]
+        self.assertIn("Silent Worker", names)
+
+    def test_the_supplemented_session_carries_its_state(self):
+        sweep = self._sweep_live()
+        row = {r["name"]: r for r in sweep["not_parked"]}["Silent Worker"]
+        self.assertEqual(h.STATE_WORKING, row["state"])
+        self.assertEqual("/supervisor:jump 402", row["jump"])
+
+    def test_the_calling_session_is_not_added_back(self):
+        # `load()` drops the caller because its gate is already in its own pane;
+        # the registry supplement must not undo that through a second door.
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "s-silent"}):
+            sweep = self._sweep_live()
+        names = [r["name"] for r in sweep["parked"] + sweep["not_parked"]]
+        self.assertNotIn("Silent Worker", names)
+
+
 if __name__ == "__main__":
     unittest.main()
