@@ -181,6 +181,31 @@ MANAGER_QUESTION = (
     "What is the next SC or DoD item you could complete soon, and what blocks it?"
 )
 
+# --- The four states ---------------------------------------------------------
+#
+# Every live session is labelled `decision`, `external`, `working` or `closed`.
+# The label is a PROJECTION over what this script already computes — `parked()`,
+# the registry's status, `cause_class()`, `gate_class()`, `watcher_of()` and
+# `eta_of()` — never a second classifier.
+#
+# `unclassified` is a first-class answer, not a fallback that hides a bug. A
+# session the four states cannot describe is a session whose reason is the only
+# useful thing to report about it, and forcing it into a bucket would be a silent
+# lie about the fleet.
+STATE_DECISION = "decision"
+STATE_EXTERNAL = "external"
+STATE_WORKING = "working"
+STATE_CLOSED = "closed"
+STATE_UNCLASSIFIED = "unclassified"
+STATES = (STATE_DECISION, STATE_EXTERNAL, STATE_WORKING, STATE_CLOSED,
+          STATE_UNCLASSIFIED)
+
+# A task at one of these is finished, so a tab still open on it is `closed` rather
+# than idle. Read through `wnm.task_status_from_closer()` — the sibling already
+# resolves the anchored task from the closer's own `📌 Task:` link and reads its
+# frontmatter `status:`; nothing new is read here.
+TERMINAL_TASK = ("completed", "aborted", "hold")
+
 
 # --- The pane viewport read -------------------------------------------------
 
@@ -560,6 +585,65 @@ def gate_class(rec, cause, shape, task_text):
     return "C"
 
 
+# --- The four-state label ----------------------------------------------------
+
+
+def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
+             readable, is_parked):
+    """The four-state label, or `unclassified` with the reason. Pure.
+
+    Order is load-bearing. A decision outranks everything else: a session asking
+    the operator a question is not `working` whatever the registry says, and it
+    is not `closed` even when its task already reads `completed` — a session that
+    finished its task and then raised a new gate is a live question, not a corpse.
+
+    The parked branch is tested first and the registry status only decides the
+    unparked one. That is deliberate: a session mid-turn reads `busy`, and its
+    last assistant text is then the PREVIOUS turn's panel, so a stale `⏰ Next:`
+    line would otherwise report a running session as `external`. `parked()` is
+    the two-channel verdict that already refuses that inference.
+
+    `unclassified` is a first-class answer, never a fallback that hides a bug, and
+    it always carries the reason that produced it. A permission modal is class D only when the session's own
+    closer is an operator ask; a modal raised by a SETTINGS ASK RULE has no
+    closer verb, so `is_operator_ask()` is False and `build()` leaves `gate` as
+    None. That is the fifth state the operator named, and it is reported as
+    `unclassified` rather than folded into `decision`, because the harness is
+    waiting on a permission click the session never asked for.
+    """
+    if gate in OPERATOR_BOUND:
+        return STATE_DECISION, ""
+    if is_parked:
+        if watcher or eta or cause == wnm.CAUSE_CLOCK:
+            return STATE_EXTERNAL, ""
+        if gate in ("A", "B"):
+            # Manager-clearable, never the operator's: the runbook's classes A/B.
+            return STATE_EXTERNAL, f"manager-cleared gate (class {gate})"
+        if cause == wnm.CAUSE_TASK:
+            return STATE_UNCLASSIFIED, "restates a peer gate"
+        if cause == wnm.CAUSE_CAP:
+            return STATE_UNCLASSIFIED, "spawn cap"
+        if shape == "permission":
+            return STATE_UNCLASSIFIED, "permission prompt (ask rule)"
+        if shape == "question":
+            return STATE_UNCLASSIFIED, "modal question with no closer verb"
+        if cause == wnm.CAUSE_OPERATOR:
+            # `is_open_gate()` says operator, `is_operator_ask()` says no verb —
+            # the two disagree, and the honest answer names the disagreement
+            # instead of inventing a decision the operator was never asked for.
+            return STATE_UNCLASSIFIED, "operator gate with no closer verb"
+        if not readable:
+            return STATE_UNCLASSIFIED, "transcript unreadable"
+        return STATE_UNCLASSIFIED, "no state signal"
+    if reg_status == "busy":
+        return STATE_WORKING, ""
+    if task_status in TERMINAL_TASK:
+        return STATE_CLOSED, ""
+    if reg_status == "shell":
+        return STATE_UNCLASSIFIED, "bare shell"
+    return STATE_UNCLASSIFIED, "idle with no ask"
+
+
 # --- The sweep ---------------------------------------------------------------
 
 
@@ -674,12 +758,23 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
     for sid, recs in groups.items():
         rec = representative(recs)
         name = wnm.name_of(rec, pmap, registry)
+        reg_status = ((reg_records.get(sid) or {}).get("status") or "").strip().lower()
         if not parked(rec, reg_records.get(sid), resumed_ids):
             pane = rec.get("pane")
             manager = is_manager(rec, registry)
+            task_status = wnm.task_status_from_closer(rec)
+            state, reason = state_of(reg_status, None, None, "", "", task_status,
+                                     None, bool(wnm.last_assistant_text(rec)), False)
             not_parked.append({"session_id": sid, "name": name,
                                "pane": pane,
                                "manager": manager,
+                               "reg_status": reg_status,
+                               "state": state,
+                               "state_reason": reason,
+                               "cause": None,
+                               "gate": None,
+                               "watcher": "",
+                               "eta": "",
                                "next_item": next_item(read_task(anchor_page(rec, manager))),
                                "wait": "",
                                "jump": link_of(pane) if pane else ""})
@@ -698,6 +793,13 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
         # off the anchored task file it came back empty on every live manager.
         next_text = read_task(anchor_page(rec, manager)) if manager else task_text
         options, recommended = options_of(wnm.current_closer(rec))
+        gate = (gate_class(rec, cause, shape, task_text)
+                if is_operator_ask(rec) or sid in carded else None)
+        watcher = watcher_of(rec)
+        eta = eta_of(rec)
+        task_status = wnm.task_status_from_closer(rec)
+        state, reason = state_of(reg_status, cause, gate, watcher, eta, task_status,
+                                 shape, bool(wnm.last_assistant_text(rec)), True)
         parked_rows.append({
             "session_id": sid,
             "name": name,
@@ -711,12 +813,15 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
             # so a session sitting on arbitrary prose is handed to the operator.
             # Measured 2026-10-15: that is exactly how panes 1557 and 1619 reached
             # `Handover` while all three instruments agreed they were not gated.
-            "gate": (gate_class(rec, cause, shape, task_text)
-                     if is_operator_ask(rec) or sid in carded else None),
+            "gate": gate,
             "flags": flags,
+            "reg_status": reg_status,
+            "state": state,
+            "state_reason": reason,
+            "task_status": task_status,
             "wait": wait_reason(rec),
-            "watcher": watcher_of(rec),
-            "eta": eta_of(rec),
+            "watcher": watcher,
+            "eta": eta,
             "jump": link_of(pane) if pane else "",
             "options": options,
             "answer": recommended,
@@ -783,6 +888,15 @@ def render(sweep):
     out = []
 
     out.append(f"Sweep ({len(live)} live, {len(parked)} parked)")
+    # The four-state tally, printed once before any row: the operator's question
+    # is "what is every session doing", and answering it only row-by-row makes
+    # them count. Classes with no rows are omitted rather than printed as 0 —
+    # a zero is noise, while an absent class is the honest answer.
+    tally = {s: 0 for s in STATES}
+    for r in parked + not_parked:
+        tally[r["state"]] = tally.get(r["state"], 0) + 1
+    if any(tally.values()):
+        out.append("  " + " · ".join(f"{s} {tally[s]}" for s in STATES if tally[s]))
     # Which source answered, printed once before any row — a silent fallback would
     # be indistinguishable from a healthy store, and a failed store read makes
     # `board_flags()` emit nothing, so without this line an outage reads as a
@@ -790,7 +904,8 @@ def render(sweep):
     if sweep.get("source_note"):
         out.append(f"  {sweep['source_note']}")
     for r in sorted(parked, key=lambda r: r["name"]):
-        head = f"  [{r['pane'] or '?':>4}] {r['name'][:50]:<50}  {r['cause_label']}"
+        head = (f"  {r['state']:<13} [{r['pane'] or '?':>4}] "
+                f"{r['name'][:50]:<50}  {r['cause_label']}")
         if r["gate"]:
             head += f" · gate {r['gate']}"
         else:
@@ -800,6 +915,8 @@ def render(sweep):
                      else " · not gated")
         if r["flags"]:
             head += f" [{' '.join(r['flags'])}]"
+        if r.get("state_reason"):
+            head += f" · {r['state_reason']}"
         out.append(head)
         if r["watcher"]:
             out.append(f"         watcher: {r['watcher']}")
@@ -810,10 +927,19 @@ def render(sweep):
         if r["jump"]:
             out.append(f"         {r['jump']}")
     # A live pane all three instruments agree is NOT gated is recorded as such, so
-    # the negative direction is assessable at all rather than vacuous.
+    # the negative direction is assessable at all rather than vacuous. Rendered one
+    # row per session, like the parked list: the state label and the jump link are
+    # the payload of this report, and a comma-joined name list carries neither.
     if not_parked:
-        names = ", ".join(f"[{r['pane'] or '?'}] {r['name']}" for r in not_parked)
-        out.append(f"  not parked ({len(not_parked)}): {names}")
+        out.append(f"  not parked ({len(not_parked)})")
+        for r in sorted(not_parked, key=lambda r: r["name"]):
+            line = (f"  {r['state']:<13} [{r['pane'] or '?':>4}] "
+                    f"{r['name'][:50]:<50}")
+            if r.get("state_reason"):
+                line += f"  {r['state_reason']}"
+            out.append(line)
+            if r["jump"]:
+                out.append(f"         {r['jump']}")
 
     rows = handover_order(parked)
     out.append("")
@@ -880,6 +1006,24 @@ def sweep_live(shape_of=pane_shape, link_of=jump_link):
     reg_records = wnm.registry_records()
     live_ids = None if registry is None else set(registry)
     records = wnm.load("needs")
+    # Every live session, not only the ones that posted an item. The attention
+    # store holds a row only for a session with something to report, so a sweep
+    # fed by it alone omits every session that is simply working or finished —
+    # exactly the population the four-state label exists to describe. One
+    # synthetic record per registry session the store does not cover restores it;
+    # `resolve_missing_panes()` then resolves its pane from the registry name, and
+    # `is_live()` keeps the existing orphan filter, so a session with no
+    # resolvable pane is still dropped rather than rendered unjumpable.
+    # The caller is excluded for the same reason `load()` excludes it: a session
+    # is never its own attention item, because its gate is already in front of
+    # the operator in its own pane. Adding it back through this door would make
+    # every sweep report the session that ran it.
+    known = {r.get("session_id") for r in records}
+    known.add(os.environ.get("CLAUDE_CODE_SESSION_ID", ""))
+    for sid in (registry or {}):
+        if sid not in known:
+            records.append({"session_id": sid, "pane": "", "detail": "",
+                            "kind": "idle", "ts": 0})
     wnm.resolve_missing_panes(records, pmap, registry)
     quiet = wnm.quiet_session_ids(records, live_ids)
     live = [wnm.reclassify_idle(r) for r in records
