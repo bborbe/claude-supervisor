@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`/supervisor:who-needs-my-help` no longer bounds how long an operator reply's lead-in may be, because the live fleet exceeded the bound on the first run after it shipped.** The previous release classified a watcher line as an operator reply only when the verb came within 24 characters of `your`; pane 483 read `external` with `⏰ Ends: your \`nukeprod-threshold-applied\` reply` — a 29-character lead-in. The pattern is now unbounded and non-greedy, so it stops at the first verb wherever it falls. A bound here is a bet on how long a phrase written by another session will be, and the fleet settled that bet against the code within minutes. A fixture pins the live shape. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
+
 ## v0.177.6
 
 - fix: **`progress-window.py` reads a window with a Moved box as `PROGRESSING` even while a tool call is in flight.** `TOOL-RUNNING` ranked above `PROGRESSING`, and a productive session is nearly always mid-call, so the short path was close to unreachable: measured 2026-10-18 on the SC4 exercise, both progressing windows read `TOOL-RUNNING` — one of them with a grade-A `SC4` tick and a `backed` claim. `TOOL-RUNNING` now ranks below `DONE-CANDIDATE` and `PROGRESSING`, so it shields only the no-move verdicts it exists for (never read an in-flight call as stuck). On that window the fixed script reads `PROGRESSING`, `short_path: true`. One fixture pins a measured tick plus a young trailing call; it fails on the old order. Change set: `scripts/progress-window.py`, `scripts/tests/test_progress_window.py`, `docs/session-progress.md`, `CHANGELOG.md`.
