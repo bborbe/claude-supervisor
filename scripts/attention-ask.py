@@ -294,6 +294,11 @@ MECHANISM = "message"
 # enum here lets argparse reject it before the request is sent, and list the
 # accepted values in `--help`.
 PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+# The three levels the store's schema declares for `risk`. It is a producer
+# declaration, stored unchanged; the board may render HIGHER than it and never
+# lower, so a poster that under-declares still cannot make a destructive card
+# render green. See [[Attention Item Schema]] § Fields.
+RISKS = ("routine", "decision", "risk")
 
 
 def resolved_session_id(environ=None):
@@ -414,6 +419,7 @@ def post_question(
     liveness_ref,
     dedup_key,
     interrupt_class,
+    risk,
     payload,
     context,
     options,
@@ -432,6 +438,11 @@ def post_question(
     # an absent `expires_at` as pre-change/optional values, while "" would be a
     # *present* field holding nothing — the same distinction attention-answer.py
     # draws for resolved_by and decision.
+    # Omitted rather than sent empty, for the reason `context` below gives: an
+    # absent `risk` is the schema's "declared nothing" and renders `decision`,
+    # while "" would be a present field holding an undeclared value.
+    if risk:
+        body["risk"] = risk
     if context:
         body["context"] = context
     if options:
@@ -690,6 +701,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             liveness_ref=liveness_ref,
             dedup_key=args.dedup_key,
             interrupt_class=args.interrupt_class,
+            risk=args.risk,
             payload=payload,
             context=args.context,
             options=options,
@@ -855,6 +867,12 @@ def main(argv=None):
         help="<model>:<value> deciding whether the store prunes this item; default owner:<producer-id>",
     )
     post.add_argument("--interrupt-class", default="pick")
+    # The producer's declaration of how much care this deserves. Optional:
+    # omitted, nothing is recorded and the board renders `decision`, which is
+    # what every card posted before this flag existed reads as. The board may
+    # render higher than whatever is passed here and never lower, so this is a
+    # convenience for the poster rather than the safety rule itself.
+    post.add_argument("--risk", default="", choices=("",) + RISKS)
     post.add_argument(
         "--expires-at",
         default="",
@@ -882,6 +900,11 @@ def main(argv=None):
         help="<model>:<value> deciding whether the store prunes this item; default owner:<producer-id>",
     )
     batch.add_argument("--interrupt-class", default="pick")
+    # Carried here as well as on `post`, because both reach the same
+    # `_post_and_report` and therefore the same `post_question`: a flag on one
+    # subcommand and not the other would leave the shared helper reading an
+    # attribute half its callers never set.
+    batch.add_argument("--risk", default="", choices=("",) + RISKS)
     batch.add_argument(
         "--expires-at",
         default="",
