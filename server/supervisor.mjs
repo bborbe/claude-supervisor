@@ -1702,6 +1702,14 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
           writeLedger(built.record)
           return
         }
+        // ⚠️ RECORDED BEFORE THE AWAIT, SO THE FIELD NEVER READS AS "NOT STARTED" WHILE IN FLIGHT.
+        // The seed says "the turn has not yet named a task" — the exact opposite of the truth once
+        // this callback is running, and the timeout alone does not remove that: a bounded call
+        // still leaves a window in which the field is wrong. `onDiagnostic`'s guard
+        // (`state !== 'not-attempted'`) already refuses to overwrite a non-seed state, which is
+        // what keeps the two writers from disagreeing mid-flight.
+        built.record.pushRegistration = { state: 'attempting', taskId, at: new Date().toISOString() }
+        writeLedger(built.record)
         const registration = await registerPushCallbackOnWorker({
           endpoint: card.endpoint,
           taskId,
@@ -1727,7 +1735,12 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       // ⚠️ IT NEVER OVERWRITES A TERMINAL STATE. `onTaskId` owns `attempted-ok` / `attempted-error`,
       // and a diagnostic arriving afterwards must not undo it — hence the early return.
       onDiagnostic: (d) => {
-        if (built.record.pushRegistration?.state !== 'not-attempted') return
+        // ⚠️ TERMINAL STATES ARE FINAL; `not-attempted` AND `attempting` ARE NOT. The guard used to
+        // return on anything that was not the seed, which would have discarded the throw report
+        // once the pre-await `attempting` write had landed — the exact silence this task spent four
+        // probes on.
+        const state = built.record.pushRegistration?.state
+        if (state === 'attempted-ok' || state === 'attempted-error') return
         // ⚠️ THE BRANCH LIVES IN `pushDiagnosticPatch`, AND THAT IS THE FIX. Deciding it here on
         // `d.taskIdFound === false` mislabelled every incremental run that found no task id as
         // "whole-body" — the announcement carries no `taskIdFound` key at all. A pure function is
@@ -2846,6 +2859,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               writeLedger(agent)
               return
             }
+            // ⚠️ SAME PRE-AWAIT WRITE AS THE SPAWN SITE, and it matters more here: a follow-up is
+            // the turn a reader is most likely to catch mid-flight, because it is issued against a
+            // worker that already exists. Without this the field would say "not yet named a task"
+            // for a task the stream named seconds ago.
+            agent.pushRegistration = { state: 'attempting', taskId, at: new Date().toISOString() }
+            writeLedger(agent)
             const registration = await registerPushCallbackOnWorker({
               endpoint: channel.endpoint,
               taskId,
@@ -2858,7 +2877,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             writeLedger(agent)
           },
           onDiagnostic: (d) => {
-            if (agent.pushRegistration?.state !== 'not-attempted') return
+            // ⚠️ TERMINAL STATES ARE FINAL; `attempting` IS NOT — same rule as the spawn site, and
+            // for the same reason: the pre-await write must not be able to hide a thrown call.
+            const state = agent.pushRegistration?.state
+            if (state === 'attempted-ok' || state === 'attempted-error') return
             const patch = pushDiagnosticPatch(d)
             if (!patch) return
             agent.pushRegistration = patch
