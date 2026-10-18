@@ -297,6 +297,16 @@ class TestTicks(Case):
         report = self.ok(self.env.run(coverage=path))
         self.assertEqual([(o["grade"], o["boxes"]) for o in report["moved"]], [("A", ["DoD1"])])
 
+    def test_coverage_row_labelled_with_a_bracketed_box_id_rates_that_box(self):
+        dod = "plugin updated locally and the installed version confirmed"
+        self.env.commit_anchor(anchor_text(dod=("[ ] " + dod,)), at(-50))
+        self.env.commit_anchor(anchor_text(dod=("[x] " + dod,)), at(5))
+        path = self.env.root / "coverage-label.txt"
+        path.write_text("[DoD1] %s | none | measured(PR #12) | —\n" % dod, encoding="utf-8")
+        report = self.ok(self.env.run(coverage=path))
+        self.assertEqual(report["sources"]["coverage"]["rows"], 1)
+        self.assertEqual([(o["grade"], o["boxes"]) for o in report["moved"]], [("A", ["DoD1"])])
+
     def test_claim_picks_its_own_box_among_several_uncommitted_ticks(self):
         self.env.anchor.write_text(anchor_text(sc=("[x] SC1: first criterion", "[x] SC2: second criterion")),
                                    encoding="utf-8")

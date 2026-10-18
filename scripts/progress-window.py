@@ -385,7 +385,8 @@ def load_coverage(path, anchor_boxes):
         if rating is None:
             continue
         ident = None
-        token = re.match(r"^((?:SC|DoD)\d+)\b", box)
+        # The agent labels a row by checkbox (`[x] …`) or by box id (`[DoD1] …`).
+        token = re.match(r"^\[?((?:SC|DoD)\d+)\b\]?", box)
         if token and token.group(1) in anchor_boxes:
             ident = token.group(1)
         else:
