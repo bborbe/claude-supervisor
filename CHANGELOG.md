@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.177.5
 
 - fix: **`/supervisor:who-needs-my-help` no longer labels a live session a `bare shell`.** The shell limb of `state_of()` keyed on the registry's `status: shell` alone — stale metadata, since the harness stamps `shell` when a shell child is spawned and never resets it — while the same registry record already carried the `alive` identity verdict. Measured 2026-10-18: nine panes with `status: shell, alive: True` were handed to the operator as `bare shell`, the label a close-the-exited-tabs action reads as safe. `alive` is now threaded from `build()` into `state_of()` at both call sites, and the limb fires only on `alive is False`; `alive: None` (pid occupied, identity unprovable) falls through like any other live-but-quiet session rather than being read as death. Three fixtures pin it: a differential (the same pane under `status: shell` and `status: idle` must classify identically, so renaming the reason cannot satisfy the suite), the dead-shell arm (deleting the branch would otherwise pass), and the unknown arm. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
 
