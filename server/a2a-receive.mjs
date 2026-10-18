@@ -162,6 +162,18 @@ export function createA2AStatusReceiver({ workerTokens, onMessage, host = '127.0
         // body-supplied `ts` would be worker-asserted. This is the receive instant, which
         // is the only timestamp this side can vouch for.
         ts: new Date().toISOString(),
+        // `source` is written ONLY here, and that is its whole value: `a2aTurnPatch`, which
+        // files the turn the spawner collected for itself, never sets it — so an entry
+        // carrying `push` can only have arrived through this receive path, which is what
+        // lets a reader tell a pushed completion from a synthesised one.
+        source: 'push',
+        // The worker's own message id, read from the status message the SDK built. It is
+        // `null` when the event carries no message at all — which the terminal completion
+        // currently does (`NewStatusUpdateEvent(ctx, a2a.TaskStateCompleted, nil)`), so a
+        // null here means "this event had no message", NOT "the receive path dropped it".
+        // Read from the same `status.message` the text comes from, so the two cannot
+        // disagree about which message they describe.
+        messageId: parsed.payload?.status?.message?.messageId ?? null,
       }
       const list = messages.get(workerId) ?? []
       list.push(entry)
