@@ -664,6 +664,32 @@ export async function registerPushCallbackOnWorker({ endpoint, taskId, push, tok
   return { registered: true }
 }
 
+// The record patch a collection diagnostic produces — the new `pushRegistration`, or `null` when
+// the diagnostic says nothing about WHY the callback did not fire.
+//
+// ⚠️ BRANCH ON `path`, NEVER ON `taskIdFound`, and this is a defect fix rather than a style choice.
+// The incremental branch announces itself with `{path: 'incremental'}` and **no `taskIdFound`
+// key**, so a `d.taskIdFound === false ? … : …` test sends that announcement down the whole-body
+// arm and reports "collected whole-body" for every incremental run that finds no task id — which
+// is precisely the failure the diagnostic exists to name. The announcement returns `null` and
+// writes nothing; only a terminal diagnostic patches the record.
+export function pushDiagnosticPatch(d) {
+  if (!d || typeof d !== 'object') return null
+  if (d.path === 'whole-body') {
+    return {
+      state: 'not-attempted',
+      reason: 'the turn was collected whole-body, so the task-id callback was never wired',
+    }
+  }
+  if (d.path === 'incremental' && d.taskIdFound === false) {
+    return {
+      state: 'not-attempted',
+      reason: `the turn's stream was read incrementally but no frame named a task (${d.frames} frame(s))`,
+    }
+  }
+  return null
+}
+
 // Consume the turn's stream — THE COLLECTION. `{ state, contextId, reply }`, or `{ error }`.
 //
 // `res` may be a settled response OR the still-pending promise `openWorkerTurn` returned as
