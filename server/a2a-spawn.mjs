@@ -670,7 +670,7 @@ export async function registerPushCallbackOnWorker({ endpoint, taskId, push, tok
 // `pending`. `await` is the same expression for both, so the collector never has to know which
 // case it is in — and that is the point: the two differ only in WHEN they resolve, and a
 // collector that cared would be re-deriving a distinction the sender had already made.
-export async function collectWorkerTurn({ res, sentContextId, onTaskId } = {}) {
+export async function collectWorkerTurn({ res, sentContextId, onTaskId, onDiagnostic } = {}) {
   if (!res) return { error: 'collectWorkerTurn was given no response to collect from.' }
 
   let settled
@@ -688,8 +688,15 @@ export async function collectWorkerTurn({ res, sentContextId, onTaskId } = {}) {
   // caller keeps `.text()`, and that path is what the existing tests stub; the reader's own
   // split-point test is what keeps the two from drifting apart.
   if (typeof onTaskId === 'function' && settled.body && typeof settled.body.getReader === 'function') {
-    return collectTurnIncrementally({ body: settled.body, sentContextId, onTaskId })
+    onDiagnostic?.({ path: 'incremental' })
+    return collectTurnIncrementally({ body: settled.body, sentContextId, onTaskId, onDiagnostic })
   }
+  // ⚠️ THE FALLBACK IS REPORTED, NOT JUST TAKEN. A whole-body collection structurally cannot fire
+  // `onTaskId`, so a caller that asked for a push registration learns HERE that its callback was
+  // never wired. That is a different failure from "the stream named no task", which only the
+  // incremental branch can produce — and without this report the two collapse into one
+  // indistinguishable `not-attempted`, which is what made the first instrumented run ambiguous.
+  onDiagnostic?.({ path: 'whole-body' })
 
   // ⚠️ `text()`, NOT `json()`, for the reason `createWorkerOnController` gives: the frames arrive
   // as an SSE body and `a2aFrames` takes the RAW string. `json()` here would throw on the first
@@ -714,7 +721,7 @@ export async function collectWorkerTurn({ res, sentContextId, onTaskId } = {}) {
 // status be emitted and dropped before the registration landed — the silent failure this whole
 // path exists to prevent, and one that leaves a completed turn and a perfectly good outcome behind
 // it. A callback that throws does not fail the collection: the turn's outcome is still the turn's.
-async function collectTurnIncrementally({ body, sentContextId, onTaskId }) {
+async function collectTurnIncrementally({ body, sentContextId, onTaskId, onDiagnostic }) {
   const reader = createSseFrameReader()
   // ⚠️ `{ stream: true }`, so a multi-byte character split across a chunk boundary is held rather
   // than decoded as two replacement characters — which would corrupt a frame's JSON and read as a
@@ -747,6 +754,12 @@ async function collectTurnIncrementally({ body, sentContextId, onTaskId }) {
   }
   reader.end()
   if (reader.error) return { error: reader.error }
+  // ⚠️ REPORTED ONLY AFTER THE STREAM ENDS, which is the one point at which "no frame named a
+  // task" is a fact rather than a not-yet. `announced` is the very flag `onTaskId` sets, so this
+  // cannot disagree with whether the callback ran.
+  if (!announced) {
+    onDiagnostic?.({ path: 'incremental', taskIdFound: false, frames: reader.frames.length })
+  }
   return a2aOutcome(reader.frames, { sentContextId })
 }
 
