@@ -815,6 +815,13 @@ class FourStateTest(Base):
                        name="Ask In Watcher Slot",
                        transcript="👤 You: Orienting on the task — assistant is searching the vault.\n"
                                   "⏰ Ends: ` your reply — I run the three commands\n")
+        # unclassified — a LONG lead-in before the operator verb (pane 483 shape).
+        # The first cut bounded the lead-in to 24 characters, and this live one is
+        # 30, so it still read `external` on the release that was meant to fix it.
+        self.fleet.add("s-unc-longlead", 313, "",
+                       name="Long Lead-In",
+                       transcript="👤 You: Task discovery is running in the background…\n"
+                                  "⏰ Ends: your `nukeprod-threshold-applied` reply\n")
         # working — a busy record, and a busy session with no attention record
         self.fleet.add("s-wrk-record", 305, "", status="busy", name="Working Record")
         self.fleet.registry["s-wrk-bare"] = "Working Bare"
@@ -861,6 +868,7 @@ class FourStateTest(Base):
             "External Clock": h.STATE_EXTERNAL,
             "External Agent": h.STATE_EXTERNAL,
             "Ask In Watcher Slot": h.STATE_UNCLASSIFIED,
+            "Long Lead-In": h.STATE_UNCLASSIFIED,
             "Working Record": h.STATE_WORKING,
             "Working Bare": h.STATE_WORKING,
             "Closed Done": h.STATE_CLOSED,

@@ -593,8 +593,13 @@ def gate_class(rec, cause, shape, task_text):
 # fifth state exists to keep them out of. Measured on the first live run
 # (2026-10-18, pane 449): `⏰ Ends: \` your reply — I run the three commands…`
 # classified `external` while the session was waiting on the operator.
-_OPERATOR_REPLY = re.compile(r"^your\b[^.]{0,24}\b(reply|answer|pick|approval)\b",
-                             re.I)
+# ⚠️ **Unbounded on purpose.** The first cut bounded the lead-in to 24 characters,
+# and the live fleet produced a 30-character one on the first run after release —
+# `your \`nukeprod-threshold-applied\` reply` (pane 483) still classified `external`.
+# A bound here is a bet on how long a watcher's phrase will be, and the phrase is
+# written by whichever session emits it; the non-greedy `.*?` stops at the FIRST
+# verb, so widening costs nothing but reaches every lead-in.
+_OPERATOR_REPLY = re.compile(r"^your\b.*?\b(reply|answer|pick|approval)\b", re.I)
 
 # A closer that names the machine event resuming the session. `later (on …)` is
 # the sibling's own parked verb; a closer opening with the panel's `⏰ Ends:` /
