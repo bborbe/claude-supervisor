@@ -373,11 +373,14 @@ def load_coverage(path, anchor_boxes):
         raise Unknown("coverage unreadable: %s (%s)" % (path, exc.strerror))
     ratings = {}
     for line in raw.splitlines():
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # A box's own text can carry a pipe (`ls … | head -1`), so the columns are
+        # read from the right: the last cell is the proposal, the one before it the
+        # evidence, and the box is everything before the first separator.
+        cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
         if len(cells) < 4:
             continue
-        box = re.sub(r"^-?\s*\[[ xX/]\]\s*", "", cells[0]).strip("` ")
-        evidence = cells[2].lower()
+        box = re.sub(r"^-?\s*\[[ xX/]\]\s*", "", cells[0]).strip()
+        evidence = cells[-2].lower()
         rating = next((r for r in ("measured", "asserted", "none") if evidence.startswith(r)), None)
         if rating is None:
             continue
@@ -388,7 +391,7 @@ def load_coverage(path, anchor_boxes):
         else:
             norm = " ".join(box.lower().split())[:50]
             for key, value in anchor_boxes.items():
-                if norm and " ".join(value["text"].lower().split())[:50] == norm:
+                if len(norm) >= 15 and " ".join(value["text"].lower().split()).startswith(norm):
                     ident = key
                     break
         if ident:
@@ -503,8 +506,11 @@ def worktree_observation(root, written, last_write):
 # --- claim ------------------------------------------------------------------------------
 
 
-def match_ref(obs, ref, kind):
-    """The observation a claim's `ref` names -- the claimed kind first, then any kind."""
+def match_ref(obs, ref, kind, box):
+    """The observation a claim's `ref` names -- the claimed box and kind first, then any.
+
+    Every uncommitted change shares the ref `worktree`, so a ref alone cannot pick one
+    tick out of several; the claimed box is what does."""
     low = ref.strip().lower()
 
     def hits(o):
@@ -514,8 +520,9 @@ def match_ref(obs, ref, kind):
             return o["ref"] == "worktree"
         return len(low) >= 7 and o["ref"] != "worktree" and o["ref"].startswith(low)
 
-    same = [o for o in obs if o["kind"] == kind and hits(o)]
-    return (same or [o for o in obs if hits(o)] or [None])[0]
+    ranked = sorted((o for o in obs if hits(o)),
+                    key=lambda o: (box not in o["boxes"], o["kind"] != kind))
+    return (ranked or [None])[0]
 
 
 def evaluate_claim(raw, obs, start_boxes, known, ratings, roots, vault, since, start_progress):
@@ -545,7 +552,7 @@ def evaluate_claim(raw, obs, start_boxes, known, ratings, roots, vault, since, s
             return out("rejected:out-of-scope")
         scope = [repo]
     met = start_boxes.get(box, {}).get("checked", False)
-    hit = match_ref([o for o in obs if not claim.get("repo") or o.get("repo", vault) in scope], ref, kind)
+    hit = match_ref([o for o in obs if not claim.get("repo") or o.get("repo", vault) in scope], ref, kind, box)
     if hit is None:
         if kind == "progress-entry" and ref.strip().lower() in "\n".join(start_progress).lower():
             return out("rejected:predates-window")
