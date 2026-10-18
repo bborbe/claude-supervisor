@@ -717,6 +717,7 @@ def measure(args):
         "session_started": iso(started) if started else None,
         "claim": claim,
     })
+    report["block"] = render(report)
     return report
 
 

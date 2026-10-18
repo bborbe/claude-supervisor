@@ -507,6 +507,12 @@ class TestSources(Case):
         self.assertEqual([l.split(":")[0].strip() for l in out[1:]],
                          ["Moved", "Toward", "Activity", "Claim"])
 
+    def test_json_carries_the_same_block_the_text_render_prints(self):
+        self.tick(at(5))
+        report = self.ok(self.env.run())
+        self.assertTrue(report["block"].startswith("⏱ Window "))
+        self.assertIn("Moved:     B  SC1 ticked — rating unavailable", report["block"])
+
 
 if __name__ == "__main__":
     unittest.main()
