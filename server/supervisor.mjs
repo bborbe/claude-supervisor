@@ -1611,6 +1611,17 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   })
   if (built.error) return { error: built.error }
 
+  // ⚠️ A RECEIVER THAT NEVER BOUND IS THE FIRST THING THIS FIELD MUST SAY. Without it the spawn
+  // proceeds, `push` is undefined, `onTaskId` returns at its first line, and the channel is silent
+  // for a reason nothing records — the shape that cost a whole e2e run and could not be diagnosed
+  // from `status_messages` afterwards.
+  if (!push) {
+    built.record.pushRegistration = {
+      state: 'not-attempted',
+      reason: `the status receiver is unavailable: ${pushBegun.error}`,
+    }
+  }
+
   agents.set(id, built.record)
   writeLedger(built.record)
 
@@ -1668,12 +1679,22 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       // already held and re-registering would add a duplicate callback per message.
       onTaskId: async (taskId) => {
         if (!push) return
-        await registerPushCallbackOnWorker({
+        const registration = await registerPushCallbackOnWorker({
           endpoint: card.endpoint,
           taskId,
           push,
           token: created.token,
         })
+        // ⚠️ RECORDED, NOT DISCARDED — and that is the whole fix. `registerPushCallbackOnWorker`
+        // returns its refusal precisely so the caller can record it, and this call used to drop
+        // the value on the floor. The result was that a REFUSED registration and one that NEVER
+        // HAPPENED left identical evidence: an empty channel and no explanation. Recording it
+        // here keeps the turn's own outcome untouched — the refusal is filed as a property of the
+        // CHANNEL, never as a turn failure, which is what the comment above requires.
+        built.record.pushRegistration = registration.error
+          ? { state: 'attempted-error', taskId, error: registration.error, at: new Date().toISOString() }
+          : { state: 'attempted-ok', taskId, at: new Date().toISOString() }
+        writeLedger(built.record)
       },
     })
       .then((collected) => {
@@ -2402,6 +2423,11 @@ const agentView = (a) => {
     // projection. See `a2a-receive.mjs` for why the receive instant and not a body-supplied one.
     status_messages: a2aPushRegistry.statusMessagesFor(a.workerId),
     last_status: a2aPushRegistry.lastStatusFor(a.workerId),
+    // ⚠️ THE CHANNEL'S OWN OUTCOME, so an empty `status_messages` stops being ambiguous. It says
+    // whether a registration was attempted and, when refused, why — the distinction the two
+    // fields above cannot draw on their own. Always present, `null` only for a record written
+    // before this field existed. Holds no credential: `taskId` is the task's own id.
+    push_registration: a.pushRegistration ?? null,
   }
 }
 
