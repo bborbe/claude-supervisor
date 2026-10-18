@@ -384,6 +384,59 @@ def build_options(labels, recommended):
     return options
 
 
+GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "manager-menu-guard.py")
+
+
+def manager_guard():
+    """The canonical predicate module, or None when it cannot be loaded.
+
+    Loaded, never mirrored: a copy of the match would drift, and the match is
+    the half `manager-menu-guard.py`'s own docstring records as MEASURED WRONG
+    on 2026-10-16 (it denied two legitimate operator-only menus).
+    """
+    try:
+        spec = importlib.util.spec_from_file_location("manager_menu_guard", GUARD)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod if hasattr(mod, "names_manager_owned_action") else None
+    except Exception:
+        return None
+
+
+def manager_settleable_only(options):
+    """True when EVERY option label names a manager-owned action.
+
+    The board-noise task's **class 2**: a card whose every choice is a move the
+    asking session could have taken itself is a decision already made, and the
+    operator spends a click ratifying it.
+
+    ⚠️ Distinct from `attention-log.py`'s `manager_settleable`, which judges only
+    the RECOMMENDED option. There an operator-owned alternative may still sit
+    beside it, so the card is a real question. Here there is none — no option on
+    the card asks the operator for anything a manager cannot do itself.
+
+    ⚠️ **Fails OPEN, and the direction is load-bearing.** A missing or raising
+    guard returns False, so the card posts. Refusing a real question strands the
+    asking session, which is strictly worse than one low-value card — the same
+    trade `attention-log.py`'s `manager_settleable` already refuses to make.
+
+    ⚠️ A card with no options at all is NOT manager-settleable by this rule: it
+    carries no recommendation to judge, and `attention-ask.py`'s own docstring
+    says the option-less card is the free-text ask.
+    """
+    guard = manager_guard()
+    if guard is None:
+        return False
+    labels = [o.get("label") or "" for o in (options or []) if isinstance(o, dict)]
+    if not labels:
+        return False
+    try:
+        return all(guard.names_manager_owned_action(label) for label in labels)
+    except Exception:
+        return False
+
+
 def build_batch_payload(tasks):
     """Return the ONE batched card's payload, or raise ValueError naming the bad input.
 
@@ -741,6 +794,17 @@ def cmd_post(args, out=sys.stdout):
     except ValueError as err:
         print(f"REFUSED: {err}", file=out)
         return 2
+    # Class 2 of the board-noise task: every choice is a manager-owned action, so
+    # the card asks the operator to ratify a decision already made. Refused by
+    # default, with the fix named; `--force` keeps a deliberate card postable.
+    if not getattr(args, "force", False) and manager_settleable_only(options):
+        print(
+            "REFUSED: every --option names a manager-owned action, so this card "
+            "asks the operator to ratify a decision the asking session could "
+            "have taken itself. Take the action, or include one option the "
+            "operator owns. Re-run with --force if the card is deliberate.",
+            file=out)
+        return 2
     return _post_and_report(args, *producer, args.payload, options, out)
 
 
@@ -855,6 +919,13 @@ def main(argv=None):
     post.add_argument("--context", default="")
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
+    post.add_argument(
+        "--force",
+        action="store_true",
+        help="post even when every --option names a manager-owned action "
+             "(refused by default: such a card asks the operator to ratify a "
+             "decision the asking session could have taken itself)",
+    )
     post.add_argument(
         "--producer-id",
         default="",

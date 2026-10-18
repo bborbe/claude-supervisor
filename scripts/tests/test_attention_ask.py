@@ -262,6 +262,47 @@ class BuildOptionsTest(unittest.TestCase):
             ask.build_options(["a", "  "], "")
 
 
+class ManagerSettleableOnlyTest(unittest.TestCase):
+    """Class 2 of the board-noise task: a card with no operator-owned option.
+
+    The rule is deliberately `all`, not `any`. `attention-log.py`'s
+    `manager_settleable` judges the RECOMMENDED option and lets an
+    operator-owned alternative sit beside it, so that card is a real question.
+    Here there is no alternative anywhere on the card, so nothing on it asks the
+    operator for anything a manager cannot do itself.
+    """
+
+    def opts(self, *labels):
+        return [{"label": l, "recommended": i == 0} for i, l in enumerate(labels)]
+
+    def test_every_option_manager_owned_is_settleable(self):
+        self.assertTrue(ask.manager_settleable_only(
+            self.opts("open the row", "file the task")))
+
+    def test_one_operator_owned_option_makes_it_a_real_question(self):
+        # The boundary the rule must not cross. A card carrying an
+        # operator-owned choice stays a real question even when the other
+        # option is manager-owned, and refusing it takes the decision away.
+        self.assertFalse(ask.manager_settleable_only(
+            self.opts("open the row", "leave it held")))
+
+    def test_no_options_is_not_settleable(self):
+        # The option-less card is the free-text ask; there is no recommendation
+        # to judge, so the rule cannot speak about it.
+        self.assertFalse(ask.manager_settleable_only([]))
+
+    def test_fails_open_when_the_guard_is_missing(self):
+        # Refusing a real question strands the asking session — strictly worse
+        # than one low-value card, the same trade the Stop-closer rule refuses.
+        original = ask.GUARD
+        ask.GUARD = "/nonexistent/manager-menu-guard.py"
+        try:
+            self.assertFalse(ask.manager_settleable_only(
+                self.opts("open the row", "file the task")))
+        finally:
+            ask.GUARD = original
+
+
 class ProducerKindTest(unittest.TestCase):
     """The store validates `producer_kind` against a closed enum and rejects an
     unknown value with a `400` naming the field, so an invented kind used to cost
