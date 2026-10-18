@@ -104,6 +104,7 @@ def post_args(**overrides):
         producer_kind="session",
         liveness_ref="",
         interrupt_class="pick",
+        risk="",
         expires_at="",
         closer="",
     )
@@ -120,6 +121,7 @@ def batch_args(**overrides):
         producer_kind="session",
         liveness_ref="",
         interrupt_class="pick",
+        risk="",
         expires_at="",
     )
     defaults.update(overrides)
@@ -192,6 +194,28 @@ class PostBatchTest(unittest.TestCase):
             ask.cmd_post_batch(batch_args(), out=io.StringIO())
 
         self.assertNotIn("options", captured["body"])
+
+    def test_carries_the_declared_risk_on_the_batch_arm_too(self):
+        """The batch arm posts the operator's approval card, so it is the one that matters.
+
+        ⚠️ `--risk` is declared on `post` AND on `post-batch` for the reason the
+        comment above gives: the two `add_parser` blocks drift independently while
+        both reach the same `_post_and_report` and therefore the same
+        `post_question`. A flag added to one and not the other leaves that shared
+        helper reading an attribute half its callers never set — not a
+        hypothetical, which is why this spec exists.
+        """
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": "batch1"})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            rc = ask.cmd_post_batch(batch_args(risk="decision"), out=io.StringIO())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["body"]["risk"], "decision")
 
     def test_refuses_without_a_producer_id(self):
         out = io.StringIO()
@@ -320,6 +344,45 @@ class PostTest(unittest.TestCase):
         self.assertEqual(body["answer_mechanism"], "message")
         self.assertEqual(body["options"][0], {"label": "the board", "recommended": True})
         self.assertIn(f"ITEM_ID: {STORE_ITEM_ID}", out.getvalue())
+
+    def test_posts_the_declared_risk(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            rc = ask.cmd_post(post_args(risk="risk"), out=io.StringIO())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["body"]["risk"], "risk")
+
+    def test_omits_risk_when_none_was_declared(self):
+        """Absent, never empty — the same distinction `context` draws below.
+
+        The schema reads an absent `risk` as "the producer declared nothing"
+        and renders `decision`. A present "" would instead be a field holding an
+        undeclared value, and the store's validator would have to decide what
+        that means.
+        """
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            rc = ask.cmd_post(post_args(), out=io.StringIO())
+
+        self.assertEqual(rc, 0)
+        self.assertNotIn("risk", captured["body"])
+
+    def test_offers_only_the_levels_the_store_declares(self):
+        # Pinning the tuple is what keeps the poster's list and the store's
+        # AvailableRisks from drifting apart silently; the store validates the
+        # value, so a fourth level here would be rejected at push time.
+        self.assertEqual(ask.RISKS, ("routine", "decision", "risk"))
 
     def test_expires_at_defaults_to_a_bound_so_an_owner_card_cannot_live_forever(self):
         """The other half of the `owner:` default, and it has to ship with it.
