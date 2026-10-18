@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.178.1
 
 - fix: **`read_push_config` never worked — it read the wrong key, and its error named the opposite of the truth.** The tool shipped in `v0.178.0` issues `GetTaskPushNotificationConfig` with `params: {taskId}`, but the SDK's handler is `h.pushConfigStore.Get(ctx, req.TaskID, req.ID)` (`a2asrv/handler.go:419`) — the store is keyed by task id **and config id** — and the registration never sends a config `id`, so every call looked up an empty one and returned `failed to get push config: push config not found`. ⚠️ **That message is worse than an absence**: it reads as "the worker did not store the config", which is the opposite of the truth, and sends a debugger at the registration instead of the reader. Measured against a live worker whose pushes were arriving for the same task id, and re-measured mid-turn to rule out cleanup on terminal state. It now uses `ListTaskPushNotificationConfigs`, keyed by `taskId` alone (`a2a/push.go:45`), returning `{configs: […]}` — where an empty list is a RESULT meaning "the worker holds none", distinct from a refused call. ⚠️ The unit test passed because the stub accepted whatever params it was sent: a stub that echoes your own request shape cannot validate it. Change set: `server/a2a-client.mjs`, `server/a2a-client.test.mjs`, `server/a2a-spawn.mjs`, `server/a2a-spawn.test.mjs`, `server/supervisor.mjs`, `CHANGELOG.md`.
 
