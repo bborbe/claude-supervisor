@@ -51,7 +51,7 @@ median arm-to-arm gap once >=4 arms exist, the declared interval as fallback), s
 the two checks agree and this one cannot re-introduce the false-positive that basis
 was built to remove.
 """
-import argparse, json, os, re, sys, time
+import argparse, datetime, json, os, re, sys, time
 
 STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_RECEIPT_STATE_DIR", "~/.claude/state/manager-receipts")
@@ -67,6 +67,11 @@ EXIT_SKIPPED = 11
 
 # The steps whose artifacts the receipt must name. Order is the print order.
 STEPS = ("needs-you", "sweep", "watcher")
+
+# OSC 8 hyperlink: ESC ] 8 ; params ; URI ST. The payload `--write-payload` stores is
+# already link-free, but a frame captured from the screen carries them, and they are
+# zero-width — so they must never decide a shape question either way.
+OSC8_RE = re.compile(r"\x1b\]8;;[^\x1b\x07]*(?:\x1b\\|\x07)")
 
 
 def slug(topic: str) -> str:
@@ -172,16 +177,54 @@ def needs_you_shape(text: str) -> bool:
 
 
 def sweep_shape(text: str) -> bool:
-    """The sweep reader's payload: JSON carrying the box-table `header` key.
+    """The sweep reader's payload: the RENDERED box-table `--write-payload` stores.
 
-    `box-table.py` dies on `{}` with `KeyError: 'header'`, so a payload without it
-    would not have rendered — which is what makes this the producer's shape rather
-    than an arbitrary JSON object.
+    `--write-payload` (`manager-predispatch.py`) does `table = sys.stdin.read()` and
+    writes what it was handed — the frame `box-table.py` rendered — so `--save` can
+    read the table back and the operator can see it. It is not JSON, and never was:
+    the predicate this replaced required `"header" in json.loads(text)`, which no
+    artifact the producer writes can satisfy, so every round reported
+    `skipped: sweep` whether or not the leg ran (measured 2026-10-18, round
+    19:49–20:05 on goal manager session `beac5fd0`).
+
+    The frame's own contract is `box-table.py:render()`: a top rule opening `┌` and
+    closing `┐`, `│`-framed rows, and a bottom rule opening `└` and closing `┘`.
+    Both rules are required — a truncated file loses its bottom rule, and an empty
+    file has neither — so the shape still refuses the stub this check exists to
+    catch, while accepting every real payload.
     """
-    try:
-        return "header" in json.loads(text)
-    except ValueError:
+    lines = [ln.strip() for ln in OSC8_RE.sub("", text).splitlines() if ln.strip()]
+    if len(lines) < 4:
         return False
+    top, bottom = lines[0], lines[-1]
+    if not (top.startswith("┌") and top.endswith("┐")):
+        return False
+    if not (bottom.startswith("└") and bottom.endswith("┘")):
+        return False
+    return any(ln.startswith("│") and ln.endswith("│") for ln in lines[1:-1])
+
+
+def record_ts(value):
+    """A record's `ts` as epoch seconds, or None when it is not a timestamp.
+
+    `manager-attention-watch.py:1445` writes `time.strftime("%Y-%m-%dT%H:%M:%S%z")`
+    — an ISO-8601 string with a numeric offset. The predicate this replaced accepted
+    only `isinstance(ts, (int, float))`, so it matched **0** of the 526 records in
+    the measured log and every round reported `skipped: watcher` even while the arm
+    demonstrably polled inside the window.
+
+    A bare number stays accepted: it costs nothing and keeps a hand-written or older
+    log readable. Anything else — a torn line's junk, `"soon"`, a missing key —
+    returns None and is ignored, so one bad record never masks a good one.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except ValueError:
+        return None
 
 
 def watcher_shape(artifact: str, started: float, now: float) -> bool:
@@ -190,7 +233,14 @@ def watcher_shape(artifact: str, started: float, now: float) -> bool:
     Read from the RECORD's own `ts`, never the file's mtime: the arm appends on every
     poll, so the file's mtime only says it was touched, while the newest record's ts
     says the arm was still polling during this round.
+
+    The lower bound is floored to the producer's own resolution: `ts` carries whole
+    seconds, so a record appended in the same wall-clock second the round opened
+    would otherwise compare as *before* a fractional `round_started_at` and be
+    rejected by up to one second. Flooring widens the window by at most that second,
+    which is the honest cost of a one-second timestamp.
     """
+    started = int(started)
     newest = None
     try:
         with open(artifact, encoding="utf-8") as fh:
@@ -202,8 +252,8 @@ def watcher_shape(artifact: str, started: float, now: float) -> bool:
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                ts = rec.get("ts")
-                if isinstance(ts, (int, float)):
+                ts = record_ts(rec.get("ts"))
+                if ts is not None:
                     newest = ts if newest is None else max(newest, ts)
     except OSError:
         return False

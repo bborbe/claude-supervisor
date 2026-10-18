@@ -19,6 +19,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -26,9 +27,12 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS = os.path.dirname(_HERE)
+BOX_TABLE = os.path.join(SCRIPTS, "box-table.py")
+PREDISPATCH = os.path.join(SCRIPTS, "manager-predispatch.py")
+ATTENTION_WATCH = os.path.join(SCRIPTS, "manager-attention-watch.py")
 
 NEEDS_YOU_OK = "Needs you (0)\n\nNothing needs you.\n"
-SWEEP_OK = json.dumps({"header": ["Topic", "Status"], "rows": []})
 
 
 def load(receipt_dir, liveness_dir):
@@ -40,6 +44,35 @@ def load(receipt_dir, liveness_dir):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def load_module(name, path):
+    """Import a sibling script by path — the producers are hyphenated, not packages."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def render_table(header, rows):
+    """A frame rendered by the real producer, `box-table.py`, over its own stdin contract."""
+    return subprocess.run(
+        [sys.executable, BOX_TABLE],
+        input=json.dumps({"header": header, "rows": rows}),
+        capture_output=True, text=True, check=True,
+        env=dict(os.environ, BOX_TABLE_NO_LINKS="1"),
+    ).stdout
+
+
+def iso_ts(epoch):
+    """A `ts` in the producer's own format — `manager-attention-watch.py:1445`."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(epoch))
+
+
+# The sweep payload is a RENDERED TABLE, never JSON: `--write-payload` stores the frame
+# `box-table.py` printed. A JSON fixture here would re-encode the very defect this task
+# repairs — the old predicate accepted exactly the shape the producer never writes.
+SWEEP_OK = render_table(["Topic", "Status"], [["Recurring Operator Gates", "running"]])
 
 
 class Receipt(unittest.TestCase):
@@ -69,11 +102,17 @@ class Receipt(unittest.TestCase):
         return p
 
     def events_log(self, name, newest_ts, age=0.0):
-        """An events.jsonl whose NEWEST RECORD carries `newest_ts`."""
+        """An events.jsonl whose NEWEST RECORD carries `newest_ts`.
+
+        Written in the producer's own format — an ISO-8601 string with a numeric
+        offset, exactly as `manager-attention-watch.py:1445` writes it. A numeric
+        fixture here would let a predicate that only accepts numbers look correct,
+        which is the defect: it matched 0 of the 526 records in the measured log.
+        """
         p = os.path.join(self.arts.name, name)
         with open(p, "w", encoding="utf-8") as fh:
             for ts in sorted(newest_ts):
-                fh.write(json.dumps({"kind": "LIVENESS", "ts": ts}) + "\n")
+                fh.write(json.dumps({"kind": "LIVENESS", "ts": iso_ts(ts)}) + "\n")
         if age:
             t = time.time() - age
             os.utime(p, (t, t))
@@ -176,7 +215,9 @@ class Receipt(unittest.TestCase):
         # This is the case that separates "non-empty" from "the producer's shape".
         self.start()
         ny = self.artifact("needs-you.txt", "done\n")
-        sw = self.artifact("sweep.json", json.dumps({"rows": []}))  # no `header`
+        # The shape the OLD predicate demanded — JSON with a `header` key — is now the
+        # canonical wrong shape, because no producer writes it.
+        sw = self.artifact("sweep.json", json.dumps({"header": ["Topic"], "rows": []}))
         ev = self.events_log("events.jsonl", [time.time()])
         for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
             self.record(step, p)
@@ -184,6 +225,63 @@ class Receipt(unittest.TestCase):
         self.assertEqual(rc, self.m.EXIT_SKIPPED)
         self.assertIn("skipped: needs-you", out)
         self.assertIn("skipped: sweep", out)
+
+    # --- each predicate against its OWN producer, and against the rejection case --
+    #
+    # These are the criteria's load-bearing half. A predicate that simply returns True
+    # passes the positive case below and fails the negative one; a predicate that
+    # keeps the old type check passes the negative one and fails the positive. Only a
+    # predicate matched to what the producer actually writes passes both.
+
+    def test_sweep_shape_accepts_a_payload_written_by_write_payload(self):
+        # The full producer chain, no hand-built fixture: box-table.py renders the
+        # frame, manager-predispatch.py --write-payload stores it, and the predicate
+        # reads the stored file back — the same three steps the round performs.
+        rendered = render_table(["Topic", "Status"], [["Recurring Operator Gates", "ok"]])
+        with tempfile.TemporaryDirectory() as state, tempfile.TemporaryDirectory() as vault:
+            # `--vault` is validated as a vault root; the payload lands in the state dir.
+            os.makedirs(os.path.join(vault, "24 Goals"))
+            r = subprocess.run(
+                [sys.executable, PREDISPATCH, "--write-payload",
+                 "--subject", "Recurring Operator Gates", "--vault", vault],
+                input=rendered, capture_output=True, text=True,
+                env=dict(os.environ, MANAGER_PREDISPATCH_STATE_DIR=state),
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            stored = os.path.join(state, "recurring-operator-gates.table")
+            with open(stored, encoding="utf-8") as fh:
+                text = fh.read()
+        self.assertTrue(self.m.sweep_shape(text), text[:200])
+
+    def test_sweep_shape_rejects_json_empty_and_truncated(self):
+        # (a) the JSON the old predicate demanded — the shape no producer writes.
+        self.assertFalse(self.m.sweep_shape(json.dumps({"header": ["Topic"], "rows": []})))
+        # (b) an empty file, and a frame truncated before its bottom rule.
+        self.assertFalse(self.m.sweep_shape(""))
+        frame = render_table(["Topic"], [["row"]])
+        lines = [ln for ln in frame.splitlines() if ln.strip()]
+        self.assertFalse(self.m.sweep_shape("\n".join(lines[:-1])), "bottom rule dropped")
+        # A `return True` stub fails every line above; so does one that only looks for
+        # `│` anywhere, which a truncated frame still carries.
+
+    def test_watcher_shape_accepts_a_log_written_by_the_attention_watch(self):
+        # Call the producer's own writer, not a fixture: log_event is what appends
+        # every LIVENESS record the arm produces.
+        mw = load_module("manager_attention_watch", ATTENTION_WATCH)
+        p = os.path.join(self.arts.name, "events.jsonl")
+        now = time.time()
+        mw.log_event(p, "LIVENESS", "", "recurring-operator-gates", "0 gated · 33 held")
+        self.assertTrue(self.m.watcher_shape(p, now - 5, now + 5))
+
+    def test_watcher_shape_rejects_every_record_outside_the_window(self):
+        # The window excludes the log's newest record: the arm polled, but not this
+        # round. This is the rejection half — a predicate that accepts any parseable
+        # ts regardless of the window fails here.
+        mw = load_module("manager_attention_watch", ATTENTION_WATCH)
+        p = os.path.join(self.arts.name, "events.jsonl")
+        mw.log_event(p, "LIVENESS", "", "recurring-operator-gates", "0 gated")
+        now = time.time()
+        self.assertFalse(self.m.watcher_shape(p, now - 7200, now - 3600))
 
     # --- the heartbeat reads the record's ts, not the file's mtime -------------
 
