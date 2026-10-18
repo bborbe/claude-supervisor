@@ -11,9 +11,15 @@ mistaken for an oversight: `/supervisor:worker-restart`.** Its prefix names its 
 not its invoker — it is run by a manager, and the `worker-*` tier is the one tier whose own
 rule forbids resuming or spawning a session. It cannot move tiers: a worker cannot restart
 itself, because `restart-worker.py` refuses a `busy-target` and a session running the command
-is by definition mid-turn. The name is kept because it is already fixed by three shipped
-artifacts (the script's docstring, `docs/restart-worker.md`, and the task that built them);
-the exception is recorded here rather than paid for with a rename.
+is by definition mid-turn.
+
+**Since 2026-10-18 that command is a DEPRECATED ALIAS, and `/supervisor:restart` is the verb.**
+The rename is what the exception was waiting for: the target set had already widened past
+workers — `restart-worker.py` restarts a manager too — so a `worker-` name on the command
+described a set the verb no longer had. The exception survives **only** because the alias
+does: it is the alias's name that breaks the prefix rule, and removing the alias retires this
+paragraph and its table row in the same change. `/supervisor:restart` carries no exception —
+a bare verb names no tier, so its row states the tier directly.
 
 Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 
@@ -49,7 +55,8 @@ other side.
 | `/supervisor:open` | manager — resolves a name, then jumps, resumes, or creates the worker on the a2a-worker-controller (the backend chosen by the row's `target:`) | worker — workers never open sessions |
 | `/supervisor:open-a2a` | manager — resolves a name, then creates the worker on the a2a-worker-controller (the backend chosen by the row's `target:`) | worker — workers never open sessions |
 | `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `manager-drive`, never by driving a task itself |
-| `/supervisor:worker-restart` | fleet manager, manager — **the one exception to the prefix rule: `worker-` names the TARGET, not the invoker** | worker — it cannot restart itself (the script refuses `busy-target`, and a session running the command is mid-turn) |
+| `/supervisor:restart` | fleet manager, manager — restarts ONE worker or ONE manager, in its own role colour, and tells a manager to re-arm its loop | worker — resuming a session is dispatch, and the script refuses `busy-target` for a session restarting itself |
+| `/supervisor:worker-restart` | fleet manager, manager — **DEPRECATED alias for `/supervisor:restart`, and the one exception to the prefix rule: `worker-` names the TARGET, not the invoker** | worker — same as `/supervisor:restart` |
 | `/supervisor:read-guides` | any | — |
 | `/supervisor:jump` | any | — |
 | `/supervisor:who-needs-me` | any | — |

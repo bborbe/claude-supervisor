@@ -132,7 +132,8 @@ commands/manager-drive.md                        one goal or topic — the loop'
 commands/fleet-verify.md                         fleet manager — verify the fleet layer's contract, suggest fixes
 commands/manager-verify.md                       goal/topic manager — verify one subject, suggest fixes
 commands/worker-drive.md                         one worker session — drive its anchored task to done
-commands/worker-restart.md                       restart ONE named worker — kill, resume, re-orient in one verb
+commands/restart.md                              restart ONE named session, worker or manager — kill, resume, re-orient
+commands/worker-restart.md                       DEPRECATED alias for commands/restart.md
 scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
 scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
 commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)

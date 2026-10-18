@@ -2,9 +2,11 @@
 """Tests for scripts/restart-worker.py.
 
 The load-bearing property is that every refusal fires *before* anything is signalled:
-a manager, a busy target, a headless worker, an ambiguous pid and a load path that
+a busy target, a headless worker, an ambiguous pid, a held session and a load path that
 would reload identical code must each stop the script with its own reason token and
-exit 1, and no code path may reach `os.kill` on a target it has not cleared. The
+exit 1, and no code path may reach `os.kill` on a target it has not cleared. A manager
+is deliberately NOT among them — it is restarted like a worker, which the manager case
+pins. The
 integration cases drive the real CLI against a fixture registry, so they assert the
 exit code and the token a caller actually branches on — not an internal helper's
 return value.
@@ -412,6 +414,82 @@ class DescribeChanged(unittest.TestCase):
         self.assertIn("what changed: {describe_changed(changed)}", src)
 
 
+class McpSource(unittest.TestCase):
+    """The launch-source report (SC3).
+
+    The two versions must be READ LIVE, never hardcoded: the warning exists to catch a
+    restart that reloads stale server code and reads as a success, so a printed version
+    has to be evidence. The control case — equal versions print no warning — is what
+    makes a hardcoded warning unable to pass.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def checkout(self, version):
+        root = os.path.join(self.dir, "checkout")
+        os.makedirs(os.path.join(root, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+            json.dump({"version": version}, fh)
+        os.makedirs(os.path.join(root, "scripts"), exist_ok=True)
+        return root
+
+    def config(self, args, name="mcp.json"):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            json.dump({"mcpServers": {"supervisor": {"command": "python3", "args": args}}}, fh)
+        return path
+
+    def test_reads_root_and_version_live(self):
+        root = self.checkout("0.1.0")
+        cfg = self.config([os.path.join(root, "scripts", "mcp-start.py")])
+        got_root, got_version, _ = rw.mcp_source(f"claude --mcp-config={cfg}")
+        self.assertEqual(got_root, root)
+        self.assertEqual(got_version, "0.1.0")
+
+    def test_plugin_version_missing_file_is_none(self):
+        self.assertIsNone(rw.plugin_version(self.dir))
+
+    def test_no_supervisor_entry_is_unknown(self):
+        cfg = self.config(["/somewhere/else/other.py"])
+        self.assertIsNone(rw.mcp_source(f"claude --mcp-config={cfg}")[0])
+
+    def test_no_argv_and_no_config_are_unknown(self):
+        self.assertIsNone(rw.mcp_source(None)[0])
+        self.assertIsNone(rw.mcp_source("claude --strict-mcp-config")[0])
+
+    def test_unreadable_config_is_unknown_not_a_crash(self):
+        path = os.path.join(self.dir, "broken.json")
+        with open(path, "w") as fh:
+            fh.write("{not json")
+        self.assertIsNone(rw.mcp_source(f"claude --mcp-config={path}")[0])
+
+    def test_no_warning_when_versions_match(self):
+        """The control case: a hardcoded warning cannot pass this."""
+        lines = rw.describe_source("/checkout", "0.1.0", "0.1.0")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertFalse(lines[0][1])
+
+    def test_warning_when_source_lags_installed(self):
+        lines = rw.describe_source("/checkout", "0.1.0", "0.2.0")
+        self.assertEqual(len(lines), 2, lines)
+        self.assertTrue(lines[1][1])
+        self.assertIn("0.1.0", lines[1][0])
+        self.assertIn("0.2.0", lines[1][0])
+
+    def test_unreadable_version_is_reported_and_never_warns(self):
+        lines = rw.describe_source("/checkout", None, "0.2.0")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("unreadable", lines[0][0])
+
+    def test_unknown_source_says_so(self):
+        self.assertIn("unknown", rw.describe_source(None, None, "0.2.0")[0][0])
+
+
 class RefusalCode(unittest.TestCase):
     """Pin the exit code every refusal routes through.
 
@@ -479,9 +557,14 @@ class Cli(unittest.TestCase):
         self.write(1, entry("hl", kind="headless"))
         self.assert_refusal("hl", "headless-target")
 
-    def test_manager_target(self):
+    def test_manager_is_restarted_not_refused(self):
+        """Regression 2026-10-18: the `manager-target` refusal is gone. A manager is
+        restarted like a worker — the role selects the colour and the re-arm note, and
+        only `role-undetermined` still stops on a role."""
         self.write(1, entry("mgr", name="Fleet Manager"))
-        self.assert_refusal("mgr", "manager-target")
+        code, lines = self.run_cli("mgr")
+        self.assertEqual(code, 0, lines)
+        self.assertIn("role: manager", lines[1], lines)
 
     def test_role_undetermined(self):
         self.write(1, entry("anon", name=""))
