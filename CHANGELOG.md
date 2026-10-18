@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.174.2
 
 - fix: **the receive path now marks its own entries, so a reader can tell a pushed status from one the spawner synthesised for itself.** Every stored entry gains `source: 'push'`, written only here — which is the whole point of it: `a2aTurnPatch`, which files the turn the spawner collected on its own, never sets that field, so an entry carrying it can only have arrived through the receive endpoint. The entry also carries `messageId`, the worker's own message id read from `status.message.messageId` — the same message the entry's text is read from, so the two cannot disagree about which message they describe. It is `null` rather than absent when the event carries no message at all, which the terminal completion currently does (`NewStatusUpdateEvent(ctx, a2a.TaskStateCompleted, nil)`), so `null` reads as "this event had no message" rather than "the receive path dropped it" — the same distinction `last_status` draws between `null` and an empty object. Change set: `server/a2a-receive.mjs`, `server/a2a-receive.test.mjs`, `CHANGELOG.md`.
 
