@@ -533,7 +533,9 @@ tail is what the session *wrote*, the pane is what it is *holding*. Report the v
 over the pane instead of answering for it.
 
 Both halves are implemented in `scripts/restart-precheck.py` (its `classification:` line),
-with the orchestration in `commands/restart.md`. Do not restate the classifier
+with the orchestration in `/supervisor:restart` (`commands/restart.md`) — the one verb that
+restarts a worker **or a manager**, resuming it in its own role colour, and this classifier
+decides only whether anything is typed afterwards. Do not restate the classifier
 elsewhere — two copies of a transcript-tail read drift silently, because both keep returning a
 string.
 
