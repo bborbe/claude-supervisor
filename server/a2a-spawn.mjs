@@ -323,6 +323,19 @@ export function a2aCardUrlFor({ a2aUrl } = {}) {
   return { url: `${parsed.origin}/.well-known/agent-card.json` }
 }
 
+// The `pushRegistration` seed: no registration has been sent for this turn yet.
+//
+// ⚠️ A FACTORY, NOT A SHARED CONSTANT. The field is REPLACED (never mutated) by the handlers that
+// fill it in, so a shared object would survive — but a test that mutated it would poison every
+// later record in the same process, and the failure would surface as an unrelated assertion.
+// Exported because the FOLLOW-UP turn resets the field to this same seed before collecting: a
+// follow-up creates a task of its own, so `pushRegistration` must describe the latest turn exactly
+// as `result` does, and the spawn-path guard (`state !== 'not-attempted'`) would otherwise refuse
+// to record anything for turn 2 onward.
+export function pendingPushRegistration() {
+  return { state: 'not-attempted', reason: 'the turn has not yet named a task' }
+}
+
 // The agent record a spawn writes — pure, so the fields that must NOT appear can be asserted in
 // a test rather than checked by eye.
 //
@@ -389,7 +402,7 @@ export function a2aWorkerRecord({
       // exactly how a whole docker e2e reported an empty `status_messages` with no way to tell
       // "never registered" from "registered and refused". Projected by `agentView`, and it holds
       // no credential: `taskId` is the task's own id, never the token.
-      pushRegistration: { state: 'not-attempted', reason: 'the turn has not yet named a task' },
+      pushRegistration: pendingPushRegistration(),
 
       // ⚠️ The three fields this path adds, and the three `agentView` and `buildRecord` must
       // never project. Both are explicit allowlists of named fields with no spread, so a token

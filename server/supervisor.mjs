@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, pushDiagnosticPatch, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
@@ -1675,10 +1675,33 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       // or a roster read would report a healthy worker as broken. `collectWorkerTurn` swallows a
       // throw from here for the same reason, so the two agree rather than relying on each other.
       //
-      // Only the FIRST turn registers: a follow-up continues an existing task, so its config is
-      // already held and re-registering would add a duplicate callback per message.
+      // ⚠️ THIS IS NOT THE ONLY TURN THAT REGISTERS — corrected 2026-10-18. It read "a follow-up
+      // continues an existing task, so its config is already held and re-registering would add a
+      // duplicate callback per message", and the premise is false: `openWorkerTurn` sends a
+      // follow-up with a `contextId` and **no `taskId`**, so the worker's SDK creates a NEW task,
+      // and the previous task's config does not apply to it. The `send_agent_message` call site
+      // registers its own turn's task for exactly that reason — no duplicate is created, because
+      // each config belongs to a distinct task.
       onTaskId: async (taskId) => {
-        if (!push) return
+        // ⚠️ A MISSING PUSH CONFIG IS RECORDED, NOT SWALLOWED — and this line used to swallow it.
+        // `if (!push) return` left the SEED reason standing, which reads "the turn has not yet
+        // named a task" — the opposite of what happened: the turn named one, which is the only way
+        // this callback runs at all. Measured 2026-10-18 on a fresh docker spawn: the record showed
+        // exactly that seed while the task id had been found, so the field named the wrong cause
+        // for the third time in this task. `pushBegun.error` is the bind failure `beginCreate`
+        // returned (it is the only way `push` is undefined); carrying it here turns the next run
+        // into a diagnosis instead of another guess about which branch was taken.
+        if (!push) {
+          built.record.pushRegistration = {
+            state: 'not-attempted',
+            reason: pushBegun.error
+              ? `no push config was minted for this spawn: ${pushBegun.error}`
+              : 'no push config was minted for this spawn',
+            at: new Date().toISOString(),
+          }
+          writeLedger(built.record)
+          return
+        }
         const registration = await registerPushCallbackOnWorker({
           endpoint: card.endpoint,
           taskId,
@@ -2795,7 +2818,53 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         })
         const sendMs = Date.now() - t0
         if (sent.error) return reply({ error: `the turn could not be sent: ${sent.error}`, send_ms: sendMs })
-        void collectWorkerTurn({ res: sent.res ?? sent.pending, sentContextId: sent.contextId })
+        // ⚠️ THE FOLLOW-UP REGISTERS TOO, AND THE SEED IS RESET FIRST. A follow-up is sent with a
+        // `contextId` and no `taskId`, so the worker creates a NEW task; the push config held for
+        // the first turn's task does not apply to it. Without this the channel is silent for every
+        // turn after the first, and `pushRegistration` keeps the FIRST turn's outcome — so the row
+        // reports a registration that has nothing to do with the turn just sent.
+        //
+        // ⚠️ WHY THE SEED IS REWRITTEN RATHER THAN THE GUARD DROPPED. `onDiagnostic` refuses to
+        // overwrite a terminal state, which is what stops it undoing `onTaskId` within a turn.
+        // Resetting to the seed gives that guard the meaning it has at spawn, while keeping the
+        // field per-turn — `result` is overwritten by each follow-up for exactly this reason.
+        agent.pushRegistration = pendingPushRegistration()
+        void collectWorkerTurn({
+          res: sent.res ?? sent.pending,
+          sentContextId: sent.contextId,
+          onTaskId: async (taskId) => {
+            const push = await a2aPushRegistry.pushFor(agent.id)
+            if (!push) {
+              // ⚠️ RECORDED, NOT SKIPPED. A worker whose token this registry no longer holds — a
+              // row re-adopted after a reconnect, or a create that never bound — cannot register,
+              // and saying so is the difference between that and a channel that is merely quiet.
+              agent.pushRegistration = {
+                state: 'not-attempted',
+                reason: 'this process holds no push token for the worker, so no registration could be sent',
+                at: new Date().toISOString(),
+              }
+              writeLedger(agent)
+              return
+            }
+            const registration = await registerPushCallbackOnWorker({
+              endpoint: channel.endpoint,
+              taskId,
+              push,
+              token: push.token,
+            })
+            agent.pushRegistration = registration.error
+              ? { state: 'attempted-error', taskId, error: registration.error, at: new Date().toISOString() }
+              : { state: 'attempted-ok', taskId, at: new Date().toISOString() }
+            writeLedger(agent)
+          },
+          onDiagnostic: (d) => {
+            if (agent.pushRegistration?.state !== 'not-attempted') return
+            const patch = pushDiagnosticPatch(d)
+            if (!patch) return
+            agent.pushRegistration = patch
+            writeLedger(agent)
+          },
+        })
           .then((collected) => {
             const patch = a2aTurnPatch(collected, { at: new Date().toISOString() })
             agent.result = patch.result

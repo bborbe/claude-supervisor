@@ -104,6 +104,31 @@ export function createA2APushRegistry({
     },
 
     /**
+     * The push config a FOLLOW-UP turn must register against its own task — `{ url, token }`, or
+     * `null` when this registry holds no bound token for the worker.
+     *
+     * ⚠️ A FOLLOW-UP NEEDS ITS OWN REGISTRATION, and the spawn-side comment this replaces said the
+     * opposite ("a follow-up continues an existing task, so its config is already held"). A
+     * follow-up is sent with a `contextId` and **no `taskId`** (`openWorkerTurn`), so the worker's
+     * SDK creates a NEW task in that conversation — and a config registered for the previous task
+     * does not apply to it. Registering only on the first turn therefore leaves every follow-up
+     * turn with no callback at all, which reads downstream exactly like a quiet channel.
+     *
+     * ⚠️ IT REUSES THE BOUND TOKEN rather than minting one. The receiver files a push under the
+     * worker id its token is bound to; a freshly minted token is unbound (`tokens.set(token, null)`
+     * in `beginCreate`) and would file the status under the token itself, where `statusMessagesFor`
+     * never looks. Reusing it also keeps one credential per worker for the life of the process.
+     */
+    async pushFor(workerId) {
+      const ready = await ensureListening()
+      if (ready.error) return null
+      for (const [token, bound] of tokens.entries()) {
+        if (bound === workerId) return { url: ready.url, token }
+      }
+      return null
+    },
+
+    /**
      * Attach the controller's worker id to a minted token — `null`, or `{ error }`.
      *
      * Called once the `create` reply names the worker, and it is what moves any buffered entries
