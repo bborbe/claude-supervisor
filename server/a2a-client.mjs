@@ -397,12 +397,100 @@ export function a2aPushRefusal({ push } = {}) {
 // this module's preference: it refuses a request that sets none or more than one instead of
 // guessing at the intent. A builder that silently dropped a stray field would turn a caller's
 // mistake into a different operation than the one it asked for.
-export function a2aControlRequestFor({ operation, task, workerId } = {}) {
+// The declared `mounts` / `secrets` a `create` carries, validated — `{ declared }`, or `{ error }`.
+//
+// ⚠️ THESE ARE THE ONLY ROUTE BY WHICH A CALLER PUTS SOMETHING INTO A WORKER'S ENVIRONMENT, and
+// that is deliberate: the raw `env` argument stays REFUSED on this path (`a2aSpawnArgumentRefusal`),
+// because a bare map is an ungoverned surface. A mount is a host path the controller checks against
+// its own allowlist, and a secret is a TeamVault KEY the controller resolves itself — so the caller
+// names what it wants and the controller decides whether it may have it. Passing a secret VALUE is
+// not expressible here, which is the point rather than a limitation.
+//
+// ⚠️ VALIDATED HERE, NOT ONLY AT THE TOOL BOUNDARY. The tool schema is what a caller reads, but
+// this builder is what puts bytes on the wire, and a test drives it directly — so a shape that
+// only the schema rejected would be one the request builder would happily send.
+export function declaredCreateArguments({ mounts, secrets } = {}) {
+  const declared = {}
+
+  if (mounts !== undefined) {
+    if (!Array.isArray(mounts)) return { error: '`mounts` must be an array.' }
+    const checked = []
+    for (const [index, mount] of mounts.entries()) {
+      if (mount === null || typeof mount !== 'object' || Array.isArray(mount)) {
+        return { error: `\`mounts[${index}]\` must be an object.` }
+      }
+      const { host_path: hostPath, volume, container_path: containerPath, read_only: readOnly } = mount
+      // ⚠️ EXACTLY ONE SOURCE, and `volume` is named in the refusal rather than ignored. The
+      // controller refuses a named volume with its own `mount_not_allowed: volume <name>`; a
+      // caller told only "not supported" here would have no idea which of its fields was the
+      // problem, and the two refusals must agree about what a volume is.
+      if (volume !== undefined) {
+        return {
+          error:
+            `\`mounts[${index}]\` declares \`volume\`, which is refused: the mount allowlist governs ` +
+            'host paths only, so a named volume would be an ungoverned mount surface. Use `host_path`.',
+        }
+      }
+      if (typeof hostPath !== 'string' || hostPath === '') {
+        return { error: `\`mounts[${index}].host_path\` must be a non-empty string.` }
+      }
+      if (typeof containerPath !== 'string' || containerPath === '') {
+        return { error: `\`mounts[${index}].container_path\` must be a non-empty string.` }
+      }
+      if (readOnly !== undefined && typeof readOnly !== 'boolean') {
+        return { error: `\`mounts[${index}].read_only\` must be a boolean when given.` }
+      }
+      checked.push({ host_path: hostPath, container_path: containerPath, ...(readOnly === undefined ? {} : { read_only: readOnly }) })
+    }
+    if (checked.length > 0) declared.mounts = checked
+  }
+
+  if (secrets !== undefined) {
+    if (!Array.isArray(secrets)) return { error: '`secrets` must be an array.' }
+    const checked = []
+    for (const [index, secret] of secrets.entries()) {
+      if (secret === null || typeof secret !== 'object' || Array.isArray(secret)) {
+        return { error: `\`secrets[${index}]\` must be an object.` }
+      }
+      const { name, teamvault_key: teamVaultKey } = secret
+      if (typeof name !== 'string' || name === '') {
+        return { error: `\`secrets[${index}].name\` must be a non-empty string.` }
+      }
+      // ⚠️ THE KEY, NEVER THE VALUE. A caller cannot pass a secret's value through this field even
+      // by accident: the controller resolves the key against TeamVault itself, so the value never
+      // travels from here at all.
+      if (typeof teamVaultKey !== 'string' || teamVaultKey === '') {
+        return {
+          error:
+            `\`secrets[${index}].teamvault_key\` must be a non-empty TeamVault KEY. The value is never ` +
+            'passed by the caller — the controller resolves the key itself.',
+        }
+      }
+      checked.push({ name, teamvault_key: teamVaultKey })
+    }
+    if (checked.length > 0) declared.secrets = checked
+  }
+
+  return { declared }
+}
+
+export function a2aControlRequestFor({ operation, task, workerId, mounts, secrets } = {}) {
   if (!A2A_CONTROL_OPERATIONS.includes(operation)) {
     return {
       error:
         `\`operation\` must be one of ${A2A_CONTROL_OPERATIONS.map((o) => JSON.stringify(o)).join(', ')} ` +
         `— got ${JSON.stringify(operation) ?? 'undefined'}.`,
+    }
+  }
+  // ⚠️ REFUSED, NOT DROPPED, and checked BEFORE the per-operation branches — which is the whole
+  // point of its position. `list` and `stop` have no mount or secret surface at all, so a caller
+  // that passed one has misunderstood the call; a value silently ignored is how a caller concludes
+  // a worker was given access it never received. ⚠️ Placed after the `list` branch it would be
+  // UNREACHABLE for `list`, because that branch returns first — a guard that can never fire reads
+  // exactly like one that passed.
+  if (mounts !== undefined || secrets !== undefined) {
+    if (operation !== 'create') {
+      return { error: `\`mounts\` and \`secrets\` are \`create\` arguments — \`${operation}\` takes neither.` }
     }
   }
   if (operation === 'list') {
@@ -423,7 +511,9 @@ export function a2aControlRequestFor({ operation, task, workerId } = {}) {
     // which is what creates the task on the worker's own A2A server. The push config is registered
     // against that task, on that server, by the spawner — see `a2aPushConfigCallFor`. A callback
     // URL sent to the controller would be a field nothing could act on.
-    return { request: { operation, create: { task } } }
+    const declared = declaredCreateArguments({ mounts, secrets })
+    if (declared.error) return { error: declared.error }
+    return { request: { operation, create: { task, ...declared.declared } } }
   }
   if (typeof workerId !== 'string' || workerId === '') {
     return { error: '`stop` requires a non-empty `workerId`.' }

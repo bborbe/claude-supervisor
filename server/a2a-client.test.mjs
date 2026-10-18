@@ -25,6 +25,7 @@ import {
   a2aStreamRequestFor,
   a2aWorkerList,
   createSseFrameReader,
+  declaredCreateArguments,
   resolveA2AEndpoint,
 } from './a2a-client.mjs'
 
@@ -557,4 +558,95 @@ test('an error frame stops the reader and is reported, never yielded as data', (
   assert.equal(reader.frames.length, 1)
   reader.push(sse({ statusUpdate: { taskId: 't-1', status: { state: 'completed' } } }))
   assert.equal(reader.frames.length, 1)
+
+// ── declared mounts / secrets ───────────────────────────────────────────────
+//
+// These are the ONLY route by which a caller puts something into a worker's environment on this
+// path, so the refusals matter as much as the pass-throughs: `env` stays refused precisely because
+// a mount is checked by the controller and a secret is a KEY rather than a value. The tests below
+// pin that asymmetry — that a value is not expressible, and that a volume is refused by name.
+
+test('a create with no declaration carries neither key, so the wire shape is unchanged', () => {
+  // The regression this pins: an empty array or an empty object emitted unconditionally would
+  // change every existing create's body, and the controller would receive fields it never had.
+  assert.deepEqual(a2aControlRequestFor({ operation: 'create', task: 'T' }), {
+    request: { operation: 'create', create: { task: 'T' } },
+  })
+  assert.deepEqual(a2aControlRequestFor({ operation: 'create', task: 'T', mounts: [], secrets: [] }), {
+    request: { operation: 'create', create: { task: 'T' } },
+  })
+})
+
+test('declared mounts reach the create body, with read_only only when it was given', () => {
+  const call = a2aControlRequestFor({
+    operation: 'create',
+    task: 'T',
+    mounts: [
+      { host_path: '/srv/vault', container_path: '/vault' },
+      { host_path: '/srv/ro', container_path: '/ro', read_only: true },
+    ],
+  })
+  assert.deepEqual(call.request.create.mounts, [
+    { host_path: '/srv/vault', container_path: '/vault' },
+    { host_path: '/srv/ro', container_path: '/ro', read_only: true },
+  ])
+})
+
+test('a declared volume is refused BY NAME, because the allowlist cannot govern it', () => {
+  // The controller refuses this too, with its own `mount_not_allowed: volume <name>`. Refusing here
+  // as well is what turns a refusal at the far end into one the caller can act on, and the message
+  // names the field rather than saying "mount not allowed" about an entry whose problem is one key.
+  const call = a2aControlRequestFor({
+    operation: 'create',
+    task: 'T',
+    mounts: [{ volume: 'other-workload-data', container_path: '/data' }],
+  })
+  assert.match(call.error, /`mounts\[0\]` declares `volume`, which is refused/)
+  assert.match(call.error, /Use `host_path`/)
+})
+
+test('a secret carries a TeamVault KEY, and a value is not expressible', () => {
+  const call = a2aControlRequestFor({
+    operation: 'create',
+    task: 'T',
+    secrets: [{ name: 'GATEWAY_SECRET', teamvault_key: '9L6eMO' }],
+  })
+  assert.deepEqual(call.request.create.secrets, [{ name: 'GATEWAY_SECRET', teamvault_key: '9L6eMO' }])
+  // The key is what travels. There is no field through which a caller could send the value, and
+  // this asserts the shape rather than trusting that nobody would try.
+  assert.equal(call.request.create.secrets[0].value, undefined)
+})
+
+test('a malformed declaration refuses rather than reaching the controller', () => {
+  const cases = [
+    [{ mounts: 'nope' }, /`mounts` must be an array/],
+    [{ mounts: [{ container_path: '/x' }] }, /`mounts\[0\]\.host_path` must be a non-empty string/],
+    [{ mounts: [{ host_path: '/x' }] }, /`mounts\[0\]\.container_path` must be a non-empty string/],
+    [{ mounts: [{ host_path: '/x', container_path: '/y', read_only: 'yes' }] }, /read_only` must be a boolean/],
+    [{ secrets: 'nope' }, /`secrets` must be an array/],
+    [{ secrets: [{ teamvault_key: 'k' }] }, /`secrets\[0\]\.name` must be a non-empty string/],
+    [{ secrets: [{ name: 'N' }] }, /`secrets\[0\]\.teamvault_key` must be a non-empty TeamVault KEY/],
+  ]
+  for (const [args, pattern] of cases) {
+    assert.match(a2aControlRequestFor({ operation: 'create', task: 'T', ...args }).error, pattern)
+  }
+})
+
+test('list and stop refuse a declaration rather than dropping it', () => {
+  // A value silently ignored is how a caller concludes a worker was given access it never received.
+  // `list` and `stop` have no mount or secret surface at all, so passing one is a misunderstanding
+  // of the call and is refused as such.
+  assert.match(
+    a2aControlRequestFor({ operation: 'list', mounts: [{ host_path: '/x', container_path: '/y' }] }).error,
+    /`mounts` and `secrets` are `create` arguments — `list` takes neither/,
+  )
+  assert.match(
+    a2aControlRequestFor({ operation: 'stop', workerId: 'w-1', secrets: [{ name: 'N', teamvault_key: 'k' }] }).error,
+    /`mounts` and `secrets` are `create` arguments — `stop` takes neither/,
+  )
+})
+
+test('declaredCreateArguments returns an empty declaration rather than undefined keys', () => {
+  assert.deepEqual(declaredCreateArguments({}), { declared: {} })
+  assert.deepEqual(declaredCreateArguments({ mounts: [], secrets: [] }), { declared: {} })
 })
