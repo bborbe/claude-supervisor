@@ -8,6 +8,8 @@ allowed-tools:
   - Bash(wezterm cli list:*)
   - Bash(python3:*)
   - Bash(ls:*)
+  - Bash(sort:*)
+  - Bash(tail:*)
   - Bash(~/.claude/plugins/cache/claude-supervisor/supervisor/*/scripts/restart-precheck.py:*)
   - Bash(~/.claude/plugins/cache/claude-supervisor/supervisor/*/scripts/restart-worker.py:*)
 ---

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`restart-precheck.py` — the read-only half of `/supervisor:worker-restart`.
+"""`restart-precheck.py` — the read-only half of `/supervisor:restart`.
 
 `restart-worker.py` owns the kill+resume leg and refuses on seven conditions about the
 TARGET. This script owns the two things it does not, both of which must be answered
@@ -156,7 +156,7 @@ def classify(rec, wnm):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Read-only pre-kill probe for /supervisor:worker-restart.",
+        description="Read-only pre-kill probe for /supervisor:restart.",
     )
     parser.add_argument("session_id")
     parser.add_argument("--sessions-dir", default=None)

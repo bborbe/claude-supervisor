@@ -55,7 +55,7 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | `/supervisor:attention-next` | what's next on the attention stack — answer an item in chat, delivered to the session that asked |
 | `/supervisor:inbox` | the operator's approval queue — every live task at `phase: todo` across every vault, plus the three verbs that move one (approve / reject / later). The command never picks a row; each verb resolves its vault through `scripts/inbox.py --resolve`, which refuses on ambiguity |
 | `scripts/jump-link.py` | render a pane's jump target as a clickable link (falls back to `/supervisor:jump <N>` when the local fleet-jump server is not configured) |
-| `scripts/restart-worker.py` | restart ONE stale idle worker session under a narrow allow rule — seven registry-guarded refusals, never a manager, never a broad `kill` |
+| `scripts/restart-worker.py` | restart ONE stale idle session — **worker or manager** — under a narrow allow rule: seven registry-guarded refusals, never a broad `kill` |
 | `scripts/drive-ledger.py` | the fleet-drive ledger's **one writer** — `read` normalises the file's two shapes (flat `sid` rows and an `entries` list) to one canonical shape, and `merge` takes **only this round's entries**, so a round cannot shrink the ledger by omission. A corrupt ledger is refused rather than read as empty, and `.bak` is the pre-merge copy |
 | `scripts/manager-predispatch.py` | the **pre-dispatch gate** `/supervisor:manager-drive` and `/supervisor:manager-status` run first — when the tracked tree has not moved it replays the stored table and dispatches **no agent**; a worker dying counts as movement, because session liveness is in the digest |
 | `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop (the **arm**, invoked once), one read-only snapshot |
@@ -67,7 +67,7 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |
 | agent `worker-drive-reader` | the read half of a worker-drive round — the session diagnosis and the drive table, computed in a sub-agent so the reading instructions never re-inject on every run |
-| `/supervisor:worker-restart` | restart ONE named worker in one verb — kill, resume, and tell it what changed only when that is safe |
+| `/supervisor:restart` | restart ONE named session — **worker or manager** — in one verb: kill, resume in its own role colour, and tell it what changed only when that is safe (a manager is told to re-arm its loop). `/supervisor:worker-restart` is a deprecated alias |
 | `/supervisor:open` | resolve a task, goal or topic by name, then jump to its live session, resume its recorded one, or spawn a new one (manager-only; needs `vault-cli`) |
 | `/supervisor:ready` | ready ONE named task to the spawn bar — audit → repair → re-audit inside a sub-agent — then open it or escalate naming the gap (cross-tier; needs `vault-cli`) |
 | `/supervisor:read-guides` | load every guide in `docs/` — start here to learn which commands your session tier may run |
