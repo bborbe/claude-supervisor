@@ -1696,6 +1696,26 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
           : { state: 'attempted-ok', taskId, at: new Date().toISOString() }
         writeLedger(built.record)
       },
+      // ⚠️ WHICH PATH THE COLLECTION TOOK — the field that separates the two ways `onTaskId` can
+      // fail to run. `not-attempted` alone cannot: a whole-body collection structurally never
+      // calls it, while an incremental one calls it unless no frame named a task. Recording the
+      // path and the frame count turns the seed reason into a diagnosis.
+      //
+      // ⚠️ IT NEVER OVERWRITES A TERMINAL STATE. `onTaskId` owns `attempted-ok` / `attempted-error`,
+      // and a diagnostic arriving afterwards must not undo it — hence the early return.
+      onDiagnostic: (d) => {
+        if (built.record.pushRegistration?.state !== 'not-attempted') return
+        built.record.pushRegistration = d.taskIdFound === false
+          ? {
+              state: 'not-attempted',
+              reason: `the turn's stream was read incrementally but no frame named a task (${d.frames} frame(s))`,
+            }
+          : {
+              state: 'not-attempted',
+              reason: 'the turn was collected whole-body, so the task-id callback was never wired',
+            }
+        writeLedger(built.record)
+      },
     })
       .then((collected) => {
         const patch = a2aTurnPatch(collected, { at: new Date().toISOString() })

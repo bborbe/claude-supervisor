@@ -781,6 +781,24 @@ test('an error frame inside HTTP 200 is fatal, because the status proves nothing
   assert.match(collected.error, /refused the turn/)
 })
 
+test('a whole-body collection reports that the task-id callback was never wired', async () => {
+  // ⚠️ This is the diagnostic that separates the two ways `onTaskId` can fail to run. A response
+  // with no stream body is collected whole, and `.text()` structurally cannot fire the callback —
+  // so a caller that asked for a push registration must be told its callback was never wired,
+  // rather than being left with a bare `not-attempted` that also describes "no frame named a task".
+  const seen = []
+  const collected = await collectWorkerTurn({
+    res: await stubFetch(sse(turnFrames()))('http://x', {}),
+    sentContextId: 'ctx-1',
+    onTaskId: async () => {
+      throw new Error('the callback must not fire on the whole-body path')
+    },
+    onDiagnostic: (d) => seen.push(d),
+  })
+  assert.equal(collected.error, undefined, 'the turn itself still collects normally')
+  assert.deepEqual(seen, [{ path: 'whole-body' }])
+})
+
 test('a non-2xx answer is reported rather than read as frames', async () => {
   const collected = await collectWorkerTurn({
     res: await stubFetch('nope', { ok: false, status: 502 })('http://x', {}),
