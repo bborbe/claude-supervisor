@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.176.0
 
 - feat: **`attention-ask.py post` refuses a card whose every option names a manager-owned action.** Class 2 of the board-noise work: when nothing on the card asks the operator for something a manager cannot do itself, the card spends an operator click ratifying a decision already made. The check **loads** `manager-menu-guard.py`'s canonical `names_manager_owned_action` rather than mirroring the match, and it **fails OPEN** — a missing or raising guard posts the card, because refusing a real question strands the asking session, which is strictly worse than one low-value card. A card carrying even one operator-owned option is a real question and is never refused; `--force` keeps a deliberate card postable, and the refusal names that escape. Change set: `scripts/attention-ask.py`, `scripts/tests/test_attention_ask.py`, `CHANGELOG.md`.
 
