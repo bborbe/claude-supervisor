@@ -91,6 +91,22 @@ Per-session file, keyed on the session uuid from the scratchpad path — never a
 
 Verdict words: **ACT** — something is mine to do now; **WAIT** — a verified-alive, progressing wait with a watcher armed; **DRIFTING** — work left the anchor; **DONE** — the anchor reads terminal on disk. A WAIT then enters §2's repetition gate.
 
+### Measure the window first — from disk, never from your own account
+
+Your sense of what you achieved is a claim, not an input; `docs/session-progress.md` owns the grades, verdicts and claim classes.
+
+1. Dispatch §1's coverage mode (once); write it verbatim to `COV=~/.claude/state/worker-drive-handback/<SID>.coverage`.
+2. If a closure box moved since the last drive, file **one** claim — `{"box":"SC<n>|DoD<n>","kind":"tick|commit|progress-entry","ref":"<sha | quote-free Progress-line substring>"}`, never prose; else none.
+3. Run the script before Step 8 rewrites `last_run` (`--since` defaults to it):
+
+```bash
+P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
+WIN=~/.claude/state/worker-drive-handback/<SID>.window.json; mkdir -p "${WIN%/*}"
+python3 "$P/progress-window.py" --session <SID> --anchor "<task file>" --coverage "$COV" [--claim '<json>'] --json > "$WIN"; echo "exit=$?"
+```
+
+Exit 2 is `UNKNOWN`: name the stderr source, drive on. **`short_path: true` is the one live lever** — skip the reader and §1's inventory and drive the next open box; any other value only adds the ⏱ block (`block` field) to §8.
+
 ### Dispatch the read half
 
 One dispatch covers §0b and §1:
@@ -103,13 +119,14 @@ Task tool with:
     SID: <session uuid> · snapshot: ~/.claude/state/diagnose-snapshot-<uuid>.json
     prior_snapshot: <contents, or "no previous snapshot">
     date: <Step 0's `date -u`>
-    session_digest: last meaningful progress = <…> · last N turns = <…> · drift = <…>
+    window: <$WIN path> — the progress-window.py --json output, verbatim
+    drift_note: <your observation of work that left the anchor, or "none">
     waits: <armed monitors · background shells · pending subagent notifications · daemons/containers/queues>
     vault: <vault root path> · tasks_dir: <tasks dir>
     coverage: <the §1 coverage dispatch output, verbatim>
 ```
 
-**`session_digest` and `waits` must be passed explicitly — the reader cannot see this conversation**, and a fact you do not pass comes back `UNKNOWN`, which reads as a dead wait.
+**`window`, `drift_note` and `waits` must be passed explicitly — the reader cannot see this conversation**, and a fact you do not pass comes back `UNKNOWN`, which reads as a dead wait.
 
 It returns the diagnosis, the verdict word, the wait table, the drive table, the proposed snapshot JSON and a ≤ 1 KB `key=value` hand-back; its full output is the payload at `~/.claude/state/worker-drive-handback/<SID>.payload`.
 
@@ -119,7 +136,7 @@ Write the reader's proposed JSON to `SNAP=~/.claude/state/diagnose-snapshot-<ses
 
 ## Step 1 — Inventory the remaining work (the drive table)
 
-**Dispatch the coverage mode first — it is the reader's input, not its job** (the reader has no `Task` grant by design):
+**The coverage mode is dispatched once, in §0b's window step — it is the reader's input and the script's, never the reader's job** (the reader has no `Task` grant by design):
 
 ```
 Task tool with:
@@ -129,7 +146,7 @@ Task tool with:
 
 One row per closure box — `<box> | <driving subtask or none> | <evidence: measured(<source>) | asserted | none> | <proposal>` — plus a reconciliation line. ⚠️ **Read-only, and the only coverage implementation:** copy its ratings verbatim, never re-rate by eye, and never carry a local copy of this map into a manager command.
 
-**Then dispatch the read half** (§0b above), passing this output as its `coverage:` input. It builds the drive table — one row per open item: Open item · Evidence · Blocked by · Unlock lever · Owner · Now? — reading the Progress log before rating any row, and sorting `✅` first, cheapest-first. **The `Evidence` cell is read, never judged:** copied, never decided.
+**Then the read half** (§0b above) takes this output as its `coverage:` input. It builds the drive table — one row per open item: Open item · Evidence · Blocked by · Unlock lever · Owner · Now? — reading the Progress log before rating any row, and sorting `✅` first, cheapest-first. **The `Evidence` cell is read, never judged:** copied, never decided.
 
 **Zero `✅` rows is normally the strongest signal in this command** — a blocker is misdiagnosed (§3) or a criterion is unfinishable by construction (§5). Go there; do not park.
 
@@ -288,7 +305,9 @@ On an auto-mode denial of an inert doc edit, retry the identical `Edit` once bef
 
 One block. No per-step narration, no interim panels.
 
-**The two anchor links are mandatory and come first — always.** Not "when convenient", not "when the report is long", not "unless the verdict is Done". A `/supervisor:worker-drive` report without them is incomplete, because the operator's first question on reading any report is *which* task this was, and a bare title is not clickable.
+**The ⏱ block (`$WIN` `block`, §0b) is the report's first lines, verbatim** — never retyped.
+
+**The two anchor links are mandatory and come first after the ⏱ block — always.** Not "when convenient", not "when the report is long", not "unless the verdict is Done". A `/supervisor:worker-drive` report without them is incomplete, because the operator's first question on reading any report is *which* task this was, and a bare title is not clickable.
 
 Resolve them for real — `vault-cli task get` / `goal get` for the actual filenames, never a hand-written plausible path. Percent-encode spaces as `%20` and slashes as `%2F`, drop the `.md`. Drop only the `🎯 Goal:` line when the task genuinely has no parent goal (never write "none"); if there is no task anchor at all, write `📌 No task anchor — <reason>` rather than omitting the line.
 
@@ -301,9 +320,11 @@ Two further shapes seen the same day, both wrong:
 
 Measured across the 93 `/supervisor:worker-drive` runs that loaded this file after the 2026-09-05 fix (sampled 2026-09-07, chronological, no skipping): naming the shapes cut them but did not eliminate them. Both goal-slot shapes recurred — 2 literal `none`, 2 theme-promotions, 4/93 total — and the original whole-panel omission is now the dominant residual at 8/93, concentrated in short runs and mid-drive turns that ended without a closer.
 
-So treat the anchor block as the report's *first* emitted lines, written before the body exists — not as a header appended once the report is finished. Every shape above is a variant of the same failure: the panel was composed last, and last is when it gets dropped or improvised. If a `/supervisor:worker-drive` turn ends at all — including one that stops early, hands back a wait, or reports no change — it ends with `📌`.
+So treat the anchor block as the report's first composed lines — directly under the pasted ⏱ block — written before the body exists — not as a header appended once the report is finished. Every shape above is a variant of the same failure: the panel was composed last, and last is when it gets dropped or improvised. If a `/supervisor:worker-drive` turn ends at all — including one that stops early, hands back a wait, or reports no change — it ends with `📌`.
 
 ```
+⏱ Window … (the script's block, verbatim)
+
 🎯 Goal: [<name>](obsidian://open?vault=<V>&file=23%20Goals%2F<file>) — <n>/<m> SC · <n>/<m> subtasks · <binding constraint>
 📌 Task: [<name>](obsidian://open?vault=<V>&file=24%20Tasks%2F<file>) — <phase>, session <id-prefix>
 
@@ -334,6 +355,8 @@ ETA:        <duration + projected clock time + basis | n/a — Claude-side | unk
 👤 You: <one of the six verbs — see the global closer rule>
 ⏰ Next:  <concrete trigger: actor/mechanism, never a bare id, never "soon">
 ```
+
+Short path (§0b): no `OPEN` table — `Next open box: <box>` instead.
 
 **The four header lines are mandatory, in this order, on every report.** They are the operator's four restart questions; answering them first means the operator never has to type them. Each value comes from this run — the status from disk, the wait from §0b's evidence — never from memory. `How you can help` names a real hard stop (§ The contract) or says `nothing`; it never invents a chore.
 
