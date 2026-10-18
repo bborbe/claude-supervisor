@@ -587,9 +587,39 @@ def gate_class(rec, cause, shape, task_text):
 
 # --- The four-state label ----------------------------------------------------
 
+# A watcher line that asks the OPERATOR for a reply is not a machine wait. Some
+# sessions write their ask into the `⏰ Ends:` slot instead of the `👤 You:` slot,
+# and trusting the marker alone promotes them to `external` — the exact bucket the
+# fifth state exists to keep them out of. Measured on the first live run
+# (2026-10-18, pane 449): `⏰ Ends: \` your reply — I run the three commands…`
+# classified `external` while the session was waiting on the operator.
+_OPERATOR_REPLY = re.compile(r"^your\b[^.]{0,24}\b(reply|answer|pick|approval)\b",
+                             re.I)
+
+# A closer that names the machine event resuming the session. `later (on …)` is
+# the sibling's own parked verb; a closer opening with the panel's `⏰ Ends:` /
+# `⏰ Next:` marker is the same claim written in the panel's own vocabulary.
+_MACHINE_MARKERS = ("⏰ ends:", "⏰ next:")
+
+
+def _strip_lead(text):
+    """The text with leading punctuation/markup removed, for a start-anchored test."""
+    return re.sub(r"^[\W_]+", "", text or "")
+
+
+def is_operator_reply(watcher):
+    """True when a watcher line asks the operator for something, not a machine."""
+    return bool(_OPERATOR_REPLY.search(_strip_lead(watcher)))
+
+
+def is_machine_bound(closer):
+    """True when the session's own closer names the event that resumes it."""
+    text = wnm.normalize_closer(closer)
+    return wnm.is_parked_verb(text) or text.startswith(_MACHINE_MARKERS)
+
 
 def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
-             readable, is_parked):
+             readable, is_parked, closer=""):
     """The four-state label, or `unclassified` with the reason. Pure.
 
     Order is load-bearing. A decision outranks everything else: a session asking
@@ -614,7 +644,12 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
     if gate in OPERATOR_BOUND:
         return STATE_DECISION, ""
     if is_parked:
-        if watcher or eta or cause == wnm.CAUSE_CLOCK:
+        # A watcher is evidence only when it names a MACHINE. `watcher_of()` reads
+        # the last assistant text rather than the closer, so a session that put its
+        # ask in the `⏰ Ends:` slot would otherwise be reported `external` — the
+        # forced-bucket failure the fifth state exists to prevent.
+        if (eta or cause == wnm.CAUSE_CLOCK or is_machine_bound(closer)
+                or (watcher and not is_operator_reply(watcher))):
             return STATE_EXTERNAL, ""
         if gate in ("A", "B"):
             # Manager-clearable, never the operator's: the runbook's classes A/B.
@@ -627,6 +662,10 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
             return STATE_UNCLASSIFIED, "permission prompt (ask rule)"
         if shape == "question":
             return STATE_UNCLASSIFIED, "modal question with no closer verb"
+        if watcher and is_operator_reply(watcher):
+            # More specific than the cause class below: it names WHERE the ask
+            # lives, which is what the operator needs to go and answer it.
+            return STATE_UNCLASSIFIED, "watcher asks the operator, not a machine"
         if cause == wnm.CAUSE_OPERATOR:
             # `is_open_gate()` says operator, `is_operator_ask()` says no verb —
             # the two disagree, and the honest answer names the disagreement
@@ -799,7 +838,8 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
         eta = eta_of(rec)
         task_status = wnm.task_status_from_closer(rec)
         state, reason = state_of(reg_status, cause, gate, watcher, eta, task_status,
-                                 shape, bool(wnm.last_assistant_text(rec)), True)
+                                 shape, bool(wnm.last_assistant_text(rec)), True,
+                                 wnm.current_closer(rec))
         parked_rows.append({
             "session_id": sid,
             "name": name,
