@@ -421,6 +421,13 @@ class TestStates(Case):
         report = self.ok(self.env.run())
         self.assertEqual(report["verdict"], "TOOL-RUNNING")
 
+    def test_a_moved_box_outranks_a_young_trailing_call(self):
+        self.tick(at(5))
+        self.env.bash("make precommit", UNTIL - datetime.timedelta(seconds=60), pending=True)
+        report = self.ok(self.env.run(coverage=self.env.coverage(SC1="measured(PR #12)")))
+        self.assertEqual(report["verdict"], "PROGRESSING")
+        self.assertEqual(report["pending"]["name"], "Bash")
+
     def test_trailing_call_past_its_bound_is_not_tool_running(self):
         for minute in (-60, -50):
             self.env.bash("make test", at(minute), took=100)

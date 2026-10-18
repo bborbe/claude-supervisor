@@ -685,12 +685,14 @@ def measure(args):
     open_boxes = [k for k, v in end_boxes.items() if not v["checked"]]
 
     subtype = None
-    if pending and pending["age_s"] < pending["bound_s"]:
-        verdict = "TOOL-RUNNING"
-    elif end_boxes and not open_boxes:
+    # A call in flight only shields the no-move verdicts: a productive session is
+    # nearly always mid-call, so ranking it above a Moved entry hid PROGRESSING.
+    if end_boxes and not open_boxes:
         verdict = "DONE-CANDIDATE"
     elif moved:
         verdict = "PROGRESSING"
+    elif pending and pending["age_s"] < pending["bound_s"]:
+        verdict = "TOOL-RUNNING"
     elif started is not None and started > until - ORIENTATION:
         verdict = "ORIENTING"
     elif not window:

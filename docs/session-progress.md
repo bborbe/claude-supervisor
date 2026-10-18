@@ -145,9 +145,9 @@ Evaluated in this order; the first match wins.
 | # | Verdict | Rule | Drive does |
 |---|---|---|---|
 | 1 | `UNKNOWN` | a source is unreadable or two sources disagree | name the source; take no lever |
-| 2 | `TOOL-RUNNING` | the trailing `tool_use` is younger than 2× the median of that tool name's completed calls in the transcript (floor 120 s; 600 s with no history) | nothing — never nudge mid-call |
-| 3 | `DONE-CANDIDATE` | every closure box ticked | run the completion check (zero open boxes, DoD evidence, live state); never reap on this alone |
-| 4 | `PROGRESSING` | ≥1 A or B in the short window | with a claim backed by a **grade-A** observation (`short_path: true`): short report — the window block and the next open box; keep going. Otherwise: the window block, then the drive as before |
+| 2 | `DONE-CANDIDATE` | every closure box ticked | run the completion check (zero open boxes, DoD evidence, live state); never reap on this alone |
+| 3 | `PROGRESSING` | ≥1 A or B in the short window | with a claim backed by a **grade-A** observation (`short_path: true`): short report — the window block and the next open box; keep going. Otherwise: the window block, then the drive as before |
+| 4 | `TOOL-RUNNING` | nothing Moved, and the trailing `tool_use` is younger than 2× the median of that tool name's completed calls in the transcript (floor 120 s; 600 s with no history) | nothing — never nudge mid-call. It ranks below `PROGRESSING`: a productive session is nearly always mid-call, so ranking it first hid every Moved window (SC4 exercise, 2026-10-18: both progressing windows read `TOOL-RUNNING`) |
 | 5 | `BLOCKED-OPERATOR` | an open gate of class C/D/E (below) **with a card or pane the operator can reach** | make sure the ask is posted and ranked; never nudge the worker |
 | 6 | `WAITING-OK` | a named wait with a trigger **and** a live watcher, inside 2× its expected duration | nothing; name the watcher and ETA |
 | 7 | `WAITING-STALE` | a wait past 2× expected, a dead watcher, or a wait with no trigger at all | re-arm, re-trigger, or re-verify the wait (`worker-drive` §3) |
