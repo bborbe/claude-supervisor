@@ -50,6 +50,26 @@ test('beginCreate mints a token and the callback URL together', async () => {
   assert.deepEqual(begun.push, { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-alpha' })
 })
 
+test('pushFor hands a follow-up the token its first turn already bound', async () => {
+  const { registry } = harness({ tokenFactory: () => 'tok-alpha' })
+  const begun = await registry.beginCreate()
+  assert.equal(await registry.pushFor('w-7f3a'), null, 'no worker id is bound yet')
+  registry.bind({ token: begun.token, workerId: 'w-7f3a' })
+  assert.deepEqual(await registry.pushFor('w-7f3a'), begun.push, 'the same config, not a fresh token')
+  assert.equal(await registry.pushFor('w-other'), null, 'another worker gets nothing')
+})
+
+test('pushFor never hands back a token that is not bound to a worker', async () => {
+  let minted = 0
+  const { registry } = harness({ tokenFactory: () => `tok-${++minted}` })
+  const first = await registry.beginCreate()
+  registry.bind({ token: first.token, workerId: 'w-7f3a' })
+  // A second spawn's token is minted and left unbound, which is the state `beginCreate` always
+  // creates. Returning it would file that spawn's pushes under the token, where no worker reads.
+  await registry.beginCreate()
+  assert.deepEqual(await registry.pushFor('w-7f3a'), { url: first.push.url, token: 'tok-1' })
+})
+
 test('a push that lands before the create answers is buffered, then re-keyed to the worker', async () => {
   const { registry, deliver } = harness({ tokenFactory: () => 'tok-alpha' })
   const begun = await registry.beginCreate()

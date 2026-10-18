@@ -22,6 +22,7 @@ import {
   fetchWorkerCard,
   ledgerModeForStatus,
   openWorkerTurn,
+  pendingPushRegistration,
   pushDiagnosticPatch,
   a2aListCallFor,
   a2aLiveSessions,
@@ -394,6 +395,16 @@ test('the record seeds the push registration as NOT-ATTEMPTED, never absent', ()
   assert.equal(record.pushRegistration.state, 'not-attempted')
   assert.match(record.pushRegistration.reason, /has not yet named a task/)
   assert.ok(!('error' in record.pushRegistration), 'no error until one is attempted')
+})
+
+test('pendingPushRegistration returns a fresh object each call', () => {
+  // ⚠️ THE FACTORY EXISTS SO A RECORD CANNOT SHARE ITS SEED WITH ANOTHER. The follow-up turn
+  // resets `pushRegistration` to this seed before collecting, and the handlers REPLACE the field —
+  // but a shared literal would make any future in-place edit leak across every record in the
+  // process, surfacing as an unrelated assertion failure.
+  const first = pendingPushRegistration()
+  first.reason = 'mutated by a test'
+  assert.match(pendingPushRegistration().reason, /has not yet named a task/)
 })
 
 test('the record refuses a target this path does not own', () => {
