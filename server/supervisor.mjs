@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
@@ -2618,6 +2618,21 @@ const TOOLS = [
     },
   },
   {
+    name: 'read_push_config',
+    description:
+      'Read a worker\'s registered A2A push config back FROM THE WORKER — `{ config }` or `{ error }`. This is the read half of the push round trip: `push_registration.state === "attempted-ok"` proves only that the worker ACCEPTED a registration, not that it holds one, and this call is the only thing that separates those two. ⚠️ It requires an accepted registration to exist for that agent and refuses otherwise, rather than reading an unregistered task. ⚠️ It returns the CONFIG — the url and notification token the worker stores — never the worker\'s bearer token, which authenticates the call and is never projected. ⚠️ Read-only: nothing on the worker changes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent_id: {
+          type: 'string',
+          description: 'The A2A worker whose push config to read — the id `spawn_agent` returned, or one from `list_agents`.',
+        },
+      },
+      required: ['agent_id'],
+    },
+  },
+  {
     name: 'list_agents',
     description: 'All spawned sessions with status and how many permissions are pending. Each row also carries `current_tool_call` (the call in flight and how long it has been held) and `last_message`, so one sweep says what every worker is doing without a pane. Each row also carries `open_cards` — the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`), which is where a worker parked on a permission prompt shows up whoever spawned it, since `pending_permissions` covers only the parks this server holds. The tool name is the card\'s `payload` prefix. Answer one with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) on every row when the store is unreachable or switched off. Each row also carries `last_status` — the newest pushed A2A status for that worker as `{worker_id, state, text, ts, age_s}`, or null when nothing has arrived — which is what lets one sweep show a docker worker\'s own mid-turn progress without opening its pane or waiting for its turn to end.',
     inputSchema: { type: 'object', properties: {} },
@@ -3029,6 +3044,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // answer with `attention-answer.py answer <item_id>`. Null = store unreadable/off.
       const open_cards = await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: agent.sessionId })
       return reply({ ...agentView(agent), open_cards })
+    }
+
+    case 'read_push_config': {
+      // ⚠️ THE READ HALF OF THE ROUND TRIP. `attempted-ok` says the worker ACCEPTED a registration;
+      // only a read says it HOLDS one. Gated on an accepted registration existing, because reading
+      // a task the worker never accepted would report "no config" and read as a channel fault.
+      const agent = (await currentRoster()).get(args.agent_id)
+      if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
+      const reg = agent.pushRegistration
+      if (!reg || reg.state !== 'attempted-ok' || typeof reg.taskId !== 'string') {
+        return reply({
+          error:
+            `agent ${args.agent_id} has no accepted push registration to read back (state: ${reg?.state ?? 'none'}). ` +
+            `A read of a task the worker never accepted would report a missing config as a channel fault.`,
+        })
+      }
+      if (!agent.a2aUrl || !agent.workerToken) {
+        return reply({
+          error:
+            `agent ${args.agent_id} is an A2A worker whose endpoint or bearer token this process does not hold — ` +
+            `a row re-adopted after a reconnect can be watched but not read back.`,
+        })
+      }
+      const out = await readPushCallbackFromWorker({
+        endpoint: agent.a2aUrl,
+        taskId: reg.taskId,
+        token: agent.workerToken,
+      })
+      if (out.error) return reply({ error: out.error, task_id: reg.taskId })
+      return reply({ agent_id: agent.id, task_id: reg.taskId, config: out.config })
     }
 
     case 'pending_permissions':
