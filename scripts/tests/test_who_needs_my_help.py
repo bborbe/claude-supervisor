@@ -796,6 +796,18 @@ class FourStateTest(Base):
         # external — a watcher line and a clock line
         self.fleet.add("s-ext-watch", 303, CLOSER_WATCH, name="External Watch")
         self.fleet.add("s-ext-clock", 304, CLOSER_CLOCK, name="External Clock")
+        # external — a closer that itself names the machine event (pane 370 shape)
+        self.fleet.add("s-ext-agent", 311, "",
+                       name="External Agent",
+                       transcript="👤 You: ⏰ Ends: orientation assistant returns "
+                                  "(background agent a2d197b1)\n")
+        # unclassified — the ask was written into the `⏰ Ends:` slot, not the
+        # closer (pane 449 shape): the watcher asks the OPERATOR, so it is not a
+        # machine wait and must not be promoted to `external`.
+        self.fleet.add("s-unc-askslot", 312, "",
+                       name="Ask In Watcher Slot",
+                       transcript="👤 You: Orienting on the task — assistant is searching the vault.\n"
+                                  "⏰ Ends: ` your reply — I run the three commands in `~/.claude`\n")
         # working — a busy record, and a busy session with no attention record
         self.fleet.add("s-wrk-record", 305, "", status="busy", name="Working Record")
         self.fleet.registry["s-wrk-bare"] = "Working Bare"
@@ -837,6 +849,8 @@ class FourStateTest(Base):
             "Decision Run": h.STATE_DECISION,
             "External Watch": h.STATE_EXTERNAL,
             "External Clock": h.STATE_EXTERNAL,
+            "External Agent": h.STATE_EXTERNAL,
+            "Ask In Watcher Slot": h.STATE_UNCLASSIFIED,
             "Working Record": h.STATE_WORKING,
             "Working Bare": h.STATE_WORKING,
             "Closed Done": h.STATE_CLOSED,
@@ -856,6 +870,19 @@ class FourStateTest(Base):
         row = {r["name"]: r for r in self.sweep["parked"]}["Ask Rule Worker"]
         self.assertEqual(h.STATE_UNCLASSIFIED, row["state"])
         self.assertEqual("permission prompt (ask rule)", row["state_reason"])
+
+    def test_an_ask_written_in_the_watcher_slot_is_not_promoted_to_external(self):
+        # Pane 449 on the first live run: the session put its ask in the
+        # `⏰ Ends:` slot, so `watcher_of()` saw a watcher and the label read
+        # `external` while it was waiting on the operator.
+        row = {r["name"]: r for r in self.sweep["parked"]}["Ask In Watcher Slot"]
+        self.assertEqual(h.STATE_UNCLASSIFIED, row["state"])
+        self.assertEqual("watcher asks the operator, not a machine",
+                         row["state_reason"])
+
+    def test_a_closer_naming_the_machine_event_is_external(self):
+        row = {r["name"]: r for r in self.sweep["parked"]}["External Agent"]
+        self.assertEqual(h.STATE_EXTERNAL, row["state"])
 
     def test_a_bare_shell_is_unclassified_with_a_different_reason(self):
         row = {r["name"]: r for r in self.sweep["not_parked"]}["Bare Shell"]
