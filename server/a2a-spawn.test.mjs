@@ -29,6 +29,7 @@ import {
   listWorkersOnController,
   pollA2A,
   reapExistingWorkerForTask,
+  registerPushCallbackOnWorker,
   resolveA2AControllerTarget,
   a2aStopCallFor,
   stopWorkerOnController,
@@ -405,6 +406,81 @@ test('pendingPushRegistration returns a fresh object each call', () => {
   const first = pendingPushRegistration()
   first.reason = 'mutated by a test'
   assert.match(pendingPushRegistration().reason, /has not yet named a task/)
+})
+
+test('a push registration the worker never answers is bounded and names the timeout', async () => {
+  // ⚠️ THIS IS THE REGRESSION. Without the bound the promise never settles, the caller's write
+  // never runs, and `push_registration` keeps its creation seed — "the turn has not yet named a
+  // task" — on a turn that named one. Four probes were spent reading that seed as a missing
+  // registration. The error text has to name the timeout, because that sentence is what tells a
+  // reader the worker never answered rather than refused.
+  const out = await registerPushCallbackOnWorker({
+    endpoint: 'http://localhost:9093/a2a',
+    taskId: 't-1',
+    push: { url: 'http://host.docker.internal:1234/a2a/push', token: 'tok' },
+    token: 'tok',
+    timeoutMs: 40,
+    fetchImpl: (url, init) =>
+      new Promise((resolve, reject) => {
+        // ⚠️ `AbortSignal.timeout`'s own timer does not hold the event loop open, so a bare
+        // never-settling promise lets the runner decide the loop has drained and cancel the test.
+        // This handle keeps the loop alive until the abort actually fires — the production process
+        // has a loop of its own, which is why the bound works there and needed pinning here.
+        const keepAlive = setTimeout(() => {}, 1000)
+        init.signal.addEventListener('abort', () => {
+          clearTimeout(keepAlive)
+          reject(init.signal.reason)
+        })
+      }),
+  })
+  assert.match(out.error, /did not answer within/)
+})
+
+test('a push registration carries a bounded signal and still reports success', async () => {
+  let sawSignal = false
+  const out = await registerPushCallbackOnWorker({
+    endpoint: 'http://localhost:9093/a2a',
+    taskId: 't-1',
+    push: { url: 'http://host.docker.internal:1234/a2a/push', token: 'tok' },
+    token: 'tok',
+    timeoutMs: 1000,
+    fetchImpl: async (url, init) => {
+      sawSignal = init.signal instanceof AbortSignal
+      return { ok: true, status: 200 }
+    },
+  })
+  assert.equal(sawSignal, true, 'the call must be abortable, or it can strand the caller')
+  assert.deepEqual(out, { registered: true })
+})
+
+test('a registration that throws is reported instead of swallowed', async () => {
+  // ⚠️ THIS IS THE COVERAGE THAT WAS MISSING. A bare `catch {}` around `onTaskId` turned a
+  // `ReferenceError` from a never-imported function into silence, and four probes read that silence
+  // as a missing registration. The turn's outcome must still survive; the throw must not vanish.
+  const events = []
+  const frames = [
+    'data: {"task":{"id":"t-1"}}\n\n',
+    'data: {"statusUpdate":{"taskId":"t-1","status":{"state":"completed"}}}\n\n',
+  ]
+  const body = new ReadableStream({
+    start(c) { for (const f of frames) c.enqueue(new TextEncoder().encode(f)); c.close() },
+  })
+  const out = await collectWorkerTurn({
+    res: { ok: true, status: 200, body, text: async () => frames.join('') },
+    sentContextId: 'ctx',
+    onTaskId: async () => { throw new ReferenceError('a2aPushConfigCallFor is not defined') },
+    onDiagnostic: (d) => { events.push(d) },
+  })
+  assert.equal(out.state, 'completed', "the turn's outcome is still the turn's")
+  const thrown = events.find((e) => e.taskIdFound === true && typeof e.error === 'string')
+  assert.ok(thrown, 'the throw must be reported, not discarded')
+  assert.match(thrown.error, /is not defined/)
+})
+
+test('pushDiagnosticPatch turns a thrown registration into attempted-error', () => {
+  const patch = pushDiagnosticPatch({ path: 'incremental', taskIdFound: true, error: 'boom' })
+  assert.equal(patch.state, 'attempted-error')
+  assert.match(patch.error, /boom/)
 })
 
 test('the record refuses a target this path does not own', () => {

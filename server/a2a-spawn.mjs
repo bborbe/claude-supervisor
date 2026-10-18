@@ -22,6 +22,7 @@ import {
   a2aContextIdFor,
   a2aFrames,
   a2aOutcome,
+  a2aPushConfigCallFor,
   a2aSendRequestFor,
   a2aStreamRequestFor,
   a2aTaskIdOf,
@@ -395,10 +396,13 @@ export function a2aWorkerRecord({
       task,
       createdAt,
       // ── the status channel's registration outcome ─────────────────────────────────────────
-      // ⚠️ THREE STATES, NOT TWO, and each names a different failure. `not-attempted` means no
-      // registration was ever sent, and `reason` says why (the receiver never bound, or the turn
-      // never named a task before collection ended); `attempted-ok` means one was accepted;
-      // `attempted-error` carries the refusal. A boolean would collapse the first two — which is
+      // ⚠️ FOUR STATES, NOT TWO, and each names a different fact. `not-attempted` means no
+      // registration has been sent yet, and `reason` says why (the receiver never bound, or the
+      // turn never named a task before collection ended); `attempting` means the task id is known
+      // and the config call is in flight — a state that exists precisely so this field can never
+      // read as "not started" while it is running; `attempted-ok` means one was accepted;
+      // `attempted-error` carries the refusal or the timeout. A boolean would collapse the first
+      // two — which is
       // exactly how a whole docker e2e reported an empty `status_messages` with no way to tell
       // "never registered" from "registered and refused". Projected by `agentView`, and it holds
       // no credential: `taskId` is the task's own id, never the token.
@@ -584,6 +588,20 @@ export const A2A_ACK_TIMEOUT_MS = 1500
 // answer in time" with "the worker answered with something falsy".
 const A2A_NOT_ACKNOWLEDGED = Symbol('a2a-not-acknowledged')
 
+// How long a push registration may wait for the worker before it is abandoned and recorded.
+//
+// ⚠️ WITHOUT THIS BOUND THE FIELD LIES, and that is the whole reason it exists. The caller awaits
+// the registration BEFORE it records anything, so a POST the worker never answers strands the
+// write and leaves `push_registration` at its creation seed — "the turn has not yet named a task" —
+// on a turn that named one. Measured 2026-10-18 with three file markers: `onTaskId` entered with a
+// real task id and a real push config, the turn completed, and the record still held the seed more
+// than 90 s later. Four probes were spent reading that seed as a missing registration.
+//
+// ⚠️ 10 s IS GENEROUS, NOT TIGHT. The mid-turn event this registration exists to catch fires about
+// 10 s into the turn, so a registration slower than that is already too late to observe it; the
+// bound only has to be long enough that a merely slow worker is not misreported as a dead one.
+export const A2A_REGISTER_TIMEOUT_MS = 10_000
+
 // Send one turn to the worker — THE SEND.
 //
 // Returns `{ res, contextId }` once the worker has acknowledged, `{ pending, contextId }` when it
@@ -662,13 +680,38 @@ export async function openWorkerTurn({
 // channel is reporting-only: a worker whose registration was refused still runs its turn and still
 // files an outcome, and failing the spawn over it would lose a live container to an optional
 // transport. The refusal is surfaced so the caller can record it rather than swallow it.
-export async function registerPushCallbackOnWorker({ endpoint, taskId, push, token, fetchImpl = fetch } = {}) {
+export async function registerPushCallbackOnWorker({
+  endpoint,
+  taskId,
+  push,
+  token,
+  fetchImpl = fetch,
+  timeoutMs = A2A_REGISTER_TIMEOUT_MS,
+} = {}) {
   const call = a2aPushConfigCallFor({ endpoint, taskId, push, token })
   if (call.error) return { error: call.error }
+  // ⚠️ BOUNDED, AND THE BOUND IS HALF THE FIX. Without a signal this await can never settle, and
+  // the caller's write never happens — see `A2A_REGISTER_TIMEOUT_MS`. A non-positive bound disables
+  // it, which is what a test wants when it asserts the send's own outcome rather than its timing.
+  const signal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
   let res
   try {
-    res = await fetchImpl(call.url, { method: 'POST', headers: call.headers, body: JSON.stringify(call.body) })
+    res = await fetchImpl(call.url, {
+      method: 'POST',
+      headers: call.headers,
+      body: JSON.stringify(call.body),
+      ...(signal ? { signal } : {}),
+    })
   } catch (cause) {
+    // ⚠️ THE TIMEOUT SAYS SO IN ITS OWN WORDS. `attempted-error` carrying "the worker never
+    // answered the config call" is worth far more than a generic failure: it is the sentence that
+    // distinguishes a dead channel from a refused one, and it is the one this task spent four
+    // probes trying to infer.
+    if (cause?.name === 'TimeoutError' || cause?.name === 'AbortError') {
+      return {
+        error: `the push registration to ${call.url} did not answer within ${Math.round(timeoutMs / 1000)}s`,
+      }
+    }
     return { error: `the push registration to ${call.url} could not be made: ${cause?.message ?? cause}` }
   }
   if (!res.ok) {
@@ -699,6 +742,12 @@ export function pushDiagnosticPatch(d) {
       state: 'not-attempted',
       reason: `the turn's stream was read incrementally but no frame named a task (${d.frames} frame(s))`,
     }
+  }
+  // ⚠️ THE REGISTRATION THREW — a terminal outcome, and the one that was invisible for four
+  // probes. `taskIdFound: true` is what distinguishes it from the no-id case above: the turn DID
+  // name a task, so this is a failure of the call rather than of the stream.
+  if (d.path === 'incremental' && d.taskIdFound === true && typeof d.error === 'string') {
+    return { state: 'attempted-error', error: `the registration threw: ${d.error}` }
   }
   return null
 }
@@ -783,8 +832,19 @@ async function collectTurnIncrementally({ body, sentContextId, onTaskId, onDiagn
         // the call also means a throwing callback is not retried on every later chunk.
         try {
           await onTaskId(taskId)
-        } catch {
-          // The caller owns reporting a registration failure; the turn's outcome is not it.
+        } catch (cause) {
+          // ⚠️ STILL SWALLOWED, BUT NO LONGER SILENTLY. The catch exists so a failing registration
+          // cannot fail a healthy turn, and that is right — but a bare `catch {}` also turns a
+          // PROGRAMMING ERROR into silence. Measured 2026-10-18: `registerPushCallbackOnWorker`
+          // called a function that was never imported, threw `ReferenceError` on its first line,
+          // and this catch made four probes read it as a missing registration. The turn's outcome
+          // is still not failed; the thrown message is reported instead of discarded, which is what
+          // makes this class legible in one run rather than in five.
+          onDiagnostic?.({
+            path: 'incremental',
+            taskIdFound: true,
+            error: cause?.message ?? String(cause),
+          })
         }
       }
     }
