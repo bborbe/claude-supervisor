@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.177.8
 
 - fix: **`/supervisor:who-needs-my-help` no longer bounds how long an operator reply's lead-in may be, because the live fleet exceeded the bound on the first run after it shipped.** The previous release classified a watcher line as an operator reply only when the verb came within 24 characters of `your`; pane 483 read `external` with `⏰ Ends: your \`nukeprod-threshold-applied\` reply` — a 29-character lead-in. The pattern is now unbounded and non-greedy, so it stops at the first verb wherever it falls. A bound here is a bet on how long a phrase written by another session will be, and the fleet settled that bet against the code within minutes. A fixture pins the live shape. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
 
