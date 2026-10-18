@@ -15,12 +15,19 @@ const TOKENS = new Map([
   ['w-9c11', 'tok-beta'],
 ])
 
-function statusBody({ taskId = 't-1', state = 'working', text = 'reading server/supervisor.mjs' } = {}) {
+function statusBody({
+  taskId = 't-1',
+  state = 'working',
+  text = 'reading server/supervisor.mjs',
+  messageId,
+} = {}) {
+  // `messageId` is omitted entirely when not given, rather than sent as null: the SDK omits
+  // the field on an event built without a message, and a test that always sent it would
+  // never exercise the absent case the completion currently produces.
+  const message = { role: 'agent', parts: [{ text }] }
+  if (messageId !== undefined) message.messageId = messageId
   return JSON.stringify({
-    statusUpdate: {
-      taskId,
-      status: { state, message: { role: 'agent', parts: [{ text }] } },
-    },
+    statusUpdate: { taskId, status: { state, message } },
   })
 }
 
@@ -68,6 +75,39 @@ test('a valid token stores the status, and the two refusals beside it do not', a
     assert.equal(seen[0].entry.text, 'reading server/supervisor.mjs')
     assert.equal(seen[0].entry.worker_id, 'w-7f3a')
     assert.ok(Date.parse(seen[0].entry.ts) > 0, 'ts must be a real instant')
+    assert.equal(
+      seen[0].entry.source,
+      'push',
+      'the receive path marks its own entries; a2aTurnPatch never sets this',
+    )
+  })
+})
+
+test('the worker message id is carried through, and is null rather than absent when the event has no message', async () => {
+  await withReceiver(async ({ port, seen }) => {
+    // Present: the mid-turn event carries a message, so its id must survive to the record.
+    const withId = await post(port, {
+      token: 'tok-alpha',
+      body: statusBody({ messageId: 'msg-abc123' }),
+    })
+    assert.equal(withId.status, 200)
+    assert.equal(seen[0].entry.messageId, 'msg-abc123')
+
+    // Absent: the terminal completion is yielded as `NewStatusUpdateEvent(ctx,
+    // TaskStateCompleted, nil)` — no message, so no id exists to read. The field must be
+    // `null` rather than `undefined`, so a reader can tell "this event had no message" from
+    // "the receive path dropped it", which is the same distinction `last_status` draws
+    // between `null` and an empty object.
+    const withoutId = await post(port, {
+      token: 'tok-alpha',
+      body: statusBody({ state: 'completed', text: 'done' }),
+    })
+    assert.equal(withoutId.status, 200)
+    assert.equal(seen[1].entry.messageId, null)
+    assert.ok(
+      'messageId' in seen[1].entry,
+      'the key must be present even when its value is null',
+    )
   })
 })
 
