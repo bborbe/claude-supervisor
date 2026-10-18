@@ -518,7 +518,11 @@ class SessionLiveness(unittest.TestCase):
 
     # ---- --list ------------------------------------------------------------------------
 
-    def test_list_shows_only_live_sessions(self):
+    def test_list_carries_every_registry_live_session_and_marks_the_unstamped(self):
+        # ⚠️ **Both registry-live sessions are listed; the one the endpoint holds no `live: true`
+        # row for is DEGRADED rather than dropped.** Dropping it is the 2026-09-18 duplicate-spawn
+        # shape (`commands/open.md` Step 2C matches a roster row against exactly this output), and
+        # refusing the whole list is the 2026-10-18 outage this change removes.
         self.plant("aaaa1111-1111-2222-3333-444455556666", name="Alive")
         self.plant("bbbb2222-1111-2222-3333-444455556666", name="Dead")
         rows = [
@@ -529,7 +533,23 @@ class SessionLiveness(unittest.TestCase):
             rc, out = self.listing(fx.url)
         self.assertEqual(rc, LIVE)
         self.assertIn("Alive", out)
-        self.assertNotIn("Dead", out)
+        self.assertIn("Dead", out)
+        self.assertIn("DEGRADED", out)
+
+    def test_list_prints_the_counts_summary(self):
+        """The `rows=<n> registry_live=<n> degraded=<n>` line the acceptance criterion reads.
+
+        It is what makes the criterion mechanical: `rows` must equal `registry_live` (a smaller
+        `rows` means a session was DROPPED rather than marked), and `degraded` must be non-zero
+        exactly when a registry-live session holds no `live: true` row — so a fix that emits
+        plain rows with no marker reads `degraded=0` and fails.
+        """
+        self.plant("aaaa1111-1111-2222-3333-444455556666")
+        self.plant("bbbb2222-1111-2222-3333-444455556666")
+        with self.fixture([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
+            rc, out = self.listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertIn("rows=2 registry_live=2 degraded=1", out)
 
     def test_list_includes_a_row_with_no_identity_entry(self):
         # A headless or cluster worker holds a heartbeat row and no registry entry; it must
@@ -553,17 +573,19 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
 
-    def test_empty_list_refuses_a_partial_rollout(self):
+    def test_empty_endpoint_still_lists_a_registry_live_session_as_degraded(self):
         # A partial rollout: the endpoint holds no live row while the registry still lists a live
-        # session. An empty list here is the confident-empty-fleet shape — `commands/open.md`
-        # Step 2C reads this call to decide whether to open a session — so it must not be
-        # presented as complete. It pays the same coverage precondition ABSENT pays.
+        # session. The list must not read as a confident empty fleet — `commands/open.md` Step 2C
+        # reads this call to decide whether to open a session — but it must not refuse either:
+        # the session is carried with `degraded: true`, so Step 2C still sees it.
         self.plant("aaaa1111-1111-2222-3333-444455556666")
         self.ledger_entry("aaaa1111-1111-2222-3333-444455556666")
         with self.fixture([]) as fx:
-            rc, out = self.listing(fx.url)
-        self.assertEqual(rc, UNKNOWN)
-        self.assertIn("UNKNOWN", out)
+            rc, rows = self.json_listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertEqual([r["sessionId"] for r in rows],
+                         ["aaaa1111-1111-2222-3333-444455556666"])
+        self.assertTrue(rows[0]["degraded"])
 
     def test_empty_list_is_live_when_the_fleet_is_genuinely_idle(self):
         # Endpoint empty AND registry empty: coverage is complete, so the empty list is honest.
@@ -572,7 +594,7 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(rc, LIVE)
         self.assertEqual(rows, [])
 
-    def test_non_empty_list_refuses_a_partial_rollout(self):
+    def test_non_empty_list_degrades_the_unstamped_session(self):
         # The dangerous half of the same case, and the one that used to slip through: the
         # endpoint holds a live row, so the list is NON-empty and was handed back as complete
         # while a registry-live session with no live row was silently dropped. `commands/open.md`
@@ -585,11 +607,13 @@ class SessionLiveness(unittest.TestCase):
         self.ledger_entry("aaaa1111-1111-2222-3333-444455556666")
         self.ledger_entry("bbbb2222-1111-2222-3333-444455556666")
         with self.fixture([row("aaaa1111-1111-2222-3333-444455556666")]) as fx:
-            rc, out = self.listing(fx.url)
-        self.assertEqual(rc, UNKNOWN)
-        self.assertIn("UNKNOWN", out)
+            rc, rows = self.json_listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        by_id = {r["sessionId"]: r for r in rows}
+        self.assertFalse(by_id["aaaa1111-1111-2222-3333-444455556666"]["degraded"])
+        self.assertTrue(by_id["bbbb2222-1111-2222-3333-444455556666"]["degraded"])
 
-    def test_a_registry_live_session_outside_the_ledger_does_not_withhold_the_list(self):
+    def test_a_registry_live_session_outside_the_ledger_is_listed_and_degraded(self):
         """SC11's narrowing — the reason the guard was realigned on 2026-10-09.
 
         A manager, a bot and the operator's own sessions are registry-live and hold **no
@@ -601,27 +625,33 @@ class SessionLiveness(unittest.TestCase):
         list; the live one is served.
         """
         sid = "aaaa1111-1111-2222-3333-444455556666"
-        self.plant("bbbb2222-1111-2222-3333-444455556666", name="Fleet Manager")
+        other = "bbbb2222-1111-2222-3333-444455556666"
+        self.plant(other, name="Fleet Manager")
         with self.fixture([row(sid)]) as fx:
             rc, rows = self.json_listing(fx.url)
         self.assertEqual(rc, LIVE)
-        self.assertEqual([r["sessionId"] for r in rows], [sid])
+        by_id = {r["sessionId"]: r for r in rows}
+        self.assertEqual(sorted(by_id), sorted([sid, other]))
+        self.assertFalse(by_id[sid]["degraded"])
+        self.assertTrue(by_id[other]["degraded"])
 
-    def test_a_ledger_worker_that_is_registry_live_with_no_row_still_withholds_the_list(self):
-        """The residual hazard is the OTHER direction, and it is preserved deliberately.
+    def test_a_ledger_worker_with_no_row_is_degraded_not_withheld(self):
+        """The guard's finding rides ON the row instead of refusing the whole list.
 
-        Narrowing the guard re-opens the duplicate-spawn hazard for a live session that is
-        not a ledger worker (recorded at `commands/open.md` Step 2C). It must not also stop
-        catching a session that IS a worker: a ledger record plus a live registry entry plus
-        no endpoint row is precisely the rollout gap the guard exists for.
+        A ledger record plus a live registry entry plus no endpoint row is precisely the rollout
+        gap the guard exists for — so it must still be visible. It is visible as `degraded: true`
+        rather than by withholding every other session: measured live 2026-10-18, refusing the
+        list on twelve stale-plugin sessions left the fleet unlistable AND blocked
+        `plugin-version-census.py`, the one tool that names them.
         """
         sid = "aaaa1111-1111-2222-3333-444455556666"
         self.plant(sid, name="Stamping Worker")
         self.ledger_entry(sid)
         with self.fixture([]) as fx:
-            rc, out = self.listing(fx.url)
-        self.assertEqual(rc, UNKNOWN)
-        self.assertIn("UNKNOWN", out)
+            rc, rows = self.json_listing(fx.url)
+        self.assertEqual(rc, LIVE)
+        self.assertEqual([r["sessionId"] for r in rows], [sid])
+        self.assertTrue(rows[0]["degraded"])
 
     def test_an_unreadable_ledger_is_unknown_not_a_pass(self):
         """`{}` and None are different answers, and only one of them may satisfy the guard.

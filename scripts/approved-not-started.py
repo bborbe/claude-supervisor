@@ -134,10 +134,18 @@ def format_age(seconds):
 def read_live(registry_dir=None, heartbeat_dir=None):
     """The live session records, or None when the liveness read failed.
 
-    Delegates to `session-liveness.py --list --json`, whose exit code is the three-state
-    answer: 0 means both halves were read, non-zero means at least one could not be — and
-    a partial list presented as complete reads as "this session is not live" for every
-    session in the half that failed. `None` preserves that; it is never collapsed to `[]`.
+    Delegates to `session-liveness.py --list --json`, whose exit code is the two-state
+    answer: 0 means the list was produced, non-zero means it could not be — and a partial
+    list presented as complete reads as "this session is not live" for every session in
+    the half that failed. `None` preserves that; it is never collapsed to `[]`.
+
+    ⚠️ **Exit 0 no longer means "every session was stamped", and this caller needs no
+    change for that.** Since 2026-10-18 the list DEGRADES per row: a registry-live session
+    with no live heartbeat row is carried with `degraded: true` rather than withholding the
+    whole list, which is the shape this caller wants — it asks for every registry-live
+    session, and those rows now arrive where exit 2 previously returned `None` for the
+    entire fleet. A caller that needs the distinction reads the field; the branch below is
+    unchanged because `returncode != 0` is false on the degraded path, not true.
     """
     cmd = [sys.executable, SESSION_LIVENESS, "--list", "--json"]
     if registry_dir:

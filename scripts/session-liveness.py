@@ -691,6 +691,71 @@ def safe_unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
         )
 
 
+def _list_payload(identity, live_rows):
+    """`(payload, registry_live, degraded)` — every registry-live session, plus endpoint-only rows.
+
+    ⚠️ **A session the endpoint holds no `live: true` row for is DEGRADED, not omitted.** This
+    output is what `commands/open.md` Step 2C matches a roster row against, and an omitted
+    session reads there as "no such session" — the duplicate-spawn failure the coverage guard
+    was added for. Carrying the finding ON the row keeps both properties at once: every
+    registry-live session is listed, and the caller can see exactly which rows it cannot trust.
+
+    ⚠️ **Endpoint-only rows are listed too.** A cluster or a2a worker has a heartbeat row and no
+    registry entry — the registry is pid-keyed and local-only — so building the list from the
+    registry alone would drop exactly the population the endpoint exists to cover.
+    """
+    live_by_id = {}
+    for row in live_rows:
+        sid = row.get("session_id")
+        if isinstance(sid, str) and sid:
+            live_by_id[sid] = row
+
+    payload = []
+    registry_live = 0
+    for sid in sorted(identity):
+        ident = identity[sid]
+        if ident.get("alive") is False:
+            continue
+        registry_live += 1
+        row = live_by_id.pop(sid, None) or {}
+        payload.append(
+            {
+                "sessionId": sid,
+                "pid": ident.get("pid"),
+                "status": ident.get("status", ""),
+                "name": ident.get("name", ""),
+                "formerNames": ident.get("formerNames", []),
+                "cwd": ident.get("cwd", ""),
+                "nameSource": ident.get("nameSource", ""),
+                "alive": True,
+                "source": row.get("source") or "none",
+                "state": row.get("state") or "unstamped",
+                "age_seconds": row.get("age_seconds"),
+                "degraded": not row,
+            }
+        )
+    for sid in sorted(live_by_id):
+        row = live_by_id[sid]
+        payload.append(
+            {
+                "sessionId": sid,
+                "pid": None,
+                "status": "",
+                "name": "",
+                "formerNames": [],
+                "cwd": "",
+                "nameSource": "",
+                "alive": True,
+                "source": row.get("source") or "heartbeat",
+                "state": row.get("state") or "live",
+                "age_seconds": row.get("age_seconds"),
+                "degraded": False,
+            }
+        )
+    degraded = sum(1 for rec in payload if rec["degraded"])
+    return payload, registry_live, degraded
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Is this session id live? (session-heartbeat endpoint)")
     parser.add_argument("--check", metavar="SESSION_ID", help="full id or an 8-char prefix")
@@ -816,67 +881,31 @@ def main(argv=None):
         row for row in rows
         if isinstance(row, dict) and row.get("session_id") and row.get("live") is True
     ]
-    if not live_rows:
-        # ⚠️ **An empty list is a POSITIVE claim about the whole fleet, so it pays the coverage
-        # precondition — the same one ABSENT pays, and for the same reason.** "No live rows"
-        # reads as "no session is live anywhere", which is exactly the ABSENT shape: during a
-        # partial rollout the endpoint holds no live row while the identity registry still lists
-        # live sessions, and `commands/open.md` Step 2C reads THIS call to decide whether to open
-        # a session — so a confident empty fleet there spawns a second session onto a live topic
-        # (the 2026-09-18 failure the non-empty path's names rule already guards against).
-        # `unstamped()` is the measurement: it is LIVE only when every registry-live session has
-        # a ROW at the endpoint — not necessarily a live one, since a row reading `live: false`
-        # is a dead session the endpoint is answering about rather than a rollout gap (see that
-        # function's docstring). Anything else — an unreadable registry, or a registry-live
-        # session the endpoint has never heard of — is UNKNOWN, never an empty list presented
-        # as complete.
-        #
-        # ⚠️ **This is stricter than the earlier "decide empty before the registry" ordering**,
-        # which returned exit 0 whenever the registry could not be read. That direction reads an
-        # unmeasurable fleet as an empty one, and empty is the resume-authorising shape, so it is
-        # wrong even though it kept a genuinely idle fleet from looking like a failed probe — and
-        # a genuinely idle fleet still measures LIVE here (endpoint empty AND registry empty), so
-        # it keeps its empty list.
-        verdict, line = safe_unstamped(args.endpoint, args.dir)
-        if verdict != LIVE:
-            print(
-                "UNKNOWN — no live row at the session-heartbeat endpoint, but it has no row at "
-                "all for some registry-live session (%s), so an empty list cannot be presented "
-                "as a complete fleet" % line,
-                file=sys.stderr,
-            )
-            return UNKNOWN
-        if args.json:
-            json.dump([], sys.stdout, indent=2)
-            sys.stdout.write("\n")
-            return LIVE
-        print("no live sessions on the session-heartbeat endpoint")
-        return LIVE
-
-    # ⚠️ **A NON-EMPTY list is a positive claim about the whole fleet too, so it pays the same
-    # coverage precondition the empty one pays — and it is the MORE dangerous of the two to
-    # skip.** The rows below are the endpoint's `live: true` rows joined to identity; during a
-    # partial rollout the endpoint holds a row only for already-stamped sessions, so every
-    # live-but-unstamped session is dropped while the command still exits 0. A caller reads
-    # that as the whole live fleet. `commands/open.md` Step 2C matches `<topic> Manager`
-    # against `name`/`formerNames` from exactly this output and spawns a manager on no match,
-    # so the omission is a duplicate manager onto a live topic — the 2026-09-18 failure the
-    # names rule above exists to prevent, reached by a different route. The base version could
-    # not produce this answer: its registry half contributed rows regardless of heartbeat
-    # state. Reading the registry is not enough to license the list — a readable registry is
-    # precisely what makes the omission silent, since it proves the omitted sessions EXIST.
+    # ⚠️ **An empty list is a POSITIVE claim about the whole fleet, so it still pays the coverage
+    # precondition — but the precondition DEGRADES, it no longer REFUSES.** "No live rows" reads
+    # as "no session is live anywhere", which is the ABSENT shape: during a partial rollout the
+    # endpoint holds no live row while the identity registry still lists live sessions, and
+    # `commands/open.md` Step 2C reads THIS call to decide whether to open a session — so a
+    # confident empty fleet there spawns a second session onto a live topic (the 2026-09-18
+    # failure the names rule below guards against).
     #
-    # ⚠️ **The measurement is `unstamped()`, not `coverage()`** — see that function's docstring.
-    # `coverage()`'s `missing` also counts a registered session whose row reads `live: false`,
-    # which is a dead or hung session the endpoint is answering about rather than a rollout
-    # gap, and refusing on it broke `test_list_shows_only_live_sessions`.
+    # ⚠️ **Until 2026-10-18 both `--list` paths refused the WHOLE list on `ABSENT`, and that is
+    # the defect this change removes.** Measured live: `--list --json` exited 2 with
+    # `unstamped=12 ledger_workers=23 registry_live=43`, so a fleet carrying twelve
+    # stale-plugin sessions could not be listed AT ALL — and `plugin-version-census.py`, whose
+    # entire job is naming those stale sessions, was blocked by the same exit 2 and could not
+    # name them. The twelve are interactive sessions running a supervisor older than v0.171.1;
+    # they recur at EVERY plugin release, so a guard that fails the whole list on them is not a
+    # precondition but an outage. The finding now rides ON the row (`degraded: true`), so a
+    # caller sees which rows it cannot trust instead of losing every row it could.
+    #
+    # ⚠️ **UNKNOWN still refuses.** "Could not measure" is neither "measured complete" nor
+    # "degraded": a store that could not be reached must never read as a listed fleet.
     verdict, line = safe_unstamped(args.endpoint, args.dir)
-    if verdict != LIVE:
+    if verdict == UNKNOWN:
         print(
-            "UNKNOWN — the session-heartbeat endpoint holds live rows, but it has no row at "
-            "all for some registry-live session (%s), so this list would omit live sessions "
-            "that have not been stamped yet and cannot be presented as the whole live fleet"
-            % line,
+            "UNKNOWN — the stamp-coverage measurement could not be taken (%s), so this list "
+            "cannot be presented as the whole live fleet" % line,
             file=sys.stderr,
         )
         return UNKNOWN
@@ -886,25 +915,19 @@ def main(argv=None):
         print("UNKNOWN — cannot read the identity registry (%s)" % (args.dir or "default path"), file=sys.stderr)
         return UNKNOWN
 
-    payload = []
-    for row in live_rows:
-        sid = row.get("session_id")
-        ident = identity.get(sid) or {}
-        payload.append(
-            {
-                "sessionId": sid,
-                "pid": ident.get("pid"),
-                "status": ident.get("status", ""),
-                "name": ident.get("name", ""),
-                "formerNames": ident.get("formerNames", []),
-                "cwd": ident.get("cwd", ""),
-                "nameSource": ident.get("nameSource", ""),
-                "alive": True,
-                "source": row.get("source") or "heartbeat",
-                "state": row.get("state") or "live",
-                "age_seconds": row.get("age_seconds"),
-            }
-        )
+    payload, registry_live, degraded = _list_payload(identity, live_rows)
+    print(
+        "rows=%d registry_live=%d degraded=%d" % (len(payload), registry_live, degraded),
+        file=sys.stderr,
+    )
+
+    if not payload:
+        if args.json:
+            json.dump([], sys.stdout, indent=2)
+            sys.stdout.write("\n")
+            return LIVE
+        print("no live sessions on the session-heartbeat endpoint")
+        return LIVE
 
     if args.json:
         json.dump(payload, sys.stdout, indent=2)
@@ -914,7 +937,9 @@ def main(argv=None):
     for rec in sorted(payload, key=lambda r: r["sessionId"]):
         pid = rec["pid"]
         where = "pid %s" % pid if pid is not None else "age %ss" % rec["age_seconds"]
-        print("%s  %s  %s  [%s]" % (rec["sessionId"], where, rec["name"] or "(no name)", rec["source"]))
+        mark = "  DEGRADED (no live heartbeat row)" if rec["degraded"] else ""
+        print("%s  %s  %s  [%s]%s" % (
+            rec["sessionId"], where, rec["name"] or "(no name)", rec["source"], mark))
     return LIVE
 
 
