@@ -27,7 +27,8 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, reapExistingWorkerForTask, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
@@ -54,6 +55,21 @@ import { patchSessionLedgerRow, postSessionLedger, readSessionLedger, readSessio
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
 const agents = new Map() // id -> agent record
+
+// The worker→spawner status channel: one loopback receiver per server, started at boot, and the
+// per-worker tokens it accepts.
+//
+// ⚠️ ONE PER SERVER, AND THAT IS THE DESIGN RATHER THAN AN IMPLEMENTATION DETAIL. The callback
+// URL travels per `create`, so the pushes for a worker land in the records of the session that
+// SPAWNED it — which is the session whose `agent_status` / `list_agents` must show them. A shared
+// receiver would need a worker→session routing table that does not exist today.
+//
+// ⚠️ THE BIND IS LAZY AND ITS FAILURE IS NON-FATAL. A receiver that cannot take a port must not
+// make every A2A spawn fail: the channel is additive, and a spawn without it produces exactly the
+// pre-change worker. `ensureListening()` is called at boot so the port is ready before the first
+// spawn, and again by `beginCreate` — which is what keeps a boot-time failure from being the only
+// attempt, without ever retrying per spawn.
+const a2aPushRegistry = createA2APushRegistry()
 
 // A headless worker's liveness, published where a process that did NOT spawn it can read it.
 //
@@ -1454,6 +1470,23 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       }
     : undefined
 
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // THIS WORKER'S STATUS CHANNEL, minted ONCE per spawn — deliberately outside `createOnce`
+  // below. The retry there re-creates the SAME task's worker, so a token minted per attempt would
+  // leave the earlier one unbound and the worker reporting under a credential nothing listens for.
+  //
+  // ⚠️ NOT SENT TO THE CONTROLLER, which is the correction this design turned on. The controller
+  // creates the worker but never sees a task — this server's own first turn creates it, on the
+  // WORKER's A2A server — so the registration goes there, once the turn has named the task. See
+  // the `onTaskId` callback below.
+  //
+  // ⚠️ A RECEIVER THAT CANNOT BIND DOES NOT FAIL THE SPAWN. The channel is additive: a spawn
+  // without it produces exactly the pre-change worker, and failing here would lose a live worker
+  // to an optional transport. The degradation is visible where it matters — `status_messages`
+  // stays empty, and the surfacing criterion is written so an empty array satisfies nothing.
+  const pushBegun = await a2aPushRegistry.beginCreate()
+  const push = pushBegun.error ? undefined : pushBegun.push
+
   // A fresh `messageId` and `contextId` per attempt: a retry is a NEW turn on the controller's
   // conversation, and reusing the first attempt's ids would make it read as a duplicate of the
   // call that just failed.
@@ -1519,7 +1552,22 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   // ⚠️ A FAILURE THAT NEVER REACHED THE CONTROLLER HAS NO RECOVERY TO ATTEMPT. Returning here
   // rather than falling through is load-bearing: the card read below dereferences
   // `created.worker`, so a create error carried past this point would throw instead of reporting.
-  if (created.error) return { error: created.error }
+  if (created.error) {
+    // No worker exists, so nothing will ever push under this token — releasing it keeps a failed
+    // spawn from leaving a dead credential in the registry for the life of the process.
+    a2aPushRegistry.release({ token: pushBegun.token })
+    return { error: created.error }
+  }
+
+  // The worker exists from here on, so its token is bound to the id the controller minted for it.
+  // Binding is what re-keys anything the receiver accepted under the token — the only identity
+  // this side held before the create answered — onto the key `agent_status` reads.
+  //
+  // ⚠️ A BIND FAILURE IS NOT FATAL AND NOT FOLDED INTO THE SPAWN'S ERROR. It can only fire on an
+  // internal invariant break (the token was minted above; the controller always names a worker id,
+  // which the error paths below already dereference), and failing a spawn over a bookkeeping slip
+  // would lose a running container to it.
+  if (push) a2aPushRegistry.bind({ token: pushBegun.token, workerId: created.worker.worker_id })
 
   // ⚠️ THE CARD IS READ BEFORE ANYTHING IS RECORDED. It is what proves the URL the controller
   // returned actually answers, and it is where the turn's endpoint comes from — rather than
@@ -1592,7 +1640,36 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     // ⚠️ `void`, AND THAT ONE KEYWORD IS THE CRITERION. The record is patched in memory as well as
     // on disk, so `agent_status` and `list_agents` read the same answer the ledger holds rather
     // than the one from spawn time.
-    void collectWorkerTurn({ res: sent.res ?? sent.pending, sentContextId: sent.contextId })
+    void collectWorkerTurn({
+      res: sent.res ?? sent.pending,
+      sentContextId: sent.contextId,
+      // ───────────────────────────────────────────────────────────────────────────────────────
+      // THE REGISTRATION, fired the instant the turn names its task.
+      //
+      // ⚠️ WHY IT CANNOT WAIT FOR THE COLLECTION TO FINISH. The SDK refuses a registration naming
+      // a task its store does not hold, so this can only run after the turn has created the task —
+      // and the mid-turn status it exists to catch fires a fixed ~10 s in. Registering when
+      // `collectWorkerTurn` RESOLVES would arm the channel minutes after the event it was meant to
+      // observe, and every symptom of that is silent: the turn completes, the outcome is filed,
+      // and the only visible effect is a status channel that never carries anything.
+      //
+      // ⚠️ AND WHY A FAILURE IS SWALLOWED RATHER THAN SURFACED. The channel is reporting-only. A
+      // refused registration must not be filed against the record as though the TURN had failed,
+      // or a roster read would report a healthy worker as broken. `collectWorkerTurn` swallows a
+      // throw from here for the same reason, so the two agree rather than relying on each other.
+      //
+      // Only the FIRST turn registers: a follow-up continues an existing task, so its config is
+      // already held and re-registering would add a duplicate callback per message.
+      onTaskId: async (taskId) => {
+        if (!push) return
+        await registerPushCallbackOnWorker({
+          endpoint: card.endpoint,
+          taskId,
+          push,
+          token: created.token,
+        })
+      },
+    })
       .then((collected) => {
         const patch = a2aTurnPatch(collected, { at: new Date().toISOString() })
         built.record.result = patch.result
@@ -2297,6 +2374,20 @@ const agentView = (a) => {
     awaiting_input: awaitingInput(sessionStatus),
     result: a.result ?? null,
     error: a.error,
+    // ── the pushed status channel ────────────────────────────────────────────────────────────
+    // ⚠️ BOTH FIELDS ARE ALWAYS PRESENT, AND THAT IS THE POINT. `status_messages` is `[]` and
+    // `last_status` is `null` for every worker that is not an A2A one — the same shape a live A2A
+    // worker has before its first push lands. Neither is ever `undefined`, so a caller can tell
+    // "the channel exists and is quiet" from "this field was never wired", and only the second is
+    // a defect. That is also why the surfacing criterion is written to reject an empty array: the
+    // shape alone cannot distinguish a working channel from an unwired one.
+    //
+    // ⚠️ THE VALUES ORIGINATE AT THE WORKER. `ts` is the receive instant the receiver stamped, and
+    // `state` / `text` come from the pushed event — nothing here is synthesised from the reply the
+    // spawner already collected, which is what makes the field evidence of a push rather than of a
+    // projection. See `a2a-receive.mjs` for why the receive instant and not a body-supplied one.
+    status_messages: a2aPushRegistry.statusMessagesFor(a.workerId),
+    last_status: a2aPushRegistry.lastStatusFor(a.workerId),
   }
 }
 
@@ -2424,12 +2515,12 @@ const TOOLS = [
   },
   {
     name: 'list_agents',
-    description: 'All spawned sessions with status and how many permissions are pending. Each row also carries `current_tool_call` (the call in flight and how long it has been held) and `last_message`, so one sweep says what every worker is doing without a pane. Each row also carries `open_cards` — the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`), which is where a worker parked on a permission prompt shows up whoever spawned it, since `pending_permissions` covers only the parks this server holds. The tool name is the card\'s `payload` prefix. Answer one with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) on every row when the store is unreachable or switched off.',
+    description: 'All spawned sessions with status and how many permissions are pending. Each row also carries `current_tool_call` (the call in flight and how long it has been held) and `last_message`, so one sweep says what every worker is doing without a pane. Each row also carries `open_cards` — the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`), which is where a worker parked on a permission prompt shows up whoever spawned it, since `pending_permissions` covers only the parks this server holds. The tool name is the card\'s `payload` prefix. Answer one with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) on every row when the store is unreachable or switched off. Each row also carries `last_status` — the newest pushed A2A status for that worker as `{worker_id, state, text, ts, age_s}`, or null when nothing has arrived — which is what lets one sweep show a docker worker\'s own mid-turn progress without opening its pane or waiting for its turn to end.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'agent_status',
-    description: 'One session: status, last assistant message, the current tool call, result, pending permission ids. `current_tool_call` is `{name, input_summary, started_at, held_seconds}` — the call the worker is inside right now and how long it has been held — or null when nothing is in flight; it is read from the worker\'s transcript and is what tells a long tool call apart from a worker parked on a gate. For a tab worker the last message is read from its transcript on disk. `session_status` and `awaiting_input` come from the session registry; `awaiting_input` is null (not false) when the session is not listed, and means "blocked on input" rather than specifically "a permission gate is open". `open_cards` lists the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`) — for a tab worker this is where a live permission prompt shows, since `pending_permissions` covers headless parks only; answer a `permission` card with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) when the store is unreachable or switched off.',
+    description: 'One session: status, last assistant message, the current tool call, result, pending permission ids. `current_tool_call` is `{name, input_summary, started_at, held_seconds}` — the call the worker is inside right now and how long it has been held — or null when nothing is in flight; it is read from the worker\'s transcript and is what tells a long tool call apart from a worker parked on a gate. For a tab worker the last message is read from its transcript on disk. `session_status` and `awaiting_input` come from the session registry; `awaiting_input` is null (not false) when the session is not listed, and means "blocked on input" rather than specifically "a permission gate is open". `open_cards` lists the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`) — for a tab worker this is where a live permission prompt shows, since `pending_permissions` covers headless parks only; answer a `permission` card with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) when the store is unreachable or switched off. `status_messages` is the worker\'s pushed A2A status channel — `{worker_id, state, text, ts}` entries, oldest first, and empty for every worker that is not an A2A one; `last_status` is the newest of those with an added `age_s`, or null when nothing has arrived. Both fields are ALWAYS present, so an empty `status_messages` means the channel is quiet rather than unwired — a worker that has just spawned looks the same as one that is not an A2A worker at all.',
     inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } }, required: ['agent_id'] },
   },
   {
@@ -2826,6 +2917,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 await server.connect(new StdioServerTransport())
 log('supervisor ready')
+
+// Bind the A2A status receiver now, so its port is known before the first spawn rather than on
+// that spawn's critical path.
+//
+// ⚠️ NOT AWAITED, NOT FATAL, AND REPORTED ONCE. The server is already connected and serving, and a
+// port this process cannot take must not stop it — the channel is additive. Reporting once is
+// enough because the registry CACHES the bind result: a later spawn reads the same cached failure
+// rather than re-attempting the bind, so this line and the spawn's silent degradation cannot
+// disagree, and neither turns into a per-spawn error.
+void a2aPushRegistry.ensureListening().then((ready) => {
+  if (ready.error) log(`a2a status receiver unavailable — workers spawn without a status channel: ${ready.error}`)
+})
 
 // Stamp the session this server runs inside, on the same interval as its workers. A server
 // started outside a session has no id, so `startSelf` is a no-op there rather than a stamp

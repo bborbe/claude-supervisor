@@ -1105,3 +1105,84 @@ test('reapExistingWorkerForTask never echoes the token', async () => {
 
   assert.equal(JSON.stringify(result).includes(TOKEN), false)
 })
+
+// --- the incremental collection --------------------------------------------------------------
+
+// A response whose body is a real byte stream, so the incremental path is exercised rather than
+// the `.text()` fallback it deliberately keeps.
+function streamResponse(chunks, onRead) {
+  let i = 0
+  return {
+    ok: true,
+    body: {
+      getReader: () => ({
+        read: async () => {
+          onRead?.(i)
+          return i < chunks.length
+            ? { done: false, value: new TextEncoder().encode(chunks[i++]) }
+            : { done: true, value: undefined }
+        },
+      }),
+    },
+  }
+}
+
+test('the task id is announced MID-STREAM, not after the turn ends', async () => {
+  // ⚠️ This ordering is the whole feature. The push callback must be registered before the worker
+  // emits its mid-turn status ~10 s in, so a callback that fires only once the stream is drained
+  // is indistinguishable from one that never fires — the turn still completes and the outcome is
+  // still correct, which is exactly why the defect would go unnoticed.
+  const reads = []
+  const seen = []
+  const res = streamResponse(
+    [
+      'data: {"result":{"task":{"id":"task-1","status":{"state":"TASK_STATE_SUBMITTED"}}}}\n\n',
+      'data: {"result":{"statusUpdate":{"taskId":"task-1","status":{"state":"TASK_STATE_COMPLETED"}}}}\n\n',
+    ],
+    (i) => reads.push(i),
+  )
+
+  const outcome = await collectWorkerTurn({ res, onTaskId: async (id) => seen.push({ id, reads: reads.length }) })
+
+  assert.deepEqual(seen, [{ id: 'task-1', reads: 1 }], 'announced after the FIRST read, not at the end')
+  // The collection is unaffected by the extra path: the outcome is the same one the whole-body
+  // reader produces for the same bytes.
+  assert.equal(outcome.state, 'TASK_STATE_COMPLETED')
+  assert.equal(outcome.error, undefined)
+})
+
+test('a chunk boundary inside a frame does not lose the task id or corrupt the outcome', async () => {
+  const body = 'data: {"result":{"task":{"id":"task-9","status":{"state":"TASK_STATE_SUBMITTED"}}}}\n\n'
+  const seen = []
+  // Split inside the JSON — where the network actually breaks chunks.
+  const outcome = await collectWorkerTurn({
+    res: streamResponse([body.slice(0, 25), body.slice(25)]),
+    onTaskId: async (id) => seen.push(id),
+  })
+  assert.deepEqual(seen, ['task-9'])
+  assert.equal(outcome.error, undefined)
+})
+
+test('a throwing onTaskId does not fail the collection', async () => {
+  // ⚠️ The callback registers an optional channel. A registration failure must not be reported as
+  // a failed turn — the worker ran, and the outcome is the worker's, not the channel's.
+  const body = 'data: {"result":{"task":{"id":"task-1","status":{"state":"TASK_STATE_COMPLETED"}}}}\n\n'
+  const outcome = await collectWorkerTurn({
+    res: streamResponse([body]),
+    onTaskId: async () => {
+      throw new Error('registration refused')
+    },
+  })
+  assert.equal(outcome.error, undefined, 'the turn is still collected')
+  assert.equal(outcome.state, 'TASK_STATE_COMPLETED')
+})
+
+test('with no onTaskId the whole-body path is used, even on a stream body', async () => {
+  // The fallback is what every existing caller and test relies on, so it must not be displaced by
+  // the mere presence of a stream body.
+  const body = 'data: {"result":{"task":{"id":"task-1","status":{"state":"TASK_STATE_COMPLETED"}}}}\n\n'
+  const res = streamResponse([body])
+  res.text = async () => body
+  const outcome = await collectWorkerTurn({ res })
+  assert.equal(outcome.state, 'TASK_STATE_COMPLETED')
+})
