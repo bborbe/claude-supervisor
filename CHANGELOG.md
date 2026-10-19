@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a failed liveness read now falls back to the last successful worker count when it is younger than 60 s, and labels it stale.** `workerSessions()` and `scripts/worker-sessions.py` write `last-worker-count.json` under the supervisor state dir on every successful count and read it when the live read fails; `concurrentLimitRefusal` decides on a fresh cached count and says so (`This decision uses the last successful count, 5 s old — the live read failed: …`). Past 60 s, or with no readable cache, the refusal stands — the fallback is never a fabricated `0`, and `--list` keeps refusing because a count has no rows to list. The cache is a FILE because `worker-sessions.py --count` exits after printing, so an in-memory cache could never outlive it. Change set: `server/worker-sessions.mjs`, `server/spawn-mode.mjs`, `server/supervisor.mjs`, `scripts/worker-sessions.py`, `server/worker-sessions.test.mjs`, `server/spawn-mode.test.mjs`, `scripts/tests/test_worker_sessions.py`, `CHANGELOG.md`.
+
 ## v0.184.10
 
 - fix: **a `finished` row now carries its jump link, so every `FREEABLE TABS` row has a pane to hand over.** `agents/fleet-sweep-reader.md` step 7b attempted `--pane-for` only for a `parked` `CLASSIFICATION` row and the `<link>` column admitted only `BLOCKED` / `CLOSERS` / `parked`, while the `FREEABLE TABS` population added in v0.184.6 is `finished` rows — so round 55's two finished rows (`Start Day - 2026-10-19`, `Cleanup Email Inbox (Personal) - 2026-10-19`) rendered `—` and the drive leg printed `no pane — digest carried none` for sessions live in panes 973 and 974. `pane_for()` was healthy throughout (`--pane-for a8c9ba13` → `973`, `88a2dd9a` → `974`, exit 0): the lookup was never attempted. Both clauses now admit `finished`, and two redundant clauses were trimmed in the same file to stay under the 30 KB body cap (30715 → 30674 bytes). Change set: `agents/fleet-sweep-reader.md`, `CHANGELOG.md`.

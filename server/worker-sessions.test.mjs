@@ -16,7 +16,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -65,13 +65,18 @@ function ledger(dir, sessionId, label, extra = {}) {
   dir.ledgerRows.push({ session_id: sessionId, label, mode: 'interactive', ...extra })
 }
 
-// `workerSessions` answers `{ workers, error }`. Most cases here are about the join, so this
-// unwraps the happy path; the failure cases below call `workerSessions` directly to read the
+// `workerSessions` answers `{ workers, error, stale }`. Most cases here are about the join, so
+// this unwraps the happy path; the failure cases below call `workerSessions` directly to read the
 // cause that travels with a `null` count.
+//
+// ⚠️ `stateDir` is the case's own temp root: the count cache is a real file, and a suite that
+// used the machine's state dir would read whatever the last real count left there — and write
+// into it.
 async function count(dir, rows, opts = {}) {
   const { workers } = await workerSessions({
     endpoint: FIXTURE,
     fetchImpl: endpoint(rows, { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
     ...opts,
   })
   return workers
@@ -218,7 +223,7 @@ test('an unreadable ledger store returns null, not an empty fleet', async () => 
     }
     return { status: 200, json: async () => [row(sid)] }
   }
-  const counted = await workerSessions({ endpoint: FIXTURE, fetchImpl })
+  const counted = await workerSessions({ endpoint: FIXTURE, fetchImpl, stateDir: fixture().root })
   assert.equal(counted.workers, null)
   // ⚠️ The cause travels with the null. Without it the refusal can say only "the count could not
   // be taken", which is what made 2026-10-19's lost spawns undiagnosable — and this case pins
@@ -241,7 +246,12 @@ test('an unreachable endpoint returns null, not an empty fleet', async () => {
   // reason the ledger is: the unread store may be hiding the very session being counted.
   const dir = fixture()
   ledger(dir, 'ffffffff-0000-0000-0000-000000000007', 'worker')
-  const counted = await workerSessions({ endpoint: FIXTURE, fetchImpl: deadEndpoint(), ...dir })
+  const counted = await workerSessions({
+    endpoint: FIXTURE,
+    fetchImpl: deadEndpoint(),
+    stateDir: dir.root,
+    ...dir,
+  })
   assert.equal(counted.workers, null)
   assert.match(counted.error, /session-ledger read failed after \d+ ms: ECONNREFUSED/)
 })
@@ -258,9 +268,92 @@ test('a heartbeat failure names the heartbeat, not the ledger', async () => {
     }
     throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
   }
-  const counted = await workerSessions({ endpoint: FIXTURE, fetchImpl })
+  const counted = await workerSessions({ endpoint: FIXTURE, fetchImpl, stateDir: dir.root })
   assert.equal(counted.workers, null)
   assert.match(counted.error, /session-heartbeat read failed after \d+ ms: ECONNREFUSED/)
+})
+
+// ---- the 60 s stale-count fallback ---------------------------------------------------------
+//
+// ⚠️ A count from the last minute is a real measurement, and refusing on it is what lost spawns
+// on 2026-10-19. These cases pin the three answers: fresh → use it (labelled), expired → refuse,
+// absent → refuse. It is never a fabricated `0`.
+
+test('a successful count is written to the cache', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-00000000000b'
+  ledger(dir, sid, 'worker')
+  const now = Date.parse('2026-10-20T00:00:00Z')
+  const counted = await workerSessions({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid)], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    now: () => now,
+  })
+  assert.equal(counted.workers.length, 1)
+  const cached = JSON.parse(readFileSync(join(dir.root, 'last-worker-count.json'), 'utf8'))
+  assert.deepEqual(cached, { count: 1, at: '2026-10-20T00:00:00.000Z' })
+})
+
+test('a failed read falls back to a fresh cached count, labelled', async () => {
+  const dir = fixture()
+  const now = Date.parse('2026-10-20T00:00:00Z')
+  writeFileSync(
+    join(dir.root, 'last-worker-count.json'),
+    JSON.stringify({ count: 7, at: new Date(now - 5000).toISOString() }),
+  )
+  const counted = await workerSessions({
+    endpoint: FIXTURE,
+    fetchImpl: deadEndpoint(),
+    stateDir: dir.root,
+    now: () => now,
+  })
+  assert.equal(counted.workers, null)
+  assert.equal(counted.stale.count, 7)
+  assert.equal(counted.stale.ageMs, 5000)
+})
+
+test('an expired cache is no fallback', async () => {
+  const dir = fixture()
+  const now = Date.parse('2026-10-20T00:00:00Z')
+  writeFileSync(
+    join(dir.root, 'last-worker-count.json'),
+    JSON.stringify({ count: 7, at: new Date(now - 61_000).toISOString() }),
+  )
+  const counted = await workerSessions({
+    endpoint: FIXTURE,
+    fetchImpl: deadEndpoint(),
+    stateDir: dir.root,
+    now: () => now,
+  })
+  assert.equal(counted.workers, null)
+  assert.equal(counted.stale, null)
+})
+
+test('no cache is no fallback', async () => {
+  const dir = fixture()
+  const counted = await workerSessions({
+    endpoint: FIXTURE,
+    fetchImpl: deadEndpoint(),
+    stateDir: dir.root,
+  })
+  assert.equal(counted.workers, null)
+  assert.equal(counted.stale, null)
+})
+
+test('a malformed cache is no fallback', async () => {
+  // A truncated write, another tool's file, a future timestamp — none is a count.
+  const dir = fixture()
+  for (const body of ['{', '{"count":"7","at":"2026-10-20T00:00:00Z"}', '{"count":-1,"at":"2026-10-20T00:00:00Z"}', '{"count":7,"at":"2999-01-01T00:00:00Z"}']) {
+    writeFileSync(join(dir.root, 'last-worker-count.json'), body)
+    const counted = await workerSessions({
+      endpoint: FIXTURE,
+      fetchImpl: deadEndpoint(),
+      stateDir: dir.root,
+      now: () => Date.parse('2026-10-20T00:00:00Z'),
+    })
+    assert.equal(counted.stale, null, body)
+  }
 })
 
 test('a non-200 endpoint returns null', async () => {

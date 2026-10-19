@@ -1134,6 +1134,10 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
     // the refusal can only say "the count could not be taken", which is what made 2026-10-19's
     // lost spawns undiagnosable.
     countError: counted.error,
+    // A fresh-enough stale count is a count the refusal may decide on, labelled as stale. `null`
+    // when the cache held nothing fresh enough, which keeps the refusal.
+    staleCount: counted.stale?.count ?? null,
+    staleAgeMs: counted.stale?.ageMs ?? null,
     operatorNamed,
     configFile: config.configFile,
   })

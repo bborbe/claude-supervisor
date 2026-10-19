@@ -438,6 +438,8 @@ export function concurrentLimitRefusal({
   limits,
   liveCount,
   countError = null,
+  staleCount = null,
+  staleAgeMs = null,
   operatorNamed = false,
   configFile,
 }) {
@@ -445,11 +447,23 @@ export function concurrentLimitRefusal({
   // `null` is unlimited — the soft key's off switch, which disables the pair.
   if (limits.limit === null) return null
 
+  // ⚠️ **A fresh-enough stale count IS a count, and the message says so.** The live read failing
+  // does not mean the fleet is unknown: the last successful count within 60 s is a real
+  // measurement, and refusing on it is the behaviour that lost spawns on 2026-10-19. It is
+  // labelled because a count from a minute ago is not evidence about the fleet now — and it is
+  // never synthesised: no cache means no fallback, and the refusal below stands.
+  const stale = liveCount === null && Number.isInteger(staleCount)
+  const count = liveCount === null ? (stale ? staleCount : null) : liveCount
+  const staleNote = stale
+    ? ` This decision uses the last successful count, ${Math.round((staleAgeMs ?? 0) / 1000)} s old` +
+      ` — the live read failed: ${countError || 'cause unknown'}.`
+    : ''
+
   // `null` is "a store could not be read", which is NOT "no worker is live". Refusing on it is
   // the same asymmetry the mode rule carries: a limit that cannot count must not open, because
   // opening past an uncountable limit is how the limit silently stops existing — and a caller
   // acting on the other reading spawns onto live work.
-  if (liveCount === null) {
+  if (count === null) {
     // ⚠️ **The failure is NAMED, and the limit is not the headline** — the same rule the manager
     // refusal below carries, for the same reason. On 2026-10-19 the fleet reported spawns
     // refused with only "the live-worker count could not be taken" (the count is testimony from
@@ -469,22 +483,24 @@ export function concurrentLimitRefusal({
     )
   }
 
-  if (limits.hardLimit !== null && liveCount >= limits.hardLimit) {
+  if (limits.hardLimit !== null && count >= limits.hardLimit) {
     return (
-      `the fleet is FULL: ${liveCount} live workers against a hard cap of ${limits.hardLimit} ` +
+      `the fleet is FULL: ${count} live workers against a hard cap of ${limits.hardLimit} ` +
       `(source: ${limits.hardSource}), so nothing opens — not even an operator-named task. The soft ` +
       `cap is ${limits.limit} (source: ${limits.source}). Raise spawn.maxConcurrentHard in ` +
-      `${configFile} to open past ${limits.hardLimit}, or set spawn.maxConcurrent to 0 for unlimited.`
+      `${configFile} to open past ${limits.hardLimit}, or set spawn.maxConcurrent to 0 for unlimited.` +
+      staleNote
     )
   }
 
-  if (liveCount >= limits.limit && !operatorNamed) {
+  if (count >= limits.limit && !operatorNamed) {
     return (
-      `the fleet-wide concurrent-worker limit is reached: ${liveCount} live, ${limits.limit} ` +
+      `the fleet-wide concurrent-worker limit is reached: ${count} live, ${limits.limit} ` +
       `allowed (source: ${limits.source}). Open nothing further and report the remainder as ` +
       `held-on-limit; it is picked up next sweep. An OPERATOR-NAMED task may still open here — this one was ` +
       `not named, so it is refused. Raise spawn.maxConcurrent in ${configFile}, or ` +
-      `set it to 0 for unlimited.`
+      `set it to 0 for unlimited.` +
+      staleNote
     )
   }
   return null
