@@ -34,6 +34,11 @@ the gap instead of printing a row that looks answered.
 A HEADLESS WORKER HAS NO PANE. `--pane -` renders `no pane (headless)` rather
 than a dead jump target: a link that cannot be followed is worse than none.
 
+BUT A TAB WORKER ALWAYS HAS ONE. `--pane ?` renders `pane unresolved (tab
+worker)`. The first live sample passed `-` for a tab worker whose pane id had
+not been resolved, and the row told the operator there was no window to open —
+the one direction this field must never get wrong.
+
 EXIT CODES. 0 rendered · 2 usage or validation error.
 """
 
@@ -106,9 +111,21 @@ def validate_owner(raw: str) -> str:
 
 
 def jump_link(pane: str) -> str:
-    """The operator's way to reach the pane, degrading to the command form."""
-    if not pane or pane.strip() in ("", "-"):
+    """The operator's way to reach the pane, degrading to the command form.
+
+    Three states, and the third is the one the first live sample got wrong: a
+    headless worker has no pane at all, while a TAB worker whose pane id was not
+    resolved does have one. Collapsing the second into the first tells the
+    operator to stop looking for a window that exists. `-` is headless, `?` is
+    unresolved.
+    """
+    p = (pane or "").strip()
+    if p == "-":
         return "no pane (headless)"
+    if p == "?":
+        return "pane unresolved (tab worker — resolve before reporting)"
+    if not p:
+        raise LeverError("pane is empty — pass a pane id, - for headless, or ? for unresolved")
     script = Path(__file__).resolve().parent / "jump-link.py"
     try:
         out = subprocess.run(
@@ -141,7 +158,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description="Render one parked-worker lever row; refuse a lever that names no lever.",
     )
-    p.add_argument("--pane", required=True, help="pane id, or - for a headless worker")
+    p.add_argument("--pane", required=True,
+                   help="pane id, - for a headless worker, or ? when a tab worker's pane id is unresolved")
     p.add_argument("--waits", required=True, help="what the worker is parked on")
     p.add_argument("--lever", required=True, help="the one act that clears it")
     p.add_argument("--owner", required=True, help="manager | operator | machine: <watcher>")
