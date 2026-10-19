@@ -816,6 +816,14 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
     # running` while the sweep labelled it `idle with no ask`.
     if reg_status == "shell" and alive is True:
         return STATE_WORKING, ""
+    # The panel's own `🟢 ACTIVE` / `State: working`, the running twin of the
+    # `⚪ DONE` arm above. `machine_wait()` refuses it as a wait, so before this an
+    # idle row whose turn ended on a running declaration — work resumed without a
+    # tab, a ScheduleWakeup due — fell through to `idle with no ask` (pane 796 on
+    # the v0.184.4 sweep, 2026-10-19). A dead shell was already caught above:
+    # process death outranks a stale claim.
+    if declared == STATE_WORKING:
+        return STATE_WORKING, ""
     return STATE_UNCLASSIFIED, "idle with no ask"
 
 
