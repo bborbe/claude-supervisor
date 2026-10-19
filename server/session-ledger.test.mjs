@@ -82,6 +82,18 @@ test('a failed read names its cause and elapsed milliseconds', async () => {
   assert.match(messages[0], /^session-ledger read failed after \d+ ms: ECONNREFUSED/)
 })
 
+test('a read that fails once succeeds on the retry', async () => {
+  let calls = 0
+  const fetchImpl = async () => {
+    calls += 1
+    if (calls === 1) throw Object.assign(new Error('connect refused'), { code: 'ECONNREFUSED' })
+    return { status: 200, json: async () => [{ session_id: 'a' }] }
+  }
+  const rows = await readSessionLedger({ endpoint: FIXTURE, fetchImpl })
+  assert.equal(calls, 2)
+  assert.deepEqual(rows, [{ session_id: 'a' }])
+})
+
 test('a non-200 and an unparseable body are named separately', async () => {
   const statusMessages = []
   await readSessionLedger({

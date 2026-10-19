@@ -18,14 +18,22 @@
 // filtering on its `status` would resurrect the whole fleet. Liveness comes from
 // `session-heartbeat.mjs` beside this one — the same split `registry-rehydrate.mjs` keeps.
 import { config } from './config.mjs'
-import { classifyReadError, describeReadFailure, logReadFailure } from './read-diagnostics.mjs'
+import {
+  attemptWithRetry,
+  classifyReadError,
+  describeReadFailure,
+  logReadFailure,
+} from './read-diagnostics.mjs'
 
 export const SESSION_LEDGER_PATH = '/api/1.0/session-ledger'
 
-// Seconds any one read may take. The store is local and answers in milliseconds; this is a
-// backstop against a wedged server, never a routine path. Mirrors `session-heartbeat.mjs`'s
-// `HEARTBEAT_TIMEOUT_MS` so the two readers give up at the same point.
-export const SESSION_LEDGER_TIMEOUT_MS = 5000
+// Seconds any one read may take. The store is local, but it is not fast under load — this route
+// serves a 1.76 MB body and shares the controller with the heartbeat build. 5 s was inside the
+// observed tail and refused healthy spawns, so it is 15 s.
+//
+// ⚠️ **Kept EQUAL to `session-heartbeat.mjs`'s `HEARTBEAT_TIMEOUT_MS`** — see that constant for why
+// the two halves of one count must give up at the same point.
+export const SESSION_LEDGER_TIMEOUT_MS = 15000
 
 // Every row the store serves, or `null` when the read could not run.
 //
@@ -70,30 +78,50 @@ export async function readSessionLedger({
   }
   if (!base) return fail('no endpoint configured (the attention store is switched off)')
   const url = `${String(base).replace(/\/+$/, '')}${SESSION_LEDGER_PATH}`
-  let res
-  try {
-    res = await fetchImpl(url, {
-      headers: { Accept: 'application/json' },
-      // A wedged store must not hang the roster read — this sits in front of `list_agents`.
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-  } catch (error) {
-    return fail(classifyReadError(error))
+  const attempt = async () => {
+    let res
+    try {
+      res = await fetchImpl(url, {
+        headers: { Accept: 'application/json' },
+        // A wedged store must not hang the roster read — this sits in front of `list_agents`.
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+    } catch (error) {
+      return { ok: false, cause: classifyReadError(error) }
+    }
+    // ⚠️ Only 200 is a read. A 404 is the per-id route's "never spawned" and is not an answer
+    // to the LIST question, and any other status is the store declining to answer — both are
+    // "could not read it" here.
+    if (!res || res.status !== 200) {
+      return { ok: false, cause: `HTTP ${res ? res.status : 'no response'}` }
+    }
+    let body
+    try {
+      body = await res.json()
+    } catch (error) {
+      return { ok: false, cause: `unparseable body: ${classifyReadError(error)}` }
+    }
+    if (!Array.isArray(body)) {
+      return {
+        ok: false,
+        cause: `unparseable body: expected a JSON array, got ${body === null ? 'null' : typeof body}`,
+      }
+    }
+    return { ok: true, body }
   }
-  // ⚠️ Only 200 is a read. A 404 is the per-id route's "never spawned" and is not an answer
-  // to the LIST question, and any other status is the store declining to answer — both are
-  // "could not read it" here.
-  if (!res || res.status !== 200) return fail(`HTTP ${res ? res.status : 'no response'}`)
-  let body
-  try {
-    body = await res.json()
-  } catch (error) {
-    return fail(`unparseable body: ${classifyReadError(error)}`)
-  }
-  if (!Array.isArray(body)) {
-    return fail(`unparseable body: expected a JSON array, got ${body === null ? 'null' : typeof body}`)
-  }
-  return body
+  const outcome = await attemptWithRetry(attempt, {
+    onAttemptFailure: (failed, index, attempts) => {
+      logReadFailure(
+        describeReadFailure({
+          what: 'session-ledger',
+          cause: `${failed.cause} (attempt ${index} of ${attempts}, retrying)`,
+          elapsedMs: Date.now() - startedAt,
+        }),
+      )
+    },
+  })
+  if (!outcome.ok) return fail(outcome.cause)
+  return outcome.body
 }
 
 // One row by session id, or `null` when there is none to read.

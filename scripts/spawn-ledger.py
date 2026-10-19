@@ -58,7 +58,15 @@ LEDGER_PATH = "/api/1.0/session-ledger"
 #: `attention-ask.py` and `attention-board.py` use.
 ENDPOINT_DEFAULT = "http://localhost:18080"
 
-_HTTP_TIMEOUT = 5
+# Kept EQUAL to `session-liveness.py`'s `_HTTP_TIMEOUT` — the two halves of one count must give up
+# at the same point, or the refusal names a channel for a reason that is only about timing.
+_HTTP_TIMEOUT = 15
+
+# One retry, ~250 ms apart, before a read declares failure — the same rule and the same reason as
+# `session-liveness.py`'s pair: the failure this covers is intermittent, and two failed attempts
+# still answer `None`.
+_READ_ATTEMPTS = 2
+_READ_RETRY_DELAY_S = 0.25
 
 
 def _describe_read_failure(error):
@@ -93,6 +101,19 @@ def _log_read_failure(what, cause, started, on_failure=None):
     if on_failure is not None:
         on_failure(message)
     return None
+
+
+def _read_once(url, timeout):
+    """`(payload, cause)` — the rows when the read succeeded, the failure cause otherwise."""
+    try:
+        status, payload = _get_json(url, timeout)
+    except (OSError, ValueError) as exc:
+        return None, _describe_read_failure(exc)
+    if status != 200:
+        return None, "HTTP %s" % status
+    if not isinstance(payload, list):
+        return None, "unparseable body: expected a JSON array, got %s" % type(payload).__name__
+    return payload, None
 
 
 def endpoint_base(override=None):
@@ -166,21 +187,22 @@ def read_ledger(endpoint=None, timeout=_HTTP_TIMEOUT, on_failure=None):
     """
     url = endpoint_base(endpoint) + LEDGER_PATH
     started = time.monotonic()
-    try:
-        status, payload = _get_json(url, timeout)
-    except (OSError, ValueError) as exc:
-        return _log_read_failure(
-            "session-ledger", _describe_read_failure(exc), started, on_failure
-        )
-    if status != 200:
-        return _log_read_failure("session-ledger", "HTTP %s" % status, started, on_failure)
-    if not isinstance(payload, list):
-        return _log_read_failure(
-            "session-ledger",
-            "unparseable body: expected a JSON array, got %s" % type(payload).__name__,
-            started,
-            on_failure,
-        )
+    cause = "the read was never attempted"
+    for attempt in range(1, _READ_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(_READ_RETRY_DELAY_S)
+        payload, cause = _read_once(url, timeout)
+        if payload is not None:
+            break
+        if attempt < _READ_ATTEMPTS:
+            _log_read_failure(
+                "session-ledger",
+                "%s (attempt %d of %d, retrying)" % (cause, attempt, _READ_ATTEMPTS),
+                started,
+                on_failure,
+            )
+    else:
+        return _log_read_failure("session-ledger", cause, started, on_failure)
 
     known = {}
     for row in payload:
