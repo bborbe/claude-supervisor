@@ -675,16 +675,20 @@ def is_machine_bound(closer):
     return wnm.is_parked_verb(text) or text.startswith(_MACHINE_MARKERS)
 
 
-# A watcher line that denies there is one. The `⚪ DONE` closer's own wording is
-# `⏰ Next: no mechanism is running`, so a test for "has a `⏰` line" alone would
-# label every finished session `external`.
-_NO_MECHANISM = re.compile(r"^(no|nothing|none)\b", re.I)
+# A watcher line that names no machine: it denies there is one (the `⚪ DONE`
+# closer's own `⏰ Next: no mechanism is running`), or the actor it names is the
+# operator (`⏰ Next: you open a new session` — pane 889 on the deployed v0.183.1
+# sweep, 2026-10-19, read `external` while the session was closed).
+_NO_MECHANISM = re.compile(r"^(no|nothing|none|you)\b", re.I)
 
-# The closer's state line claiming the session itself is running. A held shell
-# whose panel reads `🟢 ACTIVE` is working on that child, and its `⏰ Next:` line is
-# the step after — measured 2026-10-19 on pane 855, whose `⏰ Next: the background
-# readout exits` would otherwise have read as a machine wait.
-_ACTIVE = re.compile(r"^\s*🟢\s*ACTIVE\b", re.M)
+# The closer's panel saying the session itself is running or finished, in either
+# vocabulary: the panel's `🟢 ACTIVE` / `⚪ DONE` state line, or worker-drive's own
+# `State: working 🟢` / `State: closed ⚪` header (PR #420). A held shell whose panel
+# says it is running is working on that child, and its `⏰ Next:` line is the step
+# after — measured 2026-10-19 on panes 855 (`🟢 ACTIVE`) and 888 (`State: working
+# 🟢`), both of which would otherwise have read as a machine wait.
+_NOT_WAITING = re.compile(
+    r"^\s*(?:🟢\s*ACTIVE|⚪\s*DONE|State:\s*(?:working|closed))\b", re.M)
 
 
 def names_machine(watcher):
@@ -697,12 +701,12 @@ def machine_wait(rec):
     """True when the session's `nothing` closer waits on a named machine.
 
     The `🟡 WAITING` panel's shape: `👤 You: nothing` plus a `⏰` line naming the
-    mechanism. Refused when the state line says `🟢 ACTIVE`, because that session
-    is running its own work and the `⏰` line is what it does next, not what it
-    waits on.
+    mechanism. Refused when the panel says the session is running its own work or
+    is finished (`_NOT_WAITING`): then the `⏰` line is what it does next, not what
+    it waits on.
     """
     text = wnm.last_assistant_text(rec) or ""
-    return names_machine(watcher_of(rec)) and not _ACTIVE.search(text)
+    return names_machine(watcher_of(rec)) and not _NOT_WAITING.search(text)
 
 
 def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
