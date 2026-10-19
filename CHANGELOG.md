@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **worker-drive names its session state and mints exactly one card per ask.** The §8 report now opens with a mandatory `State:` line (`working` 🟢 / `external` 🟡 / `decision` 🔵 / `closed` ⚪, else `unclassified — <reason>`) whose closer icon must match. An external wait arms its own watcher and never asks the operator to "reply watch". A decision run produces exactly one card — the closing modal's, or the waiting verb's, never a second `📣 Board:` line or `attention-ask.py post` — and `answered-watch.py` is armed only after the card is confirmed. §8's card paragraph now points at the mint rule's home instead of restating the mechanism. The rule is carried in `docs/worker-session-states.md`; `scripts/tests/test_worker_drive_state.py` lints the shape with a negative control. `commands/worker-drive.md` stays within its size ratchet (45114 bytes). Change set: `commands/worker-drive.md`, `docs/worker-session-states.md`, `scripts/tests/test_worker_drive_state.py`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
+
 ## v0.182.1
 
 - fix: **the closer lint can see a closer that is not in the transcript's last 256 KB.** `reap-closer.py`'s `last_closer` read one fixed tail window, so on a long session the new `Stop` hook recorded `no-closer` 44 ms after the closer was written: the harness writes large `api-request-blob` entries after the assistant message, and the closer sat ~758 KB from EOF (measured 2026-10-19; a single 400 KB entry after the closer reproduces it). It now scans backwards in `WINDOW` chunks and stops at the first assistant message carrying a closer, bounded at 4 MB so a pathological transcript cannot turn a hook into a full-file read. Change set: `scripts/reap-closer.py`, `scripts/tests/test_reap_closer.py`, `CHANGELOG.md`.
