@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a closer followed by more than 200 KB of records is still read.** The deployed v0.184.5 `/supervisor:who-needs-my-help` sweep, checked against pane reads recorded before it ran (2026-10-19 22:58, 10 of 13 matched; the two others were sessions whose last turn ended on prose with no closer), put pane 955 — a `later (on the next organic broker loss)` closer followed by ~260 KB of `attachment` records — on `unclassified — transcript unreadable`: `_read_last_assistant_text()` read a fixed 200 KB tail and found no assistant text in it. It now widens the tail (200 KB → 2 MB → 20 MB) only when a window holds no assistant text, so the common case reads what it read before and a large transcript is never read whole. Change set: `scripts/who-needs-me.py`, `scripts/tests/test_who_needs_me.py`, `CHANGELOG.md`.
+
 ## v0.184.5
 
 - fix: **`/supervisor:who-needs-my-help` labels an idle session that declares itself `🟢 ACTIVE` as `working`.** The deployed v0.184.4 sweep, checked against pane reads recorded before it ran (2026-10-19 22:38, 15 of 18 matched, 2 stale), still put pane 796 — `idle`, `🟢 ACTIVE · 1 running (… resumed without a tab)`, a `nothing` closer and `⏰ Next: … (ScheduleWakeup)` — on `unclassified — idle with no ask`: `machine_wait()` rightly refuses a running declaration as a wait, and the unparked branch honoured a declared `⚪ DONE` but not its running twin. An unparked row whose panel declares `🟢 ACTIVE` / `State: working` is now `working`; a dead shell stays `bare shell`, since process death outranks a stale claim. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
