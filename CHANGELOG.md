@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.184.5
 
 - fix: **`/supervisor:who-needs-my-help` labels an idle session that declares itself `🟢 ACTIVE` as `working`.** The deployed v0.184.4 sweep, checked against pane reads recorded before it ran (2026-10-19 22:38, 15 of 18 matched, 2 stale), still put pane 796 — `idle`, `🟢 ACTIVE · 1 running (… resumed without a tab)`, a `nothing` closer and `⏰ Next: … (ScheduleWakeup)` — on `unclassified — idle with no ask`: `machine_wait()` rightly refuses a running declaration as a wait, and the unparked branch honoured a declared `⚪ DONE` but not its running twin. An unparked row whose panel declares `🟢 ACTIVE` / `State: working` is now `working`; a dead shell stays `bare shell`, since process death outranks a stale claim. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
 
