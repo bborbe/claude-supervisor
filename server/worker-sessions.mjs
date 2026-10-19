@@ -55,23 +55,30 @@ import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 // ⚠️ **Async, because the endpoint is.** Both callers already await `workerSessions`, and a
 // count resolved after the spawn has already spent the budget it protects is the failure the
 // awaited read exists to prevent.
-export async function readLedger({ endpoint, fetchImpl } = {}) {
-  const rows = await readSessionLedger({ endpoint, fetchImpl })
+export async function readLedger({ endpoint, fetchImpl, onFailure } = {}) {
+  const rows = await readSessionLedger({ endpoint, fetchImpl, onFailure })
   if (rows === null) return null
   return Object.fromEntries(ledgerBySessionId(rows))
 }
 
-// Live worker sessions as `[{sessionId, status, label}]`, or `null` when a store failed.
+// Live worker sessions as `{ workers, error }` — `workers: null` when a store failed, with
+// `error` naming what failed and how long it waited.
 //
 // The ledger supplies the worker identity; the **session-heartbeat endpoint** supplies
 // liveness. A session live at the endpoint but not in the ledger is a manager or one of the
 // operator's own; a session in the ledger and not live at the endpoint has exited.
 //
-// ⚠️ **`null` is "could not be read", and it is returned rather than folded into an empty
-// list.** The caller refuses on `null` and opens on `[]`, so collapsing the two turns a store
+// ⚠️ **`workers: null` is "could not be read", and it is returned rather than folded into an
+// empty list.** The caller refuses on it and opens on `[]`, so collapsing the two turns a store
 // outage into permission to spawn onto live work. That is the same rule the ledger read
 // carries one level up: an absent ledger directory is `{}` ("nobody has ever been spawned"),
 // which is a different answer from `null`.
+//
+// ⚠️ **`error` travels WITH a `null` count, and that is the change of 2026-10-19.** A bare `null`
+// left the refusal able to say only "the count could not be taken", so a slow store, a refused
+// socket and an unparseable body were one indistinguishable failure — measured on 2026-10-19,
+// when the fleet lost at least 5 spawns to exactly that message with no cause recorded. The
+// readers log every failure and report it here; the refusal prints it.
 //
 // ⚠️ **Asynchronous, because the endpoint is.** It reads over HTTP rather than the filesystem,
 // so both callers (`concurrentLimitError`'s two spawn paths) await it — and they must, because
@@ -81,17 +88,29 @@ export async function readLedger({ endpoint, fetchImpl } = {}) {
 // heartbeat, `cluster` for a mirrored cluster session. It is no longer the registry's own
 // `status`, because the registry is no longer on this path. Descriptive only — nothing decides
 // on it.
-export async function workerSessions({ endpoint, fetchImpl, now } = {}) {
+export async function workerSessions({ endpoint, fetchImpl, now, onFailure } = {}) {
   // ⚠️ `ledgerDir` left the signature with the file read, and a caller still passing it is
   // harmless rather than broken — an extra key on a destructured parameter is ignored. It is
   // named because a silent acceptance would let a reader believe a path is still in force.
-  const ledger = await readLedger({ endpoint, fetchImpl })
-  if (ledger === null) return null
+  //
+  // The failures are collected so the caller can print the cause; each reader still logs it, so a
+  // caller that passes no `onFailure` loses the message but not the record.
+  const failures = []
+  const observe = (message) => {
+    failures.push(message)
+    onFailure?.(message)
+  }
+  const cause = (fallback) => failures.join('; ') || fallback
+
+  const ledger = await readLedger({ endpoint, fetchImpl, onFailure: observe })
+  if (ledger === null) return { workers: null, error: cause('the session-ledger endpoint could not be read') }
 
   // Read once, not once per ledger entry: the endpoint answers the whole fleet in one request,
   // where a per-id probe would be ~1000 round trips over this ledger.
-  const rows = await readHeartbeat({ endpoint, fetchImpl })
-  if (rows === null) return null
+  const rows = await readHeartbeat({ endpoint, fetchImpl, onFailure: observe })
+  if (rows === null) {
+    return { workers: null, error: cause('the session-heartbeat endpoint could not be read') }
+  }
   const live = liveFromHeartbeat(rows)
 
   const workers = []
@@ -120,5 +139,5 @@ export async function workerSessions({ endpoint, fetchImpl, now } = {}) {
     if (record.role === 'manager') continue
     workers.push({ sessionId, status: live.get(sessionId), label: record.label })
   }
-  return workers
+  return { workers, error: null }
 }

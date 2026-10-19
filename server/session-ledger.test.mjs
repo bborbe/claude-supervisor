@@ -65,6 +65,47 @@ test('a throwing transport is null, not an empty ledger', async () => {
   assert.equal(await readSessionLedger({ endpoint: FIXTURE, fetchImpl }), null)
 })
 
+test('a failed read names its cause and elapsed milliseconds', async () => {
+  // The ledger is the identity half of the worker count, so its failure reaches the operator
+  // through the same refusal as the heartbeat's. Until 2026-10-19 both were a bare `null`, and
+  // the refusal could not say which endpoint had failed, or why.
+  const messages = []
+  const fetchImpl = async () => {
+    throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
+  }
+  await readSessionLedger({
+    endpoint: FIXTURE,
+    fetchImpl,
+    onFailure: (message) => messages.push(message),
+  })
+  assert.equal(messages.length, 1)
+  assert.match(messages[0], /^session-ledger read failed after \d+ ms: ECONNREFUSED/)
+})
+
+test('a non-200 and an unparseable body are named separately', async () => {
+  const statusMessages = []
+  await readSessionLedger({
+    endpoint: FIXTURE,
+    fetchImpl: serving([], { status: 500 }),
+    onFailure: (m) => statusMessages.push(m),
+  })
+  assert.match(statusMessages[0], /HTTP 500/)
+
+  const bodyMessages = []
+  const fetchImpl = async () => ({
+    status: 200,
+    json: async () => {
+      throw new SyntaxError('Unexpected token < in JSON')
+    },
+  })
+  await readSessionLedger({
+    endpoint: FIXTURE,
+    fetchImpl,
+    onFailure: (m) => bodyMessages.push(m),
+  })
+  assert.match(bodyMessages[0], /unparseable body/)
+})
+
 test('a non-200 is null, not an empty ledger', async () => {
   for (const status of [404, 500, 503]) {
     assert.equal(await readSessionLedger({ endpoint: FIXTURE, fetchImpl: serving([], { status }) }), null, String(status))

@@ -54,7 +54,10 @@ function endpoint(rows, { status = 200, ledgerRows } = {}) {
 
 function deadEndpoint() {
   return async () => {
-    throw new Error('connect ECONNREFUSED 127.0.0.1:18080')
+    // `code` is attached because a real socket failure carries it (Node's fetch puts it on
+    // `cause`; a direct socket error has it at the top level) — the diagnostics name the code,
+    // and a fixture that threw a bare Error would not exercise that.
+    throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:18080'), { code: 'ECONNREFUSED' })
   }
 }
 
@@ -62,12 +65,16 @@ function ledger(dir, sessionId, label, extra = {}) {
   dir.ledgerRows.push({ session_id: sessionId, label, mode: 'interactive', ...extra })
 }
 
-function count(dir, rows, opts = {}) {
-  return workerSessions({
+// `workerSessions` answers `{ workers, error }`. Most cases here are about the join, so this
+// unwraps the happy path; the failure cases below call `workerSessions` directly to read the
+// cause that travels with a `null` count.
+async function count(dir, rows, opts = {}) {
+  const { workers } = await workerSessions({
     endpoint: FIXTURE,
     fetchImpl: endpoint(rows, { ledgerRows: dir.ledgerRows }),
     ...opts,
   })
+  return workers
 }
 
 test('a ledger record with a live endpoint row is a worker', async () => {
@@ -206,10 +213,17 @@ test('an unreadable ledger store returns null, not an empty fleet', async () => 
   // rather than passing because both stores happened to be down.
   const sid = 'aaaaaaaa-0000-0000-0000-000000000009'
   const fetchImpl = async (url) => {
-    if (String(url).includes('/session-ledger')) throw new Error('connect ECONNREFUSED')
+    if (String(url).includes('/session-ledger')) {
+      throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+    }
     return { status: 200, json: async () => [row(sid)] }
   }
-  assert.equal(await workerSessions({ endpoint: FIXTURE, fetchImpl }), null)
+  const counted = await workerSessions({ endpoint: FIXTURE, fetchImpl })
+  assert.equal(counted.workers, null)
+  // ⚠️ The cause travels with the null. Without it the refusal can say only "the count could not
+  // be taken", which is what made 2026-10-19's lost spawns undiagnosable — and this case pins
+  // that the LEDGER is named, not the heartbeat, since only the ledger failed.
+  assert.match(counted.error, /session-ledger read failed after \d+ ms: ECONNREFUSED/)
 })
 
 test('an empty ledger store is an empty fleet, not an error', async () => {
@@ -227,7 +241,26 @@ test('an unreachable endpoint returns null, not an empty fleet', async () => {
   // reason the ledger is: the unread store may be hiding the very session being counted.
   const dir = fixture()
   ledger(dir, 'ffffffff-0000-0000-0000-000000000007', 'worker')
-  assert.equal(await workerSessions({ endpoint: FIXTURE, fetchImpl: deadEndpoint(), ...dir }), null)
+  const counted = await workerSessions({ endpoint: FIXTURE, fetchImpl: deadEndpoint(), ...dir })
+  assert.equal(counted.workers, null)
+  assert.match(counted.error, /session-ledger read failed after \d+ ms: ECONNREFUSED/)
+})
+
+test('a heartbeat failure names the heartbeat, not the ledger', async () => {
+  // The complement of the case above: a readable ledger and a failing heartbeat must report the
+  // SECOND reader. A message that named whichever failed first would be right by accident here
+  // and wrong there, so the two cases together pin the routing.
+  const dir = fixture()
+  ledger(dir, 'ffffffff-0000-0000-0000-00000000000a', 'worker')
+  const fetchImpl = async (url) => {
+    if (String(url).includes('/session-ledger')) {
+      return { status: 200, json: async () => dir.ledgerRows }
+    }
+    throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
+  }
+  const counted = await workerSessions({ endpoint: FIXTURE, fetchImpl })
+  assert.equal(counted.workers, null)
+  assert.match(counted.error, /session-heartbeat read failed after \d+ ms: ECONNREFUSED/)
 })
 
 test('a non-200 endpoint returns null', async () => {

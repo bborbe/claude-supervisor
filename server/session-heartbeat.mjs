@@ -21,6 +21,7 @@
 // so collapsing the two turns a store outage into permission to spawn onto live work — the one
 // direction a concurrent-worker cap must never fail in.
 import { config } from './config.mjs'
+import { classifyReadError, describeReadFailure, logReadFailure } from './read-diagnostics.mjs'
 
 export const HEARTBEAT_PATH = '/api/1.0/session-heartbeat'
 
@@ -41,9 +42,32 @@ export const HEARTBEAT_TIMEOUT_MS = 5000
 // liveness source now, so a deployment that turned it off has no way to answer this question,
 // and the honest answer is `null` — which refuses a spawn rather than permitting one. The
 // remedy for an operator who wants spawns is to run the store, not to have this reader guess.
-export async function readHeartbeat({ endpoint, fetchImpl = globalThis.fetch, timeoutMs = HEARTBEAT_TIMEOUT_MS } = {}) {
+//
+// ⚠️ **Every failed read is LOGGED with its cause and elapsed milliseconds, and reported to
+// `onFailure` when the caller passes one.** Until 2026-10-19 all three failures answered a bare
+// `null`, so a refusal could not say whether the store timed out, refused the socket, or served
+// something unparseable — measured: `worker-sessions.py --count` returned UNKNOWN at 21:49 and
+// succeeded 20/20 at 22:07 with no cause captured for the gap. The log line is what makes the
+// next occurrence diagnosable; `onFailure` is what puts the cause into `countError`.
+export async function readHeartbeat({
+  endpoint,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = HEARTBEAT_TIMEOUT_MS,
+  onFailure,
+} = {}) {
   const base = endpoint === undefined ? config.attentionStoreUrl : endpoint
-  if (!base) return null
+  const startedAt = Date.now()
+  const fail = (cause) => {
+    const message = describeReadFailure({
+      what: 'session-heartbeat',
+      cause,
+      elapsedMs: Date.now() - startedAt,
+    })
+    logReadFailure(message)
+    onFailure?.(message)
+    return null
+  }
+  if (!base) return fail('no endpoint configured (the attention store is switched off)')
   const url = `${String(base).replace(/\/+$/, '')}${HEARTBEAT_PATH}`
   let res
   try {
@@ -52,20 +76,22 @@ export async function readHeartbeat({ endpoint, fetchImpl = globalThis.fetch, ti
       // A wedged store must not hang the spawn path — this read sits in front of every spawn.
       signal: AbortSignal.timeout(timeoutMs),
     })
-  } catch {
-    return null
+  } catch (error) {
+    return fail(classifyReadError(error))
   }
   // ⚠️ Only 200 is a read. A 404 is the per-id route's "never posted" and is not an answer to
   // the LIST question, and any other status is the store declining to answer — both are
   // "could not read it" here, which is the shape the caller refuses on.
-  if (!res || res.status !== 200) return null
+  if (!res || res.status !== 200) return fail(`HTTP ${res ? res.status : 'no response'}`)
   let body
   try {
     body = await res.json()
-  } catch {
-    return null
+  } catch (error) {
+    return fail(`unparseable body: ${classifyReadError(error)}`)
   }
-  if (!Array.isArray(body)) return null
+  if (!Array.isArray(body)) {
+    return fail(`unparseable body: expected a JSON array, got ${body === null ? 'null' : typeof body}`)
+  }
   return body
 }
 
