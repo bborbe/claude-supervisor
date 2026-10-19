@@ -681,14 +681,30 @@ def is_machine_bound(closer):
 # sweep, 2026-10-19, read `external` while the session was closed).
 _NO_MECHANISM = re.compile(r"^(no|nothing|none|you)\b", re.I)
 
-# The closer's panel saying the session itself is running or finished, in either
-# vocabulary: the panel's `🟢 ACTIVE` / `⚪ DONE` state line, or worker-drive's own
-# `State: working 🟢` / `State: closed ⚪` header (PR #420). A held shell whose panel
-# says it is running is working on that child, and its `⏰ Next:` line is the step
-# after — measured 2026-10-19 on panes 855 (`🟢 ACTIVE`) and 888 (`State: working
-# 🟢`), both of which would otherwise have read as a machine wait.
-_NOT_WAITING = re.compile(
-    r"^\s*(?:🟢\s*ACTIVE|⚪\s*DONE|State:\s*(?:working|closed))\b", re.M)
+# The state the session's own panel declares, in either vocabulary: the closer
+# panel's icon line (`🟢 ACTIVE` / `🟡 WAITING` / `🔵 READY` / `🔴 BLOCKED` /
+# `⚪ DONE`) or worker-drive's `State: <state>` header (PR #420). Anchored to a line
+# start so a backticked mention in prose cannot stand in for the session's claim.
+_DECLARED_ICON = {"ACTIVE": STATE_WORKING, "WAITING": STATE_EXTERNAL,
+                  "READY": STATE_DECISION, "BLOCKED": STATE_DECISION,
+                  "DONE": STATE_CLOSED}
+_DECLARED = re.compile(
+    r"^\s*(?:(?:🟢|🟡|🔵|🔴|⚪)\s*(ACTIVE|WAITING|READY|BLOCKED|DONE)"
+    r"|State:\s*(working|external|decision|closed|unclassified))\b", re.M)
+
+
+def declared_state(rec):
+    """The state the session's last panel claims for itself, or `None`.
+
+    The LAST declaration wins, because a panel can quote an earlier one above it.
+    It is the session's testimony, so callers weigh it against what the disk says
+    rather than adopting it outright.
+    """
+    found = _DECLARED.findall(wnm.last_assistant_text(rec) or "")
+    if not found:
+        return None
+    icon, word = found[-1]
+    return _DECLARED_ICON[icon] if icon else word
 
 
 def names_machine(watcher):
@@ -701,16 +717,18 @@ def machine_wait(rec):
     """True when the session's `nothing` closer waits on a named machine.
 
     The `🟡 WAITING` panel's shape: `👤 You: nothing` plus a `⏰` line naming the
-    mechanism. Refused when the panel says the session is running its own work or
-    is finished (`_NOT_WAITING`): then the `⏰` line is what it does next, not what
-    it waits on.
+    mechanism. Refused whenever the panel declares any other state: running
+    (`🟢 ACTIVE`, `State: working` — panes 855 and 888, 2026-10-19), finished
+    (`⚪ DONE`, `State: closed` — pane 889) or waiting on the operator (`🔵 READY`
+    — pane 816, whose `⏰ Next: a fresh session picks up …` read `external`). In
+    all three the `⏰` line is what happens next, not a machine being waited on.
     """
-    text = wnm.last_assistant_text(rec) or ""
-    return names_machine(watcher_of(rec)) and not _NOT_WAITING.search(text)
+    return (names_machine(watcher_of(rec))
+            and declared_state(rec) in (None, STATE_EXTERNAL))
 
 
 def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
-             readable, is_parked, closer="", alive=None):
+             readable, is_parked, closer="", alive=None, declared=None):
     """The four-state label, or `unclassified` with the reason. Pure.
 
     Order is load-bearing. A decision outranks everything else: a session asking
@@ -777,6 +795,14 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
     if reg_status == "busy":
         return STATE_WORKING, ""
     if task_status in TERMINAL_TASK:
+        return STATE_CLOSED, ""
+    # The panel's own `⚪ DONE` / `State: closed`, when no task file says otherwise.
+    # A session with no `📌 Task:` link has no status to read, so before this its
+    # finished panel fell through to `idle with no ask` — or, holding a stray shell,
+    # to `working` (panes 890 and 887 on the v0.184.1 sweep, 2026-10-19). A task
+    # that resolves and is NOT terminal wins over the panel: a `⚪ DONE` on an open
+    # task is the anti-pattern the closer rule names, and hiding it would be worse.
+    if task_status is None and declared == STATE_CLOSED:
         return STATE_CLOSED, ""
     # A registry `status: shell` alone is not death (see the `alive` note above):
     # only `alive is False` proves the process is gone. `None` is "cannot tell",
@@ -921,7 +947,7 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
             task_status = wnm.task_status_from_closer(rec)
             state, reason = state_of(reg_status, None, None, "", "", task_status,
                                      None, bool(wnm.last_assistant_text(rec)), False,
-                                     alive=alive)
+                                     alive=alive, declared=declared_state(rec))
             not_parked.append({"session_id": sid, "name": name,
                                "pane": pane,
                                "manager": manager,
