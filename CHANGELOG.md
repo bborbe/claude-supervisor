@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **a worker can no longer end its turn on an operator gate for a step the rules already authorise.** A new `Stop` hook, `scripts/closer-gate-lint.py`, reads the session's last `👤 You:` closer (reusing `reap-closer.py`'s `last_closer`) and exits 2 when an `approve:`/`review:` line names an After Opening a PR verb — `/github-pr-watch`, `/coding:local-review` (including the observed prose form "I run the local review"), `/coding:pr-review`, `gh pr ready`, `dark-factory prompt|spec approve` — so the turn continues and the model does the work instead of asking. `gh pr merge` and every production-touching action stay gated. Fail-open on every path, a `stop_hook_active` loop guard, kill switch `SUPERVISOR_CLOSER_GATE_LINT=off`, and one JSONL record per invocation written on allow and block alike. Change set: `hooks/hooks.json`, `scripts/closer-gate-lint.py`, `scripts/tests/test_closer_gate_lint.py`, `scripts/tests/fixtures/closer-gate-lint/`, `CHANGELOG.md`.
+
 ## v0.181.0
 
 - feat: **the heartbeat sender can now emit a `location: pod` row, so a pod worker declares itself live to the attention store.** Both pod-side liveness paths stamp `location: 'pod'`: the A2A controller poll (`pollA2A`, whose stamp callback is now the exported `a2aStamp`, so the test drives the shipped callback rather than supplying its own) and the cluster ConfigMap mirror (`pollCluster`). `location` is a property of the path, not of the record — an A2A worker is created by the controller on `docker`/`k8s`, and every cluster-store entry was published by a pod. Local sessions are unchanged: `startSelfStamp` still writes `location: 'local'`.
