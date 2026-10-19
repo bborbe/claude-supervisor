@@ -382,7 +382,7 @@ def _launcher_field(path):
     return match.group(1).strip() if match else ""
 
 
-def resolve_launcher(sid, cwd, fb):
+def resolve_launcher(sid, cwd, fb, subject=None):
     """`(launcher_path, source)` the session must resume through, or `(None, reason)`.
 
     The resume must run the worker's OWN launcher, not the caller's. A launcher script
@@ -398,6 +398,11 @@ def resolve_launcher(sid, cwd, fb):
     the session's cwd. A bare name resolves beside the vault launcher. Anything that cannot
     be resolved to an existing file answers `None` — the caller refuses before the kill.
     `SUPERVISOR_LAUNCHER` overrides the whole resolution, for drills and tests.
+
+    A MANAGER (`subject` = `(kind, title)` from `manager_subject()`) takes the manager rule
+    instead, mirroring `resolveManagerLauncher` in `server/spawn-cwd.mjs`: the subject page's
+    `manager_launcher:`, else the vault launcher's `-claude` sibling when it exists, else the
+    vault's `claude_script`.
     """
     override = os.environ.get("SUPERVISOR_LAUNCHER")
     if override:
@@ -427,6 +432,13 @@ def resolve_launcher(sid, cwd, fb):
     vault_launcher = str(vault.get("claude_script") or "").strip()
     if not vault_launcher:
         return None, f"vault {vault.get('name')!r} has no claude_script"
+
+    if subject is not None:
+        kind, title = subject
+        subdirs = fb.TOPIC_SUBDIRS if kind == "topic" else fb.GOAL_SUBDIRS
+        page = next((p for p in fb._pages(root, subdirs)
+                     if os.path.basename(p)[:-3].lower() == str(title).strip().lower()), None)
+        return load_sibling("manager-launcher.py").resolve(vault_launcher, page)
 
     # The task bound to this session, matched on the row's WHOLE id set —
     # `claude_session_id` plus every `metrics_sessions[].session_id`, read through
@@ -709,7 +721,8 @@ def main():
             "anything would load differently",
         )
     argv = worker_argv(pid)
-    launcher, launcher_source = resolve_launcher(sid, (rec.get("cwd") or "").strip(), fb)
+    subject = fb.manager_subject(name, index, slugs) if role == "manager" and index is not None else None
+    launcher, launcher_source = resolve_launcher(sid, (rec.get("cwd") or "").strip(), fb, subject)
     changed = changed_inputs(load_path, load_mtime, argv, launcher, started)
     if not changed:
         checked = [

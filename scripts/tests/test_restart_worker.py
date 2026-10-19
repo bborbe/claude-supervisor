@@ -246,6 +246,31 @@ class ResolveLauncher(unittest.TestCase):
         path, source = rw.resolve_launcher("nobody", os.path.join(self.vault, "25 Tasks"), self.fb)
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private"), "vault"))
 
+    def test_manager_takes_the_claude_sibling(self):
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_manager_subject_manager_launcher_wins(self):
+        os.makedirs(os.path.join(self.vault, "23 Topics"))
+        self.page("23 Topics", "Fleet", "manager_launcher: cc-goal")
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-goal"), "subject"))
+
+    def test_manager_keeps_vault_launcher_without_sibling(self):
+        os.remove(os.path.join(self.scripts, "cc-private-claude"))
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("goal", "G"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private"), "vault"))
+
+    def test_manager_sibling_strips_deepseek(self):
+        ml = rw.load_sibling("manager-launcher.py")
+        self.assertEqual(ml.sibling("/s/cc-seibert-deepseek"), "/s/cc-seibert-claude")
+        self.assertEqual(ml.sibling("/s/cc-private-claude"), "/s/cc-private-claude")
+
+    def test_manager_unsafe_manager_launcher_is_none(self):
+        os.makedirs(os.path.join(self.vault, "23 Topics"))
+        self.page("23 Topics", "Fleet", "manager_launcher: cc;rm -rf")
+        self.assertIsNone(rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))[0])
+
     def test_cwd_outside_every_vault_is_none(self):
         self.assertIsNone(rw.resolve_launcher("s1", "/nowhere", self.fb)[0])
 

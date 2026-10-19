@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { managerLauncherSibling, parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 
 const VAULTS = [
   {
@@ -241,4 +241,36 @@ test('a launcher carrying shell metacharacters is refused, never resolved', () =
 test('an unsafe goal launcher is refused even when the task names a safe one', () => {
   const r = resolveTaskLauncher({ vaultLauncher: VAULT_LAUNCHER, taskLauncher: 'cc-private', goalLaunchers: ['x;y'] })
   assert.ok(r.error)
+})
+
+// Manager launcher — operator decision 2026-10-19: managers open on the vault's `-claude`
+// sibling launcher, a subject's `manager_launcher:` wins, and the vault launcher is kept
+// when no sibling exists. Each fallback is asserted, so a resolver that always returned the
+// sibling would fail here.
+
+test('the -claude sibling strips a -deepseek suffix, appends to a bare name, and is idempotent', () => {
+  assert.equal(managerLauncherSibling('/s/cc-private-deepseek'), '/s/cc-private-claude')
+  assert.equal(managerLauncherSibling('/s/cc-seibert-deepseek'), '/s/cc-seibert-claude')
+  assert.equal(managerLauncherSibling('/s/cc-private'), '/s/cc-private-claude')
+  assert.equal(managerLauncherSibling('/s/cc-private-claude'), '/s/cc-private-claude')
+  assert.equal(managerLauncherSibling(''), null)
+})
+
+test('a manager opens on the sibling when it exists', () => {
+  const r = resolveManagerLauncher({ vaultLauncher: '/s/cc-private-deepseek', exists: (p) => p === '/s/cc-private-claude' })
+  assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'claude-sibling' })
+})
+
+test('a manager keeps the vault launcher when no sibling exists', () => {
+  const r = resolveManagerLauncher({ vaultLauncher: '/s/cc-assistant-bro', exists: () => false })
+  assert.deepEqual(r, { launcher: '/s/cc-assistant-bro', source: 'vault' })
+})
+
+test("a subject's manager_launcher wins over the sibling and resolves beside the vault launcher", () => {
+  const r = resolveManagerLauncher({ vaultLauncher: '/s/cc-private-deepseek', managerLauncher: 'cc-private', exists: () => true })
+  assert.deepEqual(r, { launcher: '/s/cc-private', source: 'subject' })
+})
+
+test('an unsafe manager_launcher is refused', () => {
+  assert.ok(resolveManagerLauncher({ vaultLauncher: '/s/cc-private', managerLauncher: 'cc;rm -rf' }).error)
 })
