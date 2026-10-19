@@ -117,6 +117,12 @@ class RowShape(unittest.TestCase):
         with self.assertRaises(pl.LeverError):
             pl.render("-", "  ", "nudge it", "manager")
 
+    def test_refusal_does_not_resolve_a_link(self):
+        with mock.patch.object(pl, "jump_link") as link:
+            with self.assertRaises(pl.LeverError):
+                pl.render("123", "a gate", "the fleet", "manager")
+            link.assert_not_called()
+
     def test_headless_has_no_dead_link(self):
         row = pl.render("-", "a gate", "nudge it", "manager")
         self.assertTrue(row.startswith("no pane (headless)"))

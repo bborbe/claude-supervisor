@@ -124,11 +124,16 @@ def jump_link(pane: str) -> str:
 
 
 def render(pane: str, waits: str, lever: str, owner: str) -> str:
+    # Validate before resolving the link: a refused row must not spawn a
+    # subprocess for a jump target it is never going to print.
+    waits = validate_waits(waits)
+    lever = validate_lever(lever)
+    owner = validate_owner(owner)
     return FIELD_SEP.join((
         jump_link(pane),
-        f"waits: {validate_waits(waits)}",
-        f"lever: {validate_lever(lever)}",
-        f"owner: {validate_owner(owner)}",
+        f"waits: {waits}",
+        f"lever: {lever}",
+        f"owner: {owner}",
     ))
 
 
