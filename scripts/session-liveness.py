@@ -77,10 +77,13 @@ the 2026-09-26 near-miss that this file's history records was two readers over o
 disagreeing about what an id argument means.
 """
 import argparse
+import errno
 import importlib.util
 import json
 import os
+import socket
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -108,6 +111,53 @@ HEARTBEAT_PATH = "/api/1.0/session-heartbeat"
 # a backstop against a wedged server, never a routine path. A slow store is a store this file
 # should report as UNKNOWN, not one it should hang on.
 _HTTP_TIMEOUT = 5
+
+
+def _describe_read_failure(error):
+    """The cause of a failed endpoint read, in the operator's terms.
+
+    ⚠️ **This exists because `None` was the whole answer until 2026-10-19.** A timeout, a
+    refused socket and a body that is not JSON all reached a caller as the same "could not read
+    the session-heartbeat endpoint", so the next occurrence could not be attributed without a
+    manual probe — measured on 2026-10-19, `worker-sessions.py --count` returned UNKNOWN at
+    21:49 and succeeded 20/20 at 22:07 with no cause captured for the gap.
+
+    The same vocabulary the `.mjs` twins use (`read-diagnostics.mjs`), so one failure reads the
+    same whichever language reported it: `timeout`, `ECONNREFUSED`, `unparseable body: …`.
+    """
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return "timeout"
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return "timeout"
+        code = getattr(reason, "errno", None)
+        name = errno.errorcode.get(code) if code is not None else None
+        return "%s (%s)" % (name, reason) if name else "%s: %s" % (type(reason).__name__, reason)
+    if isinstance(error, ValueError):
+        # `json.JSONDecodeError` and `UnicodeDecodeError` both land here: the store answered, and
+        # what it answered was not the JSON array this reader can use.
+        return "unparseable body: %s" % error
+    code = getattr(error, "errno", None)
+    name = errno.errorcode.get(code) if code is not None else None
+    return "%s (%s)" % (name, error) if name else "%s: %s" % (type(error).__name__, error)
+
+
+def _log_read_failure(what, cause, started, on_failure=None):
+    """One stderr line naming what failed, why, and how long it waited — always `None`.
+
+    ⚠️ **The log line is emitted even when `on_failure` is passed.** The observer is how a caller
+    puts the cause into its own message (the count's UNKNOWN, a refusal); it is not a replacement
+    for the record. Without the line, a caller that collected the message and reported it as part
+    of some other text would leave the cause out of the one stream an operator actually reads.
+    """
+    elapsed_ms = int(round((time.monotonic() - started) * 1000))
+    message = "%s read failed after %d ms: %s" % (what, elapsed_ms, cause)
+    print(message, file=sys.stderr)
+    if on_failure is not None:
+        on_failure(message)
+    return None
+
 
 _IDENTITY = None
 _LIVE_WORKERS = None
@@ -245,21 +295,36 @@ def _get_json(url, timeout=_HTTP_TIMEOUT):
             return exc.code, None
 
 
-def read_endpoint(endpoint=None, timeout=_HTTP_TIMEOUT):
+def read_endpoint(endpoint=None, timeout=_HTTP_TIMEOUT, on_failure=None):
     """Every row the heartbeat store serves, or `None` when the endpoint could not be read.
 
     `None` and `[]` are different answers and must stay so: `[]` is "read it, the store holds
     nothing", `None` is "could not read it". Collapsing them turns an unreachable store into a
     confident empty fleet — the failure this file exists to correct. A non-200 is not a
     liveness answer either, so it too is `None`.
+
+    ⚠️ **Every `None` is LOGGED with its cause and elapsed milliseconds**, and reported to
+    `on_failure` when the caller passes one — see `_describe_read_failure`. A bare `None` was the
+    whole answer until 2026-10-19, which is why the fleet's lost spawns could not be attributed:
+    a timeout, a refused socket and an unparseable body all read as the same message.
     """
     url = endpoint_base(endpoint) + HEARTBEAT_PATH
+    started = time.monotonic()
     try:
         status, payload = _get_json(url, timeout)
-    except (OSError, ValueError):
-        return None
-    if status != 200 or not isinstance(payload, list):
-        return None
+    except (OSError, ValueError) as exc:
+        return _log_read_failure(
+            "session-heartbeat", _describe_read_failure(exc), started, on_failure
+        )
+    if status != 200:
+        return _log_read_failure("session-heartbeat", "HTTP %s" % status, started, on_failure)
+    if not isinstance(payload, list):
+        return _log_read_failure(
+            "session-heartbeat",
+            "unparseable body: expected a JSON array, got %s" % type(payload).__name__,
+            started,
+            on_failure,
+        )
     return payload
 
 
@@ -422,15 +487,27 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
         return UNKNOWN, "no session id given", None
     base = endpoint_base(endpoint)
 
+    started = time.monotonic()
     try:
         status, rows = _get_json(base + HEARTBEAT_PATH, timeout)
-    except (OSError, ValueError):
-        return UNKNOWN, "session-heartbeat endpoint unreachable at %s" % base, None
+    except (OSError, ValueError) as exc:
+        return UNKNOWN, "session-heartbeat endpoint unreachable at %s after %d ms (%s)" % (
+            base,
+            int(round((time.monotonic() - started) * 1000)),
+            _describe_read_failure(exc),
+        ), None
     if status != 200 or not isinstance(rows, list):
         # ⚠️ **Not ABSENT.** A 5xx, a 403, a body that is not JSON — none of them is the store
         # saying "this session is gone", and reading one as ABSENT is the resume-onto-a-live-
         # conversation this file exists to prevent.
-        return UNKNOWN, "session-heartbeat endpoint returned HTTP %s" % status, None
+        #
+        # The elapsed time is reported here too: a slow store that answered with a wrong shape is
+        # a different fact from one that answered instantly, and the difference is what tells a
+        # loaded host from a misrouted endpoint.
+        return UNKNOWN, "session-heartbeat endpoint returned HTTP %s after %d ms" % (
+            status,
+            int(round((time.monotonic() - started) * 1000)),
+        ), None
 
     # The list carries every session the store has ever seen, live or stale — a stale row is
     # matched too, exactly as the registry's own keys were: the argument identifies a session,
@@ -492,17 +569,26 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     # session the registry still calls non-dead is one the endpoint has simply never heard of.
     # The `--list` path already pays this precondition (`unstamped()`); until 2026-10-12 the
     # verdict path did not, which is how `ABSENT` was published for a demonstrably live session.
+    started = time.monotonic()
     try:
         status, row = _get_json(
             "%s%s/%s" % (base, HEARTBEAT_PATH, urllib.parse.quote(sid, safe="")), timeout
         )
-    except (OSError, ValueError):
-        return UNKNOWN, "session-heartbeat endpoint unreachable at %s" % base, None
+    except (OSError, ValueError) as exc:
+        return UNKNOWN, "session-heartbeat endpoint unreachable at %s after %d ms (%s)" % (
+            base,
+            int(round((time.monotonic() - started) * 1000)),
+            _describe_read_failure(exc),
+        ), None
     if status == 200 and isinstance(row, dict):
         return _verdict_for(row, sid)
     if status == 404:
         return _absent_licensed(sid, registry_dir)
-    return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s" % (status, sid), None
+    return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s after %d ms" % (
+        status,
+        sid,
+        int(round((time.monotonic() - started) * 1000)),
+    ), None
 
 
 def _verdict_for(row, sid):

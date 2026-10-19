@@ -223,6 +223,9 @@ class WorkerSessionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertIn("UNKNOWN", result.stderr)
+        # ⚠️ The cause, not just the fact. A bare "cannot read the endpoint" is what made the
+        # fleet's lost spawns undiagnosable; the exit-2 line now names the socket failure.
+        self.assertRegex(result.stderr, r"ECONNREFUSED")
 
     def test_a_non_200_list_route_exits_two(self):
         """A non-200 that is not a liveness answer must not be read as an empty fleet."""
@@ -233,6 +236,7 @@ class WorkerSessionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertIn("UNKNOWN", result.stderr)
+        self.assertRegex(result.stderr, r"HTTP 500")
 
     def test_the_ignored_flags_warn_instead_of_being_obeyed(self):
         """`--ledger-dir`, `--dir` and `--heartbeat-dir` are kept so existing callers do not

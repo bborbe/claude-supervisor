@@ -76,6 +76,63 @@ test('a body that is not JSON is null', async () => {
   assert.equal(await readHeartbeat({ endpoint: FIXTURE, fetchImpl }), null)
 })
 
+// ---- failure diagnostics: cause + elapsed ms ----------------------------------------------
+//
+// `null` is still the answer; what changed on 2026-10-19 is that it now carries a reason. These
+// cases pin the three causes the operator needs to tell apart — a slow store, a dead socket, and
+// a store answering something unparseable — because the spawn refusal prints this text and the
+// next occurrence has to be diagnosable from it.
+
+test('a timeout is named a timeout, with its elapsed milliseconds', async () => {
+  const messages = []
+  const fetchImpl = async () => {
+    throw Object.assign(new Error('The operation was aborted due to timeout'), {
+      name: 'TimeoutError',
+    })
+  }
+  const rows = await readHeartbeat({
+    endpoint: FIXTURE,
+    fetchImpl,
+    onFailure: (message) => messages.push(message),
+  })
+  assert.equal(rows, null)
+  assert.equal(messages.length, 1)
+  assert.match(messages[0], /^session-heartbeat read failed after \d+ ms: timeout$/)
+})
+
+test('a refused socket is named by its code, including through fetch’s cause wrapper', async () => {
+  const messages = []
+  // Node's fetch reports a socket failure as `TypeError: fetch failed` and hides the code on
+  // `cause`; reporting the TypeError alone is the collapse this change removes.
+  const fetchImpl = async () => {
+    throw Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
+  }
+  await readHeartbeat({ endpoint: FIXTURE, fetchImpl, onFailure: (m) => messages.push(m) })
+  assert.match(messages[0], /ECONNREFUSED/)
+})
+
+test('a non-200 is named by its status', async () => {
+  const messages = []
+  await readHeartbeat({
+    endpoint: FIXTURE,
+    fetchImpl: serving([], { status: 503 }),
+    onFailure: (m) => messages.push(m),
+  })
+  assert.match(messages[0], /HTTP 503/)
+})
+
+test('an unparseable body is named as unparseable, not as a transport failure', async () => {
+  const messages = []
+  const fetchImpl = async () => ({
+    status: 200,
+    json: async () => {
+      throw new SyntaxError('Unexpected token < in JSON')
+    },
+  })
+  await readHeartbeat({ endpoint: FIXTURE, fetchImpl, onFailure: (m) => messages.push(m) })
+  assert.match(messages[0], /unparseable body/)
+})
+
 test('an explicitly-off endpoint is null and dials nothing', async () => {
   // `SUPERVISOR_ATTENTION_STORE=off` resolves to a `null` endpoint. It is NOT "nothing is live":
   // the store is the fleet's only liveness source now, so a deployment that turned it off has no
