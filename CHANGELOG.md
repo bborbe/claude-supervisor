@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.184.11
 
 - fix: **a failed liveness read now falls back to the last successful worker count when it is younger than 60 s, and labels it stale.** `workerSessions()` and `scripts/worker-sessions.py` write `last-worker-count.json` under the supervisor state dir on every successful count and read it when the live read fails; `concurrentLimitRefusal` decides on a fresh cached count and says so (`This decision uses the last successful count, 5 s old — the live read failed: …`). Past 60 s, or with no readable cache, the refusal stands — the fallback is never a fabricated `0`, and `--list` keeps refusing because a count has no rows to list. The cache is a FILE because `worker-sessions.py --count` exits after printing, so an in-memory cache could never outlive it. Change set: `server/worker-sessions.mjs`, `server/spawn-mode.mjs`, `server/supervisor.mjs`, `scripts/worker-sessions.py`, `server/worker-sessions.test.mjs`, `server/spawn-mode.test.mjs`, `scripts/tests/test_worker_sessions.py`, `CHANGELOG.md`.
 
