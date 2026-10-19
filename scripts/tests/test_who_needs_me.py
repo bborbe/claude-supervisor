@@ -2405,5 +2405,44 @@ class BoardMissingSection(unittest.TestCase):
                              ["a"])
 
 
+class LastAssistantTextBeyondTheTail(unittest.TestCase):
+    """A closer followed by more than one tail window of non-assistant records.
+
+    Measured 2026-10-19 on the v0.184.5 sweep: pane 955's `later (on …)` closer was
+    followed by ~260 KB of `attachment` records, so the fixed 200 KB tail held no
+    assistant text and a readable transcript rendered `transcript unreadable`.
+    """
+
+    def write(self, records):
+        d = tempfile.mkdtemp(prefix="wnm-tail-")
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "s.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        return path
+
+    @staticmethod
+    def said(text):
+        return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+
+    def test_a_closer_behind_a_large_attachment_is_still_read(self):
+        path = self.write([self.said("👤 You: later (on the next broker loss): count it"),
+                           {"type": "attachment", "attachment": {"content": "x" * 300_000}}])
+        self.assertIn("later (on the next broker loss)",
+                      wnm._read_last_assistant_text({"transcript": path, "session_id": "s"}))
+
+    def test_the_newest_text_still_wins_inside_the_first_window(self):
+        path = self.write([self.said("👤 You: nothing"),
+                           {"type": "attachment", "attachment": {"content": "x" * 300_000}},
+                           self.said("👤 You: approve: merge it")])
+        self.assertEqual("👤 You: approve: merge it",
+                         wnm._read_last_assistant_text({"transcript": path, "session_id": "s"}))
+
+    def test_a_transcript_with_no_assistant_text_reads_empty(self):
+        path = self.write([{"type": "attachment", "attachment": {"content": "x" * 300_000}}])
+        self.assertEqual("", wnm._read_last_assistant_text({"transcript": path, "session_id": "s"}))
+
+
 if __name__ == "__main__":
     unittest.main()

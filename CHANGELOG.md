@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a closer followed by more than 200 KB of records is still read.** The deployed v0.184.5 `/supervisor:who-needs-my-help` sweep, checked against pane reads recorded before it ran (2026-10-19 22:58, 10 of 13 matched; the two others were sessions whose last turn ended on prose with no closer), put pane 955 — a `later (on the next organic broker loss)` closer followed by ~260 KB of `attachment` records — on `unclassified — transcript unreadable`: `_read_last_assistant_text()` read a fixed 200 KB tail and found no assistant text in it. It now widens the tail (200 KB → 2 MB → 20 MB) only when a window holds no assistant text, so the common case reads what it read before and a large transcript is never read whole. Change set: `scripts/who-needs-me.py`, `scripts/tests/test_who_needs_me.py`, `CHANGELOG.md`.
+
 ## v0.184.6
 
 - feat: the fleet round now renders a `FREEABLE TABS` section — every `finished — reap candidate` row plus every `parked` row idle ≥12 h whose task carries a `claude_session_id` (the resume mechanism) — each with its `jump-link.py` handover, so the operator can free a spawn-cap slot without a diagnosis. The population is a set, not a sample: a row whose pane lookup failed still renders with `no pane — <reason>`. The digest's `CLASSIFICATION` row gains `<age>` to carry the wait. The reap message now names `/exit` as the step that ends the process and frees the slot, and no longer implies that closing the task does it. Change set: `agents/fleet-sweep-reader.md`, `agents/fleet-drive.md`, `CHANGELOG.md`.
