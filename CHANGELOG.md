@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.183.1
 
 - fix: **`/supervisor:who-needs-my-help` gives watched waits, held shells and busy-but-ended turns their true state.** A hand read of 23 live panes on 2026-10-19 found 11 mislabelled. A `👤 You: nothing` closer was read as "nothing to report" before its `⏰ Ends:` / `⏰ Next:` line was looked at, so every `🟡 WAITING` panel (a cron, a manager wakeup, a PR watcher, clocks) landed on `unclassified — idle with no ask`; it is now a park whose `⏰` line names a machine, labelled `external` with its watcher and the panel's `ETA:` slot — refused for `⏰ Next: no mechanism is running` (⚪ DONE), a `⏰` line asking the operator, and a closer whose state line says `🟢 ACTIVE`. A live `status: shell` session (a held background child) is now `working` rather than `idle with no ask`; a dead one is still `bare shell`, and an unprovable one stays where it was. A `busy` session whose foreground turn ended while a background agent runs is read from its closer — a `pick —` is a `decision`, a machine `⏰` line `external` — but only on positive evidence the turn ended: `who-needs-me.py` gains `closer_turn_state()`, the three-state form of `turn_after_closer()` (unchanged for its callers), and an unreadable tail keeps the row `working`. Change set: `scripts/who-needs-my-help.py`, `scripts/who-needs-me.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
 
