@@ -40,8 +40,12 @@ be made per consumer rather than discovered.
 its 1075 entries read `running` against 26 live registry sessions. It is the durable
 half — who started this, in what mode, from which manager — never the live one.
 """
+import errno
 import json
 import os
+import socket
+import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -55,6 +59,40 @@ LEDGER_PATH = "/api/1.0/session-ledger"
 ENDPOINT_DEFAULT = "http://localhost:18080"
 
 _HTTP_TIMEOUT = 5
+
+
+def _describe_read_failure(error):
+    """The cause of a failed ledger read, in the operator's terms.
+
+    ⚠️ **Duplicated from `session-liveness.py` for the same reason `_get_json` is** — this module
+    is loaded BY that one, so importing its helpers back would close the cycle the extraction
+    exists to break. Kept in the same vocabulary (`timeout`, `ECONNREFUSED`, `unparseable body`)
+    so one failure reads the same whichever reader reported it.
+    """
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return "timeout"
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return "timeout"
+        code = getattr(reason, "errno", None)
+        name = errno.errorcode.get(code) if code is not None else None
+        return "%s (%s)" % (name, reason) if name else "%s: %s" % (type(reason).__name__, reason)
+    if isinstance(error, ValueError):
+        return "unparseable body: %s" % error
+    code = getattr(error, "errno", None)
+    name = errno.errorcode.get(code) if code is not None else None
+    return "%s (%s)" % (name, error) if name else "%s: %s" % (type(error).__name__, error)
+
+
+def _log_read_failure(what, cause, started, on_failure=None):
+    """One stderr line naming what failed, why, and how long it waited — always `None`."""
+    elapsed_ms = int(round((time.monotonic() - started) * 1000))
+    message = "%s read failed after %d ms: %s" % (what, elapsed_ms, cause)
+    print(message, file=sys.stderr)
+    if on_failure is not None:
+        on_failure(message)
+    return None
 
 
 def endpoint_base(override=None):
@@ -105,7 +143,7 @@ def _get_json(url, timeout=_HTTP_TIMEOUT):
             return exc.code, None
 
 
-def read_ledger(endpoint=None, timeout=_HTTP_TIMEOUT):
+def read_ledger(endpoint=None, timeout=_HTTP_TIMEOUT, on_failure=None):
     """Every session id the endpoint's ledger serves, mapped to its wire row — or None.
 
     ⚠️ **None and `{}` are different answers and must stay so.** `{}` is "read it, nobody
@@ -127,12 +165,22 @@ def read_ledger(endpoint=None, timeout=_HTTP_TIMEOUT):
     in hand. The endpoint serves the whole row, so the map keeps it verbatim.
     """
     url = endpoint_base(endpoint) + LEDGER_PATH
+    started = time.monotonic()
     try:
         status, payload = _get_json(url, timeout)
-    except (OSError, ValueError):
-        return None
-    if status != 200 or not isinstance(payload, list):
-        return None
+    except (OSError, ValueError) as exc:
+        return _log_read_failure(
+            "session-ledger", _describe_read_failure(exc), started, on_failure
+        )
+    if status != 200:
+        return _log_read_failure("session-ledger", "HTTP %s" % status, started, on_failure)
+    if not isinstance(payload, list):
+        return _log_read_failure(
+            "session-ledger",
+            "unparseable body: expected a JSON array, got %s" % type(payload).__name__,
+            started,
+            on_failure,
+        )
 
     known = {}
     for row in payload:

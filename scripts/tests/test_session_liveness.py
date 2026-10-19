@@ -26,9 +26,11 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row, row
 
@@ -246,6 +248,47 @@ class SessionLiveness(unittest.TestCase):
         rc, out = self.check("3fd529af", dead_url())
         self.assertEqual(rc, UNKNOWN)
         self.assertIn("UNKNOWN", out)
+
+    def test_an_unreachable_endpoint_names_the_cause_and_elapsed_ms(self):
+        # ⚠️ UNKNOWN was the whole answer until 2026-10-19, so a refused socket, a timeout and an
+        # unparseable body were indistinguishable. The refusal now names the cause — the operator
+        # reads this line, and the next occurrence has to be diagnosable from it.
+        rc, out = self.check("3fd529af", dead_url())
+        self.assertEqual(rc, UNKNOWN)
+        self.assertRegex(out, r"session-heartbeat endpoint unreachable at .* after \d+ ms \(ECONNREFUSED")
+
+    def test_a_slow_endpoint_is_logged_as_a_timeout_with_elapsed_ms(self):
+        # ⚠️ The timeout is raised through a patched `urlopen`, NOT a real slow stub. A real
+        # 0.2 s socket timeout against a 1 s stub was observed returning the body on a loaded
+        # host — the case then passes or fails by machine load, which is the same class of
+        # flakiness the fixture isolation exists to remove. The real socket timeout is exercised
+        # by the manual forced-failure run against an 8 s stub (`# Progress`, 5019 ms).
+        messages = []
+        err = io.StringIO()
+        with mock.patch.object(
+            self.m.urllib.request, "urlopen", side_effect=socket.timeout("timed out")
+        ):
+            with redirect_stderr(err):
+                rows = self.m.read_endpoint("http://fixture.invalid", on_failure=messages.append)
+        self.assertIsNone(rows)
+        self.assertRegex(err.getvalue(), r"session-heartbeat read failed after \d+ ms: timeout")
+        self.assertEqual(len(messages), 1, "the observer must receive the same line the log got")
+
+    def test_an_unparseable_body_is_logged_as_unparseable(self):
+        with self.fixture([], list_raw="<html>not json</html>") as fx:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rows = self.m.read_endpoint(fx.url)
+        self.assertIsNone(rows)
+        self.assertRegex(err.getvalue(), r"unparseable body")
+
+    def test_a_non_200_is_logged_with_its_status(self):
+        with self.fixture([], list_status=500) as fx:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rows = self.m.read_endpoint(fx.url)
+        self.assertIsNone(rows)
+        self.assertRegex(err.getvalue(), r"HTTP 500")
 
     def test_a_non_200_non_404_status_is_unknown_not_absent(self):
         # A 500 from the list route (reached when the per-id route answered 404) is not the

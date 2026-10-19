@@ -108,6 +108,14 @@ class _Handler(BaseHTTPRequestHandler):
         store = self.server.store
         path = self.path.split("?", 1)[0]
         if path == PATH:
+            # ⚠️ `list_raw` exists for the READER'S DIAGNOSTICS: a store answering something that
+            # is not JSON must be reported as unparseable, and that shape was not expressible
+            # here before. The timeout shape is deliberately NOT simulated by a delay — a real
+            # short socket timeout against a slow stub is load-dependent, so that case patches
+            # `urlopen` instead (see `test_session_liveness.py`).
+            if store.list_raw is not None:
+                self._send_raw(store.list_raw)
+                return
             self._send(store.list_status, store.rows)
             return
         if path.startswith(PATH + "/"):
@@ -139,6 +147,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_raw(self, text):
+        """A 200 whose body is not JSON — the store answering something the reader cannot use."""
+        body = text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
 
 class FixtureEndpoint:
     """A running fixture store. Use as a context manager; `.url` is the base URL.
@@ -148,9 +165,12 @@ class FixtureEndpoint:
     does the same for the ledger route, which is what the ledger reader turns into `None`.
     """
 
-    def __init__(self, rows=None, list_status=200, ledger_rows=None, ledger_status=200):
+    def __init__(self, rows=None, list_status=200, ledger_rows=None, ledger_status=200, list_raw=None):
         self.rows = list(rows or [])
         self.list_status = list_status
+        # A non-JSON body — the "unparseable" failure shape the reader's diagnostics must name.
+        # See `_Handler.do_GET`.
+        self.list_raw = list_raw
         self.ledger_rows = list(ledger_rows or [])
         self.ledger_status = ledger_status
         # ⚠️ Non-dict rows are skipped, not rejected: the reader must tolerate a malformed row

@@ -18,6 +18,7 @@
 // filtering on its `status` would resurrect the whole fleet. Liveness comes from
 // `session-heartbeat.mjs` beside this one — the same split `registry-rehydrate.mjs` keeps.
 import { config } from './config.mjs'
+import { classifyReadError, describeReadFailure, logReadFailure } from './read-diagnostics.mjs'
 
 export const SESSION_LEDGER_PATH = '/api/1.0/session-ledger'
 
@@ -38,13 +39,36 @@ export const SESSION_LEDGER_TIMEOUT_MS = 5000
 // body that is not an array is the probe failing to run. The caller must be able to tell
 // them apart — collapsing the two turns a store outage into a confident empty roster, which
 // is the direction that hides live workers.
+//
+// ⚠️ **Every failed read is LOGGED with its cause and elapsed milliseconds, and reported to
+// `onFailure` when the caller passes one** — the same diagnostics `session-heartbeat.mjs` carries
+// beside it. This read is the identity half of the worker count, so a failure here reaches the
+// operator through the same refusal; a bare `null` is what made that refusal unable to name which
+// of the two endpoints failed.
+//
+// ⚠️ **`readSessionLedgerRow` below is deliberately NOT given the same treatment.** Its `null`
+// covers "no such row" as well as "could not read it" by contract (see its own comment), so a log
+// line on every 404 would report a normal absence as a failure. The LIST route is the one whose
+// `null` is unambiguously a transport failure, and it is the one on the spawn path.
 export async function readSessionLedger({
   endpoint,
   fetchImpl = globalThis.fetch,
   timeoutMs = SESSION_LEDGER_TIMEOUT_MS,
+  onFailure,
 } = {}) {
   const base = endpoint === undefined ? config.attentionStoreUrl : endpoint
-  if (!base) return null
+  const startedAt = Date.now()
+  const fail = (cause) => {
+    const message = describeReadFailure({
+      what: 'session-ledger',
+      cause,
+      elapsedMs: Date.now() - startedAt,
+    })
+    logReadFailure(message)
+    onFailure?.(message)
+    return null
+  }
+  if (!base) return fail('no endpoint configured (the attention store is switched off)')
   const url = `${String(base).replace(/\/+$/, '')}${SESSION_LEDGER_PATH}`
   let res
   try {
@@ -53,20 +77,22 @@ export async function readSessionLedger({
       // A wedged store must not hang the roster read — this sits in front of `list_agents`.
       signal: AbortSignal.timeout(timeoutMs),
     })
-  } catch {
-    return null
+  } catch (error) {
+    return fail(classifyReadError(error))
   }
   // ⚠️ Only 200 is a read. A 404 is the per-id route's "never spawned" and is not an answer
   // to the LIST question, and any other status is the store declining to answer — both are
   // "could not read it" here.
-  if (!res || res.status !== 200) return null
+  if (!res || res.status !== 200) return fail(`HTTP ${res ? res.status : 'no response'}`)
   let body
   try {
     body = await res.json()
-  } catch {
-    return null
+  } catch (error) {
+    return fail(`unparseable body: ${classifyReadError(error)}`)
   }
-  if (!Array.isArray(body)) return null
+  if (!Array.isArray(body)) {
+    return fail(`unparseable body: expected a JSON array, got ${body === null ? 'null' : typeof body}`)
+  }
   return body
 }
 

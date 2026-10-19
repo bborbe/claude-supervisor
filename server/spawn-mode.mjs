@@ -434,7 +434,13 @@ export function resolveMaxConcurrent({ env, envHard, file, path = 'the superviso
 // ⚠️ THE HARD CAP IS ASKED FIRST because it refuses everyone, so it is the answer whatever
 // named the task — and answering the soft cap first would tell an operator-named caller it
 // was exempt at a count where nothing opens.
-export function concurrentLimitRefusal({ limits, liveCount, operatorNamed = false, configFile }) {
+export function concurrentLimitRefusal({
+  limits,
+  liveCount,
+  countError = null,
+  operatorNamed = false,
+  configFile,
+}) {
   if (limits.error) return limits.error
   // `null` is unlimited — the soft key's off switch, which disables the pair.
   if (limits.limit === null) return null
@@ -444,13 +450,22 @@ export function concurrentLimitRefusal({ limits, liveCount, operatorNamed = fals
   // opening past an uncountable limit is how the limit silently stops existing — and a caller
   // acting on the other reading spawns onto live work.
   if (liveCount === null) {
+    // ⚠️ **The failure is NAMED, and the limit is not the headline** — the same rule the manager
+    // refusal below carries, for the same reason. On 2026-10-19 the fleet reported spawns
+    // refused with only "the live-worker count could not be taken" (the count is testimony from
+    // the fleet diagnosis, not a log read), which names the limit — usually the correct one —
+    // and not the cause: a slow store, a refused socket, or an unparseable body. `countError` is
+    // that cause, collected by `workerSessions()` from the endpoint readers; without it the
+    // pointer below is still better than silence.
     return (
       `the concurrent-worker limit is set to ${limits.limit} but the live-worker count could not be ` +
-      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. The ` +
-      `spawn ledger, the session registry and the heartbeat store must all be readable, because a ` +
-      `channel that cannot be read may be hiding the very session being counted; point ` +
-      `ATTENTION_STORE_URL, SUPERVISOR_SESSIONS_DIR and SUPERVISOR_HEARTBEAT_DIR at them if they ` +
-      `live elsewhere.`
+      `taken, so it is unknown — refusing rather than opening past a limit that cannot be counted. ` +
+      (countError
+        ? `The count failed: ${countError}.`
+        : `The count reads the session-ledger and session-heartbeat endpoints, and both must be ` +
+          `readable, because a channel that cannot be read may be hiding the very session being ` +
+          `counted; point ATTENTION_STORE_URL at them if they live elsewhere.`) +
+      ` The limit is not the failure — the count is.`
     )
   }
 
