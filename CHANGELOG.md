@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.184.0
 
 - fix: **`/supervisor:who-needs-my-help` no longer reads a running or finished session's `⏰` line as a machine wait.** The deployed v0.183.1 sweep, checked pane by pane on 2026-10-19, labelled two sessions `external` wrongly: pane 888 declared itself in worker-drive's own header (`State: working 🟢`), which the `🟢 ACTIVE` test did not know, and pane 889 was a `⚪ DONE` panel whose `⏰ Next:` named the operator (`you open a new session`). `machine_wait()` now refuses a panel whose state line says it is running or finished in either vocabulary (`🟢 ACTIVE`, `⚪ DONE`, `State: working`, `State: closed`), and a `⏰` line led by `you` names no machine. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
 
