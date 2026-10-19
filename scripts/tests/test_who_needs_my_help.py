@@ -1115,7 +1115,8 @@ class WatcherAndShellStateTest(Base):
         self._add("done", 860, PANEL_DONE, status="idle")
         row = self._row("done")
         self.assertNotEqual(h.STATE_EXTERNAL, row["state"])
-        self.assertEqual("idle with no ask", row["state_reason"])
+        # No task link contradicts the panel's `⚪ DONE`, so it is closed.
+        self.assertEqual(h.STATE_CLOSED, row["state"])
 
     def test_a_done_panel_whose_next_step_is_the_operator_is_not_a_machine_wait(self):
         # Measured 2026-10-19 on the deployed v0.183.1 sweep: pane 889's `⚪ DONE`
@@ -1124,7 +1125,38 @@ class WatcherAndShellStateTest(Base):
         self._add("done-operator", 889, PANEL_DONE_OPERATOR, status="idle")
         row = self._row("done-operator")
         self.assertNotEqual(h.STATE_EXTERNAL, row["state"])
-        self.assertEqual("idle with no ask", row["state_reason"])
+        # The panel declares the session finished and no task link contradicts
+        # it, so it is `closed` — pane 890 on the v0.184.1 sweep read `idle with
+        # no ask` for this exact shape.
+        self.assertEqual(h.STATE_CLOSED, row["state"])
+
+    def test_a_done_panel_holding_a_stray_shell_is_closed_not_working(self):
+        # Pane 887 on the v0.184.1 sweep: `⚪ DONE` with a shell still held read
+        # `working` — the live-shell rule fired because no task link resolved a
+        # terminal status, though the session itself said it had finished.
+        self._add("done-shell", 887, PANEL_DONE_OPERATOR, status="shell")
+        self.assertEqual(h.STATE_CLOSED, self._row("done-shell")["state"])
+
+    def test_a_done_panel_whose_task_is_still_open_is_not_closed(self):
+        # The disk wins over the panel: a `⚪ DONE` closer anchored to a task
+        # that is still `in_progress` is the anti-pattern the closer rule names,
+        # and reporting it `closed` would hide exactly that.
+        self.fleet.task("25 Tasks/still open", "---\nstatus: in_progress\n---\n# Tasks\n- [ ] x\n")
+        self._add("done-open", 892,
+                  "📌 Task: [T](obsidian://open?vault=private-personal&file=25%20Tasks%2Fstill%20open)\n"
+                  + PANEL_DONE_OPERATOR, status="idle")
+        self.assertNotEqual(h.STATE_CLOSED, self._row("done-open")["state"])
+
+    def test_a_ready_panel_with_a_nothing_closer_is_not_a_machine_wait(self):
+        # Pane 816 on the v0.184.1 sweep: `🔵 READY · you decide` with a `nothing`
+        # closer and `⏰ Next: a fresh session picks up …` read `external`. A
+        # `nothing` closer waits on a machine only when the panel says WAITING.
+        self._add("ready-nothing", 816,
+                  "🔵 READY · nothing running · you decide\n"
+                  "👤 You: nothing — the checkpoint is complete and the next step is a fresh session\n"
+                  "⏰ Next: a fresh session picks up at `/coding:pr-review` on the branch\n",
+                  status="idle")
+        self.assertNotEqual(h.STATE_EXTERNAL, self._row("ready-nothing")["state"])
 
     def test_a_session_that_declares_itself_working_is_not_a_machine_wait(self):
         # Measured the same run on pane 888: worker-drive writes its own
