@@ -200,5 +200,49 @@ class ReplyTest(unittest.TestCase):
         self.assertIsNotNone(error)
 
 
+
+class CreateParityTest(unittest.TestCase):
+    """`--vault` / `--first-step` reach the request; `bind` and `session_id` reach stdout."""
+
+    def test_create_request_carries_vault_and_first_step(self):
+        self.assertEqual(
+            ctl.control_request("create", "T", "private-personal", "do X first"),
+            {"operation": "create", "create": {"task": "T", "vault": "private-personal", "first_step": "do X first"}},
+        )
+
+    def test_create_request_omits_empty_options(self):
+        self.assertEqual(ctl.control_request("create", "T"), {"operation": "create", "create": {"task": "T"}})
+        self.assertEqual(ctl.control_request("create", "T", "", ""), {"operation": "create", "create": {"task": "T"}})
+
+    def test_bind_line_covers_every_outcome(self):
+        self.assertEqual(ctl.bind_line({"action": "stamped"}), "bind: stamped")
+        self.assertEqual(ctl.bind_line({"action": "appended"}), "bind: appended")
+        self.assertEqual(ctl.bind_line({"error": "vault-cli failed"}), "bind: error vault-cli failed")
+        self.assertEqual(ctl.bind_line(None), "bind: none")
+
+    def test_print_created_reports_bind_and_session_and_still_redacts(self):
+        reply = json.loads(json.dumps(REPLY))
+        data = reply["result"]["task"]["artifacts"][0]["parts"][0]["data"]
+        data["create"]["worker"]["session_id"] = "11111111-2222-3333-4444-555555555555"
+        data["create"]["bind"] = {"action": "stamped"}
+        task, frames, _ = ctl.control_reply(json.dumps(reply))
+        response, _, _ = ctl.control_response(task, frames, "create")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self.assertTrue(ctl.print_created(response))
+        printed = buffer.getvalue()
+        self.assertIn("session_id: 11111111-2222-3333-4444-555555555555", printed)
+        self.assertIn("bind: stamped", printed)
+        self.assertNotIn(FAKE_TOKEN, printed)
+
+    def test_print_created_without_bind_says_none(self):
+        task, frames, _ = ctl.control_reply(json.dumps(REPLY))
+        response, _, _ = ctl.control_response(task, frames, "create")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            ctl.print_created(response)
+        self.assertIn("bind: none", buffer.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

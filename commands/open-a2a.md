@@ -36,7 +36,7 @@ Manager-tier, like `/supervisor:open` (`docs/session-tiers.md` § Command → ti
 - **name (required):** the task / goal / topic title or identifier — everything that is not a recognised flag. Quote it when passing to `vault-cli`.
 - **`--task` / `--goal` / `--topic`, `--vault <name>`, `--first-step <text>`, `--flagged`:** exactly as `/supervisor:open` defines them — read them in `${CLAUDE_PLUGIN_ROOT}/commands/open.md` § Arguments, and do not restate them here.
 - ⚠️ **`--color` has no consumer on this command.** A controller worker opens no local tab, so `/supervisor:open` § 3.0's role-map colour resolution never runs; the flag is dropped rather than half-honoured.
-- ⚠️ **`--first-step` rides the `prompt` on the `spawn_agent` branch** exactly as `/supervisor:open` § Step 3 defines it. On the local-backend branch the create call carries `task` alone, so the text has no transport there — say so, rather than dropping it silently.
+- ⚠️ **`--first-step` rides the `prompt` on the `spawn_agent` branch** exactly as `/supervisor:open` § Step 3 defines it. On the local-backend branch it is sent as `--first-step "<text>"`; the controller tells the worker `<first_step>\n\n/vault-cli:work-on-task "<task>"`, the same prompt `/supervisor:open` builds.
 
 If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a task, goal or topic name.` and STOP.
 
@@ -65,12 +65,12 @@ vault-cli --vault "<vault>" task get "<task>" target
 ### 2.2 Absent `target:` → the controller's `local` backend
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/a2a-local-control.py" create --task "<task>"
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/a2a-local-control.py" create --task "<task>" --vault "<vault>" [--first-step "<text>"]
 ```
 
 It prints `worker_id: <id>`, then the reply, redacted. The backend is served at `http://localhost:8092`, overridable with `--endpoint` then `$SUPERVISOR_A2A_URL_LOCAL` — ⚠️ **the local backend has its own URL variable**, and the docker controller is a different service on this Mac, so the two must never share one.
 
-⚠️ **The create call carries `task` alone.** Neither `vault` nor `cwd` is sent, so the worker's directory is the controller's — which is why the eligibility check above exists, and that rule is item 7's, not this file's.
+⚠️ **The create call carries `task`, `vault` and (when given) `first_step`.** `vault` is the resolved vault from Step 0–1.5: the controller reads the task's launcher, role and goals from that vault, starts the tab in its directory and writes the bind there. `cwd` is never sent. Omitting `--vault` falls back to the controller's own configured vault — never omit it.
 
 ⚠️ **The reply carries `launcher` and `launcher_source`, because this backend resolves the launcher itself.** The controller applies the same rule as `spawn_agent` — the task's `launcher:` frontmatter, else its goal's, else the vault's `claude_script` (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8) — and `launcher_source` names which of `task` / `goal` / `vault` won. So a local create is not launcher-blind: read both fields back and check them as you would on the `spawn_agent` arms.
 
@@ -92,7 +92,7 @@ Pass the frontmatter value **verbatim** — never lower-cased, never mapped, nev
 
 ⚠️ **On this branch the argument contract is different, and `role` is dropped with it.** `role`, `interactive`, `resume`, `env`, `policy`, `window_id` and `shipping` are each refused, and `task` is required — the list and its reasons have their single home in `docs/fleet-surface.md` § Spawn a worker item 7; read it there and never hand-build this branch from the line above.
 
-**The `mode:` carve-out is inherited here and consumed WITHOUT an argument — do not invent one.** The row's `mode:` was already written by `/supervisor:open` § Step 0.6, and the classifier that produced it has its single home in `docs/fleet-surface.md` § Spawn a worker item 6: it runs in both directions — `interactive=false` for a row whose `mode:` reads `headless`, `interactive=true` for one that reads `interactive`, and the argument omitted only when the field is absent. ⚠️ **Neither branch of this command can carry that argument** — a `docker` / `k8s` row refuses `interactive` whenever it is present (item 7), and the local-backend create carries `task` alone — so the field is read and reported, never passed. Say so in the report rather than implying it was consumed.
+**The `mode:` carve-out is inherited here and consumed WITHOUT an argument — do not invent one.** The row's `mode:` was already written by `/supervisor:open` § Step 0.6, and the classifier that produced it has its single home in `docs/fleet-surface.md` § Spawn a worker item 6: it runs in both directions — `interactive=false` for a row whose `mode:` reads `headless`, `interactive=true` for one that reads `interactive`, and the argument omitted only when the field is absent. ⚠️ **Neither branch of this command can carry that argument** — a `docker` / `k8s` row refuses `interactive` whenever it is present (item 7), and the local-backend create carries no mode field — so the field is read and reported, never passed. Say so in the report rather than implying it was consumed.
 
 ⚠️ **Requires `mcp__supervisor__*` in this session.** There is no wezterm fallback on this command: a tab is not a controller worker, and opening one would answer a call that asked for somewhere else.
 
@@ -108,7 +108,12 @@ A value that is neither absent nor `docker` / `k8s` is not this command's to int
 
 A controller-created worker is addressed by its **`worker_id`** — always, on every backend. ⚠️ **A `pane_id` is not an alternative to it, and it exists on only one backend.** The controller populates `pane_id` for a worker that runs in a WezTerm tab — the `local` backend — and leaves it **empty** for `docker` / `k8s`, whose workers answer at their own `a2a_url`. So the field is the local worker's jump handle and nothing at all elsewhere; address by `worker_id` regardless, and read `pane_id` only to hand the operator a way into a local worker's tab.
 
-⚠️ **The `session_id` comes from a later `list`, never from the create reply.** The create reply's job is the `worker_id` and the redacted record; the session id is read back from the fleet the controller reports:
+**Read `bind` from the create reply** — the script prints it as one line, with the same semantics as `spawn_agent`'s `bind` in `/supervisor:open` § 4.1:
+
+- `bind: stamped` — the task's `claude_session_id` was empty and now names this session (`session_id: <uuid>` is printed above it).
+- `bind: appended` — the task was already owned; this session was appended to `metrics_sessions`, the owner left intact.
+- `bind: error <msg>` — a session was found but the vault write failed. Reconcile by hand per `/supervisor:open` § 4.1 (read the owner first; prefer `append-metrics-session`).
+- `bind: none` — no session registered within the controller's ~8 s bind window. Not a failure: the worker is running, and the binding may still land. Fall back to `list`:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/a2a-local-control.py" list
@@ -120,7 +125,7 @@ One worker per line — `<worker_id>  session_id=<id>` — and a worker the cont
 
 State the branch taken in one line, plus the resolved type and the resolved vault, so a mis-resolution is visible immediately:
 
-- local backend → `🆕 created (local) · worker <worker_id> · pane <pane_id> · session <sid-prefix>`
+- local backend → `🆕 created (local) · worker <worker_id> · pane <pane_id> · session <sid-prefix> · bind <stamped|appended|error|none>`
 - `docker` / `k8s` → `🆕 created (<target>) · worker <agent_id>` — read the `target` back from the response rather than assuming it.
 - unknown `target:` → the server's refusal, verbatim.
 

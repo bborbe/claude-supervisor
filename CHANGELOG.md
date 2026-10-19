@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`/supervisor:open-a2a`'s local-backend create now matches `/supervisor:open`'s spawn.** `scripts/a2a-local-control.py create` gains `--vault` and `--first-step`, sent as the controller's new `vault` / `first_step` create fields, and prints the reply's `session_id` and a `bind:` line (`stamped` / `appended` / `error <msg>` / `none`); token redaction unchanged. `commands/open-a2a.md` passes the resolved vault and first step, reads `bind` the way `/supervisor:open` § 4.1 reads `spawn_agent`'s, falls back to `list` on `none`, and reports the bind. Requires bborbe/a2a-worker-controller#24. Change set: `scripts/a2a-local-control.py`, `scripts/tests/test_a2a_local_control.py`, `commands/open-a2a.md`, `CHANGELOG.md`.
+
 ## v0.178.4
 
 - fix: **`/supervisor:open`'s CREATE branch dispatches `spawn_agent` again instead of routing through the a2a-worker-controller.** The controller's `local` backend has a single vault directory, so a cross-vault create got the private-personal launcher and cwd, never reported or bound its session id (vault-ui showed Start, not Live), and bypassed the start-rate limit. Reverts the route-through from #367; `/supervisor:open-a2a` stays a separate, explicitly invoked command until it handles every vault.
