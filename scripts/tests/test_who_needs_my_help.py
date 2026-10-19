@@ -1186,6 +1186,28 @@ class WatcherAndShellStateTest(Base):
                   status="idle")
         self.assertEqual(h.STATE_WORKING, self._row("declared-active")["state"])
 
+    def test_a_ready_panel_whose_next_line_is_its_own_follow_up_is_not_external(self):
+        # Pane 816 on the v0.184.7 sweep (2026-10-19 23:29): `🔵 READY · you decide`
+        # with an operator action on the `👤 You:` line and `⏰ Next: I re-run … merge`
+        # read `external` — the parked branch took any non-operator `⏰` line as a
+        # machine, though the line names what the session does AFTER the operator.
+        self._add("ready-followup", 816,
+                  "🔵 READY · approval on HEAD, CI green, merge is the only step left · you decide\n"
+                  "👤 You:    switch to accept edits (Shift+Tab), reply `go`\n"
+                  "⏰ Next:   I re-run `gh -R o/r pr merge 75 --merge` and continue into the release\n",
+                  status="idle")
+        self.assertNotEqual(h.STATE_EXTERNAL, self._row("ready-followup")["state"])
+
+    def test_a_waiting_panel_whose_next_line_names_a_machine_is_still_external(self):
+        # The guard is the declaration, not the `⏰` wording: the same follow-up
+        # line under `🟡 WAITING` is a machine wait.
+        self._add("waiting-followup", 817,
+                  "🟡 WAITING\n"
+                  "👤 You:    later (on the deploy runner's report): verify the rollout\n"
+                  "⏰ Ends:   the deploy runner reports (background bash b123)\n",
+                  status="idle")
+        self.assertEqual(h.STATE_EXTERNAL, self._row("waiting-followup")["state"])
+
     def test_a_dead_shell_declaring_itself_active_is_still_a_bare_shell(self):
         # Process death outranks the panel: a `🟢 ACTIVE` closer left behind by an
         # exited process is a stale claim, and `bare shell` is what the operator
