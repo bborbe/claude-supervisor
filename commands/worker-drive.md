@@ -2,8 +2,6 @@
 description: Get a stuck session working again, or tell the operator exactly how to help. Diagnoses the session (waiting on what, task done, drift), then drives the anchored task until a hard stop. Takes no arguments. Absorbs the former /and. Bans WAIT as an answer after repetition, challenges unfinishable acceptance criteria, and never asks permission for non-forks.
 allowed-tools:
   - Read
-  - Grep
-  - Glob
   - Bash
   - Edit
   - Write
@@ -12,7 +10,7 @@ allowed-tools:
   - Monitor
   - AskUserQuestion
   - mcp__tts__say
-argument-hint: (no args — diagnose, then drive until a hard stop)
+argument-hint: "(no args — diagnose, then drive until a hard stop)"
 ---
 
 Finish the anchored task. Not report on it — **finish it**.
@@ -328,6 +326,7 @@ So treat the anchor block as the report's first composed lines — directly unde
 🎯 Goal: [<name>](obsidian://open?vault=<V>&file=23%20Goals%2F<file>) — <n>/<m> SC · <n>/<m> subtasks · <binding constraint>
 📌 Task: [<name>](obsidian://open?vault=<V>&file=24%20Tasks%2F<file>) — <phase>, session <id-prefix>
 
+State:            <working 🟢 | external 🟡 | decision 🔵 | closed ⚪ | unclassified — reason> · <signal>
 Waiting on:       <named wait — ALIVE · progressing | stalled | DEAD — or `nothing`>
 Task done?:       <status + phase read from disk this run · <n>/<m> boxes open>
 How you can help: <the one thing only the operator can do — or `nothing, I'm driving`>
@@ -358,19 +357,19 @@ ETA:        <duration + projected clock time + basis | n/a — Claude-side | unk
 
 Short path (§0b): no `OPEN` table — `Next open box: <box>` instead.
 
-**The four header lines are mandatory, in this order, on every report.** They are the operator's four restart questions; answering them first means the operator never has to type them. Each value comes from this run — the status from disk, the wait from §0b's evidence — never from memory. `How you can help` names a real hard stop (§ The contract) or says `nothing`; it never invents a chore.
+**The five header lines are mandatory, in this order, on every report.** Each value comes from this run — the status from disk, the wait from §0b's evidence — never from memory. `State:` is one of `working` 🟢 / `external` 🟡 / `decision` 🔵 / `closed` ⚪ (else `unclassified — <reason>`), names the signal read this run, and the closer icon follows it (`docs/worker-session-states.md`). `How you can help` names a real hard stop (§ The contract) or says `nothing`; never invent a chore.
 
 `PROBLEM:` is not decoration. A run can be accurate in every line and still leave the operator unable to say what the task is *for* — every other field in the shape reports state, and none restates purpose. Observed 2026-09-14: after hours of correct reports on one task, the operator asked *"what problem we try to solve"* and then *"u lost me"*. Write it in plain terms — no identifiers, no paths, no acceptance-criteria vocabulary: the sentence you would say out loud to someone who had never seen the task.
 
-**Arm the answered-card watcher before you end the turn.** A `👤 You:` line on this panel is a real question, not a note: the `Stop` hook (`~/.claude/hooks/attention-log.py`) records it and `~/.claude/scripts/attention-watcher.py` publishes it to the board as a card whose `producer_id` is *this* session — the hook writes only a local event log and never talks to the store. The operator may answer it from the board rather than from this pane. Nothing wakes this session when they do — the answer waits for the next run, which is the gap this arm closes:
+**Arm the answered-card watcher before you end the turn.** A `👤 You:` line is a real question: the `Stop` hook mints a board card for it — waiting verbs (`pick —`, `you run:`, `review:`) mint without `📣 Board:`, rule home `~/.claude/hooks/attention-log.py` — `producer_id` *this* session. The operator may answer from the board; nothing wakes this session when they do, so arm:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/answered-watch.py
 ```
 
-It emits exactly `ANSWERED <item-id>` when the operator answers a card **this session posted**, keyed on `producer_id` — so a peer's card never fires it. **On an `ANSWERED` line, run `attention-ask.py poll <item-id>` and act on the answer immediately — never wait for the next drive run.** Re-arm it on expiry exactly as §0b re-arms any other watcher.
+It emits `ANSWERED <item-id>` when the operator answers a card **this session posted** (`producer_id`), so a peer's card never fires it. **On `ANSWERED`, run `attention-ask.py poll <item-id>` and act immediately.** Re-arm on expiry as §0b does.
 
-Do **not** arm it when the panel's `👤 You:` reads `nothing` or `later (on …)`: the hook records those as `idle` rather than as a question, so there is no card to answer. Where a manager's own feed watcher is also armed it is **not a second doorbell** — that one fires on a gate being *raised* and this one on a card being *answered*. The rule for *reading* the answer — `ANSWERED:` releases, `NOT_OPERATOR_ANSWERED:` does not — has one home, `scripts/answered-attribution.py`, and is not restated here.
+Do **not** arm it when `👤 You:` reads `nothing` or `later (on …)`: the hook records those as `idle`, so there is no card. A manager's feed watcher is **not a second doorbell** — a raise vs an answer. Reading the answer — `ANSWERED:` releases, `NOT_OPERATOR_ANSWERED:` does not — has one home, `scripts/answered-attribution.py`.
 
 Then write the updated drive state. If a watcher was armed, name it in `⏰ Next:`.
 
@@ -466,6 +465,7 @@ Every rule above still applies to the fallback text.
 - **Production-touching, irreversible and criterion-rewording items never enter this modal.** They go as separate `approve:` lines, on a card this session posted itself (`attention-ask.py post`), with the consent token named on the line — a modal is a multi-select over cheap reversible work, and a blast radius is not a checkbox.
 - ⚠️ **Never a second modal, and never one earlier in the run.** A question that arises mid-turn waits for the close; two modals in one run is the shape this command exists to remove.
 - **Nothing to ask → no modal.** A run whose rows are all blocked, or all done, prints its report and stops. An empty modal is an interruption, not a closer.
+- **One card per ask.** The modal mints its own; a waiting-verb closer mints one too. Never add a `📣 Board:` line or `attention-ask.py post` on top — arm `answered-watch.py` only after `attention-ask.py poll` confirms the card.
 - ⚠️ **Why a modal here and a card on the manager tier is not an inconsistency.** Measured 2026-10-15: a one-shot cron due while a modal was open did **not** fire — it was deferred until the turn ended, and the control leg showed the same job firing the instant the session went idle. A *worker* ends its turn on the answer, so a modal costs it nothing. A *manager* round sits inside a loop whose next tick is a scheduled wakeup, so a modal there stalls its own schedule — which is why that tier posts to the attention board instead (`commands/steps/manager-gates.md`) and why this is the one place the modal shape is correct.
 
 ## Rules
