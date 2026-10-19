@@ -10,6 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.180.1
 
+- feat: **the heartbeat sender can now emit a `location: pod` row, so a pod worker declares itself live to the attention store.** Both pod-side liveness paths stamp `location: 'pod'`: the A2A controller poll (`pollA2A`, whose stamp callback is now the exported `a2aStamp`, so the test drives the shipped callback rather than supplying its own) and the cluster ConfigMap mirror (`pollCluster`). `location` is a property of the path, not of the record — an A2A worker is created by the controller on `docker`/`k8s`, and every cluster-store entry was published by a pod. Local sessions are unchanged: `startSelfStamp` still writes `location: 'local'`.
 - fix: **the changelog-fold guard is green again: a v0.176.0 bullet that shipped in v0.177.0 now sits in its own release section.** The guard failed on every push since 2026-10-18T18:38:46Z because an earlier fold repair left a v0.177.0 fix under `## v0.176.0`; the tag containing that merge proves the destination, so the bullet is relocated there as a pure move — no text change. A guard that is always red cannot signal a new fold; this clears the standing backlog, and a red run on master now blocks the next merge (`CLAUDE.md` § Changelog fold guard). Change set: `CHANGELOG.md`, `CLAUDE.md`.
 
 ## v0.180.0
