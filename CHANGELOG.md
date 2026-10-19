@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: the `FREEABLE TABS` row no longer repeats the task name when it equals the session name — a worker's session name is usually its task name, so the row printed the same string twice (measured 2026-10-19, round 55: `Start Day - 2026-10-19 · Start Day - 2026-10-19 · finished · …`). The task column is omitted when it is equal to the name. Change set: `agents/fleet-drive.md`, `CHANGELOG.md`.
+
 ## v0.184.8
 
 - fix: **a slow-but-healthy store no longer refuses the spawn: the liveness timeouts are 15 s and a failed read is retried once.** 5 s sat inside the observed tail of a loaded attention store — 12 concurrent `/session-heartbeat` reads each took ~0.95 s on 2026-10-19 (load avg 74–91), and the fleet lost spawns to `UNKNOWN` reads that succeeded 20/20 minutes later. `HEARTBEAT_TIMEOUT_MS`, `SESSION_LEDGER_TIMEOUT_MS`, `session-liveness.py`'s `_HTTP_TIMEOUT` and `spawn-ledger.py`'s copy are now **15 s, kept equal**, and each reader retries once after ~250 ms before declaring `null`/`None` — the failed attempt is logged with `(attempt 1 of 2, retrying)` so a recovered read is distinguishable from one that never failed. Two failed attempts still refuse: the retry widens the window in which a healthy store can prove itself; it never turns a failure into a count. Change set: `server/read-diagnostics.mjs`, `server/session-heartbeat.mjs`, `server/session-ledger.mjs`, `scripts/session-liveness.py`, `scripts/spawn-ledger.py`, `server/read-diagnostics.test.mjs`, `server/session-heartbeat.test.mjs`, `server/session-ledger.test.mjs`, `scripts/tests/test_session_liveness.py`, `CHANGELOG.md`.
