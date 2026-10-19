@@ -21,14 +21,25 @@
 // so collapsing the two turns a store outage into permission to spawn onto live work — the one
 // direction a concurrent-worker cap must never fail in.
 import { config } from './config.mjs'
-import { classifyReadError, describeReadFailure, logReadFailure } from './read-diagnostics.mjs'
+import {
+  attemptWithRetry,
+  classifyReadError,
+  describeReadFailure,
+  logReadFailure,
+} from './read-diagnostics.mjs'
 
 export const HEARTBEAT_PATH = '/api/1.0/session-heartbeat'
 
-// Seconds any one read may take. The store is local and answers in milliseconds; this is a
-// backstop against a wedged server, never a routine path. Mirrors `session-liveness.py`'s
-// `_HTTP_TIMEOUT` so the two readers give up at the same point.
-export const HEARTBEAT_TIMEOUT_MS = 5000
+// Seconds any one read may take. The store is local, but it is not fast under load: it rebuilds
+// and serialises a 318 KB list per request, measured 2026-10-19 at ~0.95 s per concurrent read on a
+// loaded host. This is a backstop against a wedged server, never a routine path — 5 s was inside
+// the observed tail and refused healthy spawns fleet-wide, so it is 15 s.
+//
+// ⚠️ **Kept EQUAL to `session-ledger.mjs`'s `SESSION_LEDGER_TIMEOUT_MS` and to
+// `session-liveness.py`'s `_HTTP_TIMEOUT` (and `spawn-ledger.py`'s).** The two halves of one count
+// giving up at different points makes the failure depend on which store was slower, and the
+// refusal then names a channel for a reason that is only about timing.
+export const HEARTBEAT_TIMEOUT_MS = 15000
 
 // Every row the store serves, or `null` when the read could not run.
 //
@@ -69,30 +80,53 @@ export async function readHeartbeat({
   }
   if (!base) return fail('no endpoint configured (the attention store is switched off)')
   const url = `${String(base).replace(/\/+$/, '')}${HEARTBEAT_PATH}`
-  let res
-  try {
-    res = await fetchImpl(url, {
-      headers: { Accept: 'application/json' },
-      // A wedged store must not hang the spawn path — this read sits in front of every spawn.
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-  } catch (error) {
-    return fail(classifyReadError(error))
+  // The whole read is the attempt, so a retry re-dials rather than re-reading a consumed response.
+  const attempt = async () => {
+    let res
+    try {
+      res = await fetchImpl(url, {
+        headers: { Accept: 'application/json' },
+        // A wedged store must not hang the spawn path — this read sits in front of every spawn.
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+    } catch (error) {
+      return { ok: false, cause: classifyReadError(error) }
+    }
+    // ⚠️ Only 200 is a read. A 404 is the per-id route's "never posted" and is not an answer to
+    // the LIST question, and any other status is the store declining to answer — both are
+    // "could not read it" here, which is the shape the caller refuses on.
+    if (!res || res.status !== 200) {
+      return { ok: false, cause: `HTTP ${res ? res.status : 'no response'}` }
+    }
+    let body
+    try {
+      body = await res.json()
+    } catch (error) {
+      return { ok: false, cause: `unparseable body: ${classifyReadError(error)}` }
+    }
+    if (!Array.isArray(body)) {
+      return {
+        ok: false,
+        cause: `unparseable body: expected a JSON array, got ${body === null ? 'null' : typeof body}`,
+      }
+    }
+    return { ok: true, body }
   }
-  // ⚠️ Only 200 is a read. A 404 is the per-id route's "never posted" and is not an answer to
-  // the LIST question, and any other status is the store declining to answer — both are
-  // "could not read it" here, which is the shape the caller refuses on.
-  if (!res || res.status !== 200) return fail(`HTTP ${res ? res.status : 'no response'}`)
-  let body
-  try {
-    body = await res.json()
-  } catch (error) {
-    return fail(`unparseable body: ${classifyReadError(error)}`)
-  }
-  if (!Array.isArray(body)) {
-    return fail(`unparseable body: expected a JSON array, got ${body === null ? 'null' : typeof body}`)
-  }
-  return body
+  const outcome = await attemptWithRetry(attempt, {
+    // Each failed attempt that will be retried is logged, so a recovered read is distinguishable
+    // from one that never recovered — the two attempts are two lines, not one.
+    onAttemptFailure: (failed, index, attempts) => {
+      logReadFailure(
+        describeReadFailure({
+          what: 'session-heartbeat',
+          cause: `${failed.cause} (attempt ${index} of ${attempts}, retrying)`,
+          elapsedMs: Date.now() - startedAt,
+        }),
+      )
+    },
+  })
+  if (!outcome.ok) return fail(outcome.cause)
+  return outcome.body
 }
 
 // The live set as a `Map<sessionId, source>`, from rows `readHeartbeat` returned.

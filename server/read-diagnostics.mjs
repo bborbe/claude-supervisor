@@ -47,3 +47,44 @@ export function describeReadFailure({ what, cause, elapsedMs }) {
 export function logReadFailure(message) {
   process.stderr.write(`${FAILURE_LOG_PREFIX} ${message}\n`)
 }
+
+// One retry, ~250 ms apart, before a read declares failure.
+//
+// ⚠️ **The failure this retries is INTERMITTENT, not a dead store.** Measured 2026-10-19: the same
+// `--count` call returned UNKNOWN at 21:49 and succeeded 20/20 at 22:07 — the store was healthy and
+// slow, and the attention-controller serialises each 318 KB list build, so a read that lost a race
+// with a concurrent build failed once and would have succeeded a moment later. A single retry is
+// what turns that transient into a count instead of a fleet-wide refusal.
+//
+// ⚠️ **A retry does not weaken the refusal.** Two failed attempts still answer `null`/`None`; this
+// only widens the window in which a healthy store can prove itself.
+export const READ_ATTEMPTS = 2
+export const READ_RETRY_DELAY_MS = 250
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// Run `attempt` up to `attempts` times, returning its last outcome — `{ ok: true, body }` on the
+// first success, `{ ok: false, cause }` after every attempt failed.
+//
+// `attempt` is the caller's whole read (fetch + parse + shape check), so a retry re-dials rather
+// than re-reading a half-consumed response. `onAttemptFailure` fires for each failure that will be
+// retried — not for the last one — so the log carries both lines and a reader can tell a recovered
+// read from one that never recovered.
+export async function attemptWithRetry(
+  attempt,
+  {
+    attempts = READ_ATTEMPTS,
+    delayMs = READ_RETRY_DELAY_MS,
+    sleep = defaultSleep,
+    onAttemptFailure,
+  } = {},
+) {
+  let outcome = { ok: false, cause: 'the read was never attempted' }
+  for (let index = 1; index <= attempts; index += 1) {
+    if (index > 1) await sleep(delayMs)
+    outcome = await attempt()
+    if (outcome.ok) return outcome
+    if (index < attempts) onAttemptFailure?.(outcome, index, attempts)
+  }
+  return outcome
+}

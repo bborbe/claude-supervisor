@@ -272,7 +272,12 @@ class SessionLiveness(unittest.TestCase):
                 rows = self.m.read_endpoint("http://fixture.invalid", on_failure=messages.append)
         self.assertIsNone(rows)
         self.assertRegex(err.getvalue(), r"session-heartbeat read failed after \d+ ms: timeout")
-        self.assertEqual(len(messages), 1, "the observer must receive the same line the log got")
+        # ⚠️ TWO lines now: the first attempt is retried, so it carries the "retrying" marker, and
+        # the second is the outcome. Both reach the observer, so a caller collecting the cause sees
+        # the recovery attempt and the final failure rather than only one of them.
+        self.assertEqual(len(messages), 2, "the observer must receive every logged line")
+        self.assertIn("retrying", messages[0])
+        self.assertNotIn("retrying", messages[1])
 
     def test_an_unparseable_body_is_logged_as_unparseable(self):
         with self.fixture([], list_raw="<html>not json</html>") as fx:
@@ -289,6 +294,45 @@ class SessionLiveness(unittest.TestCase):
                 rows = self.m.read_endpoint(fx.url)
         self.assertIsNone(rows)
         self.assertRegex(err.getvalue(), r"HTTP 500")
+
+    def test_a_read_that_fails_once_succeeds_on_the_retry(self):
+        # The failure this covers is intermittent — the same `--count` returned UNKNOWN at 21:49
+        # and succeeded 20/20 at 22:07. A recovered read must return rows, and the first attempt
+        # must leave a "retrying" line so a reader can tell a recovery from a clean read.
+        rows = [row("aaaaaaaa-0000-0000-0000-000000000001")]
+        calls = []
+
+        def flaky(url, timeout=None):
+            calls.append(url)
+            if len(calls) == 1:
+                raise socket.timeout("timed out")
+            return 200, rows
+
+        err = io.StringIO()
+        with mock.patch.object(self.m, "_get_json", side_effect=flaky):
+            with redirect_stderr(err):
+                payload = self.m.read_endpoint("http://fixture.invalid")
+        self.assertEqual(payload, rows)
+        self.assertEqual(len(calls), 2)
+        self.assertRegex(err.getvalue(), r"timeout .*\(attempt 1 of 2, retrying\)")
+
+    def test_two_failed_attempts_still_answer_none(self):
+        # ⚠️ The retry must not weaken the refusal: a genuinely unreadable store still answers
+        # None, and the last line is the failure — never a "retrying" line with no outcome.
+        err = io.StringIO()
+        with mock.patch.object(self.m, "_get_json", side_effect=socket.timeout("timed out")):
+            with redirect_stderr(err):
+                payload = self.m.read_endpoint("http://fixture.invalid")
+        self.assertIsNone(payload)
+        lines = [line for line in err.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("retrying", lines[0])
+        # The LAST line is the outcome: a failure, never a "retrying" with nothing after it.
+        self.assertIn("session-heartbeat read failed after", lines[-1])
+        self.assertNotIn("retrying", lines[-1])
+
+    def test_the_timeout_is_fifteen_seconds(self):
+        self.assertEqual(self.m._HTTP_TIMEOUT, 15)
 
     def test_a_non_200_non_404_status_is_unknown_not_absent(self):
         # A 500 from the list route (reached when the per-id route answered 404) is not the
