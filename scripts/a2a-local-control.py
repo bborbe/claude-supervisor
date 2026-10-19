@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Drive the a2a-worker-controller's CONTROL call against the LOCAL backend, from a slash command.
 
-    a2a-local-control.py create --task "<name>"   # start one worker on the local backend
+    a2a-local-control.py create --task "<name>" [--vault <name>] [--first-step <text>]
+                                                  # start one worker on the local backend
     a2a-local-control.py list                     # every worker the controller owns
 
 The controller exposes one JSON-RPC endpoint carrying three operations (`create` / `list` /
@@ -165,7 +166,7 @@ def resolve_token(env, lookup=teamvault_password):
     return lookup(TOKEN_KEY, env)
 
 
-def control_request(operation, task=None):
+def control_request(operation, task=None, vault=None, first_step=None):
     """The `ControlRequest` for one operation, or None when the shape the controller requires is unmet.
 
     ⚠️ Exactly one operation-specific field, which is the controller's own rule rather than this
@@ -174,7 +175,14 @@ def control_request(operation, task=None):
     if operation == "list":
         return {"operation": "list"}
     if operation == "create" and isinstance(task, str) and task != "":
-        return {"operation": "create", "create": {"task": task}}
+        # `vault` / `first_step` are optional and omitted when empty, matching the controller's
+        # `omitempty`: an empty vault means the backend's own configured vault.
+        create = {"task": task}
+        if vault:
+            create["vault"] = vault
+        if first_step:
+            create["first_step"] = first_step
+        return {"operation": "create", "create": create}
     return None
 
 
@@ -356,6 +364,22 @@ def redact(value):
     return value
 
 
+def bind_line(bind):
+    """One line naming the create's session-bind outcome, mirroring `spawn_agent`'s `bind`.
+
+    ⚠️ `none` (absent/null) is NOT a failure: no session registered within the controller's bind
+    window, so nothing was bound yet — read `list` for the session id later. `error` means a
+    session was found and the vault write failed.
+    """
+    if not isinstance(bind, dict):
+        return "bind: none"
+    if bind.get("error"):
+        return f"bind: error {bind['error']}"
+    if bind.get("action") in ("stamped", "appended"):
+        return f"bind: {bind['action']}"
+    return f"bind: unreadable {json.dumps(redact(bind))}"
+
+
 def print_created(response):
     """Print the created worker — its id first, then the reply — and say whether it was readable."""
     created = response.get("create") if isinstance(response, dict) else None
@@ -365,6 +389,10 @@ def print_created(response):
         print(f"the create reply carried no worker_id: {json.dumps(redact(response))}", file=sys.stderr)
         return False
     print(f"worker_id: {worker_id}")
+    session_id = worker.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        print(f"session_id: {session_id}")
+    print(bind_line(created.get("bind")))
     print(json.dumps(redact(response), indent=2, sort_keys=True))
     return True
 
@@ -404,13 +432,20 @@ def main(argv=None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     create = commands.add_parser("create", help="start one worker on the local backend")
     create.add_argument("--task", required=True, metavar="NAME", help="the task the worker is opened for")
+    create.add_argument("--vault", default=None, metavar="NAME", help="the vault-cli vault the task lives in")
+    create.add_argument("--first-step", default=None, metavar="TEXT", help="text told to the worker ahead of its work prompt")
     create.add_argument("--endpoint", default=argparse.SUPPRESS, help=endpoint_help)
     list_workers = commands.add_parser("list", help="print every worker the controller owns")
     list_workers.add_argument("--endpoint", default=argparse.SUPPRESS, help=endpoint_help)
 
     args = parser.parse_args(argv)
 
-    request = control_request(args.command, getattr(args, "task", None))
+    request = control_request(
+        args.command,
+        getattr(args, "task", None),
+        getattr(args, "vault", None),
+        getattr(args, "first_step", None),
+    )
     if request is None:
         parser.error(f"`{args.command}` requires a non-empty --task name")
 
