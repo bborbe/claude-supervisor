@@ -1174,6 +1174,30 @@ class WatcherAndShellStateTest(Base):
                   status="idle")
         self.assertEqual(h.STATE_EXTERNAL, self._row("declared-external")["state"])
 
+    def test_an_idle_session_whose_panel_declares_itself_active_is_working(self):
+        # Pane 796 on the v0.184.4 sweep (2026-10-19 22:38): an `idle` row whose
+        # panel says `🟢 ACTIVE · 1 running (… resumed without a tab)` read
+        # `unclassified — idle with no ask`. The `🟢 ACTIVE` guard keeps it out of
+        # `external`; the panel's own declaration says where it belongs instead.
+        self._add("declared-active", 796,
+                  "🟢 ACTIVE · 1 running (NUKE-PROD-CB check, resumed without a tab) · nothing needed\n"
+                  "👤 You: nothing\n"
+                  "⏰ Next: 22:43 — manager round reads the check's result (ScheduleWakeup)\n",
+                  status="idle")
+        self.assertEqual(h.STATE_WORKING, self._row("declared-active")["state"])
+
+    def test_a_dead_shell_declaring_itself_active_is_still_a_bare_shell(self):
+        # Process death outranks the panel: a `🟢 ACTIVE` closer left behind by an
+        # exited process is a stale claim, and `bare shell` is what the operator
+        # closes.
+        self._add("dead-active", 797,
+                  "🟢 ACTIVE · 1 running (build) · nothing needed\n"
+                  "👤 You: nothing\n"
+                  "⏰ Next: the build exits\n",
+                  status="shell", alive=False)
+        row = self._row("dead-active")
+        self.assertEqual((h.STATE_UNCLASSIFIED, "bare shell"), (row["state"], row["state_reason"]))
+
     def test_a_watcher_slot_asking_the_operator_is_not_a_machine_wait(self):
         self._add("reply", 861, PANEL_REPLY, status="idle")
         self.assertNotEqual(h.STATE_EXTERNAL, self._row("reply")["state"])
