@@ -112,7 +112,7 @@ REAPS
 NUDGES
   TO: <exact roster name> | <message text>
 FREEABLE TABS (a slot the operator can free without a diagnosis)
-  <name> · <task> · <finished | long-wait <age>> · <link the digest carried>
+  <name> · <task | omit when equal to name> · <finished | long-wait <age>> · <link the digest carried>
   (none)
 Waiting on your keystroke
   1. **<Action verb>** <rest of the action> — <task name> · <link the digest carried>
@@ -124,7 +124,7 @@ LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · written <ts>
 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
 
-**`FREEABLE TABS` is the operator's one-click slot release, and its population is a set, not a sample.** Every `finished` row (the ones you reaped) belongs, plus every `parked` row whose digest `<age>` is ≥12 h **and** whose task carries a `claude_session_id` — the resume mechanism, without which closing the pane strands the work; a `finished` row needs none, its work is done. The link is the digest's, never one you render yourself; a row whose lookup failed still renders, with `no pane — <reason>`. Print `(none)` when the set is empty, and **the row count must equal the set size** — a section listing only the rows whose pane happened to resolve is exactly the sample-for-set defect this section exists to avoid. The digest header's `<N> sessions` is this round's census line; do not print a second count.
+**`FREEABLE TABS` is the operator's one-click slot release, and its population is a set, not a sample.** Every `finished` row (the ones you reaped) belongs, plus every `parked` row whose digest `<age>` is ≥12 h **and** whose task carries a `claude_session_id` — the resume mechanism, without which closing the pane strands the work; a `finished` row needs none, its work is done. The link is the digest's, never one you render yourself; a row whose lookup failed still renders, with `no pane — <reason>`. ⚠️ **Omit the task column when it equals the name** — a worker's session name is usually its task name, and printing both repeats the same string twice in one row (measured 2026-10-19, round 55: `Start Day - 2026-10-19 · Start Day - 2026-10-19 · finished · …`). Print `(none)` when the set is empty, and **the row count must equal the set size** — a section listing only the rows whose pane happened to resolve is exactly the sample-for-set defect this section exists to avoid. The digest header's `<N> sessions` is this round's census line; do not print a second count.
 
 Carry on each `ESCALATION` row the **rendered link** the digest gave for that session — off its
 `BLOCKED` / `CLOSERS` row, or off the `CLASSIFICATION` row when the candidate is `parked` and only
