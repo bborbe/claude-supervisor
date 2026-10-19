@@ -141,6 +141,24 @@ export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, lo
   return path
 }
 
+// The production stamp for an A2A worker's liveness poll — the callback `pollA2A` is given.
+//
+// ⚠️ **Exported so the poll's only injectable inputs are the ledger records and the controller
+// list.** `pollA2A` takes `stamp` as a parameter, so a test that supplies its own callback can
+// assert whatever it likes while the production call site writes something else entirely. Naming
+// the real callback here means `supervisor.mjs`'s timer and the test share ONE function, and a
+// test can drive `pollA2A` with a fake list while the stamping stays the shipped one.
+//
+// ⚠️ `location: 'pod'` is what makes the row readable as a pod-located session. An A2A worker is
+// created by the controller on `docker` or `k8s` — never on this host — so `pod` is a property of
+// the path rather than something the record has to carry. `mode`/`source` are unchanged: the
+// readers key their A2A rules on those, and `location` answers a different question (where it
+// runs). See `docs/session-heartbeat-pod-hook.md` in attention-controller for the wire contract.
+export function a2aStamp({ dir = heartbeatDir } = {}) {
+  return (sessionId) =>
+    stampRecord(dir, { sessionId, pid: null, mode: 'a2a', source: 'a2a', location: 'pod' })
+}
+
 // What a session is doing, as last recorded by a state hook. `null` when no hook has fired.
 //
 // ⚠️ The AGE is what decides liveness; this only says what the live session is up to. A

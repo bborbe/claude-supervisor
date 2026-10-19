@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
+import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
@@ -3257,7 +3257,7 @@ const a2aTimer = setInterval(async () => {
               messageId: randomUUID(),
               mint: () => randomUUID(),
             }),
-          stamp: (sessionId) => stampRecord(heartbeatDir, { sessionId, pid: null, mode: 'a2a', source: 'a2a' }),
+          stamp: a2aStamp({ dir: heartbeatDir }),
         }),
       )
     }

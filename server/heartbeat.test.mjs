@@ -23,6 +23,7 @@ import { join } from 'node:path'
 import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_TTL_MS,
+  a2aStamp,
   clearStamp,
   listLive,
   readLive,
@@ -192,6 +193,19 @@ test('the session-liveness fields are carried when the writer sets them', () => 
     assert.equal(row.vault, 'private-personal')
     assert.equal(row.location, 'local')
     assert.equal(row.activity, 'idle')
+  })
+})
+
+// The A2A poll's PRODUCTION stamp. ⚠️ It is exported for exactly this reason: `pollA2A` takes
+// `stamp` as a parameter, so a test supplying its own callback could assert `location: 'pod'`
+// against something no production path runs. Driving the shipped callback keeps that hole shut.
+test('the A2A stamp marks the row pod-located', () => {
+  withDir((dir) => {
+    a2aStamp({ dir })(SESSION)
+    const row = JSON.parse(readFileSync(stampPath(dir, SESSION), 'utf8'))
+    assert.equal(row.location, 'pod', 'an A2A worker runs in a controller-created container or pod')
+    assert.equal(row.mode, 'a2a')
+    assert.equal(row.source, 'a2a')
   })
 })
 
