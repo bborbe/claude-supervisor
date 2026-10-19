@@ -49,7 +49,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
    grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<task file>"    # want: 0
    ```
 
-   All three hold → draft a **reap** message: the three commands and their output, that the task is terminal on disk, that nothing was authorised and the operator has **not** answered, and that closing (`/vault-cli:sync-progress` then `/vault-cli:session-close`) is the session's own call. Any fact fails → the row is **unverifiable** (digest and disk disagree), never nudged. A manager cannot close a worker's session; the reap is the evidence message, nothing more. No owning-manager skip: the gate-loop state records only a member *count* (`sweep-gate-loop/<vault>/<subject>.json` → `"members": N`), so "this task belongs to an armed manager" is not derivable here. A second reap message from a manager that also reaps is harmless — it is the same non-authorising evidence — and the ledger (step 3) stops this layer repeating it.
+   All three hold → draft a **reap** message: the three commands and their output, that the task is terminal on disk, that nothing was authorised and the operator has **not** answered, that `/vault-cli:sync-progress` then `/vault-cli:session-close` is the session's own call, and that `/exit` is the step that ends the process and frees its spawn-cap slot — closing the task alone does not, and the slot stays held until the process ends. Any fact fails → the row is **unverifiable** (digest and disk disagree), never nudged. A manager cannot close a worker's session; the reap is the evidence message, nothing more. No owning-manager skip: the gate-loop state records only a member *count* (`sweep-gate-loop/<vault>/<subject>.json` → `"members": N`), so "this task belongs to an armed manager" is not derivable here. A second reap message from a manager that also reaps is harmless — it is the same non-authorising evidence — and the ledger (step 3) stops this layer repeating it.
 
 2. **Task and open-box count** per candidate come from the digest row (`<task file basename> · <open boxes>`), read from disk by the sweep-reader this round. A row whose task is `—` is **unverifiable**. A digest with no `parked` row while it has idle rows, or rows missing the task column, is a malformed handoff: report it in the header and treat every idle row as **unverifiable** — never pick candidates by hand. ⚠️ **Never re-count the boxes.** The row's count is the one authority for this round; a second count from a different read disagrees with it (measured 2026-09-23: row 3, re-count 7, disk 3) and the suppression rule then compares against the wrong value. If you need the task's text for probe (a), open the file named in the row with `Read` — never resolve it through `vault-cli task show "25 Tasks/<file>"`, which 404s on the path form.
 
@@ -111,6 +111,9 @@ REAPS
   TO: <exact roster name> | <evidence message text>
 NUDGES
   TO: <exact roster name> | <message text>
+FREEABLE TABS (a slot the operator can free without a diagnosis)
+  <name> · <task> · <finished | long-wait <age>> · <link the digest carried>
+  (none)
 Waiting on your keystroke
   1. **<Action verb>** <rest of the action> — <task name> · <link the digest carried>
   2. ...
@@ -120,6 +123,8 @@ LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · written <ts>
 ```
 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
+
+**`FREEABLE TABS` is the operator's one-click slot release, and its population is a set, not a sample.** Every `finished` row (the ones you reaped) belongs, plus every `parked` row whose digest `<age>` is ≥12 h **and** whose task carries a `claude_session_id` — the resume mechanism, without which closing the pane strands the work; a `finished` row needs none, its work is done. The link is the digest's, never one you render yourself; a row whose lookup failed still renders, with `no pane — <reason>`. Print `(none)` when the set is empty, and **the row count must equal the set size** — a section listing only the rows whose pane happened to resolve is exactly the sample-for-set defect this section exists to avoid. The digest header's `<N> sessions` is this round's census line; do not print a second count.
 
 Carry on each `ESCALATION` row the **rendered link** the digest gave for that session — off its
 `BLOCKED` / `CLOSERS` row, or off the `CLASSIFICATION` row when the candidate is `parked` and only

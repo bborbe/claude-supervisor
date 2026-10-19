@@ -883,28 +883,40 @@ def last_assistant_text(rec):
     return text
 
 
+# Widening tail windows: most transcripts end their last assistant text inside the
+# first 200 KB, but records written after a closer can outgrow it — pane 955's
+# `later (on …)` closer sat behind ~260 KB of `attachment` records on 2026-10-19 and
+# read as `transcript unreadable`. A window is widened only when it held no assistant
+# text at all; the cap keeps a multi-GB transcript from being read whole.
+_TAIL_WINDOWS = (200_000, 2_000_000, 20_000_000)
+
+
 def _read_last_assistant_text(rec):
     path = rec.get("transcript") or next(iter(glob.glob(os.path.expanduser(
         f"~/.claude/projects/*/{rec['session_id']}.jsonl"))), None)
     if not path or not os.path.exists(path):
         return ""
-    last = ""
     try:
+        size = os.path.getsize(path)
         with open(path, "rb") as f:
-            f.seek(max(0, os.path.getsize(path) - 200_000))
-            for line in f.read().decode("utf-8", "replace").splitlines():
-                if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
-                    continue
-                try:
-                    j = json.loads(line)
-                except Exception:
-                    continue
-                for c in j.get("message", {}).get("content", []):
-                    if isinstance(c, dict) and c.get("type") == "text":
-                        last = c["text"]
+            for window in _TAIL_WINDOWS:
+                f.seek(max(0, size - window))
+                last = ""
+                for line in f.read().decode("utf-8", "replace").splitlines():
+                    if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
+                        continue
+                    try:
+                        j = json.loads(line)
+                    except Exception:
+                        continue
+                    for c in j.get("message", {}).get("content", []):
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            last = c["text"]
+                if last or window >= size:
+                    return last
     except Exception:
         pass
-    return last
+    return ""
 
 
 def closer_from_transcript(rec):

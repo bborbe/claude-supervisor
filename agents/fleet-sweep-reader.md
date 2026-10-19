@@ -138,7 +138,7 @@ Return **≤ 40 lines** in the payload, exactly these sections, each printed as 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
 CLASSIFICATION  <total> classified · <class>=<n> · <class>=<n> …    — or: UNKNOWN (pass not run)
-  <name> [<session id 8>] · <status> · <class> · <task file basename | —> · <open boxes | —> · <link | —>        ← only non-progressing rows
+  <name> [<session id 8>] · <status> · <age> · <class> · <task file basename | —> · <open boxes | —> · <link | —>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)
   <name> · pane <id> · <link> · <gate text, ≤80 chars>
 CLOSERS (rendered panels — last-turn closer line)
