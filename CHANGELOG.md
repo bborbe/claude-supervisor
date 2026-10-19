@@ -10,6 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- feat: the fleet round now renders a `FREEABLE TABS` section — every `finished — reap candidate` row plus every `parked` row idle ≥12 h whose task carries a `claude_session_id` (the resume mechanism) — each with its `jump-link.py` handover, so the operator can free a spawn-cap slot without a diagnosis. The population is a set, not a sample: a row whose pane lookup failed still renders with `—` and its failure in NOTES, and the hand-back gains `freeable=<n>`. The reap message now names `/exit` as the step that ends the process and frees the slot, and no longer implies that closing the task does it. Change set: `agents/fleet-sweep-reader.md`, `agents/fleet-drive.md`, `CHANGELOG.md`.
+
 - fix: **`/supervisor:who-needs-my-help` labels an idle session that declares itself `🟢 ACTIVE` as `working`.** The deployed v0.184.4 sweep, checked against pane reads recorded before it ran (2026-10-19 22:38, 15 of 18 matched, 2 stale), still put pane 796 — `idle`, `🟢 ACTIVE · 1 running (… resumed without a tab)`, a `nothing` closer and `⏰ Next: … (ScheduleWakeup)` — on `unclassified — idle with no ask`: `machine_wait()` rightly refuses a running declaration as a wait, and the unparked branch honoured a declared `⚪ DONE` but not its running twin. An unparked row whose panel declares `🟢 ACTIVE` / `State: working` is now `working`; a dead shell stays `bare shell`, since process death outranks a stale claim. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
 
 ## v0.184.4
