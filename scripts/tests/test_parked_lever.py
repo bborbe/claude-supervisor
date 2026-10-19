@@ -127,6 +127,18 @@ class RowShape(unittest.TestCase):
         row = pl.render("-", "a gate", "nudge it", "manager")
         self.assertTrue(row.startswith("no pane (headless)"))
 
+    def test_tab_worker_with_unresolved_pane_is_not_headless(self):
+        # The first live sample passed `-` for a tab worker and reported "no pane
+        # (headless)" — telling the operator to stop looking for a window that exists.
+        self.assertNotIn("headless", pl.jump_link("?"))
+        self.assertIn("unresolved", pl.jump_link("?"))
+
+    def test_empty_pane_refused(self):
+        with self.assertRaises(pl.LeverError):
+            pl.jump_link("")
+        with self.assertRaises(pl.LeverError):
+            pl.jump_link("   ")
+
     def test_unresolvable_jump_falls_back_to_the_command(self):
         with mock.patch.object(pl.subprocess, "run", side_effect=OSError("no wezterm")):
             self.assertEqual(pl.jump_link("77"), "/supervisor:jump 77")
