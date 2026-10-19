@@ -172,7 +172,7 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 Resolve the task in this order — each selected row on the batch path, the single resolved task otherwise:
 
-1. **`role:` present** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once.
+1. **`role:` present** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once. **`role: manager` is never a spawn target** — render `👤 YOURS` and skip the row (see the manager guard below).
 2. **`role:` absent** → classify it now from the task's **body**, then write the result.
 3. **Body gives no basis to decide** → refuse this row, write nothing, and say so. This is the one case that still stops — see the undecidable guard below.
 
@@ -187,6 +187,8 @@ Three signals mean `human`, and each has to come from reading the body:
 Everything else is `agent`. A task naming `kubectl`, `ssh` or a deploy is still `agent`: operationally weighty is not the same as human-only, and conflating those two is precisely the error the keyword derivation made.
 
 ⚠️ **Classify from the BODY, never from the title or the frontmatter.**
+
+**A `role: manager` row is never opened — and the classifier never derives `manager`.** `manager` is **declared** by whoever files the row (the write command accepts it for exactly that), never inferred: a prose-derived value measured at ~1.1% false positives against 4/19 recall was rejected. Open a `manager` row as **nothing at all** — render `👤 YOURS` (the vocabulary `agents/manager-sweep-reader.md` step 4 and `agents/manager-drive.md` clause (4) already use), spawn no session, open no window, and write nothing; the declared value is the record.
 
 ### Then decide `mode` — the rule lives in one place, and this is not it
 
@@ -203,7 +205,7 @@ vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 **Write both values before opening anything:**
 
 ```bash
-vault-cli --vault "<vault>" task set "<task>" role <human|agent>
+vault-cli --vault "<vault>" task set "<task>" role <human|agent|manager>
 vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 ```
 
@@ -250,7 +252,7 @@ approve  a routine task - 2026W39
 ⚠️  Ordering is NOT auto-detected. Every ⛔ row is skipped;
     the rest open in the stable order printed above.
 
-Opened N · approved A · filled F fields · skipped H (human) · refused U (undecidable) · held K (blocked).
+Opened N · approved A · filled F fields · skipped H (human) · yours Y (manager) · refused U (undecidable) · held K (blocked).
 ```
 
 **Approve every eligible row first — before the readiness dispatch.** The batch's opening move is `vault-cli --vault "<vault>" task approve "<task>"` for each Step 0.5 selector row that is **not** JUMP/RESUME-bound. `role: human` rows are approved too. A row not at `phase: todo` is left alone.

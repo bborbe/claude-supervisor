@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a `role: manager` row is never opened as a worker.** `commands/open.md` § Step 0.6 resolved `role:` to `human|agent` only, so a row declaring `role: manager` fell through the classifier and was spawned as an agent — measured 2026-10-19: the two tick-35 rows already carried `role: manager`, and the open path had no branch for it. Step 0.6 now renders `👤 YOURS` and spawns nothing, writes nothing and opens no window, using the vocabulary `agents/manager-sweep-reader.md` step 4 and `agents/manager-drive.md` clause (4) already carry; the documented write values widen to `role <human|agent|manager>` so a filer can declare it. The classifier never derives `manager` — a prose-derived value was measured at ~1.1% false positives against 4/19 recall and rejected. The report line gains `yours Y (manager)`. Change set: `commands/open.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
+
 ## v0.184.7
 
 - fix: **a closer followed by more than 200 KB of records is still read.** The deployed v0.184.5 `/supervisor:who-needs-my-help` sweep, checked against pane reads recorded before it ran (2026-10-19 22:58, 10 of 13 matched; the two others were sessions whose last turn ended on prose with no closer), put pane 955 — a `later (on the next organic broker loss)` closer followed by ~260 KB of `attachment` records — on `unclassified — transcript unreadable`: `_read_last_assistant_text()` read a fixed 200 KB tail and found no assistant text in it. It now widens the tail (200 KB → 2 MB → 20 MB) only when a window holds no assistant text, so the common case reads what it read before and a large transcript is never read whole. Change set: `scripts/who-needs-me.py`, `scripts/tests/test_who_needs_me.py`, `CHANGELOG.md`.
