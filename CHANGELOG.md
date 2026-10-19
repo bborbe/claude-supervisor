@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.181.0
 
 - feat: **the heartbeat sender can now emit a `location: pod` row, so a pod worker declares itself live to the attention store.** Both pod-side liveness paths stamp `location: 'pod'`: the A2A controller poll (`pollA2A`, whose stamp callback is now the exported `a2aStamp`, so the test drives the shipped callback rather than supplying its own) and the cluster ConfigMap mirror (`pollCluster`). `location` is a property of the path, not of the record — an A2A worker is created by the controller on `docker`/`k8s`, and every cluster-store entry was published by a pod. Local sessions are unchanged: `startSelfStamp` still writes `location: 'local'`.
 
