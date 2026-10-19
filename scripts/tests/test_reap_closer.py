@@ -8,7 +8,10 @@ Load-bearing properties, from the 2026-09-27 measurement:
     however many times it has already been told — no repeat-count;
   * closers inside USER turns (injected command bodies) are ignored;
   * a symlinked project dir listing one transcript twice still resolves;
-  * a missing transcript, or no closer at all, is UNREADABLE, never CLOSED.
+  * a missing transcript, or no closer at all, is UNREADABLE, never CLOSED;
+  * a closer followed by a large entry still resolves — a fixed tail window did not
+    (measured 2026-10-19: a `Stop` hook read `no-closer` 44 ms after the closer was
+    written, because the harness writes `api-request-blob` entries after it).
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -98,6 +101,26 @@ class ReapCloserTest(unittest.TestCase):
         self.write([assistant("t1", "working on it")])
         code, out = M.classify(SID, self.projects)
         self.assertEqual(code, M.UNREADABLE, out)
+
+    def test_closer_survives_a_large_entry_after_it(self):
+        # The 2026-10-19 defect: a 256 KB tail window missed a closer followed by a
+        # large `api-request-blob`, so the Stop hook recorded `no-closer` and never fired.
+        self.write([
+            assistant("t1", "⚪ DONE\n👤 You: nothing — session closed"),
+            {"type": "api-request-blob", "data": "A" * (M.WINDOW * 2)},
+        ])
+        code, out = M.classify(SID, self.projects)
+        self.assertEqual(code, M.CLOSED, out)
+
+    def test_scan_is_bounded(self):
+        # The backward scan stops at `max_bytes`: a transcript whose closer sits beyond
+        # the bound reports nothing rather than reading the whole file.
+        self.write([
+            assistant("t1", "👤 You: nothing — session closed"),
+            {"type": "api-request-blob", "data": "A" * 4096},
+        ])
+        path = os.path.join(self.proj, f"{SID}.jsonl")
+        self.assertIsNone(M.last_closer(path, max_bytes=1024))
 
     def test_bad_session_id_is_unreadable(self):
         code, _ = M.classify("../../etc/passwd", self.projects)

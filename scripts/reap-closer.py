@@ -37,7 +37,8 @@ import re
 import sys
 
 CLOSED, OPEN, UNREADABLE = 0, 1, 2
-WINDOW = 262144  # bytes read from the tail; a closed session is idle, so its closer is at the end
+WINDOW = 262144  # bytes per backward chunk, not the whole read — see `last_closer`
+MAX_SCAN = 4194304  # hard bound on the backward scan, so a hook never reads a whole transcript
 CLOSED_RE = re.compile(r"👤 You:\s*`?nothing — session closed")
 
 
@@ -49,15 +50,50 @@ def find_transcript(session_id, projects_dir):
     return sorted(paths)
 
 
-def last_closer(path):
+def tail_lines(path, max_bytes=MAX_SCAN):
+    """Yield the transcript's lines newest-first, scanning backwards in `WINDOW` chunks.
+
+    ⚠️ **A fixed tail window is not enough, and the failure is silent.** Measured
+    2026-10-19: a `Stop` hook called `last_closer` on a 15 MB session transcript 44 ms
+    after the closer was written, and it returned `None` — the harness writes large
+    `api-request-blob` entries after the assistant message, so the closer sat ~758 KB
+    from EOF and a 256 KB read never reached it. The same defect reproduces with one
+    400 KB entry after the closer. The scan is bounded (`max_bytes`) so a pathological
+    transcript cannot turn a hook into a full-file read.
+    """
+    size = os.path.getsize(path)
+    end = size
+    carry = b""
     with open(path, "rb") as f:
-        size = os.path.getsize(path)
-        f.seek(max(0, size - WINDOW))
-        tail = f.read().decode("utf-8", "replace")
-    last = None
-    for line in tail.splitlines():
+        while end > 0 and size - end < max_bytes:
+            # ⚠️ The FIRST chunk is clamped to the remaining budget: reading a full
+            # `WINDOW` regardless would make `max_bytes` a no-op on the first iteration.
+            chunk = min(WINDOW, max_bytes - (size - end))
+            start = max(0, end - chunk)
+            f.seek(start)
+            data = f.read(end - start) + carry
+            lines = data.split(b"\n")
+            if start > 0:
+                # The first line is the tail of one whose head is in the next chunk.
+                carry = lines[0]
+                lines = lines[1:]
+            else:
+                carry = b""
+            for raw in reversed(lines):
+                if raw.strip():
+                    yield raw
+            end = start
+
+
+def last_closer(path, max_bytes=MAX_SCAN):
+    """`(timestamp, line)` for the transcript's last `👤 You:` line, or `None`.
+
+    Scans backwards from EOF and returns at the first assistant message carrying a
+    closer, so the common case (closer at the end) costs one `WINDOW` read.
+    """
+    for raw in tail_lines(path, max_bytes):
         try:
-            d = json.loads(line)
+            d = json.loads(raw)
         except ValueError:
             continue
         if d.get("type") != "assistant":
@@ -71,8 +107,8 @@ def last_closer(path):
             )
         you = [ln.strip() for ln in text.splitlines() if "👤 You:" in ln]
         if you:
-            last = (d.get("timestamp") or "?", you[-1])
-    return last
+            return d.get("timestamp") or "?", you[-1]
+    return None
 
 
 def classify(session_id, projects_dir):
