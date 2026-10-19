@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.178.4
 
 - fix: **`/supervisor:open`'s CREATE branch dispatches `spawn_agent` again instead of routing through the a2a-worker-controller.** The controller's `local` backend has a single vault directory, so a cross-vault create got the private-personal launcher and cwd, never reported or bound its session id (vault-ui showed Start, not Live), and bypassed the start-rate limit. Reverts the route-through from #367; `/supervisor:open-a2a` stays a separate, explicitly invoked command until it handles every vault.
 
