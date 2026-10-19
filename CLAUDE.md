@@ -167,6 +167,14 @@ server/supervisor.mjs                    the MCP server
 server/policy.json                       bundled approval rules (see README § The approval policy)
 ```
 
+## Changelog fold guard
+
+`.github/workflows/changelog-fold.yml` runs `bborbe/coding`'s reusable guard on every push to master. It fails when a bullet sits under a released section whose tag does not contain its merge.
+
+**A red run on master blocks the next merge.** Owner: the maintainer. Trigger: a `changelog-fold` workflow run concluding `failure` on master. Repair it in the next PR, or in a PR of its own, before merging anything else — an always-red guard cannot distinguish a new fold from a standing backlog, which is how three folds in a row (#398, #405, #406) were each found by hand while the guard sat red and unread.
+
+The repair direction is decided by the TAG, never by the guard's placement advice alone: `git tag --contains <merge-sha>` names the earliest release carrying the work, and the bullet moves into that `## vX.Y.Z` section. Run the guard locally before pushing: `CHANGELOG_ROOT=$PWD bash <path-to-bborbe-coding>/scripts/check-changelog-fold.sh`.
+
 ## Status
 
 Extracted from a working prototype proven end-to-end on 2026-09-13: one manager session spawned two workers concurrently, answered both `Write` prompts, and both workers completed (`permission_denials: 0`).
