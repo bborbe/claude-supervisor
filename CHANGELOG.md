@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`/supervisor:manager-drive` names one unblock lever per parked worker.** A worker parked on a gate used to get a reap/nudge/resume line and no statement of what would clear it, so the operator read each pane to find out. Each round now prints one row per parked tracked worker — jump link · waits · the one lever · owner (`manager` / `operator` / `machine: <watcher>`) — rendered through `scripts/parked-lever.py`, which refuses `the fleet` / `CI` / `wait` as levers because they read exactly like an answer and leave the pane unopened anyway. Manager-owned levers are executed in the same round and reported as done, never offered back; operator-owned levers feed the round's existing single card, so no second modal is added. The rule has one home, `commands/steps/manager-parked.md`, referenced from the router and restated nowhere. Change set: `commands/manager-drive.md`, `commands/steps/manager-parked.md`, `scripts/parked-lever.py`, `scripts/tests/test_parked_lever.py`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
+
 ## v0.182.1
 
 - fix: **the closer lint can see a closer that is not in the transcript's last 256 KB.** `reap-closer.py`'s `last_closer` read one fixed tail window, so on a long session the new `Stop` hook recorded `no-closer` 44 ms after the closer was written: the harness writes large `api-request-blob` entries after the assistant message, and the closer sat ~758 KB from EOF (measured 2026-10-19; a single 400 KB entry after the closer reproduces it). It now scans backwards in `WINDOW` chunks and stops at the first assistant message carrying a closer, bounded at 4 MB so a pathological transcript cannot turn a hook into a full-file read. Change set: `scripts/reap-closer.py`, `scripts/tests/test_reap_closer.py`, `CHANGELOG.md`.

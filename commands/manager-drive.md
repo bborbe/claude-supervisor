@@ -59,6 +59,7 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 | 4 | Classify the rows | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-classify.md` |
 | 4b | Coverage | every tick, before the drive leg | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-coverage.md` |
 | 5 | Drive | every tick, after the table renders | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-drive.md` |
+| 5b | Parked workers — one lever row each | every tick, after the drive leg returns | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-parked.md` |
 | 6 | Spawn on the handover | the drive leg returned `To open` / `To resume` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-spawn.md` |
 | 7 | Repair | the `Audit` block carried `repairable` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-repair.md` |
 | 8 | Gate relay | the round has `waiting-on-human` or `waiting-approval` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-gates.md` |
