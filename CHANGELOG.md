@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a `finished` row now carries its jump link, so every `FREEABLE TABS` row has a pane to hand over.** `agents/fleet-sweep-reader.md` step 7b attempted `--pane-for` only for a `parked` `CLASSIFICATION` row and the `<link>` column admitted only `BLOCKED` / `CLOSERS` / `parked`, while the `FREEABLE TABS` population added in v0.184.6 is `finished` rows — so round 55's two finished rows (`Start Day - 2026-10-19`, `Cleanup Email Inbox (Personal) - 2026-10-19`) rendered `—` and the drive leg printed `no pane — digest carried none` for sessions live in panes 973 and 974. `pane_for()` was healthy throughout (`--pane-for a8c9ba13` → `973`, `88a2dd9a` → `974`, exit 0): the lookup was never attempted. Both clauses now admit `finished`, and two redundant clauses were trimmed in the same file to stay under the 30 KB body cap (30715 → 30674 bytes). Change set: `agents/fleet-sweep-reader.md`, `CHANGELOG.md`.
+
 ## v0.184.9
 
 - fix: the `FREEABLE TABS` row no longer repeats the task name when it equals the session name — a worker's session name is usually its task name, so the row printed the same string twice (measured 2026-10-19, round 55: `Start Day - 2026-10-19 · Start Day - 2026-10-19 · finished · …`). The task column is omitted when it is equal to the name. Change set: `agents/fleet-drive.md`, `CHANGELOG.md`.
