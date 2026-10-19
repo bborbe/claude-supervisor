@@ -945,7 +945,7 @@ def is_hold(reason):
 def content_key(reason, detail):
     """The identity of a gate's CONTENT — the exact string `NEW GATE` carries.
 
-    Scope decision (SC4): **per body hash**, not per session and not per
+    Scope decision: **per body hash**, not per session and not per
     session+reason. `per session` is the defect this file exists to fix — a
     session already in the set never re-emits. `per session+reason` misses a
     body change under a stable reason: measured 2026-10-06, `7f07a37a` moved
@@ -973,7 +973,7 @@ def prev_map(prev):
 
 
 def gate_transition(prev, sid8, reason, detail):
-    """The ONE `is this a new gate?` decision both arms use (SC3).
+    """The ONE `is this a new gate?` decision both arms use.
 
     Returns `("NEW GATE" | "UNCHANGED", content)`.
 
