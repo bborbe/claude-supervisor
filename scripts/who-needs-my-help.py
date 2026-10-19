@@ -766,8 +766,12 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
         # the last assistant text rather than the closer, so a session that put its
         # ask in the `⏰ Ends:` slot would otherwise be reported `external` — the
         # forced-bucket failure the fifth state exists to prevent.
+        # A `⏰` line names a machine only under a panel that declares no state or a
+        # wait — the rule `machine_wait()` already applies to a `nothing` closer.
+        # Under `🔵 READY` it names what the session does AFTER the operator acts
+        # (pane 816 on the v0.184.7 sweep, 2026-10-19: `⏰ Next: I re-run … merge`).
         if (eta or cause == wnm.CAUSE_CLOCK or is_machine_bound(closer)
-                or names_machine(watcher)):
+                or (names_machine(watcher) and declared in (None, STATE_EXTERNAL))):
             return STATE_EXTERNAL, ""
         if gate in ("A", "B"):
             # Manager-clearable, never the operator's: the runbook's classes A/B.
@@ -993,7 +997,8 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
         state, reason = state_of(reg_status, cause, gate, watcher, trigger_of(rec),
                                  task_status, shape,
                                  bool(wnm.last_assistant_text(rec)), True,
-                                 wnm.current_closer(rec), alive=alive)
+                                 wnm.current_closer(rec), alive=alive,
+                                 declared=declared_state(rec))
         parked_rows.append({
             "session_id": sid,
             "name": name,
