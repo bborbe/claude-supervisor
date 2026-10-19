@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.184.5
 
 - feat: the fleet round now renders a `FREEABLE TABS` section — every `finished — reap candidate` row plus every `parked` row idle ≥12 h whose task carries a `claude_session_id` (the resume mechanism) — each with its `jump-link.py` handover, so the operator can free a spawn-cap slot without a diagnosis. The population is a set, not a sample: a row whose pane lookup failed still renders with `—` and its failure in NOTES, and the hand-back gains `freeable=<n>`. The reap message now names `/exit` as the step that ends the process and frees the slot, and no longer implies that closing the task does it. Change set: `agents/fleet-sweep-reader.md`, `agents/fleet-drive.md`, `CHANGELOG.md`.
 
