@@ -65,10 +65,61 @@ import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 _SPAWN_LEDGER = None
+
+# The last successful count, shared with the server. See `server/worker-sessions.mjs` for why it is
+# a FILE: this process exits after printing, so an in-memory cache could never outlive it.
+#
+# ⚠️ **The window is 60 s and the fallback is labelled.** A count from minutes ago is not evidence
+# about the fleet now; past the window the refusal stands. It is never a fabricated `0` — the cache
+# holds a real earlier count, and an absent or unreadable cache is a refusal.
+_CACHE_TTL_S = 60
+_CACHE_FILE = "last-worker-count.json"
+
+
+def _state_dir():
+    home = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(home, "claude-supervisor")
+
+
+def _cache_path():
+    return os.path.join(_state_dir(), _CACHE_FILE)
+
+
+def _read_count_cache():
+    """`(count, age_seconds)` when the cache holds a fresh-enough count, else `None`."""
+    try:
+        with open(_cache_path(), encoding="utf-8") as fh:
+            parsed = json.load(fh)
+        count = parsed.get("count")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        at = datetime.fromisoformat(str(parsed.get("at")).replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - at).total_seconds()
+        if age < 0 or age > _CACHE_TTL_S:
+            return None
+        return count, age
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _write_count_cache(count):
+    """Best-effort: a cache that cannot be written must never fail the count it records."""
+    try:
+        os.makedirs(_state_dir(), exist_ok=True)
+        with open(_cache_path(), "w", encoding="utf-8") as fh:
+            json.dump(
+                {"count": count, "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")},
+                fh,
+            )
+    except OSError:
+        pass
 
 
 def _load(module_name, filename):
@@ -208,23 +259,40 @@ def main(argv=None):
     # said only which endpoint failed, so a timeout, a refused socket and an unparseable body were
     # one indistinguishable message — measured on 2026-10-19, when `--count` returned UNKNOWN at
     # 21:49 and succeeded 20/20 at 22:07 with no cause captured for the gap.
+    def failed(message):
+        """The refusal — or, for `--count`, the last successful count when it is fresh enough.
+
+        ⚠️ **The stale path is labelled on stderr and the integer still goes to stdout**, so
+        `$(… --count)` keeps its contract and a reader can tell a live count from a stale one.
+        `--list` cannot fall back: a count has no rows to list, and inventing them would be worse
+        than the refusal.
+        """
+        if args.count:
+            stale = _read_count_cache()
+            if stale is not None:
+                count, age = stale
+                print(
+                    "STALE — using the last successful count (%d s old): %s" % (age, message),
+                    file=sys.stderr,
+                )
+                print(count)
+                return 0
+        print(message, file=sys.stderr)
+        return 2
+
     failures = []
     ledger = _ledger().read_ledger(args.endpoint, on_failure=failures.append)
     if ledger is None:
-        print(
+        return failed(
             "UNKNOWN — cannot read the session-ledger endpoint at %s%s"
-            % (_ledger().endpoint_base(args.endpoint), _cause(failures)),
-            file=sys.stderr,
+            % (_ledger().endpoint_base(args.endpoint), _cause(failures))
         )
-        return 2
 
     workers = live_workers(args.endpoint, ledger, on_failure=failures.append)
     if workers is None:
-        print(
-            "UNKNOWN — cannot read the session-heartbeat endpoint%s" % _cause(failures),
-            file=sys.stderr,
-        )
-        return 2
+        return failed("UNKNOWN — cannot read the session-heartbeat endpoint%s" % _cause(failures))
+
+    _write_count_cache(len(workers))
 
     if args.count:
         # The integer and nothing else — `$(… --count)` goes straight into a comparison.

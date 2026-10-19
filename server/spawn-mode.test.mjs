@@ -387,6 +387,39 @@ test('concurrentLimitRefusal: an uncountable store refuses rather than reading a
   assert.match(refusal, /unknown/)
 })
 
+test('concurrentLimitRefusal: a fresh stale count decides, and the message says so', () => {
+  // ⚠️ A count from the last minute is a real measurement; refusing on it is what lost spawns on
+  // 2026-10-19. The decision uses it, and the message names its age and the live failure.
+  const refusal = concurrentLimitRefusal({
+    limits: PAIR,
+    liveCount: null,
+    staleCount: 30,
+    staleAgeMs: 5000,
+    countError: 'timeout',
+  })
+  assert.match(refusal, /30 live/)
+  assert.match(refusal, /last successful count, 5 s old/)
+  assert.match(refusal, /the live read failed: timeout/)
+})
+
+test('concurrentLimitRefusal: a fresh stale count below the cap opens', () => {
+  assert.equal(
+    concurrentLimitRefusal({ limits: PAIR, liveCount: null, staleCount: 29, staleAgeMs: 1000 }),
+    null,
+  )
+})
+
+test('concurrentLimitRefusal: no stale count keeps the refusal', () => {
+  const refusal = concurrentLimitRefusal({
+    limits: PAIR,
+    liveCount: null,
+    staleCount: null,
+    staleAgeMs: null,
+  })
+  assert.match(refusal, /could not be/)
+  assert.doesNotMatch(refusal, /last successful count/)
+})
+
 test('concurrentLimitRefusal: the off switch and a resolver error pass straight through', () => {
   const off = { limit: null, hardLimit: null, source: 'config', hardSource: 'config' }
   assert.equal(concurrentLimitRefusal({ limits: off, liveCount: 999 }), null)
