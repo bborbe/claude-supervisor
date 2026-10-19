@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.184.8
 
 - fix: **`/supervisor:who-needs-my-help` no longer reads a `🔵 READY` panel's follow-up line as a machine wait.** The deployed v0.184.7 sweep, checked against pane-bottom reads recorded before it ran (2026-10-19 23:29, 16 of 17 matched, zero `unclassified`), labelled pane 816 `external`: its panel declared `🔵 READY · you decide` with an operator action on the `👤 You:` line, and its `⏰ Next: I re-run … merge` — what the session does after the operator acts — was taken as a machine, because parked rows never received the panel's declaration. `state_of()` now gets `declared` on the parked path too, and a `⏰` line counts as a machine only under a panel that declares no state or a wait — the rule `machine_wait()` already applies to a `nothing` closer. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
 
