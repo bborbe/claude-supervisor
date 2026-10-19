@@ -1594,5 +1594,135 @@ class IncidentReplayTest(unittest.TestCase):
                          "re-post, not one per poll")
 
 
+class ContentChangeReEmissionTest(unittest.TestCase):
+    """SC1–SC4: a gate whose CONTENT changes re-emits; a byte-identical one does not.
+
+    The defect measured 2026-10-06: `transitions()` compared membership only, so a
+    session that stayed in the gated set while its question changed produced no
+    event. Dedup scope is per body hash (SC4) — the exact string `NEW GATE` carries.
+    """
+
+    NEW_CLOSER = "👤 You: pick — 1. gamma · 2. delta"
+    GATED = {"aaaa1111": ("A", "pick — 1. alpha", "idle+closer", True)}
+
+    def _probe(self, closer_line):
+        fx = Fixture([assistant(text=closer_line)], "idle")
+        self.addCleanup(fx.cleanup)
+        return fx
+
+    @staticmethod
+    def _prev(state):
+        return {sid: watch.content_key(v[2], v[1]) for sid, v in state.items()}
+
+    def test_sc1_content_change_reemits_with_the_new_body(self):
+        first = self._probe(CLOSER_LINE).probe()
+        self.assertEqual(watch.gated_keys(first), [SID8])
+        second = self._probe(self.NEW_CLOSER).probe()
+        got = watch.transitions(self._prev(first), watch.gated_keys(second), second)
+        self.assertEqual([k for k, *_ in got], ["NEW GATE"],
+                         "a changed question under the same membership re-emits")
+        _, sid8, _, detail = got[0]
+        self.assertEqual(sid8, SID8)
+        self.assertIn("gamma", detail, "the line carries the NEW body")
+        self.assertNotIn("alpha", detail, "and not the old one")
+
+    def test_sc2_byte_identical_does_not_reemit(self):
+        fx = self._probe(CLOSER_LINE)
+        state = fx.probe()
+        prev = self._prev(state)
+        for _ in range(2):
+            again = fx.probe()
+            self.assertEqual(
+                [k for k, *_ in watch.transitions(prev, watch.gated_keys(again), again)],
+                [], "an unchanged poll must add no NEW GATE")
+
+    def test_sc3_streaming_and_once_share_one_predicate(self):
+        fx = self._probe(CLOSER_LINE)
+        state = fx.probe()
+        prev = self._prev(state)
+        self.assertEqual(
+            [k for k, *_ in watch.transitions(prev, watch.gated_keys(state), state)], [],
+            "streaming: unchanged → no transition")
+        self.assertEqual(
+            watch.gate_transition(prev, SID8, state[SID8][2], state[SID8][1])[0],
+            "UNCHANGED", "--once: unchanged → same verdict")
+        changed = self._probe(self.NEW_CLOSER).probe()
+        self.assertEqual(
+            [k for k, *_ in watch.transitions(prev, watch.gated_keys(changed), changed)],
+            ["NEW GATE"], "streaming: changed → NEW GATE")
+        self.assertEqual(
+            watch.gate_transition(prev, SID8, changed[SID8][2], changed[SID8][1])[0],
+            "NEW GATE", "--once: changed → same verdict")
+
+    def test_sc3_once_cli_marks_new_then_seen(self):
+        fx = self._probe(CLOSER_LINE)
+        state = fx.probe()
+        state_dir = os.path.join(fx.dir, "state")
+        argv = ["--tracked", fx.tracked, "--tasks-dir", fx.tasks,
+                "--projects-root", fx.projects, "--sessions-dir", fx.sessions,
+                "--state", state_dir, "--once"]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(watch.main(argv), 0)
+        self.assertIn("(new)", out.getvalue(),
+                      "a first read with no state file is a new gate")
+        os.makedirs(state_dir, exist_ok=True)
+        with open(watch.state_path_for(state_dir, fx.tracked), "w") as fh:
+            json.dump(self._prev(state), fh)
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(watch.main(argv), 0)
+        self.assertIn("(seen)", out2.getvalue(),
+                      "the same content against a recorded key is not a new gate")
+
+    def test_sc4_boundary_cases_follow_the_stated_scope(self):
+        prev = {"aaaa1111": watch.content_key("idle+closer", "same body")}
+        self.assertEqual(
+            watch.gate_transition(prev, "aaaa1111", "stuck:stream-closed",
+                                  "same body")[0],
+            "NEW GATE", "reason changes alone → re-emits")
+        self.assertEqual(
+            watch.gate_transition(prev, "aaaa1111", "idle+closer",
+                                  "different body")[0],
+            "NEW GATE", "body changes alone → re-emits")
+        self.assertEqual(
+            watch.gate_transition(prev, "aaaa1111", "idle+closer", "same body")[0],
+            "UNCHANGED", "byte-identical → no re-emit")
+
+    def test_legacy_list_state_records_instead_of_bursting(self):
+        fx = self._probe(CLOSER_LINE)
+        state = fx.probe()
+        self.assertEqual(
+            [k for k, *_ in watch.transitions([SID8], watch.gated_keys(state), state)],
+            [], "a pre-content-key list must not re-emit on upgrade")
+
+    def test_commit_loop_reemits_on_content_change_and_writes_a_dict(self):
+        changed = {"aaaa1111": ("A", "pick — 1. gamma", "idle+closer", True)}
+        seq = [{}, self.GATED, self.GATED, changed, changed]
+        n = len(seq)
+        out = io.StringIO()
+
+        def fake_probe(*a, **kw):
+            return seq.pop(0) if seq else {}
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "probe", fake_probe), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 redirect_stdout(out):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", str(n)])
+            with open(watch.state_path_for(os.path.join(d, "state"),
+                                           os.path.join(d, "t.txt"))) as fh:
+                written = json.load(fh)
+        text = out.getvalue()
+        self.assertEqual(text.count("NEW GATE"), 2, text)
+        self.assertIn("gamma", text, "the second line carries the changed body")
+        self.assertIsInstance(written, dict, "the state file is content-keyed")
+        self.assertEqual(written["aaaa1111"],
+                         watch.content_key("idle+closer", "pick — 1. gamma"))
+
+
 if __name__ == "__main__":
     unittest.main()
