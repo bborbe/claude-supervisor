@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`parked-lever.py` tells a headless worker apart from a tab worker whose pane is unresolved.** The first live lever-row sample passed `--pane -` for a tab worker and the row read `no pane (headless)` — telling the operator to stop looking for a window that exists. `--pane ?` now renders `pane unresolved (tab worker — resolve before reporting)`, and an empty `--pane` is refused rather than silently reading as headless. Change set: `scripts/parked-lever.py`, `scripts/tests/test_parked_lever.py`, `commands/steps/manager-parked.md`, `CHANGELOG.md`.
+
 ## v0.184.2
 
 - docs: **a `waiting-external` worker is a parked lever row too.** The first live `/supervisor:manager-drive` round on v0.183.0 rendered a `machine: <watcher>` row for a worker whose turn had ended on a PR watcher, which exposed `commands/steps/manager-parked.md` as too narrow: it listed gate classes only, while the owner taxonomy already carried `machine: <watcher>` for exactly that worker class. The definition now includes `waiting-external`. Change set: `commands/steps/manager-parked.md`, `CHANGELOG.md`.

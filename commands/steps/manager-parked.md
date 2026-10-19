@@ -21,7 +21,7 @@ definition.
 
 - **The row — four fields, always, in this order:**
   `<jump link> · waits: <what it is parked on> · lever: <the one act that clears it> · owner: <manager|operator|machine: <watcher>>`
-  - **Jump link** — `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py <pane-id>`. A headless worker has no pane: render `no pane (headless)`, never a dead link.
+  - **Jump link** — `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py <pane-id>`. ⚠️ **Two different absences, and they must not collapse:** a **headless** worker has no pane (`--pane -` → `no pane (headless)`), while a **tab** worker always has one — if you have not resolved its id, pass `--pane ?` → `pane unresolved (tab worker)`. The first live sample passed `-` for a tab worker and told the operator there was no window to open.
   - **Waits** — the gate in the worker's own words, never a paraphrase.
   - **Lever** — the ONE act that clears it. Not a list, not a plan, not a sequence.
   - **Owner** — `manager`, `operator`, or `machine: <watcher>`. Nothing else.
