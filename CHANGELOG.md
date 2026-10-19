@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.184.3
 
 - fix: **`parked-lever.py` tells a headless worker apart from a tab worker whose pane is unresolved.** The first live lever-row sample passed `--pane -` for a tab worker and the row read `no pane (headless)` — telling the operator to stop looking for a window that exists. `--pane ?` now renders `pane unresolved (tab worker — resolve before reporting)`, and an empty `--pane` is refused rather than silently reading as headless. Change set: `scripts/parked-lever.py`, `scripts/tests/test_parked_lever.py`, `commands/steps/manager-parked.md`, `CHANGELOG.md`.
 
