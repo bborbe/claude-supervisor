@@ -8,9 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.184.2
+## Unreleased
 
 - fix: **`/supervisor:who-needs-my-help` reads the state a session's own panel declares.** The deployed v0.184.1 sweep, checked against pane reads recorded before it ran (2026-10-19 22:05), still mislabelled three sessions: pane 816 — `🔵 READY · you decide` with a `nothing` closer and `⏰ Next: a fresh session picks up …` — read `external`, and panes 887 and 890 — `⚪ DONE` panels with no `📌 Task:` link — read `working` (887 holds a stray shell) and `idle with no ask`. `declared_state()` now reads the panel's last state line in either vocabulary (`🟢 ACTIVE` / `🟡 WAITING` / `🔵 READY` / `🔴 BLOCKED` / `⚪ DONE`, or worker-drive's `State: <state>`); `machine_wait()` admits a `nothing` closer only when that declaration is absent or a wait, and an unparked row whose panel declares itself closed is `closed` unless a resolved task file says it is still open — the disk wins over the panel. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
+
+## v0.184.2
 
 - docs: **a `waiting-external` worker is a parked lever row too.** The first live `/supervisor:manager-drive` round on v0.183.0 rendered a `machine: <watcher>` row for a worker whose turn had ended on a PR watcher, which exposed `commands/steps/manager-parked.md` as too narrow: it listed gate classes only, while the owner taxonomy already carried `machine: <watcher>` for exactly that worker class. The definition now includes `waiting-external`. Change set: `commands/steps/manager-parked.md`, `CHANGELOG.md`.
 
