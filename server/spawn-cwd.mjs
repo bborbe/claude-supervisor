@@ -191,6 +191,39 @@ export function resolveTaskLauncher({ vaultLauncher, taskLauncher, goalLaunchers
   return { launcher: vaultLauncher, source: 'vault' }
 }
 
+// The launcher a MANAGER session opens with, or `{ error }`.
+//
+// Managers do not take the worker rule. Operator decision 2026-10-19: a topic or goal manager
+// runs on the vault's Claude launcher (Opus at low effort) rather than the vault's
+// `claude_script`, which is typically a cheaper `-deepseek` backend. Precedence:
+//   1. the subject's own `manager_launcher:` frontmatter (topic or goal page);
+//   2. the `-claude` sibling of the vault's `claude_script` — `cc-private-deepseek` →
+//      `cc-private-claude`, `cc-private` → `cc-private-claude` — when that script exists;
+//   3. the vault's `claude_script` unchanged.
+// The sibling is a naming convention, not config: a vault with no `-claude` script keeps
+// exactly the launcher it had before this rule existed.
+//
+// Pure: `exists` is injected so the function is testable without a filesystem. The frontmatter
+// value passes the same shape check as `launcher:`, for the same reason.
+export function managerLauncherSibling(vaultLauncher) {
+  if (typeof vaultLauncher !== 'string' || !vaultLauncher) return null
+  const slash = vaultLauncher.lastIndexOf('/')
+  const base = vaultLauncher.slice(slash + 1).replace(/-deepseek$/, '')
+  if (base.endsWith('-claude')) return vaultLauncher
+  return `${vaultLauncher.slice(0, slash + 1)}${base}-claude`
+}
+
+export function resolveManagerLauncher({ vaultLauncher, managerLauncher, exists = () => false } = {}) {
+  const own = typeof managerLauncher === 'string' ? managerLauncher.trim() : ''
+  if (own) {
+    const r = resolveTaskLauncher({ vaultLauncher, taskLauncher: own, goalLaunchers: [] })
+    return r.error ? r : { launcher: r.launcher, source: 'subject' }
+  }
+  const sibling = managerLauncherSibling(vaultLauncher)
+  if (sibling && exists(sibling)) return { launcher: sibling, source: 'claude-sibling' }
+  return { launcher: vaultLauncher, source: 'vault' }
+}
+
 // The model a launcher script starts its session with, or `null` when it cannot be read.
 //
 // Read from the script rather than from vault-cli config, because the model is not in that

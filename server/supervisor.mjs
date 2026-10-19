@@ -10,7 +10,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk'
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { isAbsolute, join } from 'path'
 import { realpathSync } from 'fs'
@@ -30,7 +30,7 @@ import { randomUUID } from 'node:crypto'
 import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
-import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { resolveMessageChannel } from './message-channel.mjs'
@@ -1985,7 +1985,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // Below it, a task's own `launcher:` frontmatter, then its goal's, then the vault's
   // `claude_script` — see `resolveTaskLauncher`.
   let taskLauncher = { launcher: workerTarget.launcher, source: 'vault' }
-  if (!config.claudeCmd && typeof task === 'string' && task) {
+  if (!config.claudeCmd && roleResolution.role === 'manager') {
+    // A manager takes the manager rule, not the worker rule: the `-claude` sibling of the
+    // vault launcher when it exists — see `resolveManagerLauncher`. No subject page is read
+    // here; a topic's `manager_launcher:` is resolved by `/supervisor:open` Step 2C.
+    taskLauncher = resolveManagerLauncher({ vaultLauncher: workerTarget.launcher, exists: existsSync })
+  } else if (!config.claudeCmd && typeof task === 'string' && task) {
     const read = readTaskLaunchers({ task, vault: workerTarget.vault })
     if (read.error) return { error: read.error }
     taskLauncher = resolveTaskLauncher({ vaultLauncher: workerTarget.launcher, ...read })
