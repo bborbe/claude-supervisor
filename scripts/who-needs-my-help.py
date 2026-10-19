@@ -538,16 +538,24 @@ def watcher_of(rec):
     return m.group(1).strip() if m else ""
 
 
+def trigger_of(rec):
+    """The clock a `later (on <trigger>):` closer names — evidence of a machine wait."""
+    m = _TRIGGER.search(wnm.current_closer(rec) or "")
+    return m.group(1).strip() if m else ""
+
+
 def eta_of(rec):
-    """The clock a `later (on <trigger>):` closer names, else the panel's `ETA:` slot.
+    """The row's displayed ETA: the closer's trigger, else the panel's `ETA:` slot.
 
     The slot is the `🟡 WAITING` panel's own estimate, and it is what a `nothing`
     closer carries instead of a trigger — without it every watched wait rendered
-    with no ETA at all.
+    with no ETA at all. It is DISPLAYED, never evidence: a panel whose `⏰` line
+    asks the operator still carries an estimate, so `state_of()` is handed
+    `trigger_of()` and never this.
     """
-    m = _TRIGGER.search(wnm.current_closer(rec) or "")
-    if m:
-        return m.group(1).strip()
+    trigger = trigger_of(rec)
+    if trigger:
+        return trigger
     m = _ETA_SLOT.search(wnm.last_assistant_text(rec) or "")
     return m.group(1).strip() if m else ""
 
@@ -943,8 +951,10 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
         watcher = watcher_of(rec)
         eta = eta_of(rec)
         task_status = wnm.task_status_from_closer(rec)
-        state, reason = state_of(reg_status, cause, gate, watcher, eta, task_status,
-                                 shape, bool(wnm.last_assistant_text(rec)), True,
+        # The trigger, not the displayed `eta`: an `ETA:` slot is no evidence.
+        state, reason = state_of(reg_status, cause, gate, watcher, trigger_of(rec),
+                                 task_status, shape,
+                                 bool(wnm.last_assistant_text(rec)), True,
                                  wnm.current_closer(rec), alive=alive)
         parked_rows.append({
             "session_id": sid,

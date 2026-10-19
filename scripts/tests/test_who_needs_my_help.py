@@ -1073,7 +1073,7 @@ class WatcherAndShellStateTest(Base):
                 return r
         self.fail(f"{name} rendered no row at all")
 
-    # --- SC1: a `nothing` closer whose `⏰` line names a machine ---------------
+    # --- a `nothing` closer whose `⏰` line names a machine --------------------
 
     def test_a_cron_watch_is_external_with_the_panel_eta(self):
         self._add("cron", 808, PANEL_CRON, status="idle")
@@ -1110,7 +1110,22 @@ class WatcherAndShellStateTest(Base):
         self._add("reply", 861, PANEL_REPLY, status="idle")
         self.assertNotEqual(h.STATE_EXTERNAL, self._row("reply")["state"])
 
-    # --- SC2: a held background shell ---------------------------------------
+    def test_an_eta_slot_does_not_promote_an_operator_ask_to_external(self):
+        # The slot is displayed, never evidence: a panel whose `⏰ Ends:` asks the
+        # operator (pane 449's shape) still carries an estimate, and reading that
+        # estimate as a machine trigger would undo the guard for that shape.
+        self._add("reply-eta", 864,
+                  "👤 You: Orienting on the task — assistant is searching the vault.\n"
+                  "   ETA:      by ~21:30\n"
+                  "⏰ Ends: ` your reply — I run the three commands\n",
+                  status="idle")
+        row = self._row("reply-eta")
+        self.assertEqual((h.STATE_UNCLASSIFIED,
+                          "watcher asks the operator, not a machine"),
+                         (row["state"], row["state_reason"]))
+        self.assertEqual("by ~21:30", row["eta"])
+
+    # --- a held background shell ---------------------------------------------
 
     def test_an_active_shell_with_a_next_line_is_working_not_external(self):
         self._add("active-shell", 855, PANEL_ACTIVE_SHELL, status="shell")
@@ -1132,7 +1147,7 @@ class WatcherAndShellStateTest(Base):
         self.assertEqual((h.STATE_UNCLASSIFIED, "bare shell"),
                          (row["state"], row["state_reason"]))
 
-    # --- SC3: a `busy` session whose foreground turn ended on a pick ----------
+    # --- a `busy` session whose foreground turn ended on a pick ----------------
 
     def test_a_busy_session_idle_on_a_pick_is_a_decision(self):
         self._add("pick", 854, PANEL_PICK, status="busy", turn_after=False)
