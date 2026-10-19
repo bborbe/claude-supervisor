@@ -1030,6 +1030,17 @@ PANEL_WAITING_SHELL = (  # pane 856's first shape: a 7-day run it watches
     "👤 You:    nothing\n"
     "⏰ Ends:   the background backfill exits (run_in_background shell)\n")
 PROSE_SHELL = "Full run started with the batched GraphQL data layer.\n"  # pane 856 now
+PANEL_DECLARED_WORKING = (  # pane 888 — worker-drive's own `State:` line
+    "State:            working 🟢 · tool call in flight (this drive run) + live "
+    "background shell pid 90678 ALIVE\n"
+    "👤 You: nothing — I'm driving\n"
+    "⏰ Next: background shell `sleep 600` (pid 90678) expires at ~21:47; cleanup "
+    "runs before then\n")
+PANEL_DONE_OPERATOR = (  # pane 889 — a closed session whose next step is the operator's
+    "✅ Nothing to do — safe to close Claude :)\n\n"
+    "⚪ DONE\n"
+    "👤 You: nothing — session closed\n"
+    "⏰ Next: you open a new session; the orchestrator picks the next anchor\n")
 PANEL_PICK = (  # pane 854 — idle on a pick while a background agent keeps `busy`
     "PR #126: CI green, draft, awaiting the review loop before flipping ready.\n"
     "🔵 READY · 1 running (background agent) · you decide\n"
@@ -1105,6 +1116,31 @@ class WatcherAndShellStateTest(Base):
         row = self._row("done")
         self.assertNotEqual(h.STATE_EXTERNAL, row["state"])
         self.assertEqual("idle with no ask", row["state_reason"])
+
+    def test_a_done_panel_whose_next_step_is_the_operator_is_not_a_machine_wait(self):
+        # Measured 2026-10-19 on the deployed v0.183.1 sweep: pane 889's `⚪ DONE`
+        # panel read `external` because "you open a new session" names no
+        # negation the guard knew — the actor it names is the operator.
+        self._add("done-operator", 889, PANEL_DONE_OPERATOR, status="idle")
+        row = self._row("done-operator")
+        self.assertNotEqual(h.STATE_EXTERNAL, row["state"])
+        self.assertEqual("idle with no ask", row["state_reason"])
+
+    def test_a_session_that_declares_itself_working_is_not_a_machine_wait(self):
+        # Measured the same run on pane 888: worker-drive writes its own
+        # `State: working 🟢` line, and a `⏰ Next:` naming its background shell
+        # was read as a wait — the 🟢 test only knew the `🟢 ACTIVE` panel.
+        self._add("declared-working", 888, PANEL_DECLARED_WORKING, status="shell")
+        self.assertEqual(h.STATE_WORKING, self._row("declared-working")["state"])
+
+    def test_a_session_that_declares_itself_external_is_a_machine_wait(self):
+        # The positive arm: the declared state is evidence in both directions.
+        self._add("declared-external", 891,
+                  "State:            external 🟡 · cron 6864ab1d at 22:33\n"
+                  "👤 You: nothing\n"
+                  "⏰ Ends: one-shot cron job 6864ab1d at 22:33 re-reads Sentry\n",
+                  status="idle")
+        self.assertEqual(h.STATE_EXTERNAL, self._row("declared-external")["state"])
 
     def test_a_watcher_slot_asking_the_operator_is_not_a_machine_wait(self):
         self._add("reply", 861, PANEL_REPLY, status="idle")
