@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.184.9
 
 - fix: the `FREEABLE TABS` row no longer repeats the task name when it equals the session name — a worker's session name is usually its task name, so the row printed the same string twice (measured 2026-10-19, round 55: `Start Day - 2026-10-19 · Start Day - 2026-10-19 · finished · …`). The task column is omitted when it is equal to the name. Change set: `agents/fleet-drive.md`, `CHANGELOG.md`.
 
