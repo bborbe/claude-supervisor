@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the closer lint can see a closer that is not in the transcript's last 256 KB.** `reap-closer.py`'s `last_closer` read one fixed tail window, so on a long session the new `Stop` hook recorded `no-closer` 44 ms after the closer was written: the harness writes large `api-request-blob` entries after the assistant message, and the closer sat ~758 KB from EOF (measured 2026-10-19; a single 400 KB entry after the closer reproduces it). It now scans backwards in `WINDOW` chunks and stops at the first assistant message carrying a closer, bounded at 4 MB so a pathological transcript cannot turn a hook into a full-file read. Change set: `scripts/reap-closer.py`, `scripts/tests/test_reap_closer.py`, `CHANGELOG.md`.
+
 ## v0.182.0
 
 - feat: **a worker can no longer end its turn on an operator gate for a step the rules already authorise.** A new `Stop` hook, `scripts/closer-gate-lint.py`, reads the session's last `👤 You:` closer (reusing `reap-closer.py`'s `last_closer`) and exits 2 when an `approve:`/`review:` line names an After Opening a PR verb — `/github-pr-watch`, `/coding:local-review` (including the observed prose form "I run the local review"), `/coding:pr-review`, `gh pr ready`, `dark-factory prompt|spec approve` — so the turn continues and the model does the work instead of asking. `gh pr merge` and every production-touching action stay gated. Fail-open on every path, a `stop_hook_active` loop guard, kill switch `SUPERVISOR_CLOSER_GATE_LINT=off`, and one JSONL record per invocation written on allow and block alike. Change set: `hooks/hooks.json`, `scripts/closer-gate-lint.py`, `scripts/tests/test_closer_gate_lint.py`, `scripts/tests/fixtures/closer-gate-lint/`, `CHANGELOG.md`.
