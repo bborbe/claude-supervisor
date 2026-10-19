@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.184.0
 
 - feat: **the manager and fleet rounds act on criteria, not only on sessions.** `commands/steps/manager-gates.md` now folds every decision a round holds — its own findings, its `waiting-approval` rows and its relayed pane questions — into ONE batch claimed through `asked-ledger` and rendered under `commands/steps/needs-input.md`, so a round never opens a second modal. `commands/steps/escalate.md` files one task per cause class recurring on two or more distinct days (naming the covering task when one exists) through `Task(vault-cli:task-creator)` — the round holds `Task`, not `Skill` — leaving it at `phase: todo` for approval, instead of re-reporting the same blocker daily. `commands/steps/manager-coverage.md` persists each round's reconciliation line to `~/.claude/state/manager-coverage/<session>.json`, and `commands/steps/output-shape.md` ranks managers by closeness to their SCs from those files (`unranked`, never last, when a manager has no file). Gate letters stay the script's: A–E keep their runbook meaning and nothing in `commands/` carries a second one. Change set: `commands/steps/manager-gates.md`, `commands/steps/manager-coverage.md`, `commands/steps/escalate.md`, `commands/steps/output-shape.md`, `CHANGELOG.md`.
 
