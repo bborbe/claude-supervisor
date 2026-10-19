@@ -76,6 +76,13 @@ SITE_LIST = {
     # It returns `None` for a failed query, never an empty argv, and an unreadable argv can
     # only fall back to the load-path check, never turn a refusal into an accept.
     ("restart-worker.py", "worker_argv"),
+    # added 2026-10-20 — `close-worker.py`'s pane teardown (`wezterm cli kill-pane`).
+    # ⚠️ It is an ACTION, not a read, exactly like `reload_pane` above: it returns an exit
+    # code and reports every failure rather than collapsing one into an empty result, so
+    # it is enumerated so the mechanism and this list agree, and is deliberately not
+    # driven into the three states below. The pane JOIN it depends on is `jump.py`'s
+    # `pane_sessions`, which is already enumerated and driven.
+    ("close-worker.py", "main"),
     ("who-needs-me.py", "main"), ("who-needs-me.py", "wezterm_panes"),
     # added 2026-10-14 — `who-needs-my-help.py`'s pane-viewport read: the
     # `wezterm cli get-text` the two-channel gate detector needs, and the only

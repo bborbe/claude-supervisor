@@ -97,7 +97,7 @@ One imperative per rule; full text and the `⚠️` clauses live in `steps/rules
 - **The feed answers "was a gate raised", never "is a gate open"** — confirm via `gate-relay-read`.
 - **`mcp__supervisor__spawn_agent` is held for `resume=` alone** — never open a worker with it (fleet-surface § Spawn a worker item 6).
 - **Prefix by who answered** — `Operator answer, via supervisor:` only when the operator answered here; `Manager answer, via supervisor:` for your own.
-- **A manager cannot close a worker's session.**
+- **Close via `/supervisor:close` only.**
 - **Read-only context sends freely** — course corrections only on an explicit operator yes.
 - **Cause must be verified live, never read off the task file** (`gh pr list --state all`, `git log`).
 - **An operator ask lives on disk from the moment it is said** — `/supervisor:open-items add` it before replying.

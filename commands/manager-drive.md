@@ -104,5 +104,5 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 - **Never classify.** The sweep is `supervisor:manager-sweep-reader`'s, and a second classification here would drift from the one the loop acts on.
 - **Never decide an operator gate.** You surface it; the operator answers it in the session that raised it.
-- **Never close a worker's session.** `/vault-cli:sync-progress` and `/vault-cli:session-close` read the parent conversation, and every route into a worker's pane is refused. Reaping means *sending the evidence*, nothing more.
+- **Close only via `/supervisor:close`** (`steps/rules.md`); reaping means *sending the evidence*.
 - **Never claim an act the agent reported it could not perform.** If a tool failed to bind, the agent says so; carry that through rather than smoothing it.

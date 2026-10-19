@@ -83,7 +83,7 @@ The script owns the read: assistant messages only, since user turns carry inject
 
 ⚠️ **Why reading the session's own text does not break the rule against trusting its claim.** The closer never decides whether the task is complete; disk decides that, and it has already said yes. The closer only decides whether a message is still owed. That makes the failure modes asymmetric. A false `nothing — session closed` over a completed task costs one idle tab. A misread in the other direction just sends the notice the current rule sends anyway.
 
-**You cannot close it for them.** `/vault-cli:sync-progress` and `/vault-cli:session-close` read the parent conversation, and every route into a worker's pane is refused (`[Remote Shell Writes]`, `[Auto-Mode Bypass]`, `[Self-Modification]`; measured 2026-09-19). So the act is:
+**You cannot close the task for them, and `/supervisor:close` only closes a finished one.** `/vault-cli:sync-progress` and `/vault-cli:session-close` stay the worker's own act; a terminal or deferred task is closed through `/supervisor:close`. So the act is:
 
 - `SendMessage` the worker the **disk evidence** — the three commands and their output;
 - state explicitly that it is **non-authorising** and that the operator has **not** answered;
