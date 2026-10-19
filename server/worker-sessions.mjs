@@ -54,8 +54,8 @@ import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 // ⚠️ **A FILE, not an in-memory value, because the other counter is a short-lived process.**
 // `scripts/worker-sessions.py --count` exits after printing, so an in-memory cache could never
 // outlive it; a shared file is the only shape both readers can use. The path is the supervisor's
-// own state dir (`$XDG_STATE_HOME/claude-supervisor`, else `~/.local/state/claude-supervisor`), and
-// `worker-sessions.py` resolves the same one.
+// own state dir — `$XDG_STATE_HOME/claude-supervisor`, or the XDG default under the user's home —
+// and `worker-sessions.py` resolves the same one.
 //
 // ⚠️ **The window is 60 s and the fallback is labelled.** A count from minutes ago is not evidence
 // about the fleet now; past the window the refusal stands. And it is never `0`: the cache holds a
