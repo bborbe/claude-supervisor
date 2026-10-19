@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.180.1
 
 - fix: **the changelog-fold guard is green again: a v0.176.0 bullet that shipped in v0.177.0 now sits in its own release section.** The guard failed on every push since 2026-10-18T18:38:46Z because an earlier fold repair left a v0.177.0 fix under `## v0.176.0`; the tag containing that merge proves the destination, so the bullet is relocated there as a pure move — no text change. A guard that is always red cannot signal a new fold; this clears the standing backlog, and a red run on master now blocks the next merge (`CLAUDE.md` § Changelog fold guard). Change set: `CHANGELOG.md`, `CLAUDE.md`.
 
