@@ -942,6 +942,56 @@ def is_hold(reason):
     return reason.startswith("held:") or reason == "closer-unknown"
 
 
+def content_key(reason, detail):
+    """The identity of a gate's CONTENT — the exact string `NEW GATE` carries.
+
+    Scope decision: **per body hash**, not per session and not per
+    session+reason. `per session` is the defect this file exists to fix — a
+    session already in the set never re-emits. `per session+reason` misses a
+    body change under a stable reason: measured 2026-10-06, `7f07a37a` moved
+    from an `approve:` closer to a `pick` while `idle+closer` held. Hashing the
+    joined string makes the rule exact — re-emit iff the emitted line would
+    differ — and it catches both measured cases.
+
+    Boundary case the scope implies: a same-session gate that changes *reason*
+    but not *body* still changes the joined string and re-emits; a body change
+    alone likewise re-emits.
+    """
+    return hashlib.sha256(f"{reason} :: {detail}".encode("utf-8")).hexdigest()[:16]
+
+
+def prev_map(prev):
+    """Normalize a state-file payload to `{sid8: content_key or None}`.
+
+    The state file used to hold a bare list of session ids. A list reads as
+    `{sid8: None}` — membership known, content unknown — so an upgrade records
+    the key in place instead of re-emitting every member once.
+    """
+    if isinstance(prev, dict):
+        return dict(prev)
+    return {sid8: None for sid8 in (prev or [])}
+
+
+def gate_transition(prev, sid8, reason, detail):
+    """The ONE `is this a new gate?` decision both arms use.
+
+    Returns `("NEW GATE" | "UNCHANGED", content)`.
+
+    - absent from `prev` → a membership transition, so a new gate;
+    - present with `None` → predates content keys, UNCHANGED (the caller records
+      the key, so the NEXT poll can tell a change from a byte-identical repeat);
+    - present with a key → re-emit only when the content key differs.
+    """
+    content = f"{reason} :: {detail}"
+    if sid8 not in prev:
+        return "NEW GATE", content
+    known = prev[sid8]
+    if known is None:
+        return "UNCHANGED", content
+    return ("NEW GATE" if known != content_key(reason, detail) else "UNCHANGED",
+            content)
+
+
 def transitions(prev, key, state):
     """The transitions one poll emits — `(kind, sid8, label, detail)` records.
 
@@ -975,11 +1025,13 @@ def transitions(prev, key, state):
     whole class.
     """
     out = []
-    prevset = set(prev or [])
+    prevmap = prev_map(prev)
+    prevset = set(prevmap)
     for sid8 in key:
-        if sid8 not in prevset:
-            label, detail, reason, _ = state[sid8]
-            out.append(("NEW GATE", sid8, label, f"{reason} :: {detail}"))
+        label, detail, reason, _ = state[sid8]
+        kind, content = gate_transition(prevmap, sid8, reason, detail)
+        if kind == "NEW GATE":
+            out.append((kind, sid8, label, content))
     for sid8 in sorted(prevset - set(key)):
         if sid8 not in state:
             # Lost sight of it: no transcript under `--projects-root`, or the id
@@ -1519,7 +1571,7 @@ def main(argv=None):
     # require the new state to survive one poll before announcing it.
     # The last COMMITTED gated set, held as a set because it now advances PER
     # SESSION rather than by whole-set replacement — see the stability gate below.
-    prev = set(prev or [])
+    prev = prev_map(prev)
 
     # PARK AGES — a sibling file, read the same way and failing in the same
     # direction. ⚠️ The consequence differs from the gated-set read and is worth
@@ -1555,7 +1607,9 @@ def main(argv=None):
             if args.once:
                 for sid8 in key:
                     label, detail, reason, _ = state[sid8]
-                    print(f"GATED {sid8} [{reason}] {label}: {detail}")
+                    kind, _content = gate_transition(prev, sid8, reason, detail)
+                    marker = "new" if kind == "NEW GATE" else "seen"
+                    print(f"GATED {sid8} [{reason}] {label}: {detail}  ({marker})")
                 print(f"gated: {len(key)}  held: {len(held)}")
                 return 0
             # STABILITY GATE — PER SESSION. A worker mid-turn flips between "has
@@ -1581,7 +1635,7 @@ def main(argv=None):
             committed = False
             if pending is not None:
                 stable = stable_sessions(prev, pending, key)
-                for kind, sid8, label, detail in transitions(sorted(prev), key, state):
+                for kind, sid8, label, detail in transitions(prev, key, state):
                     if sid8 not in stable:
                         continue
                     # A HELD transition is recorded, never announced: a dead
@@ -1590,14 +1644,26 @@ def main(argv=None):
                     if kind == "NEW GATE":
                         print(f"NEW GATE  {sid8}  {label[:46]}  ::  {detail}",
                               flush=True)
-                        prev.add(sid8)
+                        prev[sid8] = content_key(state[sid8][2], state[sid8][1])
                     elif kind == "HELD":
-                        prev.discard(sid8)
+                        prev.pop(sid8, None)
                     else:
                         print(f"CLEARED  {sid8}", flush=True)
-                        prev.discard(sid8)
+                        prev.pop(sid8, None)
                     log_event(log_path, kind, sid8, label, detail)
                     committed = True
+                # Record the content key for every stable gated member, so the
+                # NEXT poll can tell a content change from a byte-identical
+                # repeat. This is also what upgrades a legacy list-format state
+                # in place: those entries read as `None`, and without this they
+                # would never acquire a key and so never detect a change.
+                for sid8 in key:
+                    if sid8 not in stable:
+                        continue
+                    fresh = content_key(state[sid8][2], state[sid8][1])
+                    if prev.get(sid8) != fresh:
+                        prev[sid8] = fresh
+                        committed = True
                 if committed:
                     # tmp + os.replace, never a bare `open(state_path, "w")`:
                     # that truncates first, so a kill or a serialisation error
@@ -1608,7 +1674,7 @@ def main(argv=None):
                     os.makedirs(os.path.dirname(state_path), exist_ok=True)
                     tmp_path = state_path + ".tmp"
                     with open(tmp_path, "w") as fh:
-                        json.dump(sorted(prev), fh)
+                        json.dump(prev, fh)
                     os.replace(tmp_path, state_path)
             # LIVENESS — one record per poll, written whether or not a gate was
             # found, and whether or not anything was committed.
