@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.180.0
 
 - feat: Manager sessions now open on the vault's Claude launcher by default. This covers topic managers from `/supervisor:open`, `spawn_agent` with `role: manager`, and manager restarts. The launcher is chosen in this order:
   1. the subject's `manager_launcher:` frontmatter;
