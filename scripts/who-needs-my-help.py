@@ -36,6 +36,11 @@ session registry, on the two limbs `scripts/manager-attention-watch.py` states:
     gated := status == "waiting"                      # parked on a harness gate
           or (status == "idle" and non-empty closer)  # turn ended on an ask
 
+and widens them for this sweep: a `nothing` closer whose `⏰` line names a machine
+is a park (the `🟡 WAITING` shape), and `shell` / `busy` take a stricter closer limb
+— a held shell or a background agent keeps those statuses after the turn ended
+(see `parked()`).
+
 What it is asking comes from the pane viewport, matched on markers **anchored to
 the start of a line**. No `tail -N`, no last-non-empty-line, no buffer-wide grep:
 `65 Runbooks/Manager Session.md` § Gate triage measured all three wrong on
@@ -135,6 +140,9 @@ _YOU_RUN = re.compile(r"you run:\s*(\S.*)")
 # The trigger and the watched mechanism, from the closer's own two lines.
 _TRIGGER = re.compile(r"later\s*\(on\s+([^)]+)\)", re.I)
 _WATCHER = re.compile(r"⏰\s*(?:Ends|Next):\s*(.+)")
+# The `🟡 WAITING` panel's estimate slot, anchored to a line start so a prose
+# mention of "ETA:" elsewhere in the text cannot stand in for it.
+_ETA_SLOT = re.compile(r"^\s*ETA:\s*(\S.*?)\s*$", re.M)
 # The vault's production-touching marker (`[[Task Writing Guide]]` § production-touching).
 _PROD_MARKER = re.compile(r"production-touching", re.I)
 _OPEN_BOX = re.compile(r"^\s*-\s*\[( |/)\]", re.M)
@@ -301,23 +309,51 @@ def parked(rec, reg_record, resumed_ids=frozenset()):
     turn after its closer, the second one whose `👤 You:` line is prose. Together
     they give the limb `idle`'s coverage — an operator ask or a machine-bound wait —
     without its mid-turn false positive.
+
+    ⚠️ **`busy` takes the same strict limb, because a background agent holds it.**
+    A session whose foreground turn ended while a `run_in_background` Agent still
+    runs reads `busy` until that agent reports. Measured 2026-10-19: pane 854 sat
+    on a `pick —` closer with its footer reading `Waiting for 1 background agent to
+    finish`, and pane 832 on a `⏰ Ends:` naming its subagent — both `busy`, so both
+    were labelled `working` while one waited on the operator and one on a machine.
+    The `turn ended` clause is what keeps a genuinely running session out: mid-turn
+    there is always a user or tool turn after the previous closer. On `busy` that
+    clause needs POSITIVE evidence — `closer_turn_state()` must find the closer and
+    nothing after it — because an unreadable tail is "cannot tell", and `busy` is
+    the one status where guessing wrong hands the operator a question already left.
+
+    ⚠️ **A `nothing` closer is a park when its `⏰` line names a machine.** That is
+    the `🟡 WAITING` panel's own shape — `👤 You: nothing` is legal only while a
+    named mechanism runs — so reading `nothing` as "nothing to report" before the
+    `⏰` line was looked at dropped every watched wait out of the parked branch, and
+    the sweep labelled them `idle with no ask`. Measured 2026-10-19: 9 of 23 panes,
+    a cron, a manager wakeup, a PR watcher and clocks among them. `machine_wait()`
+    is the test, and it refuses a closer that says it is `🟢 ACTIVE`.
     """
     status = ((reg_record or {}).get("status") or "").strip().lower()
     if status == "waiting":
         return True
-    if status not in ("idle", "shell"):
+    if status not in ("idle", "shell", "busy"):
         return False
-    if status == "shell":
-        if rec.get("session_id") in resumed_ids:
+    if status in ("shell", "busy"):
+        if status == "shell" and rec.get("session_id") in resumed_ids:
             return False
         text = wnm.normalize_closer(wnm.closer_from_transcript(rec))
-        return (bool(text) and not text.startswith("nothing")
-                and (is_operator_ask(rec) or wnm.is_parked_verb(text)))
+        if not text:
+            return False
+        if text.startswith("nothing"):
+            asks = machine_wait(rec)
+        else:
+            asks = is_operator_ask(rec) or wnm.is_parked_verb(text)
+        # Read last, and only for a closer that would park: it is a tail seek.
+        return asks and (status == "shell" or wnm.closer_turn_state(rec) is False)
     text = wnm.normalize_closer(wnm.current_closer(rec))
-    # `nothing` is a turn that ended with nothing to ask, not a park — the exclusion
-    # `reclassify_idle()` already applies. A `later (on <trigger>):` closer IS a park
-    # (a machine-bound one), so it is deliberately kept.
-    return bool(text) and not text.startswith("nothing")
+    # `nothing` with no named machine is a turn that ended with nothing to ask, not
+    # a park — the exclusion `reclassify_idle()` already applies. A `later (on
+    # <trigger>):` closer IS a park (a machine-bound one), so it is deliberately kept.
+    if text.startswith("nothing"):
+        return machine_wait(rec)
+    return bool(text)
 
 
 # --- The task-file join ------------------------------------------------------
@@ -503,8 +539,16 @@ def watcher_of(rec):
 
 
 def eta_of(rec):
-    """The clock a `later (on <trigger>):` closer names."""
+    """The clock a `later (on <trigger>):` closer names, else the panel's `ETA:` slot.
+
+    The slot is the `🟡 WAITING` panel's own estimate, and it is what a `nothing`
+    closer carries instead of a trigger — without it every watched wait rendered
+    with no ETA at all.
+    """
     m = _TRIGGER.search(wnm.current_closer(rec) or "")
+    if m:
+        return m.group(1).strip()
+    m = _ETA_SLOT.search(wnm.last_assistant_text(rec) or "")
     return m.group(1).strip() if m else ""
 
 
@@ -623,6 +667,36 @@ def is_machine_bound(closer):
     return wnm.is_parked_verb(text) or text.startswith(_MACHINE_MARKERS)
 
 
+# A watcher line that denies there is one. The `⚪ DONE` closer's own wording is
+# `⏰ Next: no mechanism is running`, so a test for "has a `⏰` line" alone would
+# label every finished session `external`.
+_NO_MECHANISM = re.compile(r"^(no|nothing|none)\b", re.I)
+
+# The closer's state line claiming the session itself is running. A held shell
+# whose panel reads `🟢 ACTIVE` is working on that child, and its `⏰ Next:` line is
+# the step after — measured 2026-10-19 on pane 855, whose `⏰ Next: the background
+# readout exits` would otherwise have read as a machine wait.
+_ACTIVE = re.compile(r"^\s*🟢\s*ACTIVE\b", re.M)
+
+
+def names_machine(watcher):
+    """True when a `⏰` line names something other than the operator or nothing."""
+    lead = _strip_lead(watcher)
+    return bool(lead) and not is_operator_reply(watcher) and not _NO_MECHANISM.match(lead)
+
+
+def machine_wait(rec):
+    """True when the session's `nothing` closer waits on a named machine.
+
+    The `🟡 WAITING` panel's shape: `👤 You: nothing` plus a `⏰` line naming the
+    mechanism. Refused when the state line says `🟢 ACTIVE`, because that session
+    is running its own work and the `⏰` line is what it does next, not what it
+    waits on.
+    """
+    text = wnm.last_assistant_text(rec) or ""
+    return names_machine(watcher_of(rec)) and not _ACTIVE.search(text)
+
+
 def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
              readable, is_parked, closer="", alive=None):
     """The four-state label, or `unclassified` with the reason. Pure.
@@ -663,7 +737,7 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
         # ask in the `⏰ Ends:` slot would otherwise be reported `external` — the
         # forced-bucket failure the fifth state exists to prevent.
         if (eta or cause == wnm.CAUSE_CLOCK or is_machine_bound(closer)
-                or (watcher and not is_operator_reply(watcher))):
+                or names_machine(watcher)):
             return STATE_EXTERNAL, ""
         if gate in ("A", "B"):
             # Manager-clearable, never the operator's: the runbook's classes A/B.
@@ -695,9 +769,15 @@ def state_of(reg_status, cause, gate, watcher, eta, task_status, shape,
     # A registry `status: shell` alone is not death (see the `alive` note above):
     # only `alive is False` proves the process is gone. `None` is "cannot tell",
     # so it falls through to `idle with no ask` like any other live-but-quiet
-    # session rather than being read as death.
+    # session rather than being read as death — or as a held child.
     if reg_status == "shell" and alive is False:
         return STATE_UNCLASSIFIED, "bare shell"
+    # A live `shell` is a held background child — the harness stamps `shell` when
+    # one is spawned and keeps it for the child's life — so an unparked one is
+    # working on it. Measured 2026-10-19: pane 855's footer read `1 shell still
+    # running` while the sweep labelled it `idle with no ask`.
+    if reg_status == "shell" and alive is True:
+        return STATE_WORKING, ""
     return STATE_UNCLASSIFIED, "idle with no ask"
 
 
@@ -806,6 +886,7 @@ def build(pmap, registry, reg_records, records, causes_state, shape_of=pane_shap
     # so it is paid once, and only when a `shell` session exists to need it.
     # `resumed_session_ids` dedupes internally — one tail read per session, not per
     # item — and an unreadable transcript returns `False`, which keeps the row.
+    # (`busy` reads its own three-state answer, lazily — see `parked()`.)
     resumed_ids = frozenset()
     if any(((reg_records.get(sid) or {}).get("status") or "").strip().lower() == "shell"
            for sid in groups):
@@ -976,7 +1057,8 @@ def render(sweep):
         else:
             # A park with no gate class is recorded as exactly that — never left
             # blank, which reads as "unclassified" rather than "not gated".
-            head += (" · machine-bound" if r["cause"] == wnm.CAUSE_CLOCK
+            head += (" · machine-bound"
+                     if r["cause"] == wnm.CAUSE_CLOCK or r["state"] == STATE_EXTERNAL
                      else " · not gated")
         if r["flags"]:
             head += f" [{' '.join(r['flags'])}]"
