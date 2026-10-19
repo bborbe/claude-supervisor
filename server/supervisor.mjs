@@ -1121,12 +1121,19 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
   })
   // Skipped when the pair is off or unresolvable: `concurrentLimitRefusal` answers both of
   // those before it ever looks at the count, and the endpoint read is the expensive half.
-  const live = limits.error || limits.limit === null ? null : await workerSessions()
+  const counted =
+    limits.error || limits.limit === null
+      ? { workers: null, error: null }
+      : await workerSessions()
   return concurrentLimitRefusal({
     limits,
     // `null` is "a store could not be read", which is NOT "no worker is live" — the refusal
     // turns that distinction into an error rather than a zero.
-    liveCount: live === null ? null : live.length,
+    liveCount: counted.workers === null ? null : counted.workers.length,
+    // The cause travels with the count, exactly as it does for the manager cap below. Without it
+    // the refusal can only say "the count could not be taken", which is what made 2026-10-19's
+    // lost spawns undiagnosable.
+    countError: counted.error,
     operatorNamed,
     configFile: config.configFile,
   })

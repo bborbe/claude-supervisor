@@ -96,7 +96,16 @@ def _ledger():
     return _SPAWN_LEDGER
 
 
-def live_workers(endpoint=None, ledger=None):
+def _cause(failures):
+    """` — <cause>` when a reader named one, else the empty string.
+
+    The readers log their own line; this carries the same text into the UNKNOWN message so the
+    exit-2 line an operator (or a caller's captured stderr) reads is self-contained.
+    """
+    return (" — %s" % "; ".join(failures)) if failures else ""
+
+
+def live_workers(endpoint=None, ledger=None, on_failure=None):
     """Live worker sessions as `[{session_id, status, label}]`, or None when a store failed.
 
     The ledger supplies the worker identity; the **session-heartbeat endpoint** supplies
@@ -116,7 +125,7 @@ def live_workers(endpoint=None, ledger=None):
     on it.
     """
     liveness = _load("session_liveness", "session-liveness.py")
-    rows = liveness.read_endpoint(endpoint)
+    rows = liveness.read_endpoint(endpoint, on_failure=on_failure)
     if rows is None:
         return None
     if ledger is None:
@@ -195,18 +204,26 @@ def main(argv=None):
         if value:
             print(f"warning: {flag} is accepted and IGNORED — {reason}", file=sys.stderr)
 
-    ledger = _ledger().read_ledger(args.endpoint)
+    # ⚠️ **The causes are collected so the UNKNOWN line NAMES them.** Until 2026-10-19 the line
+    # said only which endpoint failed, so a timeout, a refused socket and an unparseable body were
+    # one indistinguishable message — measured on 2026-10-19, when `--count` returned UNKNOWN at
+    # 21:49 and succeeded 20/20 at 22:07 with no cause captured for the gap.
+    failures = []
+    ledger = _ledger().read_ledger(args.endpoint, on_failure=failures.append)
     if ledger is None:
         print(
-            "UNKNOWN — cannot read the session-ledger endpoint at %s"
-            % _ledger().endpoint_base(args.endpoint),
+            "UNKNOWN — cannot read the session-ledger endpoint at %s%s"
+            % (_ledger().endpoint_base(args.endpoint), _cause(failures)),
             file=sys.stderr,
         )
         return 2
 
-    workers = live_workers(args.endpoint, ledger)
+    workers = live_workers(args.endpoint, ledger, on_failure=failures.append)
     if workers is None:
-        print("UNKNOWN — cannot read the session-heartbeat endpoint", file=sys.stderr)
+        print(
+            "UNKNOWN — cannot read the session-heartbeat endpoint%s" % _cause(failures),
+            file=sys.stderr,
+        )
         return 2
 
     if args.count:
