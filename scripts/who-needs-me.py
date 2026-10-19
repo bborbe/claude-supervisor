@@ -741,13 +741,25 @@ def turn_after_closer(rec):
     `False` when the transcript is unreadable -- the same rule as the registry reads: an
     absent probe proves nothing, so the row is kept rather than dropped.
     """
+    return closer_turn_state(rec) is True
+
+
+def closer_turn_state(rec):
+    """`True` superseded · `False` the turn ended on the closer · `None` cannot tell.
+
+    The three-state form of `turn_after_closer()`, for a caller that must not read
+    "cannot tell" as "the turn ended": a `busy` session is parked only on positive
+    evidence that its last closer is the last thing it did, because reading a stale
+    closer off a running session would hand the operator a question it already left.
+    `None` covers an unreadable transcript AND a tail window holding no closer at all.
+    """
     sid = rec.get("session_id")
     path = rec.get("transcript")
     if not path and sid:
         path = next(iter(glob.glob(os.path.expanduser(
             f"~/.claude/projects/*/{sid}.jsonl"))), None)
     if not path or not os.path.exists(path):
-        return False
+        return None
     closer_at = -1
     superseded = False
     try:
@@ -771,7 +783,9 @@ def turn_after_closer(rec):
                 elif kind == "user" and closer_at >= 0:
                     superseded = True
     except Exception:
-        return False
+        return None
+    if closer_at < 0:
+        return None
     return superseded
 
 

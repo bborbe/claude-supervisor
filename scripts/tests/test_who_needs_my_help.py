@@ -914,27 +914,31 @@ class FourStateTest(Base):
                 return r
         self.fail(f"{name} rendered no row at all")
 
-    def test_a_live_shell_session_classifies_exactly_as_an_idle_one(self):
+    def test_a_live_shell_session_classifies_as_working(self):
         # The differential, and the reason a rename cannot satisfy this suite:
         # the SAME pane is rendered twice, once with `status: shell` and once
-        # with `status: idle`, and the two rows must agree. Both are live, so
-        # the registry status is stale metadata and must not move the label.
+        # with `status: idle`, and the two rows must DIFFER. A live `shell` is a
+        # held background child (the harness stamps it when a shell is spawned,
+        # and a `run_in_background` child keeps it for its whole life), so the
+        # session is working; the same pane on `idle` holds nothing.
+        #
+        # This replaces the 2026-10-18 differential, which asserted the two
+        # agree. That one fixed the `bare shell` label on live panes; this one
+        # gives them their true state rather than `idle with no ask` — measured
+        # 2026-10-19 on pane 855, whose footer read `1 shell still running`.
         #
         # The empty closer matters: `parked()`'s shell limb takes a stricter
         # closer test than its idle limb, so a closer-bearing fixture could be
-        # parked under one status and not the other — that confound would fail
-        # a correct fix. With no closer both limbs agree the pane is unparked,
-        # which isolates the label.
-        #
-        # Measured 2026-10-18: nine live panes carried `status=shell, alive=True`
-        # and were handed to the operator as `bare shell`.
+        # parked under one status and not the other. With no closer both limbs
+        # agree the pane is unparked, which isolates the label.
         self.fleet.add("s-shell-live", 320, "", status="shell", alive=True,
                        name="Live Shell")
         shell_row = self._row("Live Shell")
         self.fleet.status["s-shell-live"] = "idle"
         idle_row = self._row("Live Shell")
-        self.assertEqual((idle_row["state"], idle_row["state_reason"]),
-                         (shell_row["state"], shell_row["state_reason"]))
+        self.assertEqual(h.STATE_WORKING, shell_row["state"])
+        self.assertEqual((h.STATE_UNCLASSIFIED, "idle with no ask"),
+                         (idle_row["state"], idle_row["state_reason"]))
 
     def test_a_dead_shell_session_is_still_a_bare_shell(self):
         # The negative arm. Without it, deleting the shell branch outright
@@ -955,6 +959,9 @@ class FourStateTest(Base):
                        name="Unknown Shell")
         row = self._row("Unknown Shell")
         self.assertNotEqual("bare shell", row["state_reason"])
+        # Nor is it proof of a held child: `working` needs `alive is True`.
+        self.assertEqual((h.STATE_UNCLASSIFIED, "idle with no ask"),
+                         (row["state"], row["state_reason"]))
 
     def test_a_machine_bound_wait_is_external_and_names_its_watcher(self):
         row = {r["name"]: r for r in self.sweep["parked"]}["External Watch"]
@@ -967,6 +974,207 @@ class FourStateTest(Base):
                       h.STATE_CLOSED, h.STATE_UNCLASSIFIED):
             self.assertIn(state, out)
         self.assertIn("decision 2", out)
+
+
+# The 2026-10-19 live panes this class reproduces, as their sessions wrote them.
+# A hand read of 23 panes found 11 mislabelled, and every shape below is one of
+# them — the `idle`/`shell`/`busy` registry status is the one the session really
+# carried, because a `waiting` fixture reaches the parked branch through the
+# registry alone and would be green on the code these tests exist to change.
+PANEL_CRON = (  # pane 808
+    "🟡 WAITING\n"
+    "   What:     the 24h recurrence window on the Sentry issue\n"
+    "   Progress: 21h 49m of 24h; 0 new events\n"
+    "   ETA:      by ~22:27 local (2026-10-19T20:26:42Z)\n"
+    "   Blocks:   SC3, DoD6, DoD7\n"
+    "   Done?:    in_progress · execution · 6 open\n"
+    "   Help:     nothing — unless the Sentry write 403s at 22:33\n"
+    "👤 You:    nothing\n"
+    "⏰ Ends:   one-shot cron job 6864ab1d at 22:33 local re-reads Sentry and both "
+    "pod logs, resolves the issue, closes the task\n")
+PANEL_MANAGER = (  # pane 794
+    "🟡 WAITING\n"
+    "   What:     Re-Key worker planning; SC4 recurrence windows\n"
+    "   Progress: SC4 1/3 counted, 2 shipped\n"
+    "   ETA:      SC4 2026-10-26; Re-Key unknown — planning\n"
+    "   Help:     nothing — no open gate\n"
+    "👤 You:    nothing\n"
+    "⏰ Ends:   Re-Key worker reaches its first decision (manager round wakeup at 20:42)\n")
+PANEL_CLOCK = (
+    "🟡 WAITING · nothing running (clock-bound until 2026-10-21) · nothing needed\n"
+    "👤 You: nothing\n"
+    "⏰ Next: 2026-10-21 09:00 — the one-shot ScheduleWakeup re-reads the alert count\n")
+PANEL_SUBAGENT = (  # pane 832 — `busy`, because a background agent runs
+    "🟡 WAITING\n"
+    "   What:     make buca of backtest/agent on dev\n"
+    "   Help:     nothing — automated\n"
+    "👤 You:    nothing\n"
+    "⏰ Ends:   the deploy runner reports (simple-bash-runner subagent, dispatched "
+    "this turn)\n")
+PANEL_DONE = (
+    "⚪ DONE · nothing running · nothing needed\n"
+    "👤 You: nothing\n"
+    "⏰ Next: no mechanism is running\n")
+PANEL_REPLY = (
+    "🔵 READY · nothing running · you decide\n"
+    "👤 You: nothing\n"
+    "⏰ Ends: your `applied` reply — I then run the migration\n")
+PANEL_ACTIVE_SHELL = (  # pane 855
+    "🟢 ACTIVE · 1 running (post-commit e2e readout) · nothing needed\n"
+    "👤 You: nothing\n"
+    "⏰ Next: the background readout exits; I then record # Results\n")
+PANEL_WAITING_SHELL = (  # pane 856's first shape: a 7-day run it watches
+    "🟡 WAITING\n"
+    "   What:     the 7-day accepted-changes backfill\n"
+    "   ETA:      unknown — GitHub rate limit\n"
+    "👤 You:    nothing\n"
+    "⏰ Ends:   the background backfill exits (run_in_background shell)\n")
+PROSE_SHELL = "Full run started with the batched GraphQL data layer.\n"  # pane 856 now
+PANEL_PICK = (  # pane 854 — idle on a pick while a background agent keeps `busy`
+    "PR #126: CI green, draft, awaiting the review loop before flipping ready.\n"
+    "🔵 READY · 1 running (background agent) · you decide\n"
+    "👤 You: pick — 1. flip PR #126 ready and trigger the bot review (recommended) "
+    "· 2. run one more local review round\n"
+    "⏰ Next: my next tool round\n")
+
+
+class WatcherAndShellStateTest(Base):
+    """The 2026-10-19 mislabels: a watched wait, a held shell, a busy-but-ended turn.
+
+    Every row is asserted through `build()`, never `state_of()` alone: the parked
+    branch of `state_of()` already answered `external` for these shapes, and the
+    defect was that `parked()` never sent them there — a `nothing` closer was read
+    as "nothing to report" before the `⏰` line was looked at.
+    """
+
+    def _transcript_file(self, sid, closer_text, *, turn_after):
+        """A JSONL transcript whose last closer is or is not followed by a turn."""
+        path = os.path.join(self.root, f"{sid}.jsonl")
+        lines = [{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": closer_text}]}}]
+        if turn_after:
+            lines.append({"type": "user", "message": {"content": "continue"}})
+        with open(path, "w", encoding="utf-8") as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
+        return path
+
+    def _add(self, sid, pane, text, *, status, alive=True, turn_after=False):
+        self.fleet.add(sid, pane, "", status=status, alive=alive, name=sid,
+                       kind="idle", transcript=text)
+        if status == "busy":
+            self.fleet.records[-1]["transcript"] = self._transcript_file(
+                sid, text, turn_after=turn_after)
+
+    def _row(self, name):
+        sweep = self.fleet.sweep()
+        for r in sweep["parked"] + sweep["not_parked"]:
+            if r["name"] == name:
+                return r
+        self.fail(f"{name} rendered no row at all")
+
+    # --- a `nothing` closer whose `⏰` line names a machine --------------------
+
+    def test_a_cron_watch_is_external_with_the_panel_eta(self):
+        self._add("cron", 808, PANEL_CRON, status="idle")
+        row = self._row("cron")
+        self.assertEqual(h.STATE_EXTERNAL, row["state"])
+        self.assertIn("cron job 6864ab1d", row["watcher"])
+        self.assertEqual("by ~22:27 local (2026-10-19T20:26:42Z)", row["eta"])
+
+    def test_a_manager_round_wakeup_is_external(self):
+        self._add("manager", 794, PANEL_MANAGER, status="idle")
+        row = self._row("manager")
+        self.assertEqual(h.STATE_EXTERNAL, row["state"])
+        self.assertIn("manager round wakeup", row["watcher"])
+
+    def test_a_next_clock_is_external(self):
+        self._add("clock", 824, PANEL_CLOCK, status="idle")
+        row = self._row("clock")
+        self.assertEqual(h.STATE_EXTERNAL, row["state"])
+        self.assertIn("ScheduleWakeup", row["watcher"])
+
+    def test_a_busy_session_whose_turn_ended_on_a_subagent_watch_is_external(self):
+        self._add("subagent", 832, PANEL_SUBAGENT, status="busy")
+        row = self._row("subagent")
+        self.assertEqual(h.STATE_EXTERNAL, row["state"])
+        self.assertIn("deploy runner reports", row["watcher"])
+
+    def test_a_done_closer_is_not_a_machine_wait(self):
+        self._add("done", 860, PANEL_DONE, status="idle")
+        row = self._row("done")
+        self.assertNotEqual(h.STATE_EXTERNAL, row["state"])
+        self.assertEqual("idle with no ask", row["state_reason"])
+
+    def test_a_watcher_slot_asking_the_operator_is_not_a_machine_wait(self):
+        self._add("reply", 861, PANEL_REPLY, status="idle")
+        self.assertNotEqual(h.STATE_EXTERNAL, self._row("reply")["state"])
+
+    def test_an_eta_slot_does_not_promote_an_operator_ask_to_external(self):
+        # The slot is displayed, never evidence: a panel whose `⏰ Ends:` asks the
+        # operator (pane 449's shape) still carries an estimate, and reading that
+        # estimate as a machine trigger would undo the guard for that shape.
+        self._add("reply-eta", 864,
+                  "👤 You: Orienting on the task — assistant is searching the vault.\n"
+                  "   ETA:      by ~21:30\n"
+                  "⏰ Ends: ` your reply — I run the three commands\n",
+                  status="idle")
+        row = self._row("reply-eta")
+        self.assertEqual((h.STATE_UNCLASSIFIED,
+                          "watcher asks the operator, not a machine"),
+                         (row["state"], row["state_reason"]))
+        self.assertEqual("by ~21:30", row["eta"])
+
+    # --- a held background shell ---------------------------------------------
+
+    def test_an_active_shell_with_a_next_line_is_working_not_external(self):
+        self._add("active-shell", 855, PANEL_ACTIVE_SHELL, status="shell")
+        self.assertEqual(h.STATE_WORKING, self._row("active-shell")["state"])
+
+    def test_a_shell_behind_a_prose_closer_is_working(self):
+        self._add("prose-shell", 856, PROSE_SHELL, status="shell")
+        self.assertEqual(h.STATE_WORKING, self._row("prose-shell")["state"])
+
+    def test_a_waiting_shell_that_names_its_watch_is_external(self):
+        # The precedence on a held shell is the closer's own state icon: a
+        # session that says it is WAITING on a named machine is waiting on it.
+        self._add("waiting-shell", 857, PANEL_WAITING_SHELL, status="shell")
+        self.assertEqual(h.STATE_EXTERNAL, self._row("waiting-shell")["state"])
+
+    def test_a_dead_shell_with_a_nothing_closer_is_still_a_bare_shell(self):
+        self._add("dead-shell", 858, PROSE_SHELL, status="shell", alive=False)
+        row = self._row("dead-shell")
+        self.assertEqual((h.STATE_UNCLASSIFIED, "bare shell"),
+                         (row["state"], row["state_reason"]))
+
+    # --- a `busy` session whose foreground turn ended on a pick ----------------
+
+    def test_a_busy_session_idle_on_a_pick_is_a_decision(self):
+        self._add("pick", 854, PANEL_PICK, status="busy", turn_after=False)
+        row = self._row("pick")
+        self.assertEqual(h.STATE_DECISION, row["state"])
+        self.assertIn(row["gate"], h.OPERATOR_BOUND)
+        self.assertTrue(row["answer"].startswith("flip PR #126 ready"))
+
+    def test_a_busy_session_with_a_turn_after_its_pick_is_working(self):
+        # The negative arm: mid-turn, the last assistant text is the PREVIOUS
+        # turn's panel, so reading it would hand a running session to the operator.
+        self._add("pick-resumed", 859, PANEL_PICK, status="busy", turn_after=True)
+        self.assertEqual(h.STATE_WORKING, self._row("pick-resumed")["state"])
+
+    def test_a_busy_session_with_no_readable_transcript_stays_working(self):
+        # No transcript means no proof the turn ended — stay with the registry.
+        self.fleet.add("blind", 862, "", status="busy", name="blind",
+                       kind="idle", transcript="")
+        self.assertEqual(h.STATE_WORKING, self._row("blind")["state"])
+
+    def test_a_busy_session_whose_tail_holds_no_closer_stays_working(self):
+        # A readable tail with the closer outside it (large blobs written after
+        # the message) is "cannot tell" too — `closer_turn_state()` is `None`.
+        self._add("no-closer", 863, PANEL_PICK, status="busy")
+        self.fleet.records[-1]["transcript"] = self._transcript_file(
+            "no-closer", "Working through the review comments.", turn_after=False)
+        self.assertEqual(h.STATE_WORKING, self._row("no-closer")["state"])
 
 
 class PopulationTest(Base):
