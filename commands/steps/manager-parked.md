@@ -13,9 +13,11 @@ router and restates none of it; the drive leg's report is the input, never a sec
 definition.
 
 - **What a parked row is.** One line per parked **tracked** worker — a worker whose turn
-  has ended holding an open gate: `waiting-on-human`, `waiting-approval`, and the
-  `parked-on-unregistered-gate` class. A worker inside a tool call is not parked; a
-  terminal task is not parked; an untracked session is not this round's to report.
+  has ended with something still outstanding: `waiting-on-human`, `waiting-approval`,
+  **`waiting-external`** (a named machine watcher — its owner is `machine: <watcher>`,
+  which is why that owner kind exists), and the `parked-on-unregistered-gate` class. A
+  worker inside a tool call is not parked; a terminal task is not parked; an untracked
+  session is not this round's to report.
 
 - **The row — four fields, always, in this order:**
   `<jump link> · waits: <what it is parked on> · lever: <the one act that clears it> · owner: <manager|operator|machine: <watcher>>`
