@@ -8,9 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.184.0
+## Unreleased
 
 - fix: **`/supervisor:who-needs-my-help` no longer reads a running or finished session's `⏰` line as a machine wait.** The deployed v0.183.1 sweep, checked pane by pane on 2026-10-19, labelled two sessions `external` wrongly: pane 888 declared itself in worker-drive's own header (`State: working 🟢`), which the `🟢 ACTIVE` test did not know, and pane 889 was a `⚪ DONE` panel whose `⏰ Next:` named the operator (`you open a new session`). `machine_wait()` now refuses a panel whose state line says it is running or finished in either vocabulary (`🟢 ACTIVE`, `⚪ DONE`, `State: working`, `State: closed`), and a `⏰` line led by `you` names no machine. Change set: `scripts/who-needs-my-help.py`, `scripts/tests/test_who_needs_my_help.py`, `CHANGELOG.md`.
+
+## v0.184.0
 
 - feat: **the manager and fleet rounds act on criteria, not only on sessions.** `commands/steps/manager-gates.md` now folds every decision a round holds — its own findings, its `waiting-approval` rows and its relayed pane questions — into ONE batch claimed through `asked-ledger` and rendered under `commands/steps/needs-input.md`, so a round never opens a second modal. `commands/steps/escalate.md` files one task per cause class recurring on two or more distinct days (naming the covering task when one exists) through `Task(vault-cli:task-creator)` — the round holds `Task`, not `Skill` — leaving it at `phase: todo` for approval, instead of re-reporting the same blocker daily. `commands/steps/manager-coverage.md` persists each round's reconciliation line to `~/.claude/state/manager-coverage/<session>.json`, and `commands/steps/output-shape.md` ranks managers by closeness to their SCs from those files (`unranked`, never last, when a manager has no file). Gate letters stay the script's: A–E keep their runbook meaning and nothing in `commands/` carries a second one. Change set: `commands/steps/manager-gates.md`, `commands/steps/manager-coverage.md`, `commands/steps/escalate.md`, `commands/steps/output-shape.md`, `CHANGELOG.md`.
 
