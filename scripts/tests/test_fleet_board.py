@@ -420,6 +420,43 @@ class TestGroupingRules(unittest.TestCase):
         g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
         self.assertEqual(g.parent_of(_sid(3)), _sid(10))
 
+    def test_a_task_listed_directly_under_a_topic_resolves_to_that_topic(self):
+        """F4 — the design's nearest-ancestor case.
+
+        A task named as an entry in a topic's `## Goals` carries no `goals:` and no
+        `managed_by`, so before `task_topics` existed the goal chain was empty and
+        the task fell straight to the root — the fleet manager claimed work the
+        topic manager owns.
+        """
+        index = fb.VaultIndex(
+            topics=["Manager Layer"],
+            goals=[],
+            task_titles=["Some Task"],
+            task_topics={"some task": ["Manager Layer"]},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(10))
+
+    def test_a_task_under_no_topic_still_falls_to_the_root(self):
+        """The control that keeps the new rung from claiming every task."""
+        index = fb.VaultIndex(
+            topics=["Manager Layer"],
+            goals=[],
+            task_titles=["Some Task"],
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(9))
+
     def test_rule_4_no_task_file_is_unmanaged(self):
         g = _grouping()
         self.assertEqual(g.role_of(_sid(5)), "unmanaged")

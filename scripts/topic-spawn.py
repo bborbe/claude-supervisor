@@ -7,7 +7,12 @@ named token on the **first line of stdout**, so a probe can assert on it without
 prose, and the exit code is non-zero for every one of them.
 
   goal-not-in-scope      the goal is not in the topic page's declared `## Goals`
-  goal-not-startable     the goal's `phase` is not `planning` or `execution`
+  goal-not-startable     the goal's `phase` is a value that is not `planning` or
+                           `execution`. An ABSENT phase is exempt, not refused —
+                           `Goals and Topics Carry a Phase Field Gating Manager
+                           Start` § Out of Scope keeps the unphased goals on
+                           today's behavior, and the topic tier is the only
+                           start path they have.
   manager-cap            a bound is reached; the SECOND line names which:
                            goal-cap      — this topic already runs N goal managers
                            manager-cap   — the fleet-wide manager ceiling is reached
@@ -22,7 +27,9 @@ managers against a ceiling of ten. The cap is never raised to make room.
 
 ⚠️ **Startability is the operator's approval, read from disk, never inferred.** A goal at
 `phase: todo` has not been approved; the `todo → planning` flip is the operator's own act
-and this gate must not perform or assume it.
+and this gate must not perform or assume it. ⚠️ **An ABSENT `phase` is not `todo`** — the
+accepted design leaves the unphased goals exempt, so the gate refuses a *value* it does
+not recognise and never refuses the empty one.
 """
 
 from __future__ import annotations
@@ -77,11 +84,20 @@ def section(text: str, heading: str) -> str:
     return rest[: stop.start()] if stop else rest
 
 
-def declared_goals(page: str) -> list[str]:
+def declared_goals(page: str, goals_dir: str | None = None) -> list[str]:
     """The goal names in the topic page's `## Goals` list, in declaration order.
 
     Handles a `[[wikilink]]` entry and a bare name alike, and strips a trailing
     ` — note` / ` (note)` the page may carry after the name.
+
+    ⚠️ **A prose bullet is not a declaration.** The section carries list items
+    that are notes, not members — a measured page held
+    `- **Binding now (2026-10-19 22:04):** …`, whose bold label parsed as the
+    goal name `**Binding now` and inflated the declared count 26 against 25 real
+    goals. With `goals_dir` passed, an entry is kept only when it resolves to a
+    goal page, which drops the artifact and any other non-member alike. Without
+    it (the default) the parse is purely syntactic, and a caller that needs the
+    real count must pass the directory.
     """
     body = section(page, "Goals")
     names = []
@@ -93,8 +109,11 @@ def declared_goals(page: str) -> list[str]:
         m = re.search(r"\[\[([^\]|#]+)", s)
         name = m.group(1) if m else re.split(r"\s+[—–-]\s+|\s+\(", s, maxsplit=1)[0]
         name = name.strip().strip("\"'")
-        if name:
-            names.append(name)
+        if not name or name.startswith("**"):
+            continue
+        if goals_dir is not None and not resolve_page(goals_dir, name):
+            continue
+        names.append(name)
     return names
 
 
@@ -111,15 +130,56 @@ def resolve_page(directory: str, name: str) -> str | None:
     return None
 
 
-def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
-    """Goal managers running on THIS topic, from each goal page's `manager_session_id`.
+def fleet_goal_managers(goals: list[str]) -> set:
+    """Session ids of live goal managers on `goals`, from the fleet registry.
 
-    § 4's own detection signal: the resolve step writes the id, and
-    `session-liveness.py --check` answers LIVE / ABSENT / UNKNOWN. Only LIVE counts —
-    an UNKNOWN is not a dead manager, but it is also not a running one, and counting it
-    would refuse a start on evidence nothing produced.
+    ⚠️ **The page id alone undercounts, and the shortfall is not rare.** The
+    resolve step is the only writer of `manager_session_id`, so a goal manager
+    started by any other path (a hand-opened `/supervisor:open`, a manager
+    re-adopted after a reconnect) runs with no page record at all — measured
+    2026-10-20: the live goal manager for one topic read as unmanaged, and the
+    round would have started a second one for an already-managed goal.
+    `fleet-board.py --json` classifies `role: manager` and now emits the managed
+    `subject`, which is the same field `manager_on_chain` resolves.
     """
-    count = 0
+    probe = subprocess.run(
+        [sys.executable, os.path.join(REPO, "scripts", "fleet-board.py"), "--json"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        return set()
+    try:
+        doc = json.loads(probe.stdout)
+    except ValueError:
+        return set()
+    sessions = doc.get("sessions")
+    if not isinstance(sessions, list):
+        return set()
+    wanted = {g.lower() for g in goals}
+    return {
+        s.get("session_id") for s in sessions
+        if isinstance(s, dict)
+        and s.get("role") == "manager"
+        and (s.get("subject") or "").lower() in wanted
+        and s.get("session_id")
+    }
+
+
+def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
+    """Goal managers running on THIS topic — the union of both signals.
+
+    Two independent sources, and neither is complete on its own:
+
+    * each goal page's `manager_session_id`, probed through
+      `session-liveness.py --check`, which answers LIVE / ABSENT / UNKNOWN. Only
+      LIVE counts — an UNKNOWN is not a dead manager, but it is also not a running
+      one, and counting it would refuse a start on evidence nothing produced.
+    * the fleet registry, through `fleet_goal_managers()`, which sees a manager the
+      page never recorded.
+
+    A session in both is counted once.
+    """
+    seen = fleet_goal_managers(goals)
     for goal in goals:
         page = resolve_page(os.path.join(vault, GOALS_DIR), goal)
         if not page:
@@ -137,8 +197,8 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
             capture_output=True, text=True,
         )
         if probe.returncode == 0:
-            count += 1
-    return count
+            seen.add(sid)
+    return len(seen)
 
 
 def fleet_manager_ceiling() -> int | None:
@@ -266,7 +326,9 @@ def rank(vault: str, topic_text: str, goals: list[str], n: int) -> list[dict]:
         except OSError:
             continue
         phase = scalar(fm, "phase").lower()
-        if phase not in STARTABLE_PHASES:
+        # An absent phase is exempt (see the module docstring): the goal is
+        # startable, so it must be ranked, not silently dropped from the list.
+        if phase and phase not in STARTABLE_PHASES:
             continue
         try:
             priority = int(scalar(fm, "priority") or 999)
@@ -324,7 +386,7 @@ def main(argv: list[str]) -> int:
 
     # (2b) `--rank` answers "which goals get the N slots", and needs no goal argument.
     if a.rank:
-        goals = declared_goals(topic_text)
+        goals = declared_goals(topic_text, os.path.join(vault, GOALS_DIR))
         rows = rank(vault, topic_text, goals, a.max_goal_managers)
         print(f"rank: {len(rows)} startable of {len(goals)} declared · N = {a.max_goal_managers}")
         for i, r in enumerate(rows, 1):
@@ -342,8 +404,9 @@ def main(argv: list[str]) -> int:
     with open(goal_page, encoding="utf-8") as fh:
         goal_fm = frontmatter(fh.read())
 
-    # (4) Membership — declared, never re-derived.
-    goals = declared_goals(topic_text)
+    # (4) Membership — declared, never re-derived. Resolvable entries only, so a
+    # prose bullet in the section cannot claim membership it never had.
+    goals = declared_goals(topic_text, os.path.join(vault, GOALS_DIR))
     if a.goal not in goals:
         return refuse(
             REFUSE_SCOPE,
@@ -353,12 +416,16 @@ def main(argv: list[str]) -> int:
 
     # (5) Startability — the operator's approval, read from disk.
     phase = scalar(goal_fm, "phase")
-    if phase not in STARTABLE_PHASES:
+    # ⚠️ `phase and ...` is the whole fix: an ABSENT phase is exempt, per the
+    # accepted design. Refusing it made 22 of one live topic's 25 goals
+    # unstartable the moment the split shipped — the tier is their only start
+    # path, so the stricter reading silently removed them from management.
+    if phase and phase not in STARTABLE_PHASES:
         return refuse(
             REFUSE_STARTABLE,
-            f"<{a.goal}> is at phase `{phase or '(none)'}`; only "
+            f"<{a.goal}> is at phase `{phase}`; only "
             f"{' or '.join(STARTABLE_PHASES)} is startable. `todo → planning` is the "
-            f"operator's own flip.",
+            f"operator's own flip. An absent phase is exempt, so only a value is refused.",
         )
 
     # (6) The inner bound, then the outer one — the ceiling always wins.

@@ -7,8 +7,10 @@ refused everything would satisfy every refusal case on its own.
 """
 
 import io
+import json
 import pathlib
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stdout
 
@@ -90,6 +92,34 @@ class DeclaredGoalsTest(unittest.TestCase):
         # hyphen survives — the vault has many (`Prod-Ready`, `Non-Goal`).
         self.assertEqual(["A Non-Goal Thing"], ts.declared_goals("## Goals\n- [[A Non-Goal Thing]]\n"))
 
+    def test_a_prose_bullet_is_not_a_declared_goal(self):
+        """F2 — a note bullet's bold label parsed as a goal name.
+
+        Measured 2026-10-20: `- **Binding now (2026-10-19 22:04):** …` produced the
+        name `**Binding now`, inflating one topic's declared count 26 against 25
+        real goals. With the goals dir passed, an entry must resolve to a page.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            goals = pathlib.Path(tmp)
+            (goals / "Alpha.md").write_text("---\n---\n", encoding="utf-8")
+            page = ("## Goals\n- [[Alpha]]\n"
+                    "- **Binding now (2026-10-19 22:04):** a note, not a member\n")
+            self.assertEqual(["Alpha"], ts.declared_goals(page, str(goals)))
+
+    def test_without_a_goals_dir_the_parse_stays_syntactic(self):
+        """The control: the directory is what filters an unresolvable name.
+
+        The bold-label test above passes on the markup alone, so this one uses a
+        plain name that resolves to nothing — kept by the syntactic parse, dropped
+        once the goals dir is supplied.
+        """
+        page = "## Goals\n- [[Alpha]]\n- Missing Goal\n"
+        self.assertEqual(["Alpha", "Missing Goal"], ts.declared_goals(page))
+        with tempfile.TemporaryDirectory() as tmp:
+            goals = pathlib.Path(tmp)
+            (goals / "Alpha.md").write_text("---\n---\n", encoding="utf-8")
+            self.assertEqual(["Alpha"], ts.declared_goals(page, str(goals)))
+
 
 class TopicSpawnTest(unittest.TestCase):
     def setUp(self):
@@ -156,6 +186,29 @@ class TopicSpawnTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("spawn-ok: Delta", out[0])
 
+    def test_a_goal_with_no_phase_is_exempt_and_starts(self):
+        """F1 — an ABSENT phase is exempt, not refused.
+
+        The accepted design leaves the unphased goals on today's behaviour, and the
+        topic tier is their only start path: refusing them made 22 of one live
+        topic's 25 goals unstartable the moment the split shipped.
+        """
+        (self.vault / "24 Goals" / "Delta.md").write_text(
+            "---\npage_type: goal\nstatus: in_progress\npriority: 4\n---\n",
+            encoding="utf-8",
+        )
+        rc, out = self.run_gate("--goal", "Delta")
+        self.assertEqual(0, rc)
+        self.assertEqual("spawn-ok: Delta", out[0])
+
+    def test_a_goal_with_no_phase_is_ranked_not_dropped(self):
+        (self.vault / "24 Goals" / "Delta.md").write_text(
+            "---\npage_type: goal\nstatus: in_progress\npriority: 4\n---\n",
+            encoding="utf-8",
+        )
+        rc, out = self.run_gate("--rank")
+        self.assertEqual("rank: 4 startable of 4 declared · N = 3", out[0])
+
     def test_the_per_topic_cap_refuses_and_names_goal_cap(self):
         ts.live_goal_managers = lambda vault, topics_dir, goals: 3
         rc, out = self.run_gate("--goal", "Alpha")
@@ -207,6 +260,43 @@ class TopicSpawnTest(unittest.TestCase):
         rc, out = self.run_gate("--rank")
         self.assertEqual("rank: 2 startable of 2 declared · N = 3", out[0])
         self.assertEqual(2, sum(1 for line in out[1:] if " start " in line))
+
+
+class FleetGoalManagersTest(unittest.TestCase):
+    """F5 — the N-slot count must see a goal manager the page never recorded."""
+
+    def _with_probe(self, doc):
+        fake = types.SimpleNamespace(returncode=0, stdout=json.dumps(doc))
+        original = ts.subprocess.run
+        ts.subprocess.run = lambda *a, **k: fake
+        self.addCleanup(lambda: setattr(ts.subprocess, "run", original))
+
+    def test_a_registry_manager_on_a_goal_counts(self):
+        self._with_probe({"sessions": [
+            {"session_id": "s1", "role": "manager", "subject": "Alpha"},
+            {"session_id": "s2", "role": "manager", "subject": "Beta"},
+            {"session_id": "s3", "role": "worker", "subject": "Alpha"},
+        ]})
+        self.assertEqual({"s1"}, ts.fleet_goal_managers(["Alpha"]))
+
+    def test_a_worker_on_a_goal_does_not_count(self):
+        self._with_probe({"sessions": [
+            {"session_id": "s3", "role": "worker", "subject": "Alpha"},
+        ]})
+        self.assertEqual(set(), ts.fleet_goal_managers(["Alpha"]))
+
+    def test_the_page_id_and_the_registry_id_are_counted_once_each(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = pathlib.Path(tmp)
+            (vault / "24 Goals").mkdir()
+            (vault / "24 Goals" / "Alpha.md").write_text(
+                "---\nmanager_session_id: page-sid\n---\n", encoding="utf-8"
+            )
+            self._with_probe({"sessions": [
+                {"session_id": "page-sid", "role": "manager", "subject": "Alpha"},
+                {"session_id": "registry-sid", "role": "manager", "subject": "Alpha"},
+            ]})
+            self.assertEqual(2, ts.live_goal_managers(str(vault), "", ["Alpha"]))
 
 
 if __name__ == "__main__":
