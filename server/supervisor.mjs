@@ -1432,6 +1432,97 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 // that cannot be refused first is the worker itself: a `create` whose reply fails AFTER the
 // executor started a container reports FAILED, which is why `createWorkerOnController` returns
 // the controller's own text rather than a "nothing happened" claim.
+// Stop a controller worker named by its bare id — for a worker this server has no ledger row for.
+//
+// ⚠️ THE TOKEN NEVER LEAVES THIS PROCESS, WHICH IS THE WHOLE REASON THIS EXISTS. A worker whose
+// spawn failed after `create` has no row, so `stop_agent` answered "unknown agent" and the only
+// remaining route was to run the controller's stop by hand — which means extracting the controller
+// token into a shell. The server already holds that token, so the caller supplies an id and nothing
+// else. Measured 2026-10-20: two workers filled the `a2a-worker` quota and no session on the machine
+// could free them.
+//
+// ⚠️ EVERY CONFIGURED TARGET IS TRIED, BECAUSE A BARE ID CARRIES NO TARGET. A controller that does
+// not own the id REFUSES it rather than removing something, so a wrong target costs a refusal and
+// never a wrong removal; the first target that answers wins. `target` narrows the attempt when the
+// caller knows which backend it means.
+async function stopWorkerByIdOnController({ workerId, target }) {
+  if (typeof workerId !== 'string' || workerId === '') {
+    return { error: 'stop_agent needs a non-empty agent_id or worker id' }
+  }
+  const targets = target ? [target] : A2A_SPAWN_TARGETS
+  const refusals = []
+  for (const name of targets) {
+    const controller = resolveA2AControllerTarget({
+      target: name,
+      envUrl: config.a2aUrls[name],
+      envToken: config.a2aTokens[name],
+      file: config.configFileContents,
+      path: config.configFile,
+    })
+    if (controller.error) {
+      refusals.push(`${name}: ${controller.error}`)
+      continue
+    }
+    const stopped = await stopWorkerOnController({
+      endpoint: controller.url,
+      workerId,
+      token: controller.token,
+      messageId: randomUUID(),
+      mint: () => randomUUID(),
+    })
+    if (!stopped.error) {
+      return { workerId, target: name, state: stopped.state, response: stopped.response }
+    }
+    refusals.push(`${name}: ${stopped.error}`)
+  }
+  // ⚠️ The `unknown agent` wording is kept so an existing caller's expectation does not change, but
+  // the attempts are named — "unknown" alone is what made this undiagnosable in the first place.
+  return {
+    error: `unknown agent ${workerId} — no ledger row, and no controller would stop it (${refusals.join('; ')})`,
+  }
+}
+
+// Record a worker the controller minted but this spawn could not reach, then return its error.
+//
+// ⚠️ ONE HELPER BECAUSE THE DEFECT IS ONE CLASS, NOT ONE PATH. Two returns after a successful
+// `create` can fail while the worker already EXISTS — an unreadable Agent Card, a failed session
+// binding — and each used to return its error with the worker id while writing no row, so
+// `stop_agent` answered "unknown agent" for a worker that was running. Measured twice on
+// 2026-10-20: a pod refused by ResourceQuota (503 card), then a bind failure on a task name with no
+// vault file. Fixing only the card path leaves the second one live, which is why this is a helper
+// the two paths share rather than two patches. (A third return — an unbuildable record — cannot use
+// it: `a2aWorkerRecord` refuses only on a non-A2A target, so rebuilding from the same target would
+// fail identically and write nothing. That branch reports instead; see its own guard.)
+//
+// ⚠️ `sessionId: null` IS DELIBERATE, NOT AN OMISSION. No session serves this worker — the minted
+// id was never bound to the task and never started — so naming it would let `a2aLiveSessions`
+// stamp a phantom session live on the strength of a worker that has no session behind it. That
+// function skips a record with no session id, which is exactly what this row needs.
+//
+// ⚠️ THE ERROR IS FILED ON THE RECORD, so a roster read says why the worker has no turn instead of
+// showing a healthy worker that silently never ran.
+function recordUnreachableWorker({ error, created, id, label, prompt, task, target }) {
+  const built = a2aWorkerRecord({
+    id,
+    label,
+    prompt,
+    task,
+    target,
+    sessionId: null,
+    workerId: created.worker.worker_id,
+    a2aUrl: created.worker.a2a_url,
+    workerToken: created.token,
+    parentSession: parentSessionId({ dir: config.sessionsDir }),
+    createdAt: new Date().toISOString(),
+  })
+  if (!built.error) {
+    built.record.error = error
+    agents.set(id, built.record)
+    writeLedger(built.record)
+  }
+  return { error, worker_id: created.worker.worker_id }
+}
+
 async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, windowId, role, operatorNamed, shipping, env, mounts, secrets, target }) {
   const refusal = a2aSpawnArgumentRefusal({
     target,
@@ -1593,18 +1684,28 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   // fact from a create that never ran, and the two must not read alike.
   const card = await fetchWorkerCard({ a2aUrl: created.worker.a2a_url })
   if (card.error) {
-    return {
+    return recordUnreachableWorker({
       error: `worker ${created.worker.worker_id} was created but its Agent Card could not be read, so no turn could reach it: ${card.error}`,
-      worker_id: created.worker.worker_id,
-    }
+      created,
+      id,
+      label,
+      prompt,
+      task,
+      target,
+    })
   }
 
   const bound = bindSessionToTask({ task, vault, sessionId: minted.sessionId })
   if (bound.error) {
-    return {
+    return recordUnreachableWorker({
       error: `worker ${created.worker.worker_id} was created but binding session ${minted.sessionId} to task "${task}" failed: ${bound.error}`,
-      worker_id: created.worker.worker_id,
-    }
+      created,
+      id,
+      label,
+      prompt,
+      task,
+      target,
+    })
   }
 
   const built = a2aWorkerRecord({
@@ -1620,7 +1721,20 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     parentSession: parentSessionId({ dir: config.sessionsDir }),
     createdAt: new Date().toISOString(),
   })
-  if (built.error) return { error: built.error }
+  // ⚠️ A GUARD, NOT A THIRD RECORDING PATH — and the distinction is load-bearing. `a2aWorkerRecord`
+  // refuses in exactly one case: `a2aWorkerStatus({ target })` is null, which happens iff `target` is
+  // not an A2A target. That is a pure function of the value this path already holds, and the
+  // dispatch that reaches here has restricted target to docker or k8s, so it cannot fire today.
+  // ⚠️ Routing it through `recordUnreachableWorker` would be a NO-OP IF IT EVER DID: that helper
+  // rebuilds the record from the same `target` and fails identically, writing nothing while
+  // returning a shape that reads as though a row had landed. Reporting is the honest outcome for an
+  // invariant break — a row whose status the roster cannot interpret would be worse than none.
+  if (built.error) {
+    return {
+      error: `worker ${created.worker.worker_id} was created but its record could not be built: ${built.error}`,
+      worker_id: created.worker.worker_id,
+    }
+  }
 
   // ⚠️ A RECEIVER THAT NEVER BOUND IS THE FIRST THING THIS FIELD MUST SAY. Without it the spawn
   // proceeds, `push` is undefined, `onTaskId` returns at its first line, and the channel is silent
@@ -2628,7 +2742,16 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        agent_id: { type: 'string', description: 'The A2A worker to stop — the id `spawn_agent` returned, or one from `list_agents`.' },
+        agent_id: {
+          type: 'string',
+          description:
+            'The A2A worker to stop — the id `spawn_agent` returned, or one from `list_agents`. ⚠️ A bare controller WORKER ID is also accepted, for a worker that has no ledger row (a spawn that failed after `create`): it is sent to the controller\'s stop with the token this server already holds, so no credential reaches the caller.',
+        },
+        target: {
+          type: 'string',
+          description:
+            'Optional `docker` / `k8s`, to narrow which controller a bare worker id is tried against. Ignored when `agent_id` names a ledger row, whose target the row already carries.',
+        },
       },
       required: ['agent_id'],
     },
@@ -2953,7 +3076,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // row — so a re-adopted row this process cannot MESSAGE is still stoppable, and the refusal
       // below is scoped to what stop actually requires rather than to what a turn would.
       const agent = (await currentRoster()).get(args.agent_id)
-      if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
+      // ⚠️ A BARE WORKER ID IS STOPPABLE, AND THAT IS THE POINT OF THIS BRANCH. A spawn that fails
+      // after the controller minted a worker has no row here (see `recordUnreachableWorker`), and
+      // before this the only way to remove that worker was to run the controller's own stop by
+      // hand — which means extracting the controller token into a shell. This server already holds
+      // that token, so a caller who knows the worker id stops the worker and never sees a
+      // credential. Measured 2026-10-20: two quota-filler workers were unstoppable from every
+      // session on the machine for exactly this reason.
+      if (!agent) {
+        const bare = await stopWorkerByIdOnController({
+          workerId: args.agent_id,
+          target: args.target,
+        })
+        if (bare.error) return reply({ error: bare.error })
+        return reply({
+          worker_id: bare.workerId,
+          target: bare.target,
+          state: bare.state,
+          response: bare.response,
+        })
+      }
 
       // Only an A2A worker has a controller worker behind it. Refused with the reason per kind
       // rather than a bare "not supported", so a caller told no is told what to do instead.
