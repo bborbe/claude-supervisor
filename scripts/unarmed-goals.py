@@ -48,7 +48,6 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SESSION_LIVENESS = os.path.join(HERE, "session-liveness.py")
@@ -122,20 +121,6 @@ def session_ids(block):
                 ids.add(match.group(1).strip().strip('"').strip("'").lower())
     ids.discard("")
     return ids
-
-
-def parse_iso(value):
-    """Parse an ISO-8601 frontmatter date, or None when it is absent/unparseable."""
-    if not value:
-        return None
-    text = value.strip().strip('"').strip("'")
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def read_live(registry_dir=None, heartbeat_dir=None):
@@ -264,17 +249,12 @@ def main(argv=None):
     parser.add_argument("--tasks-dir", required=True, help="the vault's task directory")
     parser.add_argument("--registry-dir", default=None, help="override the session registry path")
     parser.add_argument("--heartbeat-dir", default=None, help="override the heartbeat store")
-    parser.add_argument("--now", default=None, help="ISO-8601 'now' for tests")
     parser.add_argument("--json", action="store_true", help="emit the rows as JSON")
     args = parser.parse_args(argv)
 
     if not os.path.isdir(args.tasks_dir):
         print("❌ tasks dir not found: %s" % args.tasks_dir, file=sys.stderr)
         return 1
-    if args.now and parse_iso(args.now) is None:
-        print("❌ --now is not an ISO-8601 timestamp: %s" % args.now, file=sys.stderr)
-        return 1
-
     live = read_live(args.registry_dir, args.heartbeat_dir)
     if live is None:
         # The third state. Never `0` — an unreadable registry and an empty fleet must not
