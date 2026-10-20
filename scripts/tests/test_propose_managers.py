@@ -421,5 +421,67 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.run_main(["--json", "--post"])[0], 2)
 
 
+class PhaseGateTest(unittest.TestCase):
+    """A goal in the approval inbox is asked for APPROVAL, never for a manager.
+
+    The gate exists because `phase: todo` is the operator's inbox: a start-manager card on
+    an unapproved goal would let the approval step be skipped by answering the wrong card.
+    An ABSENT phase must keep the start card — absent is exempt, not unapproved, which is
+    the contract `vault-cli goal approve` states.
+    """
+
+    def qualify(self, rows):
+        return pm.qualify(rows, [], {}, BOARD)
+
+    def card(self, goal, phase=None):
+        candidate = {"goal": goal, "vault": "v", "approved": 2,
+                     "tasks": ["a", "b"], "priority": 2}
+        if phase is not None:
+            candidate["phase"] = phase
+        return pm.card_for(candidate, None, None)
+
+    def test_a_todo_goal_gets_the_approve_card(self):
+        card = self.card("Queued", phase="todo")
+        self.assertEqual(card["options"], ["approve", "not now"])
+        self.assertEqual(card["recommend"], "approve")
+        self.assertEqual(card["dedup_key"], pm.approve_dedup_key("Queued"))
+        self.assertIn('vault-cli goal approve "Queued"', card["context"])
+        self.assertNotIn("Start a manager", card["payload"])
+
+    def test_a_planning_goal_keeps_the_start_card(self):
+        card = self.card("Ready", phase="planning")
+        self.assertEqual(card["options"], ["start manager", "not now"])
+        self.assertEqual(card["dedup_key"], pm.dedup_key("Ready"))
+
+    def test_an_absent_phase_keeps_the_start_card(self):
+        card = self.card("Unphased")
+        self.assertEqual(card["options"], ["start manager", "not now"])
+
+    def test_the_two_cards_never_share_a_dedup_key(self):
+        """One key for both would let the store swallow whichever asked second."""
+        self.assertNotEqual(self.card("G", phase="todo")["dedup_key"],
+                            self.card("G", phase="planning")["dedup_key"])
+
+    def test_goal_phase_reads_frontmatter_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "G.md"), "w", encoding="utf-8") as handle:
+                handle.write("---\nphase: todo\npriority: 2\n---\n\n"
+                             "Prose mentioning phase: planning must not count.\n")
+            self.assertEqual(pm.goal_phase(tmp, "G"), "todo")
+            self.assertIsNone(pm.goal_phase(tmp, "Missing"))
+            self.assertIsNone(pm.goal_phase(None, "G"))
+
+    def test_qualify_carries_the_phase(self):
+        rows = [row("Queued", title="a"), row("Queued", title="b"),
+                row("Ready", title="c"), row("Ready", title="d")]
+        original = pm.goal_phase
+        pm.goal_phase = lambda _dir, name: "todo" if name == "Queued" else None
+        try:
+            by_goal = {c["goal"]: c["phase"] for c in self.qualify(rows)}
+        finally:
+            pm.goal_phase = original
+        self.assertEqual(by_goal, {"Queued": "todo", "Ready": None})
+
+
 if __name__ == "__main__":
     unittest.main()
