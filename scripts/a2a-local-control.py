@@ -166,7 +166,7 @@ def resolve_token(env, lookup=teamvault_password):
     return lookup(TOKEN_KEY, env)
 
 
-def control_request(operation, task=None, vault=None, first_step=None):
+def control_request(operation, task=None, vault=None, first_step=None, worker_id=None):
     """The `ControlRequest` for one operation, or None when the shape the controller requires is unmet.
 
     ⚠️ Exactly one operation-specific field, which is the controller's own rule rather than this
@@ -174,6 +174,13 @@ def control_request(operation, task=None, vault=None, first_step=None):
     """
     if operation == "list":
         return {"operation": "list"}
+    if operation == "stop" and isinstance(worker_id, str) and worker_id != "":
+        # ⚠️ `stop` IS KEYED ON THE WORKER ID, NEVER THE TASK NAME, and that is why this verb is
+        # here at all: a task can be spawned again after its first worker died, so a task-keyed
+        # stop would remove the successor. It is also the only route to a worker the supervisor
+        # ledger lost — `stop_agent` resolves from that ledger and answers "unknown agent" when
+        # the spawn failed after the controller had already minted the worker.
+        return {"operation": "stop", "stop": {"worker_id": worker_id}}
     if operation == "create" and isinstance(task, str) and task != "":
         # `vault` / `first_step` are optional and omitted when empty, matching the controller's
         # `omitempty`: an empty vault means the backend's own configured vault.
@@ -437,6 +444,13 @@ def main(argv=None) -> int:
     create.add_argument("--endpoint", default=argparse.SUPPRESS, help=endpoint_help)
     list_workers = commands.add_parser("list", help="print every worker the controller owns")
     list_workers.add_argument("--endpoint", default=argparse.SUPPRESS, help=endpoint_help)
+    stop_worker = commands.add_parser(
+        "stop", help="remove one worker by id — the route to a worker the ledger lost"
+    )
+    stop_worker.add_argument(
+        "--worker-id", required=True, metavar="ID", help="the worker id `list` reports"
+    )
+    stop_worker.add_argument("--endpoint", default=argparse.SUPPRESS, help=endpoint_help)
 
     args = parser.parse_args(argv)
 
@@ -445,9 +459,13 @@ def main(argv=None) -> int:
         getattr(args, "task", None),
         getattr(args, "vault", None),
         getattr(args, "first_step", None),
+        getattr(args, "worker_id", None),
     )
     if request is None:
-        parser.error(f"`{args.command}` requires a non-empty --task name")
+        # The missing argument is the operation's own, so the message names it rather than
+        # repeating `--task` for a verb that has no such flag.
+        required = "--worker-id" if args.command == "stop" else "--task"
+        parser.error(f"`{args.command}` requires a non-empty {required}")
 
     token = resolve_token(os.environ)
     if not token:
