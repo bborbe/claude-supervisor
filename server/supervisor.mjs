@@ -1484,13 +1484,15 @@ async function stopWorkerByIdOnController({ workerId, target }) {
 
 // Record a worker the controller minted but this spawn could not reach, then return its error.
 //
-// ⚠️ ONE HELPER BECAUSE THE DEFECT IS ONE CLASS, NOT ONE PATH. Three returns after a successful
+// ⚠️ ONE HELPER BECAUSE THE DEFECT IS ONE CLASS, NOT ONE PATH. Two returns after a successful
 // `create` can fail while the worker already EXISTS — an unreadable Agent Card, a failed session
-// binding, an unbuildable record — and each used to return its error with the worker id while
-// writing no row, so `stop_agent` answered "unknown agent" for a worker that was running. Measured
-// twice on 2026-10-20: a pod refused by ResourceQuota (503 card), then a bind failure on a task
-// name with no vault file. Fixing only the card path leaves the second one live, which is why this
-// is a helper the three paths share rather than three patches.
+// binding — and each used to return its error with the worker id while writing no row, so
+// `stop_agent` answered "unknown agent" for a worker that was running. Measured twice on
+// 2026-10-20: a pod refused by ResourceQuota (503 card), then a bind failure on a task name with no
+// vault file. Fixing only the card path leaves the second one live, which is why this is a helper
+// the two paths share rather than two patches. (A third return — an unbuildable record — cannot use
+// it: `a2aWorkerRecord` refuses only on a non-A2A target, so rebuilding from the same target would
+// fail identically and write nothing. That branch reports instead; see its own guard.)
 //
 // ⚠️ `sessionId: null` IS DELIBERATE, NOT AN OMISSION. No session serves this worker — the minted
 // id was never bound to the task and never started — so naming it would let `a2aLiveSessions`
@@ -1719,10 +1721,19 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     parentSession: parentSessionId({ dir: config.sessionsDir }),
     createdAt: new Date().toISOString(),
   })
-  // ⚠️ THE THIRD PATH IN THE SAME CLASS. The worker exists here too, so a record it cannot be
-  // built for is still a worker something must be able to reap.
+  // ⚠️ A GUARD, NOT A THIRD RECORDING PATH — and the distinction is load-bearing. `a2aWorkerRecord`
+  // refuses in exactly one case: `a2aWorkerStatus({ target })` is null, which happens iff `target` is
+  // not an A2A target. That is a pure function of the value this path already holds, and the
+  // dispatch that reaches here has restricted target to docker or k8s, so it cannot fire today.
+  // ⚠️ Routing it through `recordUnreachableWorker` would be a NO-OP IF IT EVER DID: that helper
+  // rebuilds the record from the same `target` and fails identically, writing nothing while
+  // returning a shape that reads as though a row had landed. Reporting is the honest outcome for an
+  // invariant break — a row whose status the roster cannot interpret would be worse than none.
   if (built.error) {
-    return recordUnreachableWorker({ error: built.error, created, id, label, prompt, task, target })
+    return {
+      error: `worker ${created.worker.worker_id} was created but its record could not be built: ${built.error}`,
+      worker_id: created.worker.worker_id,
+    }
   }
 
   // ⚠️ A RECEIVER THAT NEVER BOUND IS THE FIRST THING THIS FIELD MUST SAY. Without it the spawn
