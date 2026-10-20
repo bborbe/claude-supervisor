@@ -295,3 +295,93 @@ class StoodDownVersusLapsed(unittest.TestCase):
             self.assertIn(token, row, token)
         self.assertLess(row.index("STOPPED"), row.index("stood-down"))
         self.assertLess(row.index("STALE"), row.index("lapsed"))
+
+
+class DeprecatedTopicFlag(unittest.TestCase):
+    """`--topic` was renamed to `--subject` in 0.187.0 with no compatibility path.
+
+    ⚠️ Every armed manager loop's wakeup prompt carried `--topic`, so a reload without
+    this alias makes each tick fail with `unrecognized arguments` and the liveness
+    record silently stops updating.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(lambda: os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None))
+
+    def run_cli(self, *argv):
+        out, old = io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def test_arm_accepts_the_deprecated_topic_flag(self):
+        rc, out = self.run_cli("--arm", "--topic", "Legacy Subject", "--interval", "60")
+        self.assertEqual(0, rc)
+        self.assertIn("armed goal--legacy-subject", out)
+
+    def test_state_accepts_the_deprecated_topic_flag(self):
+        self.run_cli("--arm", "--topic", "Legacy Subject", "--interval", "60")
+        rc, out = self.run_cli("--state", "--topic", "Legacy Subject")
+        self.assertEqual(0, rc)
+        self.assertTrue(out.startswith("OK\tgoal--legacy-subject"), out)
+
+    def test_an_existing_prefixed_record_decides_the_branch(self):
+        # A topic manager that already armed under `topic--` keeps that branch even
+        # though the default for an unresolvable subject is `goal`.
+        open(self.m.path("topic--named-topic", "cadence"), "w").write("300\n")
+        rc, out = self.run_cli("--arm", "--topic", "Named Topic", "--interval", "60")
+        self.assertEqual(0, rc)
+        self.assertIn("armed topic--named-topic", out)
+
+
+class LegacyRecordMigration(unittest.TestCase):
+    """The pre-split flat records must not survive to fire a false STALE.
+
+    Measured 2026-10-20, after the release: **55** unprefixed `.cadence` records against
+    **0** prefixed ones. Left alone, the first `--check` reports every live manager as
+    lapsed.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(lambda: os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None))
+
+    def test_arming_retires_the_flat_record(self):
+        flat = self.m.path("old-subject", "cadence")
+        open(flat, "w").write("300\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.m.arm("Old Subject", "goal", 60)
+        self.assertFalse(os.path.exists(flat), "the flat record must be migrated away")
+
+    def test_a_leftover_flat_record_with_a_prefixed_twin_is_not_stale(self):
+        # The read-side guard, for a flat record an older release already wrote and
+        # nothing will re-arm.
+        flat = self.m.path("leftover", "cadence")
+        open(flat, "w").write("300\n")
+        os.utime(flat, (time.time() - 100000, time.time() - 100000))
+        open(self.m.path("goal--leftover", "cadence"), "w").write("300\n")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.check()
+        self.assertEqual(0, rc, out.getvalue())
+        self.assertEqual("", out.getvalue())
+
+    def test_a_flat_record_with_no_twin_still_reports_stale(self):
+        # The control: the guard must not swallow a genuinely dead manager.
+        flat = self.m.path("dead-subject", "cadence")
+        open(flat, "w").write("300\n")
+        os.utime(flat, (time.time() - 100000, time.time() - 100000))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.check()
+        self.assertEqual(self.m.EXIT_STALE, rc)
+        self.assertIn("STALE dead-subject", out.getvalue())
