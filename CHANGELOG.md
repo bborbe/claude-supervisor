@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a manager that re-arms and lapses again between two polls is now reported, instead of staying silent.** `check()` suppressed any subject already present in `liveness-notified.json`, and its only way to clear that entry was observing the `RECOVERED` transition — which never runs when the manager re-arms and goes stale inside the tick's one-minute gap. The entry then outlived the lapse it described and every later lapse was silent: measured 2026-10-20, `--state` read `STALE age=4328s` for `topic--development-pipeline-throughput` while `--check` exited 0 and printed nothing, and the topic had no live manager. The entry now records the epoch at which the lapse was reported, and a lapse re-notifies when the subject has armed since; a legacy list-shaped file loads at epoch 0, which is older than any arm, so it upgrades in place. Change set: `scripts/manager-liveness.py`, `scripts/tests/test_manager_liveness.py`, `CHANGELOG.md`.
+
 ## v0.189.0
 
 - feat: **a vault can name its own default A2A cluster, so a target-less row lands on its vault's cluster instead of one fleet-wide default.** `vault-cli`'s per-vault config gains `a2a_default_cluster`, a cluster NAME rather than a target string, and `/supervisor:open-a2a` reads it when the row carries no `target:` and passes `target: k8s:<name>` as an ordinary per-call argument. ⚠️ **This does not weaken the per-call-only rule**: the forbidden source is a *fleet-wide* default, where one config edit defaults every vault, and a value read from the row's own vault cannot default another vault's spawn — `resolveSpawnTarget` still has no env source and no config source. An unknown cluster name refuses at the server exactly as an explicit `k8s:<unknown>` does, never falling back to `a2a.defaultCluster` or to `local`; a vault that names no default keeps the existing local-backend path unchanged. Change set: `docs/fleet-surface.md`, `commands/open-a2a.md`, `CHANGELOG.md`.
