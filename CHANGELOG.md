@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.191.1
 
 - fix: **`propose-managers.py`'s dry-run line names the dedup key it would actually post, so a goal in the approval inbox no longer reads as a start-manager card.** The printed line called `dedup_key()` while `post()` called `card_key()`, so a `phase: todo` goal rendered `card: fleet-propose-manager:<goal>` in the dry run and was posted under `fleet-approve-manager:<goal>` — the operator would have been sent looking for a card the store never received. Measured 2026-10-20 against a scratch vault while probing the phase gate: the POSTed bodies were correct and only the printed summary disagreed, which is why a suite that asserts on `card_for()` alone never caught it. Pinned by a `MainTest` case that stubs `goal_phase` and asserts the printed key. Change set: `scripts/propose-managers.py`, `scripts/tests/test_propose_managers.py`, `CHANGELOG.md`.
 
