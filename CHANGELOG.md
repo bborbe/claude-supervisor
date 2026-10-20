@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **an ANSWERED propose-a-manager card no longer re-asks every round.** The store's dedup suppression is open-scoped, so once the card was answered the next tick wrote a fresh row under the same `fleet-propose-manager:<goal>` key — measured 2026-10-19 on 0.180.0: eight cards posted, all eight answered `start manager` within 64 s, eight posted again next round (6 open keys returned identical ids, 2 answered keys wrote new rows), repeated in round 3. `scripts/propose-managers.py` now owns a declined-ask state (`~/.claude/state/manager-propose/<key-slug>.json`), mirroring `scripts/under-target-state.py` rather than deriving a second policy: one file per **card key** (the two cards ask different questions of the same goal, so a goal-keyed file would let an answered approve card suppress the start-manager card the approval makes legitimate), `row_set` = the goal's approved non-terminal titles (broader than the card's live-phase list, so a parked row can carry its bit), and the sibling's four `compare` arms (new row · unknown · unstartable · became startable) as the single derivation. `--post` writes the snapshot and compares before posting; `--compare` is the standalone verdict (0 suppress · 10 re-post · 3 no snapshot · 2 refused) the step file runs first; `--clear --goal` removes a spent snapshot on `ANSWERED: start manager`, so a goal that later loses its manager is askable again. The policy's one home stays `commands/steps/goal-under-target.md`'s declined-ask bullet, cited not restated. Change set: `scripts/propose-managers.py`, `scripts/tests/test_propose_managers.py`, `commands/steps/propose-manager.md`, `CHANGELOG.md`.
+
 ## v0.192.0
 
 - feat: `mcp-start.py` resolves `SUPERVISOR_A2A_TOKEN_SUN` from TeamVault, so `k8s:sun` (sun-k3s) authenticates against its own controller bearer

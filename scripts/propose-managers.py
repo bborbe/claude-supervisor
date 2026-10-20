@@ -106,20 +106,76 @@ are not namespaced across vaults), so the collision is detected here and **refus
 `2`) rather than lost. The key form is the operator's, stated in the runbook; changing it
 is a spec change, not a bug fix.
 
+A declined ask is not re-posted
+-------------------------------
+The key's stability does NOT buy suppression across rounds, because the store's
+suppression is **open-scoped**: while a card is OPEN a re-post under the same key returns
+the same item id, but once the card is ANSWERED the same key writes a NEW row. Measured
+2026-10-19 on deployed 0.180.0: eight cards posted, the operator answered all eight
+`start manager` within 64 s, and the next round posted eight again — the 6 keys still open
+returned identical ids while the 2 answered between rounds wrote new rows. Repeated in
+round 3. So an answered card re-asks on the very next round, for every answered goal, and
+a card the operator has stopped reading carries no information.
+
+This branch therefore keeps its own **declined-ask state**, the same design the sibling
+under-target branch owns (`scripts/under-target-state.py`; the rule's one home is
+`commands/steps/goal-under-target.md` § under-target, its declined-ask bullet). The shape
+is mirrored rather than re-derived:
+
+  * **One state file per CARD KEY**, `~/.claude/state/manager-propose/<key-slug>.json` —
+    per card key rather than per goal because the store's suppression is per key, and the
+    two cards ask different questions of the same goal (`fleet-approve-manager:` on a
+    `phase: todo` goal, `fleet-propose-manager:` otherwise). A goal-keyed file would let an
+    answered approve card suppress the start-manager card that the approval makes
+    legitimate, and a set-level snapshot would not survive a partial answer.
+  * **`row_set`** is the goal's approved, non-terminal task titles — deliberately broader
+    than the card's live-phase list, so a row that is approved but parked is part of the
+    snapshot and the sibling's arms 3 and 4 can actually fire.
+  * **`startability`** records one bit per row: `startable` (live phase: `planning` /
+    `execution`), `unstartable` (approved but not in a live phase, including an absent
+    phase), `unknown` (an explicitly blank phase value — unreadable, and never read as
+    either of the other two).
+  * **`write` on post, `compare` before posting.** `--post` writes the snapshot for every
+    card it posts; `--compare` is the standalone verdict the step file runs first. A
+    `--post` that finds an unchanged snapshot suppresses rather than re-asking, so the
+    suppression holds even for a caller that skips the compare.
+
+The four `compare` arms are the sibling's, and are the ONE derivation — never a
+hand-rolled set-difference at a call site:
+
+  1. a row in this tick's set that is NOT in the snapshot (new approved work);
+  2. a row whose startability cannot be read this tick (`unknown`);
+  3. a row that cannot start this tick (`unstartable`);
+  4. a row that was `unstartable` in the snapshot and is `startable` now.
+
+Anything else suppresses. A row with no recorded bit fails closed (suppresses): the
+snapshot and the row set are the same set, so a missing bit is a corrupt state, not a
+change. Suppression withholds the ASK, never the information — the capacity line and the
+qualifying-goal line still print.
+
+**`--clear --goal <name>`** removes a goal's state. It is what the step file runs on
+`ANSWERED: start manager`: once a manager is actually live the snapshot is spent, and a
+goal that later loses its manager must be askable again rather than suppressed for ever.
+
 Exit codes
 ----------
-  0  one or more cards emitted (or, without `--post`, would be)
-  3  nothing to do — no qualifying goal, or no free slot
+  0  one or more cards emitted (or, without `--post`, would be); `--compare`: every
+     candidate suppressed
+  3  nothing to do — no qualifying goal, or no free slot; `--compare`: no snapshot is
+     recorded for at least one candidate, so nothing has been declined yet
+ 10  `--compare` only: at least one candidate's ask CHANGED and must re-post
   2  REFUSED — the cap, the live-manager count, a tasks dir or the dedup keys could not
      be resolved. Never read as 3.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -140,6 +196,23 @@ LIVE_STATUSES = {"next", "todo", "in_progress", ""}
 # `server/manager-sessions.mjs`, which excludes it from the same count for the same reason:
 # the operator's design puts the Fleet Manager outside the cap.
 ROOT_NAME = "Fleet Manager"
+
+# The declined-ask state, beside the sibling's — one file per goal, named by a
+# filesystem-safe slug of the goal. The slug carries a digest of the exact goal name so two
+# goals whose slugs would collide ("A/B" and "A B") cannot share a file; they are different
+# asks with different dedup keys.
+STATE_DIR = os.path.expanduser("~/.claude/state/manager-propose")
+
+# The three startability tokens, mirroring `scripts/under-target-state.py`. `unknown` is
+# its own value because a blank phase is neither startable nor unstartable, and reading it
+# as unstartable is what lets a degraded read withhold a card.
+STARTABLE = "startable"
+UNSTARTABLE = "unstartable"
+UNKNOWN = "unknown"
+
+# A row recorded before the field existed has no bit at all. Rendered, never accepted:
+# absence fails closed (suppresses), `unknown` re-posts.
+UNRECORDED = "(unrecorded)"
 
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
@@ -364,8 +437,30 @@ def topics_by_goal(vault):
     return out
 
 
+def classify(phase):
+    """The startability bit for one row's phase value.
+
+    `startable` is the live-phase predicate the threshold already uses. An **absent** phase
+    is `unstartable` — deterministic, and the honest reading of "nobody said this is
+    being planned or run". An **explicitly blank** phase is `unknown`: the file carries a
+    value we cannot read, and collapsing that into `unstartable` is what lets a degraded
+    read suppress a card it should re-post.
+    """
+    if phase is None:
+        return UNSTARTABLE
+    if not phase.strip():
+        return UNKNOWN
+    return STARTABLE if phase.strip().lower() in LIVE_PHASES else UNSTARTABLE
+
+
 def scan(roots):
-    """Every approved, non-terminal, live-phase task row, as `(goal, vault, title)` triples."""
+    """Every approved, non-terminal task row, as dicts.
+
+    ⚠️ **No phase filter here.** The threshold is a live-phase count, but the declined-ask
+    snapshot's `row_set` is deliberately broader: an approved row that is parked still
+    belongs to the goal, and excluding it would leave the sibling's arms 3 and 4 with no
+    row that could ever carry an `unstartable` bit.
+    """
     rows = []
     for root in roots:
         try:
@@ -382,13 +477,13 @@ def scan(roots):
                 continue
             if not block or not field(block, "approved_at"):
                 continue
-            if (field(block, "phase") or "").strip().lower() not in LIVE_PHASES:
-                continue
             if (field(block, "status") or "").strip().lower() not in LIVE_STATUSES:
                 continue
             title = filename[:-3]
+            phase = field(block, "phase")
             for link in list_field(block, "goals"):
-                rows.append({"goal": goal_name(link), "vault": root, "title": title})
+                rows.append({"goal": goal_name(link), "vault": root, "title": title,
+                             "phase": phase, "startability": classify(phase)})
     return rows
 
 
@@ -434,16 +529,24 @@ def qualify(rows, labels, topics, board, threshold=GOAL_THRESHOLD):
 
     Grouping is by `(vault name, goal name)`: goal titles are not namespaced across vaults,
     so the same title in two vaults is two different goals and must not be summed.
+
+    The **threshold** counts live-phase rows only — the operator's `">= 2 approved tasks"`
+    ruling is about work being planned or run, not about parked rows. The **snapshot** the
+    declined-ask state records is the group's full approved set, so a parked row can carry
+    its `unstartable` bit.
     """
     groups = {}
     for row in rows:
         key = (row["vault"]["name"], row["goal"])
-        groups.setdefault(key, {"goal": row["goal"], "vault": row["vault"], "titles": []})
-        groups[key]["titles"].append(row["title"])
+        group = groups.setdefault(key, {"goal": row["goal"], "vault": row["vault"],
+                                        "rows": {}})
+        group["rows"][row["title"]] = row["startability"]
 
     candidates = []
     for (_, goal), group in groups.items():
-        if len(group["titles"]) < threshold:
+        startability = group["rows"]
+        live = sorted(t for t, bit in startability.items() if bit == STARTABLE)
+        if len(live) < threshold:
             continue
         titles = [goal] + sorted(topics.get(goal, ()))
         if managed(titles, labels, board):
@@ -452,8 +555,10 @@ def qualify(rows, labels, topics, board, threshold=GOAL_THRESHOLD):
         candidates.append({
             "goal": goal,
             "vault": group["vault"]["name"],
-            "approved": len(group["titles"]),
-            "tasks": sorted(group["titles"]),
+            "approved": len(live),
+            "tasks": live,
+            "rows": sorted(startability),
+            "startability": startability,
             "priority": priority,
             "phase": goal_phase(group["vault"]["goals_dir"], goal),
         })
@@ -513,6 +618,159 @@ def key_collisions(candidates):
     for candidate in candidates:
         seen.setdefault(card_key(candidate), []).append(candidate["goal"])
     return {key: goals for key, goals in seen.items() if len(goals) > 1}
+
+
+def key_slug(key):
+    """A filesystem-safe, collision-free name for a card key's state file.
+
+    ⚠️ **Keyed on the dedup KEY, never the goal alone.** The two cards ask different
+    questions of the same goal (`fleet-approve-manager:` on a `phase: todo` goal,
+    `fleet-propose-manager:` otherwise), and they carry different keys for exactly the
+    reason the sibling's `approve_dedup_key` states. A goal-keyed file would let an
+    answered approve card suppress the start-manager card that the approval makes
+    legitimate.
+
+    The slug alone would collide (`A/B` and `A B`), and two different asks must never share
+    a snapshot. A short digest of the exact key is appended, so the file stays readable and
+    unique.
+    """
+    base = re.sub(r"[^a-z0-9._-]+", "-", key.lower()).strip("-")
+    digest = hashlib.sha256(key.encode()).hexdigest()[:8]
+    return f"{base or 'key'}-{digest}"
+
+
+def state_path(key):
+    return os.path.join(STATE_DIR, key_slug(key) + ".json")
+
+
+def load_state(key):
+    """The recorded snapshot as a dict, or `(None, reason)` — `(None, None)` when absent.
+
+    A corrupt file is a REFUSAL with a reason, never a traceback: `compare`'s exit code is
+    the branch's decision input, and an uncaught `JSONDecodeError` exits **1**, a code the
+    step file does not enumerate. Same contract, same reason, as `under-target-state.py`.
+    """
+    path = state_path(key)
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return None, (f"the recorded state at {path} is unreadable ({exc}); run "
+                      f"`--clear --goal` to start over")
+    if not isinstance(data, dict):
+        return None, f"the recorded state at {path} is not an object"
+    for field_name, want in (("row_set", list), ("startability", dict)):
+        if field_name in data and not isinstance(data[field_name], want):
+            return None, (f"the recorded state at {path} has a "
+                          f"{type(data[field_name]).__name__} `{field_name}`; "
+                          "the file is corrupt")
+    if any(not isinstance(r, str) for r in data.get("row_set") or []):
+        return None, f"the recorded state at {path} has a non-string row; the file is corrupt"
+    if any(not isinstance(v, str) for v in (data.get("startability") or {}).values()):
+        return None, (f"the recorded state at {path} has a non-string startability value; "
+                      "the file is corrupt")
+    return data, None
+
+
+def write_state(candidate, item_id, now=None):
+    """Record the ask that was posted. Atomic: an interrupted write leaves the old state."""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    payload = {
+        "goal": candidate["goal"],
+        "vault": candidate["vault"],
+        "dedup_key": card_key(candidate),
+        "card_item_id": item_id,
+        "row_set": list(candidate["rows"]),
+        "startability": {r: candidate["startability"][r] for r in candidate["rows"]},
+        "posted_at": now or datetime.now(timezone.utc).astimezone().isoformat(
+            timespec="seconds"),
+    }
+    path = state_path(card_key(candidate))
+    tmp = path + ".tmp.%d" % os.getpid()
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def clear_state(goal):
+    """Remove BOTH of a goal's snapshots. Returns whether either existed.
+
+    Both, because the answer that clears one has moved the goal past the question the
+    other asked: `start manager` means the goal is approved, and `approve` means the
+    start-manager card is now the legitimate next ask.
+    """
+    removed = False
+    for key in (dedup_key(goal), approve_dedup_key(goal)):
+        path = state_path(key)
+        if os.path.exists(path):
+            os.remove(path)
+            removed = True
+    return removed
+
+
+def verdict(snapshot, rows, startability):
+    """Does this tick's ask re-post? The four arms, and their ONE derivation.
+
+    Mirrors `under-target-state.py`'s `verdict()`. Never hand-roll this set-difference at a
+    call site: the two arms that must not drift are the `unknown` bit and a row that was
+    unstartable in the snapshot and can start now. Returns `(token, reason)`.
+    """
+    declined = snapshot.get("row_set") or []
+    new = sorted(set(rows) - set(declined))
+    if new:
+        return "repost", ("the candidate set is not a subset of the declined set — %s was "
+                          "not in the declined batch" % ", ".join(repr(r) for r in new))
+    was = snapshot.get("startability") or {}
+    reasons = []
+    unknown = sorted(r for r in rows if startability[r] == UNKNOWN)
+    if unknown:
+        reasons.append("%s carries no readable startability this tick"
+                       % ", ".join(repr(r) for r in unknown))
+    unstartable = sorted(r for r in rows if startability[r] == UNSTARTABLE)
+    if unstartable:
+        reasons.append("%s cannot start this tick" % ", ".join(repr(r) for r in unstartable))
+    became = sorted(r for r in rows
+                    if startability[r] == STARTABLE and was.get(r) == UNSTARTABLE)
+    if became:
+        reasons.append("%s was unstartable in the declined snapshot and can start now"
+                       % ", ".join(repr(r) for r in became))
+    if reasons:
+        return "repost", ("%s — a set that is not the ask the operator declined re-posts"
+                          % "; ".join(reasons))
+    unrecorded = sorted(r for r in rows if r not in was)
+    if unrecorded:
+        return "suppress", ("declined ask %s withheld — no row changed, and %s carries no "
+                            "recorded startability, so no change can be shown"
+                            % (snapshot.get("card_item_id", ""),
+                               ", ".join(repr(r) for r in unrecorded)))
+    moved = sorted(r for r in rows if was.get(r) == UNKNOWN)
+    if moved:
+        return "suppress", ("declined ask %s withheld — %s was recorded UNKNOWN in the "
+                            "declined snapshot and reads startable now; the bound re-posts "
+                            "on a row that was UNSTARTABLE then, so this fails closed"
+                            % (snapshot.get("card_item_id", ""),
+                               ", ".join(repr(r) for r in moved)))
+    return "suppress", ("declined ask %s withheld — every row is unchanged and can start"
+                        % snapshot.get("card_item_id", ""))
+
+
+def compare(candidate):
+    """`(token, reason, item_id)` for one candidate.
+
+    Tokens: `suppress` / `repost` / `nostate` (nothing recorded yet) / `refused` (the state
+    is unreadable — never read as a post).
+    """
+    snapshot, error = load_state(card_key(candidate))
+    if error:
+        return "refused", error, None
+    if snapshot is None:
+        return "nostate", "no declined snapshot recorded for %r" % candidate["goal"], None
+    token, reason = verdict(snapshot, candidate["rows"], candidate["startability"])
+    return token, reason, snapshot.get("card_item_id", "")
 
 
 def resolve_cap():
@@ -671,15 +929,43 @@ def main(argv):
                              "(repeatable; the vault is its parent directory)")
     parser.add_argument("--post", action="store_true",
                         help="post the cards; without it the run is a dry print")
+    parser.add_argument("--compare", action="store_true",
+                        help="print the declined-ask verdict per candidate and post nothing "
+                             "(0 suppress · 10 re-post · 3 no snapshot · 2 refused)")
+    parser.add_argument("--clear", action="store_true",
+                        help="remove the declined-ask state for --goal (run it on "
+                             "ANSWERED: start manager)")
+    parser.add_argument("--goal", default=None,
+                        help="the goal whose state --clear removes")
     parser.add_argument("--json", action="store_true",
                         help="emit the payload as JSON instead of the printed lines "
                              "(implies --dry-run: it never posts)")
     parser.add_argument("--threshold", type=int, default=GOAL_THRESHOLD,
                         help=f"approved-task count a goal must reach (default {GOAL_THRESHOLD})")
+    parser.add_argument("--state-dir", default=None,
+                        help="override the declined-ask state directory (tests)")
+    parser.add_argument("--now", default=None,
+                        help="ISO-8601 timestamp override for the snapshot (tests)")
     args = parser.parse_args(argv)
+
+    if args.state_dir:
+        global STATE_DIR
+        STATE_DIR = args.state_dir
+
+    if args.clear:
+        if not args.goal:
+            print("UNKNOWN — --clear needs --goal", file=sys.stderr)
+            return 2
+        removed = clear_state(args.goal)
+        print(f"cleared {args.goal}" if removed else f"no state for {args.goal}")
+        return 0
 
     if args.post and args.json:
         print("UNKNOWN — --json implies a dry run and cannot be combined with --post",
+              file=sys.stderr)
+        return 2
+    if args.post and args.compare:
+        print("UNKNOWN — --compare posts nothing and cannot be combined with --post",
               file=sys.stderr)
         return 2
 
@@ -726,6 +1012,9 @@ def main(argv):
 
     cards = cap_cards(candidates, free)
 
+    if args.compare:
+        return run_compare(cards)
+
     if args.json:
         print(json.dumps({
             "cap": {"soft": soft, "hard": hard, "source": source, "hardSource": hard_source},
@@ -733,6 +1022,8 @@ def main(argv):
             "free": free,
             "qualifying": candidates,
             "cards": [card_for(c, free, hard) for c in cards],
+            "compare": [dict(zip(("verdict", "reason", "item_id"), compare(c)))
+                        for c in cards],
         }, indent=2))
         return 0 if cards else 3
 
@@ -758,13 +1049,74 @@ def main(argv):
         print("(dry run — pass --post to put these on the board)")
         return 0
 
-    posted = 0
+    return run_post(cards, free, hard, args.now)
+
+
+def run_compare(cards):
+    """The standalone verdict — what the step file runs before posting.
+
+    Exit codes are the branch: `0` every candidate suppresses · `10` at least one re-posts ·
+    `3` nothing has been declined yet (no snapshot for at least one candidate) · `2` a state
+    file is unreadable. `10` and `3` both mean "post"; they are distinguished so a reader
+    can tell a CHANGED ask from a first ask.
+    """
+    if not cards:
+        print("compare: no qualifying goal — nothing to compare")
+        return 3
+    repost = nostate = refused = 0
     for candidate in cards:
-        item = post(card_for(candidate, free, hard))
+        token, reason, item_id = compare(candidate)
+        if token == "refused":
+            print(f"compare: {candidate['goal']} — REFUSED: {reason}", file=sys.stderr)
+            refused += 1
+        elif token == "nostate":
+            print(f"compare: {candidate['goal']} — NOSTATE: {reason}")
+            nostate += 1
+        elif token == "repost":
+            print(f"compare: {candidate['goal']} — REPOST: {reason}")
+            repost += 1
+        else:
+            print(f"compare: {candidate['goal']} — SUPPRESS: {reason}")
+    if refused:
+        return 2
+    if nostate:
+        return 3
+    return 10 if repost else 0
+
+
+def run_post(cards, free, hard, now):
+    """Compare first, then post what changed — and record the ask that was posted.
+
+    A `--post` that skipped the compare would re-ask exactly as before, so the suppression
+    lives here as well as in `--compare`: the state is authoritative, not the caller's
+    discipline.
+    """
+    posted = suppressed = failed = 0
+    for candidate in cards:
+        token, reason, _ = compare(candidate)
+        if token == "refused":
+            print(f"  ❌ {candidate['goal']}: {reason}", file=sys.stderr)
+            failed += 1
+            continue
+        if token == "suppress":
+            print(f"  SUPPRESS: {reason}")
+            suppressed += 1
+            continue
+        card = card_for(candidate, free, hard)
+        if token == "repost":
+            # The arm's own output, carried onto the card — never a hand-derived summary.
+            print(f"  REPOST: {reason}")
+            card["context"] = f"{card['context']} · reposted: {reason}"
+        item = post(card)
         if item:
+            write_state(candidate, item, now)
             posted += 1
             print(f"  posted: {item}")
-    return 0 if posted else 2
+        else:
+            failed += 1
+    if failed:
+        return 2
+    return 0 if (posted or suppressed) else 3
 
 
 if __name__ == "__main__":

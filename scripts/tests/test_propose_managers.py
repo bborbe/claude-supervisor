@@ -58,8 +58,9 @@ OTHER = {"name": "seibert-brogrammers", "tasks_dir": "/nonexistent/tasks",
          "goals_dir": None, "topics_dir": None}
 
 
-def row(goal, vault=VAULT, title="a task"):
-    return {"goal": goal, "vault": vault, "title": title}
+def row(goal, vault=VAULT, title="a task", phase="planning"):
+    return {"goal": goal, "vault": vault, "title": title,
+            "phase": phase, "startability": pm.classify(phase)}
 
 
 def task(phase="planning", status="in_progress", approved="2026-10-12T09:00:00+02:00",
@@ -259,8 +260,16 @@ class ScanTest(unittest.TestCase):
         rows = self.scan_dir({"t.md": task()})
         self.assertEqual([r["goal"] for r in rows], ["Some Goal"])
 
-    def test_phase_todo_is_not_approved_work(self):
-        self.assertEqual(self.scan_dir({"t.md": task(phase="todo")}), [])
+    def test_phase_todo_is_scanned_but_does_not_count_toward_the_threshold(self):
+        """`scan` is the snapshot's broader read; the card's threshold is live-phase only.
+
+        The row is kept so its `unstartable` bit can reach the declined-ask snapshot —
+        excluding it here would leave the sibling's arms 3 and 4 with no row that could
+        ever carry that bit.
+        """
+        rows = self.scan_dir({"t.md": task(phase="todo")})
+        self.assertEqual([r["startability"] for r in rows], [pm.UNSTARTABLE])
+        self.assertEqual(pm.qualify(rows, [], {}, BOARD), [])
 
     def test_terminal_status_is_not_approved_work(self):
         for status in ("completed", "aborted", "hold", "backlog"):
@@ -348,8 +357,14 @@ class MainTest(unittest.TestCase):
     """`main()`'s wiring — the layer the pure-helper tests cannot reach."""
 
     def run_main(self, argv, cap=(3, 5, "default", "default"), count=1, rows=(),
-                 labels=(), roots=(VAULT,)):
-        """Run `main()` with every I/O edge stubbed; returns `(exit_code, stdout)`."""
+                 labels=(), roots=(VAULT,), state_dir=None):
+        """Run `main()` with every I/O edge stubbed; returns `(exit_code, stdout)`.
+
+        ⚠️ **The declined-ask state dir is always isolated.** Without `--state-dir` the run
+        writes `~/.claude/state/manager-propose/`, so a second case reusing a goal name
+        would suppress on state a previous case left behind — the suite would then pass or
+        fail on its own history. `state_dir` is accepted so a two-run case can share one.
+        """
         original = (pm.resolve_cap, pm.live_manager_count, pm.scan, pm.vaults, pm.post)
         posted = []
         pm.resolve_cap = lambda: cap
@@ -358,11 +373,17 @@ class MainTest(unittest.TestCase):
         pm.vaults = lambda: list(roots)
         pm.post = lambda card: posted.append(card) or f"id-{len(posted)}"
         buf = io.StringIO()
+        tmp = None
+        if state_dir is None:
+            tmp = tempfile.TemporaryDirectory()
+            state_dir = tmp.name
         try:
             with redirect_stdout(buf):
-                code = pm.main(argv)
+                code = pm.main(list(argv) + ["--state-dir", state_dir])
         finally:
             (pm.resolve_cap, pm.live_manager_count, pm.scan, pm.vaults, pm.post) = original
+            if tmp is not None:
+                tmp.cleanup()
         self.posted = posted
         return code, buf.getvalue()
 
@@ -500,6 +521,178 @@ class PhaseGateTest(unittest.TestCase):
         finally:
             pm.goal_phase = original
         self.assertEqual(by_goal, {"Queued": "todo", "Ready": None})
+
+
+class DeclinedAskTest(unittest.TestCase):
+    """The declined-ask state — the re-ask loop this change exists to close.
+
+    Each case pins one of the four `compare` arms, plus the two properties the state must
+    have to be safe: it is isolated per goal, and a corrupt file refuses rather than
+    reading as "nothing was declined".
+    """
+
+    def setUp(self):
+        self.run = MainTest("test_no_candidates_exits_three")
+
+    def two_runs(self, first, second, argv=("--post",)):
+        with tempfile.TemporaryDirectory() as state:
+            code1, out1 = self.run.run_main(list(argv), rows=first, state_dir=state)
+            posted1 = list(self.run.posted)
+            code2, out2 = self.run.run_main(list(argv), rows=second, state_dir=state)
+            posted2 = list(self.run.posted)
+        return (code1, out1, posted1), (code2, out2, posted2)
+
+    def test_an_unchanged_ask_is_not_re_asked(self):
+        """The reproduced defect: the second run must NOT write a second card."""
+        rows = [row("G", title="a"), row("G", title="b")]
+        first, second = self.two_runs(rows, rows)
+        self.assertEqual(len(first[2]), 1)
+        self.assertEqual(second[0], 0)
+        self.assertEqual(second[2], [])
+        self.assertIn("SUPPRESS:", second[1])
+        self.assertIn("id-1", second[1])
+
+    def test_a_new_approved_row_re_posts(self):
+        """Arm 1 — a row not in the declined batch is a different ask."""
+        first, second = self.two_runs(
+            [row("G", title="a"), row("G", title="b")],
+            [row("G", title="a"), row("G", title="b"), row("G", title="c")])
+        self.assertEqual(len(first[2]), 1)
+        self.assertEqual(len(second[2]), 1)
+        self.assertIn("REPOST:", second[1])
+        self.assertIn("not a subset", second[1])
+
+    def test_an_unknown_row_re_posts(self):
+        """Arm 2 — a blank phase is neither startable nor unstartable; unknown re-posts."""
+        unknown = {"goal": "G", "vault": VAULT, "title": "c", "phase": "",
+                   "startability": pm.UNKNOWN}
+        first, second = self.two_runs(
+            [row("G", title="a"), row("G", title="b"), row("G", title="c")],
+            [row("G", title="a"), row("G", title="b"), unknown])
+        self.assertEqual(len(first[2]), 1)
+        self.assertEqual(len(second[2]), 1)
+        self.assertIn("no readable startability", second[1])
+
+    def test_a_row_that_became_unstartable_re_posts(self):
+        """Arm 3 — the operator declined work they could start; parked work is another ask."""
+        first, second = self.two_runs(
+            [row("G", title="a"), row("G", title="b"), row("G", title="c")],
+            [row("G", title="a"), row("G", title="b"), row("G", title="c", phase="todo")])
+        self.assertEqual(len(first[2]), 1)
+        self.assertEqual(len(second[2]), 1)
+        self.assertIn("cannot start this tick", second[1])
+
+    def test_a_row_that_became_startable_re_posts(self):
+        """Arm 4 — work that was parked when declined and is actionable now is a change."""
+        first, second = self.two_runs(
+            [row("G", title="a"), row("G", title="b"), row("G", title="c", phase="todo")],
+            [row("G", title="a"), row("G", title="b"), row("G", title="c")])
+        self.assertEqual(len(first[2]), 1)
+        self.assertEqual(len(second[2]), 1)
+        self.assertIn("was unstartable in the declined snapshot", second[1])
+
+    def test_a_fewer_row_ask_is_the_same_ask(self):
+        """A completed row drops out of the set; that is not a new ask."""
+        first, second = self.two_runs(
+            [row("G", title="a"), row("G", title="b"), row("G", title="c")],
+            [row("G", title="a"), row("G", title="b")])
+        self.assertEqual(len(first[2]), 1)
+        self.assertEqual(second[2], [])
+        self.assertIn("SUPPRESS:", second[1])
+
+    def test_the_snapshot_records_the_broader_row_set(self):
+        """A parked row must be in the snapshot, or arms 3 and 4 could never fire."""
+        with tempfile.TemporaryDirectory() as state:
+            self.run.run_main(["--post"],
+                              rows=[row("G", title="a"), row("G", title="b"),
+                                    row("G", title="c", phase="todo")],
+                              state_dir=state)
+            files = os.listdir(state)
+            self.assertEqual(len(files), 1)
+            with open(os.path.join(state, files[0]), encoding="utf-8") as handle:
+                data = json.load(handle)
+        self.assertEqual(data["row_set"], ["a", "b", "c"])
+        self.assertEqual(data["startability"], {"a": "startable", "b": "startable",
+                                                "c": "unstartable"})
+        self.assertEqual(data["card_item_id"], "id-1")
+
+    def test_a_corrupt_state_refuses_rather_than_posting(self):
+        with tempfile.TemporaryDirectory() as state:
+            path = os.path.join(state, pm.key_slug(pm.dedup_key("G")) + ".json")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("not json")
+            code, out = self.run.run_main(["--post"],
+                                          rows=[row("G", title="a"), row("G", title="b")],
+                                          state_dir=state)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.run.posted, [])
+
+    def test_clear_makes_the_goal_askable_again(self):
+        """The `ANSWERED: start manager` path — a spent snapshot must not suppress for ever."""
+        rows = [row("G", title="a"), row("G", title="b")]
+        with tempfile.TemporaryDirectory() as state:
+            self.run.run_main(["--post"], rows=rows, state_dir=state)
+            code, out = self.run.run_main(["--clear", "--goal", "G"], state_dir=state)
+            self.assertEqual(code, 0)
+            self.assertIn("cleared G", out)
+            code, _ = self.run.run_main(["--post"], rows=rows, state_dir=state)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.run.posted), 1)
+
+    def test_compare_exit_codes(self):
+        """0 suppress · 10 re-post · 3 no snapshot · 2 refused — the step file's branch."""
+        rows = [row("G", title="a"), row("G", title="b")]
+        with tempfile.TemporaryDirectory() as state:
+            self.assertEqual(self.run.run_main(["--compare"], rows=rows,
+                                               state_dir=state)[0], 3)
+            self.run.run_main(["--post"], rows=rows, state_dir=state)
+            self.assertEqual(self.run.run_main(["--compare"], rows=rows,
+                                               state_dir=state)[0], 0)
+            self.assertEqual(self.run.run_main(
+                ["--compare"], rows=rows + [row("G", title="c")], state_dir=state)[0], 10)
+            with open(os.path.join(state, pm.key_slug(pm.dedup_key("G")) + ".json"), "w",
+                      encoding="utf-8") as handle:
+                handle.write("{]")
+            self.assertEqual(self.run.run_main(["--compare"], rows=rows,
+                                               state_dir=state)[0], 2)
+
+    def test_the_state_is_keyed_per_goal_and_card_type(self):
+        """Two goals never share a file, and neither do a goal's two card types."""
+        with tempfile.TemporaryDirectory() as state:
+            self.run.run_main(["--post"],
+                              rows=[row("A", title="a"), row("A", title="b"),
+                                    row("B", title="c"), row("B", title="d")],
+                              state_dir=state)
+            self.assertEqual(len(os.listdir(state)), 2)
+            self.assertNotEqual(pm.key_slug(pm.dedup_key("A")), pm.key_slug(pm.dedup_key("B")))
+            self.assertNotEqual(pm.key_slug(pm.dedup_key("A/B")), pm.key_slug(pm.dedup_key("A B")))
+        self.assertNotEqual(pm.key_slug(pm.dedup_key("A")),
+                            pm.key_slug(pm.approve_dedup_key("A")))
+
+    def test_an_answered_approve_card_does_not_suppress_the_start_card(self):
+        """The two cards ask different questions; the state must be keyed by the card's key.
+
+        A goal-keyed snapshot would let an answered approve card suppress the
+        start-manager card that the approval makes legitimate — a permanent silence in the
+        direction the whole change exists to remove.
+        """
+        rows = [row("Queued", title="a"), row("Queued", title="b")]
+        original = pm.goal_phase
+        with tempfile.TemporaryDirectory() as state:
+            pm.goal_phase = lambda _d, name: "todo" if name == "Queued" else None
+            try:
+                self.run.run_main(["--post"], rows=rows, state_dir=state)
+                self.assertEqual(len(self.run.posted), 1)
+                self.assertIn("fleet-approve-manager:Queued",
+                              self.run.posted[0]["dedup_key"])
+                pm.goal_phase = lambda _d, name: None
+                code, out = self.run.run_main(["--post"], rows=rows, state_dir=state)
+            finally:
+                pm.goal_phase = original
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.run.posted), 1)
+        self.assertIn("fleet-propose-manager:Queued", self.run.posted[0]["dedup_key"])
+        self.assertNotIn("SUPPRESS", out)
 
 
 if __name__ == "__main__":
