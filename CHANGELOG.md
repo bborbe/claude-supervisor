@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a worker whose goal has no live manager is no longer parented to the topic manager.** `scripts/fleet-board.py`'s `manager_on_chain` walked `[goal] + topics_of(goal)`, so a task declaring a goal with no live goal manager resolved to the **topic** manager that lists the goal — a topic→worker edge the tier contract forbids (`docs/session-tiers.md` § The four tiers; `commands/topic-loop.md`: "A topic manager never manages a worker"). It now parents a worker only to the goal manager of a declared goal, falling to the fleet manager (the root) as a holding row when none is live; the two documented exceptions stand (`managed_by` naming a topic, and a goal-less task directly under a topic). `docs/session-tiers.md` and `docs/fleet-surface.md` § Which manager owns a subject now state that tier 4 owns the unmanaged **goal** for starting, not the worker's parent. Change set: `scripts/fleet-board.py`, `scripts/tests/test_fleet_board.py`, `docs/session-tiers.md`, `docs/fleet-surface.md`, `CHANGELOG.md`.
+
 ## v0.191.1
 
 - fix: **`propose-managers.py`'s dry-run line names the dedup key it would actually post, so a goal in the approval inbox no longer reads as a start-manager card.** The printed line called `dedup_key()` while `post()` called `card_key()`, so a `phase: todo` goal rendered `card: fleet-propose-manager:<goal>` in the dry run and was posted under `fleet-approve-manager:<goal>` — the operator would have been sent looking for a card the store never received. Measured 2026-10-20 against a scratch vault while probing the phase gate: the POSTed bodies were correct and only the printed summary disagreed, which is why a suite that asserts on `card_for()` alone never caught it. Pinned by a `MainTest` case that stubs `goal_phase` and asserts the printed key. Change set: `scripts/propose-managers.py`, `scripts/tests/test_propose_managers.py`, `CHANGELOG.md`.
