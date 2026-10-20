@@ -3159,6 +3159,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         agent_id: agent.id,
         sent: true,
         delivered: res.delivered,
+        ...(res.via ? { via: res.via } : {}),
         ...(res.reason ? { reason: res.reason } : {}),
         tab_id: res.tabId,
         pane_id: res.paneId,

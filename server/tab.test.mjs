@@ -242,6 +242,30 @@ test('confirmSubmission refuses to claim delivery for text it did not write', as
   assert.match(res.reason, /did not write/)
 })
 
+// The v0.191.2 defect: an ACCEPTED-but-queued message left a queue notice in the composer,
+// which fell into the "text I did not write" branch and read as unverified — so `delivered:
+// false` was unreachable and a swallowed send could not be told apart from an accepted one.
+test('confirmSubmission treats a queue notice as DELIVERED, not unknown', async () => {
+  const wezterm = fakeWezterm({ 'cli get-text': () => ok(`${PROMPT} Press up to edit queued messages`) })
+  const res = await confirmSubmission(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 5, intervalMs: 1 })
+  assert.equal(res.delivered, true, 'the TUI accepted the message into its queue')
+  assert.equal(res.via, 'queued')
+})
+
+test('sendToPane surfaces the queued acceptance through its verdict', async () => {
+  let reads = 0
+  const wezterm = fakeWezterm({
+    'cli list': () => ok(panesJson),
+    'cli get-text': () => {
+      reads += 1
+      return ok(reads === 1 ? `${PROMPT} ` : `${PROMPT} Press up to edit queued messages`)
+    },
+  })
+  const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 5, intervalMs: 1 })
+  assert.equal(res.delivered, true)
+  assert.equal(res.via, 'queued')
+})
+
 test('sendToPane surfaces an unconfirmed send as an error, never as applied', async () => {
   // Ready first (empty composer), then the stranded composer the send left behind.
   let reads = 0
