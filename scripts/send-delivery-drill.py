@@ -74,10 +74,15 @@ def observe(pane_id, seconds):
     return {"composer": composer(pane_id), "cleared": False}
 
 
-def run(pane_id, label, settle):
-    if settle:
-        print(f"   waiting {settle}s for the pane to be mid-turn...")
-        time.sleep(settle)
+def run(pane_id, label, settle, prime=None):
+    if prime:
+        # The condition is a pane that is MID-TURN. Sleeping before typing cannot create
+        # one, so the busy run starts a turn of its own and races the Enter against it.
+        print(f"   priming a turn: {prime!r}")
+        type_and_enter(pane_id, prime)
+        if settle:
+            print(f"   waiting {settle}s so the turn is in flight...")
+            time.sleep(settle)
     before = pane_text(pane_id)
     text = f"{MARKER} {label}"
     res = type_and_enter(pane_id, text)
@@ -100,8 +105,10 @@ def run(pane_id, label, settle):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pane-id", required=True)
-    ap.add_argument("--busy-wait", type=float, default=0.5,
-                    help="seconds to sleep after typing, to land the Enter mid-turn")
+    ap.add_argument("--busy-wait", type=float, default=1.5,
+                    help="seconds to wait after priming, so the turn is still in flight")
+    ap.add_argument("--prime", default="Count slowly from 1 to 40, one number per line.",
+                    help="prompt used to put the pane mid-turn for the busy run")
     ap.add_argument("--out", default=None, help="write both transcripts here as JSON")
     args = ap.parse_args()
 
@@ -111,7 +118,7 @@ def main():
 
     results = []
     print(f"pane {args.pane_id}: BUSY run (Enter raced against an in-flight turn)")
-    results.append(run(args.pane_id, "busy", args.busy_wait))
+    results.append(run(args.pane_id, "busy", args.busy_wait, prime=args.prime))
 
     print(f"pane {args.pane_id}: IDLE run (same text, pane settled)")
     results.append(run(args.pane_id, "idle", 0))
