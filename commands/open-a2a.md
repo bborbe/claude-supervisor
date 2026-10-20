@@ -58,11 +58,22 @@ Everything above is `/supervisor:open`'s, run by reference. This is the half tha
 vault-cli --vault "<vault>" task get "<task>" target
 ```
 
-⚠️ **The field is the task's own frontmatter, read at the call site — never from a config file and never from the environment.** An absent field is not `local` by default here: it selects the controller's **local backend**, which is a different thing from `spawn_agent`'s local path.
+⚠️ **The field is the task's own frontmatter, read at the call site — never from the supervisor's config file and never from the environment.** ⚠️ **One exception, and it is a per-vault value rather than a fleet-wide one:** when the row carries no `target:`, read the vault's own `a2a_default_cluster` and pass `target: k8s:<name>` — `docs/fleet-surface.md` § Spawn a worker item 7 carries that rule and the reason a per-vault value does not weaken the per-call-only one. An absent field with no vault default is not `local` by default here: it selects the controller's **local backend**, which is a different thing from `spawn_agent`'s local path.
 
 ⚠️ **Then check ELIGIBILITY — a separate question from which backend, read from the same item.** When the row carries a disqualifier, print a warning naming it (`⚠️ target "<t>" is not eligible for "<task>": needs <disqualifier>`). ⚠️ **Advisory, never a refusal** — print it and leave the decision here; never silently drop the `target`, and never rewrite the row's frontmatter. The disqualifier list has its single home in `docs/fleet-surface.md` § Spawn a worker item 7 — read it there and never restate it here.
 
-### 2.2 Absent `target:` → the controller's `local` backend
+### 2.2 Absent `target:` → the vault default, else the controller's `local` backend
+
+**First, the vault's own default.** Read it and, when it is set, hand the row to § 2.3 as `target: k8s:<name>` — do not reach the local backend:
+
+```bash
+vault-cli config list --output json \
+  | python3 -c 'import json,sys; v="<vault>"; print(next((x.get("a2a_default_cluster") or "" for x in json.load(sys.stdin) if x.get("name")==v), ""))'
+```
+
+⚠️ **A printed cluster name ends this step** — § 2.3's call is the one that runs, with the value formed here. An empty line means the vault names no default, and only then does the row fall through to the controller's local backend below. ⚠️ **Never substitute a name when the read fails** — an unreadable or unparsable `config list` is an error to report, not a vault with no default, because the two are otherwise one indistinguishable observable and the second silently moves the worker to a different cluster.
+
+**With no vault default**, the row takes the controller's `local` backend:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/a2a-local-control.py" create --task "<task>" --vault "<vault>" [--first-step "<text>"]
