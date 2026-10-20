@@ -757,9 +757,21 @@ What this file still owns is the part that is about the plugin rather than the f
   *not* carry (a headless worker holds no registry entry at all). Never read a short table as
   a clean fleet, and never read an empty one as an empty fleet.
 - **`--json` carries one entry per session under `sessions`** — `session_id`, `label`, `role`
-  (`manager` / `worker` / `unmanaged`), `parent` (a session id, or `unmanaged`) and `bucket`.
-  The tree is drawn from `parent`, so a consumer that needs the structure reads the document
-  rather than parsing the glyphs.
+  (`manager` / `worker` / `unmanaged`), `parent` (a session id, or `unmanaged`), `bucket`,
+  `task_title` and `task_title_reason`. The tree is drawn from `parent`, so a consumer that
+  needs the structure reads the document rather than parsing the glyphs.
+  ⚠️ **`task_title` is how a row is matched to its task — read it before `label`.** `label`
+  is the registry name; `task_title` is the title of the task the row resolved to. They
+  diverge whenever a session outlives a retitle, and `--mismatches` reports exactly that set.
+  A consumer that looks up a row's task by `label` finds nothing in the diverging case and
+  reads the row as an unresolvable session, which is the defect that made this field exist
+  (measured 2026-10-20 on `77f7ff67`).
+  `task_title_reason` names why `task_title` is `null`, with **one wording per distinct
+  absence** — a manager manages a subject page rather than a task, an unmanaged session has
+  no task file, a worker is bound by neither a stamped title nor a task file. Never one
+  shared sentence: three states read as one the moment they share a reason.
+  ⚠️ **`subject` is manager-scoped** — it names the page a manager manages and is `null` on
+  every worker row by design. It is emitted but is not a signal of resolution.
 - **The bucket rule's single source is `scripts/fleet-board.py` itself** — its module
   docstring defines the four buckets and the precedence that makes the classification total.
   Neither this file nor the runbook restates it.
