@@ -121,6 +121,14 @@ MANAGER_COLOUR = "orange"
 ROLE_MANAGER, ROLE_WORKER, ROLE_UNMANAGED = "manager", "worker", "unmanaged"
 UNMANAGED = "unmanaged"  # the `parent` value for a session no manager covers
 
+# Why a `sessions` entry carries no `task_title`. One wording per distinct
+# absence: a manager never has one by design, an unmanaged session has no task
+# file at all, and a worker can be a worker without binding to anything. A single
+# shared sentence would make three different states read as one.
+TASK_TITLE_NO_MANAGER = "manager — manages a subject page, not a task"
+TASK_TITLE_NO_TASK_FILE = "unmanaged — no stamped title and no task file of that name"
+TASK_TITLE_NO_BINDING = "worker — bound by neither a stamped title nor a task file"
+
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 _LIST_ITEM = re.compile(r"^\s*-\s")
 _MANAGER_SUFFIX = re.compile(r"\s+manager$", re.IGNORECASE)
@@ -998,6 +1006,23 @@ def build_grouping(registry, index, colours, slugs, task_titles):
     return Grouping(root, roles, parents, subjects)
 
 
+def _task_title_reason(role, titles):
+    """Why a row has no resolved task title — `None` when it has one.
+
+    The reason is a named value, never a sentence the reader has to interpret:
+    a consumer filtering rows it cannot attribute reads the constant, and each
+    distinct absence carries its own, so a manager and an unmanaged session are
+    never collapsed into one unexplained `null`.
+    """
+    if titles:
+        return None
+    if role == ROLE_MANAGER:
+        return TASK_TITLE_NO_MANAGER
+    if role == ROLE_UNMANAGED:
+        return TASK_TITLE_NO_TASK_FILE
+    return TASK_TITLE_NO_BINDING
+
+
 def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, grouping=None,
                gate_attribution=None, task_meta=None, panel_ids=frozenset()):
     """One row per registry entry, sorted by bucket precedence then name.
@@ -1029,12 +1054,21 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
         # rendered two ways across two readers of the same field is a defect
         # waiting to be mistaken for a rename.
         label = wnm.strip_status_glyph(rec.get("name") or "") or "—"
+        role = grouping.role_of(sid) if grouping else ROLE_WORKER
         rows.append(
             {
                 "session_id": sid,
                 "bucket": bucket,
                 "label": label,
-                "role": grouping.role_of(sid) if grouping else ROLE_WORKER,
+                "role": role,
+                # The task this row resolved to, from the same `task_titles` the
+                # parent chain is built from. Kept beside `cells[2]` so the
+                # `sessions` projection can publish it: a registry label that
+                # differs from the task title otherwise leaves a consumer with no
+                # way to match the two, and the row reads as an unresolvable
+                # session rather than a resolved one under a stale name.
+                "task_title": titles[0] if titles else None,
+                "task_title_reason": _task_title_reason(role, titles),
                 # The page this session manages, when it manages one. Emitted so the
                 # topic tier's N-slot count can see a live goal manager the goal page
                 # never recorded — the page id is a write the resolve step may miss,
@@ -1077,6 +1111,40 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
             )
     rows.sort(key=lambda r: (BUCKET_ORDER.index(r["bucket"]), r["label"].lower()))
     return rows, details
+
+
+def build_sessions(rows):
+    """The `sessions` projection of the drawn rows — the documented consumer view.
+
+    Pure, so the projection is testable without a live fleet. `task_title` is the
+    task the row resolved to, the same value `build_rows` renders into `cells[2]`;
+    `task_title_reason` names why it is absent. Publishing both is what lets a
+    consumer tell a row whose registry label drifted from its task title apart
+    from a row that genuinely has no task — reading `label` alone, the two look
+    identical and the resolved one reads as unresolvable.
+    """
+    return [
+        {
+            "session_id": r["session_id"],
+            "label": r["label"],
+            "role": r["role"],
+            "subject": r["subject"],
+            "task_title": r["task_title"],
+            "task_title_reason": r["task_title_reason"],
+            "parent": r["parent"],
+            "bucket": r["bucket"],
+            "unblocks": r["unblocks"],
+            # The raw seconds the `Inactive` cell was rendered from, so the
+            # sibling-group ordering is checkable against the value that
+            # decided it rather than against the 9-char string it printed.
+            # `inf` (no transcript) is emitted as `null`: it is not a
+            # duration, and a literal `Infinity` is not valid JSON — `jq`
+            # and every strict parser reject it.
+            "age": (None if r["age"] is None or not math.isfinite(r["age"])
+                    else round(r["age"], 3)),
+        }
+        for r in rows
+    ]
 
 
 TREE_BRANCH, TREE_LAST, TREE_PIPE, TREE_BLANK = "├ ", "└ ", "│   ", "    "
@@ -1276,26 +1344,7 @@ def main():
         "tree_rows": len(tree),
         "residual": sorted(fresh - set(registry)),
         "details": details,
-        "sessions": [
-            {
-                "session_id": r["session_id"],
-                "label": r["label"],
-                "role": r["role"],
-                "subject": r["subject"],
-                "parent": r["parent"],
-                "bucket": r["bucket"],
-                "unblocks": r["unblocks"],
-                # The raw seconds the `Inactive` cell was rendered from, so the
-                # sibling-group ordering is checkable against the value that
-                # decided it rather than against the 9-char string it printed.
-                # `inf` (no transcript) is emitted as `null`: it is not a
-                # duration, and a literal `Infinity` is not valid JSON — `jq`
-                # and every strict parser reject it.
-                "age": (None if r["age"] is None or not math.isfinite(r["age"])
-                        else round(r["age"], 3)),
-            }
-            for r in rows
-        ],
+        "sessions": build_sessions(rows),
         "coverage_ok": not errors,
         "coverage_errors": errors,
         # The drawn tree's session ids in emission order — a row's position in
