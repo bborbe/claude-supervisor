@@ -23,7 +23,8 @@ Seven refusals, each exit 1 with a stable reason token as the first line of outp
                       release it; closing is exactly the act the hold prevents.
   busy-target         the target is mid-turn (`status` is not `idle`). A close loses the
                       in-flight work outright — there is no resume to fall back on.
-  headless-target     the target is not `interactive`, so it has no pane to close.
+  headless-target     the target's `entrypoint` is not `cli` (an SDK worker registers
+                      `sdk-cli`), so it has no pane to close.
   dirty-worktree      the target is the only live session in its worktree and that
                       worktree carries tracked changes. A close strands them: unlike a
                       restart, nothing comes back to finish the work.
@@ -295,11 +296,19 @@ def main():
             "the in-flight work with no resume to fall back on",
         )
 
-    kind = (rec.get("kind") or "").strip().lower()
-    if kind != "interactive":
+    # `entrypoint`, not `kind`. `kind` is `interactive` for EVERY registry entry — a tab
+    # session and an SDK worker spawned with `interactive: false` both write it — so keying on
+    # it made this guard unreachable. `entrypoint` separates them: a tab registers `cli`, an
+    # SDK worker `sdk-cli` (measured 2026-10-20 across the live fleet: 24 × `cli`, 1 ×
+    # `sdk-cli`). An ABSENT entrypoint is not read as headless: it is an entry written before
+    # the field existed, and refusing those would break closes for legitimate tab sessions.
+    # Absence falls through to the pane join, which is fail-safe — it ends in an operational
+    # `❌ error:` and never a close.
+    entrypoint = (rec.get("entrypoint") or "").strip().lower()
+    if entrypoint and entrypoint != "cli":
         return refuse(
             "headless-target",
-            f"session {sid} is {kind or 'of unknown kind'}; it has no pane to close",
+            f"session {sid} runs entrypoint {entrypoint}; it has no pane to close",
         )
 
     cwd = (rec.get("cwd") or "").strip()
