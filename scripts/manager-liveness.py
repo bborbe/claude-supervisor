@@ -120,6 +120,68 @@ def observed_interval(s: str):
     return gaps[len(gaps) // 2]
 
 
+LEGACY_EXTS = ("cadence", "arms", "stopped")
+GOALS_DIR = "24 Goals"
+DEFAULT_TOPICS_DIR = "23 Topics"
+
+
+def detect_branch(subject: str, vault: str = ".") -> str:
+    """The branch for `subject`, or `goal` when nothing resolves.
+
+    Three sources, in order, because the caller may be a manager that has never
+    resolved a page in this process:
+
+      1. **An existing prefixed record** — a manager already running under
+         `goal--<base>` or `topic--<base>` keeps its branch, whatever the page says now.
+      2. **The vault's pages** — `24 Goals/<subject>.md` is a goal; the topics folder
+         holding `<subject>.md` is a topic.
+      3. **`goal`** — the default, announced on stderr so a wrong guess is visible
+         rather than silent. It is the common case: a goal manager is the tier that
+         arms a loop.
+    """
+    base = base_slug(subject)
+    for branch in BRANCHES:
+        if os.path.exists(path(f"{branch}--{base}", "cadence")) or os.path.exists(
+            path(f"{branch}--{base}", "stopped")
+        ):
+            return branch
+    root = os.path.abspath(os.path.expanduser(vault))
+    for name in (subject + ".md",):
+        if os.path.isfile(os.path.join(root, GOALS_DIR, name)):
+            return "goal"
+    topics = os.path.join(root, DEFAULT_TOPICS_DIR)
+    try:
+        if any(e.lower() == subject.lower() + ".md" for e in os.listdir(topics)):
+            return "topic"
+    except OSError:
+        pass
+    print(f"branch=goal (defaulted — no page resolved for {subject!r})", file=sys.stderr)
+    return "goal"
+
+
+def migrate_legacy(subject: str) -> None:
+    """Retire a pre-split unprefixed record once its prefixed twin is written.
+
+    ⚠️ Without this, `--check` keeps reading the flat `<base>.cadence` the old
+    release wrote, and every manager that re-arms under the new name leaves it to age
+    into a false STALE — measured 2026-10-20: **55** unprefixed records against **0**
+    prefixed ones, so the first `--check` after the split would have reported every
+    live manager as lapsed.
+    """
+    base = base_slug(subject)
+    removed = []
+    for ext in LEGACY_EXTS:
+        legacy = path(base, ext)
+        if os.path.exists(legacy):
+            try:
+                os.remove(legacy)
+                removed.append(ext)
+            except OSError:
+                pass
+    if removed:
+        print(f"migrated legacy {base} ({', '.join(removed)})", file=sys.stderr)
+
+
 def arm(subject: str, branch: str, interval: int) -> int:
     s = slug(subject, branch)
     write_atomic(path(s, "cadence"), f"{interval}\n")
@@ -134,6 +196,7 @@ def arm(subject: str, branch: str, interval: int) -> int:
         os.remove(path(s, "stopped"))
     except FileNotFoundError:
         pass
+    migrate_legacy(subject)
     print(f"armed {s} interval={interval}s")
     return 0
 
@@ -141,6 +204,7 @@ def arm(subject: str, branch: str, interval: int) -> int:
 def stop(subject: str, branch: str) -> int:
     s = slug(subject, branch)
     write_atomic(path(s, "stopped"), time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
+    migrate_legacy(subject)
     print(f"stopped {s}")
     return 0
 
@@ -175,6 +239,15 @@ def check(now: float = None) -> int:
         names = sorted(f[: -len(".cadence")] for f in os.listdir(STATE_DIR) if f.endswith(".cadence"))
     except FileNotFoundError:
         names = []
+    # ⚠️ A pre-split record is superseded the moment its prefixed twin exists. Without
+    # this skip, every manager that migrated leaves its old flat record behind and
+    # `--check` reports it STALE forever while the manager is healthy — the same false
+    # alarm `migrate_legacy` prevents on the write side, kept here as the read-side guard
+    # for a record an older release already wrote and nothing will ever re-arm.
+    prefixed_bases = {
+        n.split("--", 1)[1] for n in names if "--" in n
+    }
+    names = [n for n in names if "--" in n or n not in prefixed_bases]
     npath = os.path.join(STATE_DIR, NOTIFIED)
     try:
         with open(npath, encoding="utf-8") as fh:
@@ -210,20 +283,38 @@ def main() -> int:
         help="print ONE subject's state: OK / STALE / STOPPED / INVALID",
     )
     ap.add_argument("--subject", help="the goal or topic name")
-    ap.add_argument("--branch", choices=BRANCHES, help="goal | topic — the tier that owns the subject")
+    ap.add_argument(
+        "--topic",
+        dest="topic_alias",
+        help="DEPRECATED alias for --subject, kept so an armed loop's wakeup prompt "
+             "from a pre-0.187 release keeps working",
+    )
+    ap.add_argument(
+        "--branch",
+        choices=BRANCHES,
+        help="goal | topic — auto-detected when omitted (existing record, then the vault's pages)",
+    )
+    ap.add_argument("--vault", default=".", help="vault ROOT, used only to auto-detect --branch")
     ap.add_argument("--interval", type=int, help="the ScheduleWakeup delay just armed, seconds")
     a = ap.parse_args()
+    if a.topic_alias and not a.subject:
+        a.subject = a.topic_alias
+        print("--topic is deprecated; use --subject", file=sys.stderr)
+    elif a.topic_alias and a.subject and a.topic_alias != a.subject:
+        ap.error("--topic and --subject disagree")
     if a.check:
         return check()
     if a.state:
-        if not a.subject or not a.branch:
-            ap.error("--state requires --subject and --branch")
+        if not a.subject:
+            ap.error("--state requires --subject (or the deprecated --topic)")
+        a.branch = a.branch or detect_branch(a.subject, a.vault)
         s = slug(a.subject, a.branch)
         state, detail = classify(s, time.time())
         print(f"{state}\t{s}\t{detail}")
         return 0
-    if not a.subject or not a.branch:
-        ap.error("--subject and --branch are required with --arm/--stop")
+    if not a.subject:
+        ap.error("--subject (or the deprecated --topic) is required with --arm/--stop")
+    a.branch = a.branch or detect_branch(a.subject, a.vault)
     if a.arm:
         if not a.interval or a.interval <= 0:
             ap.error("--arm needs --interval > 0")
