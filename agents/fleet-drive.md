@@ -39,22 +39,15 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
 <process>
 
-0. **Re-evaluate the retained rows — before the candidate scan.** A row that landed `blocked` or `unverifiable` in an earlier round has left the digest's candidate set, and step 1 rebuilds candidates from the digest alone — so without this step no later round ever looks at it again. Read the ledger (`python3 $P/drive-ledger.py read`), take every entry whose `verdict` is `blocked` or `unverifiable`, and re-probe it from its **task file**:
-
-   ```bash
-   T="<task_file from the entry>"
-   grep -m1 '^status:' "$T"                              # completed | aborted | in_progress
-   grep -m1 '^phase:'  "$T"                              # done | execution | planning
-   grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "$T"   # open boxes
-   ```
+0. **Re-evaluate the retained rows — before the candidate scan.** A row that landed `blocked` or `unverifiable` in an earlier round has left the digest's candidate set, and step 1 rebuilds candidates from the digest alone — so without this step no later round ever looks at it again. Run `python3 $P/drive-retained.py reprobe`. It reads the ledger, takes every entry whose `verdict` is `blocked` or `unverifiable`, re-probes each from its **task file**, and emits one disposition per row plus the dedup key. ⚠️ **Never reimplement those probes here** — the script owns them, and `scripts/tests/test_drive_retained.py` asserts the probe runs once per retained row per round. A block that reprints the ledger's stored `probe` string passes any content check while probing nothing, which is the defect this step exists to remove.
 
    ⚠️ **The task file is the authority, and the entry must carry its path.** `session_id` is an 8-char display handle — prefix-matching it against a task's `claude_session_id:` is the anti-pattern `fleet-sweep-reader` step 8 forbids — and `name` is the session display name, which need not equal the filename (measured 2026-10-20: ledger `Row Whose Body Demands…` against file `A Row Whose Body Demands…`). An entry with an empty `task_file` is **unverifiable**; never guess the path.
 
-   Disposition per retained row, each recorded this round like any digest candidate:
-   - task terminal (`status:` `completed`/`aborted`, or `phase:` `done`, or 0 open boxes) → **finished**, joining step 1b's reap set.
-   - task `in_progress` with open boxes and the session absent from `~/.claude/sessions/*.json` → **blocked**, cause `orphan` — escalate, never nudge.
-   - task `in_progress` with open boxes and the session present → run step 4's probes: they clear → **revive** (drafted in step 6); a live blocker → **blocked**; a probe that cannot run → **unverifiable**.
-   - task file missing and session absent → **unverifiable**, dropped with reason `task file missing`.
+   Dispositions it emits, each recorded this round like any digest candidate:
+   - `finished` — terminal task; joins step 1b's reap set.
+   - `blocked` — task `in_progress` with open boxes and the session absent from the registry; cause `orphan` — escalate, never nudge.
+   - `unverifiable` — no `task_file`, the file is missing, or the registry could not be read.
+   - `needs-step-4` — task `in_progress` with open boxes and the session live. Run step 4's probes: they clear → **revive** (drafted in step 6); a live blocker → **blocked**; a probe that cannot run → **unverifiable**.
 
    **The parked signal is emitted once, not every round.** After re-probing, compare this round's `verdict` and `probe` against the entry's stored values. A change — or a first observation — emits one `PARKED` line naming the row and the parking verdict, and records `suppression: signalled`; an unchanged row records `suppression: already signalled` and emits nothing. `RETAINED` still lists every retained row every round, because that block is the re-probe evidence; `PARKED` is the signal, so an unchanged row appears in the first and stays silent in the second.
 
