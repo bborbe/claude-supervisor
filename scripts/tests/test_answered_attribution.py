@@ -371,5 +371,70 @@ class OperatorAnsweredTest(unittest.TestCase):
                 self.assertIs(attribution.operator_answered(item), expected)
 
 
+class AnswerKindVerdictTest(unittest.TestCase):
+    """The answer's KIND outranks its client — added 2026-10-20.
+
+    The operator's ruling fixes the vocabulary at four: *"the rest api is able to
+    tell the session what the state is — accepted, declined, skipped/hidden or
+    not answered — one of these 4"*. Before this, a bottom-Dismiss arrived as
+    `ANSWERED: declined (no answer given)`, so every caller gating on `ANSWERED:`
+    treated a decline as a release.
+
+    ⚠️ The ordering is the change: the kind is read BEFORE the client evidence. A
+    decline is a decline whoever sent it, so asking "was this client positively
+    flagged as automated?" first would answer ATTRIBUTED for a card the operator
+    explicitly dismissed.
+    """
+
+    ANSWERED = {
+        "state": "answered",
+        "answered_at": "2026-10-20T09:00:00Z",
+        "answered_by": "attention-board",
+        "answered_client": OPERATOR_CLIENT,
+    }
+
+    def classify(self, **extra):
+        item = dict(self.ANSWERED)
+        item.update(extra)
+        return attribution.classify(item)[0]
+
+    def test_a_decline_is_not_a_release(self):
+        self.assertEqual(attribution.DECLINED, self.classify(answer={"kind": "skip"}))
+
+    def test_a_hidden_close_is_not_a_release(self):
+        self.assertEqual(attribution.HIDDEN, self.classify(answer={"kind": "hidden"}))
+
+    def test_an_acceptance_still_releases(self):
+        self.assertEqual(
+            attribution.ATTRIBUTED,
+            self.classify(answer={"kind": "option", "value": "alpha"}),
+        )
+
+    def test_a_whole_card_hidden_multi_is_hidden(self):
+        self.assertEqual(
+            attribution.HIDDEN,
+            self.classify(
+                answers=[
+                    {"question": "a", "kind": "hidden"},
+                    {"question": "b", "kind": "hidden"},
+                ]
+            ),
+        )
+
+    # ⚠️ The negative control that keeps the rule from swallowing real answers: a
+    # card with one tab hidden and one answered is NOT a whole-card close. Reading
+    # it as one would discard the tab the operator actually answered.
+    def test_a_mixed_multi_card_is_not_hidden(self):
+        self.assertEqual(
+            attribution.ATTRIBUTED,
+            self.classify(
+                answers=[
+                    {"question": "a", "kind": "hidden"},
+                    {"question": "b", "kind": "text", "value": "yes"},
+                ]
+            ),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
