@@ -468,6 +468,8 @@ Then take exactly one branch:
 
 The goal branch **resolves and delegates**; it reimplements nothing. A worker tab is titled with a *task*, never a goal, so there is no pane to probe at goal level.
 
+0. **Approval gate — before resolving anything.** `vault-cli goal get "<goal>" phase`. A goal at `phase: todo` is in the operator's approval inbox and is NOT approved for management: print `⌛ waiting-approval — <goal> is at phase: todo; approve it with vault-cli goal approve "<goal>"` and STOP — spawn nothing, list nothing, jump nowhere. An absent `phase` is **exempt**, as is every other value; `todo` alone is gated.
+
 1. List the goal's tasks — every task whose `goals:` frontmatter names this goal. **Frontmatter only.** A body-text `[[Goal]]` mention is not membership: grepping `[[goal]]` file-wide over one topic's five member goals returned 39 tasks where frontmatter returns 21, and two of the extras were `in_progress` under entirely different goals.
 2. Then:
    - **one non-terminal task** → run the task branch (Step 2A) on it
@@ -475,6 +477,8 @@ The goal branch **resolves and delegates**; it reimplements nothing. A worker ta
    - **none** → the goal has nothing executable. Report that and suggest `/vault-cli:work-on-goal "<goal>"`, which is the planning path that creates tasks. Do not spawn anything
 
 ## Step 2C — Topic branch
+
+0. **Approval gate — before resolving anything.** `vault-cli topic get "<topic>" phase`. A topic at `phase: todo` is in the operator's approval inbox and is NOT approved for management: print `⌛ waiting-approval — <topic> is at phase: todo; approve it with vault-cli topic approve "<topic>"` and STOP — spawn nothing, jump nowhere. An absent `phase` is **exempt**, as is every other value; `todo` alone is gated.
 
 1. Resolve the topic's manager from the **session registry**, not from `ListAgents` — but read it through its single reader rather than opening the directory here. `session-liveness.py --list --json` returns one record per live session carrying `sessionId`, a live `status`, the current `name`, **`formerNames`** (the names it has held since it started) and `cwd`:
 
