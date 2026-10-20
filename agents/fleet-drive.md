@@ -119,8 +119,8 @@ fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (r
       probe: <command → result>   |   (revive: the CLOSERS row + the four step-4a rows)
       ledger: <drafted | suppressed: <reason> | excluded>
 RETAINED — re-probed from the ledger, not the digest
-  <name> [<sid8>] · <task file|no task file> · <status>/<phase> · <open boxes> · <prior verdict → this round>
-      probe: <command → result>
+  <name> [<sid8>] · <round tag> · <task file|no task file> · <status>/<phase> · <open boxes> · <prior verdict → this round>
+      probe: <the command run THIS round → its result>
       ledger: <drafted | suppressed: <reason> | excluded | dropped: task file missing>
   (none)
 PARKED — one line per row whose parking verdict or probe changed this round
@@ -143,6 +143,8 @@ Waiting on your keystroke
   unconfirmed: <name> [<sid8>] · <link|no pane — <reason>> — <why>   (only for unverifiable verdicts)
 LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · written <ts>
 ```
+
+⚠️ **`RETAINED` and `PARKED` are one line per row — a summary line is a failure, not a rendering choice.** Measured 2026-10-20 on the first `v0.194.0` round (`2026-10-20T21-16-09Z.drive`): 74 retained rows were collapsed into `74 rows, all unverifiable: … Full list: python3 drive-retained.py reprobe`, with **zero** per-row lines, and that single line carried none of the three things the section exists to show — the round tag, the command run that round, that round's result. `RETAINED` is the re-probe *evidence*, so render every row however long the list; `PARKED` names each changed row, or `(none)` when none changed. A summary is exactly the shape a build that never re-probed would also produce, which is why it cannot be accepted here.
 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
 
