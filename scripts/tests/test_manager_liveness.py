@@ -475,3 +475,76 @@ class LegacyRecordMigration(unittest.TestCase):
             rc = self.m.check()
         self.assertEqual(self.m.EXIT_STALE, rc)
         self.assertIn("STALE dead-subject", out.getvalue())
+
+
+class UnarmedAndLegacy(unittest.TestCase):
+    """`UNARMED` vs `INVALID`, and the pre-split records a prefixed read used to miss.
+
+    Measured 2026-10-20: every never-armed goal read `INVALID — unreadable cadence file`,
+    so "no manager was ever armed here" was indistinguishable from "the record cannot be
+    read". Three of the five census subjects were worse still — they HAD a record, under
+    the pre-split bare name, including one that armed the same day.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def state(self, subject):
+        s = self.m.slug(subject, "goal")
+        return self.m.classify(s, time.time())
+
+    def write(self, name, ext, text, age=0):
+        p = self.m.path(name, ext)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def test_no_record_under_either_name_is_unarmed(self):
+        state, detail = self.state("Never Armed")
+        self.assertEqual("UNARMED", state)
+        self.assertIn("no cadence file", detail)
+
+    def test_corrupt_record_is_invalid_not_unarmed(self):
+        # The distinction this whole state exists for: a record EXISTS and cannot be
+        # read, which is a probe failure, not a fact about the fleet.
+        self.write("goal--corrupt", "cadence", "not-a-number\n")
+        state, detail = self.state("Corrupt")
+        self.assertEqual("INVALID", state)
+        self.assertIn("unreadable cadence file", detail)
+
+    def test_legacy_cadence_reads_stale_not_invalid(self):
+        self.write("legacy-lapsed", "cadence", "300\n", age=100000)
+        state, detail = self.state("Legacy Lapsed")
+        self.assertEqual("STALE", state)
+        self.assertIn("legacy-record", detail)
+
+    def test_legacy_cadence_inside_its_limit_reads_ok(self):
+        self.write("legacy-fresh", "cadence", "300\n", age=10)
+        self.assertEqual("OK", self.state("Legacy Fresh")[0])
+
+    def test_legacy_stop_marker_reads_stopped(self):
+        # A deliberate stand-down must not be reported as a lapse or a probe failure.
+        self.write("legacy-stood-down", "stopped", "2026-10-19T22:37:09+0200\n")
+        state, detail = self.state("Legacy Stood Down")
+        self.assertEqual("STOPPED", state)
+        self.assertIn("legacy record", detail)
+
+    def test_prefixed_record_wins_over_legacy(self):
+        self.write("both-names", "cadence", "300\n", age=100000)
+        self.write("goal--both-names", "cadence", "300\n", age=10)
+        self.assertEqual("OK", self.state("Both Names")[0])
+
+    def test_check_still_reports_a_legacy_record_stale(self):
+        # The directory scan must not lose the record now that --state resolves it too.
+        self.write("scanned-legacy", "cadence", "300\n", age=100000)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.check()
+        self.assertEqual(self.m.EXIT_STALE, rc)
+        self.assertIn("STALE scanned-legacy", out.getvalue())
