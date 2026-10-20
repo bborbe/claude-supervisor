@@ -442,6 +442,10 @@ test('an explicit target is taken from the argument', () => {
   // spawn target" for a target that is one, which names the wrong problem.
   assert.deepEqual(resolveSpawnTarget({ target: 'docker' }), { target: 'docker', source: 'argument' })
   assert.deepEqual(resolveSpawnTarget({ target: 'k8s' }), { target: 'k8s', source: 'argument' })
+  // A cluster-named target is a well-formed call too. The CLUSTER itself is validated by the
+  // resolver that knows the configuration; this function only decides the shape.
+  assert.deepEqual(resolveSpawnTarget({ target: 'k8s:nukedev' }), { target: 'k8s:nukedev', source: 'argument' })
+  assert.deepEqual(resolveSpawnTarget({ target: 'k8s:octopus-dev' }), { target: 'k8s:octopus-dev', source: 'argument' })
 })
 
 test('the retired `cluster` target is refused by name, and the refusal lists the survivors', () => {
@@ -460,7 +464,15 @@ test('the retired `cluster` target is refused by name, and the refusal lists the
   assert.ok(error, 'cluster must be refused once retired')
   assert.match(error, /"cluster"/, 'the refusal must name the rejected value')
   assert.match(error, /Valid values: local, docker, k8s/, 'the refusal must list the surviving targets')
-  assert.ok(!/cluster/.test(error.replace(/"cluster"/g, '')), 'cluster must not appear as a valid value')
+  // ⚠️ The retired name may appear once as the rejected value and once inside the accepted
+  // `k8s:<cluster>` grammar — but never as a value of its own. An unqualified
+  // `!/cluster/.test(error)` would now fail on the grammar, so the assertion is on the quoted
+  // form, which is how a value is named in these messages.
+  assert.equal(
+    (error.match(/"cluster"/g) ?? []).length,
+    1,
+    'cluster must be named only as the rejected value, never offered',
+  )
 })
 
 test('the published tool schema lists exactly the spawn targets, so the two cannot drift', () => {
@@ -494,20 +506,22 @@ test('the published tool schema lists exactly the spawn targets, so the two cann
   }
   assert.ok(end > open, 'the target property object must be brace-balanced')
   const targetBlock = src.slice(open, end)
-  // 2. Read the enum from inside it WITHOUT coupling to the surrounding property order. An
-  //    earlier version required `type: 'string',` to be the immediately-following property and
-  //    tolerated only intervening comment LINES — so adding a `required:`, reordering the keys,
-  //    or moving a comment would have made the match null and failed with "the target enum must
-  //    exist", a message that reads as "the schema was deleted" rather than "the test is brittle".
-  //    Matching the literal only is the contract this assertion actually needs.
-  const enumMatch = targetBlock.match(/enum: \[([^\]]+)\]/)
-  assert.ok(enumMatch, 'the target enum must exist in the tool schema')
-  const published = enumMatch[1].split(',').map((v) => v.trim().replace(/^['"]|['"]$/g, ''))
-  assert.deepEqual(
-    published,
-    SPAWN_TARGETS,
-    'the tool schema enum and SPAWN_TARGETS have drifted — a caller can ask for a target the server refuses',
-  )
+  // 2. Read the PATTERN from inside it WITHOUT coupling to the surrounding property order. It was
+  //    an `enum` until 2026-10-20; the cluster names are the operator's configuration, so a closed
+  //    enum would publish a list the server does not own. The pattern still bounds the shape a
+  //    caller may send, which is the part a schema CAN state — and it must accept every kind in
+  //    `SPAWN_TARGETS` plus the `k8s:<cluster>` grammar, while still refusing the retired name.
+  const patternMatch = targetBlock.match(/pattern: '([^']+)'/)
+  assert.ok(patternMatch, 'the target pattern must exist in the tool schema')
+  const published = new RegExp(patternMatch[1])
+  for (const t of SPAWN_TARGETS) {
+    assert.ok(published.test(t), `the published pattern must accept the spawn target "${t}"`)
+  }
+  assert.ok(published.test('k8s:nukedev'), 'the pattern must accept a cluster-named target')
+  assert.ok(published.test('k8s:octopus-dev'), 'the pattern must accept a hyphenated cluster name')
+  assert.ok(!published.test('k8s:'), 'the pattern must refuse an empty cluster name')
+  assert.ok(!published.test('k8s:NukeDev'), 'the pattern must refuse a name the server would refuse')
+  assert.ok(!published.test('cluster'), 'the retired target must not be offered')
   // And the retired target must not survive in the description either, which is the other half
   // of the surface a caller reads. `local` appears there legitimately (it is the default), so
   // this asserts on the retired name alone.

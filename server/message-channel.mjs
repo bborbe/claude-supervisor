@@ -17,7 +17,7 @@
 // A pure function over the agent record, so it is testable without a server, a pane or a
 // pod. Nothing here reads the filesystem, the environment, or the clock.
 
-import { A2A_SPAWN_TARGETS } from './a2a-spawn.mjs'
+import { isA2ATarget } from './a2a-spawn.mjs'
 
 export function resolveMessageChannel(agent) {
   if (!agent || typeof agent !== 'object') {
@@ -55,7 +55,7 @@ export function resolveMessageChannel(agent) {
     return { channel: 'cluster', sessionId: agent.sessionId }
   }
 
-  if (A2A_SPAWN_TARGETS.includes(agent.status)) {
+  if (isA2ATarget(agent.status)) {
     // An A2A turn goes to the WORKER's own endpoint, never the controller (SC3), on the
     // conversation the first turn opened. All three handles are held only by the process that
     // spawned the worker: a REHYDRATED row has no token, because the ledger deliberately never

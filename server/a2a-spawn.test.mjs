@@ -9,19 +9,25 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   A2A_ACK_TIMEOUT_MS,
+  A2A_DEFAULT_CLUSTER,
   A2A_LEDGER_MODE,
   A2A_SPAWN_TARGETS,
   a2aCardUrlFor,
   a2aCreateCallFor,
   a2aSpawnArgumentRefusal,
+  a2aTargetsForClusters,
   a2aTurnPatch,
   a2aWorkerRecord,
   a2aWorkerStatus,
+  clusterEnvSuffix,
   collectWorkerTurn,
+  configuredA2AClusters,
   createWorkerOnController,
   fetchWorkerCard,
+  isA2ATarget,
   ledgerModeForStatus,
   openWorkerTurn,
+  parseA2ATarget,
   pendingPushRegistration,
   pushDiagnosticPatch,
   a2aListCallFor,
@@ -44,12 +50,18 @@ test('the A2A targets are docker and k8s, and nothing else', () => {
   assert.deepEqual(A2A_SPAWN_TARGETS, ['docker', 'k8s'])
 })
 
-test('the roster status is the target name, mirroring cluster', () => {
+test('the roster status is the target, and a cluster-named one survives', () => {
   assert.equal(a2aWorkerStatus({ target: 'docker' }), 'docker')
   assert.equal(a2aWorkerStatus({ target: 'k8s' }), 'k8s')
+  // ⚠️ THE CASE THIS EXISTS FOR: a colon-bearing status must be recognised, or the worker loses
+  // its ledger mode, its rehydrate, its liveness stamp and its stop lookup together — each of
+  // which keys off this one answer.
+  assert.equal(a2aWorkerStatus({ target: 'k8s:nukedev' }), 'k8s:nukedev')
+  assert.equal(a2aWorkerStatus({ target: 'k8s:octopus-dev' }), 'k8s:octopus-dev')
   // A local or cluster worker is not this path's to name.
   assert.equal(a2aWorkerStatus({ target: 'local' }), null)
   assert.equal(a2aWorkerStatus({ target: 'cluster' }), null)
+  assert.equal(a2aWorkerStatus({ target: 'k8s:' }), null)
   assert.equal(a2aWorkerStatus({}), null)
 })
 
@@ -57,10 +69,40 @@ test('the ledger mode is its own value, and only for an A2A status', () => {
   assert.equal(A2A_LEDGER_MODE, 'a2a')
   assert.equal(ledgerModeForStatus('docker'), 'a2a')
   assert.equal(ledgerModeForStatus('k8s'), 'a2a')
+  assert.equal(ledgerModeForStatus('k8s:nukedev'), 'a2a', 'a colon status must keep its ledger mode')
   // The existing modes keep their own answers — this must not swallow them.
   assert.equal(ledgerModeForStatus('interactive'), null)
   assert.equal(ledgerModeForStatus('cluster'), null)
   assert.equal(ledgerModeForStatus('running'), null)
+})
+
+test('the target grammar is docker, k8s, or k8s:<cluster> — and nothing else', () => {
+  assert.deepEqual(parseA2ATarget('docker'), { kind: 'docker', cluster: null })
+  assert.deepEqual(parseA2ATarget('k8s'), { kind: 'k8s', cluster: null })
+  assert.deepEqual(parseA2ATarget('k8s:nukedev'), { kind: 'k8s', cluster: 'nukedev' })
+  assert.deepEqual(parseA2ATarget('k8s:octopus-dev'), { kind: 'k8s', cluster: 'octopus-dev' })
+  for (const bad of ['local', 'cluster', 'k8s:', 'k8s:NukeDev', 'k8s:nuke_dev', '', null, undefined, 42]) {
+    assert.ok(parseA2ATarget(bad).error, `${JSON.stringify(bad)} must refuse`)
+    assert.equal(isA2ATarget(bad), false)
+  }
+  assert.equal(isA2ATarget('k8s:nukedev'), true)
+})
+
+test('the configured cluster set is the union of both maps, minus the reserved keys', () => {
+  assert.deepEqual(
+    configuredA2AClusters({
+      envUrls: { docker: 'x', k8s: 'y', local: 'w', hell: 'z' },
+      fileUrls: { nukedev: 'a', 'octopus-dev': 'b' },
+      defaultCluster: 'nukedev',
+    }),
+    ['hell', 'nukedev', 'octopus-dev'],
+    'docker/k8s are kinds and the legacy alias, local is the local backend, and none is a cluster name',
+  )
+  assert.deepEqual(configuredA2AClusters({ defaultCluster: A2A_DEFAULT_CLUSTER }), [A2A_DEFAULT_CLUSTER])
+})
+
+test('the poll fan-out covers docker and one target per configured cluster', () => {
+  assert.deepEqual(a2aTargetsForClusters(['nukedev', 'hell']), ['docker', 'k8s:nukedev', 'k8s:hell'])
 })
 
 // --- argument refusals --------------------------------------------------------------------
@@ -159,15 +201,119 @@ test('each target resolves its OWN url from one map — the 2026-10-14 divergenc
   )
 })
 
-test('configuring one target does not configure the other', () => {
-  // The failure this must keep: a map that names only `docker` leaves `k8s` unconfigured, and a
-  // k8s spawn has to refuse rather than fall back to the docker address.
+test('configuring one target does not configure another', () => {
+  // The failure this must keep: a map that names only `docker` leaves every k8s cluster
+  // unconfigured, and a k8s spawn has to refuse rather than fall back to the docker address.
   const file = { a2a: { url: { docker: 'http://127.0.0.1:8080/a2a' } } }
   const resolved = resolveA2AControllerTarget({ target: 'k8s', envToken: TOKEN, file })
-  assert.match(resolved.error, /SUPERVISOR_A2A_URL_K8S/, 'must name the key the operator has to set')
+  assert.match(
+    resolved.error,
+    /SUPERVISOR_A2A_URL_NUKEDEV/,
+    'a bare k8s resolves to the default cluster, so the refusal must name THAT cluster key',
+  )
   // Asserted on the RESULT, not on the message: the refusal's own "e.g." hint carries an example
   // address, so a message-matching assertion here would fail on the hint rather than on a fallback.
   assert.equal(resolved.url, undefined, 'must not fall back to the other target')
+})
+
+test('each named cluster resolves its own URL and token, and none shares another', () => {
+  // The seven names the goal allows. The point is not that the map has seven entries — it is that
+  // each resolves a DISTINCT pair, so a spawn aimed at one cluster cannot reach another's
+  // controller. An implementation that echoed the name while reading one shared key fails on the
+  // distinctness assertion, which is the discriminator a live nukedev probe cannot supply.
+  const clusters = ['nukedev', 'nukeprod', 'hell', 'sun', 'octopus-dev', 'octopus-staging', 'octopus-prod']
+  const fileUrls = {}
+  const fileTokens = {}
+  for (const cluster of clusters) {
+    fileUrls[cluster] = `https://${cluster}.example/a2a`
+    fileTokens[cluster] = `token-for-${cluster}`
+  }
+  const seen = new Set()
+  for (const cluster of clusters) {
+    const resolved = resolveA2AControllerTarget({
+      target: `k8s:${cluster}`,
+      envTokens: fileTokens,
+      file: { a2a: { url: fileUrls } },
+      clusters,
+    })
+    assert.equal(resolved.error, undefined, `${cluster} must resolve: ${resolved.error}`)
+    assert.equal(resolved.url, fileUrls[cluster], `${cluster} must resolve its own URL`)
+    assert.equal(resolved.token, fileTokens[cluster], `${cluster} must resolve its own token`)
+    assert.equal(resolved.cluster, cluster)
+    assert.equal(resolved.target, `k8s:${cluster}`, 'the canonical target names the cluster')
+    assert.ok(!seen.has(resolved.url), `${cluster} must not share a URL with another cluster`)
+    seen.add(resolved.url)
+  }
+})
+
+test('the environment key is the cluster uppercased with non-alphanumerics replaced', () => {
+  // `octopus-dev` cannot be an environment variable name, so the mapping is lossy by necessity —
+  // and it is the only lossy one on this path, which is why it is pinned here rather than left to
+  // the reader of the scan.
+  const resolved = resolveA2AControllerTarget({
+    target: 'k8s:octopus-dev',
+    envUrls: { 'octopus-dev': 'https://octopus-dev.example/a2a' },
+    envTokens: { 'octopus-dev': TOKEN },
+    file: {},
+    clusters: ['octopus-dev'],
+  })
+  assert.equal(resolved.url, 'https://octopus-dev.example/a2a')
+  assert.equal(resolved.token, TOKEN)
+  assert.equal(clusterEnvSuffix('octopus-dev'), 'OCTOPUS_DEV')
+})
+
+test('a bare k8s resolves the default cluster, including the legacy k8s key', () => {
+  // Backward compatibility, and the reason it is scoped to the DEFAULT: a live setup predating
+  // cluster names has `a2a.url.k8s` and `SUPERVISOR_A2A_TOKEN_K8S`, and a bare-`k8s` row has to
+  // keep resolving without an operator edit.
+  const legacy = resolveA2AControllerTarget({
+    target: 'k8s',
+    envToken: TOKEN,
+    file: { a2a: { url: { k8s: 'https://nuke.example/a2a' } } },
+  })
+  assert.equal(legacy.error, undefined)
+  assert.equal(legacy.url, 'https://nuke.example/a2a')
+  assert.equal(legacy.target, 'k8s:nukedev', 'a bare k8s is recorded as the cluster it resolved')
+
+  // The cluster's own key WINS over the legacy one, so migrating one target does not silently keep
+  // reading the old value.
+  const both = resolveA2AControllerTarget({
+    target: 'k8s',
+    envToken: TOKEN,
+    file: { a2a: { url: { k8s: 'https://legacy.example/a2a', nukedev: 'https://named.example/a2a' } } },
+  })
+  assert.equal(both.url, 'https://named.example/a2a')
+
+  // ⚠️ The legacy fallback does NOT extend to a non-default cluster: that would put two clusters on
+  // one address, which is the 2026-10-14 divergence one level down.
+  const other = resolveA2AControllerTarget({
+    target: 'k8s:hell',
+    envToken: TOKEN,
+    file: { a2a: { url: { k8s: 'https://nuke.example/a2a' } } },
+    clusters: ['nukedev', 'hell'],
+  })
+  assert.match(other.error, /SUPERVISOR_A2A_URL_HELL/)
+  assert.equal(other.url, undefined, 'hell must not inherit the legacy k8s address')
+})
+
+test('an unknown cluster refuses, naming the configured ones', () => {
+  const resolved = resolveA2AControllerTarget({
+    target: 'k8s:bogus',
+    envToken: TOKEN,
+    file: { a2a: { url: { nukedev: 'https://nuke.example/a2a' } } },
+    clusters: ['nukedev'],
+  })
+  assert.match(resolved.error, /unknown cluster "bogus"/)
+  assert.match(resolved.error, /Configured: nukedev/, 'the refusal must say what IS configured')
+  assert.equal(resolved.url, undefined)
+})
+
+test('a malformed cluster name refuses rather than being normalised', () => {
+  for (const target of ['k8s:', 'k8s:NukeDev', 'k8s:nuke_dev', 'k8s:-nuke', 'k8s:nuke dev']) {
+    const resolved = resolveA2AControllerTarget({ target, envToken: TOKEN, file: {} })
+    assert.ok(resolved.error, `${target} must refuse`)
+    assert.equal(resolved.url, undefined)
+  }
 })
 
 test('the environment wins over the file, and a trailing slash is trimmed', () => {
@@ -193,10 +339,10 @@ test('a bare-string a2a.url REFUSES, naming the map that replaces it', () => {
   assert.equal(resolved.url, undefined, 'must not resolve a url at all')
 })
 
-test('an unknown target refuses, naming the targets that exist', () => {
+test('an unknown target refuses, naming the forms that exist', () => {
   const resolved = resolveA2AControllerTarget({ target: 'local', envToken: TOKEN, file: {} })
   assert.match(resolved.error, /is not an A2A spawn target/)
-  assert.match(resolved.error, /"docker" or "k8s"/)
+  assert.match(resolved.error, /"docker", "k8s", or "k8s:<cluster>"/)
 })
 
 // --- the plaintext token the migration removes ----------------------------------------------
