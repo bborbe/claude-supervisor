@@ -244,5 +244,38 @@ class CreateParityTest(unittest.TestCase):
         self.assertIn("bind: none", buffer.getvalue())
 
 
+class StopVerbTest(unittest.TestCase):
+    """`stop` is the route to a worker the supervisor ledger lost, so its shape is pinned here."""
+
+    def test_stop_request_is_keyed_on_the_worker_id(self):
+        # Never the task name: a task can be spawned again after its first worker died, so a
+        # task-keyed stop would remove the successor instead of the worker it was aimed at.
+        self.assertEqual(
+            ctl.control_request("stop", worker_id="abc123"),
+            {"operation": "stop", "stop": {"worker_id": "abc123"}},
+        )
+
+    def test_stop_refuses_an_empty_worker_id(self):
+        self.assertIsNone(ctl.control_request("stop"))
+        self.assertIsNone(ctl.control_request("stop", worker_id=""))
+
+    def test_stop_carries_exactly_one_operation_field(self):
+        # The controller refuses a request that sets none or more than one, so a task passed
+        # alongside an id must not leak into the stop request.
+        request = ctl.control_request("stop", "some-task", None, None, "abc123")
+        self.assertEqual(list(request.keys()), ["operation", "stop"])
+
+    def test_the_parser_names_the_stop_verbs_own_missing_flag(self):
+        # `--task` is not a stop flag; reporting it would send the reader to a flag that does
+        # not exist on this subcommand.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                ctl.main(["stop"])
+        self.assertNotEqual(raised.exception.code, 0)
+        self.assertIn("--worker-id", stderr.getvalue())
+        self.assertNotIn("--task", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
