@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.191.3
 
 - fix: **a worker whose goal has no live manager is no longer parented to the topic manager.** `scripts/fleet-board.py`'s `manager_on_chain` walked `[goal] + topics_of(goal)`, so a task declaring a goal with no live goal manager resolved to the **topic** manager that lists the goal — a topic→worker edge the tier contract forbids (`docs/session-tiers.md` § The four tiers; `commands/topic-loop.md`: "A topic manager never manages a worker"). It now parents a worker only to the goal manager of a declared goal, falling to the fleet manager (the root) as a holding row when none is live; the two documented exceptions stand (`managed_by` naming a topic, and a goal-less task directly under a topic). `docs/session-tiers.md` and `docs/fleet-surface.md` § Which manager owns a subject now state that tier 4 owns the unmanaged **goal** for starting, not the worker's parent. Change set: `scripts/fleet-board.py`, `scripts/tests/test_fleet_board.py`, `docs/session-tiers.md`, `docs/fleet-surface.md`, `CHANGELOG.md`.
 
