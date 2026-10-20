@@ -40,9 +40,14 @@ def agent_text():
 
 
 def documented_invocation():
-    """The one line in the agent file that runs the producer, or None."""
+    """The one line in the agent file that runs the producer, or None.
+
+    All three flags must sit on the same line: a prose line that merely names
+    `--liveness` beside the script is not an invocation, and matching it would
+    make this lockstep pass on a file that documents no runnable command.
+    """
     for line in agent_text().splitlines():
-        if "scripts/reap-line.py" in line and "--liveness" in line:
+        if "scripts/reap-line.py" in line and all(flag in line for flag in FLAGS):
             return line
     return None
 

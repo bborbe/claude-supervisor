@@ -114,8 +114,9 @@ def recheck_command(session, root=None):
     The full session id, never a prefix: `session-liveness.py` accepts an 8-char
     prefix for its own convenience, but the id embedded here is the one the
     caller holds, and shortening it would hand the reader a weaker probe than the
-    caller had. The prefix form is also the measured trap — it returns AMBIGUOUS
-    or MALFORMED, the branches that say "not a recipient".
+    caller had. A prefix matching more than one session answers AMBIGUOUS, and
+    one matching none answers ABSENT or MALFORMED — so a shortened id can turn a
+    live recipient into a moot verdict.
     """
     return f"python3 {plugin_root(root)}/scripts/session-liveness.py --check {session}"
 
