@@ -44,6 +44,7 @@ def entry(sid, **over):
         "pid": 4242,
         "status": "idle",
         "kind": "interactive",
+        "entrypoint": "cli",
         "name": "fixture",
         "cwd": "/tmp",
     }
@@ -232,9 +233,20 @@ class TestCliRefusals(unittest.TestCase):
         self.assertEqual(done.stdout.splitlines()[0], "busy-target")
 
     def test_headless_target(self):
-        self._registry(kind="headless")
+        # `sdk-cli` is the value a real SDK worker writes. The old fixture used
+        # `kind="headless"`, a value NOTHING in the fleet produces — which is why this guard
+        # read green while being unreachable: every registry entry writes `kind: interactive`,
+        # tab and SDK worker alike (measured 2026-10-20).
+        self._registry(entrypoint="sdk-cli")
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "headless-target")
+
+    def test_kind_is_not_the_headless_signal(self):
+        # Pins the fix: a record claiming `kind: headless` but carrying a real tab entrypoint
+        # must NOT be refused as headless. Keying on `kind` again would fail this.
+        self._registry(kind="headless", entrypoint="cli")
+        done = self._run()
+        self.assertNotEqual(done.stdout.splitlines()[0], "headless-target")
 
     def test_held_session(self):
         self._registry()
