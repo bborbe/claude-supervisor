@@ -56,7 +56,9 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
    - task `in_progress` with open boxes and the session present → run step 4's probes: they clear → **revive** (drafted in step 6); a live blocker → **blocked**; a probe that cannot run → **unverifiable**.
    - task file missing and session absent → **unverifiable**, dropped with reason `task file missing`.
 
-   ⚠️ **Every retained row is re-probed every round, and its `probe` is rewritten with this round's command and result.** Carrying the previous round's `probe` string forward is the defect this step exists to remove — the stub-probe test fails it.
+   **The parked signal is emitted once, not every round.** After re-probing, compare this round's `verdict` and `probe` against the entry's stored values. A change — or a first observation — emits one `PARKED` line naming the row and the parking verdict, and records `suppression: signalled`; an unchanged row records `suppression: already signalled` and emits nothing. `RETAINED` still lists every retained row every round, because that block is the re-probe evidence; `PARKED` is the signal, so an unchanged row appears in the first and stays silent in the second.
+
+   ⚠️ **Every retained row is re-probed every round, and its `probe` is rewritten with this round's command and result.** Carrying the previous round's `probe` string forward is the defect this step exists to remove — the stub-probe test fails it. The same rewrite is what makes the dedup key work: an unchanged `probe` is precisely what `already signalled` means.
 
 1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `[unresolved]` rows and rows with no task are **unverifiable**.
 
@@ -127,6 +129,9 @@ RETAINED — re-probed from the ledger, not the digest
   <name> [<sid8>] · <task file|no task file> · <status>/<phase> · <open boxes> · <prior verdict → this round>
       probe: <command → result>
       ledger: <drafted | suppressed: <reason> | excluded | dropped: task file missing>
+  (none)
+PARKED — one line per row whose parking verdict or probe changed this round
+  <name> [<sid8>] · <verdict> · <probe> → <result> · <link|no pane — <reason>>
   (none)
 ESCALATION — grouped by cause
   <cause>
