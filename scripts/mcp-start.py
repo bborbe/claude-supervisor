@@ -102,14 +102,23 @@ def find_bun(env, which=shutil.which):
 # variable's name (`INTERACTIVE_AUTH_TOKEN`) — one value configures both halves — while each A2A
 # token is a worker controller's own control secret, with no counterparty name to borrow.
 #
-# ⚠️ ONE A2A TOKEN PER SPAWN TARGET, because the two controllers are separate deployments — the
-# docker controller runs on this Mac, the k8s controller in nuke dev. One shared variable would
-# force both deployments to carry the same secret, a constraint the single-token shape imposed
+# ⚠️ ONE A2A TOKEN PER TARGET, because every controller is a separate deployment — the docker
+# controller runs on this Mac and each k8s cluster has its own. One shared variable would force
+# every deployment to carry the same secret, a constraint the single-token shape imposed
 # silently. Each entry names the key its own controller was started with, so a target with no
 # entry here refuses by NAME — which is the intended failure, not a gap.
+#
+# ⚠️ THE A2A TOKENS ARE NOW PER CLUSTER (`SUPERVISOR_A2A_TOKEN_<CLUSTER>`), 2026-10-20. The name
+# is uppercased with every non-alphanumeric replaced by `_`, matching `config.mjs`'s scan, so
+# `octopus-dev` reads `SUPERVISOR_A2A_TOKEN_OCTOPUS_DEV`. The old `SUPERVISOR_A2A_TOKEN_K8S` is
+# still ACCEPTED by the server as the default cluster's fallback, so an entry not yet migrated
+# keeps working — but nothing emits it from here any more, because two names for one secret in
+# one process is how the two ends drift apart. Add a `(SUPERVISOR_A2A_TOKEN_<CLUSTER>, <key>)`
+# pair here for each cluster whose controller the operator deploys.
 TOKEN_KEYS = (
     ("INTERACTIVE_AUTH_TOKEN", "VO0Gmw"),
-    ("SUPERVISOR_A2A_TOKEN_K8S", "lO4j5q"),
+    ("SUPERVISOR_A2A_TOKEN_NUKEDEV", "lO4j5q"),
+    ("SUPERVISOR_A2A_TOKEN_NUKEPROD", "zL8akq"),
     ("SUPERVISOR_A2A_TOKEN_DOCKER", "pLv8Mw"),
 )
 

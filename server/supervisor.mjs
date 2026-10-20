@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
@@ -1432,6 +1432,38 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 // that cannot be refused first is the worker itself: a `create` whose reply fails AFTER the
 // executor started a container reports FAILED, which is why `createWorkerOnController` returns
 // the controller's own text rather than a "nothing happened" claim.
+// The per-call inputs `resolveA2AControllerTarget` needs: the env maps, the config file, the
+// default cluster and the configured cluster set.
+//
+// ⚠️ ONE HELPER, because four sites resolve a controller — spawn, stop-by-row, stop-by-bare-id
+// and the liveness fan-out — and a default or a cluster set computed at only one of them would
+// make them disagree about what "configured" means. `config` is resolved once at load, so a
+// config edit reaches all four on the next server start (a reconnect), never mid-run.
+//
+// ⚠️ The FILE's `a2a.defaultCluster` wins over the environment's, matching every other file/env
+// pair on this path in spirit — but note the direction: the file is the source a running server
+// re-reads on restart, while an MCP `env` block is cached at session start. The built-in
+// `A2A_DEFAULT_CLUSTER` is the last resort so a bare `k8s` keeps resolving with no config at all.
+function a2aResolverInputs() {
+  const file = config.configFileContents
+  const fileDefault = file?.a2a?.defaultCluster
+  const defaultCluster =
+    typeof fileDefault === 'string' && fileDefault !== '' ? fileDefault : config.a2aDefaultCluster ?? A2A_DEFAULT_CLUSTER
+  const clusters = configuredA2AClusters({
+    envUrls: config.a2aUrls,
+    fileUrls: file?.a2a?.url,
+    defaultCluster,
+  })
+  return {
+    envUrls: config.a2aUrls,
+    envTokens: config.a2aTokens,
+    file,
+    path: config.configFile,
+    defaultCluster,
+    clusters,
+  }
+}
+
 // Stop a controller worker named by its bare id — for a worker this server has no ledger row for.
 //
 // ⚠️ THE TOKEN NEVER LEAVES THIS PROCESS, WHICH IS THE WHOLE REASON THIS EXISTS. A worker whose
@@ -1449,15 +1481,12 @@ async function stopWorkerByIdOnController({ workerId, target }) {
   if (typeof workerId !== 'string' || workerId === '') {
     return { error: 'stop_agent needs a non-empty agent_id or worker id' }
   }
-  const targets = target ? [target] : A2A_SPAWN_TARGETS
+  const targets = target ? [target] : a2aTargetsForClusters(a2aResolverInputs().clusters)
   const refusals = []
   for (const name of targets) {
     const controller = resolveA2AControllerTarget({
       target: name,
-      envUrl: config.a2aUrls[name],
-      envToken: config.a2aTokens[name],
-      file: config.configFileContents,
-      path: config.configFile,
+      ...a2aResolverInputs(),
     })
     if (controller.error) {
       refusals.push(`${name}: ${controller.error}`)
@@ -1545,12 +1574,16 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
 
   const controller = resolveA2AControllerTarget({
     target,
-    envUrl: config.a2aUrls[target],
-    envToken: config.a2aTokens[target],
-    file: config.configFileContents,
-    path: config.configFile,
+    ...a2aResolverInputs(),
   })
   if (controller.error) return { error: controller.error }
+
+  // ⚠️ THE CANONICAL TARGET, not the caller's string. A bare `k8s` resolves to the configured
+  // default cluster, and everything recorded downstream — the roster status, the capture file
+  // name, the ledger row — must name that cluster rather than echoing `k8s`: the status is also
+  // what `stop_agent` resolves a controller from, so a bare `k8s` there would have to guess the
+  // cluster again. A manager reading two clusters' rows could not tell them apart either.
+  const canonicalTarget = controller.target
 
   // Paced after every refusal above, so a call that never reaches the controller does not spend
   // a rate slot — the same ordering `spawnClusterWorker` uses and for the same reason.
@@ -1566,8 +1599,8 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
         mkdirSync(captureDir, { recursive: true })
         const at = new Date().toISOString()
         writeFileSync(
-          join(captureDir, `${at.replace(/[:.]/g, '-')}-${target}-create.json`),
-          `${JSON.stringify({ at, target, task, url, body }, null, 2)}\n`,
+          join(captureDir, `${at.replace(/[:.]/g, '-')}-${canonicalTarget.replace(/:/g, '-')}-create.json`),
+          `${JSON.stringify({ at, target: canonicalTarget, task, url, body }, null, 2)}\n`,
         )
       }
     : undefined
@@ -1691,7 +1724,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       label,
       prompt,
       task,
-      target,
+      target: canonicalTarget,
     })
   }
 
@@ -1704,7 +1737,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
       label,
       prompt,
       task,
-      target,
+      target: canonicalTarget,
     })
   }
 
@@ -1713,7 +1746,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     label,
     prompt,
     task,
-    target,
+    target: canonicalTarget,
     sessionId: minted.sessionId,
     workerId: created.worker.worker_id,
     a2aUrl: card.endpoint,
@@ -1995,7 +2028,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // arguments that name a LOCAL process, a local window or a local policy — see
   // `a2aSpawnArgumentRefusal`, which owns that rule and is unit-tested because this file cannot
   // be imported by a test at all.
-  if (A2A_SPAWN_TARGETS.includes(spawnTarget.target)) {
+  if (isA2ATarget(spawnTarget.target)) {
     return spawnA2AWorker({
       id,
       prompt,
@@ -2647,14 +2680,18 @@ const TOOLS = [
         },
         target: {
           type: 'string',
-          // ⚠️ A HARDCODED LITERAL, NOT DERIVED FROM `SPAWN_TARGETS` — this file imports only
-          // `A2A_SPAWN_TARGETS`, so the two can drift and the enum is the surface a caller
-          // actually reads. `cluster` was removed here in the same change that removed it from
-          // `SPAWN_TARGETS` (2026-10-15), because leaving it would keep the published tool
-          // OFFERING a target the server refuses.
-          enum: ['local', 'docker', 'k8s'],
+          // ⚠️ A PATTERN RATHER THAN AN ENUM, since 2026-10-20. The cluster names are the
+          // OPERATOR'S configuration (`a2a.url` / `SUPERVISOR_A2A_URL_<CLUSTER>`), so an enum would
+          // either freeze a list the server does not own or publish names it cannot guarantee are
+          // configured. The pattern bounds the SHAPE a caller may send — the same grammar
+          // `resolveSpawnTarget` and `parseA2ATarget` enforce — and the server still refuses an
+          // unknown or unconfigured cluster, which no schema can know.
+          // `cluster` was removed here in the same change that removed it from `SPAWN_TARGETS`
+          // (2026-10-15), because leaving it would keep the published tool OFFERING a target the
+          // server refuses.
+          pattern: '^(local|docker|k8s(:[a-z0-9][a-z0-9-]*)?)$',
           description:
-            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the target is a second option rather than the fleet default — a config value able to default the whole fleet somewhere is exactly what that split forecloses. A value that is not a known target REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. `docker` and `k8s` are the A2A worker-controller targets: `docker` asks the controller for one container per task on this Mac, `k8s` for one pod per task in nuke dev, and both then talk to the worker DIRECTLY over A2A. Both are PER-CALL ONLY for the same reason. ⚠️ With either, the local-only arguments `interactive`, `resume`, `policy` and `env` are REFUSED rather than ignored: the controller creates the worker, so there is no local process or window here to set one on, and a dropped `resume` would look like a resume while opening a fresh session. Omit all four on a docker or k8s call. ⚠️ A worker created this way is stopped with `stop_agent`, never with `send_agent_message` — the two are different planes (see that tool). ⚠️ `cluster` was RETIRED on 2026-10-15 (the shared long-lived `claude-interactive` pod in nuke dev); `k8s` is the route to a worker in that cluster now, and `cluster` is refused like any other unknown target.',
+            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the target is a second option rather than the fleet default — a config value able to default the whole fleet somewhere is exactly what that split forecloses. A value that is not a known target REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. `docker` and `k8s` are the A2A worker-controller targets: `docker` asks the controller for one container per task on this Mac; `k8s` for one pod per task on the DEFAULT cluster (nuke dev unless `a2a.defaultCluster` says otherwise); `k8s:<cluster>` (e.g. `k8s:nukedev`, `k8s:octopus-dev`) names the cluster explicitly, and there is one controller per cluster with its own URL and token. An unknown or unconfigured cluster REFUSES rather than defaulting, and the refusal names the configured clusters. All of them talk to the worker DIRECTLY over A2A. ⚠️ With any of them, the local-only arguments `interactive`, `resume`, `policy` and `env` are REFUSED rather than ignored: the controller creates the worker, so there is no local process or window here to set one on, and a dropped `resume` would look like a resume while opening a fresh session. Omit all four on a docker or k8s call. ⚠️ A worker created this way is stopped with `stop_agent`, never with `send_agent_message` — the two are different planes (see that tool). ⚠️ `cluster` was RETIRED on 2026-10-15 (the shared long-lived `claude-interactive` pod in nuke dev); `k8s` is the route to a worker in that cluster now, and `cluster` is refused like any other unknown target.',
         },
         task: {
           type: 'string',
@@ -3099,12 +3136,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Only an A2A worker has a controller worker behind it. Refused with the reason per kind
       // rather than a bare "not supported", so a caller told no is told what to do instead.
-      if (!A2A_SPAWN_TARGETS.includes(agent.status)) {
+      if (!isA2ATarget(agent.status)) {
         return reply({
           error:
             `agent ${agent.id} is not an A2A worker (status "${agent.status}"), so there is no controller worker ` +
             'to stop. A tab worker is closed in its own tab; a cluster worker is the shared long-lived pod and is ' +
-            'out of this tool\'s scope. Only the `docker` and `k8s` targets are stopped here.',
+            'out of this tool\'s scope. Only the A2A targets (`docker`, `k8s`, `k8s:<cluster>`) are stopped here.',
         })
       }
       // ⚠️ THE WORKER ID COMES OFF THE RECORD, NEVER FROM A TASK. It is the id `create` recorded
@@ -3125,13 +3162,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // a token the operator has since rotated.
       // ⚠️ `agent.status` IS the target for an A2A row — the roster stores the spawn target there,
       // which is why the guard above reads it as one. So a stop resolves the same controller the
-      // spawn did, from the record rather than from the caller's memory.
+      // spawn did, from the record rather than from the caller's memory. A row written before
+      // clusters existed carries a bare `k8s`, which resolves through the default-cluster clause.
       const controller = resolveA2AControllerTarget({
         target: agent.status,
-        envUrl: config.a2aUrls[agent.status],
-        envToken: config.a2aTokens[agent.status],
-        file: config.configFileContents,
-        path: config.configFile,
+        ...a2aResolverInputs(),
       })
       if (controller.error) return reply({ error: controller.error })
 
@@ -3363,23 +3398,24 @@ const a2aPollState = { ok: null, inFlight: false }
 const a2aTimer = setInterval(async () => {
   if (a2aPollState.inFlight) return
   // ⚠️ ONE POLL PER CONFIGURED TARGET, NOT ONE POLL. The docker controller runs on this Mac and
-  // the k8s controller in nuke dev, behind separate URLs, so a single list call can only ever see
-  // half the fleet. That matters here and nowhere else on this path: `pollA2A` STAMPS what it
-  // lists and never un-stamps what it does not, so a one-controller poll would leave the other
-  // target's workers unstamped — reading as dead while they run.
+  // each k8s cluster has its own, behind separate URLs, so a single list call can only ever see
+  // part of the fleet. That matters here and nowhere else on this path: `pollA2A` STAMPS what it
+  // lists and never un-stamps what it does not, so a poll that skipped a target would leave that
+  // target's workers unstamped — reading as dead while they run. A `k8s:<cluster>` roster status
+  // is exactly why the fan-out is built from the CONFIGURED CLUSTERS rather than the closed kind
+  // list: the kind list knows `k8s`, not which clusters exist.
   //
   // Fanning out is safe for exactly that reason: an unlisted session is left alone, never marked
   // stopped. A target whose controller is unreachable contributes `ok: false` rather than a false
   // "no workers", so the caller's existing warning still fires.
-  const controllers = A2A_SPAWN_TARGETS.map((t) =>
-    resolveA2AControllerTarget({
-      target: t,
-      envUrl: config.a2aUrls[t],
-      envToken: config.a2aTokens[t],
-      file: config.configFileContents,
-      path: config.configFile,
-    }),
-  ).filter((c) => !c.error)
+  const controllers = a2aTargetsForClusters(a2aResolverInputs().clusters)
+    .map((t) =>
+      resolveA2AControllerTarget({
+        target: t,
+        ...a2aResolverInputs(),
+      }),
+    )
+    .filter((c) => !c.error)
   // Silent when NO target is configured, and that is the common case rather than a fault: most
   // servers never spawn an A2A worker, and logging a missing `SUPERVISOR_A2A_URL_*` every 30 s
   // would bury the signal.

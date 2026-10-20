@@ -118,6 +118,29 @@ export const readConfigFile = (path) => {
 
 const CONFIG_FILE_READ = readConfigFile(CONFIG_FILE)
 
+// Every `<PREFIX><NAME>` environment variable, as `{ <name>: value }` — the A2A per-target maps.
+//
+// ⚠️ The name is lowercased with `_` → `-`, because the operator's cluster names are
+// lowercase-hyphen (`octopus-dev`) and an environment variable cannot carry a hyphen. That makes
+// the mapping lossy — `OCTOPUS_DEV` and `OCTOPUS-DEV` are the same key — which is why the config
+// FILE is documented as the preferred source and this route is documented as the normalized one.
+//
+// Empty and whitespace-only values are dropped rather than kept: an unset target must read as
+// "not configured" so the resolver refuses, and a blank string would otherwise pass `set`'s
+// `!== ''` test only to fail the URL check with a message about a value the operator never meant
+// to set.
+function collectPrefixed(env, prefix) {
+  const out = {}
+  for (const [name, value] of Object.entries(env)) {
+    if (!name.startsWith(prefix)) continue
+    if (typeof value !== 'string' || value.trim() === '') continue
+    const suffix = name.slice(prefix.length)
+    if (suffix === '') continue
+    out[suffix.toLowerCase().replace(/_/g, '-')] = value
+  }
+  return out
+}
+
 export const config = Object.freeze({
   // stderr is the transport-safe log channel — stdout carries MCP frames — so a file
   // log is opt-in and nothing depends on a machine-local path by default.
@@ -192,8 +215,8 @@ export const config = Object.freeze({
   // message belong to cluster-spawn.mjs, which can be tested without an environment.
   clusterAuthToken: ENV.INTERACTIVE_AUTH_TOKEN || null,
 
-  // The A2A worker-controller's base URL and the token this server presents to it — the `docker`
-  // and `k8s` spawn targets.
+  // The A2A worker-controller's base URL and the token this server presents to it — one entry
+  // per TARGET, where a target is `docker` or `k8s:<cluster>` (2026-10-20).
   //
   // ⚠️ TWO names of OUR OWN, unlike the cluster pair above, and the asymmetry is deliberate. The
   // cluster token reuses `INTERACTIVE_AUTH_TOKEN` because that is the name the SERVICE reads at
@@ -202,12 +225,20 @@ export const config = Object.freeze({
   // so these are the supervisor's own keys and appear under `a2a` in the config file.
   //
   // ⚠️ PER TARGET, and there is deliberately no target-agnostic variable. The controller runs on
-  // this Mac for `docker` and in nuke dev for `k8s` — two deployments, two control secrets, and no
-  // address or token that is right for both. A single `SUPERVISOR_A2A_URL` is not a default; it is
-  // a value that is wrong for one target whichever one it holds (measured 2026-10-14: a
+  // this Mac for `docker` and once per cluster for `k8s` — separate deployments, separate control
+  // secrets, and no address or token that is right for more than one. A single `SUPERVISOR_A2A_URL`
+  // is not a default; it is a value that is wrong for every target but one (measured 2026-10-14: a
   // `target: "docker"` spawn against the one configured URL created a k8s pod).
   //
   // The file carries the same split, as a target-keyed map under `a2a.url`; the environment wins.
+  //
+  // ⚠️ THE ENVIRONMENT IS SCANNED, not enumerated, because the cluster set is the operator's and
+  // grows without a code change. `SUPERVISOR_A2A_URL_<SUFFIX>` becomes the key `suffix.toLowerCase()
+  // with '_' → '-'`, so `…_OCTOPUS_DEV` is the cluster `octopus-dev`. That mapping is lossy
+  // (`octopus_dev` and `octopus-dev` collide) and it is the ONLY lossy one on this path: the file
+  // map is keyed by the cluster name as written, which is why the file is the preferred source.
+  // `docker` and `k8s` are reserved: a target KIND and the legacy default-cluster alias, never a
+  // cluster name.
   //
   // Unset means "that target is not configured here", and such a spawn REFUSES rather than
   // reaching for a default — see `resolveA2AControllerTarget`, which owns both the shape rules
@@ -215,14 +246,13 @@ export const config = Object.freeze({
   //
   // ⚠️ Neither token is ever logged, echoed or written. Nothing in this module prints them, and
   // the record that holds one is an allowlisted projection away from every read surface.
-  a2aUrls: {
-    docker: ENV.SUPERVISOR_A2A_URL_DOCKER || null,
-    k8s: ENV.SUPERVISOR_A2A_URL_K8S || null,
-  },
-  a2aTokens: {
-    docker: ENV.SUPERVISOR_A2A_TOKEN_DOCKER || null,
-    k8s: ENV.SUPERVISOR_A2A_TOKEN_K8S || null,
-  },
+  a2aUrls: collectPrefixed(ENV, 'SUPERVISOR_A2A_URL_'),
+  a2aTokens: collectPrefixed(ENV, 'SUPERVISOR_A2A_TOKEN_'),
+  // The cluster a bare `k8s` target resolves to. Unset means the built-in default (`nukedev`,
+  // what the single `k8s` target meant before clusters existed), so a live row keeps working
+  // with no config edit. The FILE's `a2a.defaultCluster` is read by the resolver, which owns
+  // that precedence; this is only the environment's contribution.
+  a2aDefaultCluster: ENV.SUPERVISOR_A2A_DEFAULT_CLUSTER || null,
 
   // Whether a reported cost figure describes the traffic that actually ran. See the
   // note above the resolution — this is a property of the deployment, not of a turn.
