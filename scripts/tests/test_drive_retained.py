@@ -128,6 +128,39 @@ class TestDispositions(unittest.TestCase):
         row = entry("aaaa", "blocked", task_file="")
         self.assertEqual(drive_retained.probe(row)["verdict"], "unverifiable")
 
+    def test_a_parked_row_becomes_revive_eligible_in_a_later_round(self):
+        """Round N: dead session -> blocked. Round N+k: live -> needs-step-4.
+
+        `needs-step-4` is the state step 6 drafts a nudge from, so this is the
+        transition the change exists to make reachable. Before step 0 the row was
+        never re-probed at all, so it could not move.
+
+        The disposition must also *signal*, because that is what makes it a nudge
+        rather than a silent re-render.
+        """
+        self.write_task("in_progress", "execution", 3)
+
+        first = drive_retained.probe(
+            entry("aaaa", "blocked", task_file=self.task),
+            read_task_fn=drive_retained.read_task,
+            alive_fn=lambda _sid: False,
+        )
+        self.assertEqual(first["verdict"], "blocked")
+
+        later = drive_retained.probe(
+            entry("aaaa", "blocked", task_file=self.task),
+            read_task_fn=drive_retained.read_task,
+            alive_fn=lambda _sid: True,
+        )
+        self.assertEqual(later["verdict"], drive_retained.NEEDS_STEP_4)
+
+        out = drive_retained.disposition(
+            entry("aaaa", "blocked", task_file=self.task, probe=first["probe"]),
+            probe_fn=lambda _row: later,
+        )
+        self.assertEqual(out["verdict"], drive_retained.NEEDS_STEP_4)
+        self.assertEqual(out["suppression"], "signalled")
+
     def test_unknown_liveness_is_not_death(self):
         """An unreadable registry must not invent an orphan."""
         self.write_task("in_progress", "execution", 3)
