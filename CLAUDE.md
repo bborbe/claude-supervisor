@@ -135,8 +135,10 @@ commands/worker-drive.md                         one worker session — drive it
 scripts/progress-window.py                       its measured window — verdict, A/B/C observations and the claim result, from disk only (spec: docs/session-progress.md)
 commands/restart.md                              restart ONE named session, worker or manager — kill, resume, re-orient
 commands/worker-restart.md                       DEPRECATED alias for commands/restart.md
+commands/close.md                                close ONE finished session's pane — seven guards, never a resume
 scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
 scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
+scripts/close-worker.py                          the close leg — reuses restart-worker/restart-precheck/jump, adds the task gate
 commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)
 commands/ready.md                                ready ONE named task to the bar, then open it (cross-tier)
 commands/stop.md                                 stand that loop down

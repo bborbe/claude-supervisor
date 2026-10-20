@@ -18,6 +18,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.184.9
 
+- feat: **`/supervisor:close <session-id|pid>` closes a finished session's pane** — the fleet manager could open and restart a session but not close one, so every finished tab waited for the operator (nine of them on 2026-10-19). The verb refuses in seven named cases — `busy-target`, `gate-held`, `dirty-worktree`, `held-session`, `headless-target`, `task-not-terminal`, `task-unresolved` — and reuses the existing guards rather than adding a second kill mechanism: the registry read, the hold store and the refusal contract come from `restart-worker.py`, the worktree probe and cause-of-death classifier from `restart-precheck.py`, and the pane→session join from `jump.py`. The two new guards are the task gate: a task that is neither `completed`/`aborted`/`hold` nor deferred to a future `defer_date` refuses, and so does a session no task claims as its `claude_session_id`. Change set: `commands/close.md`, `scripts/close-worker.py`, `scripts/tests/test_close_worker.py`, `commands/steps/rules.md`, `commands/fleet-drive.md`, `agents/fleet-drive.md`, `commands/manager-drive.md`, `agents/manager-drive.md`, `commands/steps/manager-drive.md`, `docs/fleet-surface.md`, `docs/session-tiers.md`, `CLAUDE.md`, `CHANGELOG.md`.
+
 - fix: the `FREEABLE TABS` row no longer repeats the task name when it equals the session name — a worker's session name is usually its task name, so the row printed the same string twice (measured 2026-10-19, round 55: `Start Day - 2026-10-19 · Start Day - 2026-10-19 · finished · …`). The task column is omitted when it is equal to the name. Change set: `agents/fleet-drive.md`, `CHANGELOG.md`.
 
 ## v0.184.8

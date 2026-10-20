@@ -57,6 +57,7 @@ other side.
 | `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `manager-drive`, never by driving a task itself |
 | `/supervisor:restart` | fleet manager, manager — restarts ONE worker or ONE manager, in its own role colour, and tells a manager to re-arm its loop | worker — resuming a session is dispatch, and the script refuses `busy-target` for a session restarting itself |
 | `/supervisor:worker-restart` | fleet manager, manager — **DEPRECATED alias for `/supervisor:restart`, and the one exception to the prefix rule: `worker-` names the TARGET, not the invoker** | worker — same as `/supervisor:restart` |
+| `/supervisor:close` | fleet manager, manager — closes ONE finished session's pane (task terminal or deferred, idle, no gate, no hold, no stranded worktree) | worker — closing a session is dispatch's mirror image, and the seven refusals assume a manager's judgement |
 | `/supervisor:read-guides` | any | — |
 | `/supervisor:jump` | any | — |
 | `/supervisor:who-needs-me` | any | — |
