@@ -105,6 +105,13 @@ SITE_LIST = {
     ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change
     ("who-needs-me.py", "pane_for"), ("who-needs-me.py", "live_pane_ids"),
     ("fleet-board.py", "collect_signals"),
+    # added 2026-10-20 — `send-delivery-drill.py`, the reproduction harness for the
+    # swallowed-submit defect. Its `wezterm` helper is the only transport call. The READS
+    # built on it (`pane_text`, `composer`) return `None` for a failed read, never `''`:
+    # an unreadable pane must never read as a clean composer, because a clean composer is
+    # exactly the state the defect misreads as delivery. Enumerated so the mechanism and
+    # this list agree.
+    ("send-delivery-drill.py", "wezterm"),
 }
 
 
