@@ -168,6 +168,32 @@ test('a bare k8s target is judged by its RESOLVED cluster, which is the join tha
   )
 })
 
+test('a forbidden pairing is refused even when its cluster has no controller configured', () => {
+  // ⚠️ THE DEFECT THIS PINS, found by the manager before it shipped. The resolver REFUSES an
+  // unconfigured cluster, and if the allowlist ran only after resolution, a forbidden pairing aimed
+  // at one would stop at the resolver with ITS message — the boundary would never be consulted, and
+  // the forbidden half of the rule would have no evidence at all. On this supervisor octopus has no
+  // URL or token, so `private-personal` → `k8s:octopus-dev` and `private-trading` →
+  // `k8s:octopus-prod` are exactly that case: both must be refused by the ALLOWLIST.
+  const file = { a2a: { url: { k8s: 'https://nuke.example/a2a' } } }
+  const resolved = resolveA2AControllerTarget({ target: 'k8s:octopus-dev', envToken: 'token', file })
+  assert.ok(resolved.error, 'the resolver refuses an unconfigured cluster — this is the masking risk')
+
+  const refusal = clusterAllowlistRefusal({
+    vault: 'private-personal',
+    target: 'k8s:octopus-dev',
+    allowlist: ALLOWLIST,
+  })
+
+  assert.ok(refusal, 'the boundary must refuse the pairing, not defer to the resolver')
+  assert.match(refusal, /private-personal/)
+  assert.match(refusal, /octopus-dev/)
+  // The two refusals must be distinguishable, or an operator cannot tell which rule fired and a
+  // resolver error could be recorded as the boundary's evidence.
+  assert.doesNotMatch(refusal, /SUPERVISOR_A2A_URL|SUPERVISOR_A2A_TOKEN/)
+})
+
+
 test('clusterOfTarget separates "no cluster target" from "cluster target naming no cluster"', () => {
   assert.deepEqual(clusterOfTarget('docker'), { named: false })
   assert.deepEqual(clusterOfTarget('local'), { named: false })
