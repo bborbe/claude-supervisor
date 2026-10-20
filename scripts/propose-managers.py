@@ -305,6 +305,29 @@ def goal_priority(goals_dir, name):
         return None
 
 
+def goal_phase(goals_dir, name):
+    """The goal page's `phase`, or None when it has none.
+
+    `todo` is the operator's approval inbox: a goal carrying it has NOT been approved for
+    management, and `vault-cli goal approve` is the only writer that leaves it while
+    recording `approved_by` / `approved_at`. Every other value — including an absent key —
+    reads as approved-or-exempt, which is the contract `vault-cli goal approve` states:
+    an absent phase does not mean todo.
+
+    Returns the raw string, unvalidated: an unknown value is still not `todo`, so it
+    neither gates a card nor claims an approval.
+    """
+    if not goals_dir:
+        return None
+    path = os.path.join(goals_dir, f"{name}.md")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            block = frontmatter(handle.read())
+    except OSError:
+        return None
+    return field(block, "phase")
+
+
 def topics_by_goal(vault):
     """`{goal title: {topic title, …}}` for one vault's topic pages.
 
@@ -432,6 +455,7 @@ def qualify(rows, labels, topics, board, threshold=GOAL_THRESHOLD):
             "approved": len(group["titles"]),
             "tasks": sorted(group["titles"]),
             "priority": priority,
+            "phase": goal_phase(group["vault"]["goals_dir"], goal),
         })
 
     # Priority ascending (1 = high), then the most approved work first, then the goal name —
@@ -459,6 +483,24 @@ def dedup_key(goal):
     return f"fleet-propose-manager:{goal}"
 
 
+def approve_dedup_key(goal):
+    """`fleet-approve-manager:<goal name>` — the todo goal's key, distinct from the start card.
+
+    Two keys rather than one because the two cards ask different questions of the same
+    goal. Sharing a key would make the store's open-scoped suppression swallow whichever
+    asked second: an operator who declined to start a manager would never be asked to
+    approve the goal, and vice versa.
+    """
+    return f"fleet-approve-manager:{goal}"
+
+
+def card_key(candidate):
+    """The dedup key for this candidate — the approve key when the goal is in the inbox."""
+    if candidate.get("phase") == "todo":
+        return approve_dedup_key(candidate["goal"])
+    return dedup_key(candidate["goal"])
+
+
 def key_collisions(candidates):
     """`{key: [goal, …]}` for keys two or more candidates share.
 
@@ -469,7 +511,7 @@ def key_collisions(candidates):
     """
     seen = {}
     for candidate in candidates:
-        seen.setdefault(dedup_key(candidate["goal"]), []).append(candidate["goal"])
+        seen.setdefault(card_key(candidate), []).append(candidate["goal"])
     return {key: goals for key, goals in seen.items() if len(goals) > 1}
 
 
@@ -515,7 +557,34 @@ def live_manager_count():
 
 
 def card_for(candidate, free, cap):
-    """The card's fields — one shape, so the printed line and the post cannot disagree."""
+    """The card's fields — one shape, so the printed line and the post cannot disagree.
+
+    Two shapes, chosen by the goal's phase. A goal at `phase: todo` sits in the operator's
+    approval inbox, so the loop asks for the APPROVAL and never for the manager — asking
+    to start a manager on an unapproved goal would make the approval step skippable by
+    answering the wrong card. Every other phase, including an absent key, keeps the
+    start-manager ask: an absent phase is exempt, not unapproved.
+    """
+    if candidate.get("phase") == "todo":
+        return {
+            "dedup_key": approve_dedup_key(candidate["goal"]),
+            "payload": (
+                f"Goal \"{candidate['goal']}\" ({candidate['vault']}) holds "
+                f"{candidate['approved']} approved tasks in planning/execution, sits at "
+                f"phase: todo, and has no live manager. Approve it for management?"
+            ),
+            "context": (
+                f"approved: {candidate['approved']} · phase: todo (approval inbox) · "
+                f"priority: {candidate['priority'] if candidate['priority'] is not None else 'unset'} · "
+                f"tasks: "
+                + "; ".join(candidate["tasks"][:3])
+                + ("; …" if len(candidate["tasks"]) > 3 else "")
+                + " · approving records approved_by/approved_at and flips it to planning: "
+                + f'vault-cli goal approve "{candidate["goal"]}"'
+            ),
+            "options": ["approve", "not now"],
+            "recommend": "approve",
+        }
     return {
         "dedup_key": dedup_key(candidate["goal"]),
         "payload": (
