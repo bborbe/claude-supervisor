@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `scripts/close-worker.py` closes a session that was handed off from a task. `find_task` resolves `metrics_sessions` membership when `claude_session_id` names a successor, and that branch skips `task-not-terminal` — the session no longer owns the task, so the successor's progress is not its gate. Every other refusal still applies, and a session id appearing only in a task's body prose is still not a claim.
+
 ## v0.187.1
 
 - fix: **`CHANGELOG.md` no longer carries git conflict markers, and two long-folded bullets are back in the releases that shipped them.** The merge of #449 resolved three conflicts and left this file's own in place, so `<<<<<<< HEAD` / `=======` / `>>>>>>> origin/master` sat between the manager-tier block and `## v0.186.0` — and the v0.187.0 cut then renamed that block's heading with the markers still inside it. Both sides were real content, so the repair keeps both in order and drops only the three marker lines. ⚠️ **A malformed changelog is not cosmetic on an `autoRelease` repo:** the release watcher reads this file to decide what to cut, and a marker line is neither a heading nor a bullet. Separately, the `changelog-fold` guard had been red on master for two unrelated bullets, each sitting under a release that does not contain its merge — the liveness-timeout fix (v0.184.8 → v0.184.9, merge `ae93916d`) and the `FREEABLE TABS` feature (v0.184.6 → v0.184.7, merge `a4f64e5f`). Both move INTO the later tag, per `git tag --contains`, never back into `## Unreleased`, which would announce shipped work as pending. Guard now reports `0 folded`. Change set: `CHANGELOG.md`.

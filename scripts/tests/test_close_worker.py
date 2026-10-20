@@ -109,8 +109,8 @@ class TestTaskVerdict(unittest.TestCase):
         import datetime
         self.today = datetime.date(2026, 10, 20)
 
-    def _verdict(self, **fm):
-        return cw.task_verdict(("/v/25 Tasks/x.md", fm), self.today)
+    def _verdict(self, handed_off=False, **fm):
+        return cw.task_verdict(("/v/25 Tasks/x.md", fm, handed_off), self.today)
 
     def test_unresolved_task_refuses(self):
         refusal, _ = cw.task_verdict(None, self.today)
@@ -141,6 +141,13 @@ class TestTaskVerdict(unittest.TestCase):
         refusal, _ = self._verdict()
         self.assertEqual(refusal, "task-not-terminal")
 
+    def test_handed_off_passes_while_in_progress(self):
+        """A session the task was handed off from closes without waiting for terminality."""
+        self.assertIsNone(self._verdict(handed_off=True, status="in_progress"))
+
+    def test_handed_off_passes_after_completion(self):
+        self.assertIsNone(self._verdict(handed_off=True, status="completed"))
+
 
 class TestFindTask(unittest.TestCase):
     def setUp(self):
@@ -169,6 +176,34 @@ class TestFindTask(unittest.TestCase):
     def test_other_session_does_not_match(self):
         self._write("a.md", f"---\nclaude_session_id: {OTHER}\nstatus: completed\n---\n")
         self.assertIsNone(cw.find_task(SID, self.tmp, self.vaults))
+
+    def test_finds_by_metrics_session_membership(self):
+        """The id in `metrics_sessions` while another session owns the task is a handoff."""
+        path = self._write(
+            "a.md",
+            f"---\nclaude_session_id: {OTHER}\nstatus: in_progress\n"
+            f"metrics_sessions:\n"
+            f"    - session_id: {SID}\n"
+            f"      started_at: \"2026-10-20T11:51:47+02:00\"\n"
+            f"    - session_id: {OTHER}\n"
+            f"      started_at: \"2026-10-20T11:52:00+02:00\"\n---\n",
+        )
+        found = cw.find_task(SID, self.tmp, self.vaults)
+        self.assertIsNotNone(found)
+        self.assertEqual(found[0], path)
+        self.assertTrue(found[2])
+
+    def test_own_anchor_wins_over_membership(self):
+        path = self._write(
+            "a.md",
+            f"---\nclaude_session_id: {SID}\n"
+            f"metrics_sessions:\n"
+            f"    - session_id: {SID}\n"
+            f"      started_at: \"2026-10-20T11:51:47+02:00\"\n---\n",
+        )
+        found = cw.find_task(SID, self.tmp, self.vaults)
+        self.assertEqual(found[0], path)
+        self.assertFalse(found[2])
 
     def test_vault_walk_up_finds_the_task(self):
         """A worker whose cwd is inside its vault resolves without the vault scan."""
