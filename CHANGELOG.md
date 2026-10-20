@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.195.1
 
 - fix: **`RETAINED` and `PARKED` render one line per row, never a summary.** The first `v0.194.0` round (`~/.claude/state/fleet-handback/2026-10-20T21-16-09Z.drive`) collapsed 74 retained rows into a single line — `74 rows, all unverifiable: … Full list: python3 drive-retained.py reprobe` — with zero per-row lines, and that line carried none of the three things the section exists to show: the round tag, the command run that round, and that round's result. The template now carries the round tag and says the probe is the one run *this* round, and an explicit rule states that a summary is a failure rather than a style choice, because a summary is exactly the shape a build that never re-probed would also produce. Change set: `agents/fleet-drive.md`, `CHANGELOG.md`.
 
