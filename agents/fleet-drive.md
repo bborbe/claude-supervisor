@@ -39,7 +39,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
 <process>
 
-1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `[unresolved]` rows and rows with no task are **unverifiable**.
+1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `deferred` rows are never nudged either; step 1b verifies them and lists them as freeable. `[unresolved]` rows and rows with no task are **unverifiable**.
 
 1b. **Reap the finished — before drafting any nudge.** This is the reap contract's canonical home: `fleet-loop` Step 3b dispatches this leg on every round and points here rather than restating it. Measured 2026-09-23 the fleet snapshot had not been written for ~14h and the ledger held two `finished` verdicts that nothing ever messaged. For each finished row, re-read the three disk facts this run:
 
@@ -48,6 +48,8 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
    grep -m1 '^phase:'  "<task file>"                               # want: done
    grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<task file>"    # want: 0
    ```
+
+   A **`deferred`** row (a clock-bound park, `commands/worker-drive.md` § Park a clock-bound session) reads `status: in_progress` plus a `defer_date` after today instead of the three facts above. Both hold → the worker already ran its own session-close, so draft no reap message and no nudge; list the row under `FREEABLE TABS` as `deferred <defer_date>`, for the round to close through `/supervisor:close` (which accepts a deferred task). Either fails → **unverifiable**.
 
    All three hold → draft a **reap** message: the three commands and their output, that the task is terminal on disk, that nothing was authorised and the operator has **not** answered, that `/vault-cli:sync-progress` then `/vault-cli:session-close` is the session's own call, and that `/exit` is the step that ends the process and frees its spawn-cap slot — closing the task alone does not, and the slot stays held until the process ends. Any fact fails → the row is **unverifiable** (digest and disk disagree), never nudged. A manager closes a finished worker's session only through `/supervisor:close`, which refuses a busy target, an open gate, a dirty worktree, a held session, a headless one, and any task that is not terminal or deferred; the reap itself is the evidence message, nothing more. No owning-manager skip: the gate-loop state records only a member *count* (`sweep-gate-loop/<vault>/<subject>.json` → `"members": N`), so "this task belongs to an armed manager" is not derivable here. A second reap message from a manager that also reaps is harmless — it is the same non-authorising evidence — and the ledger (step 3) stops this layer repeating it.
 
@@ -112,7 +114,7 @@ REAPS
 NUDGES
   TO: <exact roster name> | <message text>
 FREEABLE TABS (a slot the operator can free without a diagnosis)
-  <name> · <task | omit when equal to name> · <finished | long-wait <age>> · <link the digest carried>
+  <name> · <task | omit when equal to name> · <finished | deferred <date> | long-wait <age>> · <link the digest carried>
   (none)
 Waiting on your keystroke
   1. **<Action verb>** <rest of the action> — <task name> · <link the digest carried>
@@ -124,7 +126,7 @@ LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · written <ts>
 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
 
-**`FREEABLE TABS` is the operator's one-click slot release, and its population is a set, not a sample.** Every `finished` row (the ones you reaped) belongs, plus every `parked` row whose digest `<age>` is ≥12 h **and** whose task carries a `claude_session_id` — the resume mechanism, without which closing the pane strands the work; a `finished` row needs none, its work is done. The link is the digest's, never one you render yourself; a row whose lookup failed still renders, with `no pane — <reason>`. ⚠️ **Omit the task column when it equals the name** — a worker's session name is usually its task name, and printing both repeats the same string twice in one row (measured 2026-10-19, round 55: `Start Day - 2026-10-19 · Start Day - 2026-10-19 · finished · …`). Print `(none)` when the set is empty, and **the row count must equal the set size** — a section listing only the rows whose pane happened to resolve is exactly the sample-for-set defect this section exists to avoid. The digest header's `<N> sessions` is this round's census line; do not print a second count.
+**`FREEABLE TABS` is the operator's one-click slot release, and its population is a set, not a sample.** Every `finished` row (the ones you reaped) belongs, every verified `deferred` row (step 1b) belongs, plus every `parked` row whose digest `<age>` is ≥12 h **and** whose task carries a `claude_session_id` — the resume mechanism, without which closing the pane strands the work; a `finished` row needs none, its work is done. The link is the digest's, never one you render yourself; a row whose lookup failed still renders, with `no pane — <reason>`. ⚠️ **Omit the task column when it equals the name** — a worker's session name is usually its task name, and printing both repeats the same string twice in one row (measured 2026-10-19, round 55: `Start Day - 2026-10-19 · Start Day - 2026-10-19 · finished · …`). Print `(none)` when the set is empty, and **the row count must equal the set size** — a section listing only the rows whose pane happened to resolve is exactly the sample-for-set defect this section exists to avoid. The digest header's `<N> sessions` is this round's census line; do not print a second count.
 
 Carry on each `ESCALATION` row the **rendered link** the digest gave for that session — off its
 `BLOCKED` / `CLOSERS` row, or off the `CLASSIFICATION` row when the candidate is `parked` and only

@@ -195,6 +195,16 @@ Observed basis: `eed76c7d` returned WAITING on the same fleet queue 5 times in 3
 
 Both real levers in that session were found *after* the user pushed, never by the session's own verdict. Hunt before you park.
 
+### Park a clock-bound session — free the slot, do not hold it
+
+**This is the rule's single home.** When the hunt above leaves **every** open item clock- or event-bound and the earliest resume is **more than 2 h** away, the session does not hold its fleet slot. It parks the task and closes:
+
+1. **Set `defer_date`** — the trigger's own date when it has one (`vault-cli task set "<task>" defer_date "<YYYY-MM-DD>"`). An **event-bound** wait with no date (a first real refusal, a peer's fix landing) gets a **bounded re-check date** instead, at most one day out; the reopened session re-checks the event and parks again if it has not fired. Never leave an event wait undated: nothing resurfaces a task without a `defer_date`.
+2. **Record the trigger** in `# Progress` as `later (on <trigger>): <action>`, naming what replaces the session's live watcher (the `defer_date` itself, a cron/launchd job, or the fleet round re-checking).
+3. **Close**: `/vault-cli:sync-progress`, then `/vault-cli:session-close`, then `/exit`. The status stays `in_progress`; a deferred task is not `hold`. The fleet round reaps the pane through `/supervisor:close`, which accepts a task deferred to a future `defer_date` (`task-not-terminal` refuses only a task that is neither terminal nor deferred).
+
+**One doable item voids the park.** A step runnable today (a reload, a re-trigger, a criterion to reword) is driven first, and the park is re-tested afterwards. A wait of 2 h or less stays live under its watcher. This is the one exception to § Rules' *never end the session*: the anchor is not terminal, but it is deferred, and holding a slot on a clock buys nothing the `defer_date` does not.
+
 ## Step 4 — Never ask for a non-fork
 
 Ban list. If the next action is one of these, **do it and report it** — a question here is the failure mode, not politeness:
@@ -482,6 +492,6 @@ Every rule above still applies to the fallback text.
 - **Never tick a moved criterion.** Relocated ≠ met. Move the line out under `# Moved to [[<task>]]`, unchecked, or the completion gate passes on a false count.
 - **Verify, never recall.** Every claim of done needs output from this run. §0b's liveness rules apply unchanged.
 - **Never touch another session's work** — containers, branches, worktrees, task framing, prompts, and the PR levers on a PR they own (push, re-trigger, retry, merge, close). Report the finding to the manager instead.
-- **Never end the session.** No wind-down, no `/vault-cli:session-close` unless the anchor is **terminal** on disk, verified this run — either `status: completed` with zero `[ ]`/`[/]` boxes, **or** `status: aborted`. An aborted anchor is equally terminal, and its open boxes are moot by construction, so requiring `completed` alone left a session with no closer at all; when the anchor is `aborted` rather than `completed`, say so plainly in the panel rather than presenting it as a clean completion. `hold` does **not** qualify — it is parked, not finished. Handed-off, parked, blocked and tidied all look done and are not — a `/supervisor:worker-drive` run that ends by offering session-close on an unfinished task has inverted its own purpose.
+- **Never end the session.** No wind-down, no `/vault-cli:session-close` unless the anchor is **terminal** on disk, verified this run — either `status: completed` with zero `[ ]`/`[/]` boxes, **or** `status: aborted`. An aborted anchor is equally terminal, and its open boxes are moot by construction, so requiring `completed` alone left a session with no closer at all; when the anchor is `aborted` rather than `completed`, say so plainly in the panel rather than presenting it as a clean completion. `hold` does **not** qualify — it is parked, not finished. The one exception is a clock-bound park under § Step 3 *Park a clock-bound session* (future `defer_date`, every open item more than 2 h out). Handed-off, parked, blocked and tidied all look done and are not — a `/supervisor:worker-drive` run that ends by offering session-close on an unfinished task has inverted its own purpose.
 - **One goal per session.** Drive the anchor. Never drift to another goal's tasks, even if the daily note lists them.
 - **Irreversible actions are never inside a menu.** Present alone, with blast radius, for explicit approval.
