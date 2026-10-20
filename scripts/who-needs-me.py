@@ -609,7 +609,7 @@ def session_transcript_age(sid):
     `last_message_ts()`, which prefers the last transcript line's embedded
     `timestamp`, this reads the transcript file's own mtime — so `touch` moves this
     reading and not that one. The two answer different questions on purpose, and the
-    idle check in `agents/manager-drive.md` reads this one. An absent transcript
+    idle check in `agents/goal-drive.md` reads this one. An absent transcript
     returns `inf` so it reads as stale, which is the honest answer: nothing has been
     written for a session with no transcript.
 

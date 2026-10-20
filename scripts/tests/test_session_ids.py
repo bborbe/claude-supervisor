@@ -185,7 +185,7 @@ class TestReads(Frontmatter):
 
 class TestDeclaredFieldSet(Frontmatter):
     def test_the_declared_field_set_is_the_set_the_extractor_reads(self):
-        """`commands/manager-loop.md`'s guard bullet must name the same field set the
+        """`commands/goal-loop.md`'s guard bullet must name the same field set the
         script enforces, so the constant has to track the extractor.
 
         ⚠️ Asserted against the extractor's BEHAVIOUR, never against the literal: a

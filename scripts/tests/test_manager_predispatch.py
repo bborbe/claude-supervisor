@@ -591,7 +591,7 @@ class TestLiveness(Base):
         input — and the exit-0 branch then replays the stored table verbatim. One cell in
         that table is no longer true: the Status cell, which reads `⌛ waiting-on-human`
         for a parked row and `🔄 progressing` for a live one
-        (`agents/manager-sweep-reader.md:136`). The stale cell is the *Status* cell and
+        (`agents/goal-sweep-reader.md:136`). The stale cell is the *Status* cell and
         NOT the Session cell, which is `[<sid8>]` for both — `parked` is ALIVE, so it
         takes the live-shaped delimiter (step 7).
 
@@ -1795,7 +1795,7 @@ class TestStuck(Base):
 class TestVerdictsCache(Base):
     """The verdicts cache's writer — the half clause (1) delegated to the caller in prose.
 
-    Clause (1) (`agents/manager-drive.md`) names the cache's home and assigns the write to
+    Clause (1) (`agents/goal-drive.md`) names the cache's home and assigns the write to
     the *caller* ("The write is the caller's … let the caller persist them"), but nothing in
     the shipped tree wrote the file: the leg holds no write tool, and the two sibling
     subjects' caches are one-off writes whose mtimes never move while their subject ticks
@@ -3050,7 +3050,7 @@ class TestRosterOwnerTruncation(Base):
 class TestCheckboxCountStruckRows(unittest.TestCase):
     """`checkbox_count` excludes a struck row — and the SHAPE of that exclusion is load-bearing.
 
-    The rule carriers (`agents/manager-sweep-reader.md:457-458`) state the unit as the
+    The rule carriers (`agents/goal-sweep-reader.md:457-458`) state the unit as the
     file's total checkboxes with struck rows excluded. Both ways an implementation can get
     the shape wrong are regressions with measurements behind them, not hypotheticals: an
     anchor requiring the whole row to be the struck wikilink matches **nothing** in the

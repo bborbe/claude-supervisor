@@ -2,7 +2,7 @@
 readings must not come back.
 
 The defect this guards against, measured in one review round: the rule is carried four times
-in `agents/manager-sweep-reader.md`, and within a single round the `<success_criteria>` bullet
+in `agents/goal-sweep-reader.md`, and within a single round the `<success_criteria>` bullet
 kept an escape clause the frame paragraph had already retracted, while the input-8 contract's
 new "render no goal rows" clause silently deleted the root row of every goal-branch frame.
 Both were found by a reviewer reading prose, not by anything mechanical.
@@ -33,7 +33,7 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-goal-row-clause.py"
 
-CARRIER = "agents/manager-sweep-reader.md"
+CARRIER = "agents/goal-sweep-reader.md"
 EXEMPTION = "The GOAL branch is exempt by construction"
 
 #: The four carriers as the real file spells them, verbatim in shape — the input-8 contract
@@ -60,7 +60,7 @@ class Base(unittest.TestCase):
         (pathlib.Path(self.dir) / "scripts").mkdir()
         shutil.copy(SCRIPT, pathlib.Path(self.dir) / "scripts" / "check-goal-row-clause.py")
         self.write(CARRIER, "---\nname: x\n---\n\n" + "\n\n".join(FOUR_CARRIERS) + f"\n\n{EXEMPTION}\n")
-        self.write("commands/manager-loop.md", "---\ntitle: x\n---\n\nnothing here\n")
+        self.write("commands/goal-loop.md", "---\ntitle: x\n---\n\nnothing here\n")
         self.write("docs/fleet-surface.md", "---\ntitle: x\n---\n\nnothing here\n")
 
     def write(self, relpath, text):
@@ -128,11 +128,11 @@ class TestGoalRowClauseGuard(Base):
         exercised a single phrase across three directories and left two anchors unguarded."""
         for phrase in RETRACTED_PHRASES:
             with self.subTest(phrase=phrase):
-                self.write("commands/manager-loop.md", f"---\ntitle: x\n---\n\nit says: {phrase}\n")
+                self.write("commands/goal-loop.md", f"---\ntitle: x\n---\n\nit says: {phrase}\n")
                 result = self.run_check()
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(phrase, result.stderr)
-                self.assertIn("commands/manager-loop.md", result.stderr)
+                self.assertIn("commands/goal-loop.md", result.stderr)
 
     def test_retracted_reading_in_docs_fails(self):
         self.write("docs/fleet-surface.md", f"---\ntitle: x\n---\n\nit is {RETRACTED_PHRASES[0]}\n")

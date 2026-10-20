@@ -25,7 +25,7 @@ The command **resolves** and **dispatches**. It never does the work, never runs 
 /supervisor:open <name>
   ├─ task   → live pane? jump · live but no pane (cluster worker)? refuse · has claude_session_id? resume · else spawn gates (Step 1.5: approval, then readiness) → spawn
   ├─ goal   → resolve to its active task, then the task branch
-  └─ topic  → live manager-loop? jump · else spawn /supervisor:manager-loop
+  └─ topic  → live goal-loop? jump · else spawn /supervisor:goal-loop
 
 /supervisor:open --flagged → batch: select flag:true · in_progress · due today,
                              classify + WRITE any missing role: and mode: from the
@@ -188,7 +188,7 @@ Everything else is `agent`. A task naming `kubectl`, `ssh` or a deploy is still 
 
 ⚠️ **Classify from the BODY, never from the title or the frontmatter.**
 
-**A `role: manager` row is never opened — and the classifier never derives `manager`.** `manager` is **declared** by whoever files the row (the write command accepts it for exactly that), never inferred: a prose-derived value measured at ~1.1% false positives against 4/19 recall was rejected. Open a `manager` row as **nothing at all** — render `👤 YOURS` (the vocabulary `agents/manager-sweep-reader.md` step 4 and `agents/manager-drive.md` clause (4) already use), spawn no session, open no window, and write nothing; the declared value is the record.
+**A `role: manager` row is never opened — and the classifier never derives `manager`.** `manager` is **declared** by whoever files the row (the write command accepts it for exactly that), never inferred: a prose-derived value measured at ~1.1% false positives against 4/19 recall was rejected. Open a `manager` row as **nothing at all** — render `👤 YOURS` (the vocabulary `agents/goal-sweep-reader.md` step 4 and `agents/goal-drive.md` clause (4) already use), spawn no session, open no window, and write nothing; the declared value is the record.
 
 ### Then decide `mode` — the rule lives in one place, and this is not it
 
@@ -339,7 +339,7 @@ vault-cli --vault "<vault>" task get "<task>" phase
 
 ⚠️ **The ruling is load-bearing, not decorative** — a `flag: true` **is** task content, and `vault-cli`'s `docs/task-writing.md` § *Phase transitions* permits approval only on the operator's "own explicit words" — which the ruling is.
 
-The approval does **not** extend to the four sweeps (`manager-loop`, `manager-drive`, `fleet-loop`, `fleet-drive`), which report `todo` rows instead of acting on them. ⚠️ **Enforcement of the flag's provenance sits upstream of this gate**, in the § Step 0.5 selector.
+The approval does **not** extend to the four sweeps (`goal-loop`, `goal-drive`, `fleet-loop`, `fleet-drive`), which report `todo` rows instead of acting on them. ⚠️ **Enforcement of the flag's provenance sits upstream of this gate**, in the § Step 0.5 selector.
 ### Gate 2 — readiness
 
 **Scope: CREATE only.** JUMP and RESUME are never gated. ⚠️ **The decision here is the readiness ladder, whose single home is `docs/fleet-surface.md` § Spawn a worker item 2** — read the branches there; the thresholds are never restated as a second counter. Orientation only: **≥ 9 opens directly; below 9 runs one improvement pass and re-audits; ≥ 7 after that pass opens; below 7 is carded and held.** ⚠️ **In the `--flagged` batch the card branch is overridden for operator-flagged rows**: a row the Step 0.5 selector admitted that lands below the ladder's open bar **opens** anyway, its gap bullets carried into the worker's prompt as its first step (§ Step 0.6 owns the transport). **Gate 1 is untouched.** `role: human` rows into Direct are not gated. **`task_type:` frontmatter rows are exempt**; show `— (pipeline contract)`.
@@ -351,12 +351,12 @@ Agent(subagent_type='vault-cli:task-auditor', description='Readiness: <task>',
   prompt='Audit <absolute task path>. READ-ONLY readiness probe for a spawn gate: never edit, never ask. Return your normal report, then additionally check these hard gates and list each failure: (1) # Success Criteria with ≥2 binary checkboxes; (2) # Tasks lists concrete steps that reach the SC; (3) shipping-class tasks carry an e2e verify subtask naming a procedure AND an expected result; (4) every # Tasks item maps to an SC or is the verify subtask; (5) any push/deploy/credential names its target system and account. Score the row and name every hard-gate failure; do NOT apply an open bar yourself — the open decision is the readiness ladder's, and its single home is `docs/fleet-surface.md` § Spawn a worker item 2. Then, before you score, check for the one class of gap that is not yours to close: a gap whose resolution needs a decision only the operator can make — a Success Criterion depending on a page, artifact or credential that does not exist, a scope question the task file does not answer, a target system or account named nowhere. If you find one, end with UNFIXABLE: <reason> as your ONLY final line, naming the gap and why only the operator can resolve it — no score, no READINESS line, and do not repair it yourself. Otherwise end with exactly one line: READINESS: <score>/10 — <gap>; <gap>. Report the score and the gaps and stop there: do NOT add a ready/not-ready word, and do NOT apply the ladder yourself — the ladder decides whether it opens, and a verdict word you add is never read. Never run a filesystem-wide find.')
 ```
 
-**A sub-agent that cannot close a gap because its resolution needs an operator decision returns `UNFIXABLE: <reason>` instead of a `READINESS:` line.** ⚠️ **`UNFIXABLE:` no longer stops the row — the improvement pass acts on it first:** the pass **rewrites the unmeetable criterion into a falsifiable form, or splits it into its own follow-up task**, then re-audits. The card is the **fallback**, fired only when neither works or the criterion is operator-only. Reader: `agents/manager-drive.md` clause (1) **step 0**.
+**A sub-agent that cannot close a gap because its resolution needs an operator decision returns `UNFIXABLE: <reason>` instead of a `READINESS:` line.** ⚠️ **`UNFIXABLE:` no longer stops the row — the improvement pass acts on it first:** the pass **rewrites the unmeetable criterion into a falsifiable form, or splits it into its own follow-up task**, then re-audits. The card is the **fallback**, fired only when neither works or the criterion is operator-only. Reader: `agents/goal-drive.md` clause (1) **step 0**.
 
 **The ladder, as this gate runs it — dispatch the probe, read the score, then branch.** The thresholds' single home is `docs/fleet-surface.md` § Spawn a worker item 2; this is the gate's own execution of them:
 
 1. **Score ≥ 9** → ready. Spawn.
-2. **Score < 9** → run **one improvement pass**: edit the task file to fix the audit's named gaps (for an `UNFIXABLE:`, rewrite the criterion falsifiable or split it into a follow-up task). Then re-dispatch the probe. ⚠️ **One run of `agents/manager-drive.md` clause (1)'s repair loop — this gate adds no second loop and no round cap.** ⚠️ **A hard-gate failure is never waived by the ladder.**
+2. **Score < 9** → run **one improvement pass**: edit the task file to fix the audit's named gaps (for an `UNFIXABLE:`, rewrite the criterion falsifiable or split it into a follow-up task). Then re-dispatch the probe. ⚠️ **One run of `agents/goal-drive.md` clause (1)'s repair loop — this gate adds no second loop and no round cap.** ⚠️ **A hard-gate failure is never waived by the ladder.**
 3. **Post-pass score ≥ 7** → ready. Spawn. Nothing is carried into the worker's prompt: the row clears the ladder on its own.
 4. **Post-pass score < 7** → print `⛔ NOT READY <score>/10 — <task>` with the gap bullets, **post the attention-board card** per `docs/fleet-surface.md` § Spawn a worker item 2, and hold the row. ⚠️ **In the `--flagged` batch this branch is overridden** — the row opens with its gap bullets carried into the worker's prompt (see § Scope above, and § Step 0.6 for the transport).
 
@@ -505,7 +505,7 @@ The goal branch **resolves and delegates**; it reimplements nothing. A worker ta
    wezterm cli spawn -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<MGR>" -n "<topic> Manager" "/color orange"'
    ```
 
-   Same `unset` prefix as Step 3.1 — without it the manager comes up named after the session that spawned it. The colour rides as the spawn prompt, per the recipe. Then tell the operator to run `/supervisor:manager-loop "<topic>"` in it. The manager loop is stateful and this command is not; `/supervisor:open` starts the session, the manager arms its own loop.
+   Same `unset` prefix as Step 3.1 — without it the manager comes up named after the session that spawned it. The colour rides as the spawn prompt, per the recipe. Then tell the operator to run `/supervisor:goal-loop "<topic>"` in it. The manager loop is stateful and this command is not; `/supervisor:open` starts the session, the manager arms its own loop.
 
 **The colour is a role signal, not decoration** — a topic manager comes up `orange` so it can never be read as a worker, which stays `pink` (Step 3.1 and the `--color` default). Keep the two distinct.
 
@@ -674,7 +674,7 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 
 ## Notes
 
-- Managers (`/supervisor:manager-loop`, `/supervisor:fleet-loop`) *recommend* opening sessions; this command is the executor — run it when the human approves.
+- Managers (`/supervisor:goal-loop`, `/supervisor:fleet-loop`) *recommend* opening sessions; this command is the executor — run it when the human approves.
 
 - Replaces `.claude/commands/open-session.md`. The jump branch and the goal/topic resolution are the additions.
 

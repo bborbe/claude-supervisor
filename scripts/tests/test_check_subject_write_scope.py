@@ -11,8 +11,8 @@ PR #173 actually found:
   * a non-writer regaining `Bash(vault-cli:*)` while the table still says it holds none.
 
 ⚠️ **Since 2026-10-11 both writers resolve through the same step file**
-(`commands/steps/manager-resolve.md` — `manager-loop` became the arm and
-`commands/manager-drive.md` the loop's per-round router), so the guard's cross-copy
+(`commands/steps/goal-resolve.md` — `manager-loop` became the arm and
+`commands/goal-drive.md` the loop's per-round router), so the guard's cross-copy
 paragraph comparison is a no-op and the test that exercised it was removed with the
 divergence it constructed. The paragraph-level mutations below now target the step file,
 which is where the paragraph lives; the frontmatter-grant mutations still target the
@@ -36,14 +36,19 @@ DOC = "docs/subject-resolution.md"
 #: writer check is about lives on the command that reads the step. Kept separate from
 #: COMMANDS so the two roles cannot be conflated by a future bulk rename.
 GRANT_CARRIERS = [
-    "commands/manager-loop.md",
+    "commands/goal-loop.md",
+    "commands/topic-loop.md",
 ]
 
 COMMANDS = [
-    "commands/steps/manager-resolve.md",
-    "commands/manager-drive.md",
-    "commands/manager-status.md",
-    "commands/manager-verify.md",
+    "commands/steps/goal-resolve.md",
+    "commands/steps/topic-resolve.md",
+    "commands/goal-drive.md",
+    "commands/goal-status.md",
+    "commands/goal-verify.md",
+    "commands/topic-drive.md",
+    "commands/topic-status.md",
+    "commands/topic-verify.md",
 ]
 
 
@@ -53,7 +58,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = pathlib.Path(self.tmp.name)
         (self.root / "docs").mkdir()
-        # `parents=True`: one of the carriers is now a step file (`commands/steps/manager-resolve.md`),
+        # `parents=True`: one of the carriers is now a step file (`commands/steps/goal-resolve.md`),
         # since the loop's subject resolution moved there when it became a router. The fixture
         # mirrors the real layout, so it has to create the nested directory too.
         (self.root / "commands" / "steps").mkdir(parents=True, exist_ok=True)
@@ -91,17 +96,17 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
 
     def test_writer_losing_its_invocation_fails(self):
         self.mutate(
-            "commands/steps/manager-resolve.md",
+            "commands/steps/goal-resolve.md",
             "§ *Reconcile the subject's status* **now**",
             "§ *Reconcile the subject's status*",
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("manager-resolve.md", result.stderr)
+        self.assertIn("goal-resolve.md", result.stderr)
 
     def test_non_writer_carrying_the_imperative_fails(self):
         self.mutate(
-            "commands/manager-status.md",
+            "commands/goal-status.md",
             "**⚠️ The subject's status is left exactly as found",
             "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.** "
             "Run § *Reconcile the subject's status* **now**, before the report.\n\n"
@@ -109,7 +114,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("manager-status.md", result.stderr)
+        self.assertIn("goal-status.md", result.stderr)
 
     def test_non_writer_that_never_names_the_section_fails(self):
         # Assertion (b): a non-writer that says nothing at all reads as a missing step rather
@@ -117,34 +122,34 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         # Both of this file's mentions must go — the divergence list's entry and the carve-out
         # sentence that names the section. Removing only one leaves the assertion satisfied.
         self.mutate(
-            "commands/manager-verify.md",
+            "commands/goal-verify.md",
             "the recording block, and § *Reconcile the subject's status*.",
             "the recording block.",
         )
         self.mutate(
-            "commands/manager-verify.md",
-            "§ *Reconcile the subject's status*, which names this command and `/manager-status`",
-            "the write-scope carve-out, which names this command and `/manager-status`",
+            "commands/goal-verify.md",
+            "§ *Reconcile the subject's status*, which names this command and `/goal-status`",
+            "the write-scope carve-out, which names this command and `/goal-status`",
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("manager-verify.md", result.stderr)
+        self.assertIn("goal-verify.md", result.stderr)
 
     def test_table_row_removed_fails(self):
         self.mutate(
             DOC,
-            "| `/manager-verify` | yes | **no** — holds no `Bash(vault-cli:*)` |\n",
+            "| `/supervisor:goal-verify` | yes | **no** — holds no `Bash(vault-cli:*)` |\n",
             "",
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("3 row(s)", result.stderr)
+        self.assertIn("7 row(s)", result.stderr)
 
     def test_table_row_duplicated_fails(self):
         self.mutate(
             DOC,
-            "| `/manager-drive` | yes | **yes** |",
-            "| `/manager-loop` | yes | **yes** |",
+            "| `/supervisor:goal-drive` | yes | **yes** |",
+            "| `/supervisor:goal-loop` | yes | **yes** |",
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
@@ -153,13 +158,13 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
     def test_missing_command_file_fails(self):
         # The writers' paragraph now lives in the step file both of them resolve through, so
         # that is the file whose absence the table check must catch.
-        (self.root / "commands/steps/manager-resolve.md").unlink()
+        (self.root / "commands/steps/goal-resolve.md").unlink()
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("named in the table but missing", result.stderr)
 
     def test_unreadable_frontmatter_fails_closed(self):
-        self.mutate("commands/manager-verify.md", "---\n", "--- \n")
+        self.mutate("commands/goal-verify.md", "---\n", "--- \n")
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("could not be read", result.stderr)
@@ -168,7 +173,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         # The one branch with no mutation pinning it: the imperative can survive while the
         # shared marker does not, and the paragraph comparison then has nothing to compare.
         self.mutate(
-            "commands/steps/manager-resolve.md",
+            "commands/steps/goal-resolve.md",
             "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.**",
             "**⚠️ Reconcile the subject's status.**",
         )
@@ -190,9 +195,9 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertIn("does not state the reason its frontmatter implies", result.stderr)
 
     def test_writer_missing_a_required_grant_fails(self):
-        # The guarantee that shipped false: manager-drive carried the invocation without the
+        # The guarantee that shipped false: goal-drive carried the invocation without the
         # awk grant the rule needs, and nothing asserted the writers' grants.
-        self.mutate("commands/manager-drive.md", "  - Bash(awk:*)\n", "")
+        self.mutate("commands/goal-drive.md", "  - Bash(awk:*)\n", "")
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("Bash(awk:*)", result.stderr)
@@ -203,7 +208,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         # Mutate the GRANT CARRIER, not the relocated writer: the guard reads grants from
         # `commands/<name>.md`, so mutating the step file would leave the grant loop skipping
         # silently and the test would pass for the wrong reason.
-        self.mutate("commands/manager-loop.md", "---\n", "--- \n")
+        self.mutate("commands/goal-loop.md", "---\n", "--- \n")
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("its grants were never checked", result.stderr)
@@ -211,7 +216,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
     def test_step_word_missing_fails(self):
         # The STEP_SLOT fold is asserted to have fired; without this the assertion is itself
         # unchecked, and a third step word would degrade the compare to a strict literal.
-        self.mutate("commands/steps/manager-resolve.md", "before the sweep", "before the pass")
+        self.mutate("commands/steps/goal-resolve.md", "before the sweep", "before the pass")
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
         self.assertIn("the fold never fired", result.stderr)
@@ -220,7 +225,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         # Dropping the pointer from the shared carrier would otherwise pass every other
         # assertion, since both writers read the same file.
         self.mutate(
-            "commands/steps/manager-resolve.md",
+            "commands/steps/goal-resolve.md",
             "run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *Reconcile the subject's status*",
             "run § *Reconcile the subject's status*",
         )
@@ -229,7 +234,7 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         self.assertIn("does not name its home", result.stderr)
 
     def test_non_writer_row_reworded_to_the_other_reason_fails(self):
-        # The silent skip: manager-verify holds no grant, so its row must state the grant reason.
+        # The silent skip: goal-verify holds no grant, so its row must state the grant reason.
         # Rewording it to the read-only reason must fail rather than skip the assertion.
         self.mutate(
             DOC,
@@ -247,22 +252,22 @@ class CheckSubjectWriteScopeTest(unittest.TestCase):
         # exactly why it is derived from the *table* rather than from the loop's survivors.
         self.mutate(
             DOC,
-            "| `/manager-drive` | yes | **yes** |",
-            "| `/manager-drive` | yes | **no** — read-only by its own contract |",
+            "| `/supervisor:goal-drive` | yes | **yes** |",
+            "| `/supervisor:goal-drive` | yes | **no** — read-only by its own contract |",
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("expected 2", result.stderr)
+        self.assertIn("expected 4", result.stderr)
 
     def test_non_writer_regaining_the_grant_fails(self):
         self.mutate(
-            "commands/manager-verify.md",
+            "commands/goal-verify.md",
             "  - Bash(find:*)",
             "  - Bash(vault-cli:*)\n  - Bash(find:*)",
         )
         result = self.run_guard()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("manager-verify.md", result.stderr)
+        self.assertIn("goal-verify.md", result.stderr)
 
 
 if __name__ == "__main__":

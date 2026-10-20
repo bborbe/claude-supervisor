@@ -239,7 +239,7 @@ class TestGradedCases(Base):
         self.assertIn("open", err)
         # The reason names the action to execute instead, not merely the refusal.
         self.assertIn("/supervisor:open", err)
-        self.assertIn("commands/manager-loop.md", err)
+        self.assertIn("commands/goal-loop.md", err)
 
     def test_positive_every_manager_owned_verb_is_reachable_in_its_natural_phrasing(self):
         # ⚠️ One verb per call, in the phrasing the rule homes actually use, so a regex

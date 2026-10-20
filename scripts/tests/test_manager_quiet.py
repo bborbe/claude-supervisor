@@ -362,7 +362,7 @@ class TestSlugAgreesWithLiveness(Base):
             "Recurring Operator Gates Are Fixed Once, Not Answered Every Session",
             "Drive Rounds Report Success-Criterion Progress, Not Session Activity",
         ):
-            self.assertEqual(self.m.slug(subject), live.slug(subject))
+            self.assertEqual(self.m.slug(subject), live.base_slug(subject))
 
     def test_the_counter_sits_beside_the_liveness_files(self):
         self.assertEqual(

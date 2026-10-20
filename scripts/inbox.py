@@ -22,7 +22,7 @@ question on every render.
 
 ⚠️ Excluding `backlog` is not the same as excluding a stale row; the two are
 independent and this script does not judge staleness. It reports what sits at
-the boundary. The audit that RANKS rows is `agents/manager-drive.md` clause
+the boundary. The audit that RANKS rows is `agents/goal-drive.md` clause
 (1)'s, not this one's.
 
 WHAT IS EXCLUDED AS RECURRING. `recurring:` frontmatter, or a cadence-marked
@@ -62,7 +62,7 @@ which writes its notified-set file and would break this script's read-only rule.
 This mirrors the open-items rule: a subject's manager carries its asks, the fleet
 manager carries the residual.
 
-RANKED, NEVER THE TAIL. The view renders at most `agents/manager-drive.md`
+RANKED, NEVER THE TAIL. The view renders at most `agents/goal-drive.md`
 clause (7)'s cap, in that clause's order: a row serving a goal, then a row other
 live rows are `blocked_by`, then the rest by cached `task-auditor` score
 (`manager-predispatch/*.verdicts.json`; rows with no entry sort after, by name).
@@ -119,7 +119,7 @@ MANAGER_DIR = os.path.expanduser(os.environ.get(
     "SUPERVISOR_WORKER_MANAGER_DIR", "~/.claude/state/worker-manager"))
 VERDICTS_DIR = os.path.expanduser(os.environ.get(
     "SUPERVISOR_PREDISPATCH_DIR", "~/.claude/state/manager-predispatch"))
-CLAUSE7 = os.path.join(SCRIPTS, os.pardir, "agents", "manager-drive.md")
+CLAUSE7 = os.path.join(SCRIPTS, os.pardir, "agents", "goal-drive.md")
 CAP_RE = re.compile(r"recommend \*\*at most (\d+)\*\*")
 WIKI_RE = re.compile(r"\[\[([^\]|]+)")
 

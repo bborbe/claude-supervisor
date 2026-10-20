@@ -41,8 +41,8 @@ class Liveness(unittest.TestCase):
 
     def arm(self, topic, interval, age):
         with redirect_stdout(io.StringIO()):
-            self.m.arm(topic, interval)
-        p = self.m.path(self.m.slug(topic), "cadence")
+            self.m.arm(topic, "goal", interval)
+        p = self.m.path(self.m.slug(topic, "goal"), "cadence")
         t = time.time() - age
         os.utime(p, (t, t))
 
@@ -60,7 +60,7 @@ class Liveness(unittest.TestCase):
         self.arm("Manager Layer", 300, age=2 * 300 + 61)
         rc, out = self.check()
         self.assertEqual(rc, 10)
-        self.assertTrue(out.startswith("STALE manager-layer "), out)
+        self.assertTrue(out.startswith("STALE goal--manager-layer "), out)
 
     def test_slow_manager_uses_its_own_interval(self):
         # 19 min old on a 20-min cadence: healthy, not a lapse (2026-09-23 13:32 case).
@@ -70,14 +70,14 @@ class Liveness(unittest.TestCase):
     def test_stop_marker_suppresses(self):
         self.arm("Manager Layer", 300, age=5000)
         with redirect_stdout(io.StringIO()):
-            self.m.stop("Manager Layer")
+            self.m.stop("Manager Layer", "goal")
         self.assertEqual(self.check(), (0, ""))
 
     def test_rearm_clears_stop_marker(self):
         with redirect_stdout(io.StringIO()):
-            self.m.stop("Manager Layer")
+            self.m.stop("Manager Layer", "goal")
         self.arm("Manager Layer", 300, age=5000)
-        self.assertFalse(os.path.exists(self.m.path("manager-layer", "stopped")))
+        self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
         self.assertEqual(self.check()[0], 10)
 
     def test_one_lapse_notifies_once_then_recovers(self):
@@ -87,7 +87,7 @@ class Liveness(unittest.TestCase):
         self.arm("Manager Layer", 300, age=0)
         rc, out = self.check()
         self.assertEqual(rc, 0)
-        self.assertTrue(out.startswith("RECOVERED manager-layer OK"), out)
+        self.assertTrue(out.startswith("RECOVERED goal--manager-layer OK"), out)
         self.arm("Manager Layer", 300, age=5000)  # a NEW lapse notifies again
         self.assertEqual(self.check()[0], 10)
 
@@ -96,12 +96,12 @@ class Liveness(unittest.TestCase):
         self.arm("Beta", 300, age=10)
         rc, out = self.check()
         self.assertEqual(rc, 10)
-        self.assertIn("STALE alpha", out)
+        self.assertIn("STALE goal--alpha", out)
         self.assertNotIn("beta", out)
 
     def plant_arms(self, topic, offsets):
         """Write a re-arm history: epochs at now - offset for each offset."""
-        s = self.m.slug(topic)
+        s = self.m.slug(topic, "goal")
         now = time.time()
         body = "".join(f"{now - o:.0f}\n" for o in offsets)
         with open(self.m.path(s, "arms"), "w") as fh:
@@ -134,16 +134,16 @@ class Liveness(unittest.TestCase):
         # restart starts a fresh sample instead.
         self.plant_arms("Manager Layer", [11000, 10000, 9000, 8000])
         with redirect_stdout(io.StringIO()):
-            self.m.stop("Manager Layer")
-            self.m.arm("Manager Layer", 300)
-        self.assertEqual(len(self.m.read_arms("manager-layer")), 1)
-        self.assertIsNone(self.m.observed_interval("manager-layer"))
+            self.m.stop("Manager Layer", "goal")
+            self.m.arm("Manager Layer", "goal", 300)
+        self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 1)
+        self.assertIsNone(self.m.observed_interval("goal--manager-layer"))
 
     def test_history_survives_ordinary_rearms(self):
         self.plant_arms("Manager Layer", [3000, 2000, 1000])
         self.arm("Manager Layer", 300, age=0)
-        self.assertEqual(len(self.m.read_arms("manager-layer")), 4)
-        self.assertEqual(int(self.m.observed_interval("manager-layer")), 1000)
+        self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 4)
+        self.assertEqual(int(self.m.observed_interval("goal--manager-layer")), 1000)
 
     def test_unreadable_cadence_is_flagged(self):
         with open(self.m.path("broken", "cadence"), "w") as fh:
@@ -188,26 +188,26 @@ class StateVerb(unittest.TestCase):
 
     def test_stopped_marker_reads_stopped(self):
         with redirect_stdout(io.StringIO()):
-            self.m.arm("Manager Layer", 300)
-            self.m.stop("Manager Layer")
-        rc, out = self.state("--state", "--topic", "Manager Layer")
+            self.m.arm("Manager Layer", "goal", 300)
+            self.m.stop("Manager Layer", "goal")
+        rc, out = self.state("--state", "--subject", "Manager Layer", "--branch", "goal")
         self.assertEqual(rc, 0)
         self.assertTrue(out.startswith("STOPPED\t"), out)
 
     def test_stale_cadence_reads_stale(self):
         with redirect_stdout(io.StringIO()):
-            self.m.arm("Manager Layer", 300)
-        p = self.m.path(self.m.slug("Manager Layer"), "cadence")
+            self.m.arm("Manager Layer", "goal", 300)
+        p = self.m.path(self.m.slug("Manager Layer", "goal"), "cadence")
         t = time.time() - 100000
         os.utime(p, (t, t))
-        rc, out = self.state("--state", "--topic", "Manager Layer")
+        rc, out = self.state("--state", "--subject", "Manager Layer", "--branch", "goal")
         self.assertEqual(rc, 0)
         self.assertTrue(out.startswith("STALE\t"), out)
 
     def test_fresh_cadence_reads_ok(self):
         with redirect_stdout(io.StringIO()):
-            self.m.arm("Manager Layer", 300)
-        rc, out = self.state("--state", "--topic", "Manager Layer")
+            self.m.arm("Manager Layer", "goal", 300)
+        rc, out = self.state("--state", "--subject", "Manager Layer", "--branch", "goal")
         self.assertEqual(rc, 0)
         self.assertTrue(out.startswith("OK\t"), out)
 
@@ -216,10 +216,10 @@ class StateVerb(unittest.TestCase):
         # manager read as a failure to anything wrapping the call, which is the
         # opposite of what STOPPED means.
         for topic in ("Nothing Here",):
-            rc, _ = self.state("--state", "--topic", topic)
+            rc, _ = self.state("--state", "--subject", topic, "--branch", "goal")
             self.assertEqual(rc, 0, topic)
 
-    def test_state_requires_a_topic(self):
+    def test_state_requires_a_subject(self):
         with self.assertRaises(SystemExit):
             self.state("--state")
 
@@ -227,8 +227,8 @@ class StateVerb(unittest.TestCase):
         # The property the new verb exists for, pinned so a later change to
         # --check cannot quietly make the two agree and hide the distinction.
         with redirect_stdout(io.StringIO()):
-            self.m.arm("Manager Layer", 300)
-            self.m.stop("Manager Layer")
+            self.m.arm("Manager Layer", "goal", 300)
+            self.m.stop("Manager Layer", "goal")
         out = io.StringIO()
         with redirect_stdout(out):
             self.m.check()
@@ -255,7 +255,7 @@ class StoodDownVersusLapsed(unittest.TestCase):
 
     def state(self, topic):
         out, old = io.StringIO(), sys.argv
-        sys.argv = ["manager-liveness.py", "--state", "--topic", topic]
+        sys.argv = ["manager-liveness.py", "--state", "--subject", topic, "--branch", "goal"]
         try:
             with redirect_stdout(out), redirect_stderr(io.StringIO()):
                 self.m.main()
@@ -266,12 +266,12 @@ class StoodDownVersusLapsed(unittest.TestCase):
     def test_a_stand_down_and_a_lapse_are_told_apart(self):
         # Stood down: cadence frozen AND a marker saying so, deliberately.
         with redirect_stdout(io.StringIO()):
-            self.m.arm("Stood Down Manager", 900)
-            self.m.stop("Stood Down Manager")
+            self.m.arm("Stood Down Manager", "goal", 900)
+            self.m.stop("Stood Down Manager", "goal")
         # Lapsed: the same frozen cadence, no marker -- nothing said it stopped.
         with redirect_stdout(io.StringIO()):
-            self.m.arm("Lapsed Manager", 900)
-        p = self.m.path(self.m.slug("Lapsed Manager"), "cadence")
+            self.m.arm("Lapsed Manager", "goal", 900)
+        p = self.m.path(self.m.slug("Lapsed Manager", "goal"), "cadence")
         t = time.time() - 100000
         os.utime(p, (t, t))
 

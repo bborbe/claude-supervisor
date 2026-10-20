@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The gate class test must precede the post instruction in `steps/manager-gates.md`.
 
-`commands/steps/manager-gates.md` carries the waiting-on-human branch. A manager reading it
+`commands/steps/goal-gates.md` carries the waiting-on-human branch. A manager reading it
 must classify the gate **before** it acts on it, because the class picks the channel:
 a class-D/E gate cannot be released by a board button, a selection modal cannot be
 deferred, and a class-C gate that cannot be carded at all — today a closer-line
@@ -12,7 +12,7 @@ the same bullet, a manager reading top-down **carded a closer-line `pick`** and 
 operator was asked twice. The fix (commit 54cbcf1, released v0.128.4) was purely an
 ordering change: lead with the class test.
 
-This row moved that bullet into `commands/steps/manager-gates.md` verbatim. **Nothing else
+This row moved that bullet into `commands/steps/goal-gates.md` verbatim. **Nothing else
 asserts the order** — before this guard, any later edit could undo it with every
 other check green, which is exactly how it broke the first time. So this is a
 relocation guard, not a semantics guard: it proves the two phrases are in the right
@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-TARGET = "commands/steps/manager-gates.md"
+TARGET = "commands/steps/goal-gates.md"
 CLASS_TEST = "classify the gate before you act on it"
 POST_CALL = "attention-ask.py post"
 

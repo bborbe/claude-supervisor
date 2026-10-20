@@ -1,10 +1,10 @@
 # Session tiers — who runs which command
 
 Every `/supervisor:*` command belongs to the tier of the session that invokes it, and its
-prefix names that tier: `fleet-*` for the fleet manager, `manager-*` for a goal/topic manager,
-`worker-*` for a worker. A few bare verbs are cross-tier — **the table below is the list**, so it
-is never restated here. Ask one question — *which session am I in?* — and the table answers what
-you may run.
+prefix names that tier: `fleet-*` for the fleet manager, `topic-*` for a topic manager,
+`goal-*` for a goal manager, `worker-*` for a worker. A few bare verbs are cross-tier —
+**the table below is the list**, so it is never restated here. Ask one question — *which
+session am I in?* — and the table answers what you may run.
 
 ⚠️ **One command breaks the prefix rule, and it is named in the table so it cannot be
 mistaken for an oversight: `/supervisor:worker-restart`.** Its prefix names its **target**,
@@ -23,13 +23,32 @@ a bare verb names no tier, so its row states the tier directly.
 
 Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 
-## The three tiers
+## The four tiers
 
-| Tier | Carries | Started by |
-|---|---|---|
-| **Fleet manager** | every session on the machine; one stateful loop | the operator, in a session created for it |
-| **Manager** (goal/topic manager) | ONE goal or ONE topic and its tracked task set | the operator, in a session created for it |
-| **Worker** | ONE anchored task | a manager (`/supervisor:manager-spawn`, or `/supervisor:open` run from the manager's side) |
+The tiers form a **strict tree**: each level manages only the level directly below it, and
+each level's `-spawn` starts that level and nothing else. `topic-spawn` starts a **goal
+manager**; `goal-spawn` starts a **worker**. There is no `fleet-spawn` — the operator starts
+topic managers — and no `worker-spawn` at all.
+
+| Tier | Manages | May start | Done condition |
+|---|---|---|---|
+| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (operator-initiated); never a goal manager or a worker directly | the fleet has no unmanaged subject and no gate it owns is outstanding |
+| **Topic manager** | ONE topic's declared goal set, and the goal managers running on it | a **goal manager**, at most N at once per topic and never past the fleet manager ceiling | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
+| **Goal manager** | ONE goal's declared task set, and the workers running on it | a **worker**, under the spawn cap | every task in its declared set is terminal, waiting on a named party, or held with a stated reason |
+| **Worker** | ONE anchored task | nothing — a worker never opens a session | its anchored task is terminal, or it reports the gate that stops it |
+
+⚠️ **The tree starts at whatever level exists.** Not every piece of work needs a goal or a
+topic: a worker whose task has no goal is managed by the nearest existing ancestor — its
+topic's manager if the task sits directly under a topic, otherwise the fleet manager. A goal
+with no topic is managed by the fleet manager. `docs/fleet-surface.md` § Which manager owns a
+subject is the canonical statement of that fallback.
+
+⚠️ **`topic-*` commands hold no `spawn_agent` tool.** A topic manager starts a goal manager
+through `/supervisor:open --goal`, whose resume and spawn branches already carry the hold
+check, the liveness guard and the spawn-recipe rules. Handing the topic tier its own spawn
+tool would create a second, unaudited route to a session — the exact failure
+`commands/open.md` § Step 2C exists to prevent. `commands/topic-spawn.md` is the tier's own
+front door and it delegates.
 
 ## Command → tier
 
@@ -38,33 +57,43 @@ other side.
 
 | Command | Tier | Never run from |
 |---|---|---|
-| `/supervisor:fleet-loop` | fleet manager | worker; goal/topic manager (use `manager-loop`) |
+| `/supervisor:fleet-loop` | fleet manager | worker; topic manager (use `topic-loop`); goal manager (use `goal-loop`) |
 | `/supervisor:fleet-status` | fleet manager | worker |
-| `/supervisor:fleet-drive` | fleet manager | worker; goal/topic manager (use `manager-drive`) |
+| `/supervisor:fleet-drive` | fleet manager | worker; topic manager (use `topic-drive`); goal manager (use `goal-drive`) |
 | `/supervisor:fleet-workers` | fleet manager | worker |
-| `/supervisor:fleet-verify` | fleet manager | worker; goal/topic manager (use `manager-verify`) |
-| `/supervisor:manager-loop` | manager | worker — arming it collapses the two roles silently |
-| `/supervisor:manager-status` | manager | worker |
-| `/supervisor:manager-drive` | manager | worker |
-| `/supervisor:manager-verify` | manager | worker |
-| `/supervisor:manager-spawn` | manager | worker — workers never start sessions |
-| `/supervisor:manager-answer` | manager | worker |
-| `/supervisor:manager-drain` | manager | worker |
-| `/supervisor:stop` | manager — stands down *this* session's manager loop | worker (it has no loop to stop) |
-| `/supervisor:reset` | manager — re-discovers *this* manager's state | worker |
-| `/supervisor:open` | manager — resolves a name, then jumps, resumes or spawns | worker — workers never open sessions |
-| `/supervisor:open-a2a` | manager — resolves a name, then creates the worker on the a2a-worker-controller (the backend chosen by the row's `target:`) | worker — workers never open sessions |
-| `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `manager-drive`, never by driving a task itself |
-| `/supervisor:restart` | fleet manager, manager — restarts ONE worker or ONE manager, in its own role colour, and tells a manager to re-arm its loop | worker — resuming a session is dispatch, and the script refuses `busy-target` for a session restarting itself |
-| `/supervisor:worker-restart` | fleet manager, manager — **DEPRECATED alias for `/supervisor:restart`, and the one exception to the prefix rule: `worker-` names the TARGET, not the invoker** | worker — same as `/supervisor:restart` |
-| `/supervisor:close` | fleet manager, manager — closes ONE finished session's pane (task terminal or deferred, idle, no gate, no hold, no stranded worktree) | worker — closing a session is dispatch's mirror image, and the seven refusals assume a manager's judgement |
+| `/supervisor:fleet-verify` | fleet manager | worker; topic manager (use `topic-verify`); goal manager (use `goal-verify`) |
+| `/supervisor:topic-loop` | topic manager | worker; goal manager — arming it collapses the two roles silently |
+| `/supervisor:topic-status` | topic manager | worker; goal manager |
+| `/supervisor:topic-drive` | topic manager | worker; goal manager |
+| `/supervisor:topic-verify` | topic manager | worker; goal manager |
+| `/supervisor:topic-spawn` | topic manager — starts a goal manager | worker; goal manager — this tier starts only the level below it |
+| `/supervisor:goal-loop` | goal manager | worker — arming it collapses the two roles silently |
+| `/supervisor:goal-status` | goal manager | worker; topic manager (use `topic-status`) |
+| `/supervisor:goal-drive` | goal manager | worker; topic manager (use `topic-drive`) |
+| `/supervisor:goal-verify` | goal manager | worker; topic manager (use `topic-verify`) |
+| `/supervisor:goal-spawn` | goal manager — spawns a worker | worker — workers never start sessions |
+| `/supervisor:goal-answer` | goal manager | worker; topic manager — a goal manager is a tab session and answers its own prompts |
+| `/supervisor:goal-drain` | goal manager | worker; topic manager — it serves headless workers only |
+| `/supervisor:stop` | topic manager, goal manager — stands down *this* session's loop | worker (it has no loop to stop) |
+| `/supervisor:reset` | topic manager, goal manager — re-discovers *this* manager's state | worker |
+| `/supervisor:open` | fleet manager, topic manager, goal manager — resolves a name, then jumps, resumes or spawns | worker — workers never open sessions |
+| `/supervisor:open-a2a` | fleet manager, topic manager, goal manager — resolves a name, then creates the worker on the a2a-worker-controller (the backend chosen by the row's `target:`) | worker — workers never open sessions |
+| `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `goal-drive`, never by driving a task itself |
+| `/supervisor:restart` | fleet manager, topic manager, goal manager — restarts ONE worker or ONE manager, in its own role colour, and tells a manager to re-arm its loop | worker — resuming a session is dispatch, and the script refuses `busy-target` for a session restarting itself |
+| `/supervisor:worker-restart` | fleet manager, topic manager, goal manager — **DEPRECATED alias for `/supervisor:restart`, and the one exception to the prefix rule: `worker-` names the TARGET, not the invoker** | worker — same as `/supervisor:restart` |
+| `/supervisor:manager-loop` | topic manager, goal manager — **DEPRECATED alias; resolves the tier, then runs `topic-loop` or `goal-loop`** | worker |
+| `/supervisor:manager-drive` | topic manager, goal manager — **DEPRECATED alias; resolves the tier, then runs `topic-drive` or `goal-drive`** | worker |
+| `/supervisor:manager-status` | topic manager, goal manager — **DEPRECATED alias; resolves the tier, then runs `topic-status` or `goal-status`** | worker |
 | `/supervisor:read-guides` | any | — |
 | `/supervisor:jump` | any | — |
+| `/supervisor:close` | any | — |
 | `/supervisor:who-needs-me` | any | — |
 | `/supervisor:who-needs-my-help` | any — sweeps every live session and reports; its one outward action is a `SendMessage` per live manager | — |
 | `/supervisor:attention-next` | any — relays the operator's own answer | — |
 | `/supervisor:inbox` | any — the operator's own approval queue; relays their approve / reject / later, and never picks a row itself | — |
 | `/supervisor:ready` | any — readies ONE named task to the spawn bar (audit → repair → re-audit in a sub-agent), then opens it or escalates | — |
+
+⚠️ **A `manager-*` prefix now survives on exactly three commands, and they are aliases.** `manager-loop`, `manager-drive` and `manager-status` are kept for one reason: **every armed manager loop wakes by calling `/supervisor:manager-drive <subject>`** — the prompt its own `ScheduleWakeup` carries. A rename with no alias stops every live loop on the first `/reload-plugins` after the release, silently, and nothing reports it until `manager-liveness.py` calls the cadence stale two intervals later. Each alias resolves the tier and invokes the tier's own command through `Skill`; none reimplements a procedure. **They are not a second home for any rule** and they are deleted in a later release once no armed loop carries the old prompt.
 
 Keep this table in lockstep with `commands/`: a command file with no row here, or a row with
 no command file, is a defect. Check it with:
@@ -82,7 +111,7 @@ Empty output is a pass.
 
 - **`/supervisor:open` is manager-only.** Opening, resuming or spawning a session is dispatch, and
   dispatch authority is the manager's (`docs/fleet-surface.md` § Session roles). A worker
-  never runs `/supervisor:open` — nor `/supervisor:manager-spawn` — and never hands the operator a
+  never runs `/supervisor:open` — nor `/supervisor:goal-spawn` — and never hands the operator a
   session-opening command.
 - **A worker talks to its manager for anything out of scope.** Work outside its anchored task,
   a blocker another session must clear, a content question: the worker sends it to its
@@ -123,20 +152,26 @@ output — the fleet table.
 
 ## The manager boundary
 
-- **A manager is never started in a worker session**, and starting a manager is a human act —
-  `docs/fleet-surface.md` § Session roles is the canonical statement.
+- **A manager is never started in a worker session.** ⚠️ **Starting a *topic* manager is a
+  human act; starting a *goal* manager is the topic manager's** — `docs/fleet-surface.md`
+  § Session roles is the canonical statement.
 - **A manager does not execute a worker's task.** It spawns, drives, answers and reaps
   workers; the task's work happens in the worker's own session.
-- **A manager starts or resumes a worker on a vault task with `/supervisor:open --task`** —
+- **A goal manager starts or resumes a worker on a vault task with `/supervisor:open --task`** —
   the path that reads the task's recorded session and writes it back. Reach for a bare
-  manager-spawn (a direct `spawn_agent` call) **only** when the brief has no task file;
-  `commands/manager-spawn.md` is the canonical statement of that split. ⚠️ **This is a rule
+  goal-spawn (a direct `spawn_agent` call) **only** when the brief has no task file;
+  `commands/goal-spawn.md` is the canonical statement of that split. ⚠️ **This is a rule
   about dispatching a worker onto a task — it is not a general ban on `spawn_agent`.** Two
   documented direct-call paths sit outside it: the loops execute the rows their sweep already
-  decided directly (`commands/manager-loop.md` § Procedure, the `To open` and `To resume`
-  bullets; the act leg it runs is the `supervisor:manager-drive` agent, `agents/manager-drive.md`),
+  decided directly (`commands/goal-loop.md` § Procedure, the `To open` and `To resume`
+  bullets; the act leg it runs is the `supervisor:goal-drive` agent, `agents/goal-drive.md`),
   and continuing an exited headless worker is a direct call by design
   (`docs/fleet-surface.md` § A headless worker exits at turn end). Neither is a hand-rolled
   dispatch. ⚠️ And it is a **policy, not a gate** — the same caveat `docs/fleet-surface.md`
   § Session roles attaches to the worker-side prohibition, so do not go hunting for an
   enforcement that does not exist.
+- **A topic manager starts a goal manager with `/supervisor:open --goal "<goal>"`**, and only
+  for a goal its own `## Goals` list declares. `commands/topic-spawn.md` owns the three
+  refusals (`goal-not-in-scope`, `goal-not-startable`, `manager-cap`), the ranking that picks
+  which goals get one of the N slots, and the keep-alive contract. It holds no `spawn_agent`
+  tool.

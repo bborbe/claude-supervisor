@@ -1,6 +1,6 @@
 ---
 description: Verify one topic or goal and suggest the fixes — seven gated checks, read-only, ending in a numbered fix list
-argument-hint: "[topic-or-goal-name-or-path] — omit the name to resolve it from the session, like /supervisor:manager-status"
+argument-hint: "[topic-or-goal-name-or-path] — omit the name to resolve it from the session, like /supervisor:goal-status"
 allowed-tools:
   - Read
   - Task
@@ -11,7 +11,7 @@ allowed-tools:
 ---
 
 <objective>
-Verify ONE subject — **a topic or a goal** — and **suggest** the fixes. Resolve the subject, detect the branch, call that branch's instrument, dispatch `supervisor:manager-verify`, and print what it returns. **The seven gated checks, their per-branch forks and the report shape live in `agents/manager-verify.md` and are not restated here.**
+Verify ONE subject — **a topic or a goal** — and **suggest** the fixes. Resolve the subject, detect the branch, call that branch's instrument, dispatch `supervisor:goal-verify`, and print what it returns. **The seven gated checks, their per-branch forks and the report shape live in `agents/goal-verify.md` and are not restated here.**
 </objective>
 
 ⚠️ **This command is READ-ONLY, re-scoped 2026-09-20 on the operator's instruction:** *"we don't need 20 different commands to do stuff. We have worker status that shows the status and then we have worker verify that should verify and suggest fix."* It **diagnoses and advises**; it does not prune, author, plan or spawn. Every mutating step is a **suggestion in the report**. There is **no `--dry-run`, and none is needed** — the flag was removed 2026-09-20 in the same pass, so the whole run *is* the preview. Do not reintroduce a mutating mode behind a flag.
@@ -26,13 +26,13 @@ Verify ONE subject — **a topic or a goal** — and **suggest** the fixes. Reso
 
 **Only source 3 stays inline**, because it is the one an agent cannot reach:
 
-3. **Conversation** — the most recent `/supervisor:manager-loop`, `/supervisor:manager-status`, `/supervisor:manager-drive` or `/supervisor:manager-verify` argument in this conversation, then the most recent goal/topic page referenced **as a subject** (a wikilink or a read/edited path — not a prose mention).
+3. **Conversation** — the most recent `/supervisor:goal-loop`, `/supervisor:goal-status`, `/supervisor:goal-drive` or `/supervisor:goal-verify` argument in this conversation, then the most recent goal/topic page referenced **as a subject** (a wikilink or a read/edited path — not a prose mention).
 
-**Nothing resolves → STOP.** Print `❌ No subject detected. Pass a goal or topic name: /supervisor:manager-verify "<name>"` and do nothing else.
+**Nothing resolves → STOP.** Print `❌ No subject detected. Pass a goal or topic name: /supervisor:goal-verify "<name>"` and do nothing else.
 
 **Print the source.** The first output line is `Subject: <name> (from <explicit|session|name|conversation|last>)`, so a wrong pick is interruptable before the report runs — the same reason `/vault-cli:task-status` prints `Detected task:`.
 
-⚠️ **This copy can run none of the shared doc's executable contract, and that is deliberate — but every half must be stated, not just one.** Its 2026-09-20 read-only re-scope trimmed `Bash(python3:*)`, `Bash(mkdir:*)` **and `Bash(vault-cli:*)`**, so three things are unavailable here: the vault lookup, the recording block, and § *Reconcile the subject's status*. So it **resolves the vault the way it always has** — from cwd, through the literal `24 Goals/` / `23 Topics/` probes in § Branch detection, which already assume the vault root — **records nothing**, and **leaves the subject's `status` exactly as it finds it**, reporting that status rather than reconciling it. None of the three is a regression: this command could never run any of them. ⚠️ **The reconcile is the one that would read as an omission rather than a refusal** — a reader who knows `/manager-loop` and `/manager-drive` flip a `todo` subject to `in_progress` could take its absence here for a gap, so it is stated rather than left to be inferred. It is the write-scope carve-out in `docs/subject-resolution.md` § *Reconcile the subject's status*, which names this command and `/manager-status` as resolving-but-not-writing; § *Resolve the vault first* and § *Recording* carry the same shape for the other two halves.
+⚠️ **This copy can run none of the shared doc's executable contract, and that is deliberate — but every half must be stated, not just one.** Its 2026-09-20 read-only re-scope trimmed `Bash(python3:*)`, `Bash(mkdir:*)` **and `Bash(vault-cli:*)`**, so three things are unavailable here: the vault lookup, the recording block, and § *Reconcile the subject's status*. So it **resolves the vault the way it always has** — from cwd, through the literal `24 Goals/` / `23 Topics/` probes in § Branch detection, which already assume the vault root — **records nothing**, and **leaves the subject's `status` exactly as it finds it**, reporting that status rather than reconciling it. None of the three is a regression: this command could never run any of them. ⚠️ **The reconcile is the one that would read as an omission rather than a refusal** — a reader who knows `/goal-loop` and `/goal-drive` flip a `todo` subject to `in_progress` could take its absence here for a gap, so it is stated rather than left to be inferred. It is the write-scope carve-out in `docs/subject-resolution.md` § *Reconcile the subject's status*, which names this command and `/goal-status` as resolving-but-not-writing; § *Resolve the vault first* and § *Recording* carry the same shape for the other two halves.
 
 ## Branch detection — never assume one
 
@@ -54,7 +54,7 @@ Probe with the resolved `$SUBJECT`, never the raw argument (under detection the 
 
 3. **Call the branch's instrument** — the topic branch's `verify-topic`, or the goal branch's `/vault-cli:verify-goal`, with the subject. ⚠️ The independent-checks branch is **NOT TAKEN**: both verifiers landed, so this command calls them; forking would duplicate and drift. `verify-topic` is still vault-local (tracked by *a separate task*); in a vault without it, pass no instrument output and let the agent report step 1 as `UNKNOWN`.
 
-4. **Dispatch the coverage mode — check 3's instrument, and the reason it no longer reports `GAP`.** The criterion-coverage check had no instrument of its own: `agents/manager-verify.md` check 3 read `GAP` by hand. It now consumes the same reverse map the drive rounds use. ⚠️ **The dispatch is this command's act and never the agent's** — that agent holds **no `Task` grant** (`agents/manager-verify.md:5`, `tools: Read, Bash`) and its own contract at `:69` says so outright, so a dispatch written into the agent would be a promise it cannot keep. One call per closure-box owner, the same split `commands/steps/manager-coverage.md` uses:
+4. **Dispatch the coverage mode — check 3's instrument, and the reason it no longer reports `GAP`.** The criterion-coverage check had no instrument of its own: `agents/goal-verify.md` check 3 read `GAP` by hand. It now consumes the same reverse map the drive rounds use. ⚠️ **The dispatch is this command's act and never the agent's** — that agent holds **no `Task` grant** (`agents/goal-verify.md:5`, `tools: Read, Bash`) and its own contract at `:69` says so outright, so a dispatch written into the agent would be a promise it cannot keep. One call per closure-box owner, the same split `commands/steps/goal-coverage.md` uses:
 
    - a tracked task's boxes → `Task(subagent_type: "vault-cli:task-manager-agent", prompt: "Action: coverage. TASK_PATH: <absolute path to the task file>. MODE: tool.")`
    - the subject page's own boxes → `Task(subagent_type: "vault-cli:goal-manager-agent", prompt: "Action: coverage. TASK_PATH: <absolute path to the subject page>. MODE: tool.")`
@@ -63,8 +63,8 @@ Probe with the resolved `$SUBJECT`, never the raw argument (under detection the 
 
 5. **Dispatch the agent.**
 
-   `Task(subagent_type: "supervisor:manager-verify", prompt: <subject + resolution source + branch + the instrument's output + the coverage output + vault + timestamp>)`
+   `Task(subagent_type: "supervisor:goal-verify", prompt: <subject + resolution source + branch + the instrument's output + the coverage output + vault + timestamp>)`
 
-   The **`supervisor:` prefix is required** — a bare `manager-verify` resolves to a personal `~/.claude/agents/` copy, never the plugin agent. Its rules — the seven steps, the per-branch forks, the two-dispositions rule, the report frame — live in `agents/manager-verify.md` and are not restated here.
+   The **`supervisor:` prefix is required** — a bare `goal-verify` resolves to a personal `~/.claude/agents/` copy, never the plugin agent. Its rules — the seven steps, the per-branch forks, the two-dispositions rule, the report frame — live in `agents/goal-verify.md` and are not restated here.
 
 6. **Print what came back, verbatim.** Reproduce the agent's frame, its `Issues` block and its numbered fix list. If it returns a `Route:` line, that line is the subject's manager's to send — **do not** restate it as an `approve:` line for the operator.

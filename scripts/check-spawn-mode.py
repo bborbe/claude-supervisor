@@ -44,14 +44,14 @@ MODE_HOME = "docs/fleet-surface.md"
 MODE_ANCHOR = "Spawn a worker item 6"
 
 #: Files that document opening a NEW worker. Each must reference the home.
-#: ⚠️ `agents/manager-drive.md` is listed here even though it no longer opens at all: it
+#: ⚠️ `agents/goal-drive.md` is listed here even though it no longer opens at all: it
 #: **decides** the mode and writes `mode:` to disk, which is the half a text scan can still
 #: hold to the rule. Until 2026-09-25 it also *opened* — its `tools:` grant permitted it, and
 #: on 2026-09-24 it used that to open two rows directly, writing `mode: interactive` to each
 #: task and then omitting the argument, so both reported `mode_source=config`. A site defined
 #: by a grant is invisible to a text scan, which is why the grant is gone and the decision
 #: stayed.
-#: ⚠️ `commands/manager-drive.md` joined on 2026-09-25 for the opposite reason: the spawn
+#: ⚠️ `commands/goal-drive.md` joined on 2026-09-25 for the opposite reason: the spawn
 #: moved *out* of the agent and into its caller, so the command that executes the hand-off
 #: rows is now a spawn site and must carry the binding.
 SPAWN_SITES = (
@@ -62,14 +62,14 @@ SPAWN_SITES = (
     # `docker` / `k8s` branch calls the tool, and the mode rule has to be reachable from the
     # file either way.
     "commands/open-a2a.md",
-    # ⚠️ `commands/manager-loop.md` left this set on 2026-10-11: the spawn moved OUT of the
+    # ⚠️ `commands/goal-loop.md` left this set on 2026-10-11: the spawn moved OUT of the
     # arm and into its per-round step file when the loop was restructured into a router.
     # The arm still grants the tool, so it carries the anchor pointer below — a grant with
-    # no route to the rule is the exact bypass `agents/manager-drive.md` had.
-    "commands/steps/manager-spawn.md",
-    "commands/manager-spawn.md",
-    "commands/manager-drive.md",
-    "agents/manager-drive.md",
+    # no route to the rule is the exact bypass `agents/goal-drive.md` had.
+    "commands/steps/goal-spawn.md",
+    "commands/goal-spawn.md",
+    "commands/goal-drive.md",
+    "agents/goal-drive.md",
 )
 
 #: Resume-only sites. Excluded on purpose — they are not new-worker sites and must not
@@ -81,10 +81,10 @@ RESUME_ONLY = (
 #: The dimension a text scan cannot reach. A tool grant permits a spawn whether or not the
 #: prose describes one, so every file whose frontmatter grants one must at least carry the
 #: pointer to the rule's home — otherwise a reader (or an agent) following that file has no
-#: route to the rule at all. This is what `agents/manager-drive.md` was missing.
+#: route to the rule at all. This is what `agents/goal-drive.md` was missing.
 #:
 #: ⚠️ **Every route, not the first one found.** This was a single string until 2026-09-25,
-#: when a second surface of the same class turned up: `agents/manager-drive.md` had its
+#: when a second surface of the same class turned up: `agents/goal-drive.md` had its
 #: `mcp__supervisor__spawn_agent` grant removed, and **still** granted
 #: `Bash(wezterm cli spawn:*)` — a raw terminal spawn the tool-only pattern could not see, and
 #: the exact bypass the change existed to close. A defect class returning one surface further
@@ -92,7 +92,7 @@ RESUME_ONLY = (
 #:
 #: **What this widening does not cover.** The grant dimension asks only whether a granting
 #: file can *reach* the rule. It cannot ask whether a file is *allowed* to grant a spawn route
-#: at all — that is a property of the file's contract, and for `agents/manager-drive.md` it is
+#: at all — that is a property of the file's contract, and for `agents/goal-drive.md` it is
 #: carried by the task criterion (its served `tools:` / `allowed-tools` must name no spawn
 #: route), not by a prose scan. Do not read a pass here as proof that no file holds a grant it
 #: should not.
@@ -143,7 +143,7 @@ def check(root):
 
             # The grant dimension runs before the call-shape filter: a file that can open a
             # worker must point at the rule even when its prose shows no `spawn_agent(prompt=`
-            # call at all, which is exactly how `agents/manager-drive.md` bypassed the wiring.
+            # call at all, which is exactly how `agents/goal-drive.md` bypassed the wiring.
             fm = FRONTMATTER.match(text)
             granted = [g for g in GRANT_TOOLS if fm and g in fm.group(1)]
             if granted and rel not in SPAWN_SITES and MODE_ANCHOR not in text:

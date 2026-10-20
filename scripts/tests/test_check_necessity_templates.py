@@ -23,8 +23,8 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-necessity-templates.py"
 
-READER = "agents/manager-sweep-reader.md"
-VERIFY = "agents/manager-verify.md"
+READER = "agents/goal-sweep-reader.md"
+VERIFY = "agents/goal-verify.md"
 
 SERVES = 'needed: <task> — serves <SC<n>|DoD<n>>: "<served line>" ← "<task line>"'
 FOUNDATION = 'needed: <task> — foundation for <SC<n>|DoD<n>>: "<the foundation line>" ← "<task line>"'
