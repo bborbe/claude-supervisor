@@ -32,6 +32,7 @@ Verbs, one file each, all under STATE_DIR:
 
               OK         digest=<ts> age=<s> limit=<s>
               STALE      digest=<ts> age=<s> limit=<s> round=<file>
+              SUPPRESSED digest=<ts> … reason=already-reported
               RECOVERED  digest=<ts> age=<s> limit=<s>
               UNOBSERVED gap=<s> — this watcher did not run across the gap; baseline reset
 
@@ -302,11 +303,15 @@ def cmd_check():
     was = read_notified()
 
     if state == "STALE":
-        if was and was.get("digest") == detail.split("digest=")[1].split(" ")[0]:
+        # Dedup on the baseline EPOCH, not on a substring of the rendered detail. The
+        # rendered line is for the ledger and may change shape; keying the "already
+        # reported" decision on it would make a cosmetic edit silently re-notify.
+        if was and was.get("epoch") == epoch:
             write_heartbeat(0)
-            print("OK %s suppressed=already-reported" % detail)
+            print("SUPPRESSED %s reason=already-reported" % detail)
             return 0
-        write_notified({"digest": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)),
+        write_notified({"epoch": epoch,
+                        "digest": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)),
                         "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
         write_heartbeat(EXIT_STALE)
         print("STALE %s" % detail)

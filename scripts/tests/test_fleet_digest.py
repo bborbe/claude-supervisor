@@ -18,9 +18,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 
 import importlib.util
 import io
-import json
 import os
-import sys
 import tempfile
 import time
 import unittest
@@ -187,7 +185,7 @@ class Check(Base):
         self.tick(60)
         rc, out = self.run_check()
         self.assertEqual(rc, 0)
-        self.assertIn("suppressed=already-reported", out)
+        self.assertIn("SUPPRESSED", out)
 
     def test_healthy_round_clears_the_report(self):
         self.digest("a.digest", self.ago(5000))
