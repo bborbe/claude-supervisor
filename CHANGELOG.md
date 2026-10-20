@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.191.4
 
 - fix: **`manager-liveness.py` reports a lapsed manager after one cadence, not two.** `classify()` built its limit as `2 x PERIOD + SLACK`, so a stopped loop stayed unreported for two cadence periods — measured live on 2026-10-20, every production report landed at 1860–2040 s against a 900–960 s cadence, and a planted-lapse probe took 681 s on a 300 s cadence. The limit is now `PERIOD + SLACK`. Halving the multiplier alone is not enough: PERIOD was the median arm-to-arm gap, and the median is what a *healthy* tick costs, so a limit built from it fires on every ordinary slow tick — replayed over the retained `.arms` history (41 subjects, 374 gaps, 12.56 subject-days) a plain 1x rule gives 5.02 events/manager-day against the old rule's 1.35, 33 of the 46 extra events being near-misses inside 1.5x the median. PERIOD is therefore the **p90** of the observed gaps, **capped at 2.5x their median** — the p90 absorbs jitter, the cap stops one historic stop from inflating a subject's limit for ever (uncapped, the worst subject sat at 13.4x its own median). On the same snapshot that rule gives 1.91 events/manager-day, a median limit/period ratio of 1.22, and a worst subject at 2.69x. `SLACK` moves 60 → 180 s. Change set: `scripts/manager-liveness.py`, `scripts/tests/test_manager_liveness.py`, `commands/manager-loop.md`, `commands/manager-drive.md`, `commands/manager-status.md`, `docs/session-tiers.md`, `CHANGELOG.md`.
 
