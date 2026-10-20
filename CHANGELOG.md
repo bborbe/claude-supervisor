@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.189.1
 
 - fix: **a manager that re-arms and lapses again between two polls is now reported, instead of staying silent.** `check()` suppressed any subject already present in `liveness-notified.json`, and its only way to clear that entry was observing the `RECOVERED` transition — which never runs when the manager re-arms and goes stale inside the tick's one-minute gap. The entry then outlived the lapse it described and every later lapse was silent: measured 2026-10-20, `--state` read `STALE age=4328s` for `topic--development-pipeline-throughput` while `--check` exited 0 and printed nothing, and the topic had no live manager. The entry now records the epoch at which the lapse was reported, and a lapse re-notifies when the subject has armed since; a legacy list-shaped file loads at epoch 0, which is older than any arm, so it upgrades in place. Change set: `scripts/manager-liveness.py`, `scripts/tests/test_manager_liveness.py`, `CHANGELOG.md`.
 
