@@ -181,10 +181,42 @@ class Liveness(unittest.TestCase):
 
     def test_genuinely_stopped_loop_still_flags_despite_history(self):
         self.plant_arms("Manager Layer", [3760, 2740, 1720, 700])
-        self.arm("Manager Layer", 300, age=3 * 1020)  # way past 2 x observed period
+        self.arm("Manager Layer", 300, age=3 * 1020)  # way past one observed period
         rc, out = self.check()
         self.assertEqual(rc, 10)
         self.assertIn("period=1020s(observed)", out)
+
+    def test_one_cadence_plus_slack_is_still_ok(self):
+        # The limit is ONE cadence plus slack, not two (2026-10-20). A manager that
+        # has only just reached the limit has not yet missed its next re-arm.
+        self.plant_arms("Manager Layer", [2700, 1800, 900])
+        self.arm("Manager Layer", 900, age=900 + 180)
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_past_one_cadence_plus_slack_is_stale(self):
+        self.plant_arms("Manager Layer", [2700, 1800, 900])
+        self.arm("Manager Layer", 900, age=900 + 181)
+        rc, out = self.check()
+        self.assertEqual(rc, 10)
+        self.assertIn("limit=1080s", out)
+
+    def test_a_slow_tick_does_not_trip_the_limit(self):
+        # The period estimate is the p90 gap, not the median: a manager whose tick
+        # once cost 20 min on a 15-min cadence is slow, not lapsed. A median-based
+        # limit fires on it — measured 2026-10-20 at 5.02 events/manager-day against
+        # the old rule's 1.35.
+        self.plant_arms("Manager Layer", [4200, 2700, 1800, 900])  # one 25-min tick
+        self.arm("Manager Layer", 900, age=1200)
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_an_historic_outage_does_not_inflate_the_limit_forever(self):
+        # One long stop stays in the retained history. Uncapped, its p90 lets that
+        # subject fire at 13.4x its own median for ever; the cap keeps it bounded.
+        self.plant_arms("Manager Layer", [90000, 2700, 1800, 900])
+        self.arm("Manager Layer", 900, age=1000)
+        state, detail = self.m.classify("goal--manager-layer", time.time())
+        self.assertEqual(state, "OK")
+        self.assertIn("period=2250s(observed)", detail)
 
     def test_rearm_after_a_stand_down_resets_the_history(self):
         # The outage gap must never count as cadence. It cannot be filtered at read

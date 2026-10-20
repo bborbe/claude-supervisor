@@ -26,10 +26,13 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     deliberately stood-down manager is not reported
                                     as a lapse. The next --arm clears it.
   --check                          every <slug>.cadence -> OK / STALE / STOPPED.
-                                    STALE = no marker AND age > 2 x PERIOD + SLACK,
-                                    where PERIOD is the manager's observed median
-                                    arm-to-arm gap (>=3 gaps), falling back to the
-                                    reported interval until that history exists.
+                                    STALE = no marker AND age > PERIOD + SLACK,
+                                    where PERIOD is the p90 of the manager's observed
+                                    arm-to-arm gaps capped at 2.5x their median (>=3
+                                    gaps), falling back to the reported interval until
+                                    that history exists. The p90 absorbs an ordinary
+                                    slow tick; the cap stops one historic stop from
+                                    inflating the limit for ever.
                                     A re-arm after a stand-down resets the history,
                                     so an outage gap never counts as cadence.
                                     Prints one line per subject that TURNED stale (or
@@ -64,8 +67,9 @@ STATE_DIR = os.path.expanduser(
 )
 NOTIFIED = "liveness-notified.json"
 BRANCHES = ("goal", "topic")
-SLACK = 60  # seconds: covers the tick's own runtime before the re-arm lands
-ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable median
+SLACK = 180  # seconds: the tick's own runtime plus ordinary jitter before a re-arm lands
+PERIOD_CAP = 2.5  # the p90 period estimate never exceeds this multiple of the median
+ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable percentile
 EXIT_STALE = 10
 
 
@@ -109,15 +113,60 @@ def read_arms(s: str) -> list:
         return []
 
 
-def observed_interval(s: str):
-    """Median arm-to-arm gap in seconds, or None when there is too little history."""
+def observed_gaps(s: str):
+    """Sorted arm-to-arm gaps in seconds, or None when there is too little history."""
     vals = read_arms(s)[-ARMS_KEEP:]
     if len(vals) < 4:
         return None
     gaps = sorted(b - a for a, b in zip(vals, vals[1:]))
     if len(gaps) < 3:
         return None
-    return gaps[len(gaps) // 2]
+    return gaps
+
+
+def median(xs):
+    """True median of an already-sorted list.
+
+    `xs[len(xs) // 2]` is the UPPER median on an even count, and it is not a cosmetic
+    difference: it is what `PERIOD_CAP` is measured against, so a subject with 10 gaps
+    got a cap 2.5x an over-estimate — measured 2026-10-20, one subject's limit came out
+    at 4478 s against a 3590 s cap.
+    """
+    n = len(xs)
+    mid = n // 2
+    return xs[mid] if n % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
+def observed_interval(s: str):
+    """Median arm-to-arm gap in seconds, or None when there is too little history."""
+    gaps = observed_gaps(s)
+    return None if gaps is None else median(gaps)
+
+
+def percentile(xs, p: float):
+    """Linear-interpolated percentile over an already-sorted list."""
+    k = (len(xs) - 1) * p
+    lo = int(k)
+    hi = min(lo + 1, len(xs) - 1)
+    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+
+def observed_period(s: str):
+    """The p90 arm-to-arm gap, capped at PERIOD_CAP x the median; None without history.
+
+    The MEDIAN alone is what a healthy tick costs, so a limit built from it fires on
+    every ordinary slow tick: measured 2026-10-20 over the retained `.arms` history,
+    5.02 events/manager-day against the old 2x rule's 1.35, and 33 of the 46 extra
+    events were near-misses (inside 1.5x the median), i.e. jitter rather than lapses.
+
+    The UNCAPPED p90 is the other failure: one historic stop stays in the retained
+    window, so a subject that once sat down for hours would keep a limit ~13x its own
+    median for ever. The cap bounds that while leaving the p90 to absorb jitter.
+    """
+    gaps = observed_gaps(s)
+    if gaps is None:
+        return None
+    return min(percentile(gaps, 0.90), PERIOD_CAP * median(gaps))
 
 
 LEGACY_EXTS = ("cadence", "arms", "stopped")
@@ -270,12 +319,18 @@ def classify(s: str, now: float) -> tuple:
     # tick costs real time on top of the delay, so a limit built from the delay alone
     # sits below the true period and fires on a live manager every cycle. Measured
     # 2026-09-23: reported 300 s, real arm-to-arm 17 min — five false pushes in 32 min.
-    observed = observed_interval(s)
-    if observed:
-        limit, basis = 2 * observed + SLACK, f"period={int(observed)}s(observed)"
+    #
+    # ONE period, not two. A two-period limit reports a lapse only after the manager
+    # has missed its next re-arm AND that whole cycle has elapsed again: the live
+    # ledger shows every production report landing at 1860-2040 s against a 900-960 s
+    # cadence, and a planted-lapse probe took 681 s on a 300 s cadence. One period
+    # plus SLACK reports the first missed re-arm instead.
+    period = observed_period(s)
+    if period:
+        limit, basis = period + SLACK, f"period={int(period)}s(observed)"
     else:
-        limit, basis = 2 * interval + SLACK, f"period={interval}s(reported)"
-    detail = f"age={age}s limit={limit}s {basis}"
+        limit, basis = interval + SLACK, f"period={interval}s(reported)"
+    detail = f"age={age}s limit={int(limit)}s {basis}"
     return ("STALE" if age > limit else "OK"), detail
 
 
