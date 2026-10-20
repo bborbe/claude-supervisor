@@ -78,18 +78,28 @@ This is an ordinary spawn with `target: "docker"` (or `"k8s"`) and the task name
 a **new** worker id and a new session id, which is the point: the old conversation is
 unrecoverable, and the new worker starts clean.
 
-⚠️ **A repeat create for a task that already has a worker is refused.** The controller
-answers with the worker id it found and the remedy, at `a2a-worker-controller`
+⚠️ **A repeat create for a task that already has a worker returns that worker** on
+`a2a-worker-controller` `v0.16.1` and later: the reply names the **same** `worker_id`, sets
+`reused: true`, and carries the worker's own token, read back from its Secret under
+`INTERACTIVE_AUTH_TOKEN`. Retrying a create is therefore safe — it cannot mint a second worker,
+which is what used to leave an unstoppable orphan behind.
+
+Before `v0.16.1` the `k8s` backend refused instead (`docker` has carried the reuse since
+`v0.16.0`), answering with the worker id it found and this remedy, at `a2a-worker-controller`
 `pkg/docker.go:256`:
 
 > `task "…" already has worker "…", whose token this controller did not keep; stop that
 > worker and create another`
 
-That string has been present since `v0.9.1`. The worker id is in the message for a
-reason — it is the only handle a caller gets on a container it cannot authenticate to,
-and it is exactly the argument `stop_agent` needs. ⚠️ **Do not retry the create
-unchanged**; a retry is refused identically. Resolve the id from `list`, stop it, then
-create.
+That string has been present since `v0.9.1`. On a controller older than `v0.16.1` the worker id
+in it is the only handle a caller gets on a container it cannot authenticate to, and it is
+exactly the argument `stop_agent` needs — resolve the id from `list`, stop it, then create. A
+worker whose Secret is missing or carries no token still refuses that way on the current
+release, so `stop` + create remains reachable.
+
+⚠️ `reused: true` is visible on the **controller's own create reply** only —
+`createWorkerOnController` (`server/a2a-spawn.mjs:495-505`) drops the field, so no
+`spawn_agent` response can show it.
 
 ## Do not retry inside the 120 s card-ready window
 
