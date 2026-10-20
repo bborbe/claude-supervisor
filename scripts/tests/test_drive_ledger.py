@@ -43,7 +43,9 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "drive-ledger.py"
 
-#: The canonical entry's seven fields, as `agents/fleet-drive.md` step 7 names them.
+#: The canonical entry's eight fields, as `agents/fleet-drive.md` step 7 names them.
+#: `task_file` is what step 0 re-probes from; without it a retained row cannot be
+#: resolved back to a task at all.
 FIELDS = {
     "session_id",
     "name",
@@ -52,6 +54,7 @@ FIELDS = {
     "probe",
     "nudge",
     "suppression",
+    "task_file",
 }
 
 FLAT_ONLY = tuple("flat%05d" % i for i in range(13))
@@ -240,7 +243,7 @@ class TestRead(Base):
             "exactly one entry per session id",
         )
         for row in out["entries"]:
-            self.assertEqual(set(row), FIELDS, "canonical shape, all seven fields")
+            self.assertEqual(set(row), FIELDS, "canonical shape, all eight fields")
 
     def test_absent_ledger_reads_empty(self):
         proc = self.run_script(["read"])
@@ -374,6 +377,35 @@ class TestMergeRefusals(Base):
         with open(self.ledger, "rb") as handle:
             self.assertEqual(handle.read(), before)
         self.assertFalse(os.path.exists(self.ledger + ".bak"))
+
+
+class TestTaskFile(Base):
+    """Step 0 of `agents/fleet-drive.md` re-probes a retained row from its task file.
+
+    The path is the only identity field in an entry that can resolve a task: the
+    session id is an 8-char display handle, and the name is a session name that need
+    not equal the filename. So an entry that loses this field cannot be re-probed at
+    all, and it must survive both a read of a legacy row and a merge round-trip.
+    """
+
+    def test_a_legacy_row_without_task_file_reads_empty_not_absent(self):
+        self.seed()
+        proc = self.run_script(["read"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = json.loads(proc.stdout)["entries"]
+        self.assertTrue(rows, "fixture must not be empty")
+        for row in rows:
+            self.assertIn("task_file", row)
+            self.assertEqual(row["task_file"], "")
+
+    def test_task_file_survives_a_merge_round_trip(self):
+        self.seed()
+        path = "/vault/25 Tasks/A Task.md"
+        proc = self.merge(
+            [{"session_id": "abc12345", "verdict": "unverifiable", "task_file": path}]
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.rows_on_disk()["abc12345"]["task_file"], path)
 
 
 class TestNoOpControl(Base):
