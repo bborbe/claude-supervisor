@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.185.1
 
 - fix: **a `role: manager` row is never opened as a worker.** `commands/open.md` § Step 0.6 resolved `role:` to `human|agent` only, so a row declaring `role: manager` fell through the classifier and was spawned as an agent — measured 2026-10-19: the two tick-35 rows already carried `role: manager`, and the open path had no branch for it. Step 0.6 now renders `👤 YOURS` and spawns nothing, writes nothing and opens no window, using the vocabulary `agents/manager-sweep-reader.md` step 4 and `agents/manager-drive.md` clause (4) already carry; the documented write values widen to `role <human|agent|manager>` so a filer can declare it. The classifier never derives `manager` — a prose-derived value was measured at ~1.1% false positives against 4/19 recall and rejected. The report line gains `yours Y (manager)`. Change set: `commands/open.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
