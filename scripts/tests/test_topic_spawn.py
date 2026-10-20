@@ -43,6 +43,54 @@ manager_session_id: {sid}
 """
 
 
+class GoalsOfShapesTest(unittest.TestCase):
+    """The three shapes the vault writes, plus the two that name nothing.
+
+    ⚠️ The block form is the one that bit: `m.end()` lands before the newline after the
+    `goals:` key, so `splitlines()` opens with an empty line, and a parser that treats
+    that as the end of the block returns `[]` for every block-form task — which is most
+    of the vault. A goal then reads as having no ready work, and the ranking silently
+    falls through to `priority`.
+    """
+
+    def test_inline_list(self):
+        self.assertEqual(["A", "B"], ts.goals_of("goals: ['[[A]]', '[[B]]']"))
+
+    def test_plain_scalar(self):
+        self.assertEqual(["Solo Goal"], ts.goals_of("goals: Solo Goal"))
+
+    def test_block_list(self):
+        self.assertEqual(
+            ["A2A Workers Are Prod-Ready", "Second"],
+            ts.goals_of("goals:\n    - '[[A2A Workers Are Prod-Ready]]'\n    - '[[Second]]'\nstatus: x"),
+        )
+
+    def test_nested_list_of_list(self):
+        self.assertEqual(
+            ["Nested One", "Nested Two"],
+            ts.goals_of("goals:\n    - - Nested One\n    - - Nested Two"),
+        )
+
+    def test_an_empty_declaration_names_nothing(self):
+        self.assertEqual([], ts.goals_of("goals: []"))
+
+    def test_an_absent_key_names_nothing(self):
+        self.assertEqual([], ts.goals_of("status: in_progress"))
+
+
+class DeclaredGoalsTest(unittest.TestCase):
+    def test_wikilinks_and_a_trailing_note(self):
+        self.assertEqual(
+            ["Prod-Ready Thing", "Other"],
+            ts.declared_goals("## Goals\n- [[Prod-Ready Thing]]\n- [[Other]] — a note\n"),
+        )
+
+    def test_a_hyphenated_name_is_not_split(self):
+        # The separator rule requires whitespace around the dash, so an intra-word
+        # hyphen survives — the vault has many (`Prod-Ready`, `Non-Goal`).
+        self.assertEqual(["A Non-Goal Thing"], ts.declared_goals("## Goals\n- [[A Non-Goal Thing]]\n"))
+
+
 class TopicSpawnTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

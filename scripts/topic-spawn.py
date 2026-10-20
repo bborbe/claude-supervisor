@@ -224,8 +224,14 @@ def goals_of(fm: str) -> list[str]:
         names = re.findall(r"\[\[([^\]|#]+)", inline)
         return names or [inline.strip("\"' ")] if inline.strip("\"' ") else []
     # Block form: every following indented `- …` entry, with any `- - ` nesting.
+    # ⚠️ Blank lines are SKIPPED, not treated as the end of the block: `m.end()` lands
+    # before the newline that follows the `goals:` key, so the first item of
+    # `splitlines()` is always empty and a `break` there returns `[]` for every block-form
+    # task — the shape most of the vault uses.
     names = []
     for line in fm[m.end():].splitlines():
+        if not line.strip():
+            continue
         if not line.startswith((" ", "\t")):
             break
         s = line.strip()
