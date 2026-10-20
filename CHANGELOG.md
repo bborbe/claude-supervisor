@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.188.1
 
 - fix: `scripts/close-worker.py` closes a session that was handed off from a task. `find_task` resolves `metrics_sessions` membership when `claude_session_id` names a successor, and that branch skips `task-not-terminal` — the session no longer owns the task, so the successor's progress is not its gate. Every other refusal still applies, and a session id appearing only in a task's body prose is still not a claim.
 
