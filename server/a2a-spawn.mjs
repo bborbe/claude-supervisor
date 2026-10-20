@@ -282,8 +282,9 @@ export function clusterAllowlistRefusal({ vault, target, allowlist } = {}) {
 
   if (typeof vault !== 'string' || vault.trim() === '') {
     return (
-      `target ${JSON.stringify(target)} names cluster ${JSON.stringify(cluster)}, but no vault was resolved ` +
-      "for this spawn, so no allowlist applies to it — refusing rather than spawning unchecked."
+      `target ${JSON.stringify(target)} names cluster ${JSON.stringify(cluster)}, but this spawn names no vault, ` +
+      'so no cluster allowlist can be applied to it — refusing rather than spawning unchecked. Pass `vault` ' +
+      '(that is how a spawn is attributed to a vault, and the allowlist is per vault).'
     )
   }
 

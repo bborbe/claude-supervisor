@@ -15,7 +15,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { clusterAllowlistRefusal, clusterOfTarget } from './a2a-spawn.mjs'
+import { A2A_DEFAULT_CLUSTER, clusterAllowlistRefusal, clusterOfTarget, resolveA2AControllerTarget } from './a2a-spawn.mjs'
 import { mtimeReloadedAllowlist, parseAllowlist, readAllowlistFile } from './cluster-allowlist.mjs'
 
 const ALLOWLIST = {
@@ -138,6 +138,34 @@ test('the refusal cannot depend on where the target came from', () => {
 
   assert.equal(explicit, fromDefault)
   assert.ok(explicit, 'a default-sourced forbidden pairing must refuse too')
+})
+
+test('a bare k8s target is judged by its RESOLVED cluster, which is the join that makes it origin-agnostic', () => {
+  // ⚠️ THIS IS THE JOIN, and it is why the guard is called on `controller.target` rather than on
+  // the caller's string. A per-vault default cluster means a spawn can arrive with no explicit
+  // cluster at all (`target: 'k8s'`); `resolveA2AControllerTarget` turns that into the canonical
+  // `k8s:<default>`, and the guard is applied to THAT. Checking the caller's value instead would
+  // refuse a legitimate default spawn for naming no cluster while the cluster it will actually
+  // run on went unchecked — the guard inverted, loudest exactly where it is wrong.
+  const file = { a2a: { url: { k8s: 'https://nuke.example/a2a' } } }
+  const resolved = resolveA2AControllerTarget({ target: 'k8s', envToken: 'token', file })
+  assert.equal(resolved.target, `k8s:${A2A_DEFAULT_CLUSTER}`, 'a bare k8s resolves to the default cluster')
+
+  const refusal = clusterAllowlistRefusal({
+    vault: 'private-personal',
+    target: resolved.target,
+    allowlist: { 'private-personal': ['octopus-dev'] },
+  })
+  assert.ok(refusal, 'a default-sourced forbidden pairing must refuse')
+  assert.match(refusal, /private-personal/)
+  assert.match(refusal, new RegExp(A2A_DEFAULT_CLUSTER))
+
+  // And the same resolved target passes when the vault does allow that cluster — so the test
+  // cannot be satisfied by a guard that refuses every default-sourced spawn.
+  assert.equal(
+    clusterAllowlistRefusal({ vault: 'private-personal', target: resolved.target, allowlist: ALLOWLIST }),
+    null,
+  )
 })
 
 test('clusterOfTarget separates "no cluster target" from "cluster target naming no cluster"', () => {

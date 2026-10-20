@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, clusterAllowlistRefusal, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
@@ -39,6 +39,7 @@ import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
+import { mtimeReloadedAllowlist } from './cluster-allowlist.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
@@ -1153,6 +1154,12 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
 // as 5. `liveConfig` re-reads the file when its mtime moves; see `config-reload.mjs`.
 const liveConfig = mtimeReloadedConfig({ path: config.configFile })
 
+// The per-vault cluster allowlist, read live for the same reason `liveConfig` is: the operator
+// edits it precisely because they want the NEXT spawn to differ from the last, and a spawn
+// decided against permissions read at boot is a decision against a file that may no longer exist.
+// Its fail-closed semantics differ from `liveConfig`'s on purpose — see `cluster-allowlist.mjs`.
+const liveAllowlist = mtimeReloadedAllowlist()
+
 async function managerLimitError({ operatorNamed = false } = {}) {
   const limits = resolveMaxManagers({ file: liveConfig.current().file, path: config.configFile })
   const counted = limits.error || limits.limit === null ? { ids: null, error: null } : await managerSessions()
@@ -1577,6 +1584,30 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     ...a2aResolverInputs(),
   })
   if (controller.error) return { error: controller.error }
+
+  // ⚠️ THE ALLOWLIST IS CHECKED AFTER THE CONTROLLER RESOLUTION, ON THE CANONICAL TARGET — not
+  // before it and not on the caller's string, and both halves of that are load-bearing.
+  //
+  // AFTER, because a bare `k8s` resolves to the configured default cluster INSIDE
+  // `resolveA2AControllerTarget`. Checking the caller's value would refuse a legitimate
+  // default-cluster spawn (a bare `k8s` names no cluster) while the cluster it will actually run
+  // on went unchecked — the guard would be inverted, loudest where it is wrong.
+  //
+  // ON `controller.target`, because that is the cluster the worker will really be created on,
+  // whichever way the caller arrived at it. That is what makes the rule origin-agnostic: an
+  // explicit `k8s:octopus-dev` and a default that resolves to it are refused by the same call,
+  // and no path reaches the controller without passing here.
+  //
+  // A read error is returned as itself rather than folded into the refusal, so the message names
+  // the file the operator has to fix instead of saying only "the allowlist could not be read".
+  const allowlistRead = liveAllowlist.current()
+  if (allowlistRead.error) return { error: allowlistRead.error }
+  const allowlistRefusal = clusterAllowlistRefusal({
+    vault,
+    target: controller.target,
+    allowlist: allowlistRead.allowlist,
+  })
+  if (allowlistRefusal) return { error: allowlistRefusal }
 
   // ⚠️ THE CANONICAL TARGET, not the caller's string. A bare `k8s` resolves to the configured
   // default cluster, and everything recorded downstream — the roster status, the capture file
