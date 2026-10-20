@@ -218,6 +218,19 @@ def _matches_one_title(key, titles):
     return sum(1 for t in titles if t.startswith(key)) == 1
 
 
+def _prefix_title(key, titles):
+    """The single title `key` unambiguously prefixes, or `None`.
+
+    The same two guards `_matches_one_title` applies — a length floor and "exactly
+    one" — but returning the title rather than a boolean, because a manager's
+    subject has to be named, not merely confirmed.
+    """
+    if not key or len(key) < _TRUNCATION_MIN_PREFIX:
+        return None
+    hits = [t for k, t in titles.items() if k.startswith(key)]
+    return hits[0] if len(hits) == 1 else None
+
+
 class VaultIndex:
     """Topic and goal titles, and the links between them — read once per run.
 
@@ -228,13 +241,20 @@ class VaultIndex:
     """
 
     def __init__(self, topics=(), goals=(), task_titles=(), task_goals=None, goal_topics=None,
-                 task_managed_by=None):
+                 task_managed_by=None, task_topics=None):
         self.topics = {t.lower(): t for t in topics}
         self.goals = {g.lower(): g for g in goals}
         self.task_titles = {t.lower(): t for t in task_titles}
         self.task_goals = task_goals or {}
         self.goal_topics = goal_topics or {}
         self.task_managed_by = task_managed_by or {}
+        # A topic's `## Goals` section admits tasks as well as goals — the design's
+        # "a task whose task has no goal is managed by its topic's manager when it
+        # sits directly under a topic". Kept separate from `goal_topics` because the
+        # two name different populations: a goal entry resolves a goal page, a task
+        # entry resolves a task file, and collapsing them would let a task title
+        # masquerade as a goal in every goal-chain read.
+        self.task_topics = task_topics or {}
         self._norm_titles = None
 
     def subject(self, title):
@@ -263,6 +283,17 @@ class VaultIndex:
     def topics_of(self, goal_title):
         """The topics whose `## Goals` lists this goal, in order."""
         return self.goal_topics.get((goal_title or "").lower(), [])
+
+    def topics_of_task(self, task_title):
+        """The topics whose `## Goals` lists this TASK directly, in order.
+
+        The design's "a task whose task has no goal is managed by the nearest
+        existing ancestor — its topic's manager if the task sits directly under a
+        topic". Without this the branch was unreachable: `goal_topics` keeps only
+        entries that resolve to a goal page, so a task entry was dropped and the
+        task fell through to the fleet manager.
+        """
+        return self.task_topics.get((task_title or "").lower(), [])
 
     def _normalized_titles(self):
         """`{normalized title: title}`, built once — the index is read-only.
@@ -430,7 +461,7 @@ def vault_index():
             if owner:
                 task_managed_by[title.lower()] = owner[0].strip()
 
-    goal_topics = {}
+    goal_topics, task_topics = {}, {}
     for path in topic_pages:
         topic = os.path.basename(path)[:-3]
         for link in _goals_section_links(_read(path)):
@@ -439,9 +470,18 @@ def vault_index():
                 goal_topics.setdefault(key, [])
                 if topic not in goal_topics[key]:
                     goal_topics[key].append(topic)
+            elif key in task_titles:
+                # A task named directly in a topic's `## Goals` is a member of that
+                # topic — the nearest-ancestor case the tier design states. It is
+                # matched against task titles only, never goals, so an entry that
+                # resolves to neither page (F2's prose artifact) is still dropped.
+                task_topics.setdefault(key, [])
+                if topic not in task_topics[key]:
+                    task_topics[key].append(topic)
 
     return VaultIndex(topics.values(), goals.values(),
-                      task_titles.values(), task_goals, goal_topics, task_managed_by)
+                      task_titles.values(), task_goals, goal_topics, task_managed_by,
+                      task_topics)
 
 
 def loop_slugs(state_dir=None):
@@ -479,7 +519,23 @@ def manager_subject(name, index, slugs):
         found = index.subject(candidate)
         if found:
             return found
-    return None
+    # Source 3 — a TRUNCATED registry name, the same normal shape `has_task_file`
+    # documents for tasks. Without this a goal manager whose name the registry
+    # clipped resolved to no subject at all: measured 2026-10-20, the live goal
+    # manager `985c00e8` held the name `Topics and Goals Run on the Same Phase
+    # Lifecycle a` against the goal `… and Manager Tree as Tasks`, so the topic
+    # tier's N-slot count read zero and the round would start a second manager.
+    # ⚠️ Exactly ONE hit across BOTH tables, so an ambiguous prefix stays `None`
+    # rather than becoming a confident guess.
+    keys = {_norm_session_name(name), _norm_session_name(_MANAGER_SUFFIX.sub("", name or ""))}
+    hits = []
+    for kind, table in (("goal", index.goals), ("topic", index.topics)):
+        normalized = {_norm_session_name(title): title for title in table.values()}
+        for key in keys:
+            hit = _prefix_title(key, normalized)
+            if hit and (kind, hit) not in hits:
+                hits.append((kind, hit))
+    return hits[0] if len(hits) == 1 else None
 
 # Session 26 · Bucket 16 · Vault task 34 · Unblocks 18 · Inactive 9 -> sum 103,
 # and `box-table.py` renders `sum(widths) + 3n + 1` = 119 of the operator's 119
@@ -853,8 +909,18 @@ class Grouping:
     def subject_of(self, sid):
         return self.subjects.get(sid)
 
+    def subject_title_of(self, sid):
+        """The managed page's title, or `None` — the tuple's second element.
 
-def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None):
+        `subject_of` answers `('goal'|'topic'|'root', title)`; readers that only
+        need the name (the topic tier's N-slot count) should not have to unpack a
+        tuple that may also be `None`.
+        """
+        found = self.subjects.get(sid)
+        return found[1] if found else None
+
+
+def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None, task_title=None):
     """The live manager covering a task, or `None`.
 
     The order is the one `docs/fleet-surface.md` § *Which manager owns a subject* states,
@@ -865,6 +931,13 @@ def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None):
     A goal reaches a manager two ways: a manager whose subject IS the goal, or a
     manager whose subject is a topic listing that goal. The goal is tried before
     its topics, so the more specific parent wins when both exist.
+
+    ⚠️ **The goal chain is not the whole order — the task's OWN topic is the last
+    rung.** The design says a task with no goal is managed by the nearest existing
+    ancestor, "its topic's manager if the task sits directly under a topic". Before
+    `task_title` was threaded here that branch was unreachable: a task named directly
+    in a topic's `## Goals` carries no `goals:` and no `managed_by`, so it fell
+    straight to the root and the fleet manager claimed it.
     """
     for goal in ([managed_by] if managed_by else []) + list(goal_titles):
         for subject in [goal] + index.topics_of(goal):
@@ -873,6 +946,12 @@ def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None):
                     continue
                 if found[1].lower() == subject.lower():
                     return sid
+    for subject in index.topics_of_task(task_title):
+        for sid, found in subjects.items():
+            if roles.get(sid) != ROLE_MANAGER or not found:
+                continue
+            if found[1].lower() == subject.lower():
+                return sid
     return None
 
 
@@ -912,7 +991,7 @@ def build_grouping(registry, index, colours, slugs, task_titles):
         roles[sid], parents[sid] = ROLE_WORKER, root
         for title in titles:
             manager = manager_on_chain(index.goals_of(title), index, roles, subjects,
-                                       index.managed_by_of(title))
+                                       index.managed_by_of(title), task_title=title)
             if manager:
                 parents[sid] = manager
                 break
@@ -956,6 +1035,11 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
                 "bucket": bucket,
                 "label": label,
                 "role": grouping.role_of(sid) if grouping else ROLE_WORKER,
+                # The page this session manages, when it manages one. Emitted so the
+                # topic tier's N-slot count can see a live goal manager the goal page
+                # never recorded — the page id is a write the resolve step may miss,
+                # and a manager the registry knows about must still count.
+                "subject": grouping.subject_title_of(sid) if grouping else None,
                 "parent": grouping.parent_of(sid) if grouping else None,
                 # Raw seconds, kept beside the rendered cell: the sibling-group
                 # ordering reads this, never the width-9 string — "20h ago" and
@@ -1197,6 +1281,7 @@ def main():
                 "session_id": r["session_id"],
                 "label": r["label"],
                 "role": r["role"],
+                "subject": r["subject"],
                 "parent": r["parent"],
                 "bucket": r["bucket"],
                 "unblocks": r["unblocks"],
