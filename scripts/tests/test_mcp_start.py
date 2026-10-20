@@ -192,6 +192,7 @@ class DeclareTokensTest(unittest.TestCase):
         "zL8akq": "placeholder-a2a-nukeprod-5e7c13",
         "pLv8Mw": "placeholder-a2a-docker-4d1a92",
         "WOQQXO": "placeholder-a2a-sun-8c2f57",
+        "ROnzvO": "placeholder-a2a-octopus-dev-6a4b19",
     }
 
     def _lookup(self, failing=(), seen=None):
@@ -206,7 +207,7 @@ class DeclareTokensTest(unittest.TestCase):
         env, seen = {}, []
         with contextlib.redirect_stderr(io.StringIO()):
             declared = ms.declare_tokens(env, lookup=self._lookup(seen=seen))
-        self.assertEqual(sorted(seen), ["VO0Gmw", "WOQQXO", "lO4j5q", "pLv8Mw", "zL8akq"])
+        self.assertEqual(sorted(seen), ["ROnzvO", "VO0Gmw", "WOQQXO", "lO4j5q", "pLv8Mw", "zL8akq"])
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
         # ⚠️ The A2A token is PER TARGET — the docker controller runs on this Mac and each k8s
         # cluster has its own, so one shared secret would force every deployment to carry the
@@ -233,6 +234,7 @@ class DeclareTokensTest(unittest.TestCase):
                 "SUPERVISOR_A2A_TOKEN_DOCKER",
                 "SUPERVISOR_A2A_TOKEN_NUKEDEV",
                 "SUPERVISOR_A2A_TOKEN_NUKEPROD",
+                "SUPERVISOR_A2A_TOKEN_OCTOPUS_DEV",
                 "SUPERVISOR_A2A_TOKEN_SUN",
             ],
         )
@@ -244,7 +246,7 @@ class DeclareTokensTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             ms.declare_tokens(env, lookup=self._lookup(seen=seen))
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], "override-9a1c")
-        self.assertEqual(seen, ["lO4j5q", "zL8akq", "pLv8Mw", "WOQQXO"])
+        self.assertEqual(seen, ["lO4j5q", "zL8akq", "pLv8Mw", "WOQQXO", "ROnzvO"])
 
     def test_an_unresolved_token_degrades_rather_than_raising(self):
         env, stderr = {}, io.StringIO()
@@ -259,6 +261,7 @@ class DeclareTokensTest(unittest.TestCase):
                 "SUPERVISOR_A2A_TOKEN_NUKEPROD",
                 "SUPERVISOR_A2A_TOKEN_DOCKER",
                 "SUPERVISOR_A2A_TOKEN_SUN",
+                "SUPERVISOR_A2A_TOKEN_OCTOPUS_DEV",
             ],
         )
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
@@ -276,7 +279,7 @@ class DeclareTokensTest(unittest.TestCase):
         env = {}
         with contextlib.redirect_stderr(io.StringIO()):
             declared = ms.declare_tokens(
-                env, lookup=self._lookup(failing=["VO0Gmw", "lO4j5q", "zL8akq", "pLv8Mw", "WOQQXO"])
+                env, lookup=self._lookup(failing=["VO0Gmw", "lO4j5q", "zL8akq", "pLv8Mw", "WOQQXO", "ROnzvO"])
             )
         self.assertEqual(declared, [])
         self.assertEqual(env, {})
