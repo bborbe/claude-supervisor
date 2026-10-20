@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.192.0
 
 - feat: `mcp-start.py` resolves `SUPERVISOR_A2A_TOKEN_SUN` from TeamVault, so `k8s:sun` (sun-k3s) authenticates against its own controller bearer
 
