@@ -8,9 +8,13 @@ Two independent signals are read every time, because neither answers the other's
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
   2. **Is its loop armed?** `manager-liveness.py --state --subject <goal> --branch goal`
-     → `OK` / `STALE` / `STOPPED` / `INVALID`. This is the signal a liveness probe
-     structurally cannot give — a manager process can be alive with its loop unarmed
+     → `OK` / `STALE` / `STOPPED` / `UNARMED` / `INVALID`. This is the signal a liveness
+     probe structurally cannot give — a manager process can be alive with its loop unarmed
      after a missed re-arm. `STOPPED` is a deliberate stand-down and is left alone.
+     ⚠️ `UNARMED` (no record under either name) is **not** restart-worthy and must not be
+     folded into `INVALID`: a restart resumes a session that never armed a loop, so it
+     cannot create the record. It reads as `jump` for a live session — the lever is
+     `/supervisor:goal-loop`, which arms.
 
 The first line of stdout is the verdict, one token:
 
@@ -115,7 +119,7 @@ def cadence(goal: str) -> str:
     )
     first = (probe.stdout.splitlines() or [""])[0]
     state = first.split("\t")[0].strip()
-    return state if state in ("OK", "STALE", "STOPPED", "INVALID") else "INVALID"
+    return state if state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID") else "INVALID"
 
 
 def main(argv: list[str]) -> int:

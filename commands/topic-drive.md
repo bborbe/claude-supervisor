@@ -84,7 +84,7 @@ The **first line is the verdict**:
 
 | verdict | meaning | what this round does |
 |---|---|---|
-| `jump` | live session, loop armed | nothing; render the row |
+| `jump` | live session, loop `OK` **or `UNARMED`** | render the row. ⚠️ `UNARMED` means no record exists under either name — the loop was **never armed**, not lost; the lever is `/supervisor:goal-loop "<goal>"`, never `restart` (a restart resumes a session that never armed anything) |
 | `resume` | no session (or `ABSENT`) | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --record-resume <the id>` **once the liveness instrument shows it live** |
 | `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
 | `leave` | `STOPPED` — a deliberate stand-down | nothing; the operator stood it down |
