@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Lockstep: the drive leg's documented reap invocation must be executable.
 
-`agents/manager-drive.md`'s fifth read tells the leg to route the reap verdict
+`agents/goal-drive.md`'s fifth read tells the leg to route the reap verdict
 through `scripts/reap-line.py`. Prose cannot be executed, so a wiring that only
 mentions the script has no signal of its own — measured 2026-10-08, the leg's
 behaviour tracked only an explicit instruction in the dispatch, which is the
@@ -23,7 +23,7 @@ import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(os.path.dirname(_HERE))
-_AGENT = os.path.join(_REPO, "agents", "manager-drive.md")
+_AGENT = os.path.join(_REPO, "agents", "goal-drive.md")
 _SCRIPT = os.path.join(_REPO, "scripts", "reap-line.py")
 
 # The tick-86 target and a live control, so the probe pins BOTH directions.
@@ -70,7 +70,7 @@ class ReapWiringTest(unittest.TestCase):
     def test_documented_invocation_names_the_scripts_flags(self):
         line = documented_invocation()
         self.assertIsNotNone(
-            line, "no reap-line.py invocation documented in agents/manager-drive.md"
+            line, "no reap-line.py invocation documented in agents/goal-drive.md"
         )
         for flag in FLAGS:
             self.assertIn(flag, line, flag)

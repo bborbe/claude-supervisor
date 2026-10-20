@@ -20,7 +20,7 @@ by `vault-cli task approve` — and only by it — in every vault, so it is the 
 record of the operator's approval rather than a proxy inferred from `status`/`phase`.
 
 ⚠️ **This is deliberately NOT the runbook's "approved and unowned" clause.**
-`agents/manager-sweep-reader.md` forbids hard-coding *that* predicate, because the two
+`agents/goal-sweep-reader.md` forbids hard-coding *that* predicate, because the two
 vaults' runbooks disagree about it (the primary vault reads `status: next`, the other is
 phase-based) — it decides which rows a manager may **spawn** on. This script answers a
 different question, and answers it from the approval's own record, so that disagreement

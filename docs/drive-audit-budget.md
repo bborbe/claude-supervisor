@@ -1,12 +1,12 @@
 # The drive audit budget
 
 The single home for the manager drive leg's wall-clock bound: why it exists, why it is a
-clock rather than a row cap, and what its three branches mean. `agents/manager-drive.md`
+clock rather than a row cap, and what its three branches mean. `agents/goal-drive.md`
 clause (1) states the rule and points here; the script is `scripts/drive-audit-budget.py`.
 
 ## The defect
 
-`agents/manager-drive.md` clause (1) scores every non-terminal row with no live worker by
+`agents/goal-drive.md` clause (1) scores every non-terminal row with no live worker by
 dispatching **one `vault-cli:task-auditor` subagent per row**, sequentially. Nothing bounded
 that loop, so its duration was a function of the tracked set's size and of the audit cache's
 warmth — and a cold tick ran to completion however long that took.
@@ -27,7 +27,7 @@ Once, Not Answered Every Session` — its store record carries `ready-to-start �
 
 ≈ 34 minutes, the cold audit being all of it — the cache that tick wrote is that same tick's
 output. Corroborated on `attention-controller-is-the-fleet-s-single-source-of-session-state`,
-09:24 → 09:43 ≈ 19 minutes. `commands/steps/manager-drive.md` had already recorded the
+09:24 → 09:43 ≈ 19 minutes. `commands/steps/goal-drive.md` had already recorded the
 sibling measurement: **27 dispatches, 0 cache hits, ~246k subagent tokens, 29 minutes.**
 
 ## Why a wall clock, and not a row cap
@@ -80,7 +80,7 @@ never acted on — the same rule the `Cap failure` block states for a row the di
 - **The bound's value** is the `DEFAULT_BUDGET_SECONDS` constant in
   `scripts/drive-audit-budget.py`, and nowhere else. A second copy in prose is one a `grep`
   cannot tell from a real one.
-- **The rule** is `agents/manager-drive.md` clause (1).
+- **The rule** is `agents/goal-drive.md` clause (1).
 - **This page** is the rationale. `scripts/check-drive-audit-budget.py` keeps the clause wired
   to the script — the callee exists, the script is named, all three branch tokens survive, the
   value is stated nowhere in the prose, and clause (1)'s row-cap prohibition is intact (a

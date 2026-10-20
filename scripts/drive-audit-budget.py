@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The manager drive leg's audit bound -- a wall clock, never a row count.
 
-`agents/manager-drive.md` clause (1) scores every non-terminal row with no live worker
+`agents/goal-drive.md` clause (1) scores every non-terminal row with no live worker
 by dispatching one `vault-cli:task-auditor` subagent PER ROW, sequentially. Nothing
 bounded that loop, so its duration was a function of the tracked set's size and of the
 audit cache's warmth -- and a cold tick ran to completion however long that took.
@@ -12,7 +12,7 @@ and `stuck` 0 in the tick's own store record, and the tick's own artifacts ran
 `.tracked.txt` 11:05:04 -> `.verdicts.json` 11:39:01, about 34 minutes, the cold audit
 being all of it -- the cache that tick wrote is that same tick's output. Corroborated on
 `attention-controller-is-the-fleet-s-single-source-of-session-state`, 09:24 -> 09:43,
-about 19 minutes. `commands/steps/manager-drive.md` had already recorded the sibling
+about 19 minutes. `commands/steps/goal-drive.md` had already recorded the sibling
 measurement: 27 dispatches, 0 cache hits, about 246k subagent tokens, 29 minutes.
 
 WHY A WALL CLOCK AND NOT A ROW CAP. Clause (1) forbids a per-tick row cap in as many

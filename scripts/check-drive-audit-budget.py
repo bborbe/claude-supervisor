@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The manager drive leg's audit bound has one home in code, and the clause keeps it there.
 
-`agents/manager-drive.md` clause (1) dispatches one `vault-cli:task-auditor` subagent per
+`agents/goal-drive.md` clause (1) dispatches one `vault-cli:task-auditor` subagent per
 row and nothing bounded the loop, so a cold tick ran to completion however long that took
 -- measured 2026-10-16 at about 34 min on a round with zero actionable rows
 (`.tracked.txt` 11:05:04 -> `.verdicts.json` 11:39:01). The bound now lives in
@@ -17,7 +17,7 @@ Five assertions, all required:
       tell a name from a working call, and a leg naming a script that is not there dies at
       runtime with `No such file` while every other assertion reads green. Measured on the
       sibling gate 2026-10-12: `check-drive-ledger-writes.py`'s (a) green, (d) red.
-  (b) `agents/manager-drive.md` **names the script** at least twice -- the call, and the
+  (b) `agents/goal-drive.md` **names the script** at least twice -- the call, and the
       single-home reference to its constant.
   (c) The clause carries **all three branch tokens** -- `CONTINUE`, `TERMINAL:` and
       `REFUSED`. A clause naming only the happy path has dropped the stop it exists for.
@@ -42,7 +42,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 #: The one file allowed to name the script and to carry the clause.
-DRIVE = "agents/manager-drive.md"
+DRIVE = "agents/goal-drive.md"
 
 #: The script's name, as the clause must call it.
 SCRIPT = "drive-audit-budget.py"

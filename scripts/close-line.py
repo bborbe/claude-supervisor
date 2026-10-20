@@ -16,7 +16,7 @@ command and its moment — and the precedent is the sweep table's
 `⏸️ HELD — <reason> · <age>`, where the age is part of the cell, not decoration.
 
 ⚠️ **This is the line's one producer.** `sweep-gate.py`'s `action_lines()` and the
-two manager print steps (`commands/manager-loop.md`, `commands/manager-status.md`)
+two manager print steps (`commands/goal-loop.md`, `commands/goal-status.md`)
 all render through here, so the three sites cannot drift and a bare close
 instruction has no door left. A caller that hand-assembles the line is the defect
 this script exists to remove, not an optimisation of it.
@@ -41,14 +41,14 @@ the one that acts on it.
 registry answers *is the process alive*; it cannot answer *has the turn finished*,
 and a session that has run its own close is still live for as long as its process
 holds the socket. So the runnable line needs a second input, and the manager
-already takes it — `agents/manager-drive.md`'s fourth read, `scripts/reap-closer.py`:
+already takes it — `agents/goal-drive.md`'s fourth read, `scripts/reap-closer.py`:
 
   --closer closed     → the candidate line, no command, exit 1
   --closer open       → the liveness verdict decides, exactly as before
   --closer unreadable → the liveness verdict decides, exactly as before
   (omitted)           → the liveness verdict decides, exactly as before
 
-⚠️ `unreadable` is deliberately NOT a suppression: `agents/manager-drive.md` states
+⚠️ `unreadable` is deliberately NOT a suppression: `agents/goal-drive.md` states
 the rule — this read "may only *remove* a notice, and only on a positive match. It
 never adds a reap, and a failed read never suppresses one."
 

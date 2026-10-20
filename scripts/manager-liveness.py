@@ -7,9 +7,14 @@ signal. Nothing a peer session can probe (`ListAgents`, sockets, `ps`, transcrip
 mtime) tells a lapsed manager from a healthy one between ticks, so the manager leaves
 evidence on disk itself. This script writes that evidence and checks it.
 
-Four verbs, one file each, all in the sweep-gate state dir:
+Four verbs, one file each, all in the sweep-gate state dir. **`<slug>` carries the
+branch — `goal--<base>` or `topic--<base>`** — because a topic and a goal may share a
+name, and a flat slug let one subject's cadence record overwrite the other's:
 
-  --arm   --topic T --interval S   <slug>.cadence = "<S>\\n" and an epoch appended to
+
+
+  --arm   --subject T --branch B --interval S
+                                  <slug>.cadence = "<S>\\n" and an epoch appended to
                                     <slug>.arms; clears <slug>.stopped. Run by the
                                     manager at EVERY re-arm, so the cadence file's mtime
                                     marks the last re-arm that actually happened and
@@ -17,7 +22,7 @@ Four verbs, one file each, all in the sweep-gate state dir:
                                     against. The interval is recorded, never assumed:
                                     managers change it at runtime (a 20-min idle tick
                                     was set 2026-09-22), so a fixed limit false-positives.
-  --stop  --topic T                <slug>.stopped. Run by `/supervisor:stop`, so a
+  --stop  --subject T --branch B   <slug>.stopped. Run by `/supervisor:stop`, so a
                                     deliberately stood-down manager is not reported
                                     as a lapse. The next --arm clears it.
   --check                          every <slug>.cadence -> OK / STALE / STOPPED.
@@ -27,14 +32,14 @@ Four verbs, one file each, all in the sweep-gate state dir:
                                     reported interval until that history exists.
                                     A re-arm after a stand-down resets the history,
                                     so an outage gap never counts as cadence.
-                                    Prints one line per topic that TURNED stale (or
+                                    Prints one line per subject that TURNED stale (or
                                     recovered) since the last check; exits 10 if any
                                     turned stale, else 0. The notified set lives in
                                     liveness-notified.json, so one lapse notifies
                                     once, not on every poll.
-  --state --topic T                ONE topic's state, as `<STATE>\t<slug>\t<detail>`.
+  --state --subject T --branch B   ONE subject's state, as `<STATE>\t<slug>\t<detail>`.
                                     `--check` structurally cannot answer this: it prints
-                                    only the topics that TURNED stale, so STOPPED -- the
+                                    only the subjects that TURNED stale, so STOPPED -- the
                                     state a deliberate stand-down produces -- is invisible
                                     to it by construction. A reader that must tell a
                                     stood-down manager from a lapsed one asks about the
@@ -58,14 +63,30 @@ STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_LIVENESS_STATE_DIR", "~/.claude/state/sweep-gate")
 )
 NOTIFIED = "liveness-notified.json"
+BRANCHES = ("goal", "topic")
 SLACK = 60  # seconds: covers the tick's own runtime before the re-arm lands
 ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable median
 EXIT_STALE = 10
 
 
-def slug(topic: str) -> str:
-    # Same slug as sweep-gate.py and stop-probe.py, so the files sit side by side.
-    return re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")
+def base_slug(subject: str) -> str:
+    # Same base transform as sweep-gate.py and stop-probe.py, so the files sit side by side.
+    return re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")
+
+
+def slug(subject: str, branch: str) -> str:
+    """The state slug, carrying the BRANCH: `goal--<base>` / `topic--<base>`.
+
+    ⚠️ The prefix is not decoration. A topic and a goal may share a name — that is
+    exactly why `docs/subject-resolution.md` requires exact-basename matching — so a
+    flat slug let one subject's cadence record overwrite the other's in this one
+    directory. The branch is the only thing that tells the two apart, and the
+    directory can stay flat.
+    """
+    if branch not in BRANCHES:
+        raise ValueError(f"branch must be one of {BRANCHES}, got {branch!r}")
+    return f"{branch}--{base_slug(subject)}"
+
 
 
 def path(name: str, ext: str) -> str:
@@ -99,8 +120,8 @@ def observed_interval(s: str):
     return gaps[len(gaps) // 2]
 
 
-def arm(topic: str, interval: int) -> int:
-    s = slug(topic)
+def arm(subject: str, branch: str, interval: int) -> int:
+    s = slug(subject, branch)
     write_atomic(path(s, "cadence"), f"{interval}\n")
     # A re-arm after a stand-down starts a NEW cadence sample. The outage gap is not
     # cadence, and it cannot be filtered at read time: the marker that records when
@@ -117,8 +138,8 @@ def arm(topic: str, interval: int) -> int:
     return 0
 
 
-def stop(topic: str) -> int:
-    s = slug(topic)
+def stop(subject: str, branch: str) -> int:
+    s = slug(subject, branch)
     write_atomic(path(s, "stopped"), time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
     print(f"stopped {s}")
     return 0
@@ -182,31 +203,32 @@ def main() -> int:
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--arm", action="store_true", help="record a re-arm (manager, every tick)")
     mode.add_argument("--stop", action="store_true", help="mark a deliberate stand-down")
-    mode.add_argument("--check", action="store_true", help="report topics that turned stale")
+    mode.add_argument("--check", action="store_true", help="report subjects that turned stale")
     mode.add_argument(
         "--state",
         action="store_true",
-        help="print ONE topic's state: OK / STALE / STOPPED / INVALID",
+        help="print ONE subject's state: OK / STALE / STOPPED / INVALID",
     )
-    ap.add_argument("--topic")
+    ap.add_argument("--subject", help="the goal or topic name")
+    ap.add_argument("--branch", choices=BRANCHES, help="goal | topic — the tier that owns the subject")
     ap.add_argument("--interval", type=int, help="the ScheduleWakeup delay just armed, seconds")
     a = ap.parse_args()
     if a.check:
         return check()
     if a.state:
-        if not a.topic:
-            ap.error("--state requires --topic")
-        s = slug(a.topic)
+        if not a.subject or not a.branch:
+            ap.error("--state requires --subject and --branch")
+        s = slug(a.subject, a.branch)
         state, detail = classify(s, time.time())
         print(f"{state}\t{s}\t{detail}")
         return 0
-    if not a.topic:
-        ap.error("--topic is required with --arm/--stop")
+    if not a.subject or not a.branch:
+        ap.error("--subject and --branch are required with --arm/--stop")
     if a.arm:
         if not a.interval or a.interval <= 0:
             ap.error("--arm needs --interval > 0")
-        return arm(a.topic, a.interval)
-    return stop(a.topic)
+        return arm(a.subject, a.branch, a.interval)
+    return stop(a.subject, a.branch)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ the guard had, and neither of which the real clause would have revealed:
     tokens in one sentence, and this case is what pins that.
 
 `test_shipped_clause_passes` is the third: it runs the guard against this repository's real
-`agents/manager-drive.md` rather than a fixture, so a future edit that satisfies the fixture
+`agents/goal-drive.md` rather than a fixture, so a future edit that satisfies the fixture
 while breaking the shipped clause is caught.
 """
 import pathlib
@@ -28,7 +28,7 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-content-key-formula.py"
 REPO = SCRIPT.parent.parent
-HOME = "agents/manager-drive.md"
+HOME = "agents/goal-drive.md"
 
 #: A minimal clause (1) carrying every token the guard asserts, in the sentence structure the
 #: guard requires: the formula and its truncation in ONE sentence, the excluded fields in a

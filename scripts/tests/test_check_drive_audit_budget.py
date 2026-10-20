@@ -13,7 +13,7 @@ matter most are the ones a plausible future edit would break:
     rests on, and every other assertion here stays green.
 
 `test_shipped_clause_passes` runs the guard against this repository's real
-`agents/manager-drive.md` rather than a fixture, so a future edit that satisfies the
+`agents/goal-drive.md` rather than a fixture, so a future edit that satisfies the
 fixture while breaking the shipped clause is caught.
 """
 import pathlib
@@ -25,7 +25,7 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-drive-audit-budget.py"
 REPO = SCRIPT.parent.parent
-HOME = "agents/manager-drive.md"
+HOME = "agents/goal-drive.md"
 BOUND = "scripts/drive-audit-budget.py"
 
 #: A minimal clause (1) carrying every token the guard asserts: the script named twice (the

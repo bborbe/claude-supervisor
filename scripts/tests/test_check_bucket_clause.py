@@ -1,10 +1,10 @@
 """check-bucket-clause.py: the per-bucket shape clause must not drift across its homes.
 
 The defect this guards against, measured across two days: the clause telling a sweep reader
-what `--write-buckets` accepts lives byte-identical in `commands/steps/manager-sweep.md`
+what `--write-buckets` accepts lives byte-identical in `commands/steps/goal-sweep.md`
 and `manager-status.md`, and was amended by hand at every site on 2026-10-03 (the vocabulary
 half) and again on 2026-10-04 (the shape half) — each time with the copies compared by eye.
-`commands/manager-drive.md` carried a third copy until 2026-10-11, when it became the loop's
+`commands/goal-drive.md` carried a third copy until 2026-10-11, when it became the loop's
 per-round router; a router holds no executable rule, so that copy was retired and the guard's
 list follows it.
 
@@ -29,8 +29,8 @@ CLAUSE = (
     "read path alike — so **every declared bucket must appear**, each mapping to a list of names."
 )
 COMMANDS = (
-    "commands/steps/manager-sweep.md",
-    "commands/manager-status.md",
+    "commands/steps/goal-sweep.md",
+    "commands/goal-status.md",
 )
 
 

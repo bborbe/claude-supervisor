@@ -6,7 +6,7 @@ Audience split follows `coding/docs/readme-guide.md`: README answers *"can a new
 
 ## Session tiers
 
-Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `manager-*` for a goal/topic manager, `worker-*` for a worker; `jump`, `who-needs-me`, `read-guides`, `attention-next` and `ready` are cross-tier. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
+Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `topic-*` for a topic manager, `goal-*` for a goal manager, `worker-*` for a worker; `jump`, `who-needs-me`, `read-guides`, `attention-next`, `close` and `ready` are cross-tier. The tiers form a **strict tree** — each level manages only the level directly below it, and `<tier>-spawn` starts that level: `topic-spawn` starts a goal manager, `goal-spawn` a worker. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
 
 ## How it works
 
@@ -22,7 +22,7 @@ manager session ──MCP──► supervisor server ──query()×N──► w
                               └──── canUseTool ──────────────┘
 ```
 
-**Escalation chain:** worker → policy → `manager-wrangler` → manager → human. Routine approvals should never reach the manager, and genuine forks should never reach the human.
+**Escalation chain:** worker → policy → `goal-wrangler` → manager → human. Routine approvals should never reach the manager, and genuine forks should never reach the human.
 
 ## Where a worker runs
 
@@ -122,15 +122,20 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
 .mcp.json                                starts the server (${CLAUDE_PLUGIN_ROOT}/server)
 skills/supervising-workers/SKILL.md
 skills/open-items/SKILL.md               the operator-asks ledger — rules + /supervisor:open-items (script stays at scripts/open-items.py)
-commands/{manager-spawn,fleet-workers,manager-answer,manager-drain}.md
+commands/{goal-spawn,fleet-workers,goal-answer,goal-drain}.md
 commands/{jump,who-needs-me}.md                  find and reach a session
 commands/attention-next.md + scripts/attention-answer.py  answer an attention item, route it to the asker
 commands/{fleet-loop,fleet-status}.md            fleet surface — many sessions; the loop's arm and its read-only snapshot
 commands/fleet-drive.md                          fleet surface — the loop's round, dispatched on every wakeup and runnable by hand
-commands/{manager-loop,manager-status}.md       one goal or topic — the loop's arm and its read-only snapshot
-commands/manager-drive.md                        one goal or topic — the loop's round, and runnable by hand
+commands/{topic-loop,topic-status}.md    one TOPIC — the loop's arm and its read-only goal snapshot
+commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start what the ranking admits
+commands/topic-spawn.md                  one TOPIC — start ONE goal manager; holds no spawn tool, delegates to /supervisor:open --goal
+commands/topic-verify.md                 topic manager — verify one topic, suggest fixes
+commands/{goal-loop,goal-status}.md      one GOAL — the loop's arm and its read-only task snapshot
+commands/goal-drive.md                   one GOAL — the loop's round, and runnable by hand
+commands/goal-spawn.md                   one GOAL — spawn ONE worker (holds the spawn tool)
 commands/fleet-verify.md                         fleet manager — verify the fleet layer's contract, suggest fixes
-commands/manager-verify.md                       goal/topic manager — verify one subject, suggest fixes
+commands/goal-verify.md                          goal manager — verify one goal, suggest fixes
 commands/worker-drive.md                         one worker session — drive its anchored task to done
 scripts/progress-window.py                       its measured window — verdict, A/B/C observations and the claim result, from disk only (spec: docs/session-progress.md)
 commands/restart.md                              restart ONE named session, worker or manager — kill, resume, re-orient
@@ -146,7 +151,9 @@ commands/reset.md + scripts/reset.py             re-discover its state; never de
 docs/fleet-surface.md                            spawn shape + fleet table render spec (canonical)
 docs/sweep-output.md                             the manager sweep's output frame — columns, widths, icons (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
-docs/subject-resolution.md                      the four-source subject chain the four manager commands share
+docs/subject-resolution.md                      the four-source subject chain the eight manager commands share
+scripts/topic-spawn.py                           the topic tier's spawn gate — goal-not-in-scope / goal-not-startable / manager-cap, the § 1 ranking, and the worker refusal
+scripts/topic-keepalive.py                       the topic tier's keep-alive — resume-not-respawn, 3 resumes per goal per 30 min, crash-loop line
 docs/voice-asks.md                               a voiced question is also a board card — rule + detector (canonical)
 docs/orphan-recovery.md                          stop + recreate a remote worker whose container or pod is gone (canonical)
 scripts/voice-ask-pairing.py                     flags question `say`s with no `attention-ask.py post` within 60 s
@@ -157,11 +164,14 @@ scripts/adopt-orphans.py                         adopts an exited manager's live
 scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns (state: ~/.claude/state/gate-feed/<self-session-id>.json)
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
-agents/manager-wrangler.md                routine approval loop over headless workers
-agents/manager-sweep-reader.md            the worker sweep's read-only half (called by both worker commands)
+agents/goal-wrangler.md                routine approval loop over headless workers
+agents/topic-sweep-reader.md            the TOPIC sweep's read half — goal rows and their managers (called by topic-loop/topic-status)
+agents/topic-drive.md                   the TOPIC sweep's act leg — keep-alive and the ranked start hand-over
+agents/topic-verify.md                  the topic tier's checks + report shape (dispatched by /topic-verify)
+agents/goal-sweep-reader.md            the GOAL sweep's read half — task rows and their buckets (called by goal-loop/goal-status)
 agents/fleet-sweep-reader.md             the fleet sweep's read half, Steps 0b–3 (called by /fleet-loop, read-only by /fleet-drive)
-agents/manager-drive.md                    the worker sweep's act leg (composed by manager-loop, runnable by hand)
-agents/manager-verify.md                  the seven-step verify fork + report shape (dispatched by /manager-verify)
+agents/goal-drive.md                    the GOAL sweep's act leg (composed by goal-loop, runnable by hand)
+agents/goal-verify.md                  the goal tier's checks + report shape (dispatched by /goal-verify)
 agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive and by /fleet-loop every round)
 agents/gate-relay-read.md                the manager's gate relay, read leg — pane id in, ≤15-line per-pane summary out; declares no write tool at all
 agents/gate-relay-send.md                the manager's gate relay, send leg — the operator's answer into a tab worker's pane; never drives a selection modal

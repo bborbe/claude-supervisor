@@ -14,7 +14,7 @@ prints a verdict line and nothing else; every gap and every fix diff stays in th
 ## What this is not
 
 - **Not a second readiness loop.** The bounded repair-then-open loop already lives in
-  `agents/manager-drive.md` clause (1). This verb re-surfaces it onto **one named task**. Read the
+  `agents/goal-drive.md` clause (1). This verb re-surfaces it onto **one named task**. Read the
   loop there — its round cap, its stop condition and its early-stop rule are owned by that clause
   and are never restated here.
 - **Not a second readiness bar.** The bar and its single home are `docs/fleet-surface.md`
@@ -47,7 +47,7 @@ home is `commands/open.md` § Step 1.5 Gate 2. `Task` is the only tool that addr
 
 Read the `READINESS:` line. **Parse the score** — the line carries no verdict word (the `ready`/`not-ready` word was removed 2026-10-02; it was never read, and it flipped polarity on unchanged input). A missing or unparseable line is not-ready.
 
-Then run `agents/manager-drive.md` clause (1)'s loop against this one row: repair, re-audit, stop on
+Then run `agents/goal-drive.md` clause (1)'s loop against this one row: repair, re-audit, stop on
 the conditions that clause owns — including its **step 0 `UNFIXABLE:` branch**, which is that
 token's only reader. Do not re-implement the branch here: a caller-side reader leaves the loop's
 own stop rule unenforced for every other entry into it.
@@ -64,12 +64,12 @@ never soften the bar.
 - **Still below the ladder's open threshold after the improvement pass** → escalate naming the gap.
   A row below the threshold is not held in silence: **post the attention-board card that names the
   score against the threshold, then hold the row** — per `docs/fleet-surface.md` § Spawn a worker
-  item 2, with the card's fields and the hold line as `agents/manager-drive.md` clause (1)'s
+  item 2, with the card's fields and the hold line as `agents/goal-drive.md` clause (1)'s
   `<error_handling>` entry writes them.
 - **An `UNFIXABLE:` verdict is NOT an escalate-by-default.** The improvement pass rewrites the
   criterion into a falsifiable form, or splits it into its own follow-up task, and re-audits; the
   card is the **fallback**, and fires only when neither works or the criterion is an operator-only
-  decision. That branch is read by `agents/manager-drive.md` clause (1) **step 0** — this step
+  decision. That branch is read by `agents/goal-drive.md` clause (1) **step 0** — this step
   relays its outcome and never re-implements it.
 
 ### 5. Print the verdict — and only the verdict
@@ -88,7 +88,7 @@ contract even if the caller then summarises it.
 ## Why the loop is not re-implemented
 
 A second loop is a second counter: the day one is edited and the other is not, nothing errors and
-no diff catches it. `agents/manager-drive.md` clause (1) already runs this loop for the
+no diff catches it. `agents/goal-drive.md` clause (1) already runs this loop for the
 ready-to-start bucket of a swept set; this verb runs it for one named row and hands the result to
 `open`. Same loop, same bar, one home each.
 
@@ -96,5 +96,5 @@ ready-to-start bucket of a swept set; this verb runs it for one named row and ha
 
 - `/supervisor:open <name>` — resolves a name and jumps, resumes or spawns. This verb is the
   readiness prelude; it does not replace `open`.
-- `/supervisor:manager-drive` — the act leg for a whole swept set, by hand.
+- `/supervisor:goal-drive` — the act leg for a whole swept set, by hand.
 - `/supervisor:fleet-drive` — the same act leg for the fleet.

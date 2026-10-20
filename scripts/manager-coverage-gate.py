@@ -54,7 +54,7 @@ on a tick that moved leaves the round reporting a stale SC-to-evidence table as 
 and nothing announces the loss. The same direction `manager-predispatch.py` and
 `manager-quiet.py` take, for the same reason.
 
-⚠️ **The delta is an INPUT, never recomputed here.** `agents/manager-sweep-reader.md` step 1
+⚠️ **The delta is an INPUT, never recomputed here.** `agents/goal-sweep-reader.md` step 1
 item 3 already computes it against the prior snapshot, and the coverage step's own line 37
 forbids that step becoming "a second classifier". This gate consumes the verdict; it does
 not derive a second one.
@@ -95,7 +95,7 @@ NO_CHANGE_MARKER = "no change since the last sweep"
 def normalise_delta(raw):
     """Reduce the sweep reader's rendered delta to the verdict token it leads with.
 
-    `agents/manager-sweep-reader.md` renders `Delta: <what moved, or "no change">`, usually
+    `agents/goal-sweep-reader.md` renders `Delta: <what moved, or "no change">`, usually
     with a trailing clause explaining the verdict — measured 2026-10-16:
     `Delta: no change — all 14 rows' status/phase/met/progress_hash match the frozen
     snapshot (recorded_at …)`. The coverage step tells the caller to pass that verdict

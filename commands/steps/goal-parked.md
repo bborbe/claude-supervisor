@@ -8,7 +8,7 @@ user-invocable: false
 
 When: every tick, after the drive leg returns
 
-⚠️ **This file is the lever row's ONE home.** `commands/manager-drive.md` names it in the
+⚠️ **This file is the lever row's ONE home.** `commands/goal-drive.md` names it in the
 router and restates none of it; the drive leg's report is the input, never a second
 definition.
 
@@ -36,7 +36,7 @@ definition.
 - **A manager-owned lever is executed in this round, not offered.** Nudge, re-arm a
   watcher, reap, resume, ready a row — these are the round's own work: perform them, then
   render the row with `owner: manager` and the act already done. ⚠️ **Never present one as
-  an `AskUserQuestion` option** — the rule's home is `commands/manager-loop.md:87`
+  an `AskUserQuestion` option** — the rule's home is `commands/goal-loop.md:87`
   (execute, then report as a table line), and a lever offered back is a lever the round
   declined to pull.
 

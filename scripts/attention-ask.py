@@ -8,15 +8,29 @@ instead of blocking its whole turn on AskUserQuestion.
   post   POST /api/1.0/attention, then print the item id it created
   poll   GET /api/1.0/attention/{ITEM_ID}, print the answer, or OPEN
 
-**Three poll terminals, not two.** `OPEN` means still unanswered, and
-`ANSWERED:` means the item carries client evidence that is not positively
-flagged as automated. A third, `NOT_OPERATOR_ANSWERED:`, covers the item that
-moved on evidence the operator did not supply — no `answered_client` on the
-record, or a client that reported `automation: true`. A caller gating on this
-must read that the way it reads `OPEN`: **the gate is not released.** Reading
-only `ANSWERED` is the defect this terminal exists to narrow — the board's
-controls post a caller-declared `answered_by` and nothing in the request
-separates a pointer event from a synthesised one.
+**Five poll terminals, and exactly four of them are states of the card.** The
+operator's ruling fixes the state vocabulary: *"the rest api is able to tell the
+session what the state is — accepted, declined, skipped/hidden or not answered —
+one of these 4"*. So:
+
+  OPEN       still unanswered
+  ANSWERED   accepted — the operator picked an option or typed an answer
+  DECLINED   the bottom Dismiss: a deliberate decline, and NOT an acceptance
+  HIDDEN     the corner X: handled elsewhere, nothing routed back
+
+The fifth, `NOT_OPERATOR_ANSWERED:`, is not a state of the card — it is a
+refusal to treat the card's movement as the operator's answer, covering an item
+that moved on evidence the operator did not supply (no `answered_client` on the
+record, or a client that reported `automation: true`). A caller gating on it, on
+`OPEN`, on `DECLINED` or on `HIDDEN` must read all four the same way: **the gate
+is not released.** Only `ANSWERED:` releases one. Reading only `ANSWERED` is the
+defect these terminals exist to narrow — the board's controls post a
+caller-declared `answered_by` and nothing in the request separates a pointer
+event from a synthesised one.
+
+⚠️ `DECLINED` was added 2026-10-20 and is a behaviour change, not a rename: a
+dismissed card used to arrive as `ANSWERED: declined (no answer given)`, so
+every caller gating on `ANSWERED:` treated a decline as a release.
 
 ⚠️ **`ANSWERED:` is not proof the operator answered, and this arm does not claim
 it is.** A Playwright/CDP-driven browser reports `navigator.webdriver === false`
@@ -942,6 +956,26 @@ def cmd_poll(item_id, out=sys.stdout):
     content = described or f"(no answer content recorded; item is {item.get('state')})"
     if verdict == attribution.ATTRIBUTED:
         print(f"ANSWERED: {content}", file=out)
+        if answered_by:
+            print(f"ANSWERED_BY: {answered_by}", file=out)
+        return 0
+    # ⚠️ Two terminals of their own, from 2026-10-20. Both are answers the
+    # operator GAVE, so neither is `NOT_OPERATOR_ANSWERED`, and neither is
+    # `ANSWERED` — a decline is not an acceptance and a hidden close carries no
+    # answer at all. The operator's ruling fixes the vocabulary at four: *"the
+    # rest api is able to tell the session what the state is — accepted,
+    # declined, skipped/hidden or not answered — one of these 4"*.
+    #
+    # ⚠️ Neither releases a gate, and a caller must read them the way it reads
+    # `OPEN`. `DECLINED` used to arrive as `ANSWERED: declined (no answer
+    # given)`, which every command gating on `ANSWERED:` treated as a release.
+    if verdict == attribution.DECLINED:
+        print(f"DECLINED: {content}", file=out)
+        if answered_by:
+            print(f"ANSWERED_BY: {answered_by}", file=out)
+        return 0
+    if verdict == attribution.HIDDEN:
+        print("HIDDEN", file=out)
         if answered_by:
             print(f"ANSWERED_BY: {answered_by}", file=out)
         return 0

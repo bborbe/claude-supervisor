@@ -2,7 +2,7 @@
 """Tests for the verdicts cache's content-key derivation (`manager-predispatch.py`).
 
 `content_key` is the single home of a derivation that used to live only as **prose**, in
-`agents/manager-drive.md` clause (1). The drive leg is an agent, so every leg re-implemented
+`agents/goal-drive.md` clause (1). The drive leg is an agent, so every leg re-implemented
 the formula and they disagreed — a leg's own `Audit` block on **2026-10-12T15:49:30Z**
 reported that its stored keys reproduced under a `mode:`-only exclusion while the clause
 named four fields. Writer and reader therefore keyed the same row differently, and the row

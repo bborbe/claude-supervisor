@@ -61,7 +61,7 @@ ADVISORY_MARKER = "Advisory, never a refusal"
 #: a2a-worker-controller, and it reads the field itself (§ 2.1) rather than inheriting the check
 #: from `open.md`. It is the site no gate covered before this one existed.
 CITING_SITES = (
-    "commands/steps/manager-spawn.md",
+    "commands/steps/goal-spawn.md",
     "commands/open.md",
     "commands/open-a2a.md",
 )

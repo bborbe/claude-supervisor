@@ -10,7 +10,7 @@ the ROW's own key -- never on the asker, and never on the question text.
 
 Why this exists (repair C, [[The Operator's Blocked Sessions Arrive as One
 Grouped Decision]]): `commands/fleet-loop.md` drops an entry whose owning manager
-is live, and `commands/manager-loop.md` batches its own topic's set. Both are
+is live, and `commands/goal-loop.md` batches its own topic's set. Both are
 correct alone, and together they still let the operator receive the SAME question
 twice -- the fleet drops what a manager covers, but a manager and the fleet can
 both hold the same underlying blocked session and neither sees the other's batch.

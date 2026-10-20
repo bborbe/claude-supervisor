@@ -68,7 +68,7 @@ NEW_WORKER_CALL = 'mcp__supervisor__spawn_agent(\n  prompt="/vault-cli:work-on-t
 
 
 #: A resume-only file that GRANTS the spawn tool. Its prose shows no spawn call at all, which
-#: is exactly how `agents/manager-drive.md` opened two workers directly on 2026-09-24 while
+#: is exactly how `agents/goal-drive.md` opened two workers directly on 2026-09-24 while
 #: its own text said to route through `/supervisor:open` — a site defined by a grant, not text.
 GRANT_NO_ANCHOR = (
     "---\nallowed-tools:\n  - mcp__supervisor__spawn_agent\n---\n"
@@ -104,7 +104,7 @@ class CheckSpawnModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_site_without_the_reference_fails(self):
-        self.write("commands/steps/manager-spawn.md", SITE_NO_ANCHOR)
+        self.write("commands/steps/goal-spawn.md", SITE_NO_ANCHOR)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("no reference to the rule's home", result.stderr)
@@ -112,7 +112,7 @@ class CheckSpawnModeTest(unittest.TestCase):
     def test_site_without_the_binding_fails(self):
         """A pointer with no binding is the shape this check exists to reject: the site
         names the home but never passes the argument, so the rule stays unreachable."""
-        self.write("commands/manager-spawn.md", SITE_NO_BINDING)
+        self.write("commands/goal-spawn.md", SITE_NO_BINDING)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("binding", result.stderr)
@@ -120,7 +120,7 @@ class CheckSpawnModeTest(unittest.TestCase):
     def test_one_directional_site_fails(self):
         """Passing only `interactive=false` leaves `mode: interactive` inert — the defect
         this check gained a second assertion for on 2026-09-24."""
-        self.write("commands/steps/manager-spawn.md", SITE_ONE_DIRECTION)
+        self.write("commands/steps/goal-spawn.md", SITE_ONE_DIRECTION)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("interactive=true", result.stderr)
@@ -142,7 +142,7 @@ class CheckSpawnModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_raw_wezterm_spawn_grant_is_also_a_spawn_route(self):
-        """The second surface of the same class, found 2026-09-25. `agents/manager-drive.md`
+        """The second surface of the same class, found 2026-09-25. `agents/goal-drive.md`
         had its supervisor grant removed and still granted `Bash(wezterm cli spawn:*)` — a raw
         terminal spawn the tool-only pattern could not see, and the exact bypass the change
         existed to close. The grant dimension enumerates the routes, so a file granting either

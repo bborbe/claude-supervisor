@@ -82,6 +82,21 @@ UNATTRIBUTED = "unattributed"
 AUTOMATED = "automated"
 NOTHING = "nothing"
 
+# What the answer's KIND says, which outranks what its client says.
+#
+# ⚠️ These are verdicts, not the poll terminals that render them, and they are
+# checked BEFORE the client evidence. The reason is that a kind is a fact about
+# what the operator did, while the client is evidence about who sent it: a
+# decline is a decline whether a person or a script clicked it, and asking "was
+# this positively flagged as automated?" first would answer ATTRIBUTED for a
+# card the operator explicitly dismissed.
+#
+# ⚠️ The operator's ruling fixes the vocabulary at four — *"the rest api is able
+# to tell the session what the state is — accepted, declined, skipped/hidden or
+# not answered — one of these 4"* — and these two are the middle pair.
+DECLINED = "declined"
+HIDDEN = "hidden"
+
 
 def answered_client(item):
     """The store-read client record, or None when the item carries none.
@@ -119,6 +134,29 @@ def was_acted_on(item):
     return bool(item.get("answered_by")) and item.get("state") in (ANSWERED, CLOSED)
 
 
+def answer_kind(item):
+    """The kind the operator's answer took, or "" when the item carries none.
+
+    Two fields carry it and they are mutually exclusive by construction: `answer`
+    holds a single-question item's content and `answers` holds a multi-question
+    item's, one entry per tab. A multi-question item is read as `hidden` or
+    `skip` only when EVERY unit carries that kind — a card with one tab answered
+    and one hidden is not a whole-card close, and reporting it as one would
+    swallow the tab the operator actually answered.
+    """
+    item = item or {}
+    units = item.get("answers")
+    if isinstance(units, list) and units:
+        kinds = {u.get("kind") for u in units if isinstance(u, dict)}
+        if len(kinds) == 1:
+            return kinds.pop() or ""
+        return ""
+    answer = item.get("answer")
+    if isinstance(answer, dict):
+        return answer.get("kind") or ""
+    return ""
+
+
 def classify(item):
     """Return (verdict, reason) for one item — the single rule every caller uses.
 
@@ -147,6 +185,27 @@ def classify(item):
             "the item was closed without an answer — a close is a clear, not an "
             "answer, so the asking session is still frozen and the gate is not "
             "released",
+        )
+
+    # ⚠️ The answer's KIND is read before the client evidence, and that ordering
+    # IS the 2026-10-20 change. A decline or a hidden close is a fact about what
+    # the operator did; asking "was this client positively flagged as automated?"
+    # first answers ATTRIBUTED for a card the operator explicitly dismissed —
+    # which is what shipped until this date, and what let a bottom-Dismiss
+    # release a gate.
+    kind = answer_kind(item)
+    if kind == "skip":
+        return (
+            DECLINED,
+            "the operator dismissed the card — a decline, not an acceptance, so "
+            "the gate is not released",
+        )
+    if kind == "hidden":
+        return (
+            HIDDEN,
+            "the card was closed as handled elsewhere — the operator answered in "
+            "the asking session's own pane, so there is no answer here to release "
+            "a gate with",
         )
 
     # The client evidence is read next, so an item that is positively flagged as

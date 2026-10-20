@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Has this session already run its close? The reap test's fourth read.
 
-The drive leg's reap test (`agents/manager-drive.md` <process> step 1) decides that a task is
+The drive leg's reap test (`agents/goal-drive.md` <process> step 1) decides that a task is
 finished from three disk facts: `status: completed`, `phase: done`, zero open boxes. Those facts
 say nothing about the SESSION, so a worker that has already run its close and is merely still
 open reads exactly like one parked on the close gate. Measured 2026-09-27: one Manager Layer tick

@@ -52,13 +52,14 @@ Manager Session runbook § Sweep output):
   4. no task file at all -> `Unmanaged`.
 
 A manager's SUBJECT is resolved from two sources in order: the loop record its
-manager wrote under `~/.claude/state/sweep-gate/<subject-slug>.*`, then its
+manager wrote under `~/.claude/state/sweep-gate/<branch>--<base>.*`, then its
 registry name matching a topic or goal title (case-insensitively; a `<X> Manager`
 suffix allowed). ⚠️ Never from the session's `claude_session_id` stamp — measured
 2026-09-24, `Sample Agent`'s stamp points at an unrelated task. ⚠️ The two
 sources are not independent: `manager-liveness.py`'s slug is
-`re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")`, a lossy transform that
-carries no session id, so source 1 narrows the SUBJECT and the session still comes
+`f"{branch}--" + re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")`, a lossy
+transform that carries no session id, so source 1 narrows the SUBJECT and the
+session still comes
 from the registry — the same name the fallback reads. A manager that resolves
 neither way is still a manager (colour is the signal); it just has no subject, so
 nothing nests under it.
@@ -126,8 +127,19 @@ _MANAGER_SUFFIX = re.compile(r"\s+manager$", re.IGNORECASE)
 
 
 def slug(text):
-    """`manager-liveness.py`'s slug, verbatim — one definition, two readers."""
+    """The BASE slug — `manager-liveness.py`'s own transform, one definition, two readers."""
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+
+
+def subject_slug(text, branch):
+    """`manager-liveness.py`'s state slug, verbatim: `goal--<base>` / `topic--<base>`.
+
+    ⚠️ The branch prefix is what keeps a topic and a goal that share a name from
+    colliding in one flat state directory. Reading the unprefixed form here would
+    find neither record — every manager would silently lose its subject and the tree
+    would collapse to the root.
+    """
+    return f"{branch}--{slug(text)}"
 
 
 def frontmatter(text):
@@ -458,10 +470,11 @@ def manager_subject(name, index, slugs):
     through to source 2 rather than answering `None` — the loop proves a manager
     exists, not what it covers.
     """
-    if slug(name) in slugs:
-        for key, title in list(index.topics.items()) + list(index.goals.items()):
-            if slug(title) == slug(name):
-                return index.subject(title)
+    if any(subject_slug(name, b) in slugs for b in ("topic", "goal")):
+        for branch, table in (("topic", index.topics), ("goal", index.goals)):
+            for title in table:
+                if subject_slug(title, branch) in slugs and slug(title) == slug(name):
+                    return index.subject(title)
     for candidate in (name, _MANAGER_SUFFIX.sub("", name or "")):
         found = index.subject(candidate)
         if found:
