@@ -8,9 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.192.0
+## Unreleased
 
 - feat: **`fleet-digest.py` reports a fleet round that stopped being produced.** The fleet drive leg acts only on a digest round — no round, no `CLASSIFICATION` set, so no `parked` candidate, no `revive` verdict and no nudge — and nothing watched digest production: `grep -rln 'fleet-handback'` returned only `CHANGELOG.md`, `agents/fleet-drive.md`, `agents/fleet-sweep-reader.md` and `commands/steps/sweep.md`. Measured 2026-10-20: the retained digests run `2026-10-18T12:52:46Z` then nothing until `2026-10-19T21:58:31Z` — a **33h05m gap** spanning the day-end census, in which four of the six `idle-with-open-work` rows were never dispatched to at all. `--check` ages the newest round's own `snapshot written:` line against a 1080 s limit and exits 10 once per lapse, with the following healthy round clearing it; `--state` prints one line and always exits 0; `--stale` reports the watcher's own liveness, since a dead watcher prints nothing and silence is not evidence. Three traps are pinned by tests: the newest round is ordered by its parsed timestamp rather than its filename (`2026-10-20T08-43-00-02-00.digest` holds `06:43:35Z`), the nine non-timestamp snapshot forms resolve to parsed/unknown and never to "fresh" (a silent miss) nor "parse failure" (a false report), and a gap the watcher itself did not run across is `UNOBSERVED` rather than a lapse, so a sleeping host is not reported as a lapsed loop. Change set: `scripts/fleet-digest.py`, `scripts/tests/test_fleet_digest.py`, `CHANGELOG.md`.
+
+## v0.192.0
+
 - feat: `mcp-start.py` resolves `SUPERVISOR_A2A_TOKEN_SUN` from TeamVault, so `k8s:sun` (sun-k3s) authenticates against its own controller bearer
 
 ## v0.191.6
