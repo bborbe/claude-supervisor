@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.191.2
 
 - fix: **`send_agent_message` reports delivery from a post-send read, not from keystroke delivery, so a swallowed Enter can no longer read as a sent message.** `sendToPane` returned `{sent: true}` whenever `send-text` reached the pty — true whether or not the Enter submitted — so a pane that was mid-turn (its composer is empty, which `waitUntilReady` reads as ready, and the TUI discards the `\r` while it is still busy) produced a success return for a message that never arrived. It now returns `delivered: true` when the composer was watched clearing, `delivered: false` with a reason when the text is still there after the Enter is re-pressed, or `delivered: 'unverified'` when the pane could not be read or its composer holds text this send did not write; `sent` is kept as an alias meaning only "keystrokes reached the pty", and `send_agent_message` surfaces the state instead of a bare `sent: true`. `scripts/send-delivery-drill.py` drives the busy/idle pair against a live pane and records both transcripts. Change set: `server/tab.mjs`, `server/supervisor.mjs`, `server/tab.test.mjs`, `scripts/send-delivery-drill.py`, `scripts/transport-read-check.py`, `CHANGELOG.md`.
 ## v0.191.1
