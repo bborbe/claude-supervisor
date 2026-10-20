@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — print both readings with the marker line, run: `python3 $P/fleet-board.py --json` · `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"`
+When: every tick — print all three readings with the marker line (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py`; commands in the step)
 
 ## The saturation reading — the ratio, not tok/s
 
@@ -34,3 +34,17 @@ Read it from `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir
 ⚠️ **`unknown` is a third answer, not `0`.** If the session registry cannot be read the script prints `approved, not started: unknown` and exits non-zero — *"no approved rows are waiting"* and *"I could not ask"* must not render the same (`docs/pane-reads.md` § The rule). Print it as it comes back; never round `unknown` down to a number.
 
 ⚠️ **The line reports; it never opens.** These rows are the drive leg's and the owning manager's to act on, under the standing mandate and its approval boundary — this reading adds visibility, not authority.
+
+## The unarmed-goals reading
+
+Every tick prints this line with the marker line:
+
+    unarmed goals: 1 unarmed goal · Build Rapid Strategy Development Pipeline (2 sessions)
+
+Read it from `python3 $P/unarmed-goals.py --vault "<vault>" --tasks-dir "<vault>/<tasks-dir>"`. A goal counts when it has **both** a live session — a non-terminal task whose `claude_session_id` or `metrics_sessions` id the registry reports alive — **and** no manager record under either the `goal--…cadence` or the pre-split `…cadence` name. A task carrying neither `goals:` nor `topics:` is listed as a `NO-SUBJECT` row: `docs/subject-resolution.md` forbids deriving a subject from `themes:`, so it is reported rather than dropped.
+
+⚠️ **The conjunction is the whole point, in both directions.** A goal with no live session is never reported — 318 goals in the primary vault, a handful with live sessions — and a goal that *has* a record is never reported, even a lapsed or stood-down one. Those are `manager-liveness.py`'s `STALE` / `STOPPED` classes and belong to `docs/sweep-output.md`; folding them into "never armed" is the defect this reading ends.
+
+⚠️ **`unknown` is a third answer, not `0`.** An unreadable session registry prints `unarmed goals: unknown` and exits non-zero. Print it as it comes back; never round it down to a number.
+
+⚠️ **The line reports; it never arms.** Arming a manager is the operator's answer to a `start manager` card (`commands/steps/propose-manager.md`), never this reading's act — `docs/fleet-surface.md` bars a manager from starting one on its own initiative.

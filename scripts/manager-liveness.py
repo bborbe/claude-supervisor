@@ -50,6 +50,19 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     Exits 0 whatever the state: the state IS the answer,
                                     and a non-zero exit would make a stood-down manager
                                     read as a failure to every `if` that wraps it.
+                                    ⚠️ `UNARMED` means NO record exists under either the
+                                    prefixed or the pre-split name -- a subject nothing has
+                                    ever armed, which is a fact about the fleet. `INVALID`
+                                    means a record EXISTS and cannot be read -- a probe
+                                    failure. Collapsing the two is how a never-armed goal
+                                    reads as a measurement error (measured 2026-10-20: all
+                                    of them did).
+                                    ⚠️ A pre-split record is resolved rather than
+                                    ignored: `migrate_legacy` deletes one once its prefixed
+                                    twin is written, but a subject that never re-armed
+                                    keeps it, and reading only the prefixed path reported
+                                    such a subject INVALID -- including one that had armed
+                                    the same day, and one that was deliberately stood down.
 
 `--check` reads files only: no model, no network. A host loop (launchd) runs it and
 turns exit 10 into a push.
@@ -97,6 +110,35 @@ def path(name: str, ext: str) -> str:
     return os.path.join(STATE_DIR, f"{name}.{ext}")
 
 
+def legacy_base(s: str):
+    """The unprefixed base of a branch-prefixed slug, or None when it has no prefix.
+
+    Records written before the goal/topic split live under the bare base name.
+    `migrate_legacy` deletes one once its prefixed twin is written, but a subject
+    that never re-armed keeps it — and a reader that looks only at the prefixed
+    path reports that subject INVALID, i.e. as a probe failure rather than as the
+    lapse (or deliberate stand-down) the record actually describes.
+    """
+    return s.split("--", 1)[1] if "--" in s else None
+
+
+def resolve(s: str, ext: str):
+    """(path, is_legacy) — the prefixed record, else its pre-split twin.
+
+    Falls back to the prefixed path when neither exists, so the caller's open()
+    raises FileNotFoundError and can tell "no record at all" from "unreadable".
+    """
+    prefixed = path(s, ext)
+    if os.path.exists(prefixed):
+        return prefixed, False
+    base = legacy_base(s)
+    if base:
+        legacy = path(base, ext)
+        if os.path.exists(legacy):
+            return legacy, True
+    return prefixed, False
+
+
 def write_atomic(p: str, text: str) -> None:
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = p + ".tmp"
@@ -106,8 +148,9 @@ def write_atomic(p: str, text: str) -> None:
 
 
 def read_arms(s: str) -> list:
+    p, _ = resolve(s, "arms")
     try:
-        with open(path(s, "arms"), encoding="utf-8") as fh:
+        with open(p, encoding="utf-8") as fh:
             return [float(x) for x in fh.read().split()]
     except (OSError, ValueError):
         return []
@@ -271,8 +314,9 @@ def write_notified(notified: dict) -> None:
 
 def last_arm(s: str) -> float:
     """When the subject last armed, from its cadence file's mtime; 0 when unreadable."""
+    p, _ = resolve(s, "cadence")
     try:
-        return os.path.getmtime(path(s, "cadence"))
+        return os.path.getmtime(p)
     except OSError:
         return 0.0
 
@@ -305,14 +349,28 @@ def stop(subject: str, branch: str) -> int:
 
 
 def classify(s: str, now: float) -> tuple:
-    """(state, detail) for one topic: OK, STALE, STOPPED or INVALID."""
-    if os.path.exists(path(s, "stopped")):
-        return "STOPPED", "marker present"
-    p = path(s, "cadence")
+    """(state, detail) for one subject: OK, STALE, STOPPED, UNARMED or INVALID.
+
+    ⚠️ `UNARMED` and `INVALID` are different answers and must never be collapsed.
+    `INVALID` means a record EXISTS and cannot be read — a probe failure, the
+    manager's state is unknown. `UNARMED` means there is no record under either
+    the prefixed or the pre-split name — no manager has ever armed this subject,
+    which is a fact about the fleet, not a failure to measure it. Measured
+    2026-10-20: every never-armed goal read `INVALID`, so a reader could not tell
+    "needs a manager started" from "cannot tell".
+    """
+    stopped_path, stopped_legacy = resolve(s, "stopped")
+    if os.path.exists(stopped_path):
+        return "STOPPED", (
+            "marker present (legacy record)" if stopped_legacy else "marker present"
+        )
+    p, legacy = resolve(s, "cadence")
     try:
         with open(p, encoding="utf-8") as fh:
             interval = int(fh.read().strip())
         age = int(now - os.path.getmtime(p))
+    except FileNotFoundError:
+        return "UNARMED", "no cadence file under either name"
     except (OSError, ValueError) as exc:
         return "INVALID", f"unreadable cadence file ({exc})"
     # Measure against the manager's OBSERVED period, never the delay it reports. A
@@ -330,6 +388,10 @@ def classify(s: str, now: float) -> tuple:
         limit, basis = period + SLACK, f"period={int(period)}s(observed)"
     else:
         limit, basis = interval + SLACK, f"period={interval}s(reported)"
+    if legacy:
+        # Say so: a pre-split record is a manager that has not re-armed since the
+        # split, and the age is measured against a file nothing will refresh.
+        basis += " legacy-record"
     detail = f"age={age}s limit={int(limit)}s {basis}"
     return ("STALE" if age > limit else "OK"), detail
 
@@ -386,7 +448,7 @@ def main() -> int:
     mode.add_argument(
         "--state",
         action="store_true",
-        help="print ONE subject's state: OK / STALE / STOPPED / INVALID",
+        help="print ONE subject's state: OK / STALE / STOPPED / UNARMED / INVALID",
     )
     ap.add_argument("--subject", help="the goal or topic name")
     ap.add_argument(
