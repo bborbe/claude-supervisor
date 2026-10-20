@@ -191,6 +191,7 @@ class DeclareTokensTest(unittest.TestCase):
         "lO4j5q": "placeholder-a2a-k8s-7b3e08",
         "zL8akq": "placeholder-a2a-nukeprod-5e7c13",
         "pLv8Mw": "placeholder-a2a-docker-4d1a92",
+        "WOQQXO": "placeholder-a2a-sun-8c2f57",
     }
 
     def _lookup(self, failing=(), seen=None):
@@ -205,7 +206,7 @@ class DeclareTokensTest(unittest.TestCase):
         env, seen = {}, []
         with contextlib.redirect_stderr(io.StringIO()):
             declared = ms.declare_tokens(env, lookup=self._lookup(seen=seen))
-        self.assertEqual(sorted(seen), ["VO0Gmw", "lO4j5q", "pLv8Mw", "zL8akq"])
+        self.assertEqual(sorted(seen), ["VO0Gmw", "WOQQXO", "lO4j5q", "pLv8Mw", "zL8akq"])
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
         # ⚠️ The A2A token is PER TARGET — the docker controller runs on this Mac and each k8s
         # cluster has its own, so one shared secret would force every deployment to carry the
@@ -218,11 +219,13 @@ class DeclareTokensTest(unittest.TestCase):
         self.assertEqual(env["SUPERVISOR_A2A_TOKEN_NUKEDEV"], self.VALUES["lO4j5q"])
         self.assertEqual(env["SUPERVISOR_A2A_TOKEN_NUKEPROD"], self.VALUES["zL8akq"])
         self.assertEqual(env["SUPERVISOR_A2A_TOKEN_DOCKER"], self.VALUES["pLv8Mw"])
+        self.assertEqual(env["SUPERVISOR_A2A_TOKEN_SUN"], self.VALUES["WOQQXO"])
         # Distinctness: one key resolved into several variables is the failure this guards, and
         # it is invisible unless the values are compared.
         self.assertNotEqual(env["INTERACTIVE_AUTH_TOKEN"], env["SUPERVISOR_A2A_TOKEN_NUKEDEV"])
         self.assertNotEqual(env["SUPERVISOR_A2A_TOKEN_NUKEDEV"], env["SUPERVISOR_A2A_TOKEN_NUKEPROD"])
         self.assertNotEqual(env["SUPERVISOR_A2A_TOKEN_NUKEDEV"], env["SUPERVISOR_A2A_TOKEN_DOCKER"])
+        self.assertNotEqual(env["SUPERVISOR_A2A_TOKEN_NUKEDEV"], env["SUPERVISOR_A2A_TOKEN_SUN"])
         self.assertEqual(
             sorted(declared),
             [
@@ -230,6 +233,7 @@ class DeclareTokensTest(unittest.TestCase):
                 "SUPERVISOR_A2A_TOKEN_DOCKER",
                 "SUPERVISOR_A2A_TOKEN_NUKEDEV",
                 "SUPERVISOR_A2A_TOKEN_NUKEPROD",
+                "SUPERVISOR_A2A_TOKEN_SUN",
             ],
         )
 
@@ -240,7 +244,7 @@ class DeclareTokensTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             ms.declare_tokens(env, lookup=self._lookup(seen=seen))
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], "override-9a1c")
-        self.assertEqual(seen, ["lO4j5q", "zL8akq", "pLv8Mw"])
+        self.assertEqual(seen, ["lO4j5q", "zL8akq", "pLv8Mw", "WOQQXO"])
 
     def test_an_unresolved_token_degrades_rather_than_raising(self):
         env, stderr = {}, io.StringIO()
@@ -250,7 +254,12 @@ class DeclareTokensTest(unittest.TestCase):
         # the degradation the module docstring promises, not a whole-launcher failure.
         self.assertEqual(
             declared,
-            ["INTERACTIVE_AUTH_TOKEN", "SUPERVISOR_A2A_TOKEN_NUKEPROD", "SUPERVISOR_A2A_TOKEN_DOCKER"],
+            [
+                "INTERACTIVE_AUTH_TOKEN",
+                "SUPERVISOR_A2A_TOKEN_NUKEPROD",
+                "SUPERVISOR_A2A_TOKEN_DOCKER",
+                "SUPERVISOR_A2A_TOKEN_SUN",
+            ],
         )
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
         self.assertNotIn("SUPERVISOR_A2A_TOKEN_NUKEDEV", env)
@@ -267,7 +276,7 @@ class DeclareTokensTest(unittest.TestCase):
         env = {}
         with contextlib.redirect_stderr(io.StringIO()):
             declared = ms.declare_tokens(
-                env, lookup=self._lookup(failing=["VO0Gmw", "lO4j5q", "zL8akq", "pLv8Mw"])
+                env, lookup=self._lookup(failing=["VO0Gmw", "lO4j5q", "zL8akq", "pLv8Mw", "WOQQXO"])
             )
         self.assertEqual(declared, [])
         self.assertEqual(env, {})

@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `mcp-start.py` resolves `SUPERVISOR_A2A_TOKEN_SUN` from TeamVault, so `k8s:sun` (sun-k3s) authenticates against its own controller bearer
+
 ## v0.191.5
 
 - fix: **`spawn_agent`'s `task` description names the retired `cluster` target where the requirement actually bites on the A2A targets.** The clause read `REQUIRED with \`target: "cluster"\``, but `cluster` was retired on 2026-10-15 and the requirement now lives in `a2aSpawnArgumentRefusal` (`server/a2a-spawn.mjs`), which refuses every A2A target — `docker`, `k8s`, `k8s:<cluster>` — without a `task`; a caller reading the schema passed `target: "k8s:<cluster>"` and lost the call to `target "k8s:octopus-dev" requires \`task\``. The clause now names those targets and keeps the retired one, matching both enforcement sites (`server/a2a-spawn.mjs`; `server/supervisor.mjs` § `spawnClusterWorker`). Change set: `server/supervisor.mjs`, `CHANGELOG.md`.
