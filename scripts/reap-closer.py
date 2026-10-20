@@ -11,13 +11,22 @@ still held `pick — 1. /vault-cli:session-close`, so its notice was correct.
 This script reads the session's last closer: the last `👤 You:` line in its latest assistant
 message carrying one, found in the transcript by session id.
 
-  <session-id>   CLOSED (exit 0) / OPEN (exit 1) / UNREADABLE (exit 2)
+  <session-id>   CLOSED (exit 0) / OPEN (exit 1) / UNREADABLE (exit 2) / PARKED (exit 3)
 
 Prints one line: `closer: <VERDICT> <timestamp> <line>`, or `closer: UNREADABLE (<why>)`.
 
-⚠️ **Only CLOSED may withhold a reap.** OPEN and UNREADABLE both mean "reap as before". A read
-that fails must never suppress a notice, which is why UNREADABLE is its own exit code rather than
-a flavour of CLOSED.
+⚠️ **Only CLOSED and PARKED may withhold a reap.** OPEN and UNREADABLE both mean "reap as before".
+A read that fails must never suppress a notice, which is why UNREADABLE is its own exit code rather
+than a flavour of CLOSED.
+
+⚠️ **PARKED is a standing `approve:`/`pick` gate — a session parked on the operator's own
+decision.** Operator ruling **2026-10-20** (attention card `92f0e524bdd5c9c0b09c063b06363575`,
+`ANSWERED: option: stop reaping`): the gate's own attention card already reaches the operator, so
+a reap notice is redundant, the session can only refuse it, and the refusal trains sessions to
+discount the reap channel. ⚠️ **PARKED is not CLOSED** — one is "the close has run", the other is
+"the operator has not answered yet" — so the caller must render them differently even though both
+withhold the reap. ⚠️ **It is not a repeat-count either:** the suppression keys on the closer's
+*kind*, first time and every time.
 
 ⚠️ **Assistant messages only.** User turns carry injected command bodies (`/vault-cli:session-close`
 prints its own closer templates), and a naive grep matches those.
@@ -36,10 +45,13 @@ import os
 import re
 import sys
 
-CLOSED, OPEN, UNREADABLE = 0, 1, 2
+CLOSED, OPEN, UNREADABLE, PARKED = 0, 1, 2, 3
 WINDOW = 262144  # bytes per backward chunk, not the whole read — see `last_closer`
 MAX_SCAN = 4194304  # hard bound on the backward scan, so a hook never reads a whole transcript
 CLOSED_RE = re.compile(r"👤 You:\s*`?nothing — session closed")
+# A standing operator gate: the closer's own line carries `pick` or `approve`. Matched
+# after CLOSED, so a `nothing — session closed` line can never reach here.
+PARKED_RE = re.compile(r"👤 You:\s*`?(pick|approve)\b")
 
 
 def find_transcript(session_id, projects_dir):
@@ -127,6 +139,8 @@ def classify(session_id, projects_dir):
     ts, line = last
     if CLOSED_RE.search(line):
         return CLOSED, f"closer: CLOSED {ts} {line}"
+    if PARKED_RE.search(line):
+        return PARKED, f"closer: PARKED {ts} {line}"
     return OPEN, f"closer: OPEN {ts} {line}"
 
 

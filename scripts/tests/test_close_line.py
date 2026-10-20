@@ -13,6 +13,10 @@ emission and the session was gone ~10 minutes later):
     the 2026-10-09 measurement, where the line was void at BIRTH rather than
     decaying: the session had closed clean four minutes BEFORE the line was
     emitted, so a live verdict alone is not a sufficient condition;
+  * a `parked` newest closer (a standing `approve:`/`pick` gate) also suppresses the
+    runnable line, and renders its OWN reason — operator ruling 2026-10-20: the
+    decision is already in the operator's queue, so offering the close would pre-empt
+    it. It must not be folded into `closed`: the session is live and has not closed;
   * the stamp is the emission moment, not a constant — two emissions differ, and
     `--now` pins it for a fixture.
 
@@ -103,6 +107,23 @@ class CloseLineTest(unittest.TestCase):
         self.assertNotIn(M.CANDIDATE_SUFFIX, out)
         self.assertIn(M.CLOSED_SUFFIX, out)
 
+    def test_a_parked_closer_suppresses_the_runnable_line(self):
+        # Operator ruling 2026-10-20: a session parked on a standing `approve:`/`pick`
+        # gate is not reaped, and the close is not offered — the decision is already
+        # in the operator's queue, so a close instruction here would pre-empt it.
+        out = self.line(M.LIVENESS_LIVE, closer=M.CLOSER_PARKED)
+        self.assertIn("🔧 CLOSE-ME CANDIDATE:", out)
+        self.assertNotIn("✅ DONE — CLOSE:", out)
+        self.assertNotIn(M.CLOSE_ACTION, out)
+
+    def test_the_parked_candidate_is_not_the_closed_candidate(self):
+        # The three candidate reasons must not collapse: the session is live and has
+        # NOT closed, so claiming "closed clean" (or "UNVERIFIED") would be false.
+        out = self.line(M.LIVENESS_LIVE, closer=M.CLOSER_PARKED)
+        self.assertIn(M.PARKED_SUFFIX, out)
+        self.assertNotIn(M.CLOSED_SUFFIX, out)
+        self.assertNotIn(M.CANDIDATE_SUFFIX, out)
+
     def test_an_open_closer_leaves_the_liveness_verdict_deciding(self):
         # A real gate: the row still owes its close, so the line stays runnable.
         self.assertIn("✅ DONE — CLOSE:",
@@ -163,6 +184,11 @@ class CloseLineTest(unittest.TestCase):
         self.assertEqual(
             M.main(["--task", TASK, "--session", SID, "--liveness", "live",
                     "--closer", "closed"]),
+            1,
+        )
+        self.assertEqual(
+            M.main(["--task", TASK, "--session", SID, "--liveness", "live",
+                    "--closer", "parked"]),
             1,
         )
         self.assertEqual(
