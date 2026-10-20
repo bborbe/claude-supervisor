@@ -44,6 +44,30 @@ Rationale: `docs/subject-resolution.md` and `commands/topic-loop.md` § Resoluti
    Then read it back and say which happened: `✅ Registered: <subject>` or
    `⚠️ Not registered — the recording step did not run`, then run it.
 
+4b. **⚠️ Record the manager's session on the TOPIC page — the durable half, and a
+   step to run.** Write this session's id onto the topic page:
+   `vault-cli topic set "<subject>" manager_session_id "$CLAUDE_CODE_SESSION_ID" --vault "<vault>"`,
+   then read the page back and say what it now holds.
+
+   ⚠️ **Without this write the topic tier has no durable record of its own
+   manager at all.** `commands/steps/goal-resolve.md` names "the `topic` verb for
+   a topic page" but nothing in the topic branch called it, so the fleet
+   manager's keep-alive of a topic manager read a stale or absent id and could
+   not tell a stopped manager from a running one.
+
+   ⚠️ **The writer carve-out is the same one § Reconcile the subject's status
+   carries** — `topic-loop` and `topic-drive` write it; `topic-status` is
+   read-only by its own contract and `topic-verify` holds no `Bash(vault-cli:*)`,
+   so neither writes. Both still resolve and still report the id they find.
+
+   ⚠️ **`--vault` is not optional:** without it the write targets the default
+   vault, so a subject in any other vault lands on the wrong page or nowhere.
+
+   ⚠️ **This field is a lead, never a verdict.** Every reader runs
+   `session-liveness.py --check` on it first and takes the action that exit code
+   maps to in `docs/fleet-surface.md` § *Which manager owns a subject* — the id
+   is evidence of *who*, never of *alive*.
+
 5. **⚠️ Reconcile the subject's status — a step to run, not a reference to follow.** Having resolved a subject, run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *Reconcile the subject's status* **now** — once the page and the branch are known, and before the sweep. ⚠️ **That precondition is this command's own page test, wherever the file puts it** — not this line: where the two sit in different sections, run the step at the page test. Read the subject page's frontmatter `status` and, when it reads `todo`/`next` **or is absent**, set it to `in_progress`; then read the page back and say what it now reads — or say plainly that the write failed, never proceeding as though it landed. ⚠️ **Once at resolution, never again mid-run**, and it writes `in_progress` over `todo`/`next`/absent **only** — an already-`in_progress` subject, and one at `hold`/`backlog`/terminal, is left alone. ⚠️ **The rule, its rationale, the exact commands and the write-scope table live in the doc — read them there; they are not restated here.**
 
    ⚠️ **This is a resolution-time write, never closure.** The topic's `# Success Criteria` still close mechanically through the vault's own completion path.
