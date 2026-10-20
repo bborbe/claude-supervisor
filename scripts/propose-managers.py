@@ -751,7 +751,7 @@ def main(argv):
         return 3
 
     for candidate in cards:
-        print(f"  card: {dedup_key(candidate['goal'])} — {candidate['goal']} "
+        print(f"  card: {card_key(candidate)} — {candidate['goal']} "
               f"({candidate['vault']}, {candidate['approved']} approved)")
 
     if not args.post:
