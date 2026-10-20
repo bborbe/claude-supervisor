@@ -14,11 +14,15 @@ Both runs read the pane back with `get-text`, so the verdict is the pane's own s
 rather than the send's exit code — the exact confusion this defect is made of.
 
 Usage:
-    send-delivery-drill.py --pane-id 940
-    send-delivery-drill.py --pane-id 940 --busy-wait 2.0
+    send-delivery-drill.py --pane-id 940 --i-spawned-this-pane
+    send-delivery-drill.py --pane-id 940 --i-spawned-this-pane --busy-wait 2.0
 
-⚠️ It drives a pane the caller already owns. It never spawns one: opening a session is
-a fleet-level act, so the pane must exist before this runs.
+⚠️ IT TYPES INTO THE PANE, so the pane must be one YOU spawned for this drill and will
+close afterwards. `--i-spawned-this-pane` is required precisely because that is not
+something this script can check: it cannot tell a throwaway fixture from the operator's
+own working session, and the first version of this file said "a pane the caller already
+owns" — which is how a drill once typed nine messages into a live operator session.
+Never point it at a pane you did not create.
 """
 import argparse, json, subprocess, sys, time
 
@@ -105,12 +109,19 @@ def run(pane_id, label, settle, prime=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pane-id", required=True)
+    ap.add_argument("--i-spawned-this-pane", action="store_true",
+                    help="required: affirm the pane was spawned for this drill, not a live session")
     ap.add_argument("--busy-wait", type=float, default=1.5,
                     help="seconds to wait after priming, so the turn is still in flight")
     ap.add_argument("--prime", default="Count slowly from 1 to 40, one number per line.",
                     help="prompt used to put the pane mid-turn for the busy run")
     ap.add_argument("--out", default=None, help="write both transcripts here as JSON")
     args = ap.parse_args()
+
+    if not args.i_spawned_this_pane:
+        print("REFUSED: pass --i-spawned-this-pane to affirm you spawned this pane for the "
+              "drill. It types into the pane, so it must never target a live working session.")
+        return 2
 
     if not pane_exists(args.pane_id):
         print(f"FAIL: pane {args.pane_id} does not exist — an unreadable pane is not a clean one")
