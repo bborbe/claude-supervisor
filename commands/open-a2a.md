@@ -23,7 +23,7 @@ Manager-tier, like `/supervisor:open` (`docs/session-tiers.md` § Command → ti
   ├─ resolve + gate → /supervisor:open § Step 0 · § Step 0.5 / 0.6 · § Step 1 · § Step 1.5, run by reference
   └─ dispatch (this file's own), by the row's `target:` frontmatter:
        absent         → the controller's `local` backend, `a2a-local-control.py create`
-       docker | k8s   → `spawn_agent`, the value passed verbatim
+       docker | k8s | k8s:<cluster> → `spawn_agent`, the value passed verbatim
        anything else  → `spawn_agent`, verbatim, so the server refuses it there
 ```
 
@@ -82,7 +82,7 @@ It prints `worker_id: <id>`, then the reply, redacted. The backend is served at 
 
 ⚠️ **Never read a token out of a reply.** The create reply carries the worker's own token beside its record; the script redacts any token-shaped key rather than trusting a later filter, and so must anything you print.
 
-### 2.3 `docker` / `k8s` → `spawn_agent`, the value verbatim
+### 2.3 `docker` / `k8s` / `k8s:<cluster>` → `spawn_agent`, the value verbatim
 
 ```
 mcp__supervisor__spawn_agent(prompt='/vault-cli:work-on-task "<task>"', task="<task>", vault="<vault>", label="<task>", target="<value>")
@@ -98,7 +98,7 @@ Pass the frontmatter value **verbatim** — never lower-cased, never mapped, nev
 
 ### 2.4 An unknown `target:` → pass it verbatim, and relay the refusal
 
-A value that is neither absent nor `docker` / `k8s` is not this command's to interpret. Make the same call as § 2.3, with the value **verbatim**, so the server refuses it there — then **relay the server's refusal text verbatim** and stop.
+A value that is neither absent nor `docker` / `k8s` / `k8s:<cluster>` is not this command's to interpret. Make the same call as § 2.3, with the value **verbatim**, so the server refuses it there — then **relay the server's refusal text verbatim** and stop.
 
 ⚠️ **Never default it, never substitute `local`, never lower-case it.** A worker created on this Mac under a call that asked for somewhere else looks exactly like a working call, which is why the refusal is the safe direction and the design.
 

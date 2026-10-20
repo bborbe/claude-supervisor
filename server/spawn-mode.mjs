@@ -183,6 +183,22 @@ export function resolveSpawnMode({ interactive, env, file, path = 'the superviso
 // workers spawned BEFORE this retirement. Retiring the TARGET does not retire the BACKEND.
 export const SPAWN_TARGETS = ['local', 'docker', 'k8s']
 
+// A cluster-named k8s target — `k8s:nukedev`, `k8s:octopus-dev`.
+//
+// ⚠️ NOT AN ENTRY IN `SPAWN_TARGETS`, and it must not become one: the list is a closed set a
+// caller can read, and the cluster names are the operator's configuration, not code. So the
+// grammar is a second accepted shape rather than a growing enum, and it is validated here — the
+// server refuses a malformed name with the same "refuse, never default" rule as an unknown value.
+// The name itself is checked again in `parseA2ATarget`, which owns the cluster-level refusal; this
+// regex only decides whether the CALL is well-formed.
+const NAMED_K8S_TARGET = /^k8s:[a-z0-9][a-z0-9-]*$/
+
+// The KIND a target names — `local`, `docker`, or `k8s` for both `k8s` and `k8s:<cluster>`.
+// Used by the implementation check below, which asks "does anything carry this out", a question
+// about the backend rather than about which cluster.
+export const spawnTargetKind = (target) =>
+  typeof target === 'string' && target.startsWith('k8s:') ? 'k8s' : target
+
 // The target this spawn runs under, plus the source that decided it — or `{error}` for a
 // value that is not a known target.
 //
@@ -193,12 +209,13 @@ export function resolveSpawnTarget({ target } = {}) {
   if (target === undefined || target === null || target === '') {
     return { target: 'local', source: 'default' }
   }
-  if (typeof target !== 'string' || !SPAWN_TARGETS.includes(target)) {
+  if (typeof target !== 'string' || !(SPAWN_TARGETS.includes(target) || NAMED_K8S_TARGET.test(target))) {
     return {
       error:
         `"target" is ${JSON.stringify(target)}, which is not a spawn target — refusing to spawn rather than ` +
         `guessing, since a worker created somewhere the caller did not ask for is discovered only by noticing it. ` +
-        `Valid values: ${SPAWN_TARGETS.join(', ')} (omit the argument for the local default).`,
+        `Valid values: ${SPAWN_TARGETS.join(', ')}, or k8s:<cluster> (e.g. k8s:nukedev) to name a cluster ` +
+        '(omit the argument for the local default).',
     }
   }
   return { target, source: 'argument' }
@@ -236,7 +253,7 @@ export const IMPLEMENTED_SPAWN_TARGETS = ['local', 'docker', 'k8s']
 // `resolveSpawnTarget` has already refused anything that is not a target at all. This answers
 // the second question only and never repeats the first.
 export function spawnTargetImplementationRefusal({ target } = {}) {
-  if (IMPLEMENTED_SPAWN_TARGETS.includes(target)) return null
+  if (IMPLEMENTED_SPAWN_TARGETS.includes(spawnTargetKind(target))) return null
   return (
     `target ${JSON.stringify(target)} is a known spawn target but has no client yet — the A2A ` +
     `worker-controller path is not implemented, so this spawn is REFUSED rather than falling ` +
