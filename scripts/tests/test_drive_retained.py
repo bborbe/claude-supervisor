@@ -169,5 +169,32 @@ class TestDedup(unittest.TestCase):
         self.assertEqual(out["suppression"], "signalled")
 
 
+class TestLivenessMapping(unittest.TestCase):
+    """Only LIVE and ABSENT may become booleans; everything else is unknown."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="drive-retained-live-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def stub(self, code):
+        path = os.path.join(self.tmp, "fake-liveness-%d.py" % code)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("import sys\nsys.exit(%d)\n" % code)
+        return path
+
+    def test_live_maps_to_true(self):
+        self.assertIs(drive_retained.session_alive("aaaa", self.stub(0)), True)
+
+    def test_absent_maps_to_false(self):
+        self.assertIs(drive_retained.session_alive("aaaa", self.stub(1)), False)
+
+    def test_unknown_ambiguous_and_malformed_are_none(self):
+        for code in (2, 3, 4):
+            self.assertIsNone(
+                drive_retained.session_alive("aaaa", self.stub(code)),
+                "exit %d must not read as death" % code,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

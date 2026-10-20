@@ -45,7 +45,7 @@ NEEDS_STEP_4 = "needs-step-4"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LEDGER_SCRIPT = os.path.join(HERE, "drive-ledger.py")
-SESSIONS = os.path.expanduser("~/.claude/sessions")
+LIVENESS_SCRIPT = os.path.join(HERE, "session-liveness.py")
 
 
 def read_ledger(script=None):
@@ -84,27 +84,27 @@ def read_task(path):
     return status, phase, boxes
 
 
-def session_alive(sid, sessions_dir=None):
-    """True / False, or None when the registry itself could not be read.
+def session_alive(sid, script=None):
+    """True / False, or None when liveness could not be established.
 
-    `None` is not `False`: an unreadable registry is unknown liveness, and treating
-    it as death would invent an orphan.
+    Delegates to `scripts/session-liveness.py` -- the plugin's one liveness instrument.
+    It answers from the attention store's heartbeat, accepts the 8-char prefix the
+    ledger carries, and distinguishes ABSENT from UNKNOWN.
+
+    A local scan of `~/.claude/sessions/*.json` was the first draft and it was wrong
+    twice over: a substring match over every session file finds the id inside
+    unrelated content, and it cannot tell "not live" from "could not ask" -- which is
+    exactly the distinction that decides whether a row is an orphan.
+
+    Exit codes map 0 LIVE -> True and 1 ABSENT -> False; 2 UNKNOWN, 3 AMBIGUOUS and
+    4 MALFORMED all map to None, because none of them licenses calling a session dead.
     """
-    root = sessions_dir or SESSIONS
-    try:
-        names = os.listdir(root)
-    except OSError:
-        return None
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(root, name), encoding="utf-8") as handle:
-                if sid in handle.read():
-                    return True
-        except OSError:
-            continue
-    return False
+    out = subprocess.run(
+        [sys.executable, str(script or LIVENESS_SCRIPT), "--check", sid],
+        capture_output=True,
+        text=True,
+    )
+    return {0: True, 1: False}.get(out.returncode)
 
 
 def probe(entry, read_task_fn=read_task, alive_fn=session_alive):
