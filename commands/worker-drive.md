@@ -369,7 +369,7 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 It emits `ANSWERED <item-id>` when the operator answers a card **this session posted** (`producer_id`), so a peer's card never fires it. **On `ANSWERED`, run `attention-ask.py poll <item-id>` and act immediately.** Re-arm on expiry as §0b does.
 
-Do **not** arm it when `👤 You:` reads `nothing` or `later (on …)`: the hook records those as `idle`, so there is no card. A manager's feed watcher is **not a second doorbell** — a raise vs an answer. Reading the answer — `ANSWERED:` releases, `NOT_OPERATOR_ANSWERED:` does not — has one home, `scripts/answered-attribution.py`.
+Do **not** arm it when `👤 You:` reads `nothing` or `later (on …)`: the hook records those as `idle`, so there is no card. A manager's feed watcher is **not a second doorbell** — a raise vs an answer. Reading the answer — `ANSWERED:` releases; `NOT_OPERATOR_ANSWERED:`, `DECLINED:` and `HIDDEN` do not — has one home, `scripts/answered-attribution.py`.
 
 Then write the updated drive state. If a watcher was armed, name it in `⏰ Next:`.
 
