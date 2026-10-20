@@ -574,13 +574,27 @@ class DeclinedAskTest(unittest.TestCase):
         self.assertIn("no readable startability", second[1])
 
     def test_a_row_that_became_unstartable_re_posts(self):
-        """Arm 3 — the operator declined work they could start; parked work is another ask."""
+        """Arm 3 — a TRANSITION. The operator declined work they could start; parked now."""
         first, second = self.two_runs(
             [row("G", title="a"), row("G", title="b"), row("G", title="c")],
             [row("G", title="a"), row("G", title="b"), row("G", title="c", phase="todo")])
         self.assertEqual(len(first[2]), 1)
         self.assertEqual(len(second[2]), 1)
-        self.assertIn("cannot start this tick", second[1])
+        self.assertIn("was startable in the declined snapshot", second[1])
+
+    def test_a_permanently_parked_row_does_not_loop(self):
+        """The loop guard: arm 3 must be a transition, never a state.
+
+        This branch's `row_set` deliberately includes parked rows, so a state test
+        ("unstartable this tick") would re-post every round for any goal holding one —
+        the exact defect the declined-ask state exists to remove.
+        """
+        rows = [row("G", title="a"), row("G", title="b"),
+                row("G", title="c", phase="todo")]
+        first, second = self.two_runs(rows, rows)
+        self.assertEqual(len(first[2]), 1)
+        self.assertEqual(second[2], [])
+        self.assertIn("SUPPRESS:", second[1])
 
     def test_a_row_that_became_startable_re_posts(self):
         """Arm 4 — work that was parked when declined and is actionable now is a change."""

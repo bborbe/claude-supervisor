@@ -145,8 +145,14 @@ hand-rolled set-difference at a call site:
 
   1. a row in this tick's set that is NOT in the snapshot (new approved work);
   2. a row whose startability cannot be read this tick (`unknown`);
-  3. a row that cannot start this tick (`unstartable`);
+  3. a row that was `startable` in the snapshot and cannot start now (`unstartable`);
   4. a row that was `unstartable` in the snapshot and is `startable` now.
+
+⚠️ **Arms 3 and 4 are TRANSITIONS, and arm 3's being a transition rather than a state is
+what keeps this branch out of the very loop it exists to remove.** The sibling can test
+`unstartable this tick` because its candidate set only ever names rows that could start;
+this branch's `row_set` deliberately includes parked rows, so a state test would re-post
+every round for any goal holding one.
 
 Anything else suppresses. A row with no recorded bit fails closed (suppresses): the
 snapshot and the row set are the same set, so a missing bit is a corrupt state, not a
@@ -730,9 +736,19 @@ def verdict(snapshot, rows, startability):
     if unknown:
         reasons.append("%s carries no readable startability this tick"
                        % ", ".join(repr(r) for r in unknown))
-    unstartable = sorted(r for r in rows if startability[r] == UNSTARTABLE)
-    if unstartable:
-        reasons.append("%s cannot start this tick" % ", ".join(repr(r) for r in unstartable))
+    # ⚠️ Arm 3 is a TRANSITION, not a state, and the difference is the whole re-ask loop.
+    # The sibling can test `unstartable this tick` because its candidate set only ever
+    # names rows that could start; this branch's `row_set` deliberately includes parked
+    # rows, so a state test would re-post every round for any goal holding one — the very
+    # defect this state exists to remove. A row that was startable when the operator
+    # declined and is parked now is a genuine change; a row that was already parked then
+    # is not.
+    became_unstartable = sorted(r for r in rows
+                                if startability[r] == UNSTARTABLE
+                                and was.get(r) == STARTABLE)
+    if became_unstartable:
+        reasons.append("%s was startable in the declined snapshot and cannot start now"
+                       % ", ".join(repr(r) for r in became_unstartable))
     became = sorted(r for r in rows
                     if startability[r] == STARTABLE and was.get(r) == UNSTARTABLE)
     if became:
