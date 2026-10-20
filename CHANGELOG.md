@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.185.2
 
 - fix: **`/supervisor:close`'s `headless-target` guard now fires, instead of being unreachable.** The guard keyed on the registry's `kind` field, which every entry writes as `interactive` — a tab session and an SDK worker spawned with `interactive: false` alike — so the branch could never be taken and a headless target fell through to the task gate. It now keys on `entrypoint`, which does separate them (`cli` for a tab, `sdk-cli` for an SDK worker; measured across the live fleet on 2026-10-20: 24 × `cli`, 1 × `sdk-cli`). An absent `entrypoint` is deliberately NOT read as headless: those are entries written before the field existed, and refusing them would break closes for legitimate tab sessions — absence falls through to the pane join, which is fail-safe (an operational `❌ error:`, never a close). The unit test that made this look covered used `kind="headless"`, a value nothing in the fleet produces, so it read green against a branch no real session could reach; it now uses `sdk-cli`, and a second test pins that `kind` is not the signal. Change set: `scripts/close-worker.py`, `scripts/tests/test_close_worker.py`, `CHANGELOG.md`.
 
