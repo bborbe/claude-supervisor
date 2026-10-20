@@ -28,6 +28,7 @@ ledger through the fixture instead — and the two directory-shaped cases became
 ones rather than being deleted, because "unreadable" and "nobody recorded" are the two answers
 this counter must never collapse and both still have to be reachable.
 """
+import json
 import os
 import pathlib
 import shutil
@@ -35,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
 import endpoint_fixture  # noqa: E402
 from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row, row  # noqa: E402
@@ -61,6 +63,10 @@ class WorkerSessionsTest(unittest.TestCase):
         shutil.copy(SCRIPT, self.bin)
         shutil.copy(SCRIPTS / "session-liveness.py", self.bin)
         shutil.copy(SCRIPTS / "spawn-ledger.py", self.bin)
+        # ⚠️ The count cache is a real file under `$XDG_STATE_HOME/claude-supervisor`. A suite that
+        # used the machine's state dir would read whatever the last real count left there and
+        # write into it — so every case gets its own.
+        self.state = os.path.join(self.dir, "state")
 
     def ledger_entry(self, session_id, label, **extra):
         """One spawn-ledger row in the store's wire shape — a ROW now, not a file.
@@ -77,7 +83,17 @@ class WorkerSessionsTest(unittest.TestCase):
             [sys.executable, os.path.join(self.bin, "worker-sessions.py"),
              "--endpoint", endpoint or self.endpoint, *args],
             capture_output=True, text=True,
+            env={**os.environ, "XDG_STATE_HOME": self.state},
         )
+
+    def cache_path(self):
+        return os.path.join(self.state, "claude-supervisor", "last-worker-count.json")
+
+    def seed_cache(self, count, age_seconds):
+        os.makedirs(os.path.dirname(self.cache_path()), exist_ok=True)
+        at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        with open(self.cache_path(), "w", encoding="utf-8") as fh:
+            json.dump({"count": count, "at": at.isoformat().replace("+00:00", "Z")}, fh)
 
     def test_count_is_zero_when_nothing_is_registered(self):
         with FixtureEndpoint() as ep:
@@ -237,6 +253,40 @@ class WorkerSessionsTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("UNKNOWN", result.stderr)
         self.assertRegex(result.stderr, r"HTTP 500")
+
+    def test_a_successful_count_is_written_to_the_cache(self):
+        sid = "ffffffff-0000-0000-0000-00000000000b"
+        ledger = [self.ledger_entry(sid, "worker")]
+        with FixtureEndpoint(rows=[row(sid)], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(self.cache_path(), encoding="utf-8") as fh:
+            cached = json.load(fh)
+        self.assertEqual(cached["count"], 1)
+
+    def test_a_failed_read_uses_a_fresh_cached_count(self):
+        """The stale path: the integer still goes to stdout so `$(… --count)` keeps its
+        contract, and the label goes to stderr so a reader can tell it from a live count."""
+        self.seed_cache(7, age_seconds=5)
+        result = self.run_script("--count", endpoint=dead_url())
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "7")
+        self.assertIn("STALE", result.stderr)
+        self.assertIn("last successful count", result.stderr)
+
+    def test_an_expired_cache_is_not_used(self):
+        self.seed_cache(7, age_seconds=120)
+        result = self.run_script("--count", endpoint=dead_url())
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("UNKNOWN", result.stderr)
+
+    def test_no_cache_is_not_used(self):
+        result = self.run_script("--count", endpoint=dead_url())
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("UNKNOWN", result.stderr)
 
     def test_the_ignored_flags_warn_instead_of_being_obeyed(self):
         """`--ledger-dir`, `--dir` and `--heartbeat-dir` are kept so existing callers do not

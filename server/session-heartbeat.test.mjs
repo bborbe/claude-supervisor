@@ -12,7 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { HEARTBEAT_PATH, liveFromHeartbeat, readHeartbeat } from './session-heartbeat.mjs'
+import { HEARTBEAT_PATH, HEARTBEAT_TIMEOUT_MS, liveFromHeartbeat, readHeartbeat } from './session-heartbeat.mjs'
 
 const FIXTURE = 'http://fixture.invalid'
 
@@ -131,6 +131,50 @@ test('an unparseable body is named as unparseable, not as a transport failure', 
   })
   await readHeartbeat({ endpoint: FIXTURE, fetchImpl, onFailure: (m) => messages.push(m) })
   assert.match(messages[0], /unparseable body/)
+})
+
+test('a read that fails once succeeds on the retry, and both attempts are logged', async () => {
+  // ⚠️ The failure this covers is intermittent: the store is serialised and slow under load, so a
+  // read that loses a race fails once and succeeds a moment later. The recovered read must return
+  // rows (not `null`), and the first attempt must leave a "retrying" line so a reader can tell a
+  // recovery from a read that never failed.
+  const lines = []
+  const original = process.stderr.write
+  process.stderr.write = (chunk) => {
+    lines.push(String(chunk))
+    return true
+  }
+  let calls = 0
+  const fetchImpl = async () => {
+    calls += 1
+    if (calls === 1) throw Object.assign(new Error('connect refused'), { code: 'ECONNREFUSED' })
+    return { status: 200, json: async () => [{ session_id: 'a', live: true }] }
+  }
+  let rows
+  try {
+    rows = await readHeartbeat({ endpoint: FIXTURE, fetchImpl })
+  } finally {
+    process.stderr.write = original
+  }
+  assert.equal(calls, 2)
+  assert.deepEqual(rows, [{ session_id: 'a', live: true }])
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /ECONNREFUSED .*\(attempt 1 of 2, retrying\)/)
+})
+
+test('two failed attempts still answer null', async () => {
+  const fetchImpl = async () => {
+    throw Object.assign(new Error('connect refused'), { code: 'ECONNREFUSED' })
+  }
+  assert.equal(await readHeartbeat({ endpoint: FIXTURE, fetchImpl }), null)
+})
+
+test('the timeout is 15 s, and that is the value the ledger reader carries too', async () => {
+  // The two halves of one count must give up at the same point; a mismatch makes the refusal name
+  // a channel for a reason that is only about timing.
+  const ledger = await import('./session-ledger.mjs')
+  assert.equal(HEARTBEAT_TIMEOUT_MS, 15000)
+  assert.equal(ledger.SESSION_LEDGER_TIMEOUT_MS, HEARTBEAT_TIMEOUT_MS)
 })
 
 test('an explicitly-off endpoint is null and dials nothing', async () => {

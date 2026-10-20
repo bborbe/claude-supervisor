@@ -107,10 +107,22 @@ _ID_MAX = 36
 ENDPOINT_DEFAULT = "http://localhost:18080"
 HEARTBEAT_PATH = "/api/1.0/session-heartbeat"
 
-# Seconds any one HTTP read may take. The store is local and answers in milliseconds; this is
-# a backstop against a wedged server, never a routine path. A slow store is a store this file
-# should report as UNKNOWN, not one it should hang on.
-_HTTP_TIMEOUT = 5
+# Seconds any one HTTP read may take. The store is local, but it is not fast under load: it
+# rebuilds and serialises a 318 KB list per request, measured 2026-10-19 at ~0.95 s per concurrent
+# read. 5 s sat inside the observed tail and refused healthy spawns fleet-wide, so it is 15 s.
+#
+# ⚠️ **Kept EQUAL to `server/session-heartbeat.mjs`'s `HEARTBEAT_TIMEOUT_MS`,
+# `server/session-ledger.mjs`'s `SESSION_LEDGER_TIMEOUT_MS` and `spawn-ledger.py`'s copy.** The two
+# halves of one count giving up at different points makes the failure depend on which store was
+# slower, and the refusal then names a channel for a reason that is only about timing.
+_HTTP_TIMEOUT = 15
+
+# One retry, ~250 ms apart, before a read declares failure. The failure this covers is
+# INTERMITTENT, not a dead store — measured 2026-10-19: the same `--count` returned UNKNOWN at
+# 21:49 and succeeded 20/20 at 22:07. A retry does not weaken the refusal: two failed attempts
+# still answer `None`.
+_READ_ATTEMPTS = 2
+_READ_RETRY_DELAY_S = 0.25
 
 
 def _describe_read_failure(error):
@@ -310,22 +322,50 @@ def read_endpoint(endpoint=None, timeout=_HTTP_TIMEOUT, on_failure=None):
     """
     url = endpoint_base(endpoint) + HEARTBEAT_PATH
     started = time.monotonic()
+    cause = "the read was never attempted"
+    for attempt in range(1, _READ_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(_READ_RETRY_DELAY_S)
+        payload, cause = _read_once(url, timeout)
+        if payload is not None:
+            return payload
+        if attempt < _READ_ATTEMPTS:
+            _log_read_failure(
+                "session-heartbeat",
+                "%s (attempt %d of %d, retrying)" % (cause, attempt, _READ_ATTEMPTS),
+                started,
+                on_failure,
+            )
+    return _log_read_failure("session-heartbeat", cause, started, on_failure)
+
+
+def _read_once(url, timeout):
+    """`(payload, cause)` — the rows when the read succeeded, the failure cause otherwise."""
     try:
         status, payload = _get_json(url, timeout)
     except (OSError, ValueError) as exc:
-        return _log_read_failure(
-            "session-heartbeat", _describe_read_failure(exc), started, on_failure
-        )
+        return None, _describe_read_failure(exc)
     if status != 200:
-        return _log_read_failure("session-heartbeat", "HTTP %s" % status, started, on_failure)
+        return None, "HTTP %s" % status
     if not isinstance(payload, list):
-        return _log_read_failure(
-            "session-heartbeat",
-            "unparseable body: expected a JSON array, got %s" % type(payload).__name__,
-            started,
-            on_failure,
-        )
-    return payload
+        return None, "unparseable body: expected a JSON array, got %s" % type(payload).__name__
+    return payload, None
+
+
+def _get_json_with_retry(url, timeout=_HTTP_TIMEOUT):
+    """`(status, payload)` from `_get_json`, with one retry; re-raises the last transport error.
+
+    ⚠️ **The last error is RE-RAISED, not returned**, so `_check`'s existing handlers keep deciding
+    UNKNOWN-vs-ABSENT and the cause they print is the one that actually ended the read.
+    """
+    for attempt in range(1, _READ_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(_READ_RETRY_DELAY_S)
+        try:
+            return _get_json(url, timeout)
+        except (OSError, ValueError):
+            if attempt >= _READ_ATTEMPTS:
+                raise
 
 
 def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
@@ -489,7 +529,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
 
     started = time.monotonic()
     try:
-        status, rows = _get_json(base + HEARTBEAT_PATH, timeout)
+        status, rows = _get_json_with_retry(base + HEARTBEAT_PATH, timeout)
     except (OSError, ValueError) as exc:
         return UNKNOWN, "session-heartbeat endpoint unreachable at %s after %d ms (%s)" % (
             base,
@@ -571,7 +611,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     # verdict path did not, which is how `ABSENT` was published for a demonstrably live session.
     started = time.monotonic()
     try:
-        status, row = _get_json(
+        status, row = _get_json_with_retry(
             "%s%s/%s" % (base, HEARTBEAT_PATH, urllib.parse.quote(sid, safe="")), timeout
         )
     except (OSError, ValueError) as exc:
