@@ -182,6 +182,52 @@ def migrate_legacy(subject: str) -> None:
         print(f"migrated legacy {base} ({', '.join(removed)})", file=sys.stderr)
 
 
+def read_notified() -> dict:
+    """slug -> the epoch at which that lapse was reported.
+
+    A plain list is the shape older releases wrote; those entries load at the
+    file's own mtime (see below), so the upgrade reports no subject twice and a
+    manager that re-arms afterwards still re-notifies on its next lapse.
+    """
+    try:
+        with open(os.path.join(STATE_DIR, NOTIFIED), encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if isinstance(raw, dict):
+        out = {}
+        for k, v in raw.items():
+            try:
+                out[str(k)] = float(v)
+            except (TypeError, ValueError):
+                out[str(k)] = 0.0
+        return out
+    # Legacy list: stamp each entry with the file's own mtime rather than 0. At 0 the
+    # upgrade would re-announce every subject that was already known-lapsed — a
+    # notification burst on the first tick after deploy. A subject that armed after
+    # that write still re-notifies, which is the lapse this change exists to catch.
+    try:
+        legacy_epoch = os.path.getmtime(os.path.join(STATE_DIR, NOTIFIED))
+    except OSError:
+        legacy_epoch = 0.0
+    return {str(k): legacy_epoch for k in raw}
+
+
+def write_notified(notified: dict) -> None:
+    write_atomic(
+        os.path.join(STATE_DIR, NOTIFIED),
+        json.dumps({k: notified[k] for k in sorted(notified)}) + "\n",
+    )
+
+
+def last_arm(s: str) -> float:
+    """When the subject last armed, from its cadence file's mtime; 0 when unreadable."""
+    try:
+        return os.path.getmtime(path(s, "cadence"))
+    except OSError:
+        return 0.0
+
+
 def arm(subject: str, branch: str, interval: int) -> int:
     s = slug(subject, branch)
     write_atomic(path(s, "cadence"), f"{interval}\n")
@@ -248,12 +294,8 @@ def check(now: float = None) -> int:
         n.split("--", 1)[1] for n in names if "--" in n
     }
     names = [n for n in names if "--" in n or n not in prefixed_bases]
-    npath = os.path.join(STATE_DIR, NOTIFIED)
-    try:
-        with open(npath, encoding="utf-8") as fh:
-            notified = set(json.load(fh))
-    except (OSError, ValueError):
-        notified = set()
+    notified = read_notified()
+    before = dict(notified)
 
     turned_stale = False
     still = set()
@@ -261,13 +303,22 @@ def check(now: float = None) -> int:
         state, detail = classify(s, now)
         if state in ("STALE", "INVALID"):
             still.add(s)
-            if s not in notified:
+            # ⚠️ An entry alone is not proof this lapse was already reported. A manager
+            # may re-arm and lapse again between two polls, and then the RECOVERED
+            # branch below never runs — the entry survives and every later lapse is
+            # silent. An arm newer than the notification therefore starts a NEW lapse.
+            # (Measured 2026-10-20: a subject read STALE for 72 min while --check
+            # returned 0, and the topic had no live manager.)
+            if s not in notified or notified[s] < last_arm(s):
                 print(f"{state} {s} {detail}")
                 turned_stale = True
+                notified[s] = now
         elif s in notified:
             print(f"RECOVERED {s} {state} {detail}")
-    if still != notified:
-        write_atomic(npath, json.dumps(sorted(still)) + "\n")
+            del notified[s]
+    notified = {k: v for k, v in notified.items() if k in still}
+    if notified != before:
+        write_notified(notified)
     return EXIT_STALE if turned_stale else 0
 
 

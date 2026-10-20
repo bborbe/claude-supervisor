@@ -46,11 +46,16 @@ class Liveness(unittest.TestCase):
         t = time.time() - age
         os.utime(p, (t, t))
 
-    def check(self):
+    def check(self, now=None):
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = self.m.check()
+            rc = self.m.check(now)
         return rc, out.getvalue()
+
+    def set_arm_time(self, topic, t):
+        """Move a subject's last-arm marker to an explicit epoch."""
+        p = self.m.path(self.m.slug(topic, "goal"), "cadence")
+        os.utime(p, (t, t))
 
     def test_fresh_is_ok(self):
         self.arm("Manager Layer", 300, age=100)
@@ -90,6 +95,59 @@ class Liveness(unittest.TestCase):
         self.assertTrue(out.startswith("RECOVERED goal--manager-layer OK"), out)
         self.arm("Manager Layer", 300, age=5000)  # a NEW lapse notifies again
         self.assertEqual(self.check()[0], 10)
+
+    def test_a_lapse_after_a_rearm_notifies_again(self):
+        # The production shape, 2026-10-20: the manager re-armed and lapsed again
+        # between two polls, so `check` never observed the RECOVERED transition —
+        # its only other way to clear the entry. The entry then outlived the lapse
+        # it described and every later lapse was silent: `check` returned 0 on a
+        # subject `--state` read as STALE, while the topic had no live manager.
+        t0 = time.time()
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check(t0)[0], 10)  # the first lapse notifies
+        self.set_arm_time("Manager Layer", t0 + 100)  # the manager re-arms
+        rc, out = self.check(t0 + 100 + 2000)  # ... and lapses again, unseen
+        self.assertEqual(rc, 10, "a lapse after a re-arm must notify again")
+        self.assertIn("STALE goal--manager-layer", out)
+
+    def test_a_legacy_list_does_not_reannounce_known_lapses(self):
+        # The upgrade path: a list-shaped file must not fire a burst for every
+        # subject already known to be lapsed.
+        t = time.time()
+        self.arm("Manager Layer", 300, age=5000)
+        self.set_arm_time("Manager Layer", t - 1000)  # armed BEFORE the file write
+        p = os.path.join(self.m.STATE_DIR, self.m.NOTIFIED)
+        with open(p, "w") as fh:
+            fh.write('["goal--manager-layer"]\n')
+        os.utime(p, (t, t))
+        self.assertEqual(self.check(t + 100)[0], 0)  # stale, but already known
+
+    def test_a_legacy_entry_still_renotifies_after_a_later_arm(self):
+        # The half the upgrade must NOT swallow: a manager that armed after the
+        # legacy write has a new lapse, and it has to be reported.
+        t = time.time()
+        self.arm("Manager Layer", 300, age=5000)
+        p = os.path.join(self.m.STATE_DIR, self.m.NOTIFIED)
+        with open(p, "w") as fh:
+            fh.write('["goal--manager-layer"]\n')
+        os.utime(p, (t, t))
+        self.set_arm_time("Manager Layer", t + 50)  # re-armed AFTER the file write
+        rc, out = self.check(t + 50 + 2000)  # ... then lapsed again
+        self.assertEqual(rc, 10, "a post-upgrade re-arm must re-notify")
+        self.assertIn("STALE goal--manager-layer", out)
+
+    def test_a_rearm_does_not_disturb_a_siblings_entry(self):
+        # The re-notify is scoped to the subject that armed; a sibling's entry must
+        # survive, or one healthy manager would re-announce every other lapsed one.
+        t0 = time.time()
+        self.arm("Alpha", 300, age=5000)
+        self.arm("Beta", 300, age=5000)
+        self.assertEqual(self.check(t0)[0], 10)  # both notified
+        self.set_arm_time("Alpha", t0 + 100)  # Alpha recovers
+        rc, out = self.check(t0 + 200)
+        self.assertEqual(rc, 0, out)  # Beta is still notified, so nothing new
+        self.assertNotIn("STALE", out)
+        self.assertIn("RECOVERED goal--alpha", out)
 
     def test_topics_are_independent(self):
         self.arm("Alpha", 300, age=5000)
