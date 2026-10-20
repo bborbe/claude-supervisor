@@ -199,6 +199,69 @@ export async function confirmInPane(paneId, marker, opts = {}) {
   }
 }
 
+// A pane with no marker to poll still answers one question: is our text still sitting in
+// the composer? Retry the Enter while it is, and report which of three states we reached.
+//
+// The verdict is NEVER inferred from the send's exit code. That only says keystrokes
+// reached the pty, which is true whether or not anything submitted — the exact confusion
+// that let `{sent: true}` stand for a message that never arrived.
+//
+// An empty composer is a stronger signal here than it is in `confirmInPane` because this
+// function watched its OWN text leave: the failure that note warns about (a message
+// stranded, then discarded unsubmitted) still ends with the text gone, so a composer that
+// never held our text is reported as unverified rather than as delivery.
+export async function confirmSubmission(paneId, message, opts = {}) {
+  const {
+    wezterm = defaultWezterm,
+    timeoutMs = 1500,
+    intervalMs = 100,
+    retries = 2,
+    sleep = defaultSleep,
+  } = opts
+  const head = String(message).split('\n')[0].trim().slice(0, 40)
+  let sawReadable = false
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    if (attempt > 0) {
+      const retry = wezterm(['cli', 'send-text', '--pane-id', String(paneId), '--no-paste', frameMessage('')])
+      if (!retry || retry.error || retry.status !== 0) {
+        const why = retry?.error?.message || retry?.stderr?.trim() || `exit ${retry?.status}`
+        return { delivered: 'unverified', reason: `retrying Enter into pane ${paneId} failed: ${why}` }
+      }
+    }
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const text = paneText(paneId, { wezterm })
+      const line = text === null ? null : composerLine(text)
+      if (line !== null) {
+        sawReadable = true
+        const composer = line.slice(PROMPT_GLYPH.length).trim()
+        if (composer === '') return { delivered: true, attempts: attempt + 1 }
+        if (!head || !composer.includes(head)) {
+          return {
+            delivered: 'unverified',
+            reason: `pane ${paneId}'s composer holds text this send did not write — refusing to claim delivery`,
+          }
+        }
+      }
+      if (Date.now() >= deadline) break
+      await sleep(intervalMs)
+    }
+  }
+
+  // An unreadable pane is NOT a failed delivery: the difference is the whole point of
+  // the three states, and reporting `false` here would be the same false certainty in
+  // the opposite direction.
+  if (!sawReadable) {
+    return { delivered: 'unverified', reason: `pane ${paneId} could not be read — delivery cannot be established` }
+  }
+
+  return {
+    delivered: false,
+    reason: `the message is still in pane ${paneId}'s composer after ${retries + 1} attempts — the Enter was swallowed`,
+  }
+}
+
 // Activate, wait for the prompt, type, submit. Every failure is returned rather than
 // swallowed: a message that did not arrive and a message that arrived look identical
 // from the caller's side, which is exactly the confusion this must not create.
@@ -230,9 +293,15 @@ export async function sendToPane(paneId, message, opts = {}) {
     return { error: `send-text to pane ${paneId} failed: ${why}` }
   }
 
-  if (!confirm) return { sent: true, tabId, paneId: String(paneId) }
+  if (confirm) {
+    const confirmed = await confirmInPane(paneId, confirm.marker, { ...opts, ...confirm })
+    if (confirmed.error) return { error: confirmed.error }
+    return { sent: true, delivered: true, confirmed: true, attempts: confirmed.attempts, tabId, paneId: String(paneId) }
+  }
 
-  const confirmed = await confirmInPane(paneId, confirm.marker, { ...opts, ...confirm })
-  if (confirmed.error) return { error: confirmed.error }
-  return { sent: true, confirmed: true, attempts: confirmed.attempts, tabId, paneId: String(paneId) }
+  const submission = await confirmSubmission(paneId, message, opts)
+  const base = { sent: true, delivered: submission.delivered, tabId, paneId: String(paneId) }
+  if (submission.attempts !== undefined) base.attempts = submission.attempts
+  if (submission.reason !== undefined) base.reason = submission.reason
+  return base
 }

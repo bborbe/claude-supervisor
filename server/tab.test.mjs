@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { composerLine, confirmInPane, frameMessage, isReady, listPanes, policySupportError, resumeSupportError, sendToPane, tabIdForPane, waitUntilReady } from './tab.mjs'
+import { composerLine, confirmInPane, confirmSubmission, frameMessage, isReady, listPanes, policySupportError, resumeSupportError, sendToPane, tabIdForPane, waitUntilReady } from './tab.mjs'
 
 const PANE = '1710'
 const TAB = '1105'
@@ -107,7 +107,8 @@ test('sendToPane activates the tab before it types', async () => {
     'cli get-text': () => ok(PROMPT),
   })
   const res = await sendToPane(PANE, '/color pink', { wezterm, sleep: sleepNoop, timeoutMs: 1000 })
-  assert.deepEqual(res, { sent: true, tabId: TAB, paneId: PANE })
+  assert.equal(res.sent, true)
+  assert.equal(res.delivered, true, 'the composer was empty after the send, so the Enter submitted')
 
   const activateAt = wezterm.calls.findIndex((c) => c.startsWith('cli activate-pane'))
   const sendAt = wezterm.calls.findIndex((c) => c.startsWith('cli send-text'))
@@ -189,10 +190,56 @@ test('a cleared composer is NOT treated as delivery', async () => {
   assert.match(res.error, /never showed/, 'an empty composer must not satisfy confirmation')
 })
 
-test('sendToPane does not confirm unless the caller asks', async () => {
-  const wezterm = fakeWezterm({ 'cli list': () => ok(panesJson), 'cli get-text': () => ok(PROMPT) })
-  const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 1000 })
-  assert.deepEqual(res, { sent: true, tabId: TAB, paneId: PANE }, 'a relay must not wait on a marker it never produces')
+test('sendToPane never waits on a marker when the caller gives none', async () => {
+  // A relay into a mid-run worker produces no marker, so the marker poll stays opt-in —
+  // but the send must still report a delivery STATE, never a bare success.
+  const wezterm = fakeWezterm({ 'cli list': () => ok(panesJson), 'cli get-text': () => ok(`${PROMPT} `) })
+  const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 20, intervalMs: 1 })
+  assert.equal(res.sent, true, 'keystrokes reached the pty')
+  assert.equal(res.delivered, true, 'and the composer cleared, so delivery is the verdict')
+})
+
+// The regression this exists for: `{sent: true}` was returned on keystroke delivery alone,
+// so a swallowed Enter looked exactly like a delivered message.
+test('sendToPane reports NOT delivered when the Enter is swallowed', async () => {
+  let reads = 0
+  const wezterm = fakeWezterm({
+    'cli list': () => ok(panesJson),
+    'cli get-text': () => {
+      reads += 1
+      // ready (empty composer) first, then our text still sitting in it
+      return ok(reads === 1 ? `${PROMPT} ` : `${PROMPT} hello`)
+    },
+  })
+  const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 5, intervalMs: 1 })
+  assert.equal(res.sent, true, 'the keystrokes still reached the pty — that was never the question')
+  assert.equal(res.delivered, false)
+  assert.match(res.reason, /swallowed/)
+  const enters = wezterm.calls.filter((c) => c.startsWith('cli send-text') && c.endsWith('\r'))
+  assert.ok(enters.length >= 2, 'the Enter is re-pressed while the text stays in the composer')
+})
+
+test('sendToPane reports unverified when the pane cannot be read after the send', async () => {
+  // An unreadable pane is neither delivery nor failure — collapsing it into either is the
+  // same false certainty in the opposite direction.
+  let reads = 0
+  const wezterm = fakeWezterm({
+    'cli list': () => ok(panesJson),
+    'cli get-text': () => {
+      reads += 1
+      return reads === 1 ? ok(`${PROMPT} `) : fail('pane gone')
+    },
+  })
+  const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 5, intervalMs: 1 })
+  assert.equal(res.delivered, 'unverified')
+  assert.match(res.reason, /could not be read/)
+})
+
+test('confirmSubmission refuses to claim delivery for text it did not write', async () => {
+  const wezterm = fakeWezterm({ 'cli get-text': () => ok(`${PROMPT} someone else's draft`) })
+  const res = await confirmSubmission(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 5, intervalMs: 1 })
+  assert.equal(res.delivered, 'unverified')
+  assert.match(res.reason, /did not write/)
 })
 
 test('sendToPane surfaces an unconfirmed send as an error, never as applied', async () => {

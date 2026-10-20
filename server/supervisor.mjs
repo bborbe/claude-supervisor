@@ -3102,8 +3102,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const res = await sendToPane(channel.paneId, args.message)
       if (res.error) return reply({ error: res.error })
       agent.messages = [...(agent.messages ?? []), { at: new Date().toISOString(), text: args.message }]
-      log(`sent a follow-up message to ${agent.id} (pane ${channel.paneId}, tab ${res.tabId})`)
-      return reply({ agent_id: agent.id, sent: true, tab_id: res.tabId, pane_id: res.paneId })
+      log(`sent a follow-up message to ${agent.id} (pane ${channel.paneId}, tab ${res.tabId}) — delivered: ${res.delivered}`)
+      // ⚠️ `sent` IS KEPT AS AN ALIAS, and it means only "keystrokes reached the pty" —
+      // true whether or not anything submitted. `delivered` is the verdict the caller must
+      // read: true (watched the text leave the composer), false (still there after the
+      // retries), or 'unverified' (could not tell). Reporting a bare `sent: true` as if it
+      // were delivery is the defect this shape exists to remove.
+      return reply({
+        agent_id: agent.id,
+        sent: true,
+        delivered: res.delivered,
+        ...(res.reason ? { reason: res.reason } : {}),
+        tab_id: res.tabId,
+        pane_id: res.paneId,
+      })
     }
 
     case 'stop_agent': {
