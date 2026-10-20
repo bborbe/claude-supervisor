@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-round receipt for manager loops: make a round that skipped its steps visible.
 
-`commands/manager-drive.md` is a router map — it names the steps and the condition
+`commands/goal-drive.md` is a router map — it names the steps and the condition
 under which each is read, and carries no mechanical check that any of them ran. A
 round can therefore arm its wakeup, run `manager-liveness.py --arm`, count the
 task-file boxes and render exactly like a full one: `manager-liveness.py --check`

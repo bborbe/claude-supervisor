@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SC2's behavioural probe — what a manager tick may raise over a fixture subject.
 
-⚠️ **Not a grep over the rule text.** A grep over `commands/manager-loop.md` passes on
+⚠️ **Not a grep over the rule text.** A grep over `commands/goal-loop.md` passes on
 the day the rule is deleted from the arm a manager actually reads, and passes on a tree
 where nothing enforces it. This probe runs the *decision path* an `AskUserQuestion`
 takes — `scripts/manager-menu-guard.py`, invoked as a subprocess exactly as

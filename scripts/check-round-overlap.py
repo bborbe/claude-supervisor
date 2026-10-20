@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The round-overlap rule has exactly one home, and the tick router dispatches it every tick.
 
-`commands/steps/manager-readings.md` states what a tick does when the previous round is
+`commands/steps/round-readings.md` states what a tick does when the previous round is
 still in flight, which round owns each of the round's three writes, and the fate of a
 late leg's `Audit` block. Three properties make that home load-bearing, and each of them
 fails silently on its own:
@@ -20,7 +20,7 @@ fails silently on its own:
      it from every router and the assertion still passes while nothing reads the rule at
      all** (measured 2026-10-11 by mutation).
    - ⚠️ **And "some router names it" is still too weak, because the loop has two routers
-     and only one of them re-runs.** `commands/manager-loop.md` is the *arm* — invoked once
+     and only one of them re-runs.** `commands/goal-loop.md` is the *arm* — invoked once
      to start the loop and never re-invoked, which its own tick file states — and it
      carries the same step table as the *tick* router `commands/manager-loop-tick.md`,
      which is what a wakeup names. A row in either satisfies an "any router" test, so
@@ -32,7 +32,7 @@ fails silently on its own:
    paths listed in `ROUND_ROUTERS` — so the arm's row cannot stand in for the row that
    fires.
    - ⚠️ **The filename was only ever a proxy for the property.** On 2026-10-11 the manager
-     loop's round router stopped being a `*-tick.md` file: `commands/manager-drive.md`
+     loop's round router stopped being a `*-tick.md` file: `commands/goal-drive.md`
      became the one full round and the tick was retired, and the arm's duplicate table was
      removed in the same change. The property this check needs is unchanged — *a router the
      wakeup re-invokes every round, which the arm is not* — so the round routers are named
@@ -60,11 +60,11 @@ MARKER = "is ABSORBED, never run"
 EVERY_TICK = "every tick"
 TICK_ROUTER = "-tick.md"
 # ⚠️ The manager loop's round router is no longer named `*-tick.md`: since 2026-10-11
-# `commands/manager-drive.md` is the one full round and the separate tick is retired, so the
+# `commands/goal-drive.md` is the one full round and the separate tick is retired, so the
 # suffix no longer tracks the property this check needs. That property — "a router the wakeup
 # re-invokes every round, which the arm is not" — is unchanged, so the round routers are
 # listed explicitly beside the `*-tick.md` glob the fleet loop still satisfies.
-ROUND_ROUTERS = ("commands/manager-drive.md",)
+ROUND_ROUTERS = ("commands/goal-drive.md",)
 HEADER = ("#", "Step", "When", "File")
 
 
@@ -171,7 +171,7 @@ def main() -> int:
                 shown = "; ".join(f"{r.name}: {w!r}" for r, w in named_by)
                 failures.append(
                     f"{rel}: only the arm names it — {shown}.\n"
-                    f"      The arm (`commands/manager-loop.md`) is invoked once to start "
+                    f"      The arm (`commands/goal-loop.md`) is invoked once to start "
                     f"the loop and is never re-invoked, so a row there does NOT read the "
                     f"rule on the rounds it governs. A round router — a `*{TICK_ROUTER}` "
                     f"file, or one of {', '.join(ROUND_ROUTERS)} — must name this file."

@@ -439,7 +439,7 @@ class TestManagerSubject(unittest.TestCase):
     def test_source_one_resolves_through_the_loop_record(self):
         """A name that matches no page still resolves when the loop's slug does."""
         self.assertEqual(
-            fb.manager_subject("Manager-Layer", _group_index(), {"manager-layer"}),
+            fb.manager_subject("Manager-Layer", _group_index(), {"topic--manager-layer"}),
             ("topic", "Manager Layer"),
         )
 

@@ -1,6 +1,6 @@
 # Session progress — measure it, then drive
 
-The operator runs `/and` — routed to `/supervisor:worker-drive`, `/supervisor:manager-drive` or
+The operator runs `/and` — routed to `/supervisor:worker-drive`, `/supervisor:goal-drive` or
 `/supervisor:fleet-drive` by tier — whenever a session *feels* stuck. This page is the single home
 for what those three commands must answer first: **did this session move its anchor's closure in
 the last window, on what evidence, and if not, what blocks it?** Each command keeps its own

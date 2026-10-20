@@ -192,7 +192,7 @@ class CoverageGateTest(unittest.TestCase):
         every test in this file while step 4b still dispatches on every tick.
         """
         step = os.path.normpath(
-            os.path.join(_HERE, "..", "..", "commands", "steps", "manager-coverage.md")
+            os.path.join(_HERE, "..", "..", "commands", "steps", "goal-coverage.md")
         )
         with open(step, encoding="utf-8") as handle:
             body = handle.read()

@@ -1,11 +1,11 @@
 """drive-audit-budget.py: the wall-clock bound on the manager drive leg's audit loop.
 
-The defect this guards, measured 2026-10-16: `agents/manager-drive.md` clause (1)
+The defect this guards, measured 2026-10-16: `agents/goal-drive.md` clause (1)
 dispatches one `vault-cli:task-auditor` subagent PER ROW, sequentially, and nothing
 bounded the loop. On a round with zero actionable rows -- Recurring Operator Gates,
 `ready-to-start` 0 and `stuck` 0 -- the audit is the whole of the remaining work, and
 that tick ran about 34 minutes (`.tracked.txt` 11:05:04 -> `.verdicts.json` 11:39:01).
-`commands/steps/manager-drive.md` had already recorded the sibling: 27 dispatches, 0
+`commands/steps/goal-drive.md` had already recorded the sibling: 27 dispatches, 0
 cache hits, 29 minutes. The task's SC4 asks for a bound that emits a `TERMINAL` line
 instead of hanging, and this file is the test that shows it.
 

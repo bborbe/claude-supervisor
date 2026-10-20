@@ -47,7 +47,7 @@ is worth keeping because it cuts both ways:
   `sweep-gate-classify.py` keeps its own `liveness -> parked` trigger (a different gate
   with a different job). ⚠️ **Recorded HERE and not only in `docs/fleet-surface.md`,
   because this block is the digest contract's declared single home** —
-  `commands/manager-status.md` step 1 reads it rather than restating it, so a stale
+  `commands/goal-status.md` step 1 reads it rather than restating it, so a stale
   agreement here is what a reader would take as current.
 
   IT LACKS the rendered table, and it has no member list. The no-change branch must
@@ -155,7 +155,7 @@ graded on. A worker dying changes session liveness; a digest over `status`/`phas
 alone would see the dead worker's task as unchanged and replay the stored table straight
 over the death. Liveness is therefore computed HERE, in the gate — never inside the
 dispatched `manager-sweep-reader` agent, which is forbidden to probe liveness
-(`agents/manager-sweep-reader.md`) and could not see it anyway.
+(`agents/goal-sweep-reader.md`) and could not see it anyway.
 
 ⚠️ **But only its DEATH half belongs in the digest, and the two must not be conflated.**
 "Liveness is in the digest" is true of the death transition and false of the churn: a
@@ -1207,7 +1207,7 @@ def parked_names(tracked: list[dict]) -> list[str]:
     """The rows whose rendered Status cell reads `⌛ waiting-on-human`, sorted.
 
     ⚠️ **This is the Status cell, not the Session cell, and the difference is the whole
-    reason this function exists.** `agents/manager-sweep-reader.md:136` makes a *parked*
+    reason this function exists.** `agents/goal-sweep-reader.md:136` makes a *parked*
     row render `⌛ waiting-on-human` whatever its bucket, while a live one keeps its
     ordinary bucket — so a `live` <-> `parked` flip moves the Status cell. The Session
     cell does NOT move with it: step 7 is explicit that `parked` is ALIVE and therefore
@@ -1218,7 +1218,7 @@ def parked_names(tracked: list[dict]) -> list[str]:
 
     ⚠️ **This reads THIS script's `liveness_of`, while the cell it protects is rendered by
     the caller's sweep reader from a different input** — `session-liveness.py --check` over
-    the row's id set (`agents/manager-sweep-reader.md` input 10). The repo's two-renderer
+    the row's id set (`agents/goal-sweep-reader.md` input 10). The repo's two-renderer
     rule keeps those two verdicts independent on purpose, and this clause does not close
     that gap: a row the reader renders `⌛ waiting-on-human` while the gate reads `live`
     moves the cell with the parked set unchanged, and the replay is still served. Named
@@ -1276,11 +1276,11 @@ def digest_of(tracked: list[dict]) -> str:
     ⚠️ **That split NARROWS THIS DOCSTRING'S OWN CONTRACT, and the narrowing is named
     here rather than left to be rediscovered.** "What the sweep would render" no longer
     holds for one cell: `parked` is what makes a row render `⌛ waiting-on-human`
-    (`agents/manager-sweep-reader.md:136`), so a worker newly opening a gate no longer
+    (`agents/goal-sweep-reader.md:136`), so a worker newly opening a gate no longer
     moves the digest.
 
     ⚠️ **The narrowing is REAL and is covered ONE LEVEL UP, not here.** The exit-0 replay
-    path (`commands/manager-status.md` step 1, `commands/manager-drive.md` step 2) would
+    path (`commands/goal-status.md` step 1, `commands/goal-drive.md` step 2) would
     otherwise reproduce the stored table with whatever cell the row last had, so
     `evaluate` carries a separate `parked_set_moved` clause that refuses the replay on
     exactly that transition. ⚠️ **It is deliberately NOT a term in this function**:
@@ -1291,7 +1291,7 @@ def digest_of(tracked: list[dict]) -> str:
     set.
 
     ⚠️ **The cell that goes stale is the STATUS cell, never the Session cell** — named
-    because the two were conflated in the caveats that clause replaced. `agents/manager-sweep-reader.md`
+    because the two were conflated in the caveats that clause replaced. `agents/goal-sweep-reader.md`
     step 7 makes a parked session take the LIVE-shaped `[<sid8>]` delimiter, and
     `session-liveness.py` never reads the registry's `status` field, so a `live` <-> `parked`
     flip renders the SAME Session cell on both sides. The Session cell's own stale routes
@@ -1300,7 +1300,7 @@ def digest_of(tracked: list[dict]) -> str:
 
     ⚠️ **`/manager-loop` is NOT one of the replaying surfaces and is NOT a mitigation:**
     it never calls `--print` or `--check`, so it never consults this digest at all, and
-    its attention-feed read is step 4's first bullet (`commands/manager-loop.md:186`),
+    its attention-feed read is step 4's first bullet (`commands/goal-loop.md:186`),
     which runs before any verdict. The independent surfacing that does hold is step 7's
     `manager-attention-watch.py` / feed-Monitor arms, which fire `NEW GATE` off the
     registry and the feed rather than off this digest.
@@ -1487,7 +1487,7 @@ def content_key(row_path: str) -> str:
     """The verdicts cache's key for one row file — **the single implementation.**
 
     ⚠️ **This function exists because the derivation used to live only as PROSE**, in
-    `agents/manager-drive.md` clause (1). The drive leg is an agent, so every leg
+    `agents/goal-drive.md` clause (1). The drive leg is an agent, so every leg
     re-implemented the formula and they disagreed. A leg's own `Audit` block on
     **2026-10-12T15:49:30Z** reported it verbatim: *"CACHE-KEY DRIFT (report, do not fix):
     the 8 stored entries reproduce under a `mode:`-only exclusion, NOT the clause's
@@ -2756,7 +2756,7 @@ def main(argv: list[str]) -> int:
         # own frontmatter read, which is nondeterministic — measured 2026-10-02, four
         # misreads across eleven relevant ticks, and reproduced again 2026-10-03 18:44 on
         # two rows whose first entry had shipped and whose later entries had not. The
-        # warning against exactly that read has sat in `agents/manager-sweep-reader.md`
+        # warning against exactly that read has sat in `agents/goal-sweep-reader.md`
         # since v0.96.4 and did not prevent it, so the decision moves to code and the
         # agent renders the bucket from the answer.
         #

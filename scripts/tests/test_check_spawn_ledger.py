@@ -1,7 +1,7 @@
 """check-spawn-ledger.py: a recent new-worker spawn must record a decided mode.
 
 The defect this guards against, measured 2026-09-25: `agent_163` and `agent_164` were
-opened directly by `agents/manager-drive.md` and both reported `mode_source=config` —
+opened directly by `agents/goal-drive.md` and both reported `mode_source=config` —
 the value a site produces when it never passed the argument. `scripts/check-spawn-mode.py`
 stayed green throughout, because it reads what a file *says* and this defect was a
 runtime call. This check reads the record the spawn actually produced.

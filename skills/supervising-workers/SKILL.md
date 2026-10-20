@@ -46,7 +46,7 @@ Pass `interactive: false` when the point is that **you** answer the prompts — 
 
 `spawn_agent` → `agent_status` / `send_agent_message` → read the tab
 
-The slash commands wrap the same calls: `/supervisor:manager-spawn`, `/supervisor:fleet-workers`, `/supervisor:manager-answer`, and `/supervisor:manager-drain` for bulk approvals. The approval *policy* lives in the `manager-wrangler` agent — do not restate it here.
+The slash commands wrap the same calls: `/supervisor:goal-spawn`, `/supervisor:fleet-workers`, `/supervisor:goal-answer`, and `/supervisor:goal-drain` for bulk approvals. The approval *policy* lives in the `goal-wrangler` agent — do not restate it here.
 
 `spawn_agent` takes `prompt` (required) plus optional `cwd`, `label`, `interactive` and `resume`. `await_permission(timeout_ms)` blocks until a **headless** worker asks; it returns `null` on timeout, so treat a null as "nothing to do", never as an approval.
 

@@ -4,7 +4,7 @@ snapshot, its re-post verdict and its suppression line — one owner.
 
 Why this exists
 ---------------
-`commands/manager-loop.md` § Act's `under-target` bullet tells a manager to record the card
+`commands/goal-loop.md` § Act's `under-target` bullet tells a manager to record the card
 it just posted at `~/.claude/state/manager-under-target/<topic>.json`, to derive the card's
 `--dedup-key` from the round's row set, and to print a named line when it withholds a card
 because the operator already declined that ask. It described all three and **owned none of
@@ -190,7 +190,7 @@ def load_state(path):
 
     A corrupt file is a REFUSAL with a reason, never a traceback. The write is atomic, so
     corruption is unlikely — but `compare`'s exit code IS the branch's decision input, and an
-    uncaught `JSONDecodeError` exits **1**, a code `commands/manager-loop.md` does not
+    uncaught `JSONDecodeError` exits **1**, a code `commands/goal-loop.md` does not
     enumerate. A caller reading only `0` / `3` / `10` would read that `1` as "not suppressed",
     i.e. post — the wrong direction for the one file whose job is to show that nothing CHANGED.
     """

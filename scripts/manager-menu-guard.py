@@ -4,8 +4,8 @@
 WHAT IT DENIES, AND WHY A DENY RATHER THAN A WARNING. A manager session that
 presents a **manager-owned action** as an `AskUserQuestion` option is asking the
 operator to choose work the manager is supposed to execute itself. The rule is
-already written down — `commands/manager-loop.md` § Manager contract (the
-always-hold invariant) and `commands/steps/manager-drive.md` § Drive (the
+already written down — `commands/goal-loop.md` § Manager contract (the
+always-hold invariant) and `commands/steps/goal-drive.md` § Drive (the
 per-round form) — and the rule alone did not hold: measured **2026-10-15**, the
 Sentry Agent manager reverted to a menu within **~2 hours** of being told by
 `SendMessage` that it should push such work forward, and a menu blocks its pane
@@ -18,9 +18,9 @@ A warning here would be a third statement of a rule two files already carry.
 THE VERB LIST IS DERIVED, NOT INVENTED, AND MAY NOT WIDEN. It is the vocabulary of
 the two rule homes, verbatim: *"Opening or resuming an approved row, readying a
 row, filing a task, repairing a page box — those are the manager's own work."*
-Grounding, read rather than assumed: `agents/manager-drive.md` carries the report
-vocabulary `To open` (×10) and `To resume` (×8); `commands/steps/manager-repair.md`
-is a real step for `repairable` rows; `commands/manager-loop.md:92` has the manager
+Grounding, read rather than assumed: `agents/goal-drive.md` carries the report
+vocabulary `To open` (×10) and `To resume` (×8); `commands/steps/goal-repair.md`
+is a real step for `repairable` rows; `commands/goal-loop.md:92` has the manager
 itself running `/vault-cli:create-task`.
 
 ⚠️ **Adding to the list is an operator decision, not a manager one** — the Manager
@@ -424,7 +424,7 @@ KILL_SWITCH_ENV = "SUPERVISOR_MANAGER_MENU_GUARD"
 
 # The rule's own homes, quoted into the deny so the manager is pointed at the norm
 # rather than only at this gate.
-RULE_HOMES = "commands/manager-loop.md § Manager contract; commands/steps/manager-drive.md § Drive"
+RULE_HOMES = "commands/goal-loop.md § Manager contract; commands/steps/goal-drive.md § Drive"
 
 # --- the per-invocation record ------------------------------------------------
 #

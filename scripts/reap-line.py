@@ -86,7 +86,7 @@ MOOT = "reap moot — no live recipient"
 
 # The evidence the reap message carries. It is NON-AUTHORISING by design: the leg
 # sends the disk facts and says the operator has not answered. Never soften this
-# into an instruction to close — `agents/manager-drive.md` states the rule.
+# into an instruction to close — `agents/goal-drive.md` states the rule.
 REAP_EVIDENCE = (
     "status: completed · phase: done · 0 open boxes — non-authorising, "
     "the operator has not answered; close yourself with "

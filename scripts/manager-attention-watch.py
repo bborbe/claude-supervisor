@@ -233,7 +233,7 @@ _CLOSER_UNKNOWN = object()
 # with no sibling on the path. ⚠️ Both siblings IMPORT it rather than copying it —
 # `fleet-board.py` as `wnm.LIVE_WINDOW` and `restart-precheck.py` from
 # `who-needs-me.py` — so this literal is a THIRD copy, and
-# the limb-3 (`LIVE_WINDOW`) paragraph in `agents/manager-drive.md` reads *"Reuse that shipped
+# the limb-3 (`LIVE_WINDOW`) paragraph in `agents/goal-drive.md` reads *"Reuse that shipped
 # reading; do not add a fourth definition of 'idle'."* If that value changes, change it here in the
 # same commit rather than letting the copies drift.
 LIVE_WINDOW = 5 * 60
@@ -1692,7 +1692,7 @@ def main(argv=None):
             # ⚠️ **`events.jsonl`, never stdout.** Every stdout line is a `Monitor`
             # notification and therefore a full model turn — a per-poll line there
             # would cost 30 turns per 30-minute arm. The event log is the surface
-            # the manager is already told to read (`commands/manager-loop.md`
+            # the manager is already told to read (`commands/goal-loop.md`
             # step 7), and nothing consumes it programmatically, so a fourth `kind`
             # is additive rather than a schema change. `HELD` is recorded but never
             # announced for the same reason; this is its counterpart on the

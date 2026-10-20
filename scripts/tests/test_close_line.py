@@ -109,7 +109,7 @@ class CloseLineTest(unittest.TestCase):
                       self.line(M.LIVENESS_LIVE, closer=M.CLOSER_OPEN))
 
     def test_an_unreadable_closer_never_suppresses(self):
-        # `agents/manager-drive.md`: a failed read never suppresses a notice.
+        # `agents/goal-drive.md`: a failed read never suppresses a notice.
         self.assertIn("✅ DONE — CLOSE:",
                       self.line(M.LIVENESS_LIVE, closer=M.CLOSER_UNREADABLE))
 

@@ -51,9 +51,9 @@ Four assertions, all required:
 
 ⚠️ **Clause (c) is scoped to ledger-referencing lines on purpose, and the scope is the
 whole point.** Run unscoped across `agents/` + `commands/`, the same pattern has 12
-matches at v0.133.0 -- `commands/open.md` (6), `agents/manager-drive.md` (2),
-`agents/manager-sweep-reader.md`, `commands/manager-status.md`,
-`commands/steps/manager-resolve.md`, `commands/worker-drive.md` -- none of them about
+matches at v0.133.0 -- `commands/open.md` (6), `agents/goal-drive.md` (2),
+`agents/goal-sweep-reader.md`, `commands/goal-status.md`,
+`commands/steps/goal-resolve.md`, `commands/worker-drive.md` -- none of them about
 this ledger. An unscoped "0 matches" can never exit 0 and would block every change to
 the repo behind a criterion no one can meet. (22 repo-wide; 12 is the count for the two
 directories this check scans.)

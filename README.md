@@ -23,7 +23,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 Spawn a worker, then answer its permission prompt without leaving your manager session:
 
 ```
-> /supervisor:manager-spawn Run the test suite and fix any failures
+> /supervisor:goal-spawn Run the test suite and fix any failures
 
 Spawned agent_1 (interactive) — pane 1714
 ```
@@ -31,14 +31,14 @@ Spawned agent_1 (interactive) — pane 1714
 The worker runs in its own wezterm tab. When it needs approval, the prompt parks for **you** instead of the tab:
 
 ```
-> /supervisor:manager-answer
+> /supervisor:goal-answer
 
 1 pending — agent_1
   Bash: go test ./...
   allow / deny ?
 ```
 
-Answer it and the worker carries on. That is the whole loop: `/supervisor:manager-spawn` reports the `agent_id`, the mode it chose, and — for a tab worker — the `pane_id`; `/supervisor:manager-answer` drains whatever is waiting.
+Answer it and the worker carries on. That is the whole loop: `/supervisor:goal-spawn` reports the `agent_id`, the mode it chose, and — for a tab worker — the `pane_id`; `/supervisor:goal-answer` drains whatever is waiting.
 
 For a worker whose prompts you intend to answer yourself rather than letting its tab handle them, spawn it headless with `interactive=false` — that is the only mode the approval loop serves.
 
@@ -48,8 +48,8 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 |---|---|
 | MCP server `supervisor` | spawns and owns the workers; parks their permission prompts |
 | skill `supervising-workers` | when to spawn a worker instead of doing the work yourself |
-| `/supervisor:manager-spawn` `/supervisor:fleet-workers` `/supervisor:manager-answer` `/supervisor:manager-drain` | the operator surface |
-| agent `manager-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
+| `/supervisor:goal-spawn` `/supervisor:fleet-workers` `/supervisor:goal-answer` `/supervisor:goal-drain` | the operator surface |
+| agent `goal-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
 | `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
 | `/supervisor:who-needs-my-help` | the full sweep in one pass — what every live session is parked on and why, the operator-bound gates handed over with jump links and recommended answers, and the blockers that keep recurring root-caused. Report-only: it answers no gate and drives no modal |
 | `/supervisor:attention-next` | what's next on the attention stack — answer an item in chat, delivered to the session that asked |
@@ -58,12 +58,12 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | `scripts/restart-worker.py` | restart ONE stale idle session — **worker or manager** — under a narrow allow rule: seven registry-guarded refusals, never a broad `kill` |
 | `scripts/manager-launcher.py` | print the launcher a **manager** session opens on and which rule chose it (`subject` / `claude-sibling` / `vault`) — rule in `docs/fleet-surface.md` § Which launcher a manager opens on |
 | `scripts/drive-ledger.py` | the fleet-drive ledger's **one writer** — `read` normalises the file's two shapes (flat `sid` rows and an `entries` list) to one canonical shape, and `merge` takes **only this round's entries**, so a round cannot shrink the ledger by omission. A corrupt ledger is refused rather than read as empty, and `.bak` is the pre-merge copy |
-| `scripts/manager-predispatch.py` | the **pre-dispatch gate** `/supervisor:manager-drive` and `/supervisor:manager-status` run first — when the tracked tree has not moved it replays the stored table and dispatches **no agent**; a worker dying counts as movement, because session liveness is in the digest |
+| `scripts/manager-predispatch.py` | the **pre-dispatch gate** `/supervisor:goal-drive` and `/supervisor:goal-status` run first — when the tracked tree has not moved it replays the stored table and dispatches **no agent**; a worker dying counts as movement, because session liveness is in the digest |
 | `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop (the **arm**, invoked once), one read-only snapshot |
 | `/supervisor:fleet-drive` | the loop's **round** — one full fleet round, dispatched by `/supervisor:fleet-loop` on every wakeup and runnable by hand: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
 | `/supervisor:fleet-verify` | read-only: verify the fleet layer's own contract, ending in a numbered fix list |
-| `/supervisor:manager-loop` `/supervisor:manager-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
-| `/supervisor:manager-verify` | read-only: verify ONE goal or topic and suggest fixes, ending in a numbered fix list |
+| `/supervisor:goal-loop` `/supervisor:goal-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
+| `/supervisor:goal-verify` | read-only: verify ONE goal or topic and suggest fixes, ending in a numbered fix list |
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |

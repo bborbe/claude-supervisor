@@ -1,6 +1,6 @@
 ---
 name: gate-relay-read
-description: Read a blocked tab worker's pane and return a compact per-pane summary of what it is waiting on, so the manager can ask the operator without paying the pane-dump cost in its own context. Use when the attention feed or a roster read shows a tab worker blocked and its live question is needed before surfacing a batch. Dispatched by the manager's gate-relay path (see § Needs-input in `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` and the relay path in commands/manager-loop.md); never decides and never types.
+description: Read a blocked tab worker's pane and return a compact per-pane summary of what it is waiting on, so the manager can ask the operator without paying the pane-dump cost in its own context. Use when the attention feed or a roster read shows a tab worker blocked and its live question is needed before surfacing a batch. Dispatched by the manager's gate-relay path (see § Needs-input in `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` and the relay path in commands/goal-loop.md); never decides and never types.
 tools: Bash
 allowed-tools: Bash(wezterm cli get-text:*), Bash(wezterm cli list:*), Bash(date:*)
 model: sonnet

@@ -101,10 +101,10 @@ class CheckSpawnTargetTest(unittest.TestCase):
 
     def test_registered_site_that_stops_citing_fails(self):
         """SC1, from the discovery side: the file still exists but no longer cites item 7."""
-        self.write("commands/steps/manager-spawn.md", SITE_NO_ANCHOR)
+        self.write("commands/steps/goal-spawn.md", SITE_NO_ANCHOR)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("commands/steps/manager-spawn.md", result.stderr)
+        self.assertIn("commands/steps/goal-spawn.md", result.stderr)
 
     def test_site_without_the_disqualifier_warning_fails(self):
         """SC2, first branch: a site that never names the disqualifier cannot warn about one."""
@@ -117,10 +117,10 @@ class CheckSpawnTargetTest(unittest.TestCase):
     def test_site_without_the_advisory_clause_fails(self):
         """SC2, second branch: without the advisory clause the rule reads as a refusal, and a
         misclassified row loses its route to a local spawn."""
-        self.write("commands/steps/manager-spawn.md", SITE_NO_ADVISORY)
+        self.write("commands/steps/goal-spawn.md", SITE_NO_ADVISORY)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("commands/steps/manager-spawn.md", result.stderr)
+        self.assertIn("commands/steps/goal-spawn.md", result.stderr)
         self.assertIn("advisory", result.stderr)
 
     def test_unregistered_citing_site_fails(self):

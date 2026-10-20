@@ -10,7 +10,7 @@ That matters because `config` is byte-identical whether a site was wired and the
 bypassed, or never wired in the first place — so no measurement can tell the two
 apart. Measured 2026-09-25: `agent_163` and `agent_164`, spawned from `Manager
 Layer`, both reported `mode_source=config` — a direct open by
-`agents/manager-drive.md` that skipped the classification entirely, on a plugin
+`agents/goal-drive.md` that skipped the classification entirely, on a plugin
 that already carried the prose fix.
 
 **Why this reads the ledger rather than a file.** `scripts/check-spawn-mode.py`
