@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.191.6
 
 - fix: **the goal-tier reap predicate no longer reaps a session parked on the operator's own `approve:`/`pick` gate.** `scripts/reap-closer.py` gains a fourth verdict, `PARKED` (exit 3), for a last closer carrying a standing `approve:` or `pick`; `agents/goal-drive.md`'s fourth read renders such a row under `Parked on operator` and sends no notice. Operator ruling **2026-10-20** (attention card `92f0e524bdd5c9c0b09c063b06363575`, `ANSWERED: option: stop reaping`): the gate's own attention card already reaches the operator, so a reap notice is redundant, the session can only refuse it, and the refusal trains sessions to discount the reap channel. `scripts/close-line.py` accepts `--closer parked` and renders the candidate with its own reason — it must not be folded into `closed`, because the session is live and has not closed. Any other OPEN closer (`review`, `you run`, `later`, or anything unrecognised) is still reaped exactly as before, and UNREADABLE still never suppresses. Change set: `agents/goal-drive.md`, `scripts/reap-closer.py`, `scripts/close-line.py`, `scripts/tests/test_reap_closer.py`, `scripts/tests/test_close_line.py`, `commands/steps/goal-sweep.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`. ⚠️ The `agents/goal-drive.md` budget entry rises by 1527 bytes — deliberate: a fourth verdict branch is a new rule, not padding.
 
