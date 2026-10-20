@@ -235,6 +235,86 @@ export function a2aSpawnArgumentRefusal({ target, resume, policy, interactive, w
   return null
 }
 
+// The cluster a target addresses, or `{ named: false }` when it addresses none.
+//
+// `docker` runs a container on this Mac and has no cluster, so it is outside this guard's
+// business. `k8s` WITHOUT a cluster names none either — and that case is reported as
+// `{ named: true, cluster: null }` rather than as "not a cluster target", because the two must
+// not collapse: a guard that silently passes the unnamed case has a hole exactly where the
+// operator's boundary lives, and the caller has to be able to tell them apart.
+const CLUSTER_TARGET = /^k8s(?::(.*))?$/
+
+export function clusterOfTarget(target) {
+  if (typeof target !== 'string') return { named: false }
+  const match = CLUSTER_TARGET.exec(target)
+  if (!match) return { named: false }
+  const cluster = (match[1] ?? '').trim()
+  return { named: true, cluster: cluster === '' ? null : cluster }
+}
+
+// A vault's worker may only run on a cluster that vault declares — a refusal string, or `null`.
+//
+// The rule this enforces (operator, 2026-10-20): "seibert worker should not run on nuke-dev|prod
+// and trading / personal worker should not run on octopus-dev|staging|prod". A wrong placement is
+// a data boundary breach, not a mistake that can be retried, so every branch below refuses rather
+// than defaulting — the same rule `resolveWorkerTarget` and `resolveSpawnTarget` apply to their
+// own choices.
+//
+// ⚠️ NO FALLBACK, AND THE THREE SILENT PASSES ARE THE POINT. An unreadable allowlist, a vault that
+// declares nothing, and a target that names no cluster would each be satisfied by "allow it" and
+// by "deny it"; only one of those is safe, and it is deny. The refusals name what is missing so
+// the repair is visible, because a caller told only "refused" reaches for a local spawn instead.
+//
+// ⚠️ This sits on the RESOLVED target, so it cannot tell — and must not care — whether the target
+// was passed explicitly or resolved from a vault's default cluster. One join, one rule: a
+// default-sourced forbidden pairing is refused exactly like an explicit one.
+export function clusterAllowlistRefusal({ vault, target, allowlist } = {}) {
+  const { named, cluster } = clusterOfTarget(target)
+  if (!named) return null
+
+  if (cluster === null) {
+    return (
+      `target ${JSON.stringify(target)} names no cluster, so vault ${JSON.stringify(vault)}'s cluster ` +
+      'allowlist cannot be checked against it — name the cluster as `k8s:<cluster>`. Refusing rather ' +
+      'than spawning without the boundary, since a cluster that cannot be named is not one that can be allowed.'
+    )
+  }
+
+  if (typeof vault !== 'string' || vault.trim() === '') {
+    return (
+      `target ${JSON.stringify(target)} names cluster ${JSON.stringify(cluster)}, but this spawn names no vault, ` +
+      'so no cluster allowlist can be applied to it — refusing rather than spawning unchecked. Pass `vault` ' +
+      '(that is how a spawn is attributed to a vault, and the allowlist is per vault).'
+    )
+  }
+
+  if (!allowlist) {
+    return (
+      `the cluster allowlist could not be read, so vault ${JSON.stringify(vault)} cannot be checked against ` +
+      `cluster ${JSON.stringify(cluster)} — refusing rather than spawning unchecked.`
+    )
+  }
+
+  const allowed = allowlist[vault]
+  if (!Array.isArray(allowed) || allowed.length === 0) {
+    return (
+      `vault ${JSON.stringify(vault)} declares no allowed clusters, so a worker cannot run on ` +
+      `${JSON.stringify(cluster)} (or any other cluster) — refusing rather than falling back. Add the vault ` +
+      'to the cluster allowlist with the clusters it may use.'
+    )
+  }
+
+  if (!allowed.includes(cluster)) {
+    return (
+      `cluster ${JSON.stringify(cluster)} is not allowed for vault ${JSON.stringify(vault)} — that vault may ` +
+      `only use ${allowed.map((c) => JSON.stringify(c)).join(', ')}. Refusing rather than falling back, because ` +
+      'a worker started on the wrong side of a data boundary is not a mistake that can be retried.'
+    )
+  }
+
+  return null
+}
+
 // A controller base URL, or a refusal. Refused rather than defaulted: the controller runs on
 // this Mac for `docker` and in nuke dev for `k8s`, and there is no address that is right for
 // both, so a guessed one either fails confusingly or reaches the wrong thing.
