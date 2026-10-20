@@ -23,7 +23,7 @@ this script exists to remove, not an optimisation of it.
 
 Usage:
   close-line.py --task "<task name>" --session "<full session id>" --liveness <verdict>
-                [--closer <closed|open|unreadable>]
+                [--closer <closed|parked|open|unreadable>]
 
 `--liveness` is the caller's own verdict, taken this run — the caller owns it and
 this script never re-derives it (`session-liveness.py` is the instrument). The
@@ -44,6 +44,7 @@ holds the socket. So the runnable line needs a second input, and the manager
 already takes it — `agents/goal-drive.md`'s fourth read, `scripts/reap-closer.py`:
 
   --closer closed     → the candidate line, no command, exit 1
+  --closer parked     → the candidate line, no command, exit 1 (a standing operator gate)
   --closer open       → the liveness verdict decides, exactly as before
   --closer unreadable → the liveness verdict decides, exactly as before
   (omitted)           → the liveness verdict decides, exactly as before
@@ -99,12 +100,16 @@ RUNNABLE = (LIVENESS_LIVE, LIVENESS_PARKED)
 
 # The second input — the caller's own read of the session's NEWEST CLOSER, taken
 # this run by `scripts/reap-closer.py` and owned by the caller exactly as the
-# liveness verdict is. Only `closed` changes the render; `open` and `unreadable`
-# both leave the liveness verdict deciding, for the reason in the module docstring.
+# liveness verdict is. `closed` and `parked` both withhold the command; `open` and
+# `unreadable` leave the liveness verdict deciding, for the reason in the module
+# docstring. ⚠️ `parked` here is the CLOSER verdict (a standing `approve:`/`pick`
+# gate), not the LIVENESS verdict of the same word — they share a spelling and
+# nothing else, and a caller must not pass one where the other belongs.
 CLOSER_CLOSED = "closed"
+CLOSER_PARKED = "parked"
 CLOSER_OPEN = "open"
 CLOSER_UNREADABLE = "unreadable"
-CLOSER_WORDS = (CLOSER_CLOSED, CLOSER_OPEN, CLOSER_UNREADABLE)
+CLOSER_WORDS = (CLOSER_CLOSED, CLOSER_PARKED, CLOSER_OPEN, CLOSER_UNREADABLE)
 
 # The plugin root, resolved the way `sweep-gate.py` resolves its `BOX_TABLE`: an
 # absolute expanduser path rather than an inherited `${CLAUDE_PLUGIN_ROOT}`. The
@@ -125,6 +130,14 @@ CANDIDATE_SUFFIX = "terminal, liveness UNVERIFIED"
 # liveness here is CONFIRMED live, so "UNVERIFIED" would be a false statement about
 # the probe. What is void is the instruction, because the session already ran it.
 CLOSED_SUFFIX = "session already closed clean — the close it asks for has run"
+
+# The candidate's THIRD reason, and it must not be folded into either above. The session
+# is live and has not closed — it is parked on a standing `approve:`/`pick` gate, so the
+# decision is already in the operator's queue and a close instruction here would pre-empt
+# it. Operator ruling 2026-10-20 (attention card 92f0e524…, `ANSWERED: option: stop reaping`).
+PARKED_SUFFIX = (
+    "session parked on the operator's own decision — its gate is already in their queue"
+)
 
 
 def plugin_root(override=None):
@@ -168,6 +181,8 @@ def close_line(task, session, liveness, now=None, root=None, closer=None):
     """
     if closer == CLOSER_CLOSED:
         return f"🔧 CLOSE-ME CANDIDATE: {task} [{sid8(session)}] — {CLOSED_SUFFIX}"
+    if closer == CLOSER_PARKED:
+        return f"🔧 CLOSE-ME CANDIDATE: {task} [{sid8(session)}] — {PARKED_SUFFIX}"
     if liveness in RUNNABLE:
         return (
             f"✅ DONE — CLOSE: {task} [{sid8(session)}] — verified {stamp(now)} "
@@ -212,7 +227,7 @@ def main(argv=None):
     # The exit code tracks the RENDER, never the liveness alone: a closed-clean
     # session renders the candidate even on a `live` verdict, and a caller that
     # branches on 0/1 must see the same split the reader does.
-    runnable = args.liveness in RUNNABLE and args.closer != CLOSER_CLOSED
+    runnable = args.liveness in RUNNABLE and args.closer not in (CLOSER_CLOSED, CLOSER_PARKED)
     return 0 if runnable else 1
 
 
