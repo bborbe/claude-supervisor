@@ -118,6 +118,7 @@ def find_bun(env, which=shutil.which):
 TOKEN_KEYS = (
     ("INTERACTIVE_AUTH_TOKEN", "VO0Gmw"),
     ("SUPERVISOR_A2A_TOKEN_NUKEDEV", "lO4j5q"),
+    ("SUPERVISOR_A2A_TOKEN_NUKEPROD", "zL8akq"),
     ("SUPERVISOR_A2A_TOKEN_DOCKER", "pLv8Mw"),
 )
 
