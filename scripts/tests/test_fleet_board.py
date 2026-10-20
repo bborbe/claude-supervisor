@@ -342,15 +342,20 @@ class TestGroupingRules(unittest.TestCase):
         self.assertEqual(g.role_of(_sid(6)), "manager")
         self.assertIsNone(g.subject_of(_sid(6)), "orange proves a manager, not its scope")
 
-    def test_rule_2_the_goal_chain_nests_a_worker_under_its_manager(self):
-        """goal -> topic listing that goal -> the live manager for that topic."""
+    def test_a_worker_whose_goal_has_no_manager_falls_to_the_root_not_its_topic(self):
+        """A topic manager never manages a worker.
+
+        `_sid(2)` is the live topic manager for "Manager Layer", which lists
+        "Sample Goal A"; `_sid(3)`'s task names that goal, and no goal manager is
+        live. The worker must fall to the fleet manager, not to the topic manager.
+        """
         g = _grouping()
         self.assertEqual(g.role_of(_sid(3)), "worker")
-        self.assertEqual(g.parent_of(_sid(3)), _sid(2))
+        self.assertEqual(g.parent_of(_sid(3)), _sid(9))
 
-    def test_rule_2_a_manager_whose_subject_is_the_goal_beats_the_topic(self):
-        """Both a goal-subject manager and its topic's manager exist; the goal is
-        the more specific parent and must win."""
+    def test_rule_2_a_goal_manager_wins_over_its_topic(self):
+        """Both a goal-subject manager and its topic's manager exist; the worker is
+        parented to the goal manager, because the topic is not a rung for a worker."""
         g = _grouping()
         self.assertEqual(g.parent_of(_sid(8)), _sid(7))
 
@@ -419,6 +424,22 @@ class TestGroupingRules(unittest.TestCase):
         }
         g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
         self.assertEqual(g.parent_of(_sid(3)), _sid(10))
+
+    def test_managed_by_naming_a_topic_still_parents_to_that_topic(self):
+        """Tier 1 is the operator's own declaration: a `managed_by` naming a topic
+        keeps that topic manager as the worker's parent."""
+        index = fb.VaultIndex(
+            topics=["Manager Layer"],
+            task_titles=["Some Task"],
+            task_managed_by={"some task": "Manager Layer"},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(2): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(2))
 
     def test_a_task_listed_directly_under_a_topic_resolves_to_that_topic(self):
         """F4 — the design's nearest-ancestor case.
@@ -524,7 +545,7 @@ class TestTree(unittest.TestCase):
         self.assertTrue(self.tree[1][0].startswith("├ "), self.tree[1][0])
 
     def test_a_grandchild_carries_its_parents_continuation_bar(self):
-        cell = self.cell(_sid(3))
+        cell = self.cell(_sid(8))
         self.assertTrue(cell.startswith("│   └ "), cell)
 
     def test_the_last_child_uses_the_closing_glyph(self):

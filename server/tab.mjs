@@ -207,9 +207,13 @@ export async function confirmInPane(paneId, marker, opts = {}) {
 // that let `{sent: true}` stand for a message that never arrived.
 //
 // An empty composer is a stronger signal here than it is in `confirmInPane` because this
-// function watched its OWN text leave: the failure that note warns about (a message
-// stranded, then discarded unsubmitted) still ends with the text gone, so a composer that
-// never held our text is reported as unverified rather than as delivery.
+// function watched its OWN text leave. A composer showing one of `QUEUED_HINTS` is the
+// other positive signal: the TUI swaps the input box for a queue notice when it ACCEPTS a
+// message it is not ready to run yet. Treating that as "unknown" was the v0.191.2 defect —
+// it made `delivered: false` unreachable, because every accepted message read `unverified`
+// and a swallowed send landed in the same bucket.
+export const QUEUED_HINTS = ['queued message', 'queued messages', 'press up to edit queued']
+
 export async function confirmSubmission(paneId, message, opts = {}) {
   const {
     wezterm = defaultWezterm,
@@ -237,12 +241,20 @@ export async function confirmSubmission(paneId, message, opts = {}) {
         sawReadable = true
         const composer = line.slice(PROMPT_GLYPH.length).trim()
         if (composer === '') return { delivered: true, attempts: attempt + 1 }
-        if (!head || !composer.includes(head)) {
+        const holdsOurs = Boolean(head) && composer.includes(head)
+        if (!holdsOurs) {
+          // Accepted-into-the-queue is DELIVERY, not an unknown. This is the branch that
+          // made `delivered: false` unreachable when it fell through to 'unverified'.
+          if (QUEUED_HINTS.some((hint) => composer.toLowerCase().includes(hint))) {
+            return { delivered: true, via: 'queued', attempts: attempt + 1 }
+          }
           return {
             delivered: 'unverified',
-            reason: `pane ${paneId}'s composer holds text this send did not write — refusing to claim delivery`,
+            reason: `pane ${paneId}'s composer holds text this send did not write and shows no queue notice — delivery cannot be established`,
           }
         }
+        // Our text is still there: the Enter was swallowed. Keep polling; the retries below
+        // re-press it, and a composer that still holds it at the end is a real `false`.
       }
       if (Date.now() >= deadline) break
       await sleep(intervalMs)
@@ -302,6 +314,7 @@ export async function sendToPane(paneId, message, opts = {}) {
   const submission = await confirmSubmission(paneId, message, opts)
   const base = { sent: true, delivered: submission.delivered, tabId, paneId: String(paneId) }
   if (submission.attempts !== undefined) base.attempts = submission.attempts
+  if (submission.via !== undefined) base.via = submission.via
   if (submission.reason !== undefined) base.reason = submission.reason
   return base
 }
