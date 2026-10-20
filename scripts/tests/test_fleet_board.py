@@ -970,5 +970,41 @@ class TestNameTitleMismatch(unittest.TestCase):
         self.assertEqual(got[0][2], [self.DRIFTED_TITLE])
 
 
+class TestSessionTaskTitle(unittest.TestCase):
+    """A `sessions` entry names the task its row resolved to, or says why it has none.
+
+    `build_rows` renders the resolved title into `cells[2]`, but the `sessions`
+    projection used to drop it. A consumer reading the documented structure then
+    got a registry label and nothing to match it against, so a row whose label
+    differs from its task title read as an unresolvable session — which is what
+    happened to `77f7ff67` on 2026-10-20. The fixtures make both halves
+    observable: a resolved title must reach the entry, and each distinct absence
+    must carry its own wording rather than one shared sentence.
+    """
+
+    def _by_sid(self):
+        return {s["session_id"]: s for s in fb.build_sessions(_group_rows()[1])}
+
+    def test_a_worker_row_carries_its_resolved_task_title(self):
+        entry = self._by_sid()[_sid(3)]
+        self.assertEqual(entry["task_title"], "Some Task")
+        self.assertIsNone(entry["task_title_reason"], "a resolved row needs no reason")
+
+    def test_a_manager_row_carries_its_own_reason(self):
+        entry = self._by_sid()[_sid(9)]
+        self.assertIsNone(entry["task_title"], "a manager manages a page, not a task")
+        self.assertEqual(entry["task_title_reason"], fb.TASK_TITLE_NO_MANAGER)
+
+    def test_an_unmanaged_row_carries_a_different_reason(self):
+        entry = self._by_sid()[_sid(5)]
+        self.assertIsNone(entry["task_title"])
+        self.assertEqual(entry["task_title_reason"], fb.TASK_TITLE_NO_TASK_FILE)
+
+    def test_every_absence_has_its_own_wording(self):
+        reasons = {fb.TASK_TITLE_NO_MANAGER, fb.TASK_TITLE_NO_TASK_FILE,
+                   fb.TASK_TITLE_NO_BINDING}
+        self.assertEqual(len(reasons), 3, "one wording per distinct absence, never shared")
+
+
 if __name__ == "__main__":
     unittest.main()
