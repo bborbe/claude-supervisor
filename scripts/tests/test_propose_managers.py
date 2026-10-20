@@ -385,6 +385,25 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(self.posted), 2)
 
+    def test_the_dry_run_line_names_the_key_actually_posted(self):
+        """The printed key must be the one `post()` receives, or the dry run lies.
+
+        A goal in the approval inbox is posted under `fleet-approve-manager:<goal>`; a
+        print that echoed the start-manager key would point the operator at a card the
+        store never received. Measured 2026-10-20 — the line read `dedup_key()` while
+        `post()` read `card_key()`, and only the posted body was right.
+        """
+        rows = [row("Queued", title="a"), row("Queued", title="b")]
+        original = pm.goal_phase
+        pm.goal_phase = lambda _dir, name: "todo" if name == "Queued" else None
+        try:
+            code, out = self.run_main([], rows=rows)
+        finally:
+            pm.goal_phase = original
+        self.assertEqual(code, 0)
+        self.assertIn("card: fleet-approve-manager:Queued", out)
+        self.assertNotIn("card: fleet-propose-manager:Queued", out)
+
     def test_at_the_cap_posts_nothing_and_exits_three(self):
         rows = [row("G", title="a"), row("G", title="b")]
         code, out = self.run_main(["--post"], cap=(3, 3, "default", "default"), count=3, rows=rows)

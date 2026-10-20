@@ -280,6 +280,8 @@ Three consequences, all binding:
 
    ⚠️ **The rule is ADVISORY at the call site, and never a refusal by this server.** A call site that reads a disqualified `target:` on a row **prints a warning naming the disqualifier** and leaves the decision with the caller; it does not refuse, and this server neither reads the row nor refuses on this ground, because it never sees the row. That split is deliberate: eligibility is a judgement about the *work*, which the server cannot make, and a server-side refusal would leave a misclassified row with no route to a local spawn. ⚠️ **The enforcement lines live in the three call sites that carry the binding — `commands/steps/goal-spawn.md`, `commands/open.md` and `commands/open-a2a.md` — and each cites this item rather than restating it.** ⚠️ **Three, not two: `commands/open-a2a.md` joined on 2026-10-17** and reads the field itself in its § 2.1, so this sentence's count was stale the day the file landed. `scripts/check-spawn-target.py` asserts the registered set against what the tree actually cites, so the two cannot drift apart again. A second copy of this list is the defect the single-home rule forbids.
 
+   ⚠️ **ONE CARVE-OUT, AND IT IS A DIFFERENT KIND OF RULE: the VAULT↔CLUSTER BOUNDARY IS A SERVER REFUSAL.** `clusterAllowlistRefusal` (`server/a2a-spawn.mjs`, called from `spawnA2AWorker` once the controller has resolved) refuses an A2A spawn whose cluster is outside the spawning vault's declared allowlist, read from `~/.config/claude-supervisor/vaults.json` as `{"vaults": {"<vault>": ["<cluster>", …]}}`. The distinction is what each rule is a judgement **about**: eligibility above is a judgement about the *work* — whether this row's task can run with no vault mount, only the image's tools, and no local process — which this server cannot make, because it never sees the row, and which a server-side refusal would strand with no route to a local spawn. The cluster boundary is a statement about **who may touch what**, which this server *can* decide from the `vault` and the resolved `target` it already holds — and must, because a worker placed on the wrong side of it is a data boundary breach, not a mistake that can be retried. ⚠️ **It is checked at TWO points, because a cluster is decidable at two moments.** For an explicit `k8s:<cluster>` the cluster is already in the caller's string, so it is judged **before** the controller resolves — a forbidden pairing is refused whether or not that cluster is configured, because the resolver's own "unconfigured cluster" error would otherwise mask the boundary on exactly the pairings the rule exists to forbid. For a bare `k8s` it is judged **after** resolution, on `controller.target`: that target names no cluster until `resolveA2AControllerTarget` turns it into `k8s:<the default cluster>`, so judging the caller's string would refuse a legitimate default spawn while the cluster it will actually run on went unchecked. Either way no path reaches the controller without passing the check, and a default-sourced pairing is refused exactly like an explicit one. ⚠️ **It fails closed on every ambiguous state**: an unreadable or malformed allowlist, a vault that declares no clusters, and a spawn that names no vault all REFUSE. A guard that treats any of those as "no restriction" has a hole exactly where the boundary lives. ⚠️ **This does not create a second eligibility list** — nothing in the bullets above is enforced server-side by it; only the vault→cluster pairing is.
+
    ⚠️ **NO target is a `SPAWN_MODES` value, and that is the whole design rather than an omission.** `SPAWN_MODES` IS selectable from `SUPERVISOR_SPAWN_MODE` and `spawn.mode` in `~/.config/claude-supervisor/config.json`, so a value there would let one config edit default the entire fleet to it — and a non-`local` target is *"a second option, not the default"*. The target is **per-call only**: `resolveSpawnTarget` has no env source and no config source, and that absence is deliberate.
 
    ⚠️ **An unknown target REFUSES the spawn rather than falling back to `local`.** Falling back is the failure, not the safe answer: a worker created on this Mac when the caller asked for a container or a pod looks exactly like a working call, and where a worker was created is otherwise discovered only by noticing it. Same rule and same reason as item 6's unknown-mode refusal.
@@ -757,9 +759,21 @@ What this file still owns is the part that is about the plugin rather than the f
   *not* carry (a headless worker holds no registry entry at all). Never read a short table as
   a clean fleet, and never read an empty one as an empty fleet.
 - **`--json` carries one entry per session under `sessions`** — `session_id`, `label`, `role`
-  (`manager` / `worker` / `unmanaged`), `parent` (a session id, or `unmanaged`) and `bucket`.
-  The tree is drawn from `parent`, so a consumer that needs the structure reads the document
-  rather than parsing the glyphs.
+  (`manager` / `worker` / `unmanaged`), `parent` (a session id, or `unmanaged`), `bucket`,
+  `task_title` and `task_title_reason`. The tree is drawn from `parent`, so a consumer that
+  needs the structure reads the document rather than parsing the glyphs.
+  ⚠️ **`task_title` is how a row is matched to its task — read it before `label`.** `label`
+  is the registry name; `task_title` is the title of the task the row resolved to. They
+  diverge whenever a session outlives a retitle, and `--mismatches` reports exactly that set.
+  A consumer that looks up a row's task by `label` finds nothing in the diverging case and
+  reads the row as an unresolvable session, which is the defect that made this field exist
+  (measured 2026-10-20 on `77f7ff67`).
+  `task_title_reason` names why `task_title` is `null`, with **one wording per distinct
+  absence** — a manager manages a subject page rather than a task, an unmanaged session has
+  no task file, a worker is bound by neither a stamped title nor a task file. Never one
+  shared sentence: three states read as one the moment they share a reason.
+  ⚠️ **`subject` is manager-scoped** — it names the page a manager manages and is `null` on
+  every worker row by design. It is emitted but is not a signal of resolution.
 - **The bucket rule's single source is `scripts/fleet-board.py` itself** — its module
   docstring defines the four buckets and the precedence that makes the classification total.
   Neither this file nor the runbook restates it.

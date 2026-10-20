@@ -27,7 +27,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, clusterAllowlistRefusal, clusterOfTarget, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
 import { parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
@@ -39,6 +39,7 @@ import { windowIdArgument } from './window-id.mjs'
 import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
+import { mtimeReloadedAllowlist } from './cluster-allowlist.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
@@ -1153,6 +1154,12 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
 // as 5. `liveConfig` re-reads the file when its mtime moves; see `config-reload.mjs`.
 const liveConfig = mtimeReloadedConfig({ path: config.configFile })
 
+// The per-vault cluster allowlist, read live for the same reason `liveConfig` is: the operator
+// edits it precisely because they want the NEXT spawn to differ from the last, and a spawn
+// decided against permissions read at boot is a decision against a file that may no longer exist.
+// Its fail-closed semantics differ from `liveConfig`'s on purpose — see `cluster-allowlist.mjs`.
+const liveAllowlist = mtimeReloadedAllowlist()
+
 async function managerLimitError({ operatorNamed = false } = {}) {
   const limits = resolveMaxManagers({ file: liveConfig.current().file, path: config.configFile })
   const counted = limits.error || limits.limit === null ? { ids: null, error: null } : await managerSessions()
@@ -1572,11 +1579,51 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   const minted = newSessionId()
   if (minted.error) return { error: minted.error }
 
+  // ⚠️ THE BOUNDARY IS CHECKED AT TWO POINTS, AND BOTH ARE LOAD-BEARING — because a cluster is
+  // decidable at two different moments, and either one alone leaves a hole.
+  //
+  // (a) BEFORE the controller resolves, for an EXPLICIT `k8s:<cluster>`. The cluster is already in
+  // the caller's string, so the boundary can be judged with no controller configured. This
+  // ordering is not tidiness: the resolver REFUSES an unconfigured cluster, so a forbidden pairing
+  // aimed at one — `private-personal` → `k8s:octopus-dev`, where no octopus URL or token exists on
+  // this supervisor — would stop at the resolver with ITS message and the allowlist would never be
+  // consulted. The data boundary would then have no evidence at all, on exactly the pairings the
+  // rule exists to forbid. A forbidden pairing must be refused whether or not its cluster happens
+  // to be configured.
+  //
+  // (b) AFTER the controller resolves, on `controller.target`, for a BARE `k8s`. That target names
+  // no cluster until `resolveA2AControllerTarget` turns it into `k8s:<default>`, so checking the
+  // caller's string would refuse a legitimate default-cluster spawn while the cluster it will
+  // actually run on went unchecked — the guard inverted, loudest where it is wrong. On the
+  // canonical target the rule is origin-agnostic: a default-sourced pairing is judged by the
+  // cluster the worker really runs on.
+  //
+  // A read error is returned as itself rather than folded into the refusal, so the message names
+  // the file the operator has to fix instead of saying only "the allowlist could not be read".
+  const allowlistRead = liveAllowlist.current()
+  if (allowlistRead.error) return { error: allowlistRead.error }
+
+  const explicit = clusterOfTarget(target)
+  if (explicit.named && explicit.cluster !== null) {
+    const refusal = clusterAllowlistRefusal({ vault, target, allowlist: allowlistRead.allowlist })
+    if (refusal) return { error: refusal }
+  }
+
   const controller = resolveA2AControllerTarget({
     target,
     ...a2aResolverInputs(),
   })
   if (controller.error) return { error: controller.error }
+
+  // (b) — the bare-`k8s` path, judged on the cluster it resolved to. It also re-checks an explicit
+  // target, which is deliberate: if the resolver ever canonicalises a target to a different
+  // cluster than the one the caller named, the cluster actually used is still the one judged.
+  const resolvedRefusal = clusterAllowlistRefusal({
+    vault,
+    target: controller.target,
+    allowlist: allowlistRead.allowlist,
+  })
+  if (resolvedRefusal) return { error: resolvedRefusal }
 
   // ⚠️ THE CANONICAL TARGET, not the caller's string. A bare `k8s` resolves to the configured
   // default cluster, and everything recorded downstream — the roster status, the capture file
