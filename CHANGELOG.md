@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.185.3
 
 - fix: **a reap is handed over only when its recipient is live.** The drive leg decided `reap` from the roster the caller passed — read from the supervisor registry, which **retains ended sessions** — while the harness surface `SendMessage` addresses carries live sessions only, so a reap whose remedy is "nudge the session to close itself" had no recipient whenever the session had already ended. Measured 2026-10-03 (Manager Layer tick 86): `reaped 2` over two sessions absent from the 43-row peer list, both undeliverable, and the summary line indistinguishable from two nudges. `agents/manager-drive.md` step 1 gains a **fifth read** — probe the full id with `scripts/session-liveness.py --check` and route the verdict through the new `scripts/reap-line.py`, which prints the hand-over line **only** on `live` and `reap moot — no live recipient` otherwise; `reaped <n>` now counts delivered notices only, and the report gains a `Reap moot (<n>)` block. The vocabulary is pinned in the script's docstring: `LIVE`→`live`, `ABSENT`→`absent`, `UNKNOWN`/`AMBIGUOUS`/`MALFORMED`→`unknown`, and `parked` only from the sweep's classification — never deliverable, unlike `close-line.py`. Change set: `scripts/reap-line.py`, `scripts/tests/test_reap_line.py`, `scripts/tests/test_reap_wiring.py`, `agents/manager-drive.md`, `scripts/budget-baseline.json` (raised by hand for the deliberate fifth-read growth), `CHANGELOG.md`.
 
