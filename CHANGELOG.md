@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.191.0
 
 - feat: **a row in `fleet-board.py --json` now carries the task it resolved to, so a label that drifted from its task title no longer reads as an unresolvable session.** `build_rows` already held the resolved title and rendered it into `cells[2]`, but the `sessions` projection dropped it — leaving a consumer with the registry `label` and nothing to match it against. On a session that outlived a retitle the two differ, and `--mismatches` reports exactly that set, so a reader searching the tasks dir by label finds no file: measured 2026-10-20, worker `77f7ff67` was recorded as having no task at all when its `claude_session_id` resolved fine and its `parent` was already the goal manager. Each entry now carries `task_title` and `task_title_reason`, with one wording per distinct absence (manager, unmanaged, unbound worker) rather than one sentence shared across three states; `subject` is documented as manager-scoped, since every worker row carries `null` there by design. The projection moves into a pure `build_sessions(rows)` so it is testable without a live fleet. Change set: `scripts/fleet-board.py`, `scripts/tests/test_fleet_board.py`, `docs/fleet-surface.md`, `CHANGELOG.md`.
 
