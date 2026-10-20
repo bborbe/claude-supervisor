@@ -866,6 +866,15 @@ the wrong tier: the fleet manager would start a goal manager the topic manager i
 ranked to start, and the `manager-cap` accounting would be split across two counters that
 never see each other.
 
+⚠️ **Tier 4 is about the GOAL's owner, not the WORKER's parent.** The topic manager owns an
+unmanaged goal so it can start that goal's manager; it does not put the worker under the topic
+manager. `scripts/fleet-board.py`'s `manager_on_chain` parents a worker only to the goal
+manager of a goal its task declares (`managed_by` first, then `goals:`), and when no goal
+manager is live the worker falls to the Fleet Manager (the root) as a holding row. A topic
+manager never manages a worker (`commands/topic-loop.md`). Two exceptions keep a topic manager
+as a worker's parent: a task whose `managed_by` names a topic, and a goal-less task listed
+directly under a topic (the nearest-ancestor case above).
+
 ⚠️ **`managed_by` has no writer yet, and saying so is part of the rule.** It is authored by
 hand — by the operator, or by a manager settling a task whose `goals:` genuinely names more
 than one owner — and nothing in this repo writes it automatically. **Both resolvers read it**,

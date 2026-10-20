@@ -43,6 +43,14 @@ topic's manager if the task sits directly under a topic, otherwise the fleet man
 with no topic is managed by the fleet manager. `docs/fleet-surface.md` § Which manager owns a
 subject is the canonical statement of that fallback.
 
+⚠️ **A worker whose task declares a goal is parented only to that goal's manager.** When the
+goal has no live manager the worker falls to the fleet manager (the root) as a holding row —
+never to the topic manager through the goal's topic, because a topic manager never manages a
+worker (`commands/topic-loop.md`). The topic manager's product is starting that goal's manager
+(`docs/fleet-surface.md` § Which manager owns a subject tier 4); once it is live the worker
+parents to it. Two documented exceptions keep a topic manager as a worker's parent: a task
+whose `managed_by` names a topic, and a goal-less task listed directly under a topic.
+
 ⚠️ **`topic-*` commands hold no `spawn_agent` tool.** A topic manager starts a goal manager
 through `/supervisor:open --goal`, whose resume and spawn branches already carry the hold
 check, the liveness guard and the spawn-recipe rules. Handing the topic tier its own spawn
