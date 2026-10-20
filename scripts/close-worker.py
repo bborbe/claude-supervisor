@@ -117,6 +117,37 @@ def frontmatter(path):
     return out
 
 
+def metrics_session_ids(path):
+    """Session ids under `metrics_sessions` — every session that ever worked the task.
+
+    The block is a list of maps (`session_id` + `started_at`), which the flat reader above
+    cannot see: it keeps only top-level keys. The ids are read here so a session the task
+    was handed off from can still be resolved to it.
+    """
+    ids = []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return ids
+    if not lines or lines[0].strip() != "---":
+        return ids
+    in_block = False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            in_block = line.partition(":")[0].strip() == "metrics_sessions"
+            continue
+        if in_block:
+            key, sep, value = line.strip().lstrip("- ").partition(":")
+            if sep and key.strip() == "session_id":
+                ids.append(value.strip().strip("'\""))
+    return ids
+
+
 def task_dirs_for(cwd, vault_root=None):
     """Candidate task directories: the vault above `cwd`, then every known vault.
 
@@ -147,13 +178,17 @@ def task_dirs_for(cwd, vault_root=None):
 
 
 def find_task(session_id, cwd, vault_root=None):
-    """`(path, frontmatter)` for the task claiming this session id, or `None`.
+    """`(path, frontmatter, handed_off)` for the task this session may close against, or `None`.
 
     `claude_session_id` is the join: `vault-cli` writes it on entry and the session-connect
-    step appends the metrics entry beside it. A session id appearing anywhere else in a
-    task body is not a claim of ownership, so the candidates come from a substring grep
-    (one process over a bounded directory set) and the match is then confirmed on the
-    frontmatter field only.
+    step appends the metrics entry beside it. When that id has moved to another session the
+    task the session was handed off from still counts — the id is then in its
+    `metrics_sessions` while `claude_session_id` names the successor — and the third element
+    says so, because a handed-off session has already put its work on the record.
+
+    A session id appearing anywhere else in a task body is not a claim of ownership, so the
+    candidates come from a substring grep (one process over a bounded directory set) and the
+    match is then confirmed on `claude_session_id`, or on `metrics_sessions`.
 
     ⚠️ `grep -l` exiting 1 means "no match", which is the honest answer here and not an
     error — an empty stdout is read as "no task claims this session".
@@ -170,11 +205,14 @@ def find_task(session_id, cwd, vault_root=None):
         )
     except Exception:
         return None
+    handed_off = None
     for path in sorted((found.stdout or "").splitlines()):
         fm = frontmatter(path)
         if (fm.get("claude_session_id") or "").strip() == session_id:
-            return path, fm
-    return None
+            return path, fm, False
+        if handed_off is None and session_id in metrics_session_ids(path):
+            handed_off = (path, fm, True)
+    return handed_off
 
 
 def is_future(value, today):
@@ -204,7 +242,12 @@ def task_verdict(task, today):
             "no task file carries this session id as claude_session_id; a close needs a "
             "finished task, and absent evidence is not evidence of one",
         )
-    path, fm = task
+    path, fm, handed_off = task
+    if handed_off:
+        # The session no longer owns this task: its work is on the record under
+        # `metrics_sessions` and a successor is working it. Terminality is the
+        # successor's business, not this session's.
+        return None
     status = (fm.get("status") or "").strip()
     if status in TERMINAL:
         return None
@@ -347,7 +390,7 @@ def main():
         )
         return 1
 
-    task_path, fm = task
+    task_path, fm, _handed_off = task
     print(f"🧹 close-worker · session {sid[:8]} · pid {pid} · {rec.get('name')!r}")
     print(f"   task: {os.path.basename(task_path)} (status {fm.get('status')})")
     print(f"   worktree: {verdict}" + (f" · {others} other live session(s) share it" if verdict == "dirty" else ""))
