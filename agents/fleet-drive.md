@@ -39,6 +39,25 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
 <process>
 
+0. **Re-evaluate the retained rows — before the candidate scan.** A row that landed `blocked` or `unverifiable` in an earlier round has left the digest's candidate set, and step 1 rebuilds candidates from the digest alone — so without this step no later round ever looks at it again. Read the ledger (`python3 $P/drive-ledger.py read`), take every entry whose `verdict` is `blocked` or `unverifiable`, and re-probe it from its **task file**:
+
+   ```bash
+   T="<task_file from the entry>"
+   grep -m1 '^status:' "$T"                              # completed | aborted | in_progress
+   grep -m1 '^phase:'  "$T"                              # done | execution | planning
+   grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "$T"   # open boxes
+   ```
+
+   ⚠️ **The task file is the authority, and the entry must carry its path.** `session_id` is an 8-char display handle — prefix-matching it against a task's `claude_session_id:` is the anti-pattern `fleet-sweep-reader` step 8 forbids — and `name` is the session display name, which need not equal the filename (measured 2026-10-20: ledger `Row Whose Body Demands…` against file `A Row Whose Body Demands…`). An entry with an empty `task_file` is **unverifiable**; never guess the path.
+
+   Disposition per retained row, each recorded this round like any digest candidate:
+   - task terminal (`status:` `completed`/`aborted`, or `phase:` `done`, or 0 open boxes) → **finished**, joining step 1b's reap set.
+   - task `in_progress` with open boxes and the session absent from `~/.claude/sessions/*.json` → **blocked**, cause `orphan` — escalate, never nudge.
+   - task `in_progress` with open boxes and the session present → run step 4's probes: they clear → **revive** (drafted in step 6); a live blocker → **blocked**; a probe that cannot run → **unverifiable**.
+   - task file missing and session absent → **unverifiable**, dropped with reason `task file missing`.
+
+   ⚠️ **Every retained row is re-probed every round, and its `probe` is rewritten with this round's command and result.** Carrying the previous round's `probe` string forward is the defect this step exists to remove — the stub-probe test fails it.
+
 1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `[unresolved]` rows and rows with no task are **unverifiable**.
 
 1b. **Reap the finished — before drafting any nudge.** This is the reap contract's canonical home: `fleet-loop` Step 3b dispatches this leg on every round and points here rather than restating it. Measured 2026-09-23 the fleet snapshot had not been written for ~14h and the ledger held two `finished` verdicts that nothing ever messaged. For each finished row, re-read the three disk facts this run:
@@ -88,7 +107,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
    **Thresholds, numerically.** "Idle" = roster status `idle` (turn ended); this agent adds no age floor — the sweep-reader's `parked` bucket is the idle test. "One tick" = one `fleet-loop` round, ~15 min; the ledger suppression (step 3) keeps a still-idle session from being re-nudged or re-reaped every round.
 
-7. **Persist the ledger** — `python3 $P/drive-ledger.py merge`, with **this round's entries only** on stdin as `{"round": "<ts>", "entries": [...]}`. The script owns the merge: it starts from everything already on disk, updates or adds this round's, keeps a session absent this round **as-is**, takes a `.bak` of the pre-merge file, and replaces the ledger atomically. So the written file never has fewer sessions than the one read — and a round cannot shrink it by omission, because the round never holds the merged set at all. ⚠️ **Never write the ledger yourself** — no `jq`, no `python3 -c`, no `mkdir`/`mv`, and never pass a pre-merged set. `scripts/check-drive-ledger-writes.py` fails the build if any ledger-referencing line across `agents/` and `commands/` **writes** the ledger through an inline interpreter — a read is not an offence. A refused merge (exit 2) wrote **nothing**: report the refusal in the header rather than retrying by hand. One entry per candidate of **every** verdict — revive, blocked, unverifiable and finished alike, because step 3's suppression compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
+7. **Persist the ledger** — `python3 $P/drive-ledger.py merge`, with **this round's entries only** on stdin as `{"round": "<ts>", "entries": [...]}`. The script owns the merge: it starts from everything already on disk, updates or adds this round's, keeps a session absent this round **as-is**, takes a `.bak` of the pre-merge file, and replaces the ledger atomically. So the written file never has fewer sessions than the one read — and a round cannot shrink it by omission, because the round never holds the merged set at all. ⚠️ **Never write the ledger yourself** — no `jq`, no `python3 -c`, no `mkdir`/`mv`, and never pass a pre-merged set. `scripts/check-drive-ledger-writes.py` fails the build if any ledger-referencing line across `agents/` and `commands/` **writes** the ledger through an inline interpreter — a read is not an offence. A refused merge (exit 2) wrote **nothing**: report the refusal in the header rather than retrying by hand. One entry per candidate of **every** verdict — revive, blocked, unverifiable and finished alike, because step 3's suppression compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason, and **`task_file`** — the last is what step 0 re-reads, and an entry without one cannot be re-probed. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
 
 </process>
 
@@ -100,10 +119,15 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
 ```
-fleet-drive — <N> candidates · <F> finished (reaped) · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable
+fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable
   <name> [<sid8>] · <bucket> · <open boxes> · <verdict>
       probe: <command → result>   |   (revive: the CLOSERS row + the four step-4a rows)
       ledger: <drafted | suppressed: <reason> | excluded>
+RETAINED — re-probed from the ledger, not the digest
+  <name> [<sid8>] · <task file|no task file> · <status>/<phase> · <open boxes> · <prior verdict → this round>
+      probe: <command → result>
+      ledger: <drafted | suppressed: <reason> | excluded | dropped: task file missing>
+  (none)
 ESCALATION — grouped by cause
   <cause>
     <name> [<sid8>] · pane <id|—> · <link|no pane — <reason>> — <probe> → <result>   (mark unverified causes "unverified")
@@ -146,7 +170,7 @@ candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · unverifiable=<U> 
 <name> [<sid8>] = <verdict>
 ```
 
-⚠️ **Every candidate of every verdict gets a line** — revive, blocked, unverifiable and finished alike — because step 3's suppression compares each round against the previous one's value, and a row absent from the hand-back reads as a row that no longer exists.
+⚠️ **Every candidate of every verdict gets a line** — revive, blocked, unverifiable and finished alike — because step 3's suppression compares each round against the previous one's value, and a row absent from the hand-back reads as a row that no longer exists. A row re-probed in step 0 is a candidate this round and gets its line like any other.
 
 ⚠️ **Those two requirements meet at a cap, and the counts win.** One line per candidate and ≤ 1 KB cannot both hold on a large fleet — at roughly 45 bytes a line the cap arrives near twenty candidates. When they conflict, the **counts line is authoritative and is never dropped**; trim per-candidate lines until the whole hand-back fits and add `truncated=<n>` naming how many you dropped. Nothing is lost by the trim, because the payload carries every candidate regardless — so `truncated=` is the caller's instruction to read the payload, not a report that the fleet shrank. A hand-back that silently dropped rows to stay under the cap would read as candidates that no longer exist, which is the exact failure the per-line rule exists to prevent.
 

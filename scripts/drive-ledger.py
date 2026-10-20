@@ -61,6 +61,7 @@ FIELDS = (
     "probe",
     "nudge",
     "suppression",
+    "task_file",
 )
 VERDICTS = ("revive", "blocked", "unverifiable", "finished")
 NUDGES = ("drafted", "none")
@@ -83,12 +84,20 @@ def bak_path():
 
 
 def canonical(sid, raw):
-    """One entry, canonical shape, all seven fields present.
+    """One entry, canonical shape, all eight fields present.
 
     `open_boxes` is deliberately NOT defaulted to 0. A legacy row never carried the
     field, and 0 means "verified finished" while None means "never counted" -- the
     suppression rule compares this value across rounds, so conflating them would let
     a legacy row read as a verified-finished one.
+
+    `task_file` defaults to "" for the same reason `name` does: an entry written before
+    the field existed must still read as a complete entry, and "" is the honest value
+    -- it says "no path recorded". Step 0 of `agents/fleet-drive.md` treats that as
+    unverifiable rather than guessing one, because neither other identity field can
+    resolve a task: `session_id` is an 8-char display handle and `name` is a session
+    name that need not equal the filename (measured 2026-10-20: `Row Whose Body
+    Demands…` against `A Row Whose Body Demands…`).
     """
     raw = raw if isinstance(raw, dict) else {}
     return {
@@ -99,6 +108,7 @@ def canonical(sid, raw):
         "probe": raw.get("probe") or "",
         "nudge": raw.get("nudge") or "none",
         "suppression": raw.get("suppression") or "none",
+        "task_file": raw.get("task_file") or "",
     }
 
 

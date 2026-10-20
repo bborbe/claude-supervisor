@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the drive leg re-probes a retained row instead of dropping it.** `agents/fleet-drive.md` step 1 rebuilds its candidates from the digest every round, so a row that landed `blocked` or `unverifiable` and then left the digest was never looked at again. Measured 2026-10-20 on round `round14-2026-10-20T13-10Z`: `9bcd20f1` and `f61ca42d` are absent from that round's digest (`grep -c` returns 0 for both) yet still present in the ledger, which is the only record that either was ever parked. New step 0 re-probes every `blocked`/`unverifiable` ledger entry from its task file before the candidate scan, and the payload gains a `RETAINED` section. The ledger entry gains `task_file` — the only field that can resolve a task, because `session_id` is an 8-char display handle (prefix-matching it against `claude_session_id:` is the anti-pattern `fleet-sweep-reader` step 8 forbids) and `name` is a session name that need not equal the filename (measured: `Row Whose Body Demands…` against `A Row Whose Body Demands…`). Change set: `agents/fleet-drive.md`, `scripts/drive-ledger.py`, `scripts/tests/test_drive_ledger.py`, `CHANGELOG.md`.
+
 ## v0.191.5
 
 - fix: **`spawn_agent`'s `task` description names the retired `cluster` target where the requirement actually bites on the A2A targets.** The clause read `REQUIRED with \`target: "cluster"\``, but `cluster` was retired on 2026-10-15 and the requirement now lives in `a2aSpawnArgumentRefusal` (`server/a2a-spawn.mjs`), which refuses every A2A target — `docker`, `k8s`, `k8s:<cluster>` — without a `task`; a caller reading the schema passed `target: "k8s:<cluster>"` and lost the call to `target "k8s:octopus-dev" requires \`task\``. The clause now names those targets and keeps the retired one, matching both enforcement sites (`server/a2a-spawn.mjs`; `server/supervisor.mjs` § `spawnClusterWorker`). Change set: `server/supervisor.mjs`, `CHANGELOG.md`.
