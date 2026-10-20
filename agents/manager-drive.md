@@ -83,11 +83,27 @@ The script owns the read: assistant messages only, since user turns carry inject
 
 ⚠️ **Why reading the session's own text does not break the rule against trusting its claim.** The closer never decides whether the task is complete; disk decides that, and it has already said yes. The closer only decides whether a message is still owed. That makes the failure modes asymmetric. A false `nothing — session closed` over a completed task costs one idle tab. A misread in the other direction just sends the notice the current rule sends anyway.
 
+**Fifth read — is the recipient still addressable?** The four reads above decide whether the task is finished and whether the session still needs telling. None of them says whether `SendMessage` can reach it: the roster the caller passed was read from the supervisor registry, which **retains ended sessions**, while the harness surface `SendMessage` addresses carries live sessions only. Measured **2026-10-03**, Manager Layer tick 86: two reaps were decided from registry rows that had been absent from the harness peer list for days; both were undeliverable, and the run still reported `reaped 2`. ⚠️ **A reap with no recipient is not a reap**, and the summary line must say so.
+
+Probe the full id you already took from `scripts/session-ids.py` — never the roster's 8-char reference — then route the verdict through the producer. It prints the hand-over line **only** on `live`; every other verdict prints `reap moot — no live recipient` and delivers nothing:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/reap-line.py" --task "<task>" --session "<full session id>" --liveness <verdict>
+```
+
+Map the probe's verdict onto `--liveness` exactly as `scripts/reap-line.py`'s docstring tabulates: `LIVE`→`live`, `ABSENT`→`absent`, `UNKNOWN`→`unknown`, `AMBIGUOUS`→`unknown`, `MALFORMED`→`unknown`. ⚠️ **`AMBIGUOUS` and `MALFORMED` are verdicts about the argument, not the session — neither may ever become `live`, and neither may become `absent` either.** `parked` is supplied only when the sweep classified the session parked; the probe never emits it. ⚠️ **Never hand-assemble the line** — the script is its one producer, for the same reason `scripts/close-line.py` is the close line's.
+
+- **`reap moot — no live recipient`** → the reap has no recipient. Report the row under **`Reap moot`**, count it as **not reaped**, and send nothing. ⚠️ **The row still renders** — the task is terminal and the session is gone, and that is the fact the frame must carry.
+- **`✅ REAP: …`** → send it, then count the row under **`Reaped`**.
+
+⚠️ **A refused `SendMessage` is not a delivery.** If the send fails anyway, the row goes under `Reap moot` with the refusal quoted — never under `Reaped`.
+
 **You cannot close the task for them, and `/supervisor:close` only closes a finished one.** `/vault-cli:sync-progress` and `/vault-cli:session-close` stay the worker's own act; a terminal or deferred task is closed through `/supervisor:close`. So the act is:
 
-- `SendMessage` the worker the **disk evidence** — the three commands and their output;
+- `SendMessage` the worker the **disk evidence** — the three commands and their output — **only when the fifth read returned `live`**;
 - state explicitly that it is **non-authorising** and that the operator has **not** answered;
-- report it to the caller as **self-closeable** — one line for all such workers, never N approvals.
+- report it to the caller as **self-closeable** — one line for all such workers, never N approvals;
+- report a row whose fifth read returned anything else under **`Reap moot`** — nothing sent, and it does not count as reaped.
 
 Measured 2026-09-19: **four sessions** were parked on that gate at once, every one over a task reading `status: completed`, `phase: done`, zero open boxes.
 
@@ -359,7 +375,7 @@ One compact report — see `<output_format>`. You do not render the status table
 Plain markdown, one line per action, in the order you performed them. Omit empty sections.
 
 ```text
-Drive: <subject> — audited <n> · cap re-dispatched <n> · reaped <n> · closed clean <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · card <n> · stale <n> · held <n> · blocked <n>
+Drive: <subject> — audited <n> · cap re-dispatched <n> · reaped <n> · reap moot <n> · closed clean <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · card <n> · stale <n> · held <n> · blocked <n>
 Provenance: recorded_at=<the store's recorded_at> · own sets: <bucket>{<task>, …} · <bucket>{…}
 Batch held — no store provenance (missing: <which half>) — no per-row clause ran   ← clause (0)(a); ONE line for the whole batch, never one per row
 Batch held — that value is NOT the named source's — no per-row clause ran   ← clause (0)(b); same rule, and name which file disagreed
@@ -367,9 +383,13 @@ Batch held — that value is NOT the named source's — no per-row clause ran   
 Cap failure (<n>):     ← clause (1): rows refused at the dispatcher's concurrency cap that got no slot before this tick ended.
   <task> — refused at the dispatcher's concurrency cap, never audited   ← a FAILURE, not a `Held`: the retry is unbounded and the tick ended first. It is the one row shape `<success_criteria>`'s "every row left with exactly one verdict" admits as an exception, and only because it is named here.
 
-Reaped (2):
+Reaped (2):            ← the fifth read returned `live` for each; evidence SENT, self-closeable
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
   <task> — status: completed · phase: done · 0 open boxes — evidence sent, self-closeable
+
+Reap moot (2):         ← the fifth read found no live recipient — NOTHING sent, NOT counted as reaped
+  <task> — status: completed · phase: done · 0 open boxes · reap moot — no live recipient
+  <task> — status: completed · phase: done · 0 open boxes · reap moot — no live recipient
 
 Closed clean (1):      ← passed the three disk reads; the fourth read found the close already run — NO message sent
   <task> — status: completed · phase: done · 0 open boxes · closer <timestamp> "👤 You: nothing — session closed" — not reaped
@@ -449,6 +469,7 @@ Next (3):              ← the round's ONE ranked rendering, and the LAST block 
 - **Every nudged task survived both pre-nudge checks, on disk, this run** — its task file had not moved since the sweep's reading, and its session was neither inside a tool call nor inside the transcript freshness window. A nudge sent on the caller's classification alone is the false nudge this pass exists to stop.
 - **Every candidate a check dropped is reported under `Freshness / in-flight drops`, naming the check and the value that dropped it** — including a `stuck` row that arrived with no mtime and so could not be checked. A silently dropped candidate reads exactly like one the sweep never classified.
 - Every reap decision is backed by the three disk reads — `status`, `phase`, open-box count — taken **this run**, never from a session's claim or its colour.
+- **Every `Reaped` row was routed through `scripts/reap-line.py` and returned `live`; every other verdict is reported under `Reap moot` and counted as not reaped.** A reap handed over without the fifth read is the tick-86 defect — a decision recorded as taken with no recipient.
 - Every `Closed clean` row quotes the closer line and its timestamp. A row that passed the three reads and was neither reaped nor listed there is a bug; report it as one.
 - Every auto-resume names all **eleven** gate clauses, and any clause that failed is quoted with the value that failed it — including which blocker, which date, or `mode=interactive`.
 - Every `To resume` row was preceded by a re-probe at the hand-off site, and a positive re-probe aborted the row without arming the crash-loop cap.
