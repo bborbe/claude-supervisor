@@ -32,9 +32,99 @@ import {
   resolveA2AEndpoint,
 } from './a2a-client.mjs'
 
-// The targets this path serves. Kept as one list so the dispatch and the argument refusals
-// cannot disagree about which targets it implements.
+// The target KINDS this path serves. Kept as one list so the dispatch and the argument
+// refusals cannot disagree about which targets it implements.
+//
+// ⚠️ A KIND IS NOT A FULL TARGET. `k8s` names a kind of backend (a per-task pod created by a
+// cluster's controller); WHICH cluster is a separate, required answer — `k8s:nukedev`,
+// `k8s:octopus-dev`. One kind, one controller per cluster, and no address that is right for
+// more than one (2026-10-20). This list therefore stays the closed set of KINDS, and
+// `parseA2ATarget` is what decides whether a caller's string names one.
 export const A2A_SPAWN_TARGETS = ['docker', 'k8s']
+
+// A cluster name: lowercase, digits and hyphens, starting alphanumeric. Deliberately NOT
+// normalised — an uppercase or underscored value REFUSES rather than being folded, because the
+// value is also the config key and the roster status, and a silently rewritten target is a
+// worker created somewhere the caller did not name.
+const A2A_CLUSTER_NAME = /^[a-z0-9][a-z0-9-]*$/
+
+// The default cluster a bare `k8s` resolves to when neither the environment nor the file names
+// one. It is `nukedev` because that is what the single `k8s` target meant until 2026-10-20 —
+// the one controller that existed — so a row spawned before this change keeps working with no
+// config edit. Anything else here would silently move every bare-`k8s` spawn to a new cluster.
+export const A2A_DEFAULT_CLUSTER = 'nukedev'
+
+// The env-var suffix for a cluster name: uppercased, every non-alphanumeric replaced by `_`.
+// `octopus-dev` → `OCTOPUS_DEV`, because an environment variable name cannot carry a hyphen.
+// This is the ONLY lossy mapping on this path, which is why the file map stays keyed by the
+// cluster name as written and the env route is documented as the normalized one.
+export const clusterEnvSuffix = (cluster) => String(cluster).toUpperCase().replace(/[^A-Z0-9]/g, '_')
+
+// Parse a spawn target into `{ kind, cluster }`, or `{ error }`.
+//
+// `docker` is a whole target. `k8s` is a KIND with no cluster named — it resolves to the
+// configured default, which is the backward-compatibility clause. `k8s:<cluster>` names both.
+// Anything else refuses, and the refusal names every accepted form rather than a default.
+export function parseA2ATarget(target) {
+  if (typeof target !== 'string' || target === '') {
+    return {
+      error:
+        `target is ${JSON.stringify(target) ?? 'undefined'}, which is not an A2A spawn target. Expected ` +
+        '"docker", "k8s", or "k8s:<cluster>" (e.g. "k8s:nukedev").',
+    }
+  }
+  if (target === 'docker') return { kind: 'docker', cluster: null }
+  if (target === 'k8s') return { kind: 'k8s', cluster: null }
+  if (target.startsWith('k8s:')) {
+    const cluster = target.slice('k8s:'.length)
+    if (!A2A_CLUSTER_NAME.test(cluster)) {
+      return {
+        error:
+          `${JSON.stringify(target)} does not name a cluster. After "k8s:" give a lowercase cluster name — ` +
+          'letters, digits and hyphens, starting with a letter or digit (e.g. "k8s:nukedev", ' +
+          '"k8s:octopus-dev"). The value is refused rather than normalised, because it is also the ' +
+          'config key and the roster status.',
+      }
+    }
+    return { kind: 'k8s', cluster }
+  }
+  return {
+    error:
+      `${JSON.stringify(target)} is not an A2A spawn target. Expected "docker", "k8s", or "k8s:<cluster>" ` +
+      '(e.g. "k8s:nukedev").',
+  }
+}
+
+// Whether a string names an A2A target of any kind. Every membership test that used to read
+// `A2A_SPAWN_TARGETS.includes(value)` reads this instead, because a roster STATUS carries the
+// full target (`k8s:nukedev`) and an exact-list test would silently drop it — losing the ledger
+// mode, the rehydrate, the liveness stamp and the stop lookup together.
+export const isA2ATarget = (value) => parseA2ATarget(value).kind != null
+
+// The full targets to fan a fleet-wide call out over: `docker` plus one `k8s:<cluster>` per
+// configured cluster. Used by the liveness poll and the bare-id stop, both of which must cover
+// EVERY controller — a target missing from this list is not merely un-polled, it leaves that
+// cluster's workers unstamped and reading as dead.
+export function a2aTargetsForClusters(clusters = []) {
+  return ['docker', ...clusters.map((c) => `k8s:${c}`)]
+}
+
+// The cluster names this server is configured to reach, from the environment's `a2a.url` map,
+// the file's `a2a.url` map, and the default. `docker` and `k8s` are target KINDS (or the legacy
+// default alias), never cluster names, so they are excluded.
+export function configuredA2AClusters({ envUrls = {}, fileUrls = {}, defaultCluster = null } = {}) {
+  // `local` too: `scripts/a2a-local-control.py` reads `SUPERVISOR_A2A_URL_LOCAL` for the local
+  // backend, and an operator with that set would otherwise see `local` reported as a cluster.
+  const reserved = new Set(['local', 'docker', 'k8s'])
+  const names = new Set()
+  for (const map of [envUrls, fileUrls]) {
+    for (const key of Object.keys(map ?? {})) {
+      if (!reserved.has(key)) names.add(key)
+    }
+  }
+  if (defaultCluster) names.add(defaultCluster)
+  return [...names].sort()
+}
 
 // The ledger `mode` for a worker created over A2A.
 //
@@ -47,20 +137,25 @@ export const A2A_SPAWN_TARGETS = ['docker', 'k8s']
 // `interactive`, so a new value inherits a correct-if-coarse reason rather than a wrong one.
 export const A2A_LEDGER_MODE = 'a2a'
 
-// The roster status an A2A worker carries — the TARGET NAME, mirroring `cluster`.
+// The roster status an A2A worker carries — the FULL TARGET (`docker`, `k8s:nukedev`),
+// mirroring `cluster`.
 //
 // ⚠️ The status names WHERE the worker runs, and `cluster` already works exactly this way: it is
 // both a spawn target and the status a spawned cluster worker carries. A docker worker reported
 // as `running` would erase the target from every roster read, and a manager could no longer tell
-// a container on this Mac from a pod in nuke dev.
-export const a2aWorkerStatus = ({ target } = {}) =>
-  A2A_SPAWN_TARGETS.includes(target) ? target : null
+// a container on this Mac from a pod in nuke dev — nor one cluster from another.
+//
+// ⚠️ A bare `k8s` passed here is returned as given, because this function has no config to
+// resolve the default from. The SPAWN PATH canonicalises it first (`resolveA2AControllerTarget`
+// returns `target: 'k8s:<cluster>'`), so a row written by this server names its cluster; a bare
+// `k8s` here means a caller skipped that step.
+export const a2aWorkerStatus = ({ target } = {}) => (isA2ATarget(target) ? target : null)
 
 // The ledger `mode` for a worker status, or `null` when the status is not an A2A one.
 //
 // Exported so `writeLedger`'s derivation consults one rule rather than growing a third nested
 // ternary — and so the mapping is unit-tested rather than inferred from the dispatch.
-export const ledgerModeForStatus = (status) => (A2A_SPAWN_TARGETS.includes(status) ? A2A_LEDGER_MODE : null)
+export const ledgerModeForStatus = (status) => (isA2ATarget(status) ? A2A_LEDGER_MODE : null)
 
 // Arguments the A2A path cannot honour — a refusal string, or `null` to allow the call.
 //
@@ -72,8 +167,8 @@ export const ledgerModeForStatus = (status) => (A2A_SPAWN_TARGETS.includes(statu
 // supervisor never runs it and never holds a process for it. Anything that names a LOCAL
 // process, a local window, or a local policy is therefore not something this path can honour.
 export function a2aSpawnArgumentRefusal({ target, resume, policy, interactive, windowId, role, env, shipping, task } = {}) {
-  if (!A2A_SPAWN_TARGETS.includes(target)) {
-    return `a2aSpawnArgumentRefusal was called for target ${JSON.stringify(target) ?? 'undefined'}, which is not an A2A target (${A2A_SPAWN_TARGETS.join(', ')}).`
+  if (!isA2ATarget(target)) {
+    return `a2aSpawnArgumentRefusal was called for target ${JSON.stringify(target) ?? 'undefined'}, which is not an A2A target (docker, k8s, k8s:<cluster>).`
   }
   // ⚠️ `env` STAYS REFUSED, AND IT IS THE ONLY ONE OF THE THREE THAT DOES. A raw map is an
   // ungoverned surface: nothing here can tell a harmless variable from a credential, and the value
@@ -167,11 +262,19 @@ function checkControllerUrl(value, label) {
 // `{ error }`.
 //
 // ⚠️ `target` is required, and there is deliberately no target-agnostic fallback. The controller
-// runs on this Mac for `docker` and in nuke dev for `k8s`: two separate deployments, with separate
-// control secrets, and no address that is right for both. So a single `a2a.url` is not a default —
-// it is a value that is wrong for one target whichever one it holds. Measured 2026-10-14: a
-// `target: "docker"` spawn against the one configured URL created a k8s pod, because that URL was
-// the nuke-dev ingress.
+// runs on this Mac for `docker` and once per cluster for `k8s`: separate deployments, separate
+// control secrets, and no address that is right for more than one. So a single `a2a.url` is not
+// a default — it is a value that is wrong for every target but one. Measured 2026-10-14: a
+// `target: "docker"` spawn against the one configured URL created a k8s pod, because that URL
+// was the nuke-dev ingress. The same reasoning now applies BETWEEN clusters: `k8s:nukedev` and
+// `k8s:octopus-dev` have different addresses and different control tokens.
+//
+// ⚠️ A bare `k8s` resolves to `defaultCluster` — the backward-compatibility clause — and its
+// lookup falls back to the legacy `k8s` key (`SUPERVISOR_A2A_URL_K8S` / `a2a.url.k8s`) when the
+// cluster's own key is unset. That fallback is deliberately scoped to the DEFAULT cluster: it is
+// what keeps a live setup working through the rename, and widening it to every cluster would
+// recreate the 2026-10-14 divergence one level down, with one address silently serving several
+// clusters. An unknown cluster name REFUSES; it never falls back to the default.
 //
 // BOTH sources are validated, not only the winner, matching `resolveClusterTarget`: a bad value
 // in the loser sits dormant until the winner is removed, and then the spawn breaks with an error
@@ -180,34 +283,39 @@ function checkControllerUrl(value, label) {
 // ⚠️ The TOKEN's value is never echoed, here or anywhere else on this path — not in a refusal,
 // not in a log line, not in a tool result. `resolveClusterTarget` redacts a URL's userinfo for
 // the same reason, and the refusals below name the KEY rather than repeating what it held.
-export function resolveA2AControllerTarget({ target, envUrl, envToken, file, path = 'the supervisor config' } = {}) {
-  if (!A2A_SPAWN_TARGETS.includes(target)) {
-    return {
-      error:
-        `${JSON.stringify(target)} is not an A2A spawn target, so no controller can be resolved for it. ` +
-        `Expected ${A2A_SPAWN_TARGETS.map((t) => `"${t}"`).join(' or ')}.`,
-    }
-  }
+export function resolveA2AControllerTarget({
+  target,
+  envUrl,
+  envToken,
+  envUrls,
+  envTokens,
+  file,
+  path = 'the supervisor config',
+  defaultCluster = A2A_DEFAULT_CLUSTER,
+  clusters,
+} = {}) {
+  const parsed = parseA2ATarget(target)
+  if (parsed.error) return { error: parsed.error }
 
   const section = file == null ? null : file.a2a
   if (section != null && (typeof section !== 'object' || Array.isArray(section))) {
     return {
       error:
         `"a2a" in ${path} is not an object — refusing rather than guessing, since a half-read controller ` +
-        'target is discovered only by noticing it. Expected {"url": {"docker": "…", "k8s": "…"}}.',
+        'target is discovered only by noticing it. Expected {"url": {"docker": "…", "nukedev": "…"}}.',
     }
   }
 
-  // ⚠️ A bare-string `a2a.url` REFUSES rather than being read as both targets. That shape is what
+  // ⚠️ A bare-string `a2a.url` REFUSES rather than being read as every target. That shape is what
   // made the 2026-10-14 divergence reachable: one address cannot serve a local container and a
-  // remote pod, so whichever target read it, the other silently got the wrong controller. Refusing
-  // turns a mis-route into a startup-visible error naming the key to change.
+  // remote pod, nor two clusters, so whichever target read it, the others silently got the wrong
+  // controller. Refusing turns a mis-route into a startup-visible error naming the key to change.
   if (typeof section?.url === 'string') {
     return {
       error:
-        `"a2a.url" in ${path} is a single string, and one controller URL cannot serve both spawn targets — ` +
-        'the docker controller runs on this Mac and the k8s controller in nuke dev. Replace it with a ' +
-        `per-target map, e.g. {"url": {"docker": "http://127.0.0.1:8080/a2a", "k8s": "https://…/a2a"}}.`,
+        `"a2a.url" in ${path} is a single string, and one controller URL cannot serve more than one target — ` +
+        'the docker controller runs on this Mac and each k8s cluster has its own. Replace it with a ' +
+        `per-target map, e.g. {"url": {"docker": "http://127.0.0.1:8080/a2a", "nukedev": "https://…/a2a"}}.`,
     }
   }
 
@@ -229,22 +337,53 @@ export function resolveA2AControllerTarget({ target, envUrl, envToken, file, pat
     }
   }
 
-  const upper = target.toUpperCase()
-  const envUrlLabel = `SUPERVISOR_A2A_URL_${upper}`
-  const envTokenLabel = `SUPERVISOR_A2A_TOKEN_${upper}`
-  const fileUrlLabel = `"a2a.url.${target}" in ${path}`
+  const cluster = parsed.kind === 'k8s' ? (parsed.cluster ?? defaultCluster) : null
 
-  const urlSources = [
-    { label: envUrlLabel, value: envUrl },
-    { label: fileUrlLabel, value: section?.url?.[target] },
-  ]
+  // ⚠️ An unknown cluster name REFUSES, and this is the clause that makes "unknown" mean
+  // something: without it a typo would be indistinguishable from a cluster the operator simply
+  // has not configured yet, and the refusal would name a key nobody can set. `clusters` is the
+  // configured set (see `configuredA2AClusters`); when the caller does not pass one, an
+  // unconfigured cluster still refuses at the URL step below, naming its key.
+  if (cluster !== null && Array.isArray(clusters) && !clusters.includes(cluster)) {
+    return {
+      error:
+        `unknown cluster ${JSON.stringify(cluster)} — it is not one this supervisor is configured for. ` +
+        `Configured: ${clusters.length > 0 ? clusters.join(', ') : '(none)'}. Add it to "a2a.url" in ${path} ` +
+        'or set its SUPERVISOR_A2A_URL_<CLUSTER>, or omit the target to use the default cluster ' +
+        `("${defaultCluster}"). The value is refused rather than defaulted: a worker created on a cluster ` +
+        'the caller did not name is discovered only by noticing it.',
+    }
+  }
+
+  const primaryKey = parsed.kind === 'docker' ? 'docker' : cluster
+  // The default cluster also accepts the legacy `k8s` key, so a setup that predates cluster names
+  // keeps resolving. Nothing else does — see the header.
+  const lookupKeys =
+    parsed.kind === 'k8s' && cluster === defaultCluster ? [cluster, 'k8s'] : [primaryKey]
+
+  const envUrlLabel = `SUPERVISOR_A2A_URL_${clusterEnvSuffix(primaryKey)}`
+  const envTokenLabel = `SUPERVISOR_A2A_TOKEN_${clusterEnvSuffix(primaryKey)}`
+  const fileUrlLabel = `"a2a.url.${primaryKey}" in ${path}`
+  const legacyTokenLabel = lookupKeys.includes('k8s') ? ' or SUPERVISOR_A2A_TOKEN_K8S' : ''
+
+  // `envUrls` / `envTokens` are the per-key maps `config.mjs` builds; the single `envUrl` /
+  // `envToken` remain the shorthand a test (or a caller with one target) uses, and apply to the
+  // primary key only.
+  const envUrlFor = (key) => (envUrls ? envUrls[key] : key === primaryKey ? envUrl : undefined)
+  const envTokenFor = (key) => (envTokens ? envTokens[key] : key === primaryKey ? envToken : undefined)
+
+  const urlSources = lookupKeys.flatMap((key) => [
+    { label: `SUPERVISOR_A2A_URL_${clusterEnvSuffix(key)}`, value: envUrlFor(key) },
+    { label: `"a2a.url.${key}" in ${path}`, value: section?.url?.[key] },
+  ])
   // ⚠️ One source, not two: the file's `a2a.token` is refused above, so listing it here would
   // advertise a source that can never win. A per-target token has no file shape at all — the
   // migration removed plaintext tokens from the file, and re-adding one per target would restore
   // exactly the exposure it removed.
-  const tokenSources = [
-    { label: envTokenLabel, value: envToken },
-  ]
+  const tokenSources = lookupKeys.map((key) => ({
+    label: `SUPERVISOR_A2A_TOKEN_${clusterEnvSuffix(key)}`,
+    value: envTokenFor(key),
+  }))
   const set = (s) => s.value !== undefined && s.value !== null && s.value !== ''
   const pick = (sources) => sources.find(set)?.value ?? null
 
@@ -266,23 +405,31 @@ export function resolveA2AControllerTarget({ target, envUrl, envToken, file, pat
   if (token === null) {
     return {
       error:
-        `no controller token is configured for the "${target}" target — ${envTokenLabel} is not set. The token ` +
-        'is resolved from TeamVault by scripts/mcp-start.py, which the supervisor MCP entry must name as its ' +
-        '`command`; changing that needs a NEW session, since Claude Code caches the server definition at ' +
-        `session start. An "a2a.token" in ${path} is NOT a fallback: it is refused, because a plaintext ` +
-        'token there is the exposure this change removes. The controller refuses an unauthenticated control ' +
-        'call, so a spawn without one would fail at the controller rather than here, with nothing on this ' +
-        'side naming the missing key.',
+        `no controller token is configured for the "${target}" target — ${envTokenLabel}${legacyTokenLabel} is ` +
+        'not set. The token is resolved from TeamVault by scripts/mcp-start.py, which the supervisor MCP ' +
+        'entry must name as its `command`; changing that needs a NEW session, since Claude Code caches the ' +
+        `server definition at session start. An "a2a.token" in ${path} is NOT a fallback: it is refused, ` +
+        'because a plaintext token there is the exposure this change removes. The controller refuses an ' +
+        'unauthenticated control call, so a spawn without one would fail at the controller rather than ' +
+        'here, with nothing on this side naming the missing key.',
     }
   }
   if (typeof token !== 'string' || token.trim() === '') {
     return {
       error:
         'the configured controller token is not a usable string — it is set but empty or non-string. The value ' +
-        `is deliberately not echoed. Check ${envTokenLabel}.`,
+        `is deliberately not echoed. Check ${envTokenLabel}${legacyTokenLabel}.`,
     }
   }
-  return { url, token }
+  return {
+    url,
+    token,
+    kind: parsed.kind,
+    cluster,
+    // The canonical target a spawn records: `docker`, or `k8s:<cluster>` even when the caller
+    // passed a bare `k8s`. The roster status is this value, so a row always names its cluster.
+    target: parsed.kind === 'docker' ? 'docker' : `k8s:${cluster}`,
+  }
 }
 
 // The one-shot control call that creates this worker — `{ url, headers, body, contextId }`, or

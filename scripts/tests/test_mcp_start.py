@@ -206,22 +206,25 @@ class DeclareTokensTest(unittest.TestCase):
             declared = ms.declare_tokens(env, lookup=self._lookup(seen=seen))
         self.assertEqual(sorted(seen), ["VO0Gmw", "lO4j5q", "pLv8Mw"])
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
-        # ⚠️ The A2A token is PER TARGET — the docker controller runs on this Mac and the k8s
-        # controller in nuke dev, so one shared secret would force both deployments to carry the
+        # ⚠️ The A2A token is PER TARGET — the docker controller runs on this Mac and each k8s
+        # cluster has its own, so one shared secret would force every deployment to carry the
         # same value. Each target carries the entry its own controller was started with, and a
-        # target with no entry refuses by name.
-        self.assertEqual(env["SUPERVISOR_A2A_TOKEN_K8S"], self.VALUES["lO4j5q"])
+        # target with no entry refuses by name. The k8s entry is now named for its CLUSTER
+        # (`_NUKEDEV`, 2026-10-20): the server still accepts the old `_K8S` name as the default
+        # cluster's fallback, but nothing emits it from here, because two names for one secret
+        # in one process is how the two ends drift apart.
+        self.assertEqual(env["SUPERVISOR_A2A_TOKEN_NUKEDEV"], self.VALUES["lO4j5q"])
         self.assertEqual(env["SUPERVISOR_A2A_TOKEN_DOCKER"], self.VALUES["pLv8Mw"])
         # Distinctness: one key resolved into several variables is the failure this guards, and
         # it is invisible unless the values are compared.
-        self.assertNotEqual(env["INTERACTIVE_AUTH_TOKEN"], env["SUPERVISOR_A2A_TOKEN_K8S"])
-        self.assertNotEqual(env["SUPERVISOR_A2A_TOKEN_K8S"], env["SUPERVISOR_A2A_TOKEN_DOCKER"])
+        self.assertNotEqual(env["INTERACTIVE_AUTH_TOKEN"], env["SUPERVISOR_A2A_TOKEN_NUKEDEV"])
+        self.assertNotEqual(env["SUPERVISOR_A2A_TOKEN_NUKEDEV"], env["SUPERVISOR_A2A_TOKEN_DOCKER"])
         self.assertEqual(
             sorted(declared),
             [
                 "INTERACTIVE_AUTH_TOKEN",
                 "SUPERVISOR_A2A_TOKEN_DOCKER",
-                "SUPERVISOR_A2A_TOKEN_K8S",
+                "SUPERVISOR_A2A_TOKEN_NUKEDEV",
             ],
         )
 
@@ -242,7 +245,7 @@ class DeclareTokensTest(unittest.TestCase):
         # the degradation the module docstring promises, not a whole-launcher failure.
         self.assertEqual(declared, ["INTERACTIVE_AUTH_TOKEN", "SUPERVISOR_A2A_TOKEN_DOCKER"])
         self.assertEqual(env["INTERACTIVE_AUTH_TOKEN"], self.VALUES["VO0Gmw"])
-        self.assertNotIn("SUPERVISOR_A2A_TOKEN_K8S", env)
+        self.assertNotIn("SUPERVISOR_A2A_TOKEN_NUKEDEV", env)
         self.assertEqual(env["SUPERVISOR_A2A_TOKEN_DOCKER"], self.VALUES["pLv8Mw"])
         self.assertIn("lO4j5q", stderr.getvalue())
 
