@@ -401,26 +401,42 @@ def due_today(board, tasks_dir, day):
         fm = frontmatter(text)
         if fm.get("status") in TERMINAL:
             continue
-        # On or before today, not "exactly today": a task that fell due yesterday and is
-        # still open is more urgent than one due today, and exact equality buried it.
-        due_on = min(
-            (v[:10] for v in (fm.get("defer_date", ""), fm.get("due_date", "")) if v[:10]),
-            default="",
-        )
-        due = bool(due_on) and due_on <= iso
+        # `defer_date` is defer-UNTIL, not a due date: a row carrying a future one is
+        # deliberately parked and must not surface, however old its `due_date` is. The two
+        # dates answer different questions, so they are read apart rather than min()-ed —
+        # collapsing them labelled a parked task "overdue since <due>" and an active task
+        # "overdue since <defer>".
+        defer = str(fm.get("defer_date", ""))[:10]
+        due_d = str(fm.get("due_date", ""))[:10]
+        parked = bool(defer) and defer > iso
+        overdue = bool(due_d) and due_d <= iso
+        active = bool(defer) and defer <= iso
+        due = not parked and (overdue or active)
         flagged = fm.get("flag") == "true" and fm.get("flag_set_by") == "operator"
         if not (due or flagged):
             continue
+        if overdue and due_d < iso:
+            why = f"overdue since {due_d}"
+        elif due and (due_d == iso or defer == iso):
+            why = "due today"
+        elif due:
+            why = f"active since {defer}"
+        else:
+            why = "operator-flagged"
         out.append(candidate(
             path.stem, "task", fm,
             {"period": "due-today", "file": str(path), "line": 1},
-            ("due today" if due_on == iso else f"overdue since {due_on}") if due else "operator-flagged",
+            why,
         ))
     return out
 
 
-def proposed(vault, board, tasks_dir, planned_names, alerts_state, alerts_lines):
-    """Important items in NO current plan — at most PROPOSAL_CAP, one card each."""
+def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
+    """Important items in NO current plan — at most PROPOSAL_CAP, one card each.
+
+    `planned_keys` is a set of `(kind, name)`, not bare names: a planned GOAL called X
+    must not suppress an unplanned `priority: 1` TASK called X, which a name-only set did.
+    """
     rows = []
     # class 1: open P1 tasks
     d = Path(tasks_dir)
@@ -432,7 +448,7 @@ def proposed(vault, board, tasks_dir, planned_names, alerts_state, alerts_lines)
             fm = frontmatter(text)
             if fm.get("priority") != "1" or fm.get("status") in TERMINAL:
                 continue
-            if path.stem in planned_names:
+            if ("task", path.stem) in planned_keys:
                 continue
             rows.append(candidate(
                 path.stem, "task", fm,
@@ -459,7 +475,7 @@ def proposed(vault, board, tasks_dir, planned_names, alerts_state, alerts_lines)
             fm = frontmatter(text)
             if fm.get("status") != "hold" or not fm.get("blocked_by"):
                 continue
-            if path.stem in planned_names:
+            if ("goal", path.stem) in planned_keys:
                 continue
             rows.append(candidate(
                 path.stem, "goal", fm,
@@ -506,7 +522,7 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None):
 
     proposed_rows = proposed(
         vault, board, Path(vault) / tasks_dir,
-        {row["name"] for row in ordered}, alerts_state, alerts_lines,
+        {(row["kind"], row["name"]) for row in ordered}, alerts_state, alerts_lines,
     )
     proposed_overflow = proposed_rows[PROPOSAL_CAP:]
 

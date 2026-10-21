@@ -97,10 +97,12 @@ YEARLY = """# Plan for 2026
 
 
 def task(name, *, phase="planning", status="in_progress", priority="2",
-         defer=None, flag=None, blocked=None):
+         defer=None, due=None, flag=None, blocked=None):
     lines = ["---", f"status: {status}", f"phase: {phase}", f"priority: {priority}"]
     if defer:
         lines.append(f'defer_date: "{defer}"')
+    if due:
+        lines.append(f'due_date: "{due}"')
     if flag:
         lines.append("flag: true")
         lines.append(f"flag_set_by: {flag}")
@@ -168,10 +170,16 @@ class NextFocusTest(unittest.TestCase):
                          "due-today, then weekly, monthly, quarterly — in that order")
 
     def test_yearly_is_the_last_tier(self):
-        """The yearly row is below the cap in the main fixture, so widen the cap away."""
-        result = self.run_script()
-        self.assertNotIn("Yearly Topic", [r["name"] for r in result["candidates"]],
-                         "yearly sorts last and the fixture's five higher rows fill the cap")
+        """Positive assertion: with the higher tiers empty, yearly still ranks.
+
+        The earlier form asserted only `NotIn` against a full cap, so an implementation
+        that dropped the yearly tier entirely passed it.
+        """
+        for period, key in (("Weekly", WEEK), ("Monthly", MONTH), ("Quarterly", QUARTER)):
+            self.write(f"60 Periodic Notes/{period}/{key}.md", "# Empty plan\n")
+        self.write("25 Tasks/Due Task.md", task("Due Task", status="completed"))
+        names = [r["name"] for r in self.run_script()["candidates"]]
+        self.assertEqual(names, ["Yearly Topic"], "yearly must still rank when it is all there is")
 
     def test_weekly_citation_is_the_numbered_heading_line(self):
         """The citation must land on the `### 1.` heading, not on a plausible line."""
@@ -305,10 +313,26 @@ class NextFocusTest(unittest.TestCase):
 
     def test_overdue_task_ranks_and_says_so(self):
         """Exact-day equality buried a task that fell due yesterday and is still open."""
-        self.write("25 Tasks/Overdue Task.md", task("Overdue Task", defer="2026-10-19"))
+        self.write("25 Tasks/Overdue Task.md", task("Overdue Task", due="2026-10-19"))
         row = [r for r in self.run_script()["candidates"] if r["name"] == "Overdue Task"][0]
         self.assertEqual(row["source"]["period"], "due-today")
         self.assertIn("overdue since 2026-10-19", row["why"])
+
+    def test_future_defer_date_parks_the_task(self):
+        """`defer_date` is defer-UNTIL: a future one must not surface, however old the due."""
+        self.write("25 Tasks/Parked Task.md",
+                   task("Parked Task", defer="2027-01-01", due="2026-09-01"))
+        names = [r["name"] for r in self.run_script()["candidates"]]
+        self.assertNotIn("Parked Task", names,
+                         "a task deferred into the future is parked, not overdue")
+
+    def test_arrived_defer_date_surfaces_the_task(self):
+        """The other half: once the defer date has passed the row is active again."""
+        self.write("25 Tasks/Resumed Task.md",
+                   task("Resumed Task", defer="2026-10-19", due="2027-05-01"))
+        row = [r for r in self.run_script()["candidates"] if r["name"] == "Resumed Task"][0]
+        self.assertIn("active since 2026-10-19", row["why"],
+                      "a past defer with a future due is active, not overdue")
 
     def test_weekly_link_with_heading_resolves(self):
         """A `[[Page#Section]]` link is not a filename; unstripped it ranks nothing."""
