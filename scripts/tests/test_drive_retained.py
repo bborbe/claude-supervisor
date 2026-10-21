@@ -7,11 +7,14 @@ probing nothing. Counting invocations of the stubbed probe is what distinguishes
 re-probe from a copy, and a copy calls it zero times.
 """
 import importlib.util
+import io
+import json
 import os
 import pathlib
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "drive-retained.py"
 
@@ -276,6 +279,106 @@ class TestLivenessMapping(unittest.TestCase):
                 drive_retained.session_alive("aaaa", self.stub(code)),
                 "exit %d must not read as death" % code,
             )
+
+
+def rendered(sid, **over):
+    """A `disposition()`-shaped row, as `cmd_render` hands it to the renderers."""
+    row = {
+        "session_id": sid,
+        "name": "Task %s" % sid,
+        "task_file": "/vault/25 Tasks/%s.md" % sid,
+        "prior_verdict": "unverifiable",
+        "verdict": "blocked",
+        "probe": "orphan: session absent from registry",
+        "reprobe_verdict": "blocked",
+        "reprobe_probe": "orphan: session absent from registry",
+        "suppression": "already signalled",
+    }
+    row.update(over)
+    return row
+
+
+class TestRender(unittest.TestCase):
+    """The payload blocks are rendered by the script, not summarised by the agent.
+
+    The round of `2026-10-21T05-07-35Z` is the fixture this class exists for: 88
+    re-probed rows, rendered as one summary line. `test_one_line_per_row` fails on
+    that shape -- a summary produces one row-line regardless of how many rows were
+    probed, so the count is what discriminates a render from a collapse.
+    """
+
+    def row_lines(self, block):
+        """Row lines only: two-space indent, excluding the `probe:`/`ledger:` detail."""
+        return [
+            line for line in block.splitlines()
+            if line.startswith("  ") and not line.startswith("      ")
+            and line.strip() != "(none)"
+        ]
+
+    def test_one_line_per_row(self):
+        rows = [rendered("%08d" % n) for n in range(5)]
+        block = drive_retained.render_retained(rows, "2026-10-21T05-07-35Z")
+        self.assertEqual(len(self.row_lines(block)), 5)
+
+    def test_each_line_carries_round_command_and_result(self):
+        """SC1's three parts: round tag, the command run, that round's result."""
+        block = drive_retained.render_retained([rendered("abcdef12")], "R-TAG")
+        self.assertIn("round R-TAG", block)
+        self.assertIn(drive_retained.PROBE_COMMAND, block)
+        self.assertIn("orphan: session absent from registry", block)
+
+    def test_a_row_with_no_task_file_renders_dropped(self):
+        block = drive_retained.render_retained([rendered("abcdef12", task_file="")], "R")
+        self.assertIn("no task file", block)
+        self.assertIn("dropped: task file missing", block)
+
+    def test_an_empty_retained_block_says_none(self):
+        block = drive_retained.render_retained([], "R")
+        self.assertIn("(none)", block)
+        self.assertEqual(self.row_lines(block), [])
+
+    def test_parked_lists_only_changed_rows(self):
+        rows = [
+            rendered("aaaaaaaa", suppression="signalled"),
+            rendered("bbbbbbbb", suppression="already signalled"),
+        ]
+        block = drive_retained.render_parked(rows)
+        self.assertIn("aaaaaaaa", block)
+        self.assertNotIn("bbbbbbbb", block)
+        self.assertEqual(len(self.row_lines(block)), 1)
+
+    def test_parked_none_when_nothing_changed(self):
+        block = drive_retained.render_parked([rendered("aaaaaaaa")])
+        self.assertIn("(none)", block)
+        self.assertEqual(self.row_lines(block), [])
+
+    def test_json_out_and_blocks_come_from_one_probe_pass(self):
+        """One `render` run, one probe per row -- never a second pass for the merge."""
+        entries = [entry("aaaaaaaa", "blocked"), entry("bbbbbbbb", "unverifiable")]
+        rows = [rendered("aaaaaaaa"), rendered("bbbbbbbb")]
+        probed = []
+        saved = (drive_retained.read_ledger, drive_retained.disposition)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        out = os.path.join(tmp, "payload.json")
+        try:
+            drive_retained.read_ledger = lambda *_a, **_k: (
+                {"round": "R-1", "entries": entries}, None)
+            drive_retained.disposition = lambda e: (
+                probed.append(e) or rows[len(probed) - 1])
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = drive_retained.main(["render", "--json-out", out])
+        finally:
+            drive_retained.read_ledger, drive_retained.disposition = saved
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(probed), 2, "exactly one probe per retained row")
+        with open(out, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual(payload["round"], "R-1")
+        self.assertEqual(len(payload["retained"]), 2)
+        self.assertIn("aaaaaaaa", buf.getvalue())
+        self.assertIn("bbbbbbbb", buf.getvalue())
 
 
 if __name__ == "__main__":

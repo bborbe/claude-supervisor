@@ -25,7 +25,7 @@ script never guesses a revive.
 Storage and the merge belong to `drive-ledger.py` -- this reads through it and writes
 nothing. Same rule as that script: one owner per file.
 
-Subcommands: reprobe
+Subcommands: reprobe | render
 """
 import argparse
 import json
@@ -46,6 +46,12 @@ NEEDS_STEP_4 = "needs-step-4"
 HERE = os.path.dirname(os.path.abspath(__file__))
 LEDGER_SCRIPT = os.path.join(HERE, "drive-ledger.py")
 LIVENESS_SCRIPT = os.path.join(HERE, "session-liveness.py")
+
+#: The command a `RETAINED` line names as the probe that produced its result.
+#: A constant, not the invoking argv: the rendered line must stay stable when the
+#: script is called by absolute path, so the payload records the same command every
+#: round and a reader can re-run it verbatim.
+PROBE_COMMAND = "python3 scripts/drive-retained.py reprobe"
 
 
 def read_ledger(script=None):
@@ -188,6 +194,98 @@ def retained_entries(ledger):
     return [e for e in ledger.get("entries") or [] if e.get("verdict") in RETAINED]
 
 
+def render_retained(rows, round_tag):
+    """The `RETAINED` block: one line per row, however long the list.
+
+    WHY THE SCRIPT RENDERS THIS AND NOT THE AGENT. `agents/fleet-drive.md` has
+    required one line per row since v0.194.0, and the round of
+    `2026-10-21T05-07-35Z` collapsed 88 re-probed rows into a single summary line
+    anyway -- "82 unverifiable (no task file recorded), 5 needs-step-4, 1
+    finished-by-script" -- carrying none of the three things the section exists to
+    show. Prose that forbids a shape loses to an agent under load; a rendered block
+    it pastes cannot be collapsed without deleting lines a reader can count.
+
+    Each row carries the round tag, the command run that round, and that round's
+    result. A row with no `task_file` renders `dropped: task file missing`, because
+    that is what step 0 could do with it -- the honest evidence, not a blank.
+    """
+    lines = ["RETAINED — re-probed from the ledger, not the digest"]
+    for row in rows:
+        task_file = (row.get("task_file") or "").strip()
+        lines.append(
+            "  %s [%s] · round %s · %s · %s → %s"
+            % (
+                row.get("name") or "?",
+                (row.get("session_id") or "")[:8],
+                round_tag,
+                task_file or "no task file",
+                row.get("prior_verdict") or "none",
+                row.get("verdict") or "?",
+            )
+        )
+        lines.append("      probe: %s → %s" % (PROBE_COMMAND, row.get("probe") or ""))
+        lines.append(
+            "      ledger: %s"
+            % ("excluded" if task_file else "dropped: task file missing")
+        )
+    if not rows:
+        lines.append("  (none)")
+    return "\n".join(lines)
+
+
+def render_parked(rows):
+    """The `PARKED` block: only the rows whose probe changed this round.
+
+    The dedup key is `disposition()`'s, computed against the stored `reprobe_*` pair
+    -- so an unchanged row is silent here and still present in `RETAINED`. Emitting
+    `(none)` rather than dropping the section keeps a quiet round distinguishable
+    from a round that never rendered it.
+    """
+    changed = [row for row in rows if row.get("suppression") == "signalled"]
+    lines = ["PARKED — one line per row whose parking verdict or probe changed this round"]
+    for row in changed:
+        lines.append(
+            "  %s [%s] · %s · %s"
+            % (
+                row.get("name") or "?",
+                (row.get("session_id") or "")[:8],
+                row.get("verdict") or "?",
+                row.get("probe") or "",
+            )
+        )
+    if not changed:
+        lines.append("  (none)")
+    return "\n".join(lines)
+
+
+def cmd_render(args):
+    """Blocks on stdout, and optionally the merge payload -- from ONE probe pass.
+
+    `--json-out` exists so a round probes each retained row exactly once. Rendering
+    and merging need the same observations, and making the agent run `reprobe` and
+    then `render` would probe every row twice, which is precisely what
+    `test_probe_runs_once_per_retained_row` forbids.
+    """
+    ledger, reason = read_ledger(args.ledger_script)
+    if reason:
+        print("drive-retained: %s" % reason, file=sys.stderr)
+        return REFUSED
+    rows = [disposition(entry) for entry in retained_entries(ledger)]
+    round_tag = ledger.get("round") or "unknown round"
+    if args.json_out:
+        with open(args.json_out, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"round": ledger.get("round"), "retained": rows},
+                handle,
+                indent=2,
+                sort_keys=True,
+            )
+            handle.write("\n")
+    print(render_retained(rows, round_tag))
+    print(render_parked(rows))
+    return 0
+
+
 def cmd_reprobe(args):
     ledger, reason = read_ledger(args.ledger_script)
     if reason:
@@ -215,9 +313,24 @@ def main(argv=None):
         default=None,
         help="path to drive-ledger.py (default: the sibling copy)",
     )
+    render = sub.add_parser(
+        "render", help="print the payload's RETAINED and PARKED blocks, one line per row"
+    )
+    render.add_argument(
+        "--ledger-script",
+        default=None,
+        help="path to drive-ledger.py (default: the sibling copy)",
+    )
+    render.add_argument(
+        "--json-out",
+        default=None,
+        help="also write the merge payload here, from the same probe pass",
+    )
     args = parser.parse_args(argv)
     if args.command == "reprobe":
         return cmd_reprobe(args)
+    if args.command == "render":
+        return cmd_render(args)
     parser.print_help(sys.stderr)
     return REFUSED
 
