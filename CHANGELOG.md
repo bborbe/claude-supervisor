@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.196.1
 - fix: **the drive leg's `PARKED` signal is deduplicated again.** `drive-retained.py` compared step 0's own observation against the entry's `verdict` — the agent's step-4 conclusion — but the two vocabularies never coincide: the re-probe emits `needs-step-4`, which `VERDICTS` deliberately omits because step 4 resolves it, so a live row re-signalled on every round. Measured 2026-10-21 on the deployed `v0.195.1` artifact: two consecutive sandbox rounds over one digest produced byte-identical `PARKED` blocks for the same 6 rows. Step 0's observation now lives in its own `reprobe_verdict`/`reprobe_probe` fields and the dedup key is those; entries written before this change read as a first observation, so the first round after deploy re-signals each retained row once. Change set: `scripts/drive-ledger.py`, `scripts/drive-retained.py`, `scripts/tests/test_drive_ledger.py`, `scripts/tests/test_drive_retained.py`, `agents/fleet-drive.md`, `CHANGELOG.md`.
 
 ## v0.196.0
