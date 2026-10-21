@@ -62,6 +62,8 @@ FIELDS = (
     "nudge",
     "suppression",
     "task_file",
+    "reprobe_verdict",
+    "reprobe_probe",
 )
 VERDICTS = ("revive", "blocked", "unverifiable", "finished")
 NUDGES = ("drafted", "none")
@@ -109,6 +111,15 @@ def canonical(sid, raw):
         "nudge": raw.get("nudge") or "none",
         "suppression": raw.get("suppression") or "none",
         "task_file": raw.get("task_file") or "",
+        # What step 0's re-probe observed, kept apart from the agent's own
+        # `verdict`/`probe`. The two speak different vocabularies: the script emits
+        # `needs-step-4` for a live row, which is deliberately NOT in VERDICTS because
+        # the agent resolves it to revive|blocked|unverifiable after step 4. Comparing
+        # the script's observation against the agent's conclusion therefore never
+        # matched, and a live row re-signalled every round (measured 2026-10-21:
+        # identical PARKED blocks in two consecutive rounds).
+        "reprobe_verdict": raw.get("reprobe_verdict") or "",
+        "reprobe_probe": raw.get("reprobe_probe") or "",
     }
 
 

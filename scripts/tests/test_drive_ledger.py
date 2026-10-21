@@ -43,9 +43,12 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "drive-ledger.py"
 
-#: The canonical entry's eight fields, as `agents/fleet-drive.md` step 7 names them.
+#: The canonical entry's ten fields, as `agents/fleet-drive.md` step 7 names them.
 #: `task_file` is what step 0 re-probes from; without it a retained row cannot be
-#: resolved back to a task at all.
+#: resolved back to a task at all. `reprobe_verdict`/`reprobe_probe` hold step 0's own
+#: observation, kept apart from `verdict`/`probe` (the agent's conclusion) because the
+#: two vocabularies never coincide -- `needs-step-4` is emitted by the re-probe and
+#: deliberately absent from VERDICTS.
 FIELDS = {
     "session_id",
     "name",
@@ -55,6 +58,8 @@ FIELDS = {
     "nudge",
     "suppression",
     "task_file",
+    "reprobe_verdict",
+    "reprobe_probe",
 }
 
 FLAT_ONLY = tuple("flat%05d" % i for i in range(13))
@@ -243,7 +248,7 @@ class TestRead(Base):
             "exactly one entry per session id",
         )
         for row in out["entries"]:
-            self.assertEqual(set(row), FIELDS, "canonical shape, all eight fields")
+            self.assertEqual(set(row), FIELDS, "canonical shape, all ten fields")
 
     def test_absent_ledger_reads_empty(self):
         proc = self.run_script(["read"])
@@ -406,6 +411,45 @@ class TestTaskFile(Base):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(self.rows_on_disk()["abc12345"]["task_file"], path)
+
+
+class TestReprobeKey(Base):
+    """Step 0's dedup key, stored separately from the agent's own verdict.
+
+    `drive-retained.py` compares its observation against `reprobe_verdict`/
+    `reprobe_probe`. If those fields did not survive the merge, every retained row
+    would read as a first observation and re-signal on every round -- the defect
+    measured 2026-10-21 as byte-identical PARKED blocks in consecutive rounds.
+    """
+
+    def test_legacy_rows_read_the_fields_empty_not_absent(self):
+        self.seed()
+        proc = self.run_script(["read"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for row in json.loads(proc.stdout)["entries"]:
+            self.assertIn("reprobe_verdict", row)
+            self.assertEqual(row["reprobe_verdict"], "")
+            self.assertIn("reprobe_probe", row)
+            self.assertEqual(row["reprobe_probe"], "")
+
+    def test_the_key_survives_a_merge_round_trip(self):
+        self.seed()
+        proc = self.merge(
+            [
+                {
+                    "session_id": "abc12345",
+                    "verdict": "unverifiable",
+                    "reprobe_verdict": "needs-step-4",
+                    "reprobe_probe": "status=in_progress open_boxes=8, session live",
+                }
+            ]
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        row = self.rows_on_disk()["abc12345"]
+        self.assertEqual(row["reprobe_verdict"], "needs-step-4")
+        self.assertEqual(
+            row["reprobe_probe"], "status=in_progress open_boxes=8, session live"
+        )
 
 
 class TestNoOpControl(Base):
