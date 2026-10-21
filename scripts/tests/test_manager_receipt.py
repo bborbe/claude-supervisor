@@ -34,6 +34,15 @@ ATTENTION_WATCH = os.path.join(SCRIPTS, "manager-attention-watch.py")
 
 NEEDS_YOU_OK = "Needs you (0)\n\nNothing needs you.\n"
 
+# The shape `scripts/round-readings.py` writes: the four verdict families per row.
+READINGS_OK = json.dumps({
+    "subject": "a subject",
+    "recorded_at": 1792578804.9,
+    "feed_state": "read",
+    "rows": {"A task": {"liveness": "LIVE", "in_flight": "quiet",
+                        "feed": "clear", "external_wait": "none"}},
+})
+
 
 def load(receipt_dir, liveness_dir):
     os.environ["MANAGER_RECEIPT_STATE_DIR"] = receipt_dir
@@ -143,7 +152,8 @@ class Receipt(unittest.TestCase):
         ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
         sw = self.artifact("sweep.json", SWEEP_OK)
         ev = self.events_log("events.jsonl", [time.time()])
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+        rd = self.artifact("readings.json", READINGS_OK)
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev), ("readings", rd)):
             self.record(step, p)
 
     # --- the red/green property ------------------------------------------------
@@ -368,7 +378,8 @@ class Receipt(unittest.TestCase):
             fh.write("not json at all\n")              # garbage
             fh.write("\n")                             # blank line
             fh.write(json.dumps({"kind": "LIVENESS", "ts": time.time()}) + "\n")
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+        rd = self.artifact("readings.json", READINGS_OK)
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev), ("readings", rd)):
             self.record(step, p)
         rc, out = self.check()
         self.assertEqual(rc, 0, out)
