@@ -151,20 +151,35 @@ def disposition(entry, probe_fn=probe):
     `signalled` is emitted once per change; `already signalled` suppresses the repeat.
     Both the verdict and the evidence string are compared, so a row that stays
     `blocked` for a *different* reason still signals.
+
+    The comparison is against `reprobe_verdict`/`reprobe_probe` -- THIS round's
+    observation as the previous round recorded it -- and never against the entry's
+    `verdict`/`probe`, which are the agent's own conclusions. The two are different
+    vocabularies by construction: `probe()` emits `needs-step-4` for a live row, a
+    disposition the ledger deliberately does not store (see `VERDICTS`), because the
+    agent resolves it to revive|blocked|unverifiable in step 4. Comparing across the
+    two could never match, so every live row re-signalled on every round -- measured
+    2026-10-21 as byte-identical PARKED blocks in two consecutive rounds.
+
+    `prior_verdict` stays the entry's `verdict` because that is what the RETAINED
+    render shows; it is display only and never the dedup key.
     """
-    prior_verdict = entry.get("verdict") or ""
-    prior_probe = entry.get("probe") or ""
+    prior_reprobe_verdict = entry.get("reprobe_verdict") or ""
+    prior_reprobe_probe = entry.get("reprobe_probe") or ""
     result = probe_fn(entry)
     changed = (
-        result["verdict"] != prior_verdict or result["probe"] != prior_probe
+        result["verdict"] != prior_reprobe_verdict
+        or result["probe"] != prior_reprobe_probe
     )
     return {
         "session_id": entry.get("session_id") or "",
         "name": entry.get("name") or "",
         "task_file": entry.get("task_file") or "",
-        "prior_verdict": prior_verdict,
+        "prior_verdict": entry.get("verdict") or "",
         "verdict": result["verdict"],
         "probe": result["probe"],
+        "reprobe_verdict": result["verdict"],
+        "reprobe_probe": result["probe"],
         "suppression": "signalled" if changed else "already signalled",
     }
 

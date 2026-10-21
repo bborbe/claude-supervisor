@@ -30,6 +30,8 @@ def entry(sid, verdict, **over):
         "nudge": "none",
         "suppression": "none",
         "task_file": "/vault/25 Tasks/%s.md" % sid,
+        "reprobe_verdict": "",
+        "reprobe_probe": "",
     }
     row.update(over)
     return row
@@ -181,25 +183,72 @@ class TestDedup(unittest.TestCase):
         self.assertEqual(out["suppression"], "signalled")
 
     def test_unchanged_row_is_suppressed(self):
-        row = entry("aaaa", "blocked", probe="same reason")
+        row = entry("aaaa", "blocked", reprobe_verdict="blocked", reprobe_probe="same reason")
         out = drive_retained.disposition(
             row, probe_fn=self.stub("blocked", "same reason")
         )
         self.assertEqual(out["suppression"], "already signalled")
 
     def test_changed_verdict_signals(self):
-        row = entry("aaaa", "blocked", probe="same reason")
+        row = entry("aaaa", "blocked", reprobe_verdict="blocked", reprobe_probe="same reason")
         out = drive_retained.disposition(
             row, probe_fn=self.stub("unverifiable", "same reason")
         )
         self.assertEqual(out["suppression"], "signalled")
 
     def test_changed_reason_at_the_same_verdict_signals(self):
-        row = entry("aaaa", "blocked", probe="old reason")
+        row = entry("aaaa", "blocked", reprobe_verdict="blocked", reprobe_probe="old reason")
         out = drive_retained.disposition(
             row, probe_fn=self.stub("blocked", "new reason")
         )
         self.assertEqual(out["suppression"], "signalled")
+
+    def test_a_live_row_stops_resignalling_once_the_agent_resolved_it(self):
+        """The 2026-10-21 regression: two consecutive rounds, identical PARKED blocks.
+
+        The agent stores its step-4 conclusion as `verdict` (`unverifiable`), while
+        step 0's observation is `needs-step-4` -- a value VERDICTS deliberately does
+        not hold. Comparing the observation against the conclusion could never match,
+        so the row re-signalled forever. The dedup key must be the observation.
+        """
+        live = "status=in_progress phase=execution open_boxes=8, session live"
+        row = entry(
+            "aaaa",
+            "unverifiable",
+            probe="no CLOSERS row -> fail closed",
+            reprobe_verdict="needs-step-4",
+            reprobe_probe=live,
+        )
+        out = drive_retained.disposition(
+            row, probe_fn=self.stub("needs-step-4", live)
+        )
+        self.assertEqual(out["suppression"], "already signalled")
+
+    def test_a_zero_box_row_stops_resignalling_once_the_agent_disagreed(self):
+        """Same shape, other vocabulary split: probe says finished, step 1b refuses.
+
+        `probe()` calls open_boxes == 0 terminal; the agent's step 1b re-reads status
+        and phase and lands on `unverifiable`. Both verdicts are stable round to
+        round, so the row must be suppressed even though the two disagree.
+        """
+        zero = "status=in_progress phase=execution open_boxes=0"
+        row = entry(
+            "aaaa",
+            "unverifiable",
+            probe="not terminal (status not completed/aborted, phase not done)",
+            reprobe_verdict="finished",
+            reprobe_probe=zero,
+        )
+        out = drive_retained.disposition(row, probe_fn=self.stub("finished", zero))
+        self.assertEqual(out["suppression"], "already signalled")
+
+    def test_the_disposition_reports_the_observation_for_next_round(self):
+        row = entry("aaaa", "blocked", reprobe_verdict="", reprobe_probe="")
+        out = drive_retained.disposition(
+            row, probe_fn=self.stub("needs-step-4", "status=in_progress open_boxes=3")
+        )
+        self.assertEqual(out["reprobe_verdict"], "needs-step-4")
+        self.assertEqual(out["reprobe_probe"], "status=in_progress open_boxes=3")
 
 
 class TestLivenessMapping(unittest.TestCase):
