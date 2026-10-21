@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.196.0
 - feat: **`TOKEN_KEYS` gains `SUPERVISOR_A2A_TOKEN_OCTOPUS_DEV`.** The supervisor now resolves the octopus-dev controller token from TeamVault (`ROnzvO`, the personal instance `mcp-start.py` already reads) the same way it resolves the nuke and docker ones, so `k8s:octopus-dev` can authenticate once `a2a.url.octopus-dev` is present. Change set: `scripts/mcp-start.py`, `scripts/tests/test_mcp_start.py`, `CHANGELOG.md`.
 
 ## v0.195.1
