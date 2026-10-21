@@ -137,10 +137,6 @@ def parse_weekly(text):
                 continue
             if line.startswith("**Task:**"):
                 cur["names"] = wikilinks(line)
-                prio = re.search(r"🔴|HIGH", line)
-                cur["high"] = bool(prio)
-            elif line.startswith("**Priority:**"):
-                cur["high"] = "HIGH" in line
     return [r for r in rows if r["names"]]
 
 
@@ -304,7 +300,7 @@ def card_key(vault, kind, name):
     return f"next-focus:{slug}:{kind}:{item}"
 
 
-def candidate(name, kind, path, fm, source, why):
+def candidate(name, kind, fm, source, why):
     phase = (fm or {}).get("phase", "")
     status = (fm or {}).get("status", "")
     row = {
@@ -341,12 +337,12 @@ def plan_candidates(vault, board, day, notes):
             continue
         for item in parser(text):
             for name in item["names"]:
-                kind, ppath, fm = board.read(name)
+                kind, _, fm = board.read(name)
                 if kind is None:
                     notes.append(f"{name}: no page in tasks/goals/topics")
                     continue
                 out.append(candidate(
-                    name, kind, ppath, fm,
+                    name, kind, fm,
                     {"period": period, "file": str(path), "line": item["line"]},
                     item.get("title", ""),
                 ))
@@ -375,14 +371,14 @@ def due_today(board, tasks_dir, day):
         if not (due or flagged):
             continue
         out.append(candidate(
-            path.stem, "task", path, fm,
+            path.stem, "task", fm,
             {"period": "due-today", "file": str(path), "line": 1},
             "due today" if due else "operator-flagged",
         ))
     return out
 
 
-def proposed(vault, board, tasks_dir, planned_names, alerts_state, alerts_lines, day):
+def proposed(vault, board, tasks_dir, planned_names, alerts_state, alerts_lines):
     """Important items in NO current plan — at most PROPOSAL_CAP, one card each."""
     rows = []
     # class 1: open P1 tasks
@@ -398,7 +394,7 @@ def proposed(vault, board, tasks_dir, planned_names, alerts_state, alerts_lines,
             if path.stem in planned_names:
                 continue
             rows.append(candidate(
-                path.stem, "task", path, fm,
+                path.stem, "task", fm,
                 {"period": "unplanned", "file": str(path), "line": 1},
                 "priority: 1, in no current plan",
             ))
@@ -425,7 +421,7 @@ def proposed(vault, board, tasks_dir, planned_names, alerts_state, alerts_lines,
             if path.stem in planned_names:
                 continue
             rows.append(candidate(
-                path.stem, "goal", path, fm,
+                path.stem, "goal", fm,
                 {"period": "unplanned", "file": str(path), "line": 1},
                 f"blocked on {fm['blocked_by']}, in no current plan",
             ))
@@ -464,7 +460,7 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None):
     for i, row in enumerate(emitted, 1):
         row["rank"] = i
 
-    proposed_rows = proposed(vault, board, Path(vault) / tasks_dir, seen, alerts_state, alerts_lines, day)
+    proposed_rows = proposed(vault, board, Path(vault) / tasks_dir, seen, alerts_state, alerts_lines)
     proposed_overflow = proposed_rows[PROPOSAL_CAP:]
 
     return {
