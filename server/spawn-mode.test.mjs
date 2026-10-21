@@ -804,10 +804,21 @@ test('both spawn paths are wired — the claim no pure-helper test can reach', (
   // the same stated reason: a text scan cannot prove the wiring RUNS, but it does prove a
   // call site cannot silently omit it. Found by the PR review.
   const source = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  // The tab path carries the caller's env either directly or spread into the shipping
+  // merge — both keep the claim (the call site cannot silently omit it), and the second
+  // is the shipping path, so the two assertions below cover each half.
   assert.match(
     source,
-    /spawnInteractiveAgent\(\{[^}]*env: envOverrides/,
+    /spawnInteractiveAgent\(\{[^}]*env: (?:envOverrides|tabShippingEnv \? \{ \.\.\.envOverrides)/,
     'the tab path must be handed envOverrides',
+  )
+  // ⚠️ The tab path's shipping carrier, asserted for the same reason as the env itself:
+  // a shipping tab spawn that omitted this would pass every pure-helper test in
+  // `shipping-settings.test.mjs` and still park on the operator's mode switch.
+  assert.match(
+    source,
+    /spawnInteractiveAgent\(\{[^}]*\.\.\.tabShippingEnv/,
+    'the tab path must be handed the shipping env',
   )
   assert.match(
     source,

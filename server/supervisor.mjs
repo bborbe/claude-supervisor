@@ -49,7 +49,7 @@ import { foreignParkRefusal } from './park-refusal.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
-import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
+import { SHIPPING_PERMISSION_MODE, launcherHonoursModeEnv, shippingSettings, shippingSupportError, shippingTabEnv } from './shipping-settings.mjs'
 import { liveSessionIds, rehydratableAgents, unionRoster } from './registry-rehydrate.mjs'
 import { patchSessionLedgerRow, postSessionLedger, readSessionLedger, readSessionLedgerRow, recordToWire } from './session-ledger.mjs'
 
@@ -943,6 +943,22 @@ function launcherModelFor(scriptPath) {
     return parseLauncherModel(readFileSync(scriptPath, 'utf8'))
   } catch {
     return null
+  }
+}
+
+// Whether the launcher PRESERVES an exported `PERMISSION_MODE` rather than overwriting
+// it — the precondition a shipping tab worker rests on.
+//
+// `false` when the launcher cannot be read, deliberately: a launcher we cannot inspect
+// is one we cannot promise will keep the value, and `shippingSupportError` turns that
+// into a refusal at spawn time. Defaulting to `true` here would recreate the silent
+// overwrite this check exists to catch.
+function launcherPreservesModeEnv(scriptPath) {
+  if (!scriptPath) return false
+  try {
+    return launcherHonoursModeEnv(readFileSync(scriptPath, 'utf8'))
+  } catch {
+    return false
   }
 }
 
@@ -2168,9 +2184,6 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // refused, not accepted and quietly ignored.
   const unsupportedPolicy = policySupportError({ policy: policyPath, interactive: opensInteractive })
   if (unsupportedPolicy) return { error: unsupportedPolicy }
-  // Same class again: shipping settings a tab worker would never load are refused.
-  const unsupportedShipping = shippingSupportError({ shipping, interactive: opensInteractive })
-  if (unsupportedShipping) return { error: unsupportedShipping }
 
   // Resolved before anything is spawned, so a bad path costs no worker, no ledger
   // record, and no half-started session running under rules nobody chose.
@@ -2204,6 +2217,24 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   }
   const workerLauncher = config.claudeCmd || taskLauncher.launcher
   const workerModel = launcherModelFor(workerLauncher)
+
+  // Shipping is checked HERE rather than with the support guards above because it needs
+  // the LAUNCHER: the tab path delivers the mode through an env var the launcher reads,
+  // and a launcher that overwrites that var would leave the worker parked on the very
+  // gate `shipping` exists to remove. Still before every side effect — no tab, no slot,
+  // no ledger record — so the refusal costs a rejected call and nothing else.
+  const unsupportedShipping = shippingSupportError({
+    shipping,
+    interactive: opensInteractive,
+    launcherHonoursModeEnv: launcherPreservesModeEnv(workerLauncher),
+  })
+  if (unsupportedShipping) return { error: unsupportedShipping }
+
+  // The tab path's carrier. Merged AFTER the caller's env so the SERVER's value wins —
+  // a caller setting PERMISSION_MODE on a shipping worker must not be able to choose a
+  // wider mode than `acceptEdits`. Null for every non-shipping and every headless
+  // spawn, which is the negative control: those tabs keep the launcher's own default.
+  const tabShippingEnv = shippingTabEnv(shipping === true && opensInteractive)
   let workerRules = null
   let resolvedPolicyPath = null
   if (policyPath) {
@@ -2416,7 +2447,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip, env: envOverrides })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip, env: tabShippingEnv ? { ...envOverrides, ...tabShippingEnv } : envOverrides })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
