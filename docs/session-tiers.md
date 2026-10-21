@@ -89,9 +89,6 @@ other side.
 | `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `goal-drive`, never by driving a task itself |
 | `/supervisor:restart` | fleet manager, topic manager, goal manager — restarts ONE worker or ONE manager, in its own role colour, and tells a manager to re-arm its loop | worker — resuming a session is dispatch, and the script refuses `busy-target` for a session restarting itself |
 | `/supervisor:worker-restart` | fleet manager, topic manager, goal manager — **DEPRECATED alias for `/supervisor:restart`, and the one exception to the prefix rule: `worker-` names the TARGET, not the invoker** | worker — same as `/supervisor:restart` |
-| `/supervisor:manager-loop` | topic manager, goal manager — **DEPRECATED alias; resolves the tier, then runs `topic-loop` or `goal-loop`** | worker |
-| `/supervisor:manager-drive` | topic manager, goal manager — **DEPRECATED alias; resolves the tier, then runs `topic-drive` or `goal-drive`** | worker |
-| `/supervisor:manager-status` | topic manager, goal manager — **DEPRECATED alias; resolves the tier, then runs `topic-status` or `goal-status`** | worker |
 | `/supervisor:read-guides` | any | — |
 | `/supervisor:jump` | any | — |
 | `/supervisor:close` | any | — |
@@ -100,8 +97,6 @@ other side.
 | `/supervisor:attention-next` | any — relays the operator's own answer | — |
 | `/supervisor:inbox` | any — the operator's own approval queue; relays their approve / reject / later, and never picks a row itself | — |
 | `/supervisor:ready` | any — readies ONE named task to the spawn bar (audit → repair → re-audit in a sub-agent), then opens it or escalates | — |
-
-⚠️ **A `manager-*` prefix now survives on exactly three commands, and they are aliases.** `manager-loop`, `manager-drive` and `manager-status` are kept for one reason: **every armed manager loop wakes by calling `/supervisor:manager-drive <subject>`** — the prompt its own `ScheduleWakeup` carries. A rename with no alias stops every live loop on the first `/reload-plugins` after the release, silently, and nothing reports it until `manager-liveness.py` calls the cadence stale one interval later. Each alias resolves the tier and invokes the tier's own command through `Skill`; none reimplements a procedure. **They are not a second home for any rule** and they are deleted in a later release once no armed loop carries the old prompt.
 
 Keep this table in lockstep with `commands/`: a command file with no row here, or a row with
 no command file, is a defect. Check it with:
