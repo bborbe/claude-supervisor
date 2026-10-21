@@ -156,6 +156,27 @@ test('a launcher that defaults the mode but never forwards it is not honoured', 
   assert.equal(launcherHonoursModeEnv('export PERMISSION_MODE="${PERMISSION_MODE:-auto}"'), false)
 })
 
+// ⚠️ The LAST assignment decides. A defaulting export followed by a later unconditional one
+// passes a set-membership test while the second overwrites the spawn's value — the worker
+// parks on the very gate shipping removes and every reply still says it was granted.
+test('a later unconditional export overrides an earlier defaulting one', () => {
+  const script = [
+    'export PERMISSION_MODE="${PERMISSION_MODE:-auto}"',
+    'export PERMISSION_MODE="auto"',
+    'claude --permission-mode "${PERMISSION_MODE}"',
+  ].join('\n')
+  assert.equal(launcherHonoursModeEnv(script), false)
+})
+
+// An assignment after the use cannot influence the value claude was given.
+test('an assignment after the --permission-mode use does not count', () => {
+  const script = [
+    'claude --permission-mode "${PERMISSION_MODE}"',
+    'export PERMISSION_MODE="${PERMISSION_MODE:-auto}"',
+  ].join('\n')
+  assert.equal(launcherHonoursModeEnv(script), false)
+})
+
 // The pre-change form, which is what every launcher carried: assigning unconditionally
 // wins over the spawn's value, so this must read as NOT honouring.
 test('a launcher that ASSIGNS the mode unconditionally is not', () => {

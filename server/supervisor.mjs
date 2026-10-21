@@ -2800,7 +2800,7 @@ const TOOLS = [
         shipping: {
           type: 'boolean',
           description:
-            'Mark this worker as SHIPPING: it runs under `acceptEdits` with `git add` / `git commit` / `git push` pre-allowed, so its edits and commits never depend on the supervisor permission channel — a headless worker whose channel dies ("Stream closed") can otherwise neither edit nor commit. Every other tool still prompts, so the approval policy stays in force. Headless and local only: combining it with interactive:true or target:"cluster" is refused. Omit for an ordinary worker.',
+            'Mark this worker as SHIPPING: it runs under `acceptEdits`, so its edits and commits never depend on the supervisor permission channel — a headless worker whose channel dies ("Stream closed") can otherwise neither edit nor commit, and a tab worker otherwise parks on an operator-only Shift+Tab. ⚠️ The two paths carry it DIFFERENTLY: a HEADLESS worker gets `git add` / `git commit` / `git push` pre-allowed; a TAB worker gets the MODE ONLY, so its unattended command set is the ambient `permissions.allow`. Every other tool still prompts, so the approval policy stays in force. Local only — target:"cluster" is refused, and so is a tab spawn whose launcher does not preserve an exported PERMISSION_MODE. Omit for an ordinary worker.',
         },
         policy: {
           type: 'string',

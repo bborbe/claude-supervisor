@@ -104,12 +104,25 @@ export function launcherHonoursModeEnv(scriptText) {
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '' && !line.startsWith('#'))
-  // It must DEFAULT the variable…
-  const defaults = live.some((line) => /^export\s+PERMISSION_MODE=.*\$\{PERMISSION_MODE:-/.test(line))
-  // …and actually hand it to claude. A launcher that defaults the variable but never passes
-  // it leaves the mode unused, so the worker parks exactly as before.
-  const forwards = live.some((line) => /--permission-mode/.test(line))
-  return defaults && forwards
+  // ⚠️ ORDER-AWARE, not two `.some` scans. A launcher carrying the defaulting export and
+  // then a LATER unconditional one passes a set-membership test while the second assignment
+  // overwrites the spawn's `acceptEdits` — the worker parks on the very gate `shipping`
+  // removes and every reply still reports it granted. So it is the LAST assignment that
+  // decides, and it must be the defaulting form.
+  let lastAssign = -1
+  let lastAssignDefaults = false
+  let forwardAt = -1
+  live.forEach((line, index) => {
+    if (/^export\s+PERMISSION_MODE=/.test(line)) {
+      lastAssign = index
+      lastAssignDefaults = /\$\{PERMISSION_MODE:-/.test(line)
+    }
+    if (/--permission-mode/.test(line)) forwardAt = index
+  })
+  if (lastAssign < 0 || !lastAssignDefaults) return false
+  // …and it must actually hand the value to claude, from an assignment that precedes the use.
+  // A launcher that defaults the variable but never passes it leaves the mode unused.
+  return forwardAt >= 0 && lastAssign < forwardAt
 }
 
 // The refusal for a spawn that cannot honour `shipping`, or `null`.
@@ -131,9 +144,10 @@ export function shippingSupportError({ shipping, interactive, cluster, launcherH
   if (interactive && launcherHonoursModeEnv !== true) {
     return (
       `shipping on a tab worker needs a launcher that preserves an exported ${SHIPPING_MODE_ENV} ` +
-      `(the \`\${${SHIPPING_MODE_ENV}:-auto}\` form). This launcher assigns it unconditionally, so the ` +
-      `mode would be silently overwritten and the worker would still park on edits. Update the ` +
-      `launcher, or spawn with interactive:false.`
+      `(the \`\${${SHIPPING_MODE_ENV}:-auto}\` form) and forwards it with \`--permission-mode\`. ` +
+      `This launcher either could not be read, or assigns the variable unconditionally or after ` +
+      `that use — in every case the mode would be silently overwritten and the worker would ` +
+      `still park on edits. Update the launcher, or spawn with interactive:false.`
     )
   }
   return null

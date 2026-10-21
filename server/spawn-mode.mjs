@@ -13,6 +13,8 @@
 //
 // Nothing here reads the filesystem, the environment, or the clock.
 
+import { SHIPPING_MODE_ENV } from './shipping-settings.mjs'
+
 export const SPAWN_MODES = ['interactive', 'headless']
 
 // The per-call argument is still a boolean, because that is the shape the MCP tool has
@@ -709,8 +711,6 @@ export function shellEnvExports(env) {
 
 // A legal shell variable name — the tab path exports these literally, so a name that cannot
 // be exported has to be refused here rather than dropped downstream.
-import { SHIPPING_MODE_ENV } from './shipping-settings.mjs'
-
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 // ⚠️ The spawn mode is the SERVER's to declare, on every path, so a caller may not set it.
@@ -766,13 +766,20 @@ export function resolveEnvOverrides({ env } = {}) {
       }
     }
     if (RESERVED_ENV_NAMES.has(name)) {
-      return {
-        error:
-          `env cannot set ${name}: the server owns a worker's spawn mode and hands it to the worker ` +
-          `itself. A caller setting it would tell a TAB worker it is headless — and ` +
-          `scripts/permission-answer-poll.py returns early on that value, so the worker's ` +
-          `attention-store relay would go silent. Omit it; the mode is not the caller's to declare.`,
-      }
+      // ⚠️ Branched by NAME: the three reserved names are refused for different reasons, and a
+      // caller sent to the wrong subsystem debugs the wrong thing. `PERMISSION_MODE` is the
+      // tab path's shipping carrier, so its risk is a WIDER mode — not a mislabelled spawn.
+      const why =
+        name === SHIPPING_MODE_ENV
+          ? `the server owns a worker's permission mode and sets it only for a shipping spawn. ` +
+            `A caller setting it could widen a worker past the server's \`acceptEdits\` — ` +
+            `\`bypassPermissions\` would start a tab worker with every approval gate disabled, ` +
+            `and the export outlives the pane for anything launched from it.`
+          : `the server owns a worker's spawn mode and hands it to the worker itself. ` +
+            `A caller setting it would tell a TAB worker it is headless — and ` +
+            `scripts/permission-answer-poll.py returns early on that value, so the worker's ` +
+            `attention-store relay would go silent.`
+      return { error: `env cannot set ${name}: ${why} Omit it; it is not the caller's to declare.` }
     }
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
       // Stringified here so both paths agree. The SDK's `env` wants strings and the tab path
