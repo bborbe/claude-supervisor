@@ -47,6 +47,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -116,7 +117,20 @@ def plan_path(vault, period, key):
 
 
 def wikilinks(text):
-    return re.findall(r"\[\[([^\]|]+)", text)
+    """The page names a line links to — `#heading`, an alias and `.md` all stripped.
+
+    A plan writes `[[Some Page#Section|label]]` as often as a bare `[[Some Page]]`, and
+    the raw text is not a filename: left unstripped it resolves to no page and the row is
+    silently dropped into `notes` instead of ranked.
+    """
+    return [link_target(raw) for raw in re.findall(r"\[\[([^\]|]+)", text)]
+
+
+def link_target(raw):
+    name = raw.split("#", 1)[0].strip()
+    if name.lower().endswith(".md"):
+        name = name[:-3]
+    return name.rsplit("/", 1)[-1].strip()
 
 
 def parse_weekly(text):
@@ -132,7 +146,10 @@ def parse_weekly(text):
             rows.append(cur)
             continue
         if cur is not None:
-            if line.startswith("# "):
+            # Any enclosing heading closes the item. `# ` alone was not enough: a `##`
+            # section between two numbered items left `cur` set, so a later `**Task:**`
+            # was appended to the PREVIOUS item and the citation pointed at its line.
+            if re.match(r"^#{1,2}\s", line):
                 cur = None
                 continue
             if line.startswith("**Task:**"):
@@ -226,6 +243,10 @@ class Board:
         self._cache = {}
 
     def find(self, name):
+        # Containment: a plan page is vault content and can write any wikilink it likes.
+        # Without this a `[[../../etc/passwd]]` link resolves outside every board dir.
+        if not name or name.startswith(("/", "~")) or ".." in Path(name).parts:
+            return None, None
         for kind, d in self.dirs.items():
             path = d / f"{name}.md"
             if path.exists():
@@ -249,20 +270,27 @@ class Board:
 
 
 def read_capacity(live, target, plugin):
-    """Return (live, target, source). `unknown` is a value, never `0`."""
-    if live is not None and target is not None:
-        return live, target, "flags"
+    """Return (live, target, source). `unknown` is a value, never `0`.
+
+    Each half is filled independently: a caller passing only `--live` must not have that
+    value silently replaced by a re-run of the script it was meant to override.
+    """
     script_dir = Path(plugin) / "scripts"
+    from_flags = live is not None and target is not None
     try:
-        live = int(subprocess.run(
-            [sys.executable, str(script_dir / "worker-sessions.py"), "--count"],
-            capture_output=True, text=True, timeout=30).stdout.strip())
-        target = int(subprocess.run(
-            [sys.executable, str(script_dir / "worker-target.py")],
-            capture_output=True, text=True, timeout=30).stdout.strip())
-        return live, target, "scripts"
+        if live is None:
+            live = int(subprocess.run(
+                [sys.executable, str(script_dir / "worker-sessions.py"), "--count"],
+                capture_output=True, text=True, timeout=30).stdout.strip())
+        if target is None:
+            target = int(subprocess.run(
+                [sys.executable, str(script_dir / "worker-target.py")],
+                capture_output=True, text=True, timeout=30).stdout.strip())
     except (OSError, ValueError, subprocess.SubprocessError):
-        return None, None, "unknown"
+        # Keep whatever WAS read or supplied: a `--live 3` that the caller passed must not
+        # be thrown away because the other half failed to resolve.
+        return live, target, "unknown"
+    return live, target, "flags" if from_flags else "scripts"
 
 
 def read_alerts(vault):
@@ -282,7 +310,13 @@ def read_alerts(vault):
         m = re.search(r"(\d+)", total[-1])
         if not m:
             return "unread", []
-        return ("clear" if int(m.group(1)) == 0 else "firing"), lines[:3]
+        count = int(m.group(1))
+        if count == 0:
+            return "clear", []
+        # The count line is a summary, not an alert: naming the proposal card after it
+        # would ask the operator to add "total active alerts: 3" to the weekly plan.
+        detail = [ln for ln in lines if not ln.lower().startswith("total active alerts:")]
+        return "firing", detail[:3] or [f"{count} active alerts"]
     return "unread", []
 
 
@@ -315,7 +349,7 @@ def candidate(name, kind, fm, source, why):
     # A `todo` row carries NO action field at all — not an empty one. An empty action
     # reads as "acted on and found nothing to do"; the key's absence is the rule.
     if not row["needs_approval"]:
-        row["action"] = f'/supervisor:open "{name}"'
+        row["action"] = f"/supervisor:open {shlex.quote(name)}"
     return row
 
 
@@ -335,7 +369,11 @@ def plan_candidates(vault, board, day, notes):
         if err:
             notes.append(f"{period} {keys[period]}: {err}")
             continue
-        for item in parser(text):
+        items = parser(text)
+        # A tier with no parseable item is a fact about that tier, not a pass.
+        if not items:
+            notes.append(f"{period} {keys[period]}: no parseable items")
+        for item in items:
             for name in item["names"]:
                 kind, _, fm = board.read(name)
                 if kind is None:
@@ -346,9 +384,6 @@ def plan_candidates(vault, board, day, notes):
                     {"period": period, "file": str(path), "line": item["line"]},
                     item.get("title", ""),
                 ))
-        # A tier with no parseable item is a fact about that tier, not a pass.
-        if not parser(text):
-            notes.append(f"{period} {keys[period]}: no parseable items")
     return out
 
 
@@ -366,14 +401,20 @@ def due_today(board, tasks_dir, day):
         fm = frontmatter(text)
         if fm.get("status") in TERMINAL:
             continue
-        due = fm.get("defer_date", "")[:10] == iso or fm.get("due_date", "")[:10] == iso
+        # On or before today, not "exactly today": a task that fell due yesterday and is
+        # still open is more urgent than one due today, and exact equality buried it.
+        due_on = min(
+            (v[:10] for v in (fm.get("defer_date", ""), fm.get("due_date", "")) if v[:10]),
+            default="",
+        )
+        due = bool(due_on) and due_on <= iso
         flagged = fm.get("flag") == "true" and fm.get("flag_set_by") == "operator"
         if not (due or flagged):
             continue
         out.append(candidate(
             path.stem, "task", fm,
             {"period": "due-today", "file": str(path), "line": 1},
-            "due today" if due else "operator-flagged",
+            ("due today" if due_on == iso else f"overdue since {due_on}") if due else "operator-flagged",
         ))
     return out
 
@@ -450,9 +491,12 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None):
 
     seen, ordered = set(), []
     for row in ranked:
-        if row["name"] in seen:
+        # Keyed on (kind, name): a task and a goal can share a filename, and deduping on
+        # the name alone silently dropped whichever sorted second.
+        key = (row["kind"], row["name"])
+        if key in seen:
             continue
-        seen.add(row["name"])
+        seen.add(key)
         ordered.append(row)
 
     overflow = ordered[CAP:]
@@ -460,21 +504,26 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None):
     for i, row in enumerate(emitted, 1):
         row["rank"] = i
 
-    proposed_rows = proposed(vault, board, Path(vault) / tasks_dir, seen, alerts_state, alerts_lines)
+    proposed_rows = proposed(
+        vault, board, Path(vault) / tasks_dir,
+        {row["name"] for row in ordered}, alerts_state, alerts_lines,
+    )
     proposed_overflow = proposed_rows[PROPOSAL_CAP:]
 
     return {
         "as_of": day.isoformat(),
         "capacity": {
             "live": live, "target": target, "source": capacity_source,
-            "below_cap": (live is not None and target is not None and live < target),
+            # `target: 0` is the documented "unlimited" form, never "at target".
+            "below_cap": (live is not None and target is not None
+                          and (target == 0 or live < target)),
         },
         "alerts": alerts_state,
         "candidates": emitted,
         "overflow": [r["name"] for r in overflow],
         "proposed": proposed_rows[:PROPOSAL_CAP],
         "proposed_overflow": [r["name"] for r in proposed_overflow],
-        "notes": notes,
+        "notes": list(dict.fromkeys(notes)),
     }
 
 
@@ -482,6 +531,8 @@ def render(result):
     cap = result["capacity"]
     if cap["live"] is None or cap["target"] is None:
         head = "Next focus: held — workers unknown"
+    elif cap["target"] == 0:
+        head = f"Next focus ({cap['live']}/unlimited)"
     elif not cap["below_cap"]:
         head = f"Next focus: held — at target ({cap['live']}/{cap['target']})"
     else:

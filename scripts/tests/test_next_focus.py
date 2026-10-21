@@ -291,6 +291,77 @@ class NextFocusTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("REFUSED", proc.stderr)
 
+    # -- regressions the review found --------------------------------------
+
+    def test_bad_now_refuses_rather_than_emitting_nothing(self):
+        """Exit 2 is a refusal; an empty block would read as "nothing to do"."""
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--vault", str(self.vault),
+             "--tasks-dir", "25 Tasks", "--now", "not-a-date",
+             "--live", "1", "--target", "30"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("REFUSED", proc.stderr)
+
+    def test_overdue_task_ranks_and_says_so(self):
+        """Exact-day equality buried a task that fell due yesterday and is still open."""
+        self.write("25 Tasks/Overdue Task.md", task("Overdue Task", defer="2026-10-19"))
+        row = [r for r in self.run_script()["candidates"] if r["name"] == "Overdue Task"][0]
+        self.assertEqual(row["source"]["period"], "due-today")
+        self.assertIn("overdue since 2026-10-19", row["why"])
+
+    def test_weekly_link_with_heading_resolves(self):
+        """A `[[Page#Section]]` link is not a filename; unstripped it ranks nothing."""
+        self.write(f"60 Periodic Notes/Weekly/{WEEK}.md",
+                   WEEKLY.replace("[[Weekly Task]]", "[[Weekly Task#Some Section]]"))
+        self.assertIn("Weekly Task", [r["name"] for r in self.run_script()["candidates"]])
+
+    def test_link_escaping_the_board_dirs_resolves_to_nothing(self):
+        """A plan page is content: a traversal link must not resolve outside the vault."""
+        self.write(f"60 Periodic Notes/Weekly/{WEEK}.md",
+                   WEEKLY.replace("[[Weekly Task]]", "[[../../etc/passwd]]"))
+        result = self.run_script()
+        self.assertNotIn("../../etc/passwd", [r["name"] for r in result["candidates"]])
+        self.assertTrue(any("no page" in note for note in result["notes"]))
+
+    def test_partial_live_override_is_kept(self):
+        """A supplied --live must not be replaced because --target was absent."""
+        result = self.run_script("--plugin", "/nonexistent", live="3", target=None)
+        self.assertEqual(result["capacity"]["live"], 3)
+        self.assertIsNone(result["capacity"]["target"])
+
+    def test_zero_target_is_unlimited_not_at_target(self):
+        """`target: 0` is the documented unlimited form, never "held"."""
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--vault", str(self.vault),
+             "--tasks-dir", "25 Tasks", "--now", DAY, "--live", "5", "--target", "0"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertTrue(proc.stdout.startswith("Next focus (5/unlimited)"),
+                        proc.stdout.splitlines()[0])
+
+    def test_alert_row_is_named_after_the_alert_not_the_count(self):
+        """The `total active alerts: N` line is a summary, not an item to add to a plan."""
+        self.add_alerts("#!/bin/bash\necho 'total active alerts: 2'\n"
+                        "echo 'KafkaLagHigh - consumer group is 5000 behind'\n")
+        result = self.run_script()
+        self.assertEqual(result["alerts"], "firing")
+        names = [r["name"] for r in result["proposed"]]
+        self.assertIn("KafkaLagHigh - consumer group is 5000 behind", names)
+        self.assertNotIn("total active alerts: 2", names)
+
+    def test_render_names_the_proposals_and_the_overflow(self):
+        """The render path is what the round pastes; JSON-only coverage misses it."""
+        self.add_p1(4)
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--vault", str(self.vault),
+             "--tasks-dir", "25 Tasks", "--now", DAY, "--live", "3", "--target", "30"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertIn("Proposed for this week's plan:", proc.stdout)
+        self.assertIn("left for the next round (cap 3)", proc.stdout)
+        self.assertIn("left for the next round (cap 5)", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
