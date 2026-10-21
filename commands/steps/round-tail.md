@@ -29,11 +29,11 @@ When: end of every tick
 
    ⚠️ **The window opens in the readings step** (`commands/steps/round-readings.md`, router row 2 — every tick, before the sweep dispatch) **and nowhere else:** a window opened at the tail would describe a round that had already run, which is the question it exists to answer. `--start` **clears** the fields, so a round can only ever be judged on artifacts it produced itself — never on a previous round's.
 
-   ⚠️ **Each load-bearing step records its own artifact as it produces it** — the readings step records `needs-you` (the file it persisted the `who-needs-me.py --section needs-you` output to), the sweep step records `sweep` (the payload `--write-payload` wrote), and **this tail records `watcher`** (the tracked-set arm's `events.jsonl` — the `--state` directory armed in the paragraph above):
+   ⚠️ **Each load-bearing step records its own artifact as it produces it** — the readings step records `needs-you` (the file it persisted the `who-needs-me.py --section needs-you` output to) **and `readings`** (the `<slug>.readings` document `scripts/round-readings.py` wrote — the four verdict families the sweep reader refuses to render without), the sweep step records `sweep` (the payload `--write-payload` wrote), and **this tail records `watcher`** (the tracked-set arm's `events.jsonl` — the `--state` directory armed in the paragraph above):
 
    ```bash
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-receipt.py \
-     --record --topic "<subject>" --step <needs-you|sweep|watcher> --path "<artifact>"
+     --record --topic "<subject>" --step <needs-you|sweep|watcher|readings> --path "<artifact>"
    ```
 
    ⚠️ **Check it HERE, at the tail, against the round that just ran:** `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-receipt.py --check --topic "<subject>"`. It prints `skipped: <step>` for every field that does not resolve to an artifact produced **this round** and exits 11; a full round prints nothing and exits 0. ⚠️ **A field resolves only when its artifact proves the step RAN, not that a path exists** — the file must sit inside the round window *and* carry the producer's own shape, so a `touch`ed empty file, an arbitrary non-empty string and a round-written stub all fail. Existence-plus-recency alone is satisfied by the very shortcut this exists to catch. ⚠️ **Staleness uses `manager-liveness.py`'s own period basis** (the observed median arm-to-arm gap, the reported interval as fallback), so the two checks agree and this one cannot re-introduce the false-positive that basis was built to remove.

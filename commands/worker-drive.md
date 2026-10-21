@@ -309,6 +309,20 @@ Before the loop starts, classify the actions you expect to run. If any will hit 
 
 On an auto-mode denial of an inert doc edit, retry the identical `Edit` once before escalating.
 
+### A denial is reported, never absorbed
+
+When a task step is refused by the auto-mode classifier or by a gate you cannot clear yourself, do three things **in the same turn, before you retry or work around it**:
+
+1. Write `~/.claude/state/attention/<your session id>.denial.json` — `{"tool": "<tool>", "reason": "<the denial's own words>", "ts": <epoch>}`.
+2. `SendMessage` your manager the task, the tool and the reason.
+3. Post an operator card: `attention-ask.py post --dedup-key "denial:<sha1(session_id + tool_name + lowercased whitespace-collapsed reason)[:12]>" --payload "<task>: <tool> denied — <reason>" --producer-id "<your session id>" --producer-kind session --option "fix the gate" --option "leave it" --recommend "fix the gate"`.
+
+⚠️ **The marker is the only durable evidence.** A classifier denial raises **no** `permission` gate and writes no `pending_permissions` entry — the attention event log has no `answer`/`decision` field at all — so without the file the manager's round reads the feed as `clear` and buckets you `progressing` while you are blocked. Measured 2026-10-21: a worker denied `gh pr merge` twice reported nothing, and its round's receipt recorded no readings at all.
+
+⚠️ **The dedup key is what keeps two reports of one denial from becoming two cards.** A second denial of a *different* tool is a second card, deliberately — that is a second gate, not noise.
+
+⚠️ **You clear the marker when the denial stops blocking you** — delete `<sid>.denial.json` as soon as the step succeeds or is abandoned, in the same turn. It is a declaration about a *live* block, never a flag to leave behind: nothing expires it, so a stale marker keeps the row `⚠️ problem` every round for the rest of the task, which is the same indefinite-mute failure the reader records for a stale `declared_wait:`.
+
 ## Step 8 — Report once, at the end
 
 One block. No per-step narration, no interim panels.

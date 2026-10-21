@@ -26,8 +26,10 @@ Three verbs, one receipt per topic:
                                 step S produced artifact P. Steps are `needs-you`
                                 (the file the round persisted
                                 `who-needs-me.py --section needs-you` to), `sweep`
-                                (the sweep reader's payload) and `watcher` (the
-                                tracked-set arm's `events.jsonl`).
+                                (the sweep reader's payload), `watcher` (the
+                                tracked-set arm's `events.jsonl`) and `readings`
+                                (the `<slug>.readings` document
+                                `scripts/round-readings.py` writes).
   --check  --topic T            validate against the round window. Prints
                                 `skipped: <step>` per unresolved field and exits 11
                                 if any; prints nothing and exits 0 on a full round.
@@ -66,7 +68,12 @@ ARMS_KEEP = 12
 EXIT_SKIPPED = 11
 
 # The steps whose artifacts the receipt must name. Order is the print order.
-STEPS = ("needs-you", "sweep", "watcher")
+#
+# `readings` is step 2's own output — `scripts/round-readings.py` writes the four
+# verdict families to `<slug>.readings`. It is the step the 12:17 round skipped while
+# still rendering a complete-looking table, so it is the one this receipt most needs
+# to name.
+STEPS = ("needs-you", "sweep", "watcher", "readings")
 
 # OSC 8 hyperlink: ESC ] 8 ; params ; URI ST. The payload `--write-payload` stores is
 # already link-free, but a frame captured from the screen carries them, and they are
@@ -235,6 +242,52 @@ def sweep_shape(text: str) -> bool:
     return any(ln.startswith("│") and ln.endswith("│") for ln in lines[1:-1])
 
 
+READINGS_VERDICTS = {
+    "liveness": {"LIVE", "ABSENT", "UNKNOWN"},
+    "in_flight": {"in-flight", "quiet", "unread"},
+    "feed": {"gated", "clear", "unread"},
+    "external_wait": {"external", "none", "unread"},
+}
+
+
+def readings_shape(text: str) -> bool:
+    """The readings document `scripts/round-readings.py` writes — not merely JSON.
+
+    The producer's own shape is asserted rather than "it parses": the defect this check
+    exists to catch is a round that wrote *something* plausible and did none of the
+    work. A `{}`, an all-`UNKNOWN` row and a hand-written stub all parse as JSON, so
+    the predicate requires the four verdict keys on **every** row and each value inside
+    its declared vocabulary — the two facts a fabricated file is least likely to carry
+    consistently.
+
+    An empty `rows` map is accepted: a tracked set with no resolvable task is a real
+    (if alarming) outcome, and the reader refuses on its own terms. It is not accepted
+    as a *substitute* for a populated one, because nothing here can tell the two apart
+    — that is the honest bound, and `--verify` plus the reader's own refusal are the
+    checks that do.
+    """
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    if not isinstance(doc.get("recorded_at"), (int, float)):
+        return False
+    if doc.get("feed_state") not in ("read", "unread"):
+        return False
+    rows = doc.get("rows")
+    if not isinstance(rows, dict):
+        return False
+    for row in rows.values():
+        if not isinstance(row, dict):
+            return False
+        for key, allowed in READINGS_VERDICTS.items():
+            if row.get(key) not in allowed:
+                return False
+    return True
+
+
 def record_ts(value):
     """A record's `ts` as epoch seconds, or None when it is not a timestamp.
 
@@ -331,7 +384,12 @@ def check(topic: str, now: float = None) -> int:
         except OSError:
             skipped.append((step, f"unreadable ({artifact})"))
             continue
-        ok = needs_you_shape(text) if step == "needs-you" else sweep_shape(text)
+        if step == "needs-you":
+            ok = needs_you_shape(text)
+        elif step == "readings":
+            ok = readings_shape(text)
+        else:
+            ok = sweep_shape(text)
         if not ok:
             skipped.append((step, f"not the producer's shape ({artifact})"))
 
