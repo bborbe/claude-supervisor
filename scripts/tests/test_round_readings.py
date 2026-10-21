@@ -134,6 +134,27 @@ class Verify(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_readings_predating_the_round_start_refuse(self):
+        """A readings file from the PREVIOUS round is not this round's readings."""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as receipts:
+            old_state = rr.STATE_DIR
+            rr.STATE_DIR = receipts
+            try:
+                with open(os.path.join(receipts, "s.json"), "w", encoding="utf-8") as fh:
+                    json.dump({"topic": "S", "round_started_at": now, "fields": {}}, fh)
+                with tempfile.NamedTemporaryFile("w", suffix=".readings", delete=False) as fh:
+                    json.dump({"recorded_at": now - 60, "feed_state": "read", "rows": {}}, fh)
+                    path = fh.name
+                try:
+                    code, msg = rr.verify("S", path, 900, now=now + 1)
+                    self.assertEqual(code, rr.EXIT_REFUSED)
+                    self.assertIn("predate this round's start", msg)
+                finally:
+                    os.unlink(path)
+            finally:
+                rr.STATE_DIR = old_state
+
     def test_fresh_file_passes(self):
         with tempfile.NamedTemporaryFile("w", suffix=".readings", delete=False) as fh:
             json.dump({"recorded_at": time.time(), "feed_state": "read",

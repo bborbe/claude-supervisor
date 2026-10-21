@@ -477,6 +477,16 @@ def verify(subject, path, interval, now=None):
     recorded = doc.get("recorded_at") if isinstance(doc, dict) else None
     if not isinstance(recorded, (int, float)):
         return EXIT_REFUSED, f"REFUSED: readings for {subject} carry no recorded_at"
+    # The round's own start is the authority when a receipt exists: readings taken
+    # BEFORE the round opened belong to the previous round, and an age bound alone
+    # cannot tell those apart from a fresh file on a slow tick.
+    started = _round_started_at(subject)
+    if started is not None and float(recorded) < started:
+        return EXIT_REFUSED, (
+            f"REFUSED: readings for {subject} predate this round's start "
+            f"(recorded {int(float(recorded))}, round opened {int(started)}) — "
+            "step 2 did not run this tick"
+        )
     age = now - float(recorded)
     if age > interval:
         return EXIT_REFUSED, (
@@ -484,6 +494,17 @@ def verify(subject, path, interval, now=None):
             "step 2 did not run this tick"
         )
     return 0, f"OK: readings for {subject} recorded {doc.get('recorded_at_iso') or int(recorded)}"
+
+
+def _round_started_at(subject):
+    """The receipt's `round_started_at`, or None when there is no readable receipt."""
+    try:
+        with open(os.path.join(STATE_DIR, f"{slug(subject)}.json"), encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    started = d.get("round_started_at") if isinstance(d, dict) else None
+    return float(started) if isinstance(started, (int, float)) else None
 
 
 def main(argv=None):
