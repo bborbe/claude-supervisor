@@ -23,7 +23,7 @@ When: every tick — run the `{"gates": []}` prune on every round, and publish o
 
     - **Speak every item that needs the operator** — a new gate, an approval ask, a decision. An ask that reaches only the chat is an ask the operator does not read.
     - **The spoken line is count + pointer and nothing else:** `<N> items need your attention, the links are in the chat`. **Never details, never URLs, never a pane or session list.** One `mcp__tts__say` call per round however many items it names — never N calls for N items.
-    - **The details and the jump links go in the chat in the same turn** — § Output shape items 3 (`📋 Open with the operator`) and 4 (needs-input) already render them; do not restate them in voice.
+    - **The details and the jump links go in the chat in the same turn** — § Output shape items 4 (`📋 Open with the operator`) and 5 (Needs-input) already render them; do not restate them in voice.
     - **Silence when nothing needs the operator.** No gate, no ask, no decision → no `mcp__tts__say` at all.
 
     **How this composes — it changes nothing about the gate, and nothing about the silence test.**
