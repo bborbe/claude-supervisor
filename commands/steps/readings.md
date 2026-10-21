@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — print all three readings with the marker line (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py`; commands in the step)
+When: every tick — print all four readings with the marker line (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py` · `next-focus.py`; commands in the step)
 
 ## The saturation reading — the ratio, not tok/s
 
@@ -48,3 +48,26 @@ Read it from `python3 $P/unarmed-goals.py --vault "<vault>" --tasks-dir "<vault>
 ⚠️ **`unknown` is a third answer, not `0`.** An unreadable session registry prints `unarmed goals: unknown` and exits non-zero. Print it as it comes back; never round it down to a number.
 
 ⚠️ **The line reports; it never arms.** Arming a manager is the operator's answer to a `start manager` card (`commands/steps/propose-manager.md`), never this reading's act — `docs/fleet-surface.md` bars a manager from starting one on its own initiative.
+
+## The next-focus reading
+
+Every tick prints this block with the marker line:
+
+    Next focus (3/30)
+      1. Write the Gate Contract for ORB XAUUSD V8 … — 60 Periodic Notes/Weekly/2026-W43.md:65 — …
+      2. ORB DE40 W43 Sunday Review … — 60 Periodic Notes/Weekly/2026-W43.md:79 — …
+      left for the next round (cap 5)
+
+Read it from `python3 $P/next-focus.py --vault "<vault>" --tasks-dir "<tasks-dir>"`; add `--json` for the whole computation and no render, `--now <ISO>` to pin the period. **The script owns the parse, the tier order, the cap and the dedup key** — none of them is restated here, and none may be re-derived at this call site. Read its header for the order and why it is what it is.
+
+**It is the round's answer to "what should the free slot do?".** The sweep classifies live sessions and never reads the pages the operator writes to rank work, so without this reading a free slot goes to whatever was filed last. Measured 2026-10-21: `grep -rln 'Next focus'` over the repo returned nothing — the capability did not exist, so every round chose blind.
+
+⚠️ **A `phase: todo` row renders `needs your approval` and carries no action at all** — not an empty one. `todo` is the operator's approval inbox: agents file there and stop, and the operator's `todo → planning` flip *is* the approval. Such a row is reported and opens nothing — no spawn, no resume, no nudge. The rule's single home is `the Fleet Manager Session runbook` § Manager contract.
+
+⚠️ **The held line is not an omission.** At or above the target the block reads `Next focus: held — at target (<live>/<target>)`; an unreadable capacity store reads `held — workers unknown`. Both still print. A suppressed round and a round that found nothing must never render the same, and a fleet that cannot count itself is not an idle fleet — `unknown` is a third answer, never `0`.
+
+⚠️ **Proposals are capped and the remainder is named.** At most three items print under `Proposed for this week's plan:`, each with its own stable `card_key` from the script, posted as **one card each — never a batch**; the rest print `left for the next round (cap 3)`. 38 open `priority: 1` tasks existed on 2026-10-21, so an unbounded rule would have put 38 cards on the board in one round. ⚠️ **The card is an ASK, never an act** — no plan page is edited, no item added; the operator's answer is read back with `attention-ask.py poll <item-id>`.
+
+⚠️ **`2` is a REFUSAL, never "nothing to do".** An unreadable vault or a bad `--now` exits 2 with the reason on stderr; an empty plan set exits 0 with `note:` lines. The two must not render the same.
+
+⚠️ **The reading reports; it never opens.** Opening the approved candidate is the operator's answer to the card, executed through `/supervisor:open` — never this reading's act.
