@@ -439,6 +439,9 @@ def compute(subject, tracked_path, vault, interval, now=None,
         "subject": subject,
         "recorded_at": now,
         "recorded_at_iso": datetime.datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds"),
+        # The round this file belongs to, so a later reader can tell a fresh reading
+        # from one the previous round left behind without opening the receipt.
+        "round_started_at": _round_started_at(subject),
         "park_threshold_seconds": interval,
         "feed_state": feed_state,
         "rows": out_rows,
