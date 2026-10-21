@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.196.2
 - fix: **the drive leg's `RETAINED` and `PARKED` blocks are rendered by the script, not summarised by the agent.** `agents/fleet-drive.md` has required one line per row since `v0.194.0`, and the round of `2026-10-21T05-07-35Z` collapsed 99 retained rows into a single summary line anyway — carrying none of the three things the section exists to show: the round tag, the command run that round, and that round's result. A prohibition the agent must remember loses to an agent under load, so `drive-retained.py` gains a `render` subcommand that prints both blocks with one line per row, each carrying `round <tag>`, the probe command and that round's result; step 0 now pastes its output verbatim. Measured on a copy of the live ledger: 99 `RETAINED` rows rendered from the same data that produced the one-line summary, the ledger's `shasum` unchanged across the run. Change set: `scripts/drive-retained.py`, `scripts/tests/test_drive_retained.py`, `agents/fleet-drive.md`, `CHANGELOG.md`.
 
 ## v0.196.1
