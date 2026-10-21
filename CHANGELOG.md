@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.199.0
 
 - chore: **the three `manager-*` aliases are retired.** `/supervisor:manager-loop`, `/supervisor:manager-drive` and `/supervisor:manager-status` existed for exactly one reason — a pre-split loop's armed `ScheduleWakeup` prompt names them, so deleting them outright would have stopped every live loop silently on the first `/reload-plugins` after the release. `docs/session-tiers.md` carried the end condition ("deleted in a later release once no armed loop carries the old prompt"), and this release meets it: checked over every live session's transcript before deleting, 37 live sessions hold an armed wakeup and **0** carry an old alias — all name `goal-drive`, `topic-drive` or `fleet-drive`. `llms.txt` still advertised the retired commands and their agents, in both the slash form and a slashless `Agent: supervisor:manager-drive` form, plus `manager-verify`, which named a command file that never existed (its successors are `topic-verify` / `goal-verify`); the worker/agent block now names the tier commands. `scripts/check-budget.py`'s two wakeup-target comments and `scripts/restart-worker.py`'s re-arm message also named the old prompt and now name the tier loops. Change set: `commands/manager-loop.md`, `commands/manager-drive.md`, `commands/manager-status.md` (all deleted), `docs/session-tiers.md`, `llms.txt`, `scripts/check-budget.py`, `scripts/restart-worker.py`, `CHANGELOG.md`.
 
