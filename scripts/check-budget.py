@@ -27,8 +27,9 @@ re-injects whatever prompt it names, so that body — and only that body — is 
 every tick. Until 2026-10-11 the target was always a `commands/*-tick.md`, so a glob found
 them all. The manager loop's wakeup names a tier round (`/supervisor:goal-drive` or
 `/supervisor:topic-drive`), a round with no `-tick` suffix, and a glob-only rule would
-have applied the cap to nothing on that side while reporting green. Both spellings are therefore checked: the glob (the fleet loop still
-names `commands/goal-drive.md`) plus an explicit list of the targets that carry no suffix.
+have applied the cap to nothing on that side while reporting green. Both spellings are
+therefore checked: the glob (the fleet loop still names `commands/goal-drive.md`) plus an
+explicit list of the targets that carry no suffix.
 """
 
 import json
