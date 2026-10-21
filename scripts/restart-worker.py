@@ -829,7 +829,8 @@ def main():
     if role == "manager":
         print(
             "   ↪ manager: tell the resumed session it was restarted and must RE-ARM its "
-            "loop (`/supervisor:manager-loop <subject>`, or `/supervisor:fleet-loop`) — a "
+            "loop (`/supervisor:goal-loop <subject>` or `/supervisor:topic-loop <subject>`, "
+            "or `/supervisor:fleet-loop`) — a "
             f"killed session's scheduled jobs die with it. Changed: {describe_changed(changed)}"
         )
     else:

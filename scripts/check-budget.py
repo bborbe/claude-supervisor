@@ -25,9 +25,9 @@ tree — and `--tighten` drops it, since a deleted file has no size to hold.
 ⚠️ **The strict cap follows the WAKEUP TARGET, never a filename pattern alone.** A wakeup
 re-injects whatever prompt it names, so that body — and only that body — is paid again on
 every tick. Until 2026-10-11 the target was always a `commands/*-tick.md`, so a glob found
-them all. The manager loop's wakeup now names `/supervisor:manager-drive`, a round with no
-`-tick` suffix, and a glob-only rule would have applied the cap to nothing on that side
-while reporting green. Both spellings are therefore checked: the glob (the fleet loop still
+them all. The manager loop's wakeup names a tier round (`/supervisor:goal-drive` or
+`/supervisor:topic-drive`), a round with no `-tick` suffix, and a glob-only rule would
+have applied the cap to nothing on that side while reporting green. Both spellings are therefore checked: the glob (the fleet loop still
 names `commands/goal-drive.md`) plus an explicit list of the targets that carry no suffix.
 """
 
@@ -43,7 +43,7 @@ SCAN_DIRS = ("commands", "agents", "skills")
 
 #: Wakeup targets that carry no `-tick` suffix, so the glob below cannot find them.
 #: `commands/goal-drive.md` is the manager loop's round since 2026-10-11 — the prompt
-#: `/supervisor:manager-loop` arms `ScheduleWakeup` with. `commands/fleet-drive.md` is the
+#: `/supervisor:goal-loop` arms `ScheduleWakeup` with. `commands/fleet-drive.md` is the
 #: fleet loop's round since 2026-10-12, when the former fleet round command was folded
 #: into it and the `*-tick.md` glob stopped matching anything on the fleet side. A target
 #: missing from this list is a body the strict cap silently stops covering.
