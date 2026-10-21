@@ -86,7 +86,7 @@ def bak_path():
 
 
 def canonical(sid, raw):
-    """One entry, canonical shape, all eight fields present.
+    """One entry, canonical shape, all ten fields present.
 
     `open_boxes` is deliberately NOT defaulted to 0. A legacy row never carried the
     field, and 0 means "verified finished" while None means "never counted" -- the
