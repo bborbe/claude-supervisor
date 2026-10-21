@@ -95,7 +95,21 @@ export function shippingTabEnv(isShipping) {
 // `export PERMISSION_MODE="auto"` — the form every launcher carried before this
 // change — assigns unconditionally and outranks the spawn's value.
 export function launcherHonoursModeEnv(scriptText) {
-  return typeof scriptText === 'string' && /\$\{PERMISSION_MODE:-/.test(scriptText)
+  if (typeof scriptText !== 'string') return false
+  // ⚠️ Commented lines are DROPPED before matching, not merely tolerated. A bare text search
+  // is satisfied by a commented-out default sitting beside a live unconditional export — the
+  // worker would then run on `auto` while the spawn reported shipping granted, which is the
+  // silent-overwrite class this guard exists to prevent. Found by the PR review.
+  const live = scriptText
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'))
+  // It must DEFAULT the variable…
+  const defaults = live.some((line) => /^export\s+PERMISSION_MODE=.*\$\{PERMISSION_MODE:-/.test(line))
+  // …and actually hand it to claude. A launcher that defaults the variable but never passes
+  // it leaves the mode unused, so the worker parks exactly as before.
+  const forwards = live.some((line) => /--permission-mode/.test(line))
+  return defaults && forwards
 }
 
 // The refusal for a spawn that cannot honour `shipping`, or `null`.

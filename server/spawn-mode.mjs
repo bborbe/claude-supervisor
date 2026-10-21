@@ -709,6 +709,8 @@ export function shellEnvExports(env) {
 
 // A legal shell variable name — the tab path exports these literally, so a name that cannot
 // be exported has to be refused here rather than dropped downstream.
+import { SHIPPING_MODE_ENV } from './shipping-settings.mjs'
+
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 // ⚠️ The spawn mode is the SERVER's to declare, on every path, so a caller may not set it.
@@ -720,7 +722,16 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 // silences that worker's attention-store relay. REFUSED on both paths rather than silently
 // outranked on one, so the rule reads the same wherever it is found. Found by the PR review
 // (round 2), which caught that the stated invariant held on only one of the two paths.
-const RESERVED_ENV_NAMES = new Set([WORKER_MODE_ENV, WORKER_MODE_SOURCE_ENV])
+// ⚠️ `PERMISSION_MODE` is the second such name, and it arrived with the tab path's shipping
+// carrier. The launchers now DEFAULT the variable (`${PERMISSION_MODE:-auto}`) rather than
+// assigning it, so a caller-supplied value reaches `--permission-mode` on ANY tab — not only
+// a shipping one. Left unreserved, `spawn_agent(interactive: true, env: {PERMISSION_MODE:
+// "bypassPermissions"})` starts a worker with every approval gate disabled, which is exactly
+// the mode the shipping design exists to refuse, and the export outlives the pane so a nested
+// `claude` or `cc-*` launched from that tab inherits it too. The server owns this one: only
+// `shippingTabEnv` may set it, and only to `acceptEdits`. Found by the PR review, which
+// caught that the shipping merge protected one branch and left every other tab open.
+const RESERVED_ENV_NAMES = new Set([WORKER_MODE_ENV, WORKER_MODE_SOURCE_ENV, SHIPPING_MODE_ENV])
 
 // Validates and normalises a caller's `env` object.
 //

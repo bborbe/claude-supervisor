@@ -30,6 +30,7 @@ import {
   WORKER_MODE_ENV,
   WORKER_MODE_SOURCE_ENV,
 } from './spawn-mode.mjs'
+import { SHIPPING_MODE_ENV } from './shipping-settings.mjs'
 
 const file = (mode) => ({ spawn: { mode } })
 
@@ -776,6 +777,24 @@ test('a caller cannot declare a worker\'s spawn mode', () => {
   // The refusal is about the NAME, not the value — `headless` on any other key is ordinary.
   assert.deepEqual(resolveEnvOverrides({ env: { SUPERVISOR_WORKER_MODE_X: 'headless' } }).env, {
     SUPERVISOR_WORKER_MODE_X: 'headless',
+  })
+})
+
+// ⚠️ The tab path's shipping carrier is what made this name dangerous. The launchers now
+// DEFAULT `PERMISSION_MODE` instead of assigning it, so a caller-supplied value reaches
+// `--permission-mode` on ANY tab — and `bypassPermissions` would start a worker with every
+// approval gate disabled, the exact mode the shipping design exists to refuse, with the
+// export outliving the pane for any nested `claude` or `cc-*` launched from it. The server
+// owns it: only `shippingTabEnv` may set it, and only to `acceptEdits`. Found by the PR
+// review, which caught that the shipping merge protected one branch and left every other tab
+// open.
+test('a caller cannot choose a tab worker\'s permission mode', () => {
+  const { error } = resolveEnvOverrides({ env: { [SHIPPING_MODE_ENV]: 'bypassPermissions' } })
+  assert.ok(error, `expected ${SHIPPING_MODE_ENV} to be refused`)
+  assert.match(error, /cannot set/)
+  // The refusal is about the NAME — the same value on a lookalike key is ordinary.
+  assert.deepEqual(resolveEnvOverrides({ env: { [`${SHIPPING_MODE_ENV}_X`]: 'bypassPermissions' } }).env, {
+    [`${SHIPPING_MODE_ENV}_X`]: 'bypassPermissions',
   })
 })
 

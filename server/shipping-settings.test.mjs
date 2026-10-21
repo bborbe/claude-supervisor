@@ -130,8 +130,30 @@ test('the tab env is frozen', () => {
 
 // --- launcher detection -------------------------------------------------------
 
-test('a launcher that DEFAULTS the mode is detected', () => {
-  assert.equal(launcherHonoursModeEnv('export PERMISSION_MODE="${PERMISSION_MODE:-auto}"'), true)
+test('a launcher that DEFAULTS the mode and forwards it is detected', () => {
+  const script = [
+    'export PERMISSION_MODE="${PERMISSION_MODE:-auto}" # acceptEdits, auto',
+    'claude \\',
+    '--permission-mode "${PERMISSION_MODE}" \\',
+    '"$@"',
+  ].join('\n')
+  assert.equal(launcherHonoursModeEnv(script), true)
+})
+
+// ⚠️ A commented-out default beside a live unconditional export satisfied the previous bare
+// text search, so the worker ran on `auto` while the spawn reported shipping granted.
+test('a launcher whose defaulting line is COMMENTED OUT is not honoured', () => {
+  const script = [
+    '# export PERMISSION_MODE="${PERMISSION_MODE:-auto}"',
+    'export PERMISSION_MODE="auto"',
+    'claude --permission-mode "${PERMISSION_MODE}"',
+  ].join('\n')
+  assert.equal(launcherHonoursModeEnv(script), false)
+})
+
+// Defaulting the variable without handing it to claude leaves the mode unused.
+test('a launcher that defaults the mode but never forwards it is not honoured', () => {
+  assert.equal(launcherHonoursModeEnv('export PERMISSION_MODE="${PERMISSION_MODE:-auto}"'), false)
 })
 
 // The pre-change form, which is what every launcher carried: assigning unconditionally
