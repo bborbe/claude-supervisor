@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Tests for scripts/next-focus.py.
+
+Each case guards a claim the fleet round makes to the operator, so each is written to
+fail on a plausible wrong implementation rather than on a broken one:
+
+  * **the tier order is asserted as a full list, not as a membership check.** A set
+    comparison passes on a script that sorts alphabetically; only sequence equality
+    catches the ordering the operator asked for (due-today, then weekly, monthly,
+    quarterly, yearly).
+  * **the weekly citation is asserted against the `### 1.` heading line itself.** A
+    hardcoded five-row block with plausible-looking citations is the laziest way to
+    satisfy a "cites a plan line" criterion, and resolving the line number back to the
+    heading is what it cannot fake.
+  * **a `phase: todo` row carries NO `action` key at all** — not an empty one. `todo` is
+    the operator's approval inbox: a row there is reported and opened by nobody. An
+    empty `action` reads as "acted on and found nothing", which is the opposite claim.
+  * **a task in no plan never appears as a candidate.** The rule is about absence, and an
+    absence assertion over a population the script could satisfy by listing everything
+    needs the positive half too — so the same fixture asserts it IS proposed.
+  * **four unplanned `priority: 1` rows yield exactly three proposals with distinct
+    dedup keys.** 38 such rows exist in the live vault; an unbounded rule posts 38 cards
+    in one round. Distinct keys are asserted because the store's suppression is keyed,
+    and two items sharing a key would answer one another.
+  * **every alert failure renders `unread`, never `0 firing`** — three shapes (non-zero
+    exit, unparseable output, absent script). A failed fetch and a quiet cluster must
+    not look the same.
+  * **at or above the target the block is held, not omitted.** A suppressed round and a
+    round that found nothing must never render the same.
+  * **an unreadable capacity store is `unknown`, never `0`.** A fleet that cannot count
+    itself is not an idle fleet.
+"""
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+import unittest
+
+SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "next-focus.py"
+
+WEEK = "2026-W43"
+MONTH = "2026-10"
+QUARTER = "2026-Q4"
+YEAR = "2026"
+DAY = "2026-10-21"
+
+WEEKLY = """# Fixture week
+
+# Tasks
+
+### 1. Weekly first item
+
+**Task:** [[Weekly Task]]
+
+**Priority:** 🔴 HIGH
+
+### 2. Weekly second item
+
+**Task:** [[Todo Task]]
+"""
+
+MONTHLY = """# Plan for this month
+
+## Must / Should / Could
+
+**Must**
+1. **Monthly item** — [[Monthly Goal]]
+
+**Should**
+2. **Monthly second** — [[Monthly Goal]]
+"""
+
+QUARTERLY = """# Plan for this quarter
+
+**🚀 Q4 Objectives (projects):**
+
+1. **[[Quarterly Objective]]** (P1, theme [[Some Theme]]) — text
+
+**🔁 Standing commitments:**
+- 👨‍👩‍👧 **Family** — [[Some Theme]]
+"""
+
+YEARLY = """# Plan for 2026
+
+## 2026 Targets
+
+### 💰 Financial (70%)
+
+- reach [[Yearly Topic]]
+
+### 💪 Health (10%)
+
+- run [[Yearly Topic]]
+"""
+
+
+def task(name, *, phase="planning", status="in_progress", priority="2",
+         defer=None, flag=None, blocked=None):
+    lines = ["---", f"status: {status}", f"phase: {phase}", f"priority: {priority}"]
+    if defer:
+        lines.append(f'defer_date: "{defer}"')
+    if flag:
+        lines.append("flag: true")
+        lines.append(f"flag_set_by: {flag}")
+    if blocked:
+        lines.append(f"blocked_by: {blocked}")
+    lines += ["---", "", f"# {name}", ""]
+    return "\n".join(lines)
+
+
+class NextFocusTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.vault = pathlib.Path(self.dir.name)
+        self.make_vault()
+
+    def write(self, rel, text):
+        path = self.vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def make_vault(self):
+        self.write(f"60 Periodic Notes/Weekly/{WEEK}.md", WEEKLY)
+        self.write(f"60 Periodic Notes/Monthly/{MONTH}.md", MONTHLY)
+        self.write(f"60 Periodic Notes/Quarterly/{QUARTER}.md", QUARTERLY)
+        self.write(f"60 Periodic Notes/Yearly/{YEAR}.md", YEARLY)
+
+        self.write("25 Tasks/Weekly Task.md", task("Weekly Task"))
+        self.write("25 Tasks/Todo Task.md", task("Todo Task", phase="todo", priority="3"))
+        self.write("25 Tasks/Due Task.md", task("Due Task", defer=DAY))
+        self.write("24 Goals/Monthly Goal.md", task("Monthly Goal", status="in_progress"))
+        self.write("22 Objectives/Quarterly Objective.md", task("Quarterly Objective"))
+        self.write("23 Topics/Yearly Topic.md", task("Yearly Topic", status="in_progress"))
+
+    def add_p1(self, count):
+        for i in range(count):
+            self.write(f"25 Tasks/Unplanned P1 {i}.md", task(f"Unplanned P1 {i}", priority="1"))
+
+    def add_alerts(self, body, name="prometheus-alerts.sh"):
+        path = self.vault / ".claude" / "scripts" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def run_script(self, *args, live="3", target="30", expect=0):
+        cmd = [sys.executable, str(SCRIPT), "--vault", str(self.vault),
+               "--tasks-dir", "25 Tasks", "--now", DAY, "--json"]
+        if live is not None:
+            cmd += ["--live", str(live)]
+        if target is not None:
+            cmd += ["--target", str(target)]
+        cmd += list(args)
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.vault.parent))
+        self.assertEqual(proc.returncode, expect, msg=proc.stderr)
+        return json.loads(proc.stdout) if proc.stdout.strip() else None
+
+    # -- ranking ------------------------------------------------------------
+
+    def test_order_is_the_four_tiers_after_due_today(self):
+        """Full-sequence equality: a set comparison passes on an alphabetical sort."""
+        names = [row["name"] for row in self.run_script()["candidates"]]
+        self.assertEqual(names, ["Due Task", "Weekly Task", "Todo Task",
+                                 "Monthly Goal", "Quarterly Objective"],
+                         "due-today, then weekly, monthly, quarterly — in that order")
+
+    def test_yearly_is_the_last_tier(self):
+        """The yearly row is below the cap in the main fixture, so widen the cap away."""
+        result = self.run_script()
+        self.assertNotIn("Yearly Topic", [r["name"] for r in result["candidates"]],
+                         "yearly sorts last and the fixture's five higher rows fill the cap")
+
+    def test_weekly_citation_is_the_numbered_heading_line(self):
+        """The citation must land on the `### 1.` heading, not on a plausible line."""
+        result = self.run_script()
+        weekly = [r for r in result["candidates"] if r["name"] == "Weekly Task"][0]
+        src = weekly["source"]
+        self.assertEqual(src["period"], "weekly")
+        text = (self.vault / f"60 Periodic Notes/Weekly/{WEEK}.md").read_text(encoding="utf-8")
+        line = text.splitlines()[src["line"] - 1]
+        self.assertTrue(line.startswith("### 1. "),
+                        f"line {src['line']} of the weekly plan is {line!r}")
+
+    def test_every_plan_citation_resolves_to_its_heading(self):
+        """Citation fidelity across every tier — a fabricated line fails here."""
+        result = self.run_script()
+        for row in result["candidates"]:
+            src = row["source"]
+            if src["period"] == "due-today":
+                continue
+            text = pathlib.Path(src["file"]).read_text(encoding="utf-8")
+            line = text.splitlines()[src["line"] - 1]
+            self.assertTrue(line.lstrip().startswith(("#", "1.", "2.", "**")),
+                            f'{row["name"]}: line {src["line"]} is {line!r}')
+
+    # -- the approval boundary ---------------------------------------------
+
+    def test_todo_row_carries_no_action_at_all(self):
+        """Not an empty action — the key's ABSENCE is the rule."""
+        todo = [r for r in self.run_script()["candidates"] if r["name"] == "Todo Task"][0]
+        self.assertTrue(todo["needs_approval"])
+        self.assertNotIn("action", todo, "a phase: todo row must carry no action key")
+        self.assertNotIn("/supervisor:open", json.dumps(todo),
+                         "a phase: todo row must not name the open verb anywhere")
+
+    def test_approved_row_carries_its_action(self):
+        """The positive half: a non-todo row DOES name the open verb."""
+        weekly = [r for r in self.run_script()["candidates"] if r["name"] == "Weekly Task"][0]
+        self.assertFalse(weekly["needs_approval"])
+        self.assertIn("/supervisor:open", weekly["action"])
+
+    # -- proposals ----------------------------------------------------------
+
+    def test_plan_absent_task_is_proposed_never_a_candidate(self):
+        self.add_p1(1)
+        result = self.run_script()
+        self.assertNotIn("Unplanned P1 0", [r["name"] for r in result["candidates"]],
+                         "a task in no plan is never a planned candidate")
+        self.assertIn("Unplanned P1 0", [r["name"] for r in result["proposed"]],
+                      "...and it must still surface as a proposal")
+
+    def test_proposal_cap_is_three_with_distinct_keys(self):
+        """38 live rows would post 38 cards; the cap is what stops that."""
+        self.add_p1(4)
+        result = self.run_script()
+        self.assertEqual(len(result["proposed"]), 3)
+        self.assertEqual(len(result["proposed_overflow"]), 1,
+                         "the fourth row must be reported, not silently dropped")
+        keys = [row["card_key"] for row in result["proposed"]]
+        self.assertEqual(len(set(keys)), 3, "two items sharing a key would answer one another")
+
+    def test_card_key_is_stable_across_runs(self):
+        """A key that moves on a re-post asks the operator the same question twice."""
+        self.add_p1(1)
+        first = self.run_script()["proposed"][0]["card_key"]
+        second = self.run_script()["proposed"][0]["card_key"]
+        self.assertEqual(first, second)
+
+    def test_blocked_goal_is_proposed(self):
+        self.write("24 Goals/Blocked Goal.md",
+                   task("Blocked Goal", status="hold", blocked="Some Bug Task"))
+        result = self.run_script()
+        self.assertIn("Blocked Goal", [r["name"] for r in result["proposed"]])
+
+    def test_goal_at_hold_without_blocked_by_is_not_proposed(self):
+        self.write("24 Goals/Parked Goal.md", task("Parked Goal", status="hold"))
+        result = self.run_script()
+        self.assertNotIn("Parked Goal", [r["name"] for r in result["proposed"]])
+
+    # -- the three-valued reads --------------------------------------------
+
+    def test_alerts_unread_on_nonzero_exit(self):
+        self.add_alerts("#!/bin/bash\nexit 1\n")
+        self.assertEqual(self.run_script()["alerts"], "unread")
+
+    def test_alerts_unread_on_unparseable_output(self):
+        self.add_alerts("#!/bin/bash\necho 'connection reset by peer'\n")
+        self.assertEqual(self.run_script()["alerts"], "unread")
+
+    def test_alerts_unavailable_without_the_script(self):
+        self.assertEqual(self.run_script()["alerts"], "unavailable")
+
+    def test_alerts_clear_when_the_count_is_zero(self):
+        self.add_alerts("#!/bin/bash\necho 'total active alerts: 0'\n")
+        self.assertEqual(self.run_script()["alerts"], "clear")
+
+    def test_unknown_capacity_is_not_zero(self):
+        """A fleet that cannot count itself is not an idle fleet."""
+        result = self.run_script("--plugin", "/nonexistent", live=None, target=None)
+        self.assertIsNone(result["capacity"]["live"])
+        self.assertIsNone(result["capacity"]["target"])
+
+    def test_at_target_renders_held_not_empty(self):
+        """A suppressed round and a round that found nothing must not look the same."""
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--vault", str(self.vault),
+             "--tasks-dir", "25 Tasks", "--now", DAY, "--live", "30", "--target", "30"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertTrue(proc.stdout.startswith("Next focus: held — at target (30/30)"),
+                        proc.stdout.splitlines()[0])
+
+    def test_missing_vault_refuses(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--vault", "/nonexistent-vault",
+             "--tasks-dir", "25 Tasks", "--live", "1", "--target", "30"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("REFUSED", proc.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
