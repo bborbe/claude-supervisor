@@ -28,7 +28,8 @@ Two things this script will not do
 **It never opens a `phase: todo` row.** `todo` is the operator's approval inbox: agents
 file there and stop, and the operator's `todo -> planning` flip *is* the approval. Such a
 row renders `needs your approval`, carries no `action` field, and is reported rather than
-acted on. (Rule's single home: the Fleet Manager Session runbook, Manager contract.)
+acted on. (Rule's single home: `agents/goal-sweep-reader.md` § step 4's
+*Waiting-approval* bullet.)
 
 **It never renders an unreadable read as an empty one.** A plan file that cannot be read
 and an alert read that failed both surface as `unread`/`unavailable`; neither collapses
