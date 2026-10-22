@@ -95,20 +95,21 @@ class Replay(unittest.TestCase):
         )
         self.assertEqual(out.returncode, 0, out.stderr)
 
-    def round(self, tag, entries):
+    def round(self, tag, entries, max_actions=drive_unverifiable.MAX_ACTIONS):
         ledger, reason = drive_unverifiable.read_ledger()
         self.assertIsNone(reason)
         payload = {"round": tag, "entries": entries}
-        acted = drive_unverifiable.plan(
+        acted, held = drive_unverifiable.plan(
             payload["entries"],
             ledger,
             tag,
             self.pane_for,
             self.pane_text,
             lambda pane: "/supervisor:jump %s" % pane,
+            max_actions=max_actions,
         )
         self.merge(payload)
-        return acted, drive_unverifiable.render(acted)
+        return acted, drive_unverifiable.render(acted, held)
 
     def ledger_entries(self):
         ledger, reason = drive_unverifiable.read_ledger()
@@ -188,7 +189,7 @@ class TestActionChoice(Replay):
         self.round("2026-10-22T10-00-00Z", [entry("aaaaaaaa", "unverifiable")])
         ledger, _ = drive_unverifiable.read_ledger()
         payload = {"round": "2026-10-22T10-15-00Z", "entries": [entry("aaaaaaaa", "unverifiable")]}
-        acted = drive_unverifiable.plan(
+        acted, _ = drive_unverifiable.plan(
             payload["entries"],
             ledger,
             payload["round"],
@@ -204,7 +205,7 @@ class TestActionChoice(Replay):
         self.round("2026-10-22T10-00-00Z", [entry("aaaaaaaa", "unverifiable")])
         ledger, _ = drive_unverifiable.read_ledger()
         payload = {"round": "2026-10-22T10-15-00Z", "entries": [entry("aaaaaaaa", "unverifiable")]}
-        acted = drive_unverifiable.plan(
+        acted, _ = drive_unverifiable.plan(
             payload["entries"],
             ledger,
             payload["round"],
@@ -219,7 +220,7 @@ class TestActionChoice(Replay):
         self.round("2026-10-22T10-00-00Z", [entry("aaaaaaaa", "unverifiable")])
         ledger, _ = drive_unverifiable.read_ledger()
         payload = {"round": "2026-10-22T10-15-00Z", "entries": [entry("aaaaaaaa", "unverifiable")]}
-        acted = drive_unverifiable.plan(
+        acted, _ = drive_unverifiable.plan(
             payload["entries"],
             ledger,
             payload["round"],
@@ -316,6 +317,79 @@ class TestHandleCommand(unittest.TestCase):
             patched = json.load(handle)
         self.assertEqual(patched["entries"][0]["unverifiable_streak"], 1)
         self.assertEqual(patched["entries"][0]["unverifiable_round"], "2026-10-22T10-00-00Z")
+
+
+class TestPerRoundCap(Replay):
+    """The cap: at most N rows act per round, and the rest are named, not dropped."""
+
+    SIDS = ("aaaaaaaa", "bbbbbbbb", "cccccccc", "dddddddd", "eeeeeeee")
+
+    def seed_streak_one(self):
+        self.round(
+            "2026-10-22T10-00-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+        )
+        self.assertEqual(self.pane_reads, [], "round 1 must act on nothing")
+
+    def test_cap_acts_on_n_and_names_the_rest(self):
+        self.seed_streak_one()
+        acted, out = self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=2,
+        )
+        self.assertEqual(len(acted), 2, "exactly the cap acts")
+        self.assertEqual(len(self.pane_reads), 2, "one pane read per acted row, no more")
+        self.assertIn("UNVERIFIABLE HELD BACK", out)
+        tail = out.split("UNVERIFIABLE HELD BACK", 1)[1]
+        held_lines = [line for line in tail.splitlines() if line.startswith("  ")]
+        self.assertEqual(len(held_lines), 3, "every held-back row is named")
+
+    def test_held_back_row_still_acts_on_a_later_round(self):
+        """The design point: a held row's streak keeps advancing past 2.
+
+        An `== 2` trigger would never match it again and it would be acted on never. The
+        action marker, not the count, is what stops a repeat.
+        """
+        self.seed_streak_one()
+        self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=2,
+        )
+        # Round 3, uncapped: the three held rows are now at streak 3 and act; the two
+        # already acted on do not act again.
+        acted, _ = self.round(
+            "2026-10-22T10-30-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=10,
+        )
+        self.assertEqual(len(acted), 3, "the held-back three act now, the acted-on two do not")
+        acted_sids = {row[0]["session_id"] for row in acted}
+        rows = self.ledger_entries()
+        already = {sid for sid in self.SIDS if rows[sid]["unverifiable_action"]} - acted_sids
+        self.assertEqual(len(already), 2)
+        for sid in acted_sids:
+            self.assertIn(rows[sid]["unverifiable_action"], ("nudge", "escalation"))
+            self.assertEqual(rows[sid]["unverifiable_streak"], 3)
+
+    def test_an_acted_row_never_acts_again_while_it_stays_unverifiable(self):
+        self.seed_streak_one()
+        self.round("2026-10-22T10-15-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.assertEqual(len(self.pane_reads), 1)
+        acted, _ = self.round("2026-10-22T10-30-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.assertEqual(acted, [])
+        self.assertEqual(len(self.pane_reads), 1, "no second pane read")
+
+    def test_recovery_clears_the_marker_so_a_later_silence_acts_again(self):
+        self.seed_streak_one()
+        self.round("2026-10-22T10-15-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.round("2026-10-22T10-30-00Z", [entry("aaaaaaaa", "revive")])
+        self.assertEqual(self.ledger_entries()["aaaaaaaa"]["unverifiable_action"], "")
+        # Two more silent rounds reach the threshold again and act a second time.
+        self.round("2026-10-22T10-45-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.round("2026-10-22T11-00-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.assertEqual(len(self.pane_reads), 2, "acted once before and once after recovery")
 
 
 if __name__ == "__main__":

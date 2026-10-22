@@ -66,8 +66,14 @@ FIELDS = (
     "reprobe_probe",
     "unverifiable_streak",
     "unverifiable_round",
+    "unverifiable_action",
 )
 VERDICTS = ("revive", "blocked", "unverifiable", "finished")
+#: What the 2-round rule did about a row, or "" when it has not acted. The marker is what
+#: makes the action fire ONCE per silence rather than on every round at or past the
+#: threshold: a row held back by the per-round cap keeps advancing its streak, so a
+#: `streak == 2` test would never match it again and it would be acted on never.
+UNVERIFIABLE_ACTIONS = ("", "nudge", "escalation")
 NUDGES = ("drafted", "none")
 
 #: Top-level keys that are not themselves session entries.
@@ -133,6 +139,7 @@ def canonical(sid, raw):
         "reprobe_probe": raw.get("reprobe_probe") or "",
         "unverifiable_streak": streak_of(raw.get("unverifiable_streak")),
         "unverifiable_round": raw.get("unverifiable_round") or "",
+        "unverifiable_action": raw.get("unverifiable_action") or "",
     }
 
 
@@ -274,6 +281,13 @@ def check(row, sid):
         return "session %s carries unverifiable_streak %r, not a non-negative int" % (
             sid,
             streak,
+        )
+    action = row.get("unverifiable_action", "")
+    if action not in UNVERIFIABLE_ACTIONS:
+        return "session %s carries unverifiable_action %r, not one of %r" % (
+            sid,
+            action,
+            UNVERIFIABLE_ACTIONS,
         )
     return None
 

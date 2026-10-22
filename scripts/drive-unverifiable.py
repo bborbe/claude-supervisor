@@ -23,11 +23,29 @@ link, and -- the load-bearing part -- a markdown file has no callable seam, so t
 acceptance replay could not discriminate a build that reads the pane from one that
 reprints a stored string. `decide()` is that seam; the test stubs it and counts.
 
-WHY THE COUNT IS EXACTLY TWO. Acting at `>= 2` re-nudges the same silent session every
-round for as long as it stays silent, which is the nag the ledger's suppression rule
-exists to prevent. The ledger records `unverifiable_streak`/`unverifiable_round`; the
-streak is consecutive only when that round tag equals the ledger's own `round`, so a gap
-resets the count without anything having to notice it.
+WHY AT LEAST TWO, AND WHY IT STILL FIRES ONLY ONCE. The trigger is `streak >= 2`; the
+thing that stops a repeat is the ledger's `unverifiable_action` marker, not the count. An
+equality test on `== 2` reads as the tighter rule and is the wrong one: a row held back by
+the per-round cap keeps advancing its streak, so the round that finally admits it sees 3,
+never 2, and it would be acted on never. The marker also carries the ordinary case — a
+session silent for six rounds gets one action, not five, which is the nag the ledger's
+suppression rule exists to prevent. A verdict that is not `unverifiable` clears both the
+streak and the marker, so a session that recovers and later goes silent is acted on again.
+The streak is consecutive only when its round tag equals the ledger's own `round`, so a
+gap resets the count without anything having to notice it.
+
+WHY AT MOST THREE ROWS A ROUND. The threshold bounds how LONG a session waits, not how
+MANY act at once, and the two are different hazards. Measured on the first `v0.201.0`
+round (2026-10-22T13:01Z): 112 sessions reached streak 1 in the same round, because the
+field was new and every retained row started from nothing -- so the next round would have
+opened up to 112 pane reads and emitted up to 112 nudges or attention cards in one tick.
+Most were rows with no task file or long-dead sessions, whose only possible action is a
+card saying "no pane resolves": nothing the operator can DO, which is the test every
+card has to pass. The cap orders by LONGEST streak first, then session id, so a backlog
+drains oldest-first and nothing starves; a held-back row keeps its streak and its empty
+action marker, so it stays eligible, and `render()` names the rows held back so a backlog
+is visible rather than silently dropped. A cap that reported nothing would be
+indistinguishable from a threshold that stopped firing.
 
 WHAT THIS DOES NOT DO. It never decides the row's verdict -- that is the agent's, from
 the digest. It reads the ledger and this round's entries, and writes only the entries it
@@ -48,6 +66,15 @@ REFUSED = 2
 #: The consecutive-unverifiable count at which a row is acted on. Exactly this value, not
 #: `>=`: see the module docstring.
 THRESHOLD = 2
+
+#: How many rows may be acted on in ONE round. The threshold alone is unbounded, and that
+#: is not a theoretical worry: the first round on `v0.201.0` put 112 sessions at streak 1
+#: at once, so the next round would have emitted up to 112 nudges or attention cards in a
+#: single tick. Most were rows with no task file or long-dead sessions, whose only possible
+#: action is a card saying "no pane resolves" -- pure noise on a board the operator reads
+#: for things they must DO. Same shape, same remedy as `next-focus.py`'s "at most three per
+#: round", adopted after 38 open rows once put 38 cards up at once.
+MAX_ACTIONS = 3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LEDGER_SCRIPT = os.path.join(HERE, "drive-ledger.py")
@@ -267,13 +294,20 @@ def escalation_text(name, sid, task_file, probe, why):
     )
 
 
-def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn):
-    """Advance every entry's streak and act on the ones crossing the threshold.
+def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn, max_actions=MAX_ACTIONS):
+    """Advance every entry's streak and act on at most `max_actions` rows at the threshold.
 
     Pure over its inputs and its three injected seams, so the acceptance replay drives it
     through two rounds against a tmp ledger without a WezTerm or a session registry. It
-    mutates the entries it is given (they ARE the merge payload) and returns the rows
-    acted on.
+    mutates the entries it is given (they ARE the merge payload) and returns
+    `(acted, held)`: the rows acted on, and the rows that reached the threshold but were
+    held back by the cap this round.
+
+    ⚠️ **The cap is applied AFTER every streak is advanced, never before.** A held-back
+    row must still have its `unverifiable_streak` written this round, or its count resets
+    and it can never reach the threshold again -- the backlog would silently empty itself.
+    Ordering is longest streak first so a backlog drains oldest-first; the session id
+    tie-break keeps two runs of the same ledger identical.
     """
     prior = {}
     for entry in ledger.get("entries") or []:
@@ -281,26 +315,48 @@ def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn):
         if sid:
             prior[sid] = entry
     ledger_round = ledger.get("round") or ""
-    acted = []
+    candidates = []
     for entry in entries:
         sid = entry.get("session_id") or ""
-        streak, streak_round = advance(
-            entry, prior.get(sid) or {}, ledger_round, round_tag
-        )
+        before = prior.get(sid) or {}
+        streak, streak_round = advance(entry, before, ledger_round, round_tag)
         entry["unverifiable_streak"] = streak
         entry["unverifiable_round"] = streak_round
-        if streak == THRESHOLD:
-            acted.append((entry, decide(sid, entry, pane_for_fn, pane_text_fn, link_fn)))
-    return acted
+        # A verdict that is not `unverifiable` clears the action marker with the streak, so
+        # a session that recovers and later goes silent again can be acted on a second time.
+        entry["unverifiable_action"] = (
+            (before.get("unverifiable_action") or "")
+            if (entry.get("verdict") or "") == "unverifiable"
+            else ""
+        )
+        # `>=`, not `==`: a row held back by the cap keeps advancing, so an equality test
+        # would never match it again. The action marker is what stops a second action.
+        if streak >= THRESHOLD and not entry["unverifiable_action"]:
+            candidates.append((entry, sid))
+    candidates.sort(key=lambda pair: (-(pair[0].get("unverifiable_streak") or 0), pair[1]))
+    chosen = candidates[: max(0, max_actions)]
+    held = candidates[max(0, max_actions) :]
+    acted = []
+    for entry, sid in chosen:
+        decision = decide(sid, entry, pane_for_fn, pane_text_fn, link_fn)
+        entry["unverifiable_action"] = decision["action"]
+        acted.append((entry, decision))
+    return acted, held
 
 
-def render(acted):
+def render(acted, held=()):
     """The `UNVERIFIABLE` block plus the two paste-ready blocks.
 
     One line per acted row, however long the list. A summary line is exactly the shape a
     build that never read a pane would also produce, which is why the rows are rendered
     here rather than left to prose in `agents/fleet-drive.md` -- the same argument
     `drive-retained.py` records for `RETAINED`.
+
+    `held` rows are those the per-round cap pushed to a later round. They are NAMED, not
+    counted away: a bare "N held back" would leave the operator unable to tell which
+    sessions are queued, and a silent cap is indistinguishable from a threshold that
+    stopped firing. They appear under their own line so the two blocks above stay exactly
+    what will be sent this round.
     """
     lines = [
         "UNVERIFIABLE — a session unverifiable %d consecutive rounds, its pane read, and the "
@@ -353,6 +409,21 @@ def render(acted):
             lines.append("      card: %s" % decision["text"])
     else:
         lines.append("  (none)")
+
+    if held:
+        lines.append(
+            "UNVERIFIABLE HELD BACK — at the threshold, deferred to a later round by the "
+            "per-round cap of %d; their streaks keep advancing" % MAX_ACTIONS
+        )
+        for entry, sid in held:
+            lines.append(
+                "  %s [%s] · streak %d"
+                % (
+                    entry.get("name") or "?",
+                    (sid or "")[:8],
+                    entry.get("unverifiable_streak") or THRESHOLD,
+                )
+            )
     return "\n".join(lines)
 
 
@@ -375,19 +446,20 @@ def cmd_handle(args):
         )
         return REFUSED
     round_tag = payload.get("round") or ""
-    acted = plan(
+    acted, held = plan(
         payload["entries"],
         ledger,
         round_tag,
         resolve_pane,
         pane_text,
         render_link,
+        max_actions=args.max_actions,
     )
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
-    print(render(acted))
+    print(render(acted, held))
     return 0
 
 
@@ -411,6 +483,13 @@ def main(argv=None):
     )
     handle.add_argument(
         "--ledger-script", default=None, help="path to drive-ledger.py (default: the sibling)"
+    )
+    handle.add_argument(
+        "--max-actions",
+        type=int,
+        default=MAX_ACTIONS,
+        help="rows acted on in one round (default %d); the rest are held back and keep "
+        "their streak" % MAX_ACTIONS,
     )
     args = parser.parse_args(argv)
     if args.command == "handle":
