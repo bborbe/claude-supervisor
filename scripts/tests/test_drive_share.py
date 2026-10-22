@@ -247,9 +247,76 @@ class TestRealDigestFormat(unittest.TestCase):
         self.assertEqual([row[1] for row in rows], ["11111111"])
         self.assertEqual(unparsed, 1)
         self.assertIn(
-            "1 digest row(s) carried a class token outside DIGEST_CLASSES",
+            "1 CLASSIFICATION line(s) could not be read as a row",
             drive_share.render([], unparsed=unparsed),
         )
+
+    def test_task_basename_beginning_with_a_class_word_is_not_the_class(self):
+        """The scan must not walk into the task column.
+
+        `brandnewclass · Parked Ideas.md` was read as a **parked** row (denominator
+        inflated, `unparsed` 0), and `brandnewclass · Finished Migration.md` was dropped
+        silently — both the fail-quiet shape this change exists to remove.
+        """
+        path = os.path.join(self.tmp, "collision.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 2 sessions\n"
+                "CLASSIFICATION  2 classified\n"
+                "  Odd One [22222222] · idle · brandnewclass · Parked Ideas.md · 1 · url\n"
+                "  Odd Two [33333333] · idle · brandnewclass · Finished Migration.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows, unparsed = drive_share.digest_rows(path)
+        self.assertEqual(rows, [])
+        self.assertEqual(unparsed, 2)
+
+    def test_semicolon_in_a_cell_does_not_hide_the_row(self):
+        """A `;` inside the task name must not make a real row disappear."""
+        path = os.path.join(self.tmp, "semicolon.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 1 sessions\n"
+                "CLASSIFICATION  1 classified\n"
+                "  Real One [11111111] · idle · parked · Task; part two.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows, unparsed = drive_share.digest_rows(path)
+        self.assertEqual(rows, [("Real One", "11111111", "parked")])
+        self.assertEqual(unparsed, 0)
+
+    def test_age_column_shape_still_reads_the_class_after_the_age(self):
+        """Every age form the render emits, not just `11m`.
+
+        `18:04Z` and `stall 2` are age cells too, and a `\\d+[smhdw]`-only test dropped two
+        real **stalled** rows out of the denominator on round `19-39-16Z`.
+        """
+        path = os.path.join(self.tmp, "aged.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 3 sessions\n"
+                "CLASSIFICATION  3 classified\n"
+                "  Aged One [44444444] · shell · 11m · parked · Task.md · 1 · url\n"
+                "  Aged Two [55555555] · idle · 18:04Z · finished · Task.md · 1 · url\n"
+                "  Aged Three [66666666] · shell · stall 2 · stalled · Task.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows, unparsed = drive_share.digest_rows(path)
+        self.assertEqual(
+            rows,
+            [
+                ("Aged One", "44444444", "parked"),
+                ("Aged Two", "55555555", "finished"),
+                ("Aged Three", "66666666", "stalled"),
+            ],
+        )
+        self.assertEqual(unparsed, 0)
+
+    def test_absent_classification_section_is_empty_not_an_error(self):
+        path = os.path.join(self.tmp, "nosection.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("DIGEST x · 0 sessions\nNOTES\n  nothing here\n")
+        self.assertEqual(drive_share.digest_rows(path), ([], 0))
 
     def test_capitalised_token_still_counts_as_detected(self):
         """A case-insensitive scan feeding a case-sensitive consumer must not disagree."""

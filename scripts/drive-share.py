@@ -151,6 +151,32 @@ def task_mtime(path):
         return None
 
 
+#: The age cell, in every form the render has been observed to emit: `11m`, `18:04Z`,
+#: `stall 2`. Deliberately narrow -- a shape this does not recognise falls through to the
+#: no-age position and is counted as unparsed, which is loud. Widening it to "anything that
+#: is not a class word" is what let a task basename be read as the class.
+AGE_CELL = re.compile(r"^(?:\d+[smhdw]|\d{2}:\d{2}Z|stall \d+)$", re.I)
+
+
+def class_index(parts):
+    """Which cell holds the class: 3 when an age column precedes it, else 2.
+
+    The two observed shapes differ by exactly one cell -- `name · state · CLASS · task · …`
+    and `name · state · AGE · CLASS · …` -- so the position is *decided*, not searched.
+    Searching forward was the first cut and it walked into the task column: a row reading
+    `brandnewclass · Parked Ideas.md` yielded class `parked` (denominator inflated,
+    `unparsed` 0) and `brandnewclass · Finished Migration.md` was dropped silently.
+
+    The age cell is the discriminator, and it is matched against the forms actually seen
+    rather than guessed at. Measured across five live digests: `11m`, `75s`, `42m`, `25m`,
+    `18:04Z`, `stall 2` -- the last two are why a `\\d+[smhdw]`-only test dropped two real
+    **stalled** rows out of the denominator.
+    """
+    if len(parts) > 3 and AGE_CELL.match(parts[2].strip()):
+        return 3
+    return 2
+
+
 def digest_rows(path):
     """(rows, unparsed) for the digest's `CLASSIFICATION` section.
 
@@ -200,20 +226,21 @@ def digest_rows(path):
         if len(parts) < 3:
             continue
         label = parts[0]
-        # A parenthesised line inside the section is a summary, not a session row, and a
-        # line carrying `;` is a GROUPED summary (`sid name | state | note ; sid …`) that
-        # packs several sessions into one line. Neither is a row, so neither is counted as
-        # unparsed -- the count is for genuine single-session rows whose class token was
-        # not recognised, which is the silent drop this function must never do again.
-        if label.startswith("(") or ";" in stripped:
+        # A parenthesised line inside the section is a summary, not a session row. It is
+        # skipped without counting: `(none)` and `(waiting x6: …)` are prose, not rows, and
+        # counting them would make the unparsed figure permanently non-zero and therefore
+        # ignorable -- the opposite of loud.
+        if label.startswith("("):
             continue
         match = re.search(r"\[([^\]]+)\]", label)
         sid8 = match.group(1) if match else ""
         name = label[: match.start()].strip() if match else label
-        # The state is parts[1] (idle/busy/shell) and never a class token, so starting at
-        # index 2 cannot pick it up by mistake.
-        klass = next((p for p in parts[2:] if class_token(p) in DIGEST_CLASSES), None)
-        if klass is None:
+        # The class position is decided from the row's own shape (see `class_index`), then
+        # exactly one cell is read. A cell that is not a known class is counted as
+        # unparsed -- never silently dropped, and never satisfied by the task basename.
+        index = class_index(parts)
+        klass = parts[index] if index < len(parts) else ""
+        if class_token(klass) not in DIGEST_CLASSES:
             unparsed += 1
             continue
         # Lowercased on the way out: the scan compares case-insensitively, and `measure()`
@@ -380,8 +407,9 @@ def render(rows, sent_known=True, unparsed=0):
         )
     if unparsed:
         lines.append(
-            "  ⚠️ %d digest row(s) carried a class token outside DIGEST_CLASSES and are NOT "
-            "in the denominator below — add the class to `DIGEST_CLASSES` in drive-share.py"
+            "  ⚠️ %d CLASSIFICATION line(s) could not be read as a row — no class token in "
+            "`DIGEST_CLASSES` at the class column — and are NOT in the denominator below. "
+            "Add the class to `DIGEST_CLASSES` in drive-share.py if it is a real one."
             % unparsed
         )
     for row in rows:
