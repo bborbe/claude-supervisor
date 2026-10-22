@@ -63,8 +63,9 @@ import sys
 #: crash) so a caller can tell "refused" from "broke" -- a refused round acted on nothing.
 REFUSED = 2
 
-#: The consecutive-unverifiable count at which a row is acted on. Exactly this value, not
-#: `>=`: see the module docstring.
+#: The consecutive-unverifiable count at which a row becomes actionable. The test is
+#: `>=`, and the ledger's `unverifiable_action` marker is what makes the action fire once
+#: per silence -- see the module docstring for why an equality test is the wrong rule.
 THRESHOLD = 2
 
 #: How many rows may be acted on in ONE round. The threshold alone is unbounded, and that
@@ -211,6 +212,10 @@ def decide(sid, entry, pane_for_fn, pane_text_fn, link_fn):
     name = entry.get("name") or "?"
     task_file = (entry.get("task_file") or "").strip()
     probe = entry.get("probe") or ""
+    # The row's OWN streak, never the constant: under `>= THRESHOLD` a held-back row acts at
+    # 3, 4, … and telling it "unverifiable for 2 consecutive rounds" understates how long it
+    # waited -- on the one line a peer reads to decide whether to act.
+    streak = entry.get("unverifiable_streak") or THRESHOLD
     pane = pane_for_fn(sid)
     if not pane:
         return {
@@ -220,7 +225,7 @@ def decide(sid, entry, pane_for_fn, pane_text_fn, link_fn):
             "closer": "",
             "pane_line": "%s → no pane resolved" % PANE_COMMAND,
             "why": "no pane resolves for the session",
-            "text": escalation_text(name, sid, task_file, probe, "no pane resolves"),
+            "text": escalation_text(name, sid, task_file, probe, "no pane resolves", streak),
         }
     text = pane_text_fn(pane)
     if text is None:
@@ -232,7 +237,7 @@ def decide(sid, entry, pane_for_fn, pane_text_fn, link_fn):
             "pane_line": "%s %s → unreadable" % (PANE_COMMAND, pane),
             "why": "the pane exists but could not be read",
             "text": escalation_text(
-                name, sid, task_file, probe, "pane %s unreadable" % pane
+                name, sid, task_file, probe, "pane %s unreadable" % pane, streak
             ),
         }
     closer = last_closer(text)
@@ -245,7 +250,7 @@ def decide(sid, entry, pane_for_fn, pane_text_fn, link_fn):
             "pane_line": "%s %s → read, no closer line" % (PANE_COMMAND, pane),
             "why": "the pane renders no closer line",
             "text": escalation_text(
-                name, sid, task_file, probe, "pane %s renders no closer line" % pane
+                name, sid, task_file, probe, "pane %s renders no closer line" % pane, streak
             ),
         }
     return {
@@ -255,11 +260,11 @@ def decide(sid, entry, pane_for_fn, pane_text_fn, link_fn):
         "closer": closer,
         "pane_line": "%s %s → read" % (PANE_COMMAND, pane),
         "why": "",
-        "text": nudge_text(closer),
+        "text": nudge_text(closer, streak),
     }
 
 
-def nudge_text(closer):
+def nudge_text(closer, streak=THRESHOLD):
     """The nudge, quoting the pane's own closer line verbatim.
 
     Read-only context, and it says so in its own words: it authorises nothing, it is not
@@ -273,18 +278,18 @@ def nudge_text(closer):
         "been unverifiable for %d consecutive rounds, so your pane was read this round. Its "
         "last closer line reads: %s — If that line is still awaiting the operator, it still "
         "is. If it is stale, continue on your own next unchecked subtask under your own "
-        "execution rules." % (THRESHOLD, closer)
+        "execution rules." % (streak, closer)
     )
 
 
-def escalation_text(name, sid, task_file, probe, why):
+def escalation_text(name, sid, task_file, probe, why, streak=THRESHOLD):
     """The escalation card's payload: the session, why, and what the read returned."""
     return (
         "Unverifiable for %d consecutive rounds: %s [%s] — %s. Task: %s. Probe: %s. No "
         "nudge was sent because the session's own state could not be read from its pane, "
         "so a manager needs to look."
         % (
-            THRESHOLD,
+            streak,
             name,
             (sid or "")[:8],
             why,
@@ -326,6 +331,14 @@ def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn, max_act
     for entry in entries:
         key = entry.get("session_id") or "anonymous-%d" % id(entry)
         if key in unique:
+            # MERGE the two copies rather than keeping one wholesale. They differ by
+            # construction: step 0's retained row carries `reprobe_verdict`/`reprobe_probe`
+            # and the digest candidate does not, so dropping the retained copy loses step
+            # 0's dedup key and the row re-signals PARKED next round.
+            kept = unique[key]
+            for field in ("reprobe_verdict", "reprobe_probe", "task_file", "probe"):
+                if not kept.get(field) and entry.get(field):
+                    kept[field] = entry[field]
             continue
         unique[key] = entry
         order.append(key)
@@ -360,7 +373,7 @@ def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn, max_act
     return acted, held
 
 
-def render(acted, held=()):
+def render(acted, held=(), max_actions=MAX_ACTIONS):
     """The `UNVERIFIABLE` block plus the two paste-ready blocks.
 
     One line per acted row, however long the list. A summary line is exactly the shape a
@@ -375,7 +388,7 @@ def render(acted, held=()):
     what will be sent this round.
     """
     lines = [
-        "UNVERIFIABLE — a session unverifiable %d consecutive rounds, its pane read, and the "
+        "UNVERIFIABLE — a session unverifiable %d+ consecutive rounds, its pane read, and the "
         "action taken" % THRESHOLD
     ]
     for entry, decision in acted:
@@ -384,7 +397,7 @@ def render(acted, held=()):
             % (
                 entry.get("name") or "?",
                 (entry.get("session_id") or "")[:8],
-                THRESHOLD,
+                entry.get("unverifiable_streak") or THRESHOLD,
                 decision["pane"] or "—",
                 decision["action"],
             )
@@ -409,7 +422,7 @@ def render(acted, held=()):
     )
     escalations = [(e, d) for e, d in acted if d["action"] == "escalation"]
     if escalations:
-        lines.append("  unverifiable for %d consecutive rounds" % THRESHOLD)
+        lines.append("  unverifiable for %d or more consecutive rounds" % THRESHOLD)
         for entry, decision in escalations:
             lines.append(
                 "    %s [%s] · pane %s · %s — %s → %s"
@@ -429,7 +442,7 @@ def render(acted, held=()):
     if held:
         lines.append(
             "UNVERIFIABLE HELD BACK — at the threshold, deferred to a later round by the "
-            "per-round cap of %d; their streaks keep advancing" % MAX_ACTIONS
+            "per-round cap of %d; their streaks keep advancing" % max_actions
         )
         for entry, sid in held:
             lines.append(
@@ -475,7 +488,7 @@ def cmd_handle(args):
         with open(args.json_out, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
-    print(render(acted, held))
+    print(render(acted, held, args.max_actions))
     return 0
 
 

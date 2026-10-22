@@ -21,8 +21,11 @@ DEFINITIONS, and they are the whole content of the number:
                `unverifiable`. Deduplicated by session id, because one session can appear
                in both the digest and the entries.
   verified  -- a detected row where an action was taken AND the session's transcript moved
-               past the round start, or its task file changed. "Action taken" is a drafted
-               nudge or reap, or the drive leg's own 2-round pane read.
+               past the round start, or its task file changed. "Action taken" is, in order
+               of authority: membership of the caller's `--sent` set; else a `nudge:
+               drafted`; else a non-empty `unverifiable_action` on the ledger. A streak is
+               never the test — the drive leg acts at `>= 2`, so a row held back by the cap
+               acts at 3 and an `== 2` check would call it unactioned.
 
 ⚠️ **The round start is the comparison point, and it is deliberately a floor rather than
 the action's own timestamp.** The action is drafted mid-round and the send follows, so a
@@ -174,8 +177,10 @@ def action_taken(entry, sid="", sent=None):
         return bool(sid) and sid in sent
     if (entry.get("nudge") or "none") == "drafted":
         return True
-    streak = entry.get("unverifiable_streak")
-    return isinstance(streak, int) and not isinstance(streak, bool) and streak == 2
+    # The ledger's own marker, never the streak: under the `>= 2` trigger a row held back
+    # by the per-round cap acts at 3, 4, … and an `== 2` test would read it as "no action
+    # taken" while a nudge or escalation was in fact taken.
+    return bool(entry.get("unverifiable_action"))
 
 
 def measure(
@@ -244,8 +249,8 @@ def measure(
         evidence = ""
         verified = False
         if not acted:
-            drafted = (entry.get("nudge") or "none") == "drafted" or (
-                entry.get("unverifiable_streak") == 2
+            drafted = (entry.get("nudge") or "none") == "drafted" or bool(
+                entry.get("unverifiable_action")
             )
             # Naming the difference matters: "no action taken" and "drafted but never
             # sent" both leave the numerator at zero, and only the second is a defect

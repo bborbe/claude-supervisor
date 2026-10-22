@@ -148,10 +148,11 @@ def streak_of(value):
 
     `bool` is an `int` in Python, so a hand-edited `true` would otherwise read as 1 --
     a plausible-looking count nobody computed. Anything unparseable is 0, and the
-    asymmetry is deliberate: the count gates an action at exactly 2, so a corrupt
-    value read as 0 stays silent, while a corrupt value read as 2 sends a nudge on no
-    evidence. A round payload that carries a bad count is REFUSED by `check()` before
-    it ever reaches here, so this default only covers a ledger already on disk.
+    asymmetry is deliberate: the count becomes actionable at `>= 2`, so a corrupt
+    value read as 0 stays silent, while a corrupt value read as 2 makes a row
+    actionable on no evidence. A round payload that carries a bad count is REFUSED by
+    `check()` before it ever reaches here, so this default only covers a ledger already
+    on disk.
     """
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return 0

@@ -47,6 +47,7 @@ def entry(sid, **over):
         "reprobe_probe": "",
         "unverifiable_streak": 0,
         "unverifiable_round": "",
+        "unverifiable_action": "",
     }
     row.update(over)
     return row
@@ -130,7 +131,12 @@ class TestShare(Fixture):
     def test_unverifiable_entry_joins_the_denominator(self):
         rows = self.measure(
             [
-                entry("eeeeeeee", verdict="unverifiable", unverifiable_streak=2),
+                entry(
+                    "eeeeeeee",
+                    verdict="unverifiable",
+                    unverifiable_streak=2,
+                    unverifiable_action="escalation",
+                ),
             ],
             moved=("eeeeeeee",),
         )
@@ -177,6 +183,28 @@ class TestSentSet(Fixture):
         rows = self.measure([entry("aaaaaaaa", nudge="drafted")])
         self.assertIn("send state unknown", drive_share.render(rows, sent_known=False))
         self.assertNotIn("send state unknown", drive_share.render(rows, sent_known=True))
+
+    def test_the_sent_none_fallback_reads_the_action_marker_not_the_streak(self):
+        """A row held back and acted at streak 3 must still count as actioned.
+
+        The fallback used to test `unverifiable_streak == 2`; under the `>= 2` trigger a
+        row acted at 3 fell through it and rendered "no action taken" although a nudge or
+        escalation was taken.
+        """
+        rows = self.measure(
+            [
+                entry(
+                    "aaaaaaaa",
+                    nudge="none",
+                    unverifiable_streak=3,
+                    unverifiable_action="nudge",
+                )
+            ],
+            moved=("aaaaaaaa",),
+        )
+        aaaa = [row for row in rows if row["sid"] == "aaaaaaaa"][0]
+        self.assertTrue(aaaa["verified"])
+        self.assertEqual(aaaa["action"], "action")
 
 
 class TestRefusals(Fixture):

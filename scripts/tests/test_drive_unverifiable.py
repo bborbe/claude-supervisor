@@ -109,7 +109,7 @@ class Replay(unittest.TestCase):
             max_actions=max_actions,
         )
         self.merge(payload)
-        return acted, drive_unverifiable.render(acted, held)
+        return acted, drive_unverifiable.render(acted, held, max_actions)
 
     def ledger_entries(self):
         ledger, reason = drive_unverifiable.read_ledger()
@@ -392,6 +392,35 @@ class TestPerRoundCap(Replay):
         self.assertEqual(len(self.pane_reads), 2, "acted once before and once after recovery")
 
 
+    def test_the_block_reports_the_effective_cap_not_the_default(self):
+        """The header must name the cap that ran, or it lies about what happened."""
+        self.seed_streak_one()
+        _, out = self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=2,
+        )
+        self.assertIn("per-round cap of 2", out)
+        self.assertNotIn("per-round cap of 3", out)
+
+    def test_an_acted_row_reports_its_own_streak_not_the_threshold(self):
+        """A row held back and acted at streak 3 must not be told it waited 2 rounds."""
+        self.seed_streak_one()
+        self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=2,
+        )
+        acted, out = self.round(
+            "2026-10-22T10-30-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=10,
+        )
+        self.assertEqual(len(acted), 3)
+        self.assertIn("streak 3", out)
+        self.assertIn("unverifiable for 3 consecutive rounds", out)
+
+
 class TestDuplicateEntries(Replay):
     """A session can arrive twice: it is in step 0's retained set AND the digest's candidates.
 
@@ -416,6 +445,21 @@ class TestDuplicateEntries(Replay):
         self.assertEqual(len(acted), 1, "one action for one session")
         self.assertEqual(self.pane_reads, ["700"], "one pane read, not two")
         self.assertEqual(out.count("TO: Task aaaaaaaa"), 1, "one nudge line, not two")
+
+    def test_the_merged_copy_keeps_step_zeros_reprobe_key(self):
+        """The digest copy can precede the retained one; the reprobe_* pair must survive.
+
+        Losing it makes the row re-signal PARKED on the next round, because step 0's dedup
+        key is that pair and an entry written without it reads as a first observation.
+        """
+        digest_copy = entry("aaaaaaaa", "unverifiable")
+        retained_copy = entry(
+            "aaaaaaaa", "unverifiable", reprobe_verdict="needs-step-4", reprobe_probe="stub"
+        )
+        self.round("2026-10-22T10-00-00Z", [digest_copy, retained_copy])
+        row = self.ledger_entries()["aaaaaaaa"]
+        self.assertEqual(row["reprobe_verdict"], "needs-step-4")
+        self.assertEqual(row["reprobe_probe"], "stub")
 
 
 if __name__ == "__main__":
