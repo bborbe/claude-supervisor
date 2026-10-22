@@ -32,6 +32,23 @@ BLOCKED (feed, raised — not verified open)
 ROUND = "2026-10-22T10-00-00Z"
 START = drive_share.round_epoch(ROUND)
 
+#: A digest captured from live round `2026-10-22T18:35:05Z`, trimmed to the rows that
+#: mattered: `name · state · CLASS · task · boxes · link`, with no age column. The fleet
+#: alternates between this shape and the age-column one above -- both were observed on the
+#: same afternoon -- which is why the parser must locate the class rather than index it.
+#: ⚠️ `agents/fleet-sweep-reader.md:142` still specifies `<status> · <age> · <class>`; the
+#: render does not always emit the age, so the spec and the render disagree. This fixture
+#: records what was observed, not what the spec says.
+REAL_DIGEST = """\
+DIGEST 2026-10-22T18:35:05Z · 3 sessions
+CLASSIFICATION  3 classified · progressing=1 · parked=2 · finished=0 · unclassified=0
+  Parked One [11111111] · idle · parked · Task One.md · 3 · http://127.0.0.1:1337/jump?pane=1
+  Parked Two [22222222] · shell · parked · — · — · http://127.0.0.1:1337/jump?pane=2
+  Moving Three [33333333] · busy · progressing · Task Three.md · 1 · http://127.0.0.1:1337/jump?pane=3
+BLOCKED (feed, raised — not verified open)
+  (none)
+"""
+
 
 def entry(sid, **over):
     row = {
@@ -145,6 +162,181 @@ class TestShare(Fixture):
         self.assertEqual(len(joined), 1)
         self.assertEqual(joined[0]["class"], "unverifiable")
         self.assertTrue(joined[0]["verified"], "the 2-round pane read counts as an action")
+
+
+class TestRealDigestFormat(unittest.TestCase):
+    """The class column must be LOCATED, not indexed.
+
+    Measured 2026-10-22 on live rounds: the parser read `parts[3]`, which is the task file
+    in the real render, and returned classes `{idle, shell}` -- zero parked rows counted
+    while the same digest's header said `parked=5`. The share's denominator then omitted
+    every stalled and parked row, and the printed ratio was wrong while looking plausible.
+
+    The fixture in this file could not catch it: it carries an age column, so it mirrors
+    the parser's wrong assumption instead of the render's real shape.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.path = os.path.join(self.tmp, "real.digest")
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(REAL_DIGEST)
+
+    def test_class_is_located_not_indexed(self):
+        rows = drive_share.digest_classes(self.path)
+        self.assertEqual(
+            [(row[1], row[2]) for row in rows],
+            [("11111111", "parked"), ("22222222", "parked"), ("33333333", "progressing")],
+        )
+
+    def test_parked_rows_reach_the_denominator(self):
+        """The consequence the defect had: two parked rows must be two detected rows."""
+        rows = drive_share.measure(
+            drive_share.digest_classes(self.path),
+            [],
+            START,
+            lambda sid: None,
+            lambda path: None,
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["sid"] for row in rows}, {"11111111", "22222222"})
+
+    def test_qualified_class_still_counts(self):
+        """`parked (closer pick)` is a parked row; an exact match drops it.
+
+        Captured live on round `2026-10-22T19-23-20Z`, where an exact-match vocabulary
+        counted 1 parked row and the qualified render carried 2.
+        """
+        path = os.path.join(self.tmp, "qualified.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 2 sessions\n"
+                "CLASSIFICATION  2 classified · parked=2\n"
+                "  Plain One [11111111] · shell · 11m · parked · — · — · url\n"
+                "  Closer Two [22222222] · shell · 11m · parked (closer pick) · — · — · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows = drive_share.measure(
+            drive_share.digest_classes(path),
+            [],
+            START,
+            lambda sid: None,
+            lambda path: None,
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["sid"] for row in rows}, {"11111111", "22222222"})
+
+    def test_unknown_class_token_is_counted_not_swallowed(self):
+        """The fail-quiet path: an unrecognised token must be REPORTED, not skipped.
+
+        The defect this change fixes was a parser that dropped rows without a trace. A
+        silent `continue` on an unknown token would reintroduce exactly that shape for the
+        next class the render adds, so the count is returned and printed.
+        """
+        path = os.path.join(self.tmp, "odd.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 2 sessions\n"
+                "CLASSIFICATION  2 classified · parked=1\n"
+                "  Parked One [11111111] · idle · parked · Task.md · 1 · url\n"
+                "  Odd One [22222222] · idle · brandnewclass · Task.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows, unparsed = drive_share.digest_rows(path)
+        self.assertEqual([row[1] for row in rows], ["11111111"])
+        self.assertEqual(unparsed, 1)
+        self.assertIn(
+            "1 CLASSIFICATION line(s) could not be read as a row",
+            drive_share.render([], unparsed=unparsed),
+        )
+
+    def test_task_basename_beginning_with_a_class_word_is_not_the_class(self):
+        """The scan must not walk into the task column.
+
+        `brandnewclass · Parked Ideas.md` was read as a **parked** row (denominator
+        inflated, `unparsed` 0), and `brandnewclass · Finished Migration.md` was dropped
+        silently — both the fail-quiet shape this change exists to remove.
+        """
+        path = os.path.join(self.tmp, "collision.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 2 sessions\n"
+                "CLASSIFICATION  2 classified\n"
+                "  Odd One [22222222] · idle · brandnewclass · Parked Ideas.md · 1 · url\n"
+                "  Odd Two [33333333] · idle · brandnewclass · Finished Migration.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows, unparsed = drive_share.digest_rows(path)
+        self.assertEqual(rows, [])
+        self.assertEqual(unparsed, 2)
+
+    def test_semicolon_in_a_cell_does_not_hide_the_row(self):
+        """A `;` inside the task name must not make a real row disappear."""
+        path = os.path.join(self.tmp, "semicolon.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 1 sessions\n"
+                "CLASSIFICATION  1 classified\n"
+                "  Real One [11111111] · idle · parked · Task; part two.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows, unparsed = drive_share.digest_rows(path)
+        self.assertEqual(rows, [("Real One", "11111111", "parked")])
+        self.assertEqual(unparsed, 0)
+
+    def test_age_column_shape_still_reads_the_class_after_the_age(self):
+        """Every age form the render emits, not just `11m`.
+
+        `18:04Z` and `stall 2` are age cells too, and a `\\d+[smhdw]`-only test dropped two
+        real **stalled** rows out of the denominator on round `19-39-16Z`.
+        """
+        path = os.path.join(self.tmp, "aged.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 3 sessions\n"
+                "CLASSIFICATION  3 classified\n"
+                "  Aged One [44444444] · shell · 11m · parked · Task.md · 1 · url\n"
+                "  Aged Two [55555555] · idle · 18:04Z · finished · Task.md · 1 · url\n"
+                "  Aged Three [66666666] · shell · stall 2 · stalled · Task.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows, unparsed = drive_share.digest_rows(path)
+        self.assertEqual(
+            rows,
+            [
+                ("Aged One", "44444444", "parked"),
+                ("Aged Two", "55555555", "finished"),
+                ("Aged Three", "66666666", "stalled"),
+            ],
+        )
+        self.assertEqual(unparsed, 0)
+
+    def test_absent_classification_section_is_empty_not_an_error(self):
+        path = os.path.join(self.tmp, "nosection.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("DIGEST x · 0 sessions\nNOTES\n  nothing here\n")
+        self.assertEqual(drive_share.digest_rows(path), ([], 0))
+
+    def test_capitalised_token_still_counts_as_detected(self):
+        """A case-insensitive scan feeding a case-sensitive consumer must not disagree."""
+        path = os.path.join(self.tmp, "caps.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 1 sessions\n"
+                "CLASSIFICATION  1 classified · parked=1\n"
+                "  Parked One [11111111] · idle · Parked · Task.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows = drive_share.measure(
+            drive_share.digest_classes(path),
+            [],
+            START,
+            lambda sid: None,
+            lambda path: None,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["class"], "parked")
 
 
 class TestSentSet(Fixture):

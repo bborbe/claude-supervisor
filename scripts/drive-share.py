@@ -55,6 +55,38 @@ REFUSED = 2
 #: is a drive-leg verdict and arrives on the entries, not on a digest class.
 DETECTED_CLASSES = ("stalled", "parked")
 
+#: Every class a `CLASSIFICATION` row can carry. Used to LOCATE the class column instead
+#: of assuming its index -- see `digest_rows`. `deferred` and `orphan` are here because
+#: `agents/fleet-sweep-reader.md` declares them even though neither is a detected problem.
+DIGEST_CLASSES = (
+    "progressing",
+    "stalled",
+    "parked",
+    "finished",
+    "unclassified",
+    "held",
+    "stood-down",
+    "lapsed",
+    "done",
+    "blocked",
+    "error",
+    "error-marked",
+    "deferred",
+    "orphan",
+)
+
+
+def class_token(cell):
+    """The class word inside a cell, ignoring a qualifier or a decoration.
+
+    The render qualifies a class inline -- `parked (closer pick)`, `finished (shell child
+    held)`, `⏸️ HELD — <reason>` -- so an exact match against `DIGEST_CLASSES` misses real
+    rows. Only the leading word is the class. Measured 2026-10-22: `parked (closer pick)`
+    is a parked row that an exact match dropped from the denominator.
+    """
+    match = re.match(r"[^a-z]*([a-z][a-z-]*)", cell.lower())
+    return match.group(1) if match else ""
+
 HOME = os.environ.get("HOME") or os.path.expanduser("~")
 
 
@@ -119,14 +151,57 @@ def task_mtime(path):
         return None
 
 
-def digest_classes(path):
-    """(name, sid8, class) for every row of the digest's `CLASSIFICATION` section.
+#: The age cell, in every form the render has been observed to emit: `11m`, `18:04Z`,
+#: `stall 2`. Deliberately narrow -- a shape this does not recognise falls through to the
+#: no-age position and is counted as unparsed, which is loud. Widening it to "anything that
+#: is not a class word" is what let a task basename be read as the class.
+AGE_CELL = re.compile(r"^(?:\d+[smhdw]|\d{2}:\d{2}Z|stall \d+)$", re.I)
+
+
+def class_index(parts):
+    """Which cell holds the class: 3 when an age column precedes it, else 2.
+
+    The two observed shapes differ by exactly one cell -- `name · state · CLASS · task · …`
+    and `name · state · AGE · CLASS · …` -- so the position is *decided*, not searched.
+    Searching forward was the first cut and it walked into the task column: a row reading
+    `brandnewclass · Parked Ideas.md` yielded class `parked` (denominator inflated,
+    `unparsed` 0) and `brandnewclass · Finished Migration.md` was dropped silently.
+
+    The age cell is the discriminator, and it is matched against the forms actually seen
+    rather than guessed at. Measured across five live digests: `11m`, `75s`, `42m`, `25m`,
+    `18:04Z`, `stall 2` -- the last two are why a `\\d+[smhdw]`-only test dropped two real
+    **stalled** rows out of the denominator.
+    """
+    if len(parts) > 3 and AGE_CELL.match(parts[2].strip()):
+        return 3
+    return 2
+
+
+def digest_rows(path):
+    """(rows, unparsed) for the digest's `CLASSIFICATION` section.
+
+    `rows` is `(name, sid8, class)` for every row whose class token is recognised;
+    `unparsed` counts the rows that carried no token in `DIGEST_CLASSES`. The count is
+    returned rather than swallowed because **a silently skipped row is the defect this
+    function already shipped once**: the original build indexed `parts[3]`, read the task
+    file as the class, and dropped every stalled/parked row without a trace. Skipping an
+    unrecognised token quietly would reintroduce exactly that failure shape for the next
+    class the render adds.
 
     Read as text, because the digest is a render rather than a serialisation: the section
-    runs from its heading to the next all-caps heading, and each row is `·`-separated with
-    the class at index 3. A digest with no `CLASSIFICATION` section yields nothing and the
-    caller reports the refusal -- never an empty classification, which would read as a
-    fleet with no problems.
+    runs from its heading to the next all-caps heading, and each row is `·`-separated.
+
+    ⚠️ **The class column is LOCATED, never assumed.** The digest alternates between two
+    live shapes: `Name [sid8] · idle · parked · task · boxes · link` (class at index 2)
+    and `Name [sid8] · idle · 12m · parked · …` (an age column, class at index 3). A fixed
+    index therefore reads the task file as the class on one shape and counts **zero**
+    stalled/parked rows, which is invisible because the share's denominator is usually
+    dominated by the ledger's `unverifiable` entries. Measured 2026-10-22 across three
+    consecutive live rounds: the fixed index detected 0, 0 and 1; scanning detected 5, 7
+    and 1.
+
+    A digest with no `CLASSIFICATION` section yields `([], 0)` and the caller reports the
+    refusal -- never an empty classification, which would read as a fleet with no problems.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -134,6 +209,7 @@ def digest_classes(path):
     except OSError:
         return None
     rows = []
+    unparsed = 0
     inside = False
     for line in lines:
         if line.startswith("CLASSIFICATION"):
@@ -147,14 +223,37 @@ def digest_classes(path):
         if line and not line[0].isspace():
             break
         parts = [part.strip() for part in stripped.split("·")]
-        if len(parts) < 4:
+        if len(parts) < 3:
             continue
         label = parts[0]
+        # A parenthesised line inside the section is a summary, not a session row. It is
+        # skipped without counting: `(none)` and `(waiting x6: …)` are prose, not rows, and
+        # counting them would make the unparsed figure permanently non-zero and therefore
+        # ignorable -- the opposite of loud.
+        if label.startswith("("):
+            continue
         match = re.search(r"\[([^\]]+)\]", label)
         sid8 = match.group(1) if match else ""
         name = label[: match.start()].strip() if match else label
-        rows.append((name, sid8, parts[3]))
-    return rows
+        # The class position is decided from the row's own shape (see `class_index`), then
+        # exactly one cell is read. A cell that is not a known class is counted as
+        # unparsed -- never silently dropped, and never satisfied by the task basename.
+        index = class_index(parts)
+        klass = parts[index] if index < len(parts) else ""
+        if class_token(klass) not in DIGEST_CLASSES:
+            unparsed += 1
+            continue
+        # Lowercased on the way out: the scan compares case-insensitively, and `measure()`
+        # compares the stored value against the lowercase `DETECTED_CLASSES`. Storing the
+        # original case made the two halves disagree for a token like `Parked`.
+        rows.append((name, sid8, class_token(klass)))
+    return rows, unparsed
+
+
+def digest_classes(path):
+    """The parsed rows only -- `digest_rows` without the unparsed count."""
+    result = digest_rows(path)
+    return None if result is None else result[0]
 
 
 def action_taken(entry, sid="", sent=None):
@@ -287,7 +386,7 @@ def measure(
     return out
 
 
-def render(rows, sent_known=True):
+def render(rows, sent_known=True, unparsed=0):
     """The `SHARE` block plus the one line the round prints.
 
     One line per detected row, because a bare ratio is exactly what a hardcoded number
@@ -295,12 +394,23 @@ def render(rows, sent_known=True):
 
     `sent_known=False` marks the header when the caller could not say what actually
     left, so a reader knows the numerator rests on drafts rather than on sends.
+
+    `unparsed` is the count of digest rows whose class token was not recognised. It is
+    printed rather than swallowed: a denominator that quietly omits rows looks exactly
+    like a smaller fleet.
     """
     lines = ["SHARE — detected problems ending in a verified action"]
     if not sent_known:
         lines.append(
             "  ⚠️ send state unknown — an action counts as taken when it was DRAFTED, so "
             "this numerator can credit a message that never left"
+        )
+    if unparsed:
+        lines.append(
+            "  ⚠️ %d CLASSIFICATION line(s) could not be read as a row — no class token in "
+            "`DIGEST_CLASSES` at the class column — and are NOT in the denominator below. "
+            "Add the class to `DIGEST_CLASSES` in drive-share.py if it is a real one."
+            % unparsed
         )
     for row in rows:
         lines.append(
@@ -326,14 +436,15 @@ def render(rows, sent_known=True):
 
 
 def cmd_share(args):
-    rows = digest_classes(args.digest)
-    if rows is None:
+    parsed = digest_rows(args.digest)
+    if parsed is None:
         print(
             "drive-share: digest unreadable at %s -- refusing to report a share over a "
             "classification that could not be read" % args.digest,
             file=sys.stderr,
         )
         return REFUSED
+    rows, unparsed = parsed
     entries = []
     if args.entries:
         try:
@@ -369,7 +480,13 @@ def cmd_share(args):
         except OSError as exc:
             print("drive-share: sent list unreadable: %s" % exc, file=sys.stderr)
             return REFUSED
-    print(render(measure(rows, entries, start, sent=sent), sent_known=sent is not None))
+    print(
+        render(
+            measure(rows, entries, start, sent=sent),
+            sent_known=sent is not None,
+            unparsed=unparsed,
+        )
+    )
     return 0
 
 
