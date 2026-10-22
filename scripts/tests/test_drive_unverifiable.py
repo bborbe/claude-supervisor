@@ -392,5 +392,31 @@ class TestPerRoundCap(Replay):
         self.assertEqual(len(self.pane_reads), 2, "acted once before and once after recovery")
 
 
+class TestDuplicateEntries(Replay):
+    """A session can arrive twice: it is in step 0's retained set AND the digest's candidates.
+
+    Two entries for one session cost two pane reads and two identical nudge lines -- and,
+    worse, `drive-ledger.py merge` REFUSES a payload carrying a session twice, so the whole
+    round's ledger write would be lost. Measured 2026-10-22T13:15Z: two sessions' nudge
+    lines appeared twice in one round's stdout block.
+    """
+
+    def test_a_session_arriving_twice_acts_once_and_merges(self):
+        # The merge inside self.round() asserts exit 0 -- with a duplicate entry and no
+        # dedupe it would refuse, so this test fails on the ledger write, not just a line.
+        self.round(
+            "2026-10-22T10-00-00Z",
+            [entry("aaaaaaaa", "unverifiable"), entry("aaaaaaaa", "unverifiable")],
+        )
+        self.assertEqual(list(self.ledger_entries()), ["aaaaaaaa"])
+        acted, out = self.round(
+            "2026-10-22T10-15-00Z",
+            [entry("aaaaaaaa", "unverifiable"), entry("aaaaaaaa", "unverifiable")],
+        )
+        self.assertEqual(len(acted), 1, "one action for one session")
+        self.assertEqual(self.pane_reads, ["700"], "one pane read, not two")
+        self.assertEqual(out.count("TO: Task aaaaaaaa"), 1, "one nudge line, not two")
+
+
 if __name__ == "__main__":
     unittest.main()

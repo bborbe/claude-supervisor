@@ -154,13 +154,24 @@ def digest_classes(path):
     return rows
 
 
-def action_taken(entry):
-    """Did this round act on the row?
+def action_taken(entry, sid="", sent=None):
+    """Did this round act on the row -- and, when known, did the action actually leave?
 
-    `nudge: drafted` covers a drafted nudge and a drafted reap -- the ledger records both
-    the same way. The 2-round pane read is recorded as a streak, not as a nudge, so it is
-    read from the streak field.
+    ⚠️ **The drive leg DRAFTS; the round SENDS.** `nudge: drafted` on a ledger entry means
+    a message was composed, not that it reached anyone -- `agents/fleet-drive.md` says so
+    outright ("A `drafted` entry counts as nudged next round — if the caller's send fails,
+    the next round suppresses rather than nags"). Counting a draft as an action therefore
+    credits the numerator for something that never left the building. Measured
+    2026-10-22T13:15Z: a round with every send deliberately held still printed
+    `share: 2/112 (2%)`, because two drafted rows happened to move for unrelated reasons.
+
+    So when the caller passes `sent` -- the session ids it actually sent to or posted a
+    card for -- that set is the only authority. `sent=None` means the caller could not say,
+    and the draft stands in, with the block's header saying so rather than the number
+    quietly overstating.
     """
+    if sent is not None:
+        return bool(sid) and sid in sent
     if (entry.get("nudge") or "none") == "drafted":
         return True
     streak = entry.get("unverifiable_streak")
@@ -173,11 +184,14 @@ def measure(
     start,
     transcript_ts_fn=transcript_ts,
     task_mtime_fn=task_mtime,
+    sent=None,
 ):
     """One row per detected problem, each carrying whether its action verified.
 
     Returns the list of rows; the caller renders and counts them. Kept pure over its two
-    seams so the test can drive a row that took an action and did not move.
+    seams so the test can drive a row that took an action and did not move. `sent` is the
+    set of session ids the round actually sent to or posted a card for — see
+    `action_taken()` for why a draft is not the same thing.
     """
     by_sid = {}
     for entry in entries or []:
@@ -226,11 +240,21 @@ def measure(
     for key in sorted(detected):
         row = detected[key]
         entry = row["entry"] or lookup(key) or {}
-        acted = action_taken(entry)
+        acted = action_taken(entry, row["sid"], sent)
         evidence = ""
         verified = False
         if not acted:
-            evidence = "no action taken"
+            drafted = (entry.get("nudge") or "none") == "drafted" or (
+                entry.get("unverifiable_streak") == 2
+            )
+            # Naming the difference matters: "no action taken" and "drafted but never
+            # sent" both leave the numerator at zero, and only the second is a defect
+            # somebody should fix.
+            evidence = (
+                "drafted, not sent"
+                if (sent is not None and drafted)
+                else "no action taken"
+            )
         else:
             moved = []
             if start is not None:
@@ -258,13 +282,21 @@ def measure(
     return out
 
 
-def render(rows):
+def render(rows, sent_known=True):
     """The `SHARE` block plus the one line the round prints.
 
     One line per detected row, because a bare ratio is exactly what a hardcoded number
     also produces -- the rows are the evidence that the counts were computed.
+
+    `sent_known=False` marks the header when the caller could not say what actually
+    left, so a reader knows the numerator rests on drafts rather than on sends.
     """
     lines = ["SHARE — detected problems ending in a verified action"]
+    if not sent_known:
+        lines.append(
+            "  ⚠️ send state unknown — an action counts as taken when it was DRAFTED, so "
+            "this numerator can credit a message that never left"
+        )
     for row in rows:
         lines.append(
             "  %s [%s] · %s · %s · %s · %s"
@@ -320,7 +352,19 @@ def cmd_share(args):
             file=sys.stderr,
         )
         return REFUSED
-    print(render(measure(rows, entries, start)))
+    sent = None
+    if args.sent:
+        try:
+            with open(args.sent, encoding="utf-8") as handle:
+                sent = {
+                    line.strip()[:8]
+                    for line in handle
+                    if line.strip() and not line.strip().startswith("#")
+                }
+        except OSError as exc:
+            print("drive-share: sent list unreadable: %s" % exc, file=sys.stderr)
+            return REFUSED
+    print(render(measure(rows, entries, start, sent=sent), sent_known=sent is not None))
     return 0
 
 
@@ -336,6 +380,12 @@ def main(argv=None):
         "--entries",
         default=None,
         help="this round's drive-leg entries, for the unverifiable rows and the actions taken",
+    )
+    share.add_argument(
+        "--sent",
+        default=None,
+        help="file of the session ids this round actually sent to or posted a card for, one "
+        "per line; without it a DRAFTED action counts as taken and the block says so",
     )
     args = parser.parse_args(argv)
     if args.command == "share":

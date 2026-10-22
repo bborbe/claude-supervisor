@@ -314,6 +314,22 @@ def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn, max_act
         sid = entry.get("session_id")
         if sid:
             prior[sid] = entry
+    # Dedupe by session id before anything else, mutating the list so the merge payload
+    # this round hands to `drive-ledger.py merge` is clean too. A session can legitimately
+    # arrive twice -- it is in step 0's retained set AND in the digest's candidate set --
+    # and two entries for one session cost two pane reads and two identical nudge lines.
+    # ⚠️ It is worse than a duplicate line: `drive-ledger.py merge` REFUSES a payload
+    # carrying a session twice, so the whole round's ledger write is lost, not just the
+    # second line. Measured 2026-10-22T13:15Z: two sessions' nudge lines appeared twice.
+    unique = {}
+    order = []
+    for entry in entries:
+        key = entry.get("session_id") or "anonymous-%d" % id(entry)
+        if key in unique:
+            continue
+        unique[key] = entry
+        order.append(key)
+    entries[:] = [unique[key] for key in order]
     ledger_round = ledger.get("round") or ""
     candidates = []
     for entry in entries:
