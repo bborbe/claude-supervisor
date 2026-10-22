@@ -1481,18 +1481,24 @@ def post_repost(sid8, full, label, reason="", script_dir=None, timeout=30):
 # bug `who-needs-me.py`'s `strip_status_glyph` had to fix, measured there as 17
 # of 27 rows disagreeing on the leading `⚙` alone. Stripping any leading
 # non-alphanumeric run handles every marker without a list to keep current.
-_TRAILING_SUFFIX = re.compile(r"\s*\(\d+\)\s*$")
+#
+# ⚠️ **A trailing ` (N)` is NOT decoration and is never stripped.**
+# `server/liveness.mjs`'s `uniqueTabName` appends it so two sessions never answer
+# to one name, and that suffixed name is what reaches both the tab's `-n` and the
+# registry `name` read here. Collapsing `⚙ foo (2)` to `foo` would make a
+# suffixed session's card match its unsuffixed sibling's pane — a jump target
+# that looks resolved and goes to the wrong session.
 
 
 def _norm_title(title):
     """A pane or registry title reduced to the part two sides can agree on.
 
-    Leading decoration (status glyphs, the `⚙`/`✳` markers) is dropped, a
-    duplicated-title `(2)` suffix is dropped, and whitespace is collapsed — so
-    a pane title and a registry name compare on the words alone.
+    Leading decoration (status glyphs, the `⚙`/`✳` markers) is dropped and
+    whitespace is collapsed, so a pane title and a registry name compare on the
+    words alone. The trailing ` (N)` uniqueness suffix is deliberately KEPT —
+    see the comment above.
     """
     text = re.sub(r"^\W+", "", (title or "").strip(), flags=re.UNICODE)
-    text = _TRAILING_SUFFIX.sub("", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -1554,6 +1560,7 @@ def pane_for_session_name(name):
         panes = json.loads(proc.stdout)
     except Exception:
         return None
+    hits = []
     for pane in panes if isinstance(panes, list) else []:
         if not isinstance(pane, dict):
             continue
@@ -1566,12 +1573,15 @@ def pane_for_session_name(name):
         pane_id = pane.get("pane_id")
         if pane_id is None:
             continue
-        # The FIRST title match wins. Duplicate titles are possible (two panes
-        # restored from the same session name), and picking the first is a
-        # decision rather than a derivation — stated so a later reader does not
-        # read it as "the only match".
-        return str(pane_id)
-    return None
+        hits.append(str(pane_id))
+    # ⚠️ **Exactly one match, or nothing.** Returning the first of two is the
+    # rule `who-needs-me.py:pane_for` states and this join now follows: *"the
+    # wrong answer wearing the appearance of a resolved one … is strictly worse
+    # than a blank"*. Two panes can normalise to one key (a title truncated by
+    # WezTerm, a hand-renamed pane), and a card that jumps to a sibling's pane
+    # is worse than a card with no jump button at all — the operator presses it
+    # and lands in a different session's modal.
+    return hits[0] if len(hits) == 1 else None
 
 
 def _jump_sentence(full, label, script_dir=None):

@@ -1978,12 +1978,31 @@ class PaneForSessionNameTest(unittest.TestCase):
         self.assertIsNone(
             self._resolve(stdout=json.dumps([{"pane_id": 1, "title": "other"}])))
 
-    def test_the_first_of_two_duplicate_titles_wins(self):
-        self.assertEqual(
+    def test_two_panes_matching_one_key_resolve_nothing(self):
+        # ⚠️ Not "the first wins". A card that jumps to a sibling's pane is
+        # worse than a card with no jump button — the operator presses it and
+        # lands in a different session's modal. Same rule as
+        # `who-needs-me.py:pane_for` (`len(hits) == 1`).
+        self.assertIsNone(
             self._resolve(stdout=json.dumps([
                 {"pane_id": 11, "title": self.NAME},
                 {"pane_id": 22, "title": self.NAME}])),
-            "11")
+            "an ambiguous match must degrade to no target, never to one of them")
+
+    def test_a_uniqueness_suffixed_name_does_not_match_the_unsuffixed_pane(self):
+        # `uniqueTabName` appends ` (2)` precisely so two sessions never answer
+        # to one name; collapsing it would point the suffixed session's card at
+        # its sibling's pane.
+        def fake_run(cmd, **kw):
+            return mock.Mock(returncode=0, stderr="", stdout=json.dumps(
+                [{"pane_id": 11, "title": "⚙ MDM split command"}]))
+
+        with mock.patch.object(watch.subprocess, "run", fake_run):
+            self.assertIsNone(
+                watch.pane_for_session_name("⚙ MDM split command (2)"),
+                "a `(2)` name must not match the unsuffixed session's pane")
+            self.assertEqual(
+                watch.pane_for_session_name("⚙ MDM split command"), "11")
 
 
 class ParkReasonJoinTest(unittest.TestCase):
@@ -2126,9 +2145,14 @@ class NormTitleTest(unittest.TestCase):
         self.assertEqual(watch._norm_title("⚙ MDM split command"),
                          watch._norm_title("MDM split command"))
 
-    def test_a_duplicate_suffix_is_dropped(self):
-        self.assertEqual(watch._norm_title("MDM split command (2)"),
-                         watch._norm_title("MDM split command"))
+    def test_the_uniqueness_suffix_is_kept(self):
+        # ⚠️ Not decoration: `uniqueTabName` adds it so two sessions never
+        # answer to one name, so it must survive normalisation or two distinct
+        # sessions collapse to one key and a card can point at the wrong pane.
+        self.assertNotEqual(watch._norm_title("MDM split command (2)"),
+                            watch._norm_title("MDM split command"))
+        self.assertEqual(watch._norm_title("✳ ⚙ MDM split command (2)"),
+                         "MDM split command (2)")
 
     def test_whitespace_is_collapsed(self):
         self.assertEqual(watch._norm_title("  a   b  "), "a b")
