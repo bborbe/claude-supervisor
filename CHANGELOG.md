@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.200.0
 
 - fix: **a worker no longer inherits its goal's launcher.** Launcher selection is keyed on ROLE: a manager takes the vault's configured `manager_launcher` (reported `manager-default`), a worker takes the vault's configured `worker_launcher` (reported `worker-default`), and an operator-set task-level `launcher:` still wins for that task. The goal rung is gone from both the spawn path (`resolveTaskLauncher`) and the resume path (`resolve_launcher` in `scripts/restart-worker.py`) — a goal's `launcher:` describes how its MANAGER runs, and inheriting it put every worker under 12 private-personal goals on Opus. Goal frontmatter is left in place and is now inert for workers. The `-claude` sibling stays as the manager's compatibility rung (`claude-sibling`) for a vault-cli too old to emit `manager_launcher`, so the two sources never look alike in a spawn response. Docs: `docs/fleet-surface.md` items 8 and § Which launcher a manager opens on, `docs/restart-worker.md`, `commands/open.md`, `commands/open-a2a.md` (which records that the a2a controller still applies the older goal-inheriting rule). Change set: `server/spawn-cwd.mjs`, `server/spawn-cwd.test.mjs`, `server/task-launcher.mjs`, `server/task-launcher.test.mjs`, `server/supervisor.mjs`, `scripts/manager-launcher.py`, `scripts/restart-worker.py`, `scripts/tests/test_restart_worker.py`, `docs/`, `commands/`, `CHANGELOG.md`.
 
