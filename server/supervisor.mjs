@@ -24,6 +24,7 @@ import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
+import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
@@ -538,8 +539,67 @@ const publicPerm = (p) => ({
   reason: p.decisionReason ?? null,
   blocked_path: p.blockedPath ?? null,
   input: p.input,
+  // The manager-allowlist entry covering this prompt, so the answering manager can see WHY it
+  // is allowed to answer before it does — rather than re-deriving a match from the command text.
+  allowlist_entry: p.allowlistEntry?.prefix ?? null,
   requested_at: p.requestedAt,
 })
+
+// The files a test-run entry's confinement reads. A `clean-runner-config` entry means "run this
+// repository's committed test suite", so none of these may carry an uncommitted change — the
+// worker can already write in its cwd, and an edited Makefile turns `make test` into whatever
+// the edit says.
+// ⚠️ Every filename the runners will read, not just the canonical one. `make` prefers
+// `GNUmakefile`, then `makefile`, then `Makefile`; `bun` reads `bunfig.toml` for preloads and
+// test configuration. Checking only `Makefile` left a worker free to write `GNUmakefile` (which
+// `make test` reads INSTEAD) and pass a clean-tree check.
+const RUNNER_CONFIG_FILES = [
+  'GNUmakefile',
+  'makefile',
+  'Makefile',
+  'package.json',
+  'bunfig.toml',
+  'bun.lock',
+  'bun.lockb',
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+]
+
+// True only when git succeeds AND reports no change to those files. Every failure — no git, not
+// a repository, a timeout, a non-string result — reads as NOT clean. The entry this gates grants
+// arbitrary execution, so a check that could not run must not grant it.
+function runnerConfigClean(cwd) {
+  if (!cwd) return false
+  try {
+    const out = spawnSync('git', ['status', '--porcelain', '--', ...RUNNER_CONFIG_FILES], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+    if (out.status !== 0 || typeof out.stdout !== 'string') return false
+    return out.stdout.trim() === ''
+  } catch {
+    return false
+  }
+}
+
+// The manager-allowlist entry that authorises this prompt, or null when none does.
+//
+// Read per call: the file is tiny, and the operator must be able to edit it without a restart —
+// the same live-read expectation the policy overlay has. A missing or malformed file yields no
+// entries and therefore no match, which sends every prompt to the operator: the safe direction.
+//
+// The confinement input is computed ONLY when a confined entry's prefix matches, so the common
+// prompt never pays for a `git status`.
+function managerAllowlistEntry(toolName, key, cwd) {
+  const { entries } = loadManagerAllowlist()
+  if (!entries) return null
+  const direct = matchManagerEntry(entries, toolName, key, {})
+  if (direct) return direct
+  if (!confinedCandidate(entries, toolName, key)) return null
+  return matchManagerEntry(entries, toolName, key, { runnerConfigClean: runnerConfigClean(cwd) })
+}
 
 function makeCanUseTool(agent) {
   return (toolName, input, opts = {}) =>
@@ -566,6 +626,11 @@ function makeCanUseTool(agent) {
         decisionReason: opts.decisionReason,
         blockedPath: opts.blockedPath,
         requestedAt: new Date().toISOString(),
+        // Which manager-allowlist entry covers this prompt, or null. Computed HERE, at park
+        // time, so the answer record can carry a server-produced `matched_entry` rather than
+        // one the manager asserts about itself — a manager reporting its own match would make
+        // the audit read the answerer's claim as evidence.
+        allowlistEntry: managerAllowlistEntry(toolName, inputKey(input), agent.cwd),
         settle,
       }
       // Fail safe: an unanswered prompt must not park a worker forever.
@@ -3415,6 +3480,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           tool: record.toolName,
           key: inputKey(record.input),
           matched_rule: null,
+          // The manager allowlist entry the server matched at park time, or null when the
+          // prompt was outside the list. Server-produced on purpose: an audit that read the
+          // manager's own claim about which entry covered it would be reading the answerer as
+          // its own witness.
+          matched_entry: record.allowlistEntry?.prefix ?? null,
           decision: behavior,
           decided_by: 'manager',
           request_id: args.request_id,
