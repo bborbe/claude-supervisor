@@ -56,7 +56,8 @@ REFUSED = 2
 DETECTED_CLASSES = ("stalled", "parked")
 
 #: Every class a `CLASSIFICATION` row can carry. Used to LOCATE the class column instead
-#: of assuming its index -- see `digest_classes`.
+#: of assuming its index -- see `digest_rows`. `deferred` and `orphan` are here because
+#: `agents/fleet-sweep-reader.md` declares them even though neither is a detected problem.
 DIGEST_CLASSES = (
     "progressing",
     "stalled",
@@ -70,7 +71,21 @@ DIGEST_CLASSES = (
     "blocked",
     "error",
     "error-marked",
+    "deferred",
+    "orphan",
 )
+
+
+def class_token(cell):
+    """The class word inside a cell, ignoring a qualifier or a decoration.
+
+    The render qualifies a class inline -- `parked (closer pick)`, `finished (shell child
+    held)`, `⏸️ HELD — <reason>` -- so an exact match against `DIGEST_CLASSES` misses real
+    rows. Only the leading word is the class. Measured 2026-10-22: `parked (closer pick)`
+    is a parked row that an exact match dropped from the denominator.
+    """
+    match = re.match(r"[^a-z]*([a-z][a-z-]*)", cell.lower())
+    return match.group(1) if match else ""
 
 HOME = os.environ.get("HOME") or os.path.expanduser("~")
 
@@ -136,25 +151,31 @@ def task_mtime(path):
         return None
 
 
-def digest_classes(path):
-    """(name, sid8, class) for every row of the digest's `CLASSIFICATION` section.
+def digest_rows(path):
+    """(rows, unparsed) for the digest's `CLASSIFICATION` section.
+
+    `rows` is `(name, sid8, class)` for every row whose class token is recognised;
+    `unparsed` counts the rows that carried no token in `DIGEST_CLASSES`. The count is
+    returned rather than swallowed because **a silently skipped row is the defect this
+    function already shipped once**: the original build indexed `parts[3]`, read the task
+    file as the class, and dropped every stalled/parked row without a trace. Skipping an
+    unrecognised token quietly would reintroduce exactly that failure shape for the next
+    class the render adds.
 
     Read as text, because the digest is a render rather than a serialisation: the section
     runs from its heading to the next all-caps heading, and each row is `·`-separated.
 
-    ⚠️ **The class column is LOCATED, never assumed.** The real render is
-    `Name [sid8] · idle · parked · task · boxes · link`, so the class sits at index 2 --
-    but the test fixture carries an age column (`· idle · 12m · parked · …`) and puts it
-    at index 3. A fixed index therefore reads the task file as the class on live digests
-    and counts **zero** stalled/parked rows, which is invisible because the share's
-    denominator is usually dominated by the ledger's `unverifiable` entries. Measured
-    2026-10-22: `parts[3]` parsed 4 of 27 rows and returned classes `{idle, shell}`,
-    while the same digest's header said `parked=5`. Scanning for a known class token
-    accepts both shapes, and `DIGEST_CLASSES` is the vocabulary that bounds it.
+    ⚠️ **The class column is LOCATED, never assumed.** The digest alternates between two
+    live shapes: `Name [sid8] · idle · parked · task · boxes · link` (class at index 2)
+    and `Name [sid8] · idle · 12m · parked · …` (an age column, class at index 3). A fixed
+    index therefore reads the task file as the class on one shape and counts **zero**
+    stalled/parked rows, which is invisible because the share's denominator is usually
+    dominated by the ledger's `unverifiable` entries. Measured 2026-10-22 across three
+    consecutive live rounds: the fixed index detected 0, 0 and 1; scanning detected 5, 7
+    and 1.
 
-    A digest with no `CLASSIFICATION` section yields nothing and the caller reports the
-    refusal -- never an empty classification, which would read as a fleet with no
-    problems.
+    A digest with no `CLASSIFICATION` section yields `([], 0)` and the caller reports the
+    refusal -- never an empty classification, which would read as a fleet with no problems.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -162,6 +183,7 @@ def digest_classes(path):
     except OSError:
         return None
     rows = []
+    unparsed = 0
     inside = False
     for line in lines:
         if line.startswith("CLASSIFICATION"):
@@ -178,16 +200,33 @@ def digest_classes(path):
         if len(parts) < 3:
             continue
         label = parts[0]
+        # A parenthesised line inside the section is a summary, not a session row, and a
+        # line carrying `;` is a GROUPED summary (`sid name | state | note ; sid …`) that
+        # packs several sessions into one line. Neither is a row, so neither is counted as
+        # unparsed -- the count is for genuine single-session rows whose class token was
+        # not recognised, which is the silent drop this function must never do again.
+        if label.startswith("(") or ";" in stripped:
+            continue
         match = re.search(r"\[([^\]]+)\]", label)
         sid8 = match.group(1) if match else ""
         name = label[: match.start()].strip() if match else label
         # The state is parts[1] (idle/busy/shell) and never a class token, so starting at
         # index 2 cannot pick it up by mistake.
-        klass = next((p for p in parts[2:] if p.lower() in DIGEST_CLASSES), None)
+        klass = next((p for p in parts[2:] if class_token(p) in DIGEST_CLASSES), None)
         if klass is None:
+            unparsed += 1
             continue
-        rows.append((name, sid8, klass))
-    return rows
+        # Lowercased on the way out: the scan compares case-insensitively, and `measure()`
+        # compares the stored value against the lowercase `DETECTED_CLASSES`. Storing the
+        # original case made the two halves disagree for a token like `Parked`.
+        rows.append((name, sid8, class_token(klass)))
+    return rows, unparsed
+
+
+def digest_classes(path):
+    """The parsed rows only -- `digest_rows` without the unparsed count."""
+    result = digest_rows(path)
+    return None if result is None else result[0]
 
 
 def action_taken(entry, sid="", sent=None):
@@ -320,7 +359,7 @@ def measure(
     return out
 
 
-def render(rows, sent_known=True):
+def render(rows, sent_known=True, unparsed=0):
     """The `SHARE` block plus the one line the round prints.
 
     One line per detected row, because a bare ratio is exactly what a hardcoded number
@@ -328,12 +367,22 @@ def render(rows, sent_known=True):
 
     `sent_known=False` marks the header when the caller could not say what actually
     left, so a reader knows the numerator rests on drafts rather than on sends.
+
+    `unparsed` is the count of digest rows whose class token was not recognised. It is
+    printed rather than swallowed: a denominator that quietly omits rows looks exactly
+    like a smaller fleet.
     """
     lines = ["SHARE — detected problems ending in a verified action"]
     if not sent_known:
         lines.append(
             "  ⚠️ send state unknown — an action counts as taken when it was DRAFTED, so "
             "this numerator can credit a message that never left"
+        )
+    if unparsed:
+        lines.append(
+            "  ⚠️ %d digest row(s) carried a class token outside DIGEST_CLASSES and are NOT "
+            "in the denominator below — add the class to `DIGEST_CLASSES` in drive-share.py"
+            % unparsed
         )
     for row in rows:
         lines.append(
@@ -359,14 +408,15 @@ def render(rows, sent_known=True):
 
 
 def cmd_share(args):
-    rows = digest_classes(args.digest)
-    if rows is None:
+    parsed = digest_rows(args.digest)
+    if parsed is None:
         print(
             "drive-share: digest unreadable at %s -- refusing to report a share over a "
             "classification that could not be read" % args.digest,
             file=sys.stderr,
         )
         return REFUSED
+    rows, unparsed = parsed
     entries = []
     if args.entries:
         try:
@@ -402,7 +452,13 @@ def cmd_share(args):
         except OSError as exc:
             print("drive-share: sent list unreadable: %s" % exc, file=sys.stderr)
             return REFUSED
-    print(render(measure(rows, entries, start, sent=sent), sent_known=sent is not None))
+    print(
+        render(
+            measure(rows, entries, start, sent=sent),
+            sent_known=sent is not None,
+            unparsed=unparsed,
+        )
+    )
     return 0
 
 
