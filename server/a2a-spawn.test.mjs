@@ -24,6 +24,7 @@ import {
   collectWorkerTurn,
   configuredA2AClusters,
   createWorkerOnController,
+  fetchControllerProtocolVersion,
   fetchWorkerCard,
   isA2ATarget,
   ledgerModeForStatus,
@@ -1710,5 +1711,27 @@ test('every worker-facing A2A call site in supervisor.mjs passes the negotiated 
     missing,
     [],
     'a call site that drops the version silently restores the -32009 refusal this change removes',
+  )
+})
+
+// The same guard as the worker-facing one above, on the CONTROL plane. The controller moved to
+// a2a-go v2.7.0 at v0.17.0, where an absent header defaults to "0.3" and is refused, so a control
+// call site that drops the version silently restores `-32009 … requested "0.3", served "1.0"` on
+// `create`, `list` and `stop` — the refusal this change exists to remove.
+test('every controller-facing control call site passes the negotiated version', () => {
+  const src = readFileSync(new URL('./a2a-spawn.mjs', import.meta.url), 'utf8')
+
+  const sites = callSites(src, 'a2aSendRequestFor')
+  assert.ok(sites.length > 0, 'the control plane must have call sites to pin')
+
+  const missing = []
+  sites.forEach((site, index) => {
+    if (!/protocolVersion/.test(site)) missing.push(`a2aSendRequestFor call #${index + 1}`)
+  })
+
+  assert.deepEqual(
+    missing,
+    [],
+    'a control call site that drops the version restores the -32009 refusal on create, list and stop',
   )
 })
