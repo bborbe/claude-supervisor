@@ -23,6 +23,11 @@ the alternative to compacting is a condition the command refuses outright.
 
 Usage:
   goal-condition.py --task "<name>" --vault <v> [--max-chars 4000] [--compact-at 3600]
+  goal-condition.py --file <path> [--task <name>] [--vault <v>]
+
+`--file` bypasses the vault-cli lookup, which is what makes the script testable without
+a vault; the caller that has a vault should use --task/--vault so the path resolves the
+way every other spawn-path read does.
 
 Prints the condition on stdout and the chosen form on stderr, so a spawn record can
 note when the ladder fell back.
@@ -30,6 +35,7 @@ note when the ladder fell back.
 import argparse
 import datetime
 import json
+import pathlib
 import re
 import subprocess
 import sys
@@ -129,17 +135,26 @@ def build(name, vault, path, crit, form, stamp):
 
 def main():
     parser = argparse.ArgumentParser(description="Emit a /goal condition with inlined SC.")
-    parser.add_argument("--task", required=True)
-    parser.add_argument("--vault", required=True)
+    parser.add_argument("--task")
+    parser.add_argument("--vault")
+    parser.add_argument("--file", help="task file path; bypasses the vault-cli lookup")
     parser.add_argument("--max-chars", type=int, default=4000)
     parser.add_argument("--compact-at", type=int, default=3600)
     args = parser.parse_args()
 
-    path = task_file(args.task, args.vault)
-    if not path:
-        print(f"goal-condition: cannot resolve task {args.task!r} in vault {args.vault!r}",
-              file=sys.stderr)
-        return 2
+    if args.file:
+        path = args.file
+        name = args.task or pathlib.Path(args.file).stem
+        vault = args.vault or "<vault>"
+    else:
+        if not (args.task and args.vault):
+            parser.error("--task and --vault are required unless --file is given")
+        name, vault = args.task, args.vault
+        path = task_file(name, vault)
+        if not path:
+            print(f"goal-condition: cannot resolve task {name!r} in vault {vault!r}",
+                  file=sys.stderr)
+            return 2
 
     try:
         with open(path, encoding="utf-8") as handle:
@@ -154,7 +169,7 @@ def main():
 
     stamp = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
     for form in ("full", "compact", "probe"):
-        condition = build(args.task, args.vault, path, crit, form, stamp)
+        condition = build(name, vault, path, crit, form, stamp)
         over_compact = form == "full" and len(condition) > args.compact_at
         over_max = len(condition) > args.max_chars
         if not (over_compact or over_max):
