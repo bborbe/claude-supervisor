@@ -662,6 +662,72 @@ class TestStall(Base):
         self.assertEqual(len(self.records()), 1)
 
 
+class TestLiveSessions(Base):
+    """`live_sessions()`'s own parsing — the seam every stall test stubs past.
+
+    ⚠️ **This suite exists because the stall tests stub `live_sessions` wholesale**,
+    so the parse had no coverage at all. That is the worst place to have none: a
+    change in `session-liveness.py`'s output shape makes the function return `None`,
+    the caller fails OPEN, and the gate is silently off while every other test stays
+    green.
+
+    ⚠️ **The `rows=… registry_live=… degraded=…` header is written to STDERR, not
+    stdout** (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
+    real contract is therefore "stdout is the JSON array, stderr carries the human
+    line", and `test_the_real_shape_parses` pins exactly that. The stdout-header case
+    is kept as a separate tolerance test rather than as the fixture — asserting the
+    tolerance as if it were the shape would pass for the wrong reason and stop
+    covering the contract that actually holds.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._run = il.subprocess.run
+
+    def tearDown(self):
+        il.subprocess.run = self._run
+        super().tearDown()
+
+    def stub_run(self, stdout, stderr="", returncode=0):
+        result = type("Result", (), {})()
+        result.stdout = stdout
+        result.stderr = stderr
+        result.returncode = returncode
+        il.subprocess.run = lambda *args, **kwargs: result
+
+    def test_the_real_shape_parses(self):
+        """stdout is the array; the human header rides stderr."""
+        self.stub_run(
+            '[\n  {"sessionId": "a"},\n  {"sessionId": "b"}\n]\n',
+            stderr="rows=2 registry_live=2 degraded=0\n",
+        )
+        self.assertEqual(il.live_sessions(), {"a", "b"})
+
+    def test_a_header_on_stdout_is_tolerated(self):
+        """Tolerance, not the shape: the header moving to stdout must not fail open."""
+        self.stub_run(
+            "rows=2 registry_live=2 degraded=0\n"
+            '[\n  {"sessionId": "a"},\n  {"sessionId": "b"}\n]\n'
+        )
+        self.assertEqual(il.live_sessions(), {"a", "b"})
+
+    def test_a_row_without_a_session_id_is_dropped(self):
+        self.stub_run('[{"sessionId": "a"}, {"nope": 1}]')
+        self.assertEqual(il.live_sessions(), {"a"})
+
+    def test_a_non_zero_exit_reads_as_unavailable(self):
+        self.stub_run("[]", returncode=1)
+        self.assertIsNone(il.live_sessions())
+
+    def test_an_unparseable_body_reads_as_unavailable(self):
+        self.stub_run("[ not json", stderr="rows=1 registry_live=1 degraded=0\n")
+        self.assertIsNone(il.live_sessions())
+
+    def test_a_body_with_no_array_reads_as_unavailable(self):
+        self.stub_run("", stderr="rows=0 registry_live=0 degraded=0\n")
+        self.assertIsNone(il.live_sessions())
+
+
 class TestResume(Base):
     """The automatic close: a tool call the WORKER made after its answer.
 

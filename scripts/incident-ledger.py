@@ -174,14 +174,21 @@ def live_sessions():
         return None
     if result.returncode != 0:
         return None
-    # `--list --json` prints a `rows=… registry_live=… degraded=…` header before the
-    # JSON body, so the payload starts at the first bracket rather than at byte 0.
-    body = result.stdout or ""
-    start = body.find("[")
-    if start < 0:
+    # ⚠️ **The `rows=… registry_live=… degraded=…` header goes to STDERR, not stdout**
+    # (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
+    # tolerance below is therefore not the shape this reads today — it is a guard for
+    # the header moving to stdout, which would otherwise be a one-character change in
+    # the producer that silently turns this gate off. Line-based, never
+    # `stdout.find("[")`: a bracket in a future header would be read as the payload
+    # start, the parse would fail, and the caller would fail OPEN — off, not loud.
+    lines = (result.stdout or "").splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if line.lstrip().startswith("[")), None
+    )
+    if start is None:
         return None
     try:
-        rows = json.loads(body[start:])
+        rows = json.loads("\n".join(lines[start:]))
     except ValueError:
         return None
     if not isinstance(rows, list):
