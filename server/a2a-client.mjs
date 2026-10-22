@@ -668,6 +668,13 @@ export function a2aPushConfigListCallFor({ endpoint, taskId, token, requestId = 
 // answers a single object, and asking it for a stream reads as a call that produced no frames.
 // `contextId` is sent for the same reason the worker half sends it — a control call is a turn on
 // the controller's conversation, and a follow-up must land on the one it started.
+//
+// ⚠️ NO `A2A-Version` HEADER HERE, AND THAT IS A MEASURED DECISION RATHER THAN AN OVERSIGHT. This
+// reaches the a2a-worker-controller, a DIFFERENT SERVICE from the worker: it pins a2a-go v2.6.0,
+// which has no `checkProtocolVersion` at all, so a version here would assert a contract it never
+// advertised. ⚠️ **Whoever bumps the controller past v2.7.0 must add a card read on this plane** —
+// from that version the handler defaults an absent header to `"0.3"` and refuses it, and this
+// function is where they will be standing. See `a2aVersionHeader`.
 export function a2aSendRequestFor({ endpoint, contextId, request, token, messageId } = {}) {
   for (const [name, value] of Object.entries({ endpoint, contextId, token, messageId })) {
     if (value === undefined || value === null || value === '') {
