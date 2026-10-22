@@ -16,12 +16,10 @@
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 
 import { loadManagerAllowlist, matchManagerEntry, MANAGER_ALLOWLIST_FILE } from './manager-allowlist.mjs'
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+import { config } from './config.mjs'
 
 // The five pinned probes.
 //
@@ -157,25 +155,29 @@ try {
   )
 
   // The live half. Report what is actually on disk rather than asserting a pass: an empty or
-  // absent log means no manager has answered under the policy here yet.
-  const logPath = process.env.SUPERVISOR_PERMISSION_LOG || join(process.env.HOME ?? '', '.claude', 'state', 'permissions.jsonl')
+  // absent log means no manager has answered under the policy here yet. The path comes from
+  // `config` — no module but `config.mjs` reads the environment, which `config.test.mjs` enforces.
+  const logPath = config.permissionLog
   let logNote
-  try {
-    const lines = readFileSync(logPath, 'utf8').split('\n').filter(Boolean)
-    const managerAnswers = lines
-      .map((line) => {
-        try {
-          return JSON.parse(line)
-        } catch {
-          return null
-        }
-      })
-      .filter((rec) => rec && rec.decided_by === 'manager')
-    const withEntry = managerAnswers.filter((rec) => rec.matched_entry != null)
-    logNote = `${managerAnswers.length} manager answer(s), ${withEntry.length} carrying matched_entry`
-  } catch (err) {
-    logNote = `no permission log at ${logPath} (${err.code ?? err.message}) — the live half is unproven here`
-  }
+  if (!logPath) {
+    logNote = 'permission logging is off (SUPERVISOR_PERMISSION_LOG=off) — the live half cannot be read'
+  } else
+    try {
+      const lines = readFileSync(logPath, 'utf8').split('\n').filter(Boolean)
+      const managerAnswers = lines
+        .map((line) => {
+          try {
+            return JSON.parse(line)
+          } catch {
+            return null
+          }
+        })
+        .filter((rec) => rec && rec.decided_by === 'manager')
+      const withEntry = managerAnswers.filter((rec) => rec.matched_entry != null)
+      logNote = `${managerAnswers.length} manager answer(s), ${withEntry.length} carrying matched_entry`
+    } catch (err) {
+      logNote = `no permission log at ${logPath} (${err.code ?? err.message}) — the live half is unproven here`
+    }
   console.log(`INFO  live log: ${logNote}`)
 } finally {
   rmSync(workerRepo, { recursive: true, force: true })
