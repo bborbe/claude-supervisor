@@ -11,7 +11,9 @@ The ladder is not decoration either: the command refuses a condition over 4,000 
 a task with many or long criteria has to fall back rather than be rejected at spawn time.
 Each form is asserted below, along with the two properties that must survive every one.
 """
+import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -156,6 +158,83 @@ class GoalConditionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("form=compact", result.stderr)
         self.assertIn("SC1 Use e.g. the CLI to do the first thing.", result.stdout)
+
+
+    def test_output_carries_the_goal_prefix(self):
+        """stdout is the spawn prompt verbatim: a caller that had to prepend `/goal ` would eventually not."""
+        result = self.run_script(SHORT)
+        self.assertTrue(result.stdout.startswith("/goal "), result.stdout[:40])
+
+    def test_task_resolution_through_vault_cli(self):
+        """The production `--task`/`--vault` path, with a fake vault-cli standing in for the real one.
+
+        This is the only coverage of `task_file()` and of the `file_path` JSON key it reads —
+        a schema drift there fails closed to exit 2, but only a live spawn would have shown it.
+        """
+        task = self.task(SHORT)
+        bindir = pathlib.Path(self.dir) / "bin"
+        bindir.mkdir()
+        fake = bindir / "vault-cli"
+        fake.write_text(f'#!/bin/sh\nprintf \'{{"file_path": "{task}"}}\'\n', encoding="utf-8")
+        fake.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bindir}:{os.environ.get('PATH', '')}"}
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--task", "any task", "--vault", "test-vault"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("form=", result.stderr)
+        self.assertIn("Status: completed", result.stdout)
+
+    def test_a_missing_file_path_key_fails_closed(self):
+        """A vault-cli whose JSON loses `file_path` must not arm anything."""
+        bindir = pathlib.Path(self.dir) / "bin"
+        bindir.mkdir()
+        fake = bindir / "vault-cli"
+        fake.write_text("#!/bin/sh\nprintf '{}'\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bindir}:{os.environ.get('PATH', '')}"}
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--task", "any", "--vault", "v"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot resolve", result.stderr)
+
+    def test_a_shell_hostile_name_and_vault_survive_quoting(self):
+        """The worker is told to run the emitted probe, so both values must round-trip through a shell."""
+        path = self.task(SHORT)
+        hostile_name = "na me$(touch pwned)"
+        hostile_vault = "v'ault"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--file", str(path),
+             "--task", hostile_name, "--vault", hostile_vault],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        probe_line = [l for l in result.stdout.splitlines() if "vault-cli task show" in l][0]
+        tokens = shlex.split(probe_line.split("`")[1])
+        self.assertIn(hostile_name, tokens)
+        self.assertIn(hostile_vault, tokens)
+
+    def test_headless_row_is_refused(self):
+        result = self.run_script("---\nmode: headless\n---\n" + SHORT)
+        self.assertEqual(result.returncode, 4)
+        self.assertIn("headless", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_cluster_target_is_refused(self):
+        for target in ("docker", "k8s", "k8s:nukedev"):
+            with self.subTest(target=target):
+                result = self.run_script(f"---\ntarget: {target}\n---\n" + SHORT)
+                self.assertEqual(result.returncode, 4)
+                self.assertIn(target, result.stderr)
+
+    def test_unnumbered_bullet_does_not_collide_with_an_explicit_id(self):
+        text = "# Success Criteria\n\n- [ ] SC2: A thing.\n- [ ] B thing.\n"
+        result = self.run_script(text)
+        self.assertIn("SC2 A thing.", result.stdout)
+        self.assertIn("SC3 B thing.", result.stdout)
 
 
 if __name__ == "__main__":

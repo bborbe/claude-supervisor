@@ -32,7 +32,12 @@ the emitted disk probe embeds it and a placeholder there cannot resolve.
 
 Exit codes: 0 emitted · 1 no form fits the cap · 2 the task could not be resolved or
 read · 3 the task carries no Success Criteria (refused — a condition with nothing to
-prove is armed and then satisfied by the disk probe alone).
+prove is armed and then satisfied by the disk probe alone) · 4 the row cannot carry a
+goal (`mode: headless`, or a `docker` / `k8s` target — neither has a pane to send the
+work command into).
+
+The emitted text **includes the `/goal ` prefix**, so stdout is the spawn prompt
+verbatim: a caller that had to remember to prepend it would eventually not.
 
 Prints the condition on stdout and the chosen form on stderr, so a spawn record can
 note when the ladder fell back.
@@ -76,7 +81,7 @@ def criteria(text):
     Both tick states are kept: the condition states the whole definition of done, and
     the disk probe — not this list — decides whether the boxes are actually ticked.
     """
-    found, inside = [], False
+    found, inside, highest = [], False, 0
     for line in text.splitlines():
         if line.startswith("# Success Criteria"):
             inside = True
@@ -91,9 +96,11 @@ def criteria(text):
         body = match.group(1).strip()
         ident, _, rest = body.partition(":")
         if rest and re.fullmatch(r"SC\d+", ident.strip()):
+            highest = max(highest, int(ident.strip()[2:]))
             found.append((ident.strip(), rest.strip()))
         else:
-            found.append((f"SC{len(found) + 1}", body))
+            highest += 1
+            found.append((f"SC{highest}", body))
     return found
 
 
@@ -132,7 +139,7 @@ def disk_probe(name, vault, path):
         "And the disk probe in the latest turn: "
         f"`vault-cli task show {shlex.quote(name)} --vault {shlex.quote(vault)} "
         "| grep -E '^(Status|Phase):'` shows Status: completed, and "
-        f"`grep -cE '^[[:space:]]*-[[:space:]]*\\[( |/)\\]' {shlex.quote(path)}` prints 0.\n"
+        f"`grep -cE '^[[:space:]]*-[[:space:]]*\\[( |/)\\]' -- {shlex.quote(path)}` prints 0.\n"
         "Live-state criteria need their own re-read command in that turn."
     )
 
@@ -156,7 +163,25 @@ def build(name, vault, path, crit, form, stamp):
             "its evidence is printed in a recent turn — an inlined criterion is not proof:\n"
             f"{listed}\n"
         )
-    return f"{body}\n{disk_probe(name, vault, path)}\n\n{GATE_STOP}"
+    return f"/goal {body}\n{disk_probe(name, vault, path)}\n\n{GATE_STOP}"
+
+
+def frontmatter_value(text, key):
+    """A scalar from the task's leading `---` block, or None.
+
+    Read here rather than by the call site because the emitter is the one place every
+    spawn path runs, so a refusal written here cannot be forgotten at one of them.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        name, sep, value = line.partition(":")
+        if sep and name.strip() == key:
+            return value.strip().strip("'\"") or None
+    return None
 
 
 def main():
@@ -197,6 +222,23 @@ def main():
             file=sys.stderr,
         )
         return 3
+
+    mode = frontmatter_value(text, "mode")
+    if mode == "headless":
+        print(
+            "goal-condition: mode: headless — a headless worker has no pane, so the work "
+            "command could never be sent and the row would idle under an armed goal",
+            file=sys.stderr,
+        )
+        return 4
+    target = frontmatter_value(text, "target")
+    if target in ("docker", "k8s") or (target or "").startswith("k8s:"):
+        print(
+            f"goal-condition: target: {target} — a cluster worker has no pane, so the "
+            "`Goal set:` readiness signal the spawn path waits on does not exist",
+            file=sys.stderr,
+        )
+        return 4
 
     stamp = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
     for form in ("full", "compact", "probe"):
