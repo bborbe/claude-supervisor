@@ -193,11 +193,27 @@ def live_sessions():
         return None
     if not isinstance(rows, list):
         return None
-    return {
-        row["sessionId"]
-        for row in rows
-        if isinstance(row, dict) and row.get("sessionId")
-    }
+    # ⚠️ **BOTH key spaces, because the two sides do not agree on one.** `--list`
+    # returns full registry UUIDs, while the drive ledger keys its entries on the
+    # 8-char display handle the sweep digest carries (`agents/fleet-drive.md:44`,
+    # `scripts/drive-ledger.py:108`) — every other consumer is prefix-tolerant
+    # (`--check`, `--pane-for`, `transcript_for`'s `session_id[:8]`), which is what
+    # made the mismatch invisible. Returning only the full id would match no
+    # production row at all: every eligible session would read as gone, the incident
+    # class would be silently disabled, and each round would print a plausible skip
+    # line per row. Lower-cased on both sides for the same reason the rest of the
+    # fleet compares ids case-insensitively.
+    live = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        session_id = row.get("sessionId")
+        if not session_id:
+            continue
+        session_id = session_id.lower()
+        live.add(session_id)
+        live.add(session_id[:8])
+    return live
 
 
 def caller_id():
@@ -463,6 +479,16 @@ def cmd_escalate(args):
     to prevent.
     """
     at = parse_ts(now())
+    # ⚠️ The probe runs BEFORE the lock, and only when it can change the outcome:
+    # holding the ledger lock across a subprocess plus an HTTP call would stall every
+    # other writer for the length of a network round trip.
+    pending_due_stall = any(
+        incident.get("outcome") == PENDING
+        and incident.get("kind") == "stall"
+        and past_deadline(incident, at)
+        for incident in read_ledger()["incidents"]
+    )
+    live = live_sessions() if pending_due_stall else None
     with Locked():
         data = read_ledger()
         due = [
@@ -474,7 +500,20 @@ def cmd_escalate(args):
             print("nothing past its deadline")
             return 0
         stamp = "round:%s" % args.round_id if args.round_id else "manual:%s" % caller_id()
+        gone = []
         for incident in due:
+            # ⚠️ A stall incident for a session that is GONE must not become a card:
+            # the card can only say "no verified resume" for a session that no longer
+            # exists, which is nothing the operator can act on. Gating only `stall`,
+            # because a permission or question incident belongs to a live producer
+            # that posted it and is polling for the answer.
+            if (
+                live is not None
+                and incident.get("kind") == "stall"
+                and (incident.get("session_id") or "").lower() not in live
+            ):
+                gone.append(incident["dedup_key"])
+                continue
             if args.dry_run:
                 print("would escalate %s (stamp %s)" % (incident["dedup_key"], stamp))
                 continue
@@ -485,6 +524,13 @@ def cmd_escalate(args):
             incident["outcome"] = TIMED_OUT
             incident["escalated_by"] = stamp
             print("escalated %s (stamp %s)" % (incident["dedup_key"], stamp))
+        if gone:
+            # Left PENDING on purpose: retention is a separate question, and a
+            # `timed-out` stamp would claim an escalation that never happened.
+            print(
+                "skipped %d stall incident(s) for gone sessions: %s"
+                % (len(gone), ", ".join(gone))
+            )
         if not args.dry_run:
             write_ledger(data)
         return 0
@@ -566,6 +612,11 @@ def cmd_stall(args):
         "SUPERVISOR_DRIVE_LEDGER"
     ) or os.path.expanduser("~/.claude/state/fleet-drive/ledger.json")
     observed = read_drive_ledger(drive_ledger)
+    if not observed:
+        # A fresh install or an empty ledger has nothing to filter, so the probe's
+        # subprocess + registry read + HTTP call would be paid for nothing.
+        print("no session has stalled for %d consecutive rounds" % required)
+        return 0
     live = live_sessions()
     if live is None:
         sys.stderr.write(
@@ -578,12 +629,22 @@ def cmd_stall(args):
         verdict, streak = observed[sid]
         if verdict != "unverifiable" or streak < required:
             continue
-        if live is not None and sid not in live:
+        if live is not None and sid.lower() not in live:
             gone.append((sid, streak))
             continue
         eligible.append((sid, streak))
-    for sid, streak in gone:
-        print("skipped %s (streak %d): the session is gone, not stalled" % (sid, streak))
+    if gone:
+        # One line, not one per row: the drive ledger keeps a row for every session
+        # that has ever been unverifiable, so a per-row line grows without bound as
+        # that graveyard does. The names stay, because a skip that only counted
+        # would be indistinguishable from a threshold that stopped firing.
+        print(
+            "skipped %d gone session(s) past the threshold: %s"
+            % (
+                len(gone),
+                ", ".join("%s(%d)" % (sid, streak) for sid, streak in gone),
+            )
+        )
     # Longest streak first, then session id — the drive leg's own order, so a backlog
     # drains oldest-first and nothing starves behind a steady trickle of new rows.
     eligible.sort(key=lambda row: (-row[1], row[0]))
@@ -628,7 +689,7 @@ def cmd_stall(args):
             )
         if opened and not args.dry_run:
             write_ledger(data)
-    if opened == 0:
+    if opened == 0 and not gone:
         print("no session has stalled for %d consecutive rounds" % required)
     return 0
 
