@@ -578,5 +578,137 @@ class TestStall(Base):
         self.assertIn("no session has stalled", out)
 
 
+class TestResume(Base):
+    """The automatic close: a tool call the WORKER made after its answer.
+
+    This is the observer SC2's "let the worker act, confirm it closes" depends on,
+    and the pairing is the point — a tool call BEFORE the answer must not close the
+    incident, or every incident on an active worker would close on the first poll
+    and the answer would be credited with a resume it never caused.
+    """
+
+    def write_transcript(self, session=SESSION, calls=None):
+        root = os.path.join(self.tmp, "projects")
+        directory = os.path.join(root, "-some-cwd")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, session[:8] + "-abcd.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            for stamp, name in calls or []:
+                handle.write(json.dumps({
+                    "type": "assistant",
+                    "timestamp": stamp,
+                    "message": {"content": [
+                        {"type": "tool_use", "id": "t1", "name": name, "input": {}}
+                    ]},
+                }) + "\n")
+        return root
+
+    def resume(self, root, dry_run=False):
+        argv = ["resume", "--projects-root", root]
+        if dry_run:
+            argv.append("--dry-run")
+        rc, out = self.run_cli(*argv)
+        self.assertEqual(rc, 0)
+        return out
+
+    def answered_incident(self, by="manager"):
+        self.open_incident()
+        self.answer(by=by)
+
+    def after_answer(self, seconds=30):
+        """A transcript stamp strictly after the recorded answer.
+
+        Derived rather than taken from `now()`: the answer and the transcript would
+        otherwise land in the same second, `stamp <= since` would be true, and the
+        test would fail while asserting the opposite of what it means to.
+        """
+        answered = il.parse_ts(self.records()[0]["answered_at"])
+        return (answered + datetime.timedelta(seconds=seconds)).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+
+    def test_a_tool_call_after_the_answer_closes_it(self):
+        self.answered_incident()
+        root = self.write_transcript(calls=[(self.after_answer(), "Bash")])
+        out = self.resume(root)
+        self.assertIn("closed", out)
+        closed = self.records()[0]
+        self.assertEqual(closed["outcome"], "manager")
+        self.assertIn("Bash", closed["resume_evidence"])
+        self.assertTrue(closed["closed_at"])
+
+    def test_a_tool_call_BEFORE_the_answer_does_not_close_it(self):
+        # The negative control. A worker that was already working when the answer
+        # landed has not resumed — crediting that would close every incident on an
+        # active worker at the first poll.
+        self.answered_incident()
+        earlier = (il.parse_ts(self.records()[0]["answered_at"])
+                   - datetime.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        root = self.write_transcript(calls=[(earlier, "Bash")])
+        out = self.resume(root)
+        self.assertIn("no verified resumes", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_an_answered_incident_with_no_tool_call_stays_open(self):
+        self.answered_incident()
+        root = self.write_transcript(calls=[])
+        out = self.resume(root)
+        self.assertIn("no verified resumes", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_an_unanswered_incident_is_untouched(self):
+        # No answer, no close, however busy the worker is.
+        self.open_incident()
+        root = self.write_transcript(calls=[(iso(), "Bash")])
+        self.resume(root)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_a_missing_answerer_is_left_open_not_defaulted(self):
+        # Crediting `manager` for an incident whose answerer nobody recorded is
+        # exactly the inflation this ledger exists to prevent.
+        self.open_incident()
+        data = self.ledger()
+        answered_at = iso()
+        data["incidents"][0]["answered_at"] = answered_at
+        data["incidents"][0]["answered_by"] = None
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        later = (il.parse_ts(answered_at)
+                 + datetime.timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        root = self.write_transcript(calls=[(later, "Bash")])
+        self.resume(root)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_the_outcome_follows_who_answered(self):
+        self.answered_incident(by="operator")
+        root = self.write_transcript(calls=[(self.after_answer(), "Bash")])
+        self.resume(root)
+        self.assertEqual(self.records()[0]["outcome"], "operator")
+
+    def test_dry_run_writes_nothing_and_does_not_contradict_itself(self):
+        self.answered_incident()
+        root = self.write_transcript(calls=[(self.after_answer(), "Bash")])
+        out = self.resume(root, dry_run=True)
+        self.assertIn("would close", out)
+        # `closed` stays 0 on a dry run, so the tail used to print "no verified
+        # resumes" directly under the "would close" lines it had just emitted.
+        self.assertNotIn("no verified resumes", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_the_transcript_is_resolved_by_id_prefix(self):
+        # The watcher's own join; a full-uuid filename match would miss every
+        # transcript whose directory is named from a munged cwd.
+        self.answered_incident()
+        root = self.write_transcript(calls=[(iso(), "Bash")])
+        found = il.transcript_for(root, SESSION)
+        self.assertIsNotNone(found)
+        self.assertTrue(found.endswith(".jsonl"))
+
+    def test_a_missing_transcript_is_not_an_error(self):
+        self.answered_incident()
+        out = self.resume(os.path.join(self.tmp, "no-such-root"))
+        self.assertIn("no verified resumes", out)
+
+
 if __name__ == "__main__":
     unittest.main()

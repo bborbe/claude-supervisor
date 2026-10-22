@@ -612,6 +612,7 @@ def cmd_resume(args):
     if not args.projects_root:
         _refuse("resume needs --projects-root (~/.claude/projects)")
     closed = 0
+    would_close = 0
     with Locked():
         data = read_ledger()
         for incident in data["incidents"]:
@@ -636,7 +637,11 @@ def cmd_resume(args):
                 incident["answered_at"],
             )
             if args.dry_run:
+                # Counted separately from `closed`: a dry run writes nothing, so
+                # `closed` stays 0 and the tail would otherwise print "no verified
+                # resumes" directly under the "would close" lines it just printed.
                 print("would close %s (%s)" % (incident["dedup_key"], evidence))
+                would_close += 1
                 continue
             incident["outcome"] = outcome
             incident["closed_at"] = now()
@@ -647,7 +652,7 @@ def cmd_resume(args):
             )
         if closed and not args.dry_run:
             write_ledger(data)
-    if closed == 0:
+    if closed == 0 and would_close == 0:
         print("no verified resumes")
     return 0
 
