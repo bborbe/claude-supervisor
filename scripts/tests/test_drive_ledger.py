@@ -43,12 +43,14 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "drive-ledger.py"
 
-#: The canonical entry's ten fields, as `agents/fleet-drive.md` step 7 names them.
+#: The canonical entry's twelve fields, as `agents/fleet-drive.md` step 7 names them.
 #: `task_file` is what step 0 re-probes from; without it a retained row cannot be
 #: resolved back to a task at all. `reprobe_verdict`/`reprobe_probe` hold step 0's own
 #: observation, kept apart from `verdict`/`probe` (the agent's conclusion) because the
 #: two vocabularies never coincide -- `needs-step-4` is emitted by the re-probe and
-#: deliberately absent from VERDICTS.
+#: deliberately absent from VERDICTS. `unverifiable_streak`/`unverifiable_round` carry
+#: how many CONSECUTIVE rounds a session has been classified unverifiable and the round
+#: tag that count was last advanced at -- `drive-unverifiable.py` acts on it at exactly 2.
 FIELDS = {
     "session_id",
     "name",
@@ -60,6 +62,8 @@ FIELDS = {
     "task_file",
     "reprobe_verdict",
     "reprobe_probe",
+    "unverifiable_streak",
+    "unverifiable_round",
 }
 
 FLAT_ONLY = tuple("flat%05d" % i for i in range(13))
@@ -248,7 +252,7 @@ class TestRead(Base):
             "exactly one entry per session id",
         )
         for row in out["entries"]:
-            self.assertEqual(set(row), FIELDS, "canonical shape, all ten fields")
+            self.assertEqual(set(row), FIELDS, "canonical shape, all twelve fields")
 
     def test_absent_ledger_reads_empty(self):
         proc = self.run_script(["read"])

@@ -417,13 +417,19 @@ def cmd_escalate(args):
 
 
 def read_drive_ledger(path):
-    """{session_id: verdict} from the fleet-drive ledger, in either of its shapes.
+    """{session_id: (verdict, unverifiable_streak)} from the fleet-drive ledger.
+
+    ⚠️ **The streak is READ, never recounted.** `scripts/drive-unverifiable.py`
+    already owns that measurement — it advances `unverifiable_streak` per entry,
+    consecutive only when `unverifiable_round` equals the ledger's own `round`, and
+    resets it on any other verdict. A second counter here would be a second answer
+    to the same question, and the two would drift the first time either changed.
 
     The drive ledger carries two shapes and the live file has carried both at once
     (`drive-ledger.py` documents the measurement): the canonical `{"round": ts,
     "entries": [...]}` and a LEGACY flat map keyed by an eight-character sid. This
-    reads both, because a stall detector that silently sees only one of them would
-    report a quiet fleet while half the sessions were invisible.
+    reads both, because a stall detector that silently saw only one would report a
+    quiet fleet while half the sessions were invisible.
 
     ⚠️ A corrupt drive ledger is REFUSED here too. Reading it as "no stalls" is the
     false-empty this ledger exists to avoid, one store over.
@@ -437,103 +443,83 @@ def read_drive_ledger(path):
         _refuse("%s is unreadable (%s); refusing to read it as no stalls" % (path, err))
     if not isinstance(data, dict):
         _refuse("%s is not a drive ledger" % path)
-    verdicts = {}
+
+    def streak_of(row):
+        try:
+            return int(row.get("unverifiable_streak") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    observed = {}
     for row in data.get("entries") or []:
         if isinstance(row, dict) and row.get("session_id"):
-            verdicts[row["session_id"]] = row.get("verdict")
+            observed[row["session_id"]] = (row.get("verdict"), streak_of(row))
     for key, row in data.items():
         if key == "entries" or not isinstance(row, dict):
             continue
         sid = row.get("sid") or row.get("session_id") or key
-        if sid and sid not in verdicts:
-            verdicts[sid] = row.get("verdict")
-    return verdicts
+        if sid and sid not in observed:
+            observed[sid] = (row.get("verdict"), streak_of(row))
+    return observed
 
 
 def cmd_stall(args):
-    """Open a stall incident once a session has been `unverifiable` for N rounds.
+    """Open a stall incident for every session the drive leg has called stalled.
 
     The stall is the one blocker that is a DURATION rather than an event, so it is
-    the one that cannot be opened on sight. `SUPERVISOR_INCIDENT_STALL_ROUNDS`
-    (default 2) is the threshold: the first observation records the incident with
-    `observations: 1`, and it only becomes an open blocker — `opened_at` and
-    `deadline` stamped, the round announced — once the count reaches the threshold.
-    A session that recovers between rounds never becomes a blocker, which is the
+    the one that cannot be filed on sight: the incident opens only once the drive
+    leg's own `unverifiable_streak` reaches `SUPERVISOR_INCIDENT_STALL_ROUNDS`
+    (default 2). A session one bad round in gets nothing, and a session that
+    recovers is reset by the drive leg before it ever reaches here — which is the
     whole reason the threshold exists.
 
-    ⚠️ The count is per CONTINUOUS streak. A session that stops being unverifiable
-    has its observations reset, so a flapping session cannot accumulate its way to a
-    blocker across unrelated rounds.
+    ⚠️ This does not count rounds. `drive-unverifiable.py` does, and reading its
+    streak is what keeps one measurement in one place.
     """
     required = stall_rounds()
-    # The path is a DEFAULT, never a prose argument. `check-drive-ledger-writes.py`
-    # allows `ledger.json` to be named exactly once across agents/ and commands/,
-    # because a second mention in prose is how a hand-rolled write starts -- so the
-    # drive leg calls this with no path at all and the default below is the single
-    # owner. The env var is the same override `drive-ledger.py` honours, so a test
-    # or a throwaway run redirects both stores the same way.
     drive_ledger = args.drive_ledger or os.environ.get(
         "SUPERVISOR_DRIVE_LEDGER"
     ) or os.path.expanduser("~/.claude/state/fleet-drive/ledger.json")
     observed = read_drive_ledger(drive_ledger)
-    stalled = sorted(
-        sid for sid, verdict in observed.items() if verdict == "unverifiable"
-    )
+    opened = 0
     with Locked():
         data = read_ledger()
-        # Reset the streak for every session the drive leg did NOT call unverifiable
-        # this round, before counting the ones it did.
-        for incident in data["incidents"]:
-            if incident.get("kind") != "stall":
+        for sid in sorted(observed):
+            verdict, streak = observed[sid]
+            if verdict != "unverifiable" or streak < required:
                 continue
-            if incident.get("outcome") != PENDING:
-                continue
-            if incident.get("session_id") not in stalled:
-                incident["observations"] = 0
-                incident["opened_at"] = None
-                incident["deadline"] = None
-        announced = 0
-        for sid in stalled:
             key = dedup_key(sid, "stall")
-            incident = find_open(data["incidents"], key)
-            if incident is None:
-                incident = {
-                    "dedup_key": key,
-                    "session_id": sid,
-                    "kind": "stall",
-                    "owner": sid,
-                    "opened_at": None,
-                    "deadline": None,
-                    "outcome": PENDING,
-                    "closed_at": None,
-                    "detected_by": "drive:unverifiable@%s" % (args.round_id or now()),
-                    "escalated_by": None,
-                    "card_id": "",
-                    "resume_evidence": None,
-                    "observations": 0,
-                }
-                data["incidents"].append(incident)
-            incident["observations"] = int(incident.get("observations") or 0) + 1
-            if incident["observations"] >= required and not incident.get("opened_at"):
-                at = now()
-                incident["opened_at"] = at
-                incident["deadline"] = (
+            if find_open(data["incidents"], key):
+                print("already open %s (streak %d)" % (key, streak))
+                continue
+            at = now()
+            incident = {
+                "dedup_key": key,
+                "session_id": sid,
+                "kind": "stall",
+                "owner": sid,
+                "opened_at": at,
+                "deadline": (
                     parse_ts(at) + datetime.timedelta(seconds=deadline_seconds())
-                ).strftime(TS_FORMAT)
-                announced += 1
-                print(
-                    "opened %s (kind stall, %d consecutive round(s), deadline %s)"
-                    % (key, incident["observations"], incident["deadline"])
-                )
-            elif not incident.get("opened_at"):
-                print(
-                    "observing %s (%d/%d consecutive rounds)"
-                    % (key, incident["observations"], required)
-                )
-        if not args.dry_run:
+                ).strftime(TS_FORMAT),
+                "outcome": PENDING,
+                "closed_at": None,
+                "detected_by": "drive:unverifiable@%s" % (args.round_id or at),
+                "escalated_by": None,
+                "card_id": "",
+                "resume_evidence": None,
+                "observations": streak,
+            }
+            data["incidents"].append(incident)
+            opened += 1
+            print(
+                "opened %s (kind stall, streak %d, deadline %s)"
+                % (key, streak, incident["deadline"])
+            )
+        if opened and not args.dry_run:
             write_ledger(data)
-    if announced == 0 and not stalled:
-        print("no stalled sessions this round")
+    if opened == 0:
+        print("no session has stalled for %d consecutive rounds" % required)
     return 0
 
 

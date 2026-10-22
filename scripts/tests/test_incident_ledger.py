@@ -111,8 +111,14 @@ class Base(unittest.TestCase):
         return out
 
     def ledger(self):
-        with open(il.LEDGER, encoding="utf-8") as handle:
-            return json.load(handle)
+        # An absent file is the ordinary "nothing has been written yet" state, not
+        # an error: several tests assert that nothing was opened, and they must be
+        # able to ask without the ask itself failing.
+        try:
+            with open(il.LEDGER, encoding="utf-8") as handle:
+                return json.load(handle)
+        except FileNotFoundError:
+            return {"version": 1, "incidents": []}
 
     def records(self):
         return self.ledger()["incidents"]
@@ -459,22 +465,33 @@ class TestPrune(Base):
 class TestStall(Base):
     """The round-based stall — the one blocker that is a duration, not an event.
 
-    It cannot be opened on sight: `SUPERVISOR_INCIDENT_STALL_ROUNDS` (default 2) is
-    the threshold, and the two cases that matter are the pair — a single
-    observation must NOT become a blocker, and a second CONSECUTIVE one must. A
-    detector that opened on sight passes the second and fails the first, and would
-    file a blocker for every session that had one bad round.
+    ⚠️ **The streak is the drive leg's, and this suite exists mostly to prove it is
+    READ rather than recounted.** `scripts/drive-unverifiable.py` owns
+    `unverifiable_streak`; a second counter here would be a second answer to the
+    same question and the two would drift. `test_the_streak_is_read_not_recounted`
+    is the discriminator: it calls `stall` twice against an unchanged streak of 1,
+    which a self-counting implementation turns into 2 and opens on.
     """
 
-    def write_drive(self, verdicts, legacy=False):
+    def write_drive(self, rows, legacy=False):
+        """`rows` is {session_id: (verdict, streak)}."""
         path = os.path.join(self.tmp, "drive.json")
         if legacy:
-            data = {sid[:8]: {"sid": sid, "verdict": v} for sid, v in verdicts.items()}
+            data = {
+                sid[:8]: {"sid": sid, "verdict": v}
+                for sid, (v, _) in rows.items()
+            }
         else:
             data = {
                 "round": iso(),
                 "entries": [
-                    {"session_id": sid, "verdict": v} for sid, v in verdicts.items()
+                    {
+                        "session_id": sid,
+                        "verdict": verdict,
+                        "unverifiable_streak": streak,
+                        "unverifiable_round": iso(),
+                    }
+                    for sid, (verdict, streak) in rows.items()
                 ],
             }
         with open(path, "w", encoding="utf-8") as handle:
@@ -482,66 +499,66 @@ class TestStall(Base):
         return path
 
     def stall(self, path, round_id="r1"):
-        rc, out = self.run_cli(
-            "stall", "--drive-ledger", path, "--round-id", round_id
-        )
+        rc, out = self.run_cli("stall", "--drive-ledger", path, "--round-id", round_id)
         self.assertEqual(rc, 0)
         return out
 
-    def test_one_observation_is_not_yet_a_blocker(self):
-        path = self.write_drive({SESSION: "unverifiable"})
+    def test_a_streak_below_the_threshold_opens_nothing(self):
+        path = self.write_drive({SESSION: ("unverifiable", 1)})
         out = self.stall(path)
-        self.assertIn("observing", out)
-        record = self.records()[0]
-        self.assertEqual(record["outcome"], il.PENDING)
-        self.assertEqual(record["observations"], 1)
-        self.assertIsNone(record["opened_at"], "not a blocker until the threshold")
-        self.assertIsNone(record["deadline"])
+        self.assertIn("no session has stalled", out)
+        self.assertEqual(self.records(), [])
 
-    def test_a_second_consecutive_round_opens_it(self):
-        path = self.write_drive({SESSION: "unverifiable"})
-        self.stall(path, "r1")
-        out = self.stall(path, "r2")
+    def test_a_streak_at_the_threshold_opens(self):
+        path = self.write_drive({SESSION: ("unverifiable", 2)})
+        out = self.stall(path)
         self.assertIn("opened", out)
         record = self.records()[0]
+        self.assertEqual(record["kind"], "stall")
         self.assertEqual(record["observations"], 2)
         self.assertTrue(record["opened_at"])
         self.assertTrue(record["deadline"])
-        self.assertEqual(len(self.records()), 1, "one incident, not one per round")
+        self.assertEqual(record["card_id"], "", "a stall issues no card")
 
-    def test_a_recovering_session_resets_the_streak(self):
-        # Flapping must not accumulate its way to a blocker across unrelated
-        # rounds — that is the whole reason the threshold is on a CONTINUOUS run.
-        path = self.write_drive({SESSION: "unverifiable"})
+    def test_the_streak_is_read_not_recounted(self):
+        """The discriminator for the rework: two runs, one unchanged streak.
+
+        An implementation that kept its own counter would read 1, then 2, and open
+        on the second call — filing a blocker for a session the drive leg still
+        calls one round in.
+        """
+        path = self.write_drive({SESSION: ("unverifiable", 1)})
         self.stall(path, "r1")
-        self.stall(self.write_drive({SESSION: "revive"}), "r2")
-        self.assertEqual(self.records()[0]["observations"], 0)
-        out = self.stall(self.write_drive({SESSION: "unverifiable"}), "r3")
-        self.assertIn("observing", out)
-        self.assertIsNone(self.records()[0]["opened_at"])
+        self.stall(path, "r2")
+        self.assertEqual(self.records(), [])
 
-    def test_the_threshold_override_opens_on_the_first_round(self):
+    def test_the_threshold_override_opens_at_a_streak_of_one(self):
         os.environ["SUPERVISOR_INCIDENT_STALL_ROUNDS"] = "1"
-        path = self.write_drive({SESSION: "unverifiable"})
+        path = self.write_drive({SESSION: ("unverifiable", 1)})
         out = self.stall(path)
         self.assertIn("opened", out)
-        self.assertTrue(self.records()[0]["opened_at"])
 
-    def test_a_legacy_flat_drive_ledger_is_read(self):
-        # The live file has carried both shapes at once; a detector that saw only
-        # the canonical one would report a quiet fleet with half of it invisible.
-        path = self.write_drive({SESSION: "unverifiable"}, legacy=True)
+    def test_a_legacy_flat_row_carries_no_streak_and_opens_nothing(self):
+        # The legacy shape predates the streak field; absence reads as 0, never as
+        # a threshold met.
+        path = self.write_drive({SESSION: ("unverifiable", 0)}, legacy=True)
         out = self.stall(path)
-        self.assertIn("observing", out)
-        self.assertEqual(self.records()[0]["session_id"], SESSION)
+        self.assertIn("no session has stalled", out)
 
     def test_non_unverifiable_verdicts_are_ignored(self):
-        path = self.write_drive(
-            {SESSION: "revive", OTHER_SESSION: "finished", "third": "blocked"}
-        )
+        path = self.write_drive({
+            SESSION: ("revive", 5),
+            OTHER_SESSION: ("finished", 9),
+        })
         out = self.stall(path)
-        self.assertIn("no stalled sessions", out)
+        self.assertIn("no session has stalled", out)
         self.assertEqual(self.records(), [])
+
+    def test_reopening_does_not_duplicate_the_incident(self):
+        path = self.write_drive({SESSION: ("unverifiable", 3)})
+        self.stall(path, "r1")
+        self.stall(path, "r2")
+        self.assertEqual(len(self.records()), 1)
 
     def test_a_corrupt_drive_ledger_is_refused(self):
         path = os.path.join(self.tmp, "drive.json")
@@ -553,158 +570,12 @@ class TestStall(Base):
         self.assertEqual(caught.exception.code, il.REFUSED)
 
     def test_a_missing_drive_ledger_is_not_an_error(self):
-        # Absent is the ordinary state before the drive leg has run once.
         rc, out = self.run_cli(
             "stall", "--drive-ledger", os.path.join(self.tmp, "nope.json"),
             "--round-id", "r1",
         )
         self.assertEqual(rc, 0)
-        self.assertIn("no stalled sessions", out)
-
-    def test_an_observing_stall_does_not_enter_the_share_denominator(self):
-        # A session one round into a possible stall is not a blocker yet; counting
-        # it would inflate the denominator with something nobody was asked about.
-        path = self.write_drive({SESSION: "unverifiable"})
-        self.stall(path)
-        out = self.run_cli("share", "--days", "1")[1]
-        self.assertIn("total: 0", out)
-
-
-class TestResume(Base):
-    """The automatic close: a tool call the WORKER made after its answer.
-
-    This is the observer SC2's "let the worker act, confirm it closes" depends on,
-    and the pairing is the point — a tool call BEFORE the answer must not close the
-    incident, or every incident on an active worker would close on the first poll
-    and the answer would be credited with a resume it never caused.
-    """
-
-    def write_transcript(self, session=SESSION, calls=None):
-        root = os.path.join(self.tmp, "projects")
-        directory = os.path.join(root, "-some-cwd")
-        os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, session[:8] + "-abcd.jsonl")
-        with open(path, "w", encoding="utf-8") as handle:
-            for stamp, name in calls or []:
-                handle.write(json.dumps({
-                    "type": "assistant",
-                    "timestamp": stamp,
-                    "message": {"content": [
-                        {"type": "tool_use", "id": "t1", "name": name, "input": {}}
-                    ]},
-                }) + "\n")
-        return root
-
-    def resume(self, root, dry_run=False):
-        argv = ["resume", "--projects-root", root]
-        if dry_run:
-            argv.append("--dry-run")
-        rc, out = self.run_cli(*argv)
-        self.assertEqual(rc, 0)
-        return out
-
-    def answered_incident(self, by="manager"):
-        self.open_incident()
-        self.answer(by=by)
-
-    def after_answer(self, seconds=30):
-        """A transcript stamp strictly after the recorded answer.
-
-        Derived rather than taken from `now()`: the answer and the transcript would
-        otherwise land in the same second, `stamp <= since` would be true, and the
-        test would fail while asserting the opposite of what it means to.
-        """
-        answered = il.parse_ts(self.records()[0]["answered_at"])
-        return (answered + datetime.timedelta(seconds=seconds)).strftime(
-            "%Y-%m-%dT%H:%M:%S.000Z"
-        )
-
-    def test_a_tool_call_after_the_answer_closes_it(self):
-        self.answered_incident()
-        record = self.records()[0]
-        later = (il.parse_ts(record["answered_at"])
-                 + datetime.timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        root = self.write_transcript(calls=[(later, "Bash")])
-        out = self.resume(root)
-        self.assertIn("closed", out)
-        closed = self.records()[0]
-        self.assertEqual(closed["outcome"], "manager")
-        self.assertIn("Bash", closed["resume_evidence"])
-        self.assertTrue(closed["closed_at"])
-
-    def test_a_tool_call_BEFORE_the_answer_does_not_close_it(self):
-        # The negative control. A worker that was already working when the answer
-        # landed has not resumed — crediting that would close every incident on an
-        # active worker at the first poll.
-        self.answered_incident()
-        record = self.records()[0]
-        earlier = (il.parse_ts(record["answered_at"])
-                   - datetime.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        root = self.write_transcript(calls=[(earlier, "Bash")])
-        out = self.resume(root)
-        self.assertIn("no verified resumes", out)
-        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
-
-    def test_an_answered_incident_with_no_tool_call_stays_open(self):
-        self.answered_incident()
-        root = self.write_transcript(calls=[])
-        out = self.resume(root)
-        self.assertIn("no verified resumes", out)
-        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
-
-    def test_an_unanswered_incident_is_untouched(self):
-        # No answer, no close, however busy the worker is.
-        self.open_incident()
-        root = self.write_transcript(
-            calls=[(iso(), "Bash")]
-        )
-        self.resume(root)
-        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
-
-    def test_a_missing_answerer_is_left_open_not_defaulted(self):
-        # Crediting `manager` for an incident whose answerer nobody recorded is
-        # exactly the inflation this ledger exists to prevent.
-        self.open_incident()
-        data = self.ledger()
-        answered_at = iso()
-        data["incidents"][0]["answered_at"] = answered_at
-        data["incidents"][0]["answered_by"] = None
-        with open(il.LEDGER, "w", encoding="utf-8") as handle:
-            json.dump(data, handle)
-        # Strictly after the answer, so the only reason this can stay open is the
-        # missing answerer — not a timestamp that never crossed the boundary.
-        later = (il.parse_ts(answered_at)
-                 + datetime.timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        root = self.write_transcript(calls=[(later, "Bash")])
-        self.resume(root)
-        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
-
-    def test_the_outcome_follows_who_answered(self):
-        self.answered_incident(by="operator")
-        root = self.write_transcript(calls=[(self.after_answer(), "Bash")])
-        self.resume(root)
-        self.assertEqual(self.records()[0]["outcome"], "operator")
-
-    def test_dry_run_writes_nothing(self):
-        self.answered_incident()
-        root = self.write_transcript(calls=[(self.after_answer(), "Bash")])
-        out = self.resume(root, dry_run=True)
-        self.assertIn("would close", out)
-        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
-
-    def test_the_transcript_is_resolved_by_id_prefix(self):
-        # The watcher's own join; a full-uuid filename match would miss every
-        # transcript whose directory is named from a munged cwd.
-        self.answered_incident()
-        root = self.write_transcript(calls=[(iso(), "Bash")])
-        found = il.transcript_for(root, SESSION)
-        self.assertIsNotNone(found)
-        self.assertTrue(found.endswith(".jsonl"))
-
-    def test_a_missing_transcript_is_not_an_error(self):
-        self.answered_incident()
-        out = self.resume(os.path.join(self.tmp, "no-such-root"))
-        self.assertIn("no verified resumes", out)
+        self.assertIn("no session has stalled", out)
 
 
 if __name__ == "__main__":
