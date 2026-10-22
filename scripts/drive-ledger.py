@@ -66,8 +66,14 @@ FIELDS = (
     "reprobe_probe",
     "unverifiable_streak",
     "unverifiable_round",
+    "unverifiable_action",
 )
 VERDICTS = ("revive", "blocked", "unverifiable", "finished")
+#: What the 2-round rule did about a row, or "" when it has not acted. The marker is what
+#: makes the action fire ONCE per silence rather than on every round at or past the
+#: threshold: a row held back by the per-round cap keeps advancing its streak, so a
+#: `streak == 2` test would never match it again and it would be acted on never.
+UNVERIFIABLE_ACTIONS = ("", "nudge", "escalation")
 NUDGES = ("drafted", "none")
 
 #: Top-level keys that are not themselves session entries.
@@ -133,6 +139,7 @@ def canonical(sid, raw):
         "reprobe_probe": raw.get("reprobe_probe") or "",
         "unverifiable_streak": streak_of(raw.get("unverifiable_streak")),
         "unverifiable_round": raw.get("unverifiable_round") or "",
+        "unverifiable_action": raw.get("unverifiable_action") or "",
     }
 
 
@@ -141,10 +148,11 @@ def streak_of(value):
 
     `bool` is an `int` in Python, so a hand-edited `true` would otherwise read as 1 --
     a plausible-looking count nobody computed. Anything unparseable is 0, and the
-    asymmetry is deliberate: the count gates an action at exactly 2, so a corrupt
-    value read as 0 stays silent, while a corrupt value read as 2 sends a nudge on no
-    evidence. A round payload that carries a bad count is REFUSED by `check()` before
-    it ever reaches here, so this default only covers a ledger already on disk.
+    asymmetry is deliberate: the count becomes actionable at `>= 2`, so a corrupt
+    value read as 0 stays silent, while a corrupt value read as 2 makes a row
+    actionable on no evidence. A round payload that carries a bad count is REFUSED by
+    `check()` before it ever reaches here, so this default only covers a ledger already
+    on disk.
     """
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return 0
@@ -274,6 +282,13 @@ def check(row, sid):
         return "session %s carries unverifiable_streak %r, not a non-negative int" % (
             sid,
             streak,
+        )
+    action = row.get("unverifiable_action", "")
+    if action not in UNVERIFIABLE_ACTIONS:
+        return "session %s carries unverifiable_action %r, not one of %r" % (
+            sid,
+            action,
+            UNVERIFIABLE_ACTIONS,
         )
     return None
 
