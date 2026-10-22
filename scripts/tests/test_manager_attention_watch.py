@@ -1724,5 +1724,79 @@ class ContentChangeReEmissionTest(unittest.TestCase):
                          watch.content_key("idle+closer", "pick — 1. gamma"))
 
 
+class IncidentKindTest(unittest.TestCase):
+    """Which incident kind a raised gate records.
+
+    The mapping is the whole join between "the watcher saw a gate" and "the ledger
+    holds a blocker of kind X", so a wrong entry here is a record that reads as
+    evidence while answering a different question. The `None` cases matter as much
+    as the mapped ones: `unregistered` and `held:*` are HELD, never NEW GATE, and an
+    implementation that defaulted an unmapped reason to `question` would record a
+    blocker the watcher never claimed.
+    """
+
+    def test_the_three_parked_reasons_map_to_their_kinds(self):
+        self.assertEqual(watch.incident_kind("registry:waiting"), "permission")
+        self.assertEqual(watch.incident_kind("busy+parked-modal"), "permission")
+        self.assertEqual(watch.incident_kind("headless+closer"), "question")
+        self.assertEqual(watch.incident_kind("closer-unknown"), "question")
+
+    def test_both_stuck_limbs_are_a_stall(self):
+        # `stuck:` is a headless worker and `stuck-tab:` a registered one; both are
+        # a duration, not a gate, so both are the same kind.
+        self.assertEqual(watch.incident_kind("stuck:stream-closed"), "stall")
+        self.assertEqual(watch.incident_kind("stuck-tab:no-writes"), "stall")
+
+    def test_held_reasons_record_nothing(self):
+        for reason in ("unregistered", "held:busy", "held:shell", "headless:no-ask",
+                       "idle:no-ask"):
+            self.assertIsNone(watch.incident_kind(reason), reason)
+
+    def test_every_parked_reason_is_mapped(self):
+        # PARKED_REASONS is the list this arm exists for; a member with no kind
+        # would be a gate the ledger never hears about.
+        for reason in watch.PARKED_REASONS:
+            self.assertIsNotNone(watch.incident_kind(reason), reason)
+
+
+class OpenIncidentTest(unittest.TestCase):
+    """The subprocess seam that writes the record.
+
+    Shelling out is deliberate (the ledger's name carries a hyphen, so it cannot be
+    imported by name), which makes the COMMAND SHAPE the thing to pin: a wrong flag
+    or a truncated session id would write a record that looks right and joins to
+    nothing.
+    """
+
+    def test_the_command_carries_the_full_session_id_and_the_kind(self):
+        with mock.patch.object(watch.subprocess, "run") as run:
+            watch.open_incident(SID, "registry:waiting")
+        self.assertEqual(run.call_count, 1)
+        command = run.call_args[0][0]
+        self.assertIn("open", command)
+        self.assertEqual(command[command.index("--session") + 1], SID)
+        self.assertEqual(command[command.index("--kind") + 1], "permission")
+        self.assertEqual(command[command.index("--detected-by") + 1],
+                         "gate:registry:waiting")
+
+    def test_an_unmapped_reason_writes_nothing(self):
+        with mock.patch.object(watch.subprocess, "run") as run:
+            watch.open_incident(SID, "held:busy")
+        run.assert_not_called()
+
+    def test_a_ledger_failure_never_raises(self):
+        # The watcher's job is to report gates. A ledger that cannot be written
+        # must not take it down and leave every gate in the fleet unreported.
+        with mock.patch.object(watch.subprocess, "run",
+                               side_effect=OSError("boom")):
+            watch.open_incident(SID, "headless+closer")
+
+    def test_a_missing_script_writes_nothing(self):
+        with mock.patch.object(watch.os.path, "exists", return_value=False), \
+                mock.patch.object(watch.subprocess, "run") as run:
+            watch.open_incident(SID, "headless+closer")
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

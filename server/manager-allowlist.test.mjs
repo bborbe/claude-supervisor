@@ -29,12 +29,35 @@ function entries() {
 
 test('the shipped file parses and carries every documented entry', () => {
   const list = entries()
-  assert.equal(list.length, 15)
+  assert.equal(list.length, 13)
   const prefixes = list.map((e) => e.prefix)
-  for (const expected of ['ls', 'cat', 'head', 'tail', 'wc', 'sort', 'uniq', 'diff', 'grep', 'shasum', 'md5', 'jq', 'tree', 'make test', 'bun test']) {
+  for (const expected of ['ls', 'cat', 'head', 'tail', 'wc', 'uniq', 'diff', 'grep', 'shasum', 'md5', 'jq', 'make test', 'bun test']) {
     assert.ok(prefixes.includes(expected), `missing entry: ${expected}`)
   }
   assert.equal(list.filter((e) => e.confine === 'clean-runner-config').length, 2)
+  assert.equal(list.filter((e) => e.exact === true).length, 2)
+})
+
+test('sort and tree are NOT allowlisted — their extensions write files', () => {
+  // `sort -o FILE`, `sort --output=FILE`, `sort --compress-program=PROG` and `tree -o FILE` all
+  // match a bare prefix and write a file or run a program. A prefix rule cannot exclude a flag,
+  // so the only honest fix is not to list the command. Catches anyone re-adding them.
+  const list = entries()
+  for (const command of ['sort x', 'sort -o /tmp/out x', 'sort --compress-program=sh x', 'tree', 'tree -o /tmp/out']) {
+    assert.equal(matchManagerEntry(list, 'Bash', command, CLEAN), null, `must not match: ${command}`)
+  }
+})
+
+test('an exact entry rejects any further token', () => {
+  // The arguments select the code that runs: `make test -f evil.mk` and `bun test --preload
+  // ./evil.ts` both start with the prefix and run something the worker wrote. Catches an entry
+  // that is `exact` in the JSON but matched as a plain prefix.
+  const list = entries()
+  for (const command of ['make test -f evil.mk', 'make test --directory=/tmp/x', 'bun test ./evil.test.ts', 'bun test --preload ./evil.ts']) {
+    assert.equal(matchManagerEntry(list, 'Bash', command, CLEAN), null, `must not match: ${command}`)
+  }
+  assert.ok(matchManagerEntry(list, 'Bash', 'make test', CLEAN))
+  assert.ok(matchManagerEntry(list, 'Bash', 'bun test', CLEAN))
 })
 
 test('a read-only entry matches its extensions', () => {

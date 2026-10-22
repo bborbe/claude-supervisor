@@ -549,9 +549,16 @@ const publicPerm = (p) => ({
 // repository's committed test suite", so none of these may carry an uncommitted change — the
 // worker can already write in its cwd, and an edited Makefile turns `make test` into whatever
 // the edit says.
+// ⚠️ Every filename the runners will read, not just the canonical one. `make` prefers
+// `GNUmakefile`, then `makefile`, then `Makefile`; `bun` reads `bunfig.toml` for preloads and
+// test configuration. Checking only `Makefile` left a worker free to write `GNUmakefile` (which
+// `make test` reads INSTEAD) and pass a clean-tree check.
 const RUNNER_CONFIG_FILES = [
+  'GNUmakefile',
+  'makefile',
   'Makefile',
   'package.json',
+  'bunfig.toml',
   'bun.lock',
   'bun.lockb',
   'package-lock.json',

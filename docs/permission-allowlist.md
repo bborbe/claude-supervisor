@@ -46,12 +46,28 @@ goal, editing a task's Success Criteria or Definition of Done, changing a policy
 granting a permission, spawning or stopping a session, or widening this list. A manager
 answers prompts; it does not decide what the work is.
 
+**credentials** — anything that reads or moves a secret, a key, a token or a credential
+store: `~/.ssh`, `~/.aws`, `~/.config/gh`, `.env` files, a keychain or TeamVault read, a
+`cat`/`grep`/`head`/`tail` aimed at any of those paths, or any command whose target is a
+password manager. ⚠️ **This class exists because the read-only entries below take any path.**
+`cat` is on the list and `cat ~/.ssh/id_rsa` matches it — the class is what stops that, and
+a manager that answers it has leaked a key. When a path could be a credential store, treat
+it as one.
+
 ## The list
 
 Each entry names the tool, an **exact command prefix**, and its confinement. Under
 `matchType: "command"` the prefix is a whole-token prefix — `ls` matches `ls -la /tmp` and
 not `lsof` — and tokens after it are unconstrained, so an entry is included only when
 **every** extension of it is read-only.
+
+⚠️ **"Every extension" is a real test, and two commands failed it.** `sort` was on this list
+until a review caught that `sort -o FILE`, `sort --output=FILE` and
+`sort --compress-program=PROG` all match the prefix and write a file or run a program;
+`tree -o FILE` does the same. Both are **removed** rather than special-cased — a prefix rule
+cannot exclude a flag, so the only honest fix is not to list the command. Any future entry
+whose extensions include an output or exec flag has the same problem and must not be added
+without a matcher that rejects those flags.
 
 | Tool | Prefix | Confinement | Why every extension is safe |
 |---|---|---|---|
@@ -60,16 +76,18 @@ not `lsof` — and tokens after it are unconstrained, so an entry is included on
 | `Bash` | `head` | any path | reads a prefix of a file |
 | `Bash` | `tail` | any path | reads a suffix of a file (`-f` blocks, it does not act) |
 | `Bash` | `wc` | any path | counts lines, words and bytes |
-| `Bash` | `sort` | any path | reads and orders stdin or a named file |
 | `Bash` | `uniq` | any path | filters adjacent duplicate lines |
 | `Bash` | `diff` | any path | compares two files; `-r` walks directories, still read-only |
 | `Bash` | `grep` | any path | matches patterns; cannot execute a match |
 | `Bash` | `shasum` | any path | hashes file content |
 | `Bash` | `md5` | any path | hashes file content |
 | `Bash` | `jq` | any path | reads JSON; a filter file cannot start a process |
-| `Bash` | `tree` | any path | lists a directory tree |
-| `Bash` | `make test` | runner config unmodified | runs the committed test suite — see *Test runs* below |
-| `Bash` | `bun test` | runner config unmodified | runs the committed test suite — see *Test runs* below |
+| `Bash` | `make test` | `exact`, `clean-runner-config` | runs the committed test suite — see *Test runs* below |
+| `Bash` | `bun test` | `exact`, `clean-runner-config` | runs the committed test suite — see *Test runs* below |
+
+The **Confinement** column is machine-read, not prose: `make check-manager-allowlist` parses
+it and fails when it disagrees with `server/manager-allowlist.json`. Write the machine name in
+backticks (`exact`, `clean-runner-config`) or `any path` — anything else is a shape error.
 
 That is the whole list. It is short on purpose — see the next section.
 
@@ -80,16 +98,27 @@ every other excluded command below does too. They are allowlisted anyway, becaus
 the command a worker asks for most often and a prompt for each one is most of what this
 list exists to remove.
 
-⚠️ **What makes them safe is the confinement, not the command.** Both entries carry
-`runner config unmodified`, and the matcher must refuse the allow when any of `Makefile`,
-`package.json`, or the lockfile carries an uncommitted change. That check is the whole
-difference between "run this repository's committed test suite" and "run whatever is on
-disk now" — and without it the entry is exactly as unsafe as the `git` exclusion below.
+⚠️ **Two things make them safe, and both are required.**
 
-**`make` itself is still excluded.** Only the `test` target is listed: `make` matches a
-whole-token prefix, so a `make` entry would also match `make buca`, `make apply` and
-`make install`, none of which are read-only. `make test` as a prefix matches `make test`
-and its arguments and nothing else.
+**1. The command must be exact.** Both entries carry `exact: true`, so the match is only
+`make test` or `bun test` **with no further tokens**. A bare prefix would not do: the
+arguments select the code that runs — `make test -f evil.mk`, `bun test ./evil.test.ts`,
+`bun test --preload ./evil.ts` all start with the prefix and run something the worker wrote.
+
+**2. The runner config must be unmodified.** The matcher refuses the allow when any file the
+runner actually reads carries an uncommitted change: `GNUmakefile`, `makefile`, `Makefile`,
+`package.json`, `bunfig.toml`, and the lockfile. ⚠️ **Every one of them, not just
+`Makefile`** — `make` prefers `GNUmakefile` over `Makefile`, and `bun` reads `bunfig.toml`
+for preloads, so checking only the canonical name leaves a worker free to write the file that
+is read *instead*. That is the whole difference between "run this repository's committed
+test suite" and "run whatever is on disk now".
+
+**`make` itself is still excluded.** Only the `test` target is listed: a `make` entry would
+also match `make buca`, `make apply` and `make install`, none of which are read-only.
+
+⚠️ **Residual risk, stated rather than hidden:** the confinement compares *uncommitted*
+state, so a worker that could commit an edited `Makefile` would pass it. It cannot — `git`
+is excluded here and escalated by the policy — but the check rests on that, not on itself.
 
 **If the matcher cannot make that check, the entry comes off this list** and test runs go to
 the operator. An entry whose confinement is not enforced is a wider entry than the page

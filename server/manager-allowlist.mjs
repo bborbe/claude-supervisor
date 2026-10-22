@@ -77,11 +77,13 @@ export function parseManagerAllowlist(parsed, path = MANAGER_ALLOWLIST_FILE) {
         error: `${path} entries[${index}] names unknown confine "${entry.confine}" (known: ${[...CONFINEMENTS].join(', ')}).`,
       }
     }
-    cleaned.push(
-      entry.confine === undefined
-        ? { tool: entry.tool, prefix: entry.prefix.trim() }
-        : { tool: entry.tool, prefix: entry.prefix.trim(), confine: entry.confine },
-    )
+    if (entry.exact !== undefined && typeof entry.exact !== 'boolean') {
+      return { entries: null, error: `${path} entries[${index}] "exact" must be a boolean.` }
+    }
+    const clean = { tool: entry.tool, prefix: entry.prefix.trim() }
+    if (entry.confine !== undefined) clean.confine = entry.confine
+    if (entry.exact !== undefined) clean.exact = entry.exact
+    cleaned.push(clean)
   }
   return { entries: cleaned, error: null }
 }
@@ -119,6 +121,7 @@ export function confinedCandidate(entries, toolName, key) {
     if (entry.tool !== '*' && entry.tool !== toolName) continue
     const prefix = entry.prefix.trim().split(/\s+/).filter(Boolean)
     if (prefix.length === 0 || prefix.length > tokens.length) continue
+    if (entry.exact === true && tokens.length !== prefix.length) continue
     if (prefix.every((token, i) => tokens[i] === token)) return entry
   }
   return null
@@ -144,6 +147,7 @@ export function matchManagerEntry(entries, toolName, key, context = {}) {
     if (entry.tool !== '*' && entry.tool !== toolName) continue
     const prefix = entry.prefix.trim().split(/\s+/).filter(Boolean)
     if (prefix.length === 0 || prefix.length > tokens.length) continue
+    if (entry.exact === true && tokens.length !== prefix.length) continue
     if (!prefix.every((token, i) => tokens[i] === token)) continue
     if (entry.confine === 'clean-runner-config' && context.runnerConfigClean !== true) continue
     return entry

@@ -6,10 +6,16 @@
 // the worst direction, because the doc is the thing a reader trusts and the JSON is the thing that
 // actually decides.
 //
-// Reads the doc's entry table (the rows between the header row and the first blank line) and
-// compares the command prefixes, as sets. A prefix present in one and not the other is a failure
-// in both directions: in the JSON only means the system allows something the doc never describes;
-// in the doc only means the doc promises something the system will not do.
+// ⚠️ IT COMPARES THE WHOLE ENTRY, NOT THE PREFIX. An earlier version compared prefix sets, so
+// dropping `confine: "clean-runner-config"` from the JSON left the doc promising a confinement the
+// system no longer enforced, and the check still reported agreement. A prefix-only comparison also
+// cannot see a `tool` change, or an entry demoted from `exact` to a bare prefix. Each entry is
+// therefore keyed on its prefix and compared as a (tool, exact, confine) signature.
+//
+// A prefix present in one artifact and not the other is a failure in both directions: in the JSON
+// only means the system allows something the doc never describes; in the doc only means the doc
+// promises something the system will not do. A duplicate prefix in either artifact is also a
+// failure — with two entries on one prefix, "which one matched" is undecidable.
 
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -41,28 +47,52 @@ try {
 if (!Array.isArray(parsed?.entries)) die(`${JSON_FILE} carries no "entries" list.`)
 
 // The entry table is the first table whose header names a "Prefix" column. Rows are matched
-// positionally rather than by any markdown parser: this is a fixed two-column contract, and a
+// positionally rather than by any markdown parser: this is a fixed four-column contract, and a
 // lenient parse would report "no rows" on a reshaped table — the same empty result a correct
 // empty list produces.
 const lines = doc.split('\n')
 const headerIndex = lines.findIndex((line) => /^\|\s*Tool\s*\|\s*Prefix\s*\|/.test(line))
 if (headerIndex === -1) die(`${DOC} has no entry table with a "Tool | Prefix" header.`)
 
-const docPrefixes = new Set()
+function unquote(cell) {
+  return (cell ?? '').replace(/`/g, '').trim()
+}
+
+// A confinement cell is a comma-separated list of machine names in backticks, or `any path`.
+function parseConfinement(cell) {
+  const text = unquote(cell)
+  if (text === '' || text === 'any path') return { exact: false, confine: null }
+  const parts = text.split(',').map((p) => p.trim()).filter(Boolean)
+  const exact = parts.includes('exact')
+  const confine = parts.find((p) => p !== 'exact') ?? null
+  return { exact, confine }
+}
+
+const docEntries = new Map()
 for (let i = headerIndex + 2; i < lines.length; i += 1) {
   const line = lines[i]
   if (!line.startsWith('|')) break
   const cells = line.split('|').map((cell) => cell.trim())
-  const prefix = (cells[2] ?? '').replace(/^`|`$/g, '').trim()
-  if (prefix) docPrefixes.add(prefix)
+  const tool = unquote(cells[1])
+  const prefix = unquote(cells[2])
+  if (!prefix) continue
+  if (docEntries.has(prefix)) die(`${DOC} lists "${prefix}" twice — which entry matched would be undecidable.`)
+  docEntries.set(prefix, { tool, ...parseConfinement(cells[3]) })
 }
-if (docPrefixes.size === 0) die(`${DOC}'s entry table parsed to zero rows.`)
+if (docEntries.size === 0) die(`${DOC}'s entry table parsed to zero rows.`)
 
-const jsonPrefixes = new Set(parsed.entries.map((entry) => String(entry?.prefix ?? '').trim()))
+const jsonEntries = new Map()
+for (const entry of parsed.entries) {
+  const prefix = String(entry?.prefix ?? '').trim()
+  if (!prefix) die(`${JSON_FILE} carries an entry with an empty prefix.`)
+  if (jsonEntries.has(prefix)) die(`${JSON_FILE} lists "${prefix}" twice — which entry matched would be undecidable.`)
+  jsonEntries.set(prefix, { tool: entry.tool, exact: entry.exact === true, confine: entry.confine ?? null })
+}
 
-const onlyJson = [...jsonPrefixes].filter((p) => !docPrefixes.has(p))
-const onlyDoc = [...docPrefixes].filter((p) => !jsonPrefixes.has(p))
+const signature = (e) => `${e.tool}|exact=${e.exact}|confine=${e.confine ?? 'none'}`
 
+const onlyJson = [...jsonEntries.keys()].filter((p) => !docEntries.has(p))
+const onlyDoc = [...docEntries.keys()].filter((p) => !jsonEntries.has(p))
 if (onlyJson.length > 0) {
   die(`in ${JSON_FILE} but not documented: ${onlyJson.join(', ')} — the system would allow an entry the doc never describes.`)
 }
@@ -70,4 +100,15 @@ if (onlyDoc.length > 0) {
   die(`documented but not in ${JSON_FILE}: ${onlyDoc.join(', ')} — the doc promises an entry the system will not honour.`)
 }
 
-console.log(`check-manager-allowlist: ${jsonPrefixes.size} entries agree between the doc and the JSON.`)
+const mismatched = []
+for (const [prefix, docEntry] of docEntries) {
+  const jsonEntry = jsonEntries.get(prefix)
+  if (signature(docEntry) !== signature(jsonEntry)) {
+    mismatched.push(`"${prefix}" — doc says ${signature(docEntry)}, JSON says ${signature(jsonEntry)}`)
+  }
+}
+if (mismatched.length > 0) {
+  die(`the two artifacts disagree about what an entry DOES:\n  ${mismatched.join('\n  ')}`)
+}
+
+console.log(`check-manager-allowlist: ${jsonEntries.size} entries agree between the doc and the JSON, including tool, exact and confine.`)
