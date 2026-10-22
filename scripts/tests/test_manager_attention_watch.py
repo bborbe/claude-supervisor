@@ -56,6 +56,36 @@ def load(name, filename):
 
 watch = load("manager_attention_watch", "manager-attention-watch.py")
 
+# ⚠️ MODULE-LEVEL, not per-fixture, and the distinction was measured rather than
+# guessed. `open_incident` shells out to `incident-ledger.py`, which inherits THIS
+# process's environment — so a test that drives the real loop writes a REAL incident
+# into the operator's ledger unless the override is set. A first attempt put the
+# redirect in `Fixture.__init__` and it did not hold: `IncidentReplayTest` and the
+# transition tests drive the loop without ever constructing a `Fixture`, so two
+# fixture records (`aaaa1111`, `15fce333`) reappeared in
+# `~/.claude/state/incidents/ledger.json` on the very next `make precommit`. Module
+# scope covers every test in this file whatever fixture it uses.
+_LEDGER_ENV = None
+_LEDGER_DIR = None
+
+
+def setUpModule():
+    global _LEDGER_ENV, _LEDGER_DIR
+    _LEDGER_ENV = os.environ.get("SUPERVISOR_INCIDENTS_LEDGER")
+    _LEDGER_DIR = tempfile.mkdtemp(prefix="maw-incidents-")
+    os.environ["SUPERVISOR_INCIDENTS_LEDGER"] = os.path.join(
+        _LEDGER_DIR, "ledger.json"
+    )
+
+
+def tearDownModule():
+    if _LEDGER_ENV is None:
+        os.environ.pop("SUPERVISOR_INCIDENTS_LEDGER", None)
+    else:
+        os.environ["SUPERVISOR_INCIDENTS_LEDGER"] = _LEDGER_ENV
+    if _LEDGER_DIR:
+        shutil.rmtree(_LEDGER_DIR, ignore_errors=True)
+
 
 def assistant(text=None, tool=None, thinking=None):
     """One assistant transcript record. `thinking`/`tool` carry NO text block.
@@ -101,25 +131,11 @@ class Fixture:
         if status is not None:
             with open(os.path.join(self.sessions, "96345.json"), "w") as fh:
                 json.dump({"sessionId": SID, "status": status, "pid": 96345}, fh)
-        # ⚠️ `open_incident` shells out to `incident-ledger.py`, which inherits THIS
-        # process's environment — so without an override every test that drives the
-        # real loop writes a REAL incident into the operator's ledger. Measured
-        # 2026-10-22: `incident:aaaa1111:permission` and a second fixture id landed
-        # in ~/.claude/state/incidents/ledger.json, because nothing in this file had
-        # ever set the override. Redirected here, restored in `cleanup`.
-        self._ledger_env = os.environ.get("SUPERVISOR_INCIDENTS_LEDGER")
-        os.environ["SUPERVISOR_INCIDENTS_LEDGER"] = os.path.join(
-            self.dir, "incidents.json"
-        )
 
     def probe(self):
         return watch.probe(self.tracked, self.tasks, self.projects, self.sessions)
 
     def cleanup(self):
-        if self._ledger_env is None:
-            os.environ.pop("SUPERVISOR_INCIDENTS_LEDGER", None)
-        else:
-            os.environ["SUPERVISOR_INCIDENTS_LEDGER"] = self._ledger_env
         shutil.rmtree(self.dir, ignore_errors=True)
 
 

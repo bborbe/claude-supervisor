@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- fix: **the watcher tests no longer write incidents into the operator's live ledger.** `scripts/tests/test_manager_attention_watch.py` never set `SUPERVISOR_INCIDENTS_LEDGER`, and `open_incident` shells out to `incident-ledger.py` inheriting this process's environment — so every test that drove the real loop opened a REAL incident. Measured 2026-10-22: two fixture records (`aaaa1111`, `15fce333`) had landed in `~/.claude/state/incidents/ledger.json`. The fixture now redirects the override to its own temp dir and restores it in `cleanup`.
+- fix: **the watcher tests no longer write incidents into the operator's live ledger.** `scripts/tests/test_manager_attention_watch.py` never set `SUPERVISOR_INCIDENTS_LEDGER`, and `open_incident` shells out to `incident-ledger.py` inheriting this process's environment — so every test that drove the real loop opened a REAL incident. Measured 2026-10-22: two fixture records (`aaaa1111`, `15fce333`) had landed in `~/.claude/state/incidents/ledger.json`. The redirect is set at **module** scope (`setUpModule`/`tearDownModule`): a per-`Fixture` version was tried first and did not hold, because `IncidentReplayTest` and the transition tests drive the loop without constructing a `Fixture`, and the records reappeared on the next `make precommit`.
 
 ## v0.202.0
 
