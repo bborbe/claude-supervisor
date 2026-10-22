@@ -535,17 +535,15 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 **The carve-out is both-ways: pass the argument whenever the task's frontmatter declares a `mode:`, and omit it only when the field is absent.** `mode: headless` → `interactive=false`; `mode: interactive` → `interactive=true`. An absent `mode:` still means *omit the argument entirely*, not *pass interactive*. ⚠️ **Local rows only** — on a `docker` / `k8s` row this carve-out does not apply; `§ Spawn a worker` item 7 carries that branch.
 
-⚠️ **The interactive half is load-bearing, not a saving.** A `mode:` the spawn honours in only one direction is inert in the other — the field must be consumed both ways.
-
 The rule that *produces* the value is not restated here — it has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6; this line is only the consumption.
 
 ⚠️ **Writing `mode: headless` today opens a worker into a mechanism with two known, measured defects** — its gates park with the spawning session's server and no one else can answer them, and the resume guard does not guard. Until prompts and questions can be answered remotely, `headless` should be rare and never a guess.
 
-**Do NOT add `policy` while `defaultMode` is `auto`.** `auto` is in `POLICY_UNREACHABLE_MODES`, so `spawn_agent` **refuses** a named policy (*"policy would never be consulted"*) and the spawn fails. Omit it; the overlay is usable only under `acceptEdits`.
+**Do NOT add `policy` while `defaultMode` is `auto`.** `auto` is in `POLICY_UNREACHABLE_MODES`, so `spawn_agent` **refuses** a named policy (*"policy would never be consulted"*). Omit it; the overlay needs `acceptEdits`.
 
 **`interactive` is the debug escape hatch, in both directions.** Pass `interactive=true` to watch a worker's screen live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn only. ⚠️ **Local rows only** (§ Spawn a worker item 7).
 
-Requires `mcp__supervisor__*` in **this** session — see the recipe's precondition, which fails silently.
+Requires `mcp__supervisor__*` in this session — its absence fails silently.
 
 **Fallback when `mcp__supervisor__*` is unavailable.** Every `cc-*` launcher passes `--strict-mcp-config`, which turns its config file into an allowlist — plugin-provided servers are never loaded, so a vault whose `~/.claude/mcp-obsidian-<vault>.json` does not itself name `supervisor` carries no supervisor tools at all. Then spawn the wezterm way and send the work command afterwards.
 
@@ -622,7 +620,7 @@ The trailing `"/color $CHIP"` is the initial prompt — Claude executes it at st
 
 ### 3.2 Send the work command — **wezterm fallback, plus every `goal_loop` row**
 
-**Skip on the `spawn_agent` path** — the work prompt *is* the spawn argument; 3.1's wezterm shape only. ⚠️ **A `goal_loop: true` row uses this section on BOTH paths** — `send_agent_message` on `spawn_agent`, `send-text` here, after the pane shows `⎿ Goal set:`.
+**Skip on the `spawn_agent` path** — the work prompt *is* the spawn argument. ⚠️ **A `goal_loop: true` row uses this section on BOTH paths** — `send_agent_message` on `spawn_agent`, `send-text` here, after the pane shows `⎿ Goal set:`. ⚠️ **On the wezterm path send the condition here FIRST** — `send-text` its stdout, wait for `⎿ Goal set:`, then the work command; the colour stays the prompt.
 
 The colour already ran as the spawn prompt, so the session is idle and the work command submits on the first try:
 

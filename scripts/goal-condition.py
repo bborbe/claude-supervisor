@@ -34,7 +34,7 @@ Exit codes: 0 emitted · 1 no form fits the cap · 2 the task could not be resol
 read · 3 the task carries no Success Criteria (refused — a condition with nothing to
 prove is armed and then satisfied by the disk probe alone) · 4 the row cannot carry a
 goal (`mode: headless`, or a `docker` / `k8s` target — neither has a pane to send the
-work command into).
+work command into) · 6 bad usage.
 
 The emitted text **includes the `/goal ` prefix**, so stdout is the spawn prompt
 verbatim: a caller that had to remember to prepend it would eventually not.
@@ -69,7 +69,13 @@ def task_file(name, vault):
             ["vault-cli", "task", "show", name, "--vault", vault, "--output", "json"],
             capture_output=True, text=True, check=True, timeout=10,
         ).stdout
-        return json.loads(out).get("file_path") or None
+        data = json.loads(out)
+        # A payload that is valid JSON but not an object (a list, a bare string) must fail
+        # as "cannot resolve" rather than raising AttributeError, which would exit 1 — the
+        # code documented for the size ladder.
+        if not isinstance(data, dict):
+            return None
+        return data.get("file_path") or None
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired,
             json.JSONDecodeError):
         return None
@@ -81,7 +87,8 @@ def criteria(text):
     Both tick states are kept: the condition states the whole definition of done, and
     the disk probe — not this list — decides whether the boxes are actually ticked.
     """
-    found, inside, highest = [], False, 0
+    found, inside = [], False
+    explicit = []
     for line in text.splitlines():
         if line.startswith("# Success Criteria"):
             inside = True
@@ -96,12 +103,21 @@ def criteria(text):
         body = match.group(1).strip()
         ident, _, rest = body.partition(":")
         if rest and re.fullmatch(r"SC\d+", ident.strip()):
-            highest = max(highest, int(ident.strip()[2:]))
+            explicit.append(int(ident.strip()[2:]))
             found.append((ident.strip(), rest.strip()))
         else:
+            found.append((None, body))
+
+    # Implicit ids start above the highest explicit one, so an unnumbered bullet can
+    # never collide with an explicit id that appears later in the file.
+    highest = max(explicit, default=0)
+    out = []
+    for ident, body in found:
+        if ident is None:
             highest += 1
-            found.append((f"SC{highest}", body))
-    return found
+            ident = f"SC{highest}"
+        out.append((ident, body))
+    return out
 
 
 ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "no.", "v.")
@@ -113,16 +129,17 @@ def first_sentence(body):
     A naive `split(". ")` truncates inside `e.g.` or a version string, so `Use e.g. the
     CLI` becomes `Use e.g.` — a different requirement, which is the opposite of what the
     compact form exists for. The cut therefore skips a period that closes a known
-    abbreviation or sits inside backticks.
+    abbreviation (matched as a whole token, so `piano.` is not read as `no.`) or sits
+    inside backticks, and treats `?` and `!` as sentence ends too.
     """
     in_code = False
     for index, char in enumerate(body):
         if char == "`":
             in_code = not in_code
             continue
-        if in_code or char != "." or not body.startswith(". ", index):
+        if in_code or char not in ".!?" or not body.startswith(" ", index + 1):
             continue
-        if body[: index + 1].lower().endswith(ABBREVIATIONS):
+        if body[: index + 1].split()[-1].lower() in ABBREVIATIONS:
             continue
         return body[: index + 1].strip()
     return body.strip()
@@ -130,6 +147,11 @@ def first_sentence(body):
 
 def disk_probe(name, vault, path):
     """The clause every form carries: the done fact, read from disk this turn.
+
+    The `Status:` / `Phase:` casing is what `vault-cli task show` actually prints — verified
+    against live output 2026-10-22 (`Status: in_progress` / `Phase: execution`) — not the
+    lowercase frontmatter keys, so a case-insensitive grep is not needed and would only hide
+    a future output change.
 
     Every interpolated value is shell-quoted: the worker is told to run this text, and a
     task name or vault carrying a quote or `$()` would otherwise break out of the command
@@ -140,13 +162,23 @@ def disk_probe(name, vault, path):
         f"`vault-cli task show {shlex.quote(name)} --vault {shlex.quote(vault)} "
         "| grep -E '^(Status|Phase):'` shows Status: completed, and "
         f"`grep -cE '^[[:space:]]*-[[:space:]]*\\[( |/)\\]' -- {shlex.quote(path)}` prints 0.\n"
+        "(That grep exits 1 when the count is 0 — a non-zero exit there is the done case.)\n"
         "Live-state criteria need their own re-read command in that turn."
     )
 
 
+def flatten(value):
+    """One line, no backticks — the head is read by the evaluator, never executed.
+
+    `disk_probe` shell-quotes these same values because a shell runs them; here they are
+    prompt text, so the hazard is a newline or a backtick reframing a condition line.
+    """
+    return " ".join(str(value).replace("`", "'").split())
+
+
 def build(name, vault, path, crit, form, stamp):
     """Assemble the condition in one of the three forms."""
-    head = f'Task "{name}" (vault {vault}) is finished.'
+    head = f'Task "{flatten(name)}" (vault {flatten(vault)}) is finished.'
     if form == "probe":
         body = (
             f"{head}\n\nAll {len(crit)} Success Criteria are met, each proven by its own "
@@ -185,7 +217,18 @@ def frontmatter_value(text, key):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Emit a /goal condition with inlined SC.")
+    class Parser(argparse.ArgumentParser):
+        """Usage errors exit 6, distinct from a resolution failure (2).
+
+        argparse's own status is 2, which would make "you passed the wrong flags"
+        indistinguishable from "the task could not be resolved".
+        """
+
+        def error(self, message):
+            print(f"goal-condition: {message}", file=sys.stderr)
+            raise SystemExit(6)
+
+    parser = Parser(description="Emit a /goal condition with inlined SC.")
     parser.add_argument("--task")
     parser.add_argument("--vault", required=True)
     parser.add_argument("--file", help="task file path; bypasses the vault-cli lookup")

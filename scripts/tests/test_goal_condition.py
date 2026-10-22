@@ -81,7 +81,7 @@ class GoalConditionTest(unittest.TestCase):
         self.assertNotIn("runs on and on. The first criterion", result.stdout)
 
     def test_probe_form_drops_the_text_and_keeps_the_count(self):
-        result = self.run_script(LONG, "--compact-at", "1", "--max-chars", "700")
+        result = self.run_script(LONG, "--compact-at", "1", "--max-chars", "900")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("form=probe", result.stderr)
         self.assertNotIn("The first criterion states", result.stdout)
@@ -97,7 +97,7 @@ class GoalConditionTest(unittest.TestCase):
         cases = (
             (SHORT, (), "full"),
             (LONG, ("--compact-at", "400", "--max-chars", "4000"), "compact"),
-            (LONG, ("--compact-at", "1", "--max-chars", "700"), "probe"),
+            (LONG, ("--compact-at", "1", "--max-chars", "900"), "probe"),
         )
         for text, args, form in cases:
             with self.subTest(form=form):
@@ -135,11 +135,12 @@ class GoalConditionTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
     def test_vault_is_required_so_no_placeholder_can_reach_a_worker(self):
+        """Usage errors exit 6, not argparse's 2 — otherwise they are indistinguishable from a resolution failure."""
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--file", str(self.task(SHORT))],
             capture_output=True, text=True,
         )
-        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.returncode, 6)
         self.assertIn("--vault", result.stderr)
 
     def test_an_unresolvable_task_exits_two(self):
@@ -235,6 +236,36 @@ class GoalConditionTest(unittest.TestCase):
         result = self.run_script(text)
         self.assertIn("SC2 A thing.", result.stdout)
         self.assertIn("SC3 B thing.", result.stdout)
+
+    def test_implicit_bullet_before_an_explicit_id_does_not_collide_either(self):
+        """SC1, an unnumbered bullet, then SC2 must not yield two SC2 labels."""
+        text = "# Success Criteria\n\n- [ ] SC1: A thing.\n- [ ] B thing.\n- [ ] SC2: C thing.\n"
+        result = self.run_script(text)
+        ids = [l.split()[0] for l in result.stdout.splitlines() if l.startswith("SC")]
+        self.assertEqual(len(ids), len(set(ids)), f"duplicate ids: {ids}")
+        self.assertIn("SC2 C thing.", result.stdout)
+
+    def test_a_question_or_exclamation_ends_a_sentence_too(self):
+        text = ("# Success Criteria\n\n- [ ] SC1: Does the first thing work? "
+                "Then keep going for a long while so that the form has to compact.\n")
+        result = self.run_script(text, "--compact-at", "1", "--max-chars", "4000")
+        self.assertIn("form=compact", result.stderr)
+        self.assertIn("SC1 Does the first thing work?", result.stdout)
+
+    def test_a_non_object_vault_cli_payload_fails_as_cannot_resolve(self):
+        """Valid JSON of the wrong shape must exit 2, not 1 — 1 means 'no form fits the cap'."""
+        bindir = pathlib.Path(self.dir) / "bin"
+        bindir.mkdir()
+        fake = bindir / "vault-cli"
+        fake.write_text("#!/bin/sh\nprintf '[]'\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bindir}:{os.environ.get('PATH', '')}"}
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--task", "any", "--vault", "v"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot resolve", result.stderr)
 
 
 if __name__ == "__main__":
