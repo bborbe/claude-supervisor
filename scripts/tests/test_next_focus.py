@@ -374,6 +374,25 @@ class NextFocusTest(unittest.TestCase):
         self.assertIn("KafkaLagHigh - consumer group is 5000 behind", names)
         self.assertNotIn("total active alerts: 2", names)
 
+    def test_firing_alert_survives_the_proposal_cap(self):
+        """Ranked first: behind the P1 rows it fell into the overflow and surfaced nowhere.
+
+        With >=3 unplanned P1 tasks the alert was always the 4th row, so it was in
+        `proposed_overflow` — never a card, never a named overflow, and the render
+        prints `alerts:` only for unread/unavailable. It vanished from the round.
+        """
+        self.add_p1(4)
+        self.add_alerts("#!/bin/bash\necho 'total active alerts: 1'\n"
+                        "echo 'KafkaLagHigh - consumer group is 5000 behind'\n")
+        result = self.run_script()
+        self.assertEqual(result["alerts"], "firing")
+        self.assertEqual(len(result["proposed"]), 3)
+        self.assertEqual(result["proposed"][0]["kind"], "alert",
+                         "a firing prod alert outranks an unplanned P1 task")
+        self.assertIn("KafkaLagHigh - consumer group is 5000 behind",
+                      [r["name"] for r in result["proposed"]],
+                      "a firing alert must never be capped out by P1 tasks")
+
     def test_render_names_the_proposals_and_the_overflow(self):
         """The render path is what the round pastes; JSON-only coverage misses it."""
         self.add_p1(4)
@@ -383,8 +402,12 @@ class NextFocusTest(unittest.TestCase):
             capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertIn("Proposed for this week's plan:", proc.stdout)
-        self.assertIn("left for the next round (cap 3)", proc.stdout)
         self.assertIn("left for the next round (cap 5)", proc.stdout)
+        overflow = [ln for ln in proc.stdout.splitlines()
+                    if ln.startswith("  left for the next round (cap 3)")]
+        self.assertEqual(len(overflow), 1, proc.stdout)
+        self.assertIn("Unplanned P1 3", overflow[0],
+                      "the remainder must be NAMED, never a bare count")
 
 
 if __name__ == "__main__":

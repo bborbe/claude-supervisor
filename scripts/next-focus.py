@@ -438,7 +438,21 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
     must not suppress an unplanned `priority: 1` TASK called X, which a name-only set did.
     """
     rows = []
-    # class 1: open P1 tasks
+    # class 1: a firing prod alert — FIRST, and it can never be capped out.
+    # Appended after the P1 tasks it was ranked behind, it fell into the overflow
+    # whenever three or more unplanned P1 rows existed (38 were open on 2026-10-21),
+    # and the round surfaced it nowhere: not as a proposal, not as a named overflow,
+    # not as an `alerts:` line (which prints only for unread/unavailable).
+    if alerts_state == "firing":
+        rows.append({
+            "kind": "alert",
+            "name": alerts_lines[0] if alerts_lines else "prod alert firing",
+            "source": {"period": "unplanned", "file": "prometheus-alerts.sh", "line": 1},
+            "why": "alert firing, in no current plan",
+            "phase": "", "status": "", "needs_approval": False,
+            "action": "add to this week's plan",
+        })
+    # class 2: open P1 tasks
     d = Path(tasks_dir)
     if d.is_dir():
         for path in sorted(d.glob("*.md")):
@@ -455,16 +469,6 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
                 {"period": "unplanned", "file": str(path), "line": 1},
                 "priority: 1, in no current plan",
             ))
-    # class 2: a firing prod alert
-    if alerts_state == "firing":
-        rows.append({
-            "kind": "alert",
-            "name": alerts_lines[0] if alerts_lines else "prod alert firing",
-            "source": {"period": "unplanned", "file": "prometheus-alerts.sh", "line": 1},
-            "why": "alert firing, in no current plan",
-            "phase": "", "status": "", "needs_approval": False,
-            "action": "add to this week's plan",
-        })
     # class 3: a goal blocked on a bug
     goals = Path(board.dirs["goal"])
     if goals.is_dir():
@@ -574,7 +578,12 @@ def render(result):
         for row in result["proposed"]:
             lines.append(f'  - {row["name"]} — {row["why"]}')
     if result["proposed_overflow"]:
-        lines.append(f'  left for the next round (cap {PROPOSAL_CAP})')
+        # NAMED, not a bare count: readings.md promises "the remainder is named", and a
+        # bare `(cap 3)` line left a dropped item indistinguishable from one never found.
+        named = ", ".join(result["proposed_overflow"][:5])
+        rest = len(result["proposed_overflow"]) - 5
+        tail = f" and {rest} more" if rest > 0 else ""
+        lines.append(f'  left for the next round (cap {PROPOSAL_CAP}): {named}{tail}')
     if result["alerts"] in ("unread", "unavailable"):
         lines.append(f'  alerts: {result["alerts"]}')
     for note in result["notes"]:
