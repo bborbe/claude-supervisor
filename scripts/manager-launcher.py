@@ -1,14 +1,30 @@
 #!/usr/bin/env python3
 """`manager-launcher.py` — print the launcher a MANAGER session opens on, and why.
 
-Usage: manager-launcher.py <vault claude_script> [<topic or goal page>]
-Prints `<launcher path>\t<source>`, source one of `subject` / `claude-sibling` / `vault`;
-exits 1 with a reason on stderr when the result is unsafe or missing.
+Usage: manager-launcher.py <launcher> [<topic or goal page>] [--default-source manager-default|vault]
+Prints `<launcher path>\t<source>`, source one of `subject` / `manager-default` /
+`claude-sibling` / `vault`; exits 1 with a reason on stderr when the result is unsafe or
+missing.
 
 Rule (single home: `docs/fleet-surface.md` § Which launcher a manager opens on): the subject
-page's `manager_launcher:`, else the vault launcher's `-claude` sibling when it exists, else
-the vault launcher. Mirrors `resolveManagerLauncher` in `server/spawn-cwd.mjs`.
+page's `manager_launcher:`, else the launcher handed in. Mirrors `resolveManagerLauncher` in
+`server/spawn-cwd.mjs`.
+
+⚠️ **Provenance is passed in, never inferred from the filename.** The caller knows whether the
+value it read came from the vault's configured `manager_launcher` or from `claude_script`, and
+says so with `--default-source`; this script only reports it. An earlier version guessed from a
+`-claude` suffix, which diverged from the JS resolver in two real cases — a configured manager
+launcher that does not end in `-claude` (`cc-private-glm`) was misreported, and an older
+vault-cli whose `claude_script` already ends in `-claude` was reported as a configured default
+it never named.
+
+⚠️ The `-claude` sibling survives only as the COMPATIBILITY rung for a vault-cli older than the
+`manager_launcher` key: the caller passes `--default-source vault` with `claude_script`, and the
+sibling is derived here, reported as `claude-sibling`. The handed-in value is shape-checked in
+every branch — it is executed by a shell, and `resolveManagerLauncher` checks the configured
+default for the same reason.
 """
+import argparse
 import os
 import re
 import sys
@@ -36,15 +52,24 @@ def sibling(vault_launcher):
     return vault_launcher if base.endswith("-claude") else os.path.join(head, base + "-claude")
 
 
-def resolve(vault_launcher, page=None):
+def safe(value):
+    return bool(SAFE.match(value)) and ".." not in value.split("/")
+
+
+def resolve(launcher, page=None, default_source="vault"):
     own = field(page, "manager_launcher") if page else ""
     if own:
-        if not SAFE.match(own) or ".." in own.split("/"):
+        if not safe(own):
             return None, f"manager_launcher {own!r} is not a plain script name or path"
-        name, source = (own if "/" in own else os.path.join(os.path.dirname(vault_launcher), own)), "subject"
+        name, source = (own if "/" in own else os.path.join(os.path.dirname(launcher), own)), "subject"
     else:
-        sib = os.path.expanduser(sibling(vault_launcher))
-        name, source = (sib, "claude-sibling") if os.path.isfile(sib) else (vault_launcher, "vault")
+        if not safe(launcher):
+            return None, f"manager launcher {launcher!r} is not a plain script name or path"
+        if default_source == "manager-default":
+            name, source = launcher, "manager-default"
+        else:
+            sib = os.path.expanduser(sibling(launcher))
+            name, source = (sib, "claude-sibling") if os.path.isfile(sib) else (launcher, "vault")
     name = os.path.expanduser(name)
     if not os.path.isfile(name):
         return None, f"launcher {name} ({source}) does not exist"
@@ -52,10 +77,19 @@ def resolve(vault_launcher, page=None):
 
 
 def main(argv):
-    if len(argv) not in (2, 3) or not argv[1]:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("launcher", nargs="?")
+    ap.add_argument("page", nargs="?")
+    ap.add_argument("--default-source", choices=("manager-default", "vault"), default="vault")
+    try:
+        args = ap.parse_args(argv[1:])
+    except SystemExit:
         print(__doc__.strip().splitlines()[2], file=sys.stderr)
         return 2
-    path, source = resolve(argv[1], argv[2] if len(argv) == 3 else None)
+    if not args.launcher:
+        print(__doc__.strip().splitlines()[2], file=sys.stderr)
+        return 2
+    path, source = resolve(args.launcher, args.page, args.default_source)
     if path is None:
         print(source, file=sys.stderr)
         return 1
