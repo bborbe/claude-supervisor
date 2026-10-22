@@ -269,6 +269,12 @@ class ResolveLauncher(unittest.TestCase):
         path, source = rw.resolve_launcher("s1", self.vault, self.fb)
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
 
+    def test_a_bare_configured_worker_launcher_resolves_beside_the_vault_launcher(self):
+        self.configure(worker_launcher="cc-private-deepseek")
+        self.page("25 Tasks", "T", "claude_session_id: s1")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
+
     def test_task_launcher_still_beats_the_worker_default(self):
         self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
         self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-private-claude")
@@ -291,6 +297,12 @@ class ResolveLauncher(unittest.TestCase):
 
     def test_manager_takes_the_configured_manager_default(self):
         self.configure(manager_launcher=os.path.join(self.scripts, "cc-private-claude"))
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "manager-default"))
+
+    def test_a_bare_configured_manager_launcher_resolves_beside_the_vault_launcher(self):
+        """A config value with no slash is a name, not a relative path — join it, never fail."""
+        self.configure(manager_launcher="cc-private-claude")
         path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "manager-default"))
 
