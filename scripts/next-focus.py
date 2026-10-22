@@ -540,7 +540,7 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None):
     )
     proposed_overflow = proposed_rows[PROPOSAL_CAP:]
 
-    return {
+    result = {
         "as_of": day.isoformat(),
         "capacity": {
             "live": live, "target": target, "source": capacity_source,
@@ -555,6 +555,12 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None):
         "proposed_overflow": [r["name"] for r in proposed_overflow],
         "notes": list(dict.fromkeys(notes)),
     }
+    # The block rides in the JSON too: a round that must post proposal cards needs the
+    # card keys AND the rendered block, and without this it ran the whole script twice
+    # per tick — re-globbing the task board and re-running both helpers and the alerts
+    # script each time.
+    result["render"] = render(result)
+    return result
 
 
 def render(result):
@@ -622,7 +628,7 @@ def main(argv=None):
         return 2
 
     result = build(args.vault, args.tasks_dir, day, args.live, args.target, args.plugin)
-    print(json.dumps(result, indent=2) if args.json else render(result))
+    print(json.dumps(result, indent=2) if args.json else result["render"])
     return 0
 
 

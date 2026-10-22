@@ -428,6 +428,23 @@ class NextFocusTest(unittest.TestCase):
         self.assertIn("Unplanned P1 3", overflow[0],
                       "the remainder must be NAMED, never a bare count")
 
+    def test_json_carries_the_same_block_the_render_path_prints(self):
+        """One invocation must serve both the block and the card keys.
+
+        A round that posts proposal cards needs the rendered block AND `card_key`/
+        `payload`. Without the block in `--json` it ran the whole script twice per tick,
+        re-globbing the task board and re-running both helpers and the alerts script.
+        """
+        self.add_p1(4)
+        result = self.run_script()
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--vault", str(self.vault),
+             "--tasks-dir", "25 Tasks", "--now", DAY, "--live", "3", "--target", "30"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertEqual(result["render"].strip(), proc.stdout.strip(),
+                         "the JSON's render must be the block the render path prints")
+
 
 if __name__ == "__main__":
     unittest.main()
