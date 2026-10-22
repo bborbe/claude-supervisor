@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.203.0
 
 - fix: **the watcher tests no longer write incidents into the operator's live ledger.** `scripts/tests/test_manager_attention_watch.py` never set `SUPERVISOR_INCIDENTS_LEDGER`, and `open_incident` shells out to `incident-ledger.py` inheriting this process's environment — so every test that drove the real loop opened a REAL incident. Measured 2026-10-22: two fixture records (`aaaa1111`, `15fce333`) had landed in `~/.claude/state/incidents/ledger.json`. The redirect is set at **module** scope (`setUpModule`/`tearDownModule`): a per-`Fixture` version was tried first and did not hold, because `IncidentReplayTest` and the transition tests drive the loop without constructing a `Fixture`, and the records reappeared on the next `make precommit`.
 - docs: add the manager permission allowlist — the closed list of commands a manager may answer, the deny list that overrides it, and the clean-tree confinement that admits test runs
