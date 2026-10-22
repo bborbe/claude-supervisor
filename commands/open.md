@@ -539,9 +539,9 @@ The rule that *produces* the value is not restated here — it has its single ho
 
 ⚠️ **Writing `mode: headless` today opens a worker into a mechanism with two known, measured defects** — its gates park with the spawning session's server and no one else can answer them, and the resume guard does not guard.
 
-**Do NOT add `policy` while `defaultMode` is `auto`.** `auto` is in `POLICY_UNREACHABLE_MODES`, so `spawn_agent` **refuses** a named policy (*"policy would never be consulted"*). Omit it; the overlay needs `acceptEdits`.
+**Do NOT add `policy` while `defaultMode` is `auto`** — `auto` is in `POLICY_UNREACHABLE_MODES`, so the spawn refuses a named policy. Omit it; the overlay needs `acceptEdits`.
 
-**`interactive` is the debug escape hatch.** Pass `interactive=true` to watch a worker's screen live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn only. ⚠️ **Local rows only.**
+**`interactive` is the debug escape hatch.** Pass `interactive=true` to watch a worker live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn. ⚠️ **Local rows only.**
 
 Requires `mcp__supervisor__*` in this session — its absence fails silently.
 
@@ -620,21 +620,24 @@ The trailing `"/color $CHIP"` is the initial prompt — Claude executes it at st
 
 ### 3.2 Send the work command — **wezterm fallback, plus every `goal_loop` row**
 
-**Skip on the `spawn_agent` path** — the work prompt *is* the spawn argument. ⚠️ **A `goal_loop: true` row uses this section on BOTH paths** — `send_agent_message` on `spawn_agent`, `send-text` here, after the pane shows `⎿ Goal set:`. ⚠️ **On the wezterm path send the condition here FIRST** — `send-text` its stdout, wait for `⎿ Goal set:`, then the work command; the colour stays the prompt. **Bounded wait; `--first-step` drops (10).**
+**Skip on the `spawn_agent` path unless the row is `goal_loop: true`** — the work prompt *is* the spawn argument. ⚠️ **A `goal_loop: true` row uses this section on BOTH paths** — `send_agent_message` on `spawn_agent`, `send-text` here, after the pane shows `⎿ Goal set:`. ⚠️ **On the wezterm path send the condition here FIRST** — `send-text` its stdout, wait for `⎿ Goal set:`, then the work command; the colour stays the prompt. **Bounded wait; `--first-step` rides on the work command (10).**
 
 The colour already ran as the spawn prompt, so the session is idle and the work command submits on the first try:
 
 ```bash
-# goal_loop rows only: send the emitter's stdout FIRST (item 10), submit it, wait for '⎿ Goal set:'
+# goal_loop rows only: arm the goal FIRST, then wait for '⎿ Goal set:' (item 10)
+wezterm cli send-text --pane-id <new-pane-id> --no-paste "$(python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-condition.py" --task "<task>" --vault "<vault>")"
+sleep 1
+wezterm cli send-text --pane-id <new-pane-id> --no-paste $'\r'
 sleep 8                                   # let the session reach its prompt
 wezterm cli send-text --pane-id <new-pane-id> --no-paste $'/vault-cli:work-on-task "<task>"'
 sleep 1
 wezterm cli send-text --pane-id <new-pane-id> --no-paste $'\r'   # submit as a separate step
 ```
 
-**Send the text and the submit as two steps.** A trailing `\r` appended to the text is not sufficient. Send the text, then a bare `\r` (`wezterm cli send-text --pane-id <N> --no-paste $'\r'`), and **repeat until the composer clears**. **Read the pane back after sending** — a prompt is not delivered until the composer is empty *and* the session is visibly working. ⚠️ **The `sleep` is a race** — the supervisor waits for the `❯` glyph instead.
+**Send the text and the submit as two steps** — a trailing `\r` on the text is not enough; read the pane back until the composer is empty and the session is visibly working. ⚠️ **The `sleep` is a race** — the supervisor waits for the `❯` glyph instead.
 
-**Why the colour goes in the spawn and the work command does not.** Confirm `Session color set to: <name>` appears before you send the work command.
+Confirm `Session color set to: <name>` appears before sending the work command.
 
 ⚠️ **Only ever send this into a pane THIS command just spawned, while it is still idle.** This is not a licence to drive other sessions by `send-text` — answering another session's operator gate that way is still forbidden.
 
