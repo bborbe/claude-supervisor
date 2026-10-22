@@ -112,6 +112,13 @@ SITE_LIST = {
     # exactly the state the defect misreads as delivery. Enumerated so the mechanism and
     # this list agree.
     ("send-delivery-drill.py", "wezterm"),
+    # added 2026-10-22 — `drive-unverifiable.py`'s pane viewport read: the
+    # `wezterm cli get-text` behind the 2-consecutive-unverifiable rule. It returns `None`
+    # for a failed read, never `''` -- an unreadable pane and a pane rendering no closer
+    # are different states, and folding them together would let a broken read render as a
+    # session with nothing to say, which is the exact silence the rule exists to end.
+    # Enumerated so the mechanism and this list agree.
+    ("drive-unverifiable.py", "pane_text"),
 }
 
 
