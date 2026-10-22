@@ -1735,3 +1735,33 @@ test('every controller-facing control call site passes the negotiated version', 
     'a control call site that drops the version restores the -32009 refusal on create, list and stop',
   )
 })
+
+// ⚠️ The controller guards its WHOLE surface, the agent card included: an unauthenticated GET
+// answers 401 (measured 2026-10-22). A card read that omitted the bearer therefore returned no
+// version, sent no `A2A-Version`, and the controller defaulted the absent header to "0.3" and
+// refused — the exact `-32009` the negotiation exists to prevent, reproduced THROUGH the fix.
+test('the controller card is read with the bearer, so a version is actually found', async () => {
+  let sawAuth
+  const version = await fetchControllerProtocolVersion({
+    endpoint: 'https://controller.example/a2a',
+    token: 'controller-bearer',
+    fetchImpl: async (url, init) => {
+      sawAuth = init.headers.authorization
+      return {
+        ok: true,
+        json: async () => ({ supportedInterfaces: [{ protocolVersion: '1.0' }] }),
+      }
+    },
+  })
+  assert.equal(version, '1.0')
+  assert.equal(sawAuth, 'Bearer controller-bearer')
+})
+
+test('a 401 card read yields no version, which is the path that reproduces the refusal', async () => {
+  const version = await fetchControllerProtocolVersion({
+    endpoint: 'https://controller.example/a2a',
+    token: 'controller-bearer',
+    fetchImpl: async () => ({ ok: false, status: 401 }),
+  })
+  assert.equal(version, undefined)
+})

@@ -563,11 +563,24 @@ export function a2aCardUrlFor({ a2aUrl } = {}) {
 // error. `undefined` sends no header — the pre-negotiation behaviour, which a controller that has
 // no version check at all still accepts. The control call that follows is the thing that should
 // report a problem, and it reports what actually happened rather than a secondhand read failure.
-export async function fetchControllerProtocolVersion({ endpoint, fetchImpl = fetch } = {}) {
+//
+// ⚠️ **THE CARD IS AUTHENTICATED, AND READING IT WITHOUT THE TOKEN SILENTLY READS NOTHING.** The
+// controller guards its whole surface, `/.well-known/agent-card.json` included: measured
+// 2026-10-22, an unauthenticated GET answers **401 `{"error":{"code":"UNAUTHORIZED"…}}`**. A read
+// that omitted the token therefore took the `!res.ok` branch, returned `undefined`, sent no
+// `A2A-Version`, and the controller defaulted the absent header to "0.3" and refused — the exact
+// `-32009` this function exists to prevent, reproduced *through* the fix. The worker's card is
+// public, which is why the turn plane never needed this; the control plane does.
+export async function fetchControllerProtocolVersion({ endpoint, token, fetchImpl = fetch } = {}) {
   const card = a2aCardUrlFor({ a2aUrl: endpoint })
   if (card.error) return undefined
   try {
-    const res = await fetchImpl(card.url, { headers: { accept: 'application/json' } })
+    const res = await fetchImpl(card.url, {
+      headers: {
+        accept: 'application/json',
+        ...(typeof token === 'string' && token !== '' ? { authorization: `Bearer ${token}` } : {}),
+      },
+    })
     if (!res.ok) return undefined
     const body = await res.json()
     const version = body?.supportedInterfaces?.[0]?.protocolVersion
@@ -702,7 +715,7 @@ export function a2aWorkerRecord({
 // the credential this task's Definition of Done forbids writing anywhere. A throwing capture
 // never fails the spawn.
 export async function createWorkerOnController({ endpoint, task, token, messageId, contextId, mint, mounts, secrets, fetchImpl = fetch, capture } = {}) {
-  const protocolVersion = await fetchControllerProtocolVersion({ endpoint, fetchImpl })
+  const protocolVersion = await fetchControllerProtocolVersion({ endpoint, token, fetchImpl })
   const call = a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint, mounts, secrets, protocolVersion })
   if (call.error) return { error: call.error }
   if (typeof capture === 'function') {
@@ -1306,7 +1319,7 @@ export async function stopWorkerOnController({
   timeoutMs = A2A_STOP_TIMEOUT_MS,
   capture,
 } = {}) {
-  const protocolVersion = await fetchControllerProtocolVersion({ endpoint, fetchImpl })
+  const protocolVersion = await fetchControllerProtocolVersion({ endpoint, token, fetchImpl })
   const call = a2aStopCallFor({ endpoint, workerId, token, messageId, contextId, mint, protocolVersion })
   if (call.error) return { error: call.error }
   // The exact body this call sends, at the send site — what a test (and SC4) diffs to prove the
@@ -1379,7 +1392,7 @@ export function a2aLiveSessions({ workers, records } = {}) {
 // process's whole life. Aborting a `list` is harmless — it starts nothing on the worker.
 export const A2A_LIST_TIMEOUT_MS = 10_000
 export async function listWorkersOnController({ endpoint, token, messageId, contextId, mint, fetchImpl = fetch, timeoutMs = A2A_LIST_TIMEOUT_MS } = {}) {
-  const protocolVersion = await fetchControllerProtocolVersion({ endpoint, fetchImpl })
+  const protocolVersion = await fetchControllerProtocolVersion({ endpoint, token, fetchImpl })
   const call = a2aListCallFor({ endpoint, token, messageId, contextId, mint, protocolVersion })
   if (call.error) return { error: call.error }
 
