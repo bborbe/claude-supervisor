@@ -218,7 +218,7 @@ class ResolveLauncher(unittest.TestCase):
         for sub in ("25 Tasks", "24 Goals"):
             os.makedirs(os.path.join(self.vault, sub))
         os.makedirs(self.scripts)
-        for name in ("cc-private", "cc-private-claude", "cc-private-deepseek", "cc-goal"):
+        for name in ("cc-private", "cc-private-claude", "cc-private-deepseek", "cc-private-glm", "cc-goal"):
             open(os.path.join(self.scripts, name), "w").close()
         cfg = os.path.join(d, "vaults.json")
         with open(cfg, "w") as fh:
@@ -299,6 +299,24 @@ class ResolveLauncher(unittest.TestCase):
         self.configure(manager_launcher=os.path.join(self.scripts, "cc-private-claude"))
         path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "manager-default"))
+
+    def test_a_configured_manager_launcher_need_not_end_in_claude(self):
+        """Provenance, not the filename, decides the source — a glm manager stays `manager-default`."""
+        self.configure(manager_launcher="cc-private-glm")
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-glm"), "manager-default"))
+
+    def test_an_old_vault_cli_with_a_claude_script_is_still_the_sibling_rung(self):
+        """No `manager_launcher` in config: the naming convention decided, and it must say so."""
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump([{"name": "v", "path": self.vault,
+                        "claude_script": os.path.join(self.scripts, "cc-private-claude")}], fh)
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_an_unsafe_configured_manager_launcher_is_refused_before_any_exec(self):
+        self.configure(manager_launcher='cc-x"; rm -rf /')
+        self.assertIsNone(rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))[0])
 
     def test_a_bare_configured_manager_launcher_resolves_beside_the_vault_launcher(self):
         """A config value with no slash is a name, not a relative path — join it, never fail."""

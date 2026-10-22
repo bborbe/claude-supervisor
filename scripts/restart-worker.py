@@ -447,10 +447,14 @@ def resolve_launcher(sid, cwd, fb, subject=None):
         # A bare configured name resolves beside the vault's own launcher, exactly as a bare
         # `launcher:` does below — `manager-launcher.py` receives one path and has no directory
         # to resolve against, so the join happens here or the file check fails on a valid value.
+        # Provenance travels with it: `manager-default` when the value came from the config key,
+        # `vault` when it is `claude_script` and the sibling rule is the one deciding.
         manager_default = str(vault.get("manager_launcher") or "").strip()
-        if manager_default and "/" not in manager_default:
+        if not manager_default:
+            return load_sibling("manager-launcher.py").resolve(vault_launcher, page, "vault")
+        if "/" not in manager_default:
             manager_default = os.path.join(os.path.dirname(vault_launcher), manager_default)
-        return load_sibling("manager-launcher.py").resolve(manager_default or vault_launcher, page)
+        return load_sibling("manager-launcher.py").resolve(manager_default, page, "manager-default")
 
     # The task bound to this session, matched on the row's WHOLE id set —
     # `claude_session_id` plus every `metrics_sessions[].session_id`, read through

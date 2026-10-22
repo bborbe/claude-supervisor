@@ -2204,7 +2204,15 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // (`worker_launcher`) — see `resolveTaskLauncher`. A goal's `launcher:` is not in that chain:
   // it is a manager statement, and letting it reach a worker gave every task under a goal its
   // manager's Opus launcher (measured 2026-10-22, 12 private-personal goals).
-  let taskLauncher = { launcher: workerTarget.launcher, source: 'vault' }
+  //
+  // ⚠️ The default is the WORKER rule with no task, not the bare vault launcher. A spawn with
+  // no `task` is still a worker, and `scripts/restart-worker.py` applies `worker_launcher` to a
+  // taskless session — so defaulting to `claude_script` here made a taskless worker spawn on one
+  // launcher and restart on another, silently changing model whenever the two differ.
+  let taskLauncher = resolveTaskLauncher({
+    vaultLauncher: workerTarget.launcher,
+    workerLauncher: workerTarget.workerLauncher,
+  })
   if (!config.claudeCmd && roleResolution.role === 'manager') {
     // A manager takes the manager rule, not the worker rule: the vault's configured manager
     // default, then the `-claude` sibling — see `resolveManagerLauncher`. No subject page is
@@ -2222,8 +2230,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       workerLauncher: workerTarget.workerLauncher,
       ...read,
     })
-    if (taskLauncher.error) return { error: taskLauncher.error }
   }
+  // ONE check, after every branch. The manager branch could not fail before `managerDefault`
+  // existed, so it carried no check; it can now (an unsafe configured `manager_launcher`), and
+  // an unchecked `{ error }` here makes `workerLauncher` `undefined` — the tab path then execs
+  // `undefined` and the headless path loses its MCP servers, both silently.
+  if (taskLauncher.error) return { error: taskLauncher.error }
   const workerLauncher = config.claudeCmd || taskLauncher.launcher
   const workerModel = launcherModelFor(workerLauncher)
 
@@ -2783,12 +2795,12 @@ const TOOLS = [
         task: {
           type: 'string',
           description:
-            'The vault task this worker is opened for. On every LOCAL path it also chooses the launcher: the task\'s `launcher:` frontmatter, else its goal\'s, else the vault\'s `claude_script` (rule: docs/fleet-surface.md § Spawn a worker item 8) — so a task that cannot be read REFUSES the spawn. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with any A2A target — `docker`, `k8s`, or `k8s:<cluster>` — and with the retired `cluster` target. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+            'The vault task this worker is opened for. On every LOCAL path it also chooses the launcher: the task\'s own `launcher:` frontmatter, else the vault\'s `worker_launcher`, else the vault\'s `claude_script` (rule: docs/fleet-surface.md § Spawn a worker item 8) — so a task that cannot be read REFUSES the spawn. ⚠️ A GOAL\'s `launcher:` is NOT read: it describes how that goal\'s manager runs, and inheriting it gave every worker under such a goal its manager\'s launcher. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with any A2A target — `docker`, `k8s`, or `k8s:<cluster>` — and with the retired `cluster` target. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
         },
         vault: {
           type: 'string',
           description:
-            'The vault this worker belongs to. Resolves BOTH the working directory and the default launcher (that vault\'s `claude_script`, which a `task`\'s `launcher:` frontmatter can override) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
+            'The vault this worker belongs to. Resolves BOTH the working directory and the default launcher from one value, so the two cannot disagree: the launcher is that vault\'s `worker_launcher` (a `manager` spawn takes `manager_launcher`), falling back to `claude_script`, and a `task`\'s own `launcher:` frontmatter can override it — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
         },
         resume: {
           type: 'string',
