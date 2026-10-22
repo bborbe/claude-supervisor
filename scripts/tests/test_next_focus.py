@@ -33,6 +33,7 @@ fail on a plausible wrong implementation rather than on a broken one:
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -392,6 +393,24 @@ class NextFocusTest(unittest.TestCase):
         self.assertIn("KafkaLagHigh - consumer group is 5000 behind",
                       [r["name"] for r in result["proposed"]],
                       "a firing alert must never be capped out by P1 tasks")
+
+    def test_proposal_payload_is_shell_quoted(self):
+        """The round pastes `payload` into a bash line, and `name` is worker-choosable.
+
+        A task filename is attacker-shaped input — any worker that can write a task file
+        picks it — and an alert row's name is a raw `prometheus-alerts.sh` line. Unquoted,
+        a `"` breaks the caller's quoting and a `$(…)` or backtick executes. `shlex.split`
+        proves the quoted form is ONE word equal to the raw text, so the shell passes it
+        through without expanding anything.
+        """
+        hostile = 'Evil " ; $(id) `whoami` Task'
+        path = self.write(f"25 Tasks/{hostile}.md", task(hostile, priority="1"))
+        row = [r for r in self.run_script()["proposed"] if r["kind"] == "task"][0]
+        self.assertEqual(row["name"], hostile)
+        self.assertEqual(
+            shlex.split(row["payload"]),
+            [f'{hostile} — priority: 1, in no current plan — {path}:1'],
+            "the payload must survive the shell as exactly one unexpanded word")
 
     def test_render_names_the_proposals_and_the_overflow(self):
         """The render path is what the round pastes; JSON-only coverage misses it."""

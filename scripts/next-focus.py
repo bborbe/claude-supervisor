@@ -488,6 +488,15 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
             ))
     for row in rows:
         row["card_key"] = card_key(vault, row["kind"], row["name"])
+        # Shell-quoted HERE, because the round pastes this into a `bash` command line.
+        # `name` is a raw line of prometheus-alerts.sh stdout for an alert row, and a
+        # task file's stem for a task/goal row — the latter is chosen by any worker that
+        # can write a task file. Unquoted, a `"` breaks the caller's quoting and a
+        # `$(…)` or backtick inside it EXECUTES when the round runs the command.
+        row["payload"] = shlex.quote(
+            f'{row["name"]} — {row["why"]} — '
+            f'{row["source"]["file"]}:{row["source"]["line"]}'
+        )
     return rows
 
 
