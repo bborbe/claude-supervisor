@@ -1592,3 +1592,60 @@ test('with no onTaskId the whole-body path is used, even on a stream body', asyn
   const outcome = await collectWorkerTurn({ res })
   assert.equal(outcome.state, 'TASK_STATE_COMPLETED')
 })
+
+// --- the card→builder path, which is where the version must actually be negotiated -------------
+//
+// ⚠️ ASSERTED THROUGH `fetchWorkerCard`, NOT AT THE BUILDER. A builder-only test passes a version
+// straight in, so a hardcoded default inside the card reader would still satisfy it — and the
+// worker would then speak the wrong protocol while every test stayed green. The criterion this
+// pair satisfies is the one that makes a hardcoded default fail.
+
+const cardFetch = (card) => stubFetch(JSON.stringify(card))
+
+test("a card advertising 0.3 makes the turn send A2A-Version: 0.3", async () => {
+  const card = await fetchWorkerCard({
+    a2aUrl: 'http://localhost:9093/a2a',
+    fetchImpl: cardFetch({
+      supportedInterfaces: [{ url: 'http://localhost:9093/a2a', protocolVersion: '0.3' }],
+    }),
+  })
+  assert.equal(card.protocolVersion, '0.3', 'the card reader must surface the version it read')
+
+  let sentHeaders
+  await openWorkerTurn({
+    endpoint: card.endpoint,
+    contextId: 'ctx-1',
+    text: 'do the thing',
+    token: TOKEN,
+    messageId: 'msg-1',
+    protocolVersion: card.protocolVersion,
+    fetchImpl: async (url, init) => {
+      sentHeaders = init.headers
+      return turnFetch(turnFrames())(url, init)
+    },
+  })
+  assert.equal(sentHeaders['a2a-version'], '0.3')
+})
+
+test('a card naming no version makes the turn send no A2A-Version header', async () => {
+  const card = await fetchWorkerCard({
+    a2aUrl: 'http://localhost:9093/a2a',
+    fetchImpl: cardFetch({ supportedInterfaces: [{ url: 'http://localhost:9093/a2a' }] }),
+  })
+  assert.equal(card.protocolVersion, undefined, 'no version on the card means no version, not a default')
+
+  let sentHeaders
+  await openWorkerTurn({
+    endpoint: card.endpoint,
+    contextId: 'ctx-1',
+    text: 'do the thing',
+    token: TOKEN,
+    messageId: 'msg-1',
+    protocolVersion: card.protocolVersion,
+    fetchImpl: async (url, init) => {
+      sentHeaders = init.headers
+      return turnFetch(turnFrames())(url, init)
+    },
+  })
+  assert.equal('a2a-version' in sentHeaders, false)
+})

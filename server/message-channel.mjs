@@ -76,7 +76,17 @@ export function resolveMessageChannel(agent) {
           `been sent, so there is no context to continue.`,
       }
     }
-    return { channel: 'a2a', endpoint: agent.a2aUrl, token: agent.workerToken, contextId: agent.contextId }
+    // `protocolVersion` travels with the endpoint and token because a follow-up turn is a fresh
+    // request to the same worker, and the worker's version gate does not remember the first turn.
+    // ⚠️ SPREAD CONDITIONALLY, so a worker that advertised no version yields the same channel shape
+    // as before this existed — an `undefined` key here would be a shape change nothing asked for.
+    return {
+      channel: 'a2a',
+      endpoint: agent.a2aUrl,
+      token: agent.workerToken,
+      contextId: agent.contextId,
+      ...(agent.protocolVersion ? { protocolVersion: agent.protocolVersion } : {}),
+    }
   }
 
   return {
