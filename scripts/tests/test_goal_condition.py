@@ -59,7 +59,8 @@ class GoalConditionTest(unittest.TestCase):
 
     def run_script(self, text, *args):
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "--file", str(self.task(text)), *args],
+            [sys.executable, str(SCRIPT), "--file", str(self.task(text)),
+             "--vault", "test-vault", *args],
             capture_output=True, text=True,
         )
 
@@ -117,11 +118,44 @@ class GoalConditionTest(unittest.TestCase):
 
     def test_missing_file_exits_two(self):
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--file", str(pathlib.Path(self.dir) / "absent.md")],
+            [sys.executable, str(SCRIPT), "--file", str(pathlib.Path(self.dir) / "absent.md"),
+             "--vault", "test-vault"],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("cannot read", result.stderr)
+
+    def test_no_success_criteria_is_refused_not_emitted(self):
+        """A condition with nothing to prove is armed, then satisfied by the disk probe alone."""
+        result = self.run_script("# Tasks\n\n- [ ] do it\n")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("refusing to arm", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_vault_is_required_so_no_placeholder_can_reach_a_worker(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--file", str(self.task(SHORT))],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--vault", result.stderr)
+
+    def test_an_unresolvable_task_exits_two(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--task", "no such task anywhere",
+             "--vault", "test-vault"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot resolve", result.stderr)
+
+    def test_compact_form_does_not_cut_inside_an_abbreviation(self):
+        text = ("# Success Criteria\n\n- [ ] SC1: Use e.g. the CLI to do the first thing. "
+                "Then keep going for a long while so that the form has to compact.\n")
+        result = self.run_script(text, "--compact-at", "1", "--max-chars", "4000")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("form=compact", result.stderr)
+        self.assertIn("SC1 Use e.g. the CLI to do the first thing.", result.stdout)
 
 
 if __name__ == "__main__":

@@ -211,8 +211,6 @@ vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 
 Writing them is the point, not a side effect. The next batch reads the fields instead of re-deciding, so one task cannot be classified one way today and the other way tomorrow. It also makes the call reviewable — a wrong value is visible on disk and the operator corrects it with that same one-line command.
 
-**`mode` is consumed, not merely recorded** — Step 3 passes `interactive=false` to `spawn_agent` only when the field reads `headless` (absent field → the argument is omitted and the fleet config decides; see § 535).
-
 **`shipping:` is read here and passed at Step 3 — never inferred.** Pass `shipping: true` to `spawn_agent` only when the field reads `true`; omit it otherwise. A derived value would hand unattended commit rights to a row nobody marked. Rule: § Spawn a worker item 9.
 
 **`goal_loop:` is read here and used at Step 3** — on `true` the spawn prompt is the condition alone; the work command follows. Rule: § Spawn a worker item 10.
@@ -529,7 +527,7 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 ⚠️ **Pass `role`, not `window_id`.** `spawn_agent` takes an optional `role` (`manager` / `agent` / `human`, default `agent`) and resolves **both** the colour and the window from the published map **in-process**, so pass § 3.0's resolved role here. The older `window_id` argument still works but is no longer how a role is routed. The response reports the resolved `role` and `window_id` — **check those fields**.
 
-**Create branch — `spawn_agent`, which takes the work prompt as an *argument*.** Call shape: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) — prompt `/vault-cli:work-on-task "<task>"`, `vault <vault>`, **`task <task>`**, label `<task>`, role `<role>` (§ 3.0), `[target <target>]`, `[shipping]` (Step 0.6's read). ⚠️ **`task` binds the worker to the vault; `label` is NOT a substitute.** ⚠️ **Pass `vault`, not `cwd`** — one of the two is **required**; rule and refusals: `§ Spawn a worker` **item 8**. **With `--first-step <text>`, the prompt is `<text>`, a blank line, then `/vault-cli:work-on-task "<task>"`**; otherwise the bare work command.
+**Create branch — `spawn_agent`, which takes the work prompt as an *argument*.** Call shape: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) — prompt `/vault-cli:work-on-task "<task>"`, `vault <vault>`, **`task <task>`**, label `<task>`, role `<role>` (§ 3.0), `[target <target>]`, `[shipping]` (Step 0.6's read). ⚠️ **`task` binds the worker to the vault; `label` is NOT a substitute.** ⚠️ **Pass `vault`, not `cwd`** — one of the two is **required**; rule and refusals: `§ Spawn a worker` **item 8**. **With `--first-step <text>`, the prompt is `<text>`, a blank line, then `/vault-cli:work-on-task "<task>"`**; otherwise the bare work command. ⚠️ **On a `goal_loop: true` row the prompt is neither** — it is `scripts/goal-condition.py --task "<task>" --vault "<vault>"`, with the work command sent afterwards (§ 3.2); refuse on the emitter's exit 1/2/3.
 
 **Read `target:` and pass `target="<value>"` when the field is present, omitting it when absent** (absent = `local`; `docs/fleet-surface.md` § Spawn a worker item 7 is the single home for the field, its default and the `docker` / `k8s` argument contract). Pass the value **verbatim** — an unknown value reaches the server and is refused there, never defaulted or lower-cased here. ⚠️ **Then check ELIGIBILITY — a separate question from which target, read from the same item.** When the row carries a disqualifier, **print a warning naming it** before spawning (`⚠️ target "<t>" is not eligible for "<task>": needs <disqualifier>`). ⚠️ **Advisory, never a refusal** — print it and leave the decision here; never silently drop the `target`, never rewrite the row's frontmatter, never refuse the spawn on this ground. The disqualifier list has its single home in item 7 — **read it there and never restate it here.** ⚠️ **On a `docker` / `k8s` row the argument contract changes and the `role` above is dropped** — item 7 carries that branch; never hand-build it from this line.
 
@@ -545,7 +543,7 @@ The rule that *produces* the value is not restated here — it has its single ho
 
 **Do NOT add `policy` while `defaultMode` is `auto`.** `auto` is in `POLICY_UNREACHABLE_MODES`, so `spawn_agent` **refuses** a named policy (*"policy would never be consulted"*) and the spawn fails. Omit it; the overlay is usable only under `acceptEdits`.
 
-**`interactive` is the debug escape hatch, and it works in both directions.** Pass `interactive=true` when a worker's own screen must be watched live. Pass `interactive=false` to force one headless worker while the fleet runs in tabs. Either way it overrides the fleet default for that one spawn only. The colour applies only on the tab path. ⚠️ **Local rows only** (§ Spawn a worker item 7).
+**`interactive` is the debug escape hatch, in both directions.** Pass `interactive=true` to watch a worker's screen live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn only. ⚠️ **Local rows only** (§ Spawn a worker item 7).
 
 **The fleet's current mode is not recorded here — read `~/.config/claude-supervisor/config.json`.**
 
@@ -626,7 +624,7 @@ The trailing `"/color $CHIP"` is the initial prompt — Claude executes it at st
 
 ### 3.2 Send the work command — **wezterm fallback path only**
 
-**Skip this section entirely on the `spawn_agent` path** — there the work prompt *is* the spawn argument, so nothing needs sending. This applies only when 3.1's wezterm shape was used.
+**Skip this section on the `spawn_agent` path** — there the work prompt *is* the spawn argument. Applies only on 3.1's wezterm shape. ⚠️ **A `goal_loop: true` row uses this section on BOTH paths** — `send_agent_message` on `spawn_agent`, `send-text` here, and only after the pane shows `⎿ Goal set:`.
 
 The colour already ran as the spawn prompt, so the session is idle and the work command submits on the first try:
 

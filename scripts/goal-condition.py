@@ -23,11 +23,16 @@ the alternative to compacting is a condition the command refuses outright.
 
 Usage:
   goal-condition.py --task "<name>" --vault <v> [--max-chars 4000] [--compact-at 3600]
-  goal-condition.py --file <path> [--task <name>] [--vault <v>]
+  goal-condition.py --file <path> --vault <v> [--task <name>]
 
 `--file` bypasses the vault-cli lookup, which is what makes the script testable without
 a vault; the caller that has a vault should use --task/--vault so the path resolves the
-way every other spawn-path read does.
+way every other spawn-path read does. `--vault` stays required in both forms, because
+the emitted disk probe embeds it and a placeholder there cannot resolve.
+
+Exit codes: 0 emitted · 1 no form fits the cap · 2 the task could not be resolved or
+read · 3 the task carries no Success Criteria (refused — a condition with nothing to
+prove is armed and then satisfied by the disk probe alone).
 
 Prints the condition on stdout and the chosen form on stderr, so a spawn record can
 note when the ladder fell back.
@@ -37,6 +42,7 @@ import datetime
 import json
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 
@@ -56,10 +62,11 @@ def task_file(name, vault):
     try:
         out = subprocess.run(
             ["vault-cli", "task", "show", name, "--vault", vault, "--output", "json"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, timeout=10,
         ).stdout
         return json.loads(out).get("file_path") or None
-    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            json.JSONDecodeError):
         return None
 
 
@@ -90,23 +97,42 @@ def criteria(text):
     return found
 
 
+ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "no.", "v.")
+
+
 def first_sentence(body):
     """The criterion cut to its first sentence — the `compact` form's unit.
 
-    Cut on a sentence boundary rather than a character count, because a criterion
-    truncated mid-word reads as a different requirement to a judge.
+    A naive `split(". ")` truncates inside `e.g.` or a version string, so `Use e.g. the
+    CLI` becomes `Use e.g.` — a different requirement, which is the opposite of what the
+    compact form exists for. The cut therefore skips a period that closes a known
+    abbreviation or sits inside backticks.
     """
-    cut = body.split(". ", 1)[0].strip()
-    return cut if cut.endswith(".") else cut + "."
+    in_code = False
+    for index, char in enumerate(body):
+        if char == "`":
+            in_code = not in_code
+            continue
+        if in_code or char != "." or not body.startswith(". ", index):
+            continue
+        if body[: index + 1].lower().endswith(ABBREVIATIONS):
+            continue
+        return body[: index + 1].strip()
+    return body.strip()
 
 
 def disk_probe(name, vault, path):
-    """The clause every form carries: the done fact, read from disk this turn."""
+    """The clause every form carries: the done fact, read from disk this turn.
+
+    Every interpolated value is shell-quoted: the worker is told to run this text, and a
+    task name or vault carrying a quote or `$()` would otherwise break out of the command
+    it is embedded in.
+    """
     return (
         "And the disk probe in the latest turn: "
-        f'`vault-cli task show "{name}" --vault {vault} | grep -E \'^(Status|Phase):\'` '
-        "shows Status: completed, and "
-        f"`grep -cE '^[[:space:]]*-[[:space:]]*\\[( |/)\\]' \"{path}\"` prints 0.\n"
+        f"`vault-cli task show {shlex.quote(name)} --vault {shlex.quote(vault)} "
+        "| grep -E '^(Status|Phase):'` shows Status: completed, and "
+        f"`grep -cE '^[[:space:]]*-[[:space:]]*\\[( |/)\\]' {shlex.quote(path)}` prints 0.\n"
         "Live-state criteria need their own re-read command in that turn."
     )
 
@@ -136,7 +162,7 @@ def build(name, vault, path, crit, form, stamp):
 def main():
     parser = argparse.ArgumentParser(description="Emit a /goal condition with inlined SC.")
     parser.add_argument("--task")
-    parser.add_argument("--vault")
+    parser.add_argument("--vault", required=True)
     parser.add_argument("--file", help="task file path; bypasses the vault-cli lookup")
     parser.add_argument("--max-chars", type=int, default=4000)
     parser.add_argument("--compact-at", type=int, default=3600)
@@ -145,10 +171,10 @@ def main():
     if args.file:
         path = args.file
         name = args.task or pathlib.Path(args.file).stem
-        vault = args.vault or "<vault>"
+        vault = args.vault
     else:
-        if not (args.task and args.vault):
-            parser.error("--task and --vault are required unless --file is given")
+        if not args.task:
+            parser.error("--task is required unless --file is given")
         name, vault = args.task, args.vault
         path = task_file(name, vault)
         if not path:
@@ -165,7 +191,12 @@ def main():
 
     crit = criteria(text)
     if not crit:
-        print(f"goal-condition: no Success Criteria found in {path}", file=sys.stderr)
+        print(
+            f"goal-condition: no Success Criteria found in {path} — refusing to arm a "
+            "condition that cannot fail",
+            file=sys.stderr,
+        )
+        return 3
 
     stamp = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
     for form in ("full", "compact", "probe"):
