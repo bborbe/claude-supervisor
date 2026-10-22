@@ -1416,7 +1416,7 @@ def aged_events(ages, now, thresholds=PARK_AGE_THRESHOLDS):
     return out
 
 
-def post_repost(sid8, full, label, script_dir=None, timeout=30):
+def post_repost(sid8, full, label, reason="", script_dir=None, timeout=30):
     """Post one re-registered card via `attention-ask.py post`. True on success.
 
     Shelled out rather than re-implemented: that script owns the dedup key, the
@@ -1424,17 +1424,41 @@ def post_repost(sid8, full, label, script_dir=None, timeout=30):
     would be a second place for all three to drift — with the store's pruning
     rule turning a wrong `liveness_ref` into a silently deleted card rather than
     an error anyone would see.
+
+    ⚠️ **The card's SHAPE follows the park, and a native permission modal gets a
+    card that offers no answer.** A re-registered park used to be posted as a
+    `message` item unconditionally, which the board renders with a free-text
+    field. For a session parked on a native permission modal that field is a lie:
+    a typed answer reaches the store and nothing else — the modal is answered by
+    a keystroke in its own pane, and a `permission` card would not fix it either,
+    because the release path reads `resolved_by`, which only an arm writes and
+    the board never sends (`attention-ask.py`'s `POSTABLE_MECHANISMS` records the
+    same rule from the poster's side). So a permission-class park is posted as an
+    `ack`: it renders the text and no control at all, and the text says where the
+    gate actually lives and how to get there.
+
+    A question-class park keeps the `message` shape — its free-text field IS the
+    answer path, and narrowing it would remove the only way to answer a parked
+    closer line from the board.
     """
     script = os.path.join(
         script_dir or os.path.dirname(os.path.abspath(__file__)),
         "attention-ask.py")
     cmd = [sys.executable, script, "post",
            "--producer-id", full,
-           "--dedup-key", f"park:{sid8}",
-           "--payload",
-           f"{label}: this session is parked on the operator and the attention "
-           f"store holds no open item for it. Re-registered by the tracked-set "
-           f"watcher — answer it and the session can continue."]
+           "--dedup-key", f"park:{sid8}"]
+    if INCIDENT_KIND_BY_REASON.get(reason) == "permission":
+        cmd += ["--mechanism", "ack", "--payload",
+                f"{label}: this session is parked on a permission prompt. "
+                f"Answer it in the pane — a board answer cannot release a "
+                f"native permission modal."
+                + _jump_sentence(label)]
+    else:
+        cmd += ["--payload",
+                f"{label}: this session is parked on the operator and the "
+                f"attention store holds no open item for it. Re-registered by "
+                f"the tracked-set watcher — answer it and the session can "
+                f"continue."]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
@@ -1447,6 +1471,76 @@ def post_repost(sid8, full, label, script_dir=None, timeout=30):
               file=sys.stderr, flush=True)
         return False
     return True
+
+
+# The glyphs WezTerm prefixes a pane title with, copied from `jump.py`'s
+# `clean_title` rather than imported: this script ships as a plugin artifact that
+# must run with no sibling on the path, the same reason `_ENTITY` is copied.
+_STATUS_GLYPHS = ("✳", "◐", "◑", "⏺", "✻",
+                  "✽", "·", "●", "○")
+
+
+def _clean_title(title):
+    """A pane title with WezTerm's leading status glyph removed."""
+    text = (title or "").strip()
+    for glyph in _STATUS_GLYPHS:
+        if text.startswith(glyph):
+            return text[len(glyph):].strip()
+    return text
+
+
+def pane_for_session_name(name):
+    """The pane whose title is this session's name, or None.
+
+    Best-effort and non-fatal by construction: the card is still worth posting
+    without a jump target, so every failure path returns None and the payload
+    degrades to naming the pane-less fact. ⚠️ `None` never means "no pane
+    exists" — a failed `wezterm cli list` cannot prove that — so callers must
+    treat it as "not resolved", never as "there is none".
+    """
+    wanted = _clean_title(name)
+    if not wanted:
+        return None
+    try:
+        proc = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
+                              capture_output=True, text=True, timeout=5)
+        if proc.returncode != 0:
+            return None
+        panes = json.loads(proc.stdout)
+    except Exception:
+        return None
+    for pane in panes if isinstance(panes, list) else []:
+        if not isinstance(pane, dict):
+            continue
+        if _clean_title(pane.get("title")) == wanted:
+            return str(pane.get("pane_id"))
+    return None
+
+
+def _jump_sentence(label):
+    """The trailing sentence naming where to answer, empty when no pane resolves.
+
+    ⚠️ Shelled to `jump-link.py` for the same reason the post is shelled to
+    `attention-ask.py`: that script owns whether a clickable URL is available
+    and its own fallback, and re-deriving either here would be a second copy of
+    a rule that already has one home.
+    """
+    pane = pane_for_session_name(label)
+    if not pane:
+        return ""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "jump-link.py")
+    target = ""
+    try:
+        proc = subprocess.run([sys.executable, script, pane],
+                              capture_output=True, text=True, timeout=5)
+        if proc.returncode == 0:
+            target = proc.stdout.strip()
+    except Exception:
+        target = ""
+    if not target:
+        target = f"/supervisor:jump {pane}"
+    return f" Jump to pane {pane}: {target}"
 
 
 def answer_covers_current_park(row, since):
@@ -1488,11 +1582,20 @@ def answer_covers_current_park(row, since):
     return stamp.timestamp() >= since
 
 
-def repost_empty_parks(parked, entries, log_path, post=None, park_since=None):
+def repost_empty_parks(parked, entries, log_path, post=None, park_since=None,
+                       reasons=None):
     """Re-post a card for every parked session the store no longer holds.
 
-    Returns the `sid8`s re-posted. `post(sid8, full, label)` is injectable, so
-    the tests assert the call without a live store.
+    Returns the `sid8`s re-posted. `post(sid8, full, label, reason=...)` is
+    injectable, so the tests assert the call without a live store.
+
+    ⚠️ **`reasons` decides the card's SHAPE, and omitting it silently falls back
+    to the question shape.** It maps `sid8` to the `is_gated` reason this poll
+    observed; a permission-class reason (`INCIDENT_KIND_BY_REASON`) makes
+    `post_repost` emit an `ack` card with no input field, because the park is a
+    native permission modal that no board answer can release. A caller that
+    passes none gets the pre-change `message` card, which is the shape the
+    incident's defect was reported against — so the caller here always passes it.
 
     ⚠️ **The producer is the WORKER, not this watcher's manager.** A store item's
     session is its `producer_id` (`who-needs-me.py:268`), so posting as the
@@ -1575,7 +1678,8 @@ def repost_empty_parks(parked, entries, log_path, post=None, park_since=None):
                       f"answer={row.get('answer')!r}) — the operator already "
                       f"answered it, so this is not a store fault; not re-posted")
             continue
-        if not post(sid8, full, name or sid8):
+        if not post(sid8, full, name or sid8,
+                    reason=(reasons or {}).get(sid8, "")):
             continue
         out.append(sid8)
         log_event(log_path, "REPOST", sid8, name,
@@ -1847,7 +1951,13 @@ def main(argv=None):
             # newest forever and silence every later lost park on that session.
             repost_empty_parks(
                 parked, entries, log_path,
-                park_since={s: r.get("since") for s, r in park_ages.items()})
+                park_since={s: r.get("since") for s, r in park_ages.items()},
+                # The reason decides the card's SHAPE: a permission-class park is
+                # posted as an `ack` with no input field, because the modal is
+                # answerable only in the pane. Read from the same `state` the
+                # `parked` set came from, so the two can never disagree about
+                # which park this card is about.
+                reasons={s: state[s][2] for s in parked if s in state})
             # tmp + os.replace, same convention and same reason as the gated-set
             # write above: a truncated park file restarts every clock, and the
             # read path cannot tell that from a first run.

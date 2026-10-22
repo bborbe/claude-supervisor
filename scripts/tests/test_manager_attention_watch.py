@@ -1120,7 +1120,7 @@ class RepostTest(unittest.TestCase):
                     watch.repost_empty_parks(
                         list(parked), self.ENTRIES,
                         os.path.join(d, "events.jsonl"),
-                        post=lambda sid8, full, label: (
+                        post=lambda sid8, full, label, **kw: (
                             posted.append((sid8, full)) or True),
                         # Epoch 0 — the park predates every answer row, so the
                         # answer covers it. Tests that need the opposite pass one.
@@ -1159,7 +1159,7 @@ class RepostTest(unittest.TestCase):
                                    lambda *a, **kw: (set(), set())):
                 out = watch.repost_empty_parks(
                     [self.SID8], self.ENTRIES, os.path.join(d, "events.jsonl"),
-                    post=lambda *a: False)
+                    post=lambda *a, **kw: False)
         self.assertEqual(out, [], "a refused post is not a re-post")
 
     def test_an_answered_park_is_not_re_posted(self):
@@ -1198,7 +1198,7 @@ class RepostTest(unittest.TestCase):
                         watch, "answered_park_keys",
                         lambda *a, **kw: {self.SID8: self.ANSWERED_ROW}):
                     watch.repost_empty_parks(
-                        [self.SID8], self.ENTRIES, log, post=lambda *a: True,
+                        [self.SID8], self.ENTRIES, log, post=lambda *a, **kw: True,
                         park_since={self.SID8: 0.0})
             with open(log, encoding="utf-8") as fh:
                 rows = [json.loads(line) for line in fh if line.strip()]
@@ -1259,7 +1259,7 @@ class RepostTest(unittest.TestCase):
                         lambda *a, **kw: {self.SID8: self.ANSWERED_ROW}):
                     out = watch.repost_empty_parks(
                         [self.SID8], self.ENTRIES,
-                        os.path.join(d, "events.jsonl"), post=lambda *a: True)
+                        os.path.join(d, "events.jsonl"), post=lambda *a, **kw: True)
         self.assertEqual(out, [self.SID8])
 
 
@@ -1826,6 +1826,99 @@ class OpenIncidentTest(unittest.TestCase):
                 mock.patch.object(watch.subprocess, "run") as run:
             watch.open_incident(SID, "headless+closer")
         run.assert_not_called()
+
+
+class ParkCardShapeTest(unittest.TestCase):
+    """The re-posted card's SHAPE follows the park it is about.
+
+    ⚠️ **This is the 2026-10-22 board defect, pinned.** The tracked-set watcher
+    re-registered a tab worker parked on a native permission modal (`Ask` rule on
+    `Bash(git push:*)`) as a `message` card, so the board offered a free-text
+    field and a Submit button. A typed answer reaches the store and nothing else:
+    the modal is answered by a keystroke in its own pane. The card has to say so
+    and offer no field at all.
+
+    Both directions are asserted. Narrowing every re-posted card to `ack` would
+    pass a test that only checked the permission case, and would silently remove
+    the board's only way to answer a parked closer line — so the question-class
+    case is asserted to KEEP its input field.
+    """
+
+    FULL = "aaaa1111-0000-0000-0000-000000000000"
+
+    def _run(self, reason, pane=None):
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(watch.subprocess, "run", fake_run), \
+                mock.patch.object(watch, "pane_for_session_name",
+                                  lambda name: pane):
+            ok = watch.post_repost("aaaa1111", self.FULL, "Some Task",
+                                   reason=reason)
+        return ok, captured.get("cmd") or []
+
+    def test_a_permission_modal_park_posts_an_ack_with_no_input(self):
+        ok, cmd = self._run("busy+parked-modal")
+        self.assertTrue(ok)
+        self.assertEqual(cmd[cmd.index("--mechanism") + 1], "ack",
+                         "an ack item renders no input field and no Allow/Deny, "
+                         "which is the only honest shape for a native modal")
+        self.assertNotIn("--option", cmd)
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertIn("Answer it in the pane", payload)
+        self.assertIn("cannot release a native permission modal", payload,
+                      "the card must say WHY the board cannot answer it, or the "
+                      "operator reads the missing field as a rendering fault")
+
+    def test_a_registry_waiting_park_is_also_permission_class(self):
+        _, cmd = self._run("registry:waiting")
+        self.assertEqual(cmd[cmd.index("--mechanism") + 1], "ack")
+
+    def test_a_closer_park_keeps_its_message_card_and_input(self):
+        ok, cmd = self._run("headless+closer")
+        self.assertTrue(ok)
+        self.assertNotIn("--mechanism", cmd,
+                         "the message default is what gives this card its input "
+                         "field — the answer path for a parked closer line")
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertIn("parked on the operator", payload)
+
+    def test_a_resolved_pane_puts_a_jump_target_on_the_card(self):
+        _, cmd = self._run("busy+parked-modal", pane="1907")
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertIn("1907", payload)
+        self.assertTrue("/supervisor:jump 1907" in payload
+                        or "jump?pane=1907" in payload, payload)
+
+    def test_an_unresolved_pane_posts_the_card_anyway(self):
+        ok, cmd = self._run("busy+parked-modal", pane=None)
+        self.assertTrue(ok, "a pane read that fails must never suppress the card")
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertNotIn("Jump to pane", payload)
+
+    def test_the_reason_reaches_the_post_from_the_park_set(self):
+        seen = []
+
+        def fake_post(sid8, full, label, reason=""):
+            seen.append((sid8, reason))
+            return True
+
+        with mock.patch.object(watch, "open_store_items",
+                               lambda *a, **kw: (set(), set())), \
+                mock.patch.object(watch, "answered_park_keys",
+                                  lambda *a, **kw: {}):
+            watch.repost_empty_parks(
+                ["aaaa1111"],
+                {"aaaa1111": ("Some Task", self.FULL)},
+                "/dev/null",
+                post=fake_post,
+                reasons={"aaaa1111": "busy+parked-modal"})
+        self.assertEqual(seen, [("aaaa1111", "busy+parked-modal")],
+                         "without the reason the post cannot pick a shape and "
+                         "falls back to the card this defect was filed against")
 
 
 if __name__ == "__main__":

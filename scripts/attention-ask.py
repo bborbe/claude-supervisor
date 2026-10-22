@@ -293,12 +293,27 @@ def is_store_item_id(candidate):
     return len(candidate) == STORE_ITEM_ID_LEN and all(c in _HEX_DIGITS for c in candidate)
 
 
-# The answer mechanisms this script posts. It asks questions, so `message` is
-# the only one it offers: a `permission` item is approve-shaped and only the
-# operator may answer it, in the session that raised it, and an `ack` item asks
-# nothing. Offering either here would let a manager post a gate it cannot
-# legally answer.
+# The answer mechanism this script posts by default. It asks questions, so
+# `message` is the default.
 MECHANISM = "message"
+
+# The mechanisms a caller may select with `--mechanism`.
+#
+# ⚠️ **`permission` is deliberately absent, and the omission is the rule rather
+# than an unfinished enum.** A `permission` item is approve-shaped: its verdict
+# is `decision`, it carries no options, and the release path reads `resolved_by`
+# — a field only an ARM writes, never the board (`attention-answer.py` records
+# why, and `attention-store-impl.go` permits the arm's second write for exactly
+# this class). A poster that minted one here would be creating a gate whose
+# Allow/Deny the operator can click and which releases nothing, which is the
+# defect this script must not be able to express.
+#
+# `ack` IS offered because it is the honest shape for a card that reports a
+# condition and asks nothing: it renders no input field and no Allow/Deny, so it
+# cannot offer an action it does not have. The re-registered-park arm uses it for
+# a session parked on a native permission modal — the modal is answerable only in
+# that session's pane, so a card there must say so and offer no field.
+POSTABLE_MECHANISMS = (MECHANISM, "ack")
 
 
 # The producer kinds the store accepts. It validates this field against a closed
@@ -534,6 +549,7 @@ def post_question(
     context,
     options,
     expires_at,
+    mechanism=MECHANISM,
 ):
     body = {
         "producer_id": producer_id,
@@ -542,7 +558,7 @@ def post_question(
         "dedup_key": dedup_key,
         "interrupt_class": interrupt_class,
         "payload": payload,
-        "answer_mechanism": MECHANISM,
+        "answer_mechanism": mechanism,
     }
     # Omitted rather than sent empty. The schema treats an absent `context` and
     # an absent `expires_at` as pre-change/optional values, while "" would be a
@@ -816,6 +832,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             context=args.context,
             options=options,
             expires_at=expires_at,
+            mechanism=_mechanism_or_default(args),
         )
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
@@ -842,9 +859,34 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
     return 0
 
 
+def _mechanism_or_default(args):
+    """`args.mechanism`, or the default when the caller did not supply one.
+
+    ⚠️ Not a bare `getattr(args, "mechanism", MECHANISM)`. `getattr` only falls
+    back when the ATTRIBUTE is absent, and callers that build their args from a
+    mock or a hand-made namespace carry one that is not a legal mechanism — which
+    is how a test fixture's placeholder reached the request body and made the
+    store's own field unserialisable. Anything outside the postable set is the
+    default, because argparse has already rejected every bad *typed* value.
+    """
+    mechanism = getattr(args, "mechanism", MECHANISM)
+    return mechanism if mechanism in POSTABLE_MECHANISMS else MECHANISM
+
+
 def cmd_post(args, out=sys.stdout):
     producer = _producer_or_refuse(args, out)
     if producer is None:
+        return 2
+    mechanism = _mechanism_or_default(args)
+    if mechanism == "ack" and (args.option or args.recommend):
+        # The store rejects `options` on an `ack` item (the schema gives the
+        # mechanism no choices), so the refusal has to land here where it reads
+        # as a bad argument rather than a store fault.
+        print(
+            "REFUSED: --mechanism ack asks nothing, so --option and --recommend "
+            "are not allowed — post the card with no choices, or drop the "
+            "--mechanism flag to ask a message question.",
+            file=out)
         return 2
     try:
         options = build_options(args.option, args.recommend)
@@ -998,6 +1040,16 @@ def main(argv=None):
     post.add_argument("--dedup-key", required=True)
     post.add_argument("--payload", required=True)
     post.add_argument("--context", default="")
+    post.add_argument(
+        "--mechanism",
+        default=MECHANISM,
+        choices=POSTABLE_MECHANISMS,
+        help="how this item is answered; default message. `ack` reports a "
+             "condition and asks nothing (no input field, no options). "
+             "`permission` is not offered: a permission gate is released only "
+             "by an arm answer carrying resolved_by, which the board never "
+             "sends, so a card minted here could not release one.",
+    )
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
     post.add_argument(
