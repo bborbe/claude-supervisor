@@ -52,11 +52,33 @@ export const A2A_STREAM_METHOD = 'SendStreamingMessage'
 // The role every part of this client's messages carries. ⚠️ The enum string, not `"user"`.
 const A2A_USER_ROLE = 'ROLE_USER'
 
+// The `A2A-Version` header, or nothing at all — `{}` spread into a request's headers.
+//
+// ⚠️ AN ABSENT HEADER IS NOT "NO VERSION", IT IS `0.3`. Measured 2026-10-22 against a2a-go v2.7.0
+// (`a2asrv/intercepted_handler.go` `checkProtocolVersion`): a request carrying no `A2A-Version`
+// has its client version defaulted to `"0.3"` and is then refused with
+// `-32009 … requested "0.3", served "1.0"` by any service serving 1.0. The refusal arrives inside
+// a well-formed HTTP 200 envelope, so every transport check passes while nothing ran.
+//
+// ⚠️ SO THE VALUE IS READ FROM THE CARD AND NEVER GUESSED. `a2a.Version` is a constant on the
+// SERVER side, and a client that hardcodes it breaks against the first peer serving a different
+// one — which is exactly the defect this header repairs, mirrored. An absent `protocolVersion`
+// therefore sends NO header rather than a default: that keeps a server which advertises none
+// behaving exactly as it did before this existed.
+export function a2aVersionHeader(protocolVersion) {
+  if (typeof protocolVersion !== 'string' || protocolVersion === '') return {}
+  return { 'a2a-version': protocolVersion }
+}
+
 // The A2A endpoint a worker's Agent Card advertises — or `{ error }` when it advertises none.
 //
 // ⚠️ REFUSES RATHER THAN FALLING BACK, and the refusal names the nested field, because the
 // wrong read is invisible: a top-level `url` is a plausible-looking key that a correct card
 // simply does not carry, so a fallback would quietly send every turn to whatever it named.
+//
+// `protocolVersion` rides beside `url` because they come from the same object and a caller that
+// read one without the other would send a turn to the right place speaking the wrong protocol —
+// see `a2aVersionHeader`. It is `undefined` when the card names none, which is a supported state.
 export function resolveA2AEndpoint(card) {
   const interfaces = card?.supportedInterfaces
   if (!Array.isArray(interfaces) || interfaces.length === 0) {
@@ -75,7 +97,11 @@ export function resolveA2AEndpoint(card) {
         'nothing, and a fallback would send every turn somewhere the card never named.',
     }
   }
-  return { url }
+  const protocolVersion = interfaces[0]?.protocolVersion
+  return {
+    url,
+    ...(typeof protocolVersion === 'string' && protocolVersion !== '' ? { protocolVersion } : {}),
+  }
 }
 
 // The `contextId` to send, given the one this conversation already used.
@@ -106,7 +132,7 @@ export function a2aContextIdFor({ previous, mint } = {}) {
 // and a flattened `parts` array. `contextId` is REQUIRED here even though the vault client makes
 // it optional, because that client can send to a worker's default conversation by design while
 // this one must not — the supervisor always knows which conversation it is continuing.
-export function a2aStreamRequestFor({ endpoint, contextId, text, token, messageId } = {}) {
+export function a2aStreamRequestFor({ endpoint, contextId, text, token, messageId, protocolVersion } = {}) {
   const missing = (name, value) =>
     value === undefined || value === null || value === ''
       ? `\`${name}\` is required to send a turn over A2A.`
@@ -125,6 +151,7 @@ export function a2aStreamRequestFor({ endpoint, contextId, text, token, messageI
       // response from a streaming route, which reads as a turn that produced no frames.
       accept: 'text/event-stream',
       authorization: `Bearer ${token}`,
+      ...a2aVersionHeader(protocolVersion),
     },
     body: {
       jsonrpc: '2.0',
@@ -568,7 +595,7 @@ export const A2A_PUSH_CONFIG_METHOD = 'CreateTaskPushNotificationConfig'
 // the RECEIVER verifies, which the SDK later echoes back as the `A2A-Notification-Token` header.
 // Swapping them would either hand the receiver's token to the worker or register the worker's
 // token as the push credential — and either one still returns a 200.
-export function a2aPushConfigCallFor({ endpoint, taskId, push, token, requestId = 1 } = {}) {
+export function a2aPushConfigCallFor({ endpoint, taskId, push, token, requestId = 1, protocolVersion } = {}) {
   for (const [name, value] of Object.entries({ endpoint, taskId, token })) {
     if (typeof value !== 'string' || value === '') {
       return { error: `\`${name}\` is required to register a push callback over A2A.` }
@@ -582,6 +609,11 @@ export function a2aPushConfigCallFor({ endpoint, taskId, push, token, requestId 
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${token}`,
+      // ⚠️ THE SAME HEADER AS THE TURN, AND FOR THE SAME REASON. This call reaches the worker's
+      // own JSONRPC handler, which runs the same version gate — so omitting it here refuses the
+      // registration with the identical -32009 while the turn itself succeeds. The symptom is not
+      // an error but a silent one: the status channel never carries anything.
+      ...a2aVersionHeader(protocolVersion),
     },
     body: {
       jsonrpc: '2.0',
@@ -607,7 +639,7 @@ export const A2A_PUSH_CONFIG_LIST_METHOD = 'ListTaskPushNotificationConfigs'
 // ⚠️ `CreateTaskPushNotificationConfig` IS ONLY EVIDENCE THAT THE WORKER ACCEPTED A REGISTRATION.
 // It says nothing about what the worker then stored, and an accepted-then-dropped config is
 // indistinguishable from a working one until something reads it back. This builder is that read.
-export function a2aPushConfigListCallFor({ endpoint, taskId, token, requestId = 1 } = {}) {
+export function a2aPushConfigListCallFor({ endpoint, taskId, token, requestId = 1, protocolVersion } = {}) {
   for (const [name, value] of Object.entries({ endpoint, taskId, token })) {
     if (typeof value !== 'string' || value === '') {
       return { error: `\`${name}\` is required to read a push callback back over A2A.` }
@@ -618,6 +650,8 @@ export function a2aPushConfigListCallFor({ endpoint, taskId, token, requestId = 
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${token}`,
+      // Same gate as the turn and the registration — see `a2aPushConfigCallFor`.
+      ...a2aVersionHeader(protocolVersion),
     },
     body: {
       jsonrpc: '2.0',
@@ -634,6 +668,13 @@ export function a2aPushConfigListCallFor({ endpoint, taskId, token, requestId = 
 // answers a single object, and asking it for a stream reads as a call that produced no frames.
 // `contextId` is sent for the same reason the worker half sends it — a control call is a turn on
 // the controller's conversation, and a follow-up must land on the one it started.
+//
+// ⚠️ NO `A2A-Version` HEADER HERE, AND THAT IS A MEASURED DECISION RATHER THAN AN OVERSIGHT. This
+// reaches the a2a-worker-controller, a DIFFERENT SERVICE from the worker: it pins a2a-go v2.6.0,
+// which has no `checkProtocolVersion` at all, so a version here would assert a contract it never
+// advertised. ⚠️ **Whoever bumps the controller past v2.7.0 must add a card read on this plane** —
+// from that version the handler defaults an absent header to `"0.3"` and refuses it, and this
+// function is where they will be standing. See `a2aVersionHeader`.
 export function a2aSendRequestFor({ endpoint, contextId, request, token, messageId } = {}) {
   for (const [name, value] of Object.entries({ endpoint, contextId, token, messageId })) {
     if (value === undefined || value === null || value === '') {

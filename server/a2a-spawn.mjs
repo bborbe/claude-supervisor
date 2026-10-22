@@ -589,6 +589,7 @@ export function a2aWorkerRecord({
   workerId,
   a2aUrl,
   workerToken,
+  protocolVersion,
   parentSession = null,
   createdAt,
 } = {}) {
@@ -645,6 +646,13 @@ export function a2aWorkerRecord({
       a2aUrl,
       workerId,
       workerToken,
+      // ⚠️ NOT A CREDENTIAL, but it rides here for the same reason and must be carried, not
+      // re-derived: every later call to this worker — a follow-up turn, the push registration, the
+      // read-back — has to speak the version the worker's card advertised at spawn time, and the
+      // record is the only thing those paths still hold. `undefined` when the card named none,
+      // which sends no header. Safe to project, unlike its three neighbours above; it is left out
+      // of `agentView` / `buildRecord` anyway so the roster's shape does not grow per wire detail.
+      protocolVersion,
     },
   }
 }
@@ -790,7 +798,11 @@ export async function fetchWorkerCard({
   }
   const endpoint = resolveA2AEndpoint(card)
   if (endpoint.error) return { error: endpoint.error }
-  return { card, endpoint: endpoint.url }
+  // `protocolVersion` rides beside the endpoint because every later call to this worker — the turn
+  // and both push-config calls — must speak the version this card advertises. It is `undefined`
+  // when the card names none, and that is a supported state: no header is sent, which is what the
+  // client did before negotiation existed.
+  return { card, endpoint: endpoint.url, protocolVersion: endpoint.protocolVersion }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -848,10 +860,11 @@ export async function openWorkerTurn({
   text,
   token,
   messageId,
+  protocolVersion,
   ackTimeoutMs = A2A_ACK_TIMEOUT_MS,
   fetchImpl = fetch,
 } = {}) {
-  const call = a2aStreamRequestFor({ endpoint, contextId, text, token, messageId })
+  const call = a2aStreamRequestFor({ endpoint, contextId, text, token, messageId, protocolVersion })
   if (call.error) return { error: call.error }
 
   // ⚠️ `issued` RESOLVES TO THE RESPONSE ITSELF, not to a wrapper — because it is handed back as
@@ -913,10 +926,11 @@ export async function registerPushCallbackOnWorker({
   taskId,
   push,
   token,
+  protocolVersion,
   fetchImpl = fetch,
   timeoutMs = A2A_REGISTER_TIMEOUT_MS,
 } = {}) {
-  const call = a2aPushConfigCallFor({ endpoint, taskId, push, token })
+  const call = a2aPushConfigCallFor({ endpoint, taskId, push, token, protocolVersion })
   if (call.error) return { error: call.error }
   // ⚠️ BOUNDED, AND THE BOUND IS HALF THE FIX. Without a signal this await can never settle, and
   // the caller's write never happens — see `A2A_REGISTER_TIMEOUT_MS`. A non-positive bound disables
@@ -963,10 +977,11 @@ export async function readPushCallbackFromWorker({
   endpoint,
   taskId,
   token,
+  protocolVersion,
   fetchImpl = fetch,
   timeoutMs = A2A_REGISTER_TIMEOUT_MS,
 } = {}) {
-  const call = a2aPushConfigListCallFor({ endpoint, taskId, token })
+  const call = a2aPushConfigListCallFor({ endpoint, taskId, token, protocolVersion })
   if (call.error) return { error: call.error }
   const signal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
   let res

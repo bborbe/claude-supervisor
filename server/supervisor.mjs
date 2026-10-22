@@ -1814,6 +1814,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     workerId: created.worker.worker_id,
     a2aUrl: card.endpoint,
     workerToken: created.token,
+    protocolVersion: card.protocolVersion,
     parentSession: parentSessionId({ dir: config.sessionsDir }),
     createdAt: new Date().toISOString(),
   })
@@ -1864,6 +1865,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     text: prompt,
     token: created.token,
     messageId: randomUUID(),
+    protocolVersion: card.protocolVersion,
   })
 
   // The conversation the first turn opened — what `send_agent_message` continues. Held in memory
@@ -1936,6 +1938,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
           taskId,
           push,
           token: created.token,
+          protocolVersion: card.protocolVersion,
         })
         // ⚠️ RECORDED, NOT DISCARDED — and that is the whole fix. `registerPushCallbackOnWorker`
         // returns its refusal precisely so the caller can record it, and this call used to drop
@@ -3118,6 +3121,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           text: args.message,
           token: channel.token,
           messageId: randomUUID(),
+          protocolVersion: channel.protocolVersion,
         })
         const sendMs = Date.now() - t0
         if (sent.error) return reply({ error: `the turn could not be sent: ${sent.error}`, send_ms: sendMs })
@@ -3160,6 +3164,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               taskId,
               push,
               token: push.token,
+              protocolVersion: channel.protocolVersion,
             })
             agent.pushRegistration = registration.error
               ? { state: 'attempted-error', taskId, error: registration.error, at: new Date().toISOString() }
@@ -3376,6 +3381,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         endpoint: agent.a2aUrl,
         taskId: reg.taskId,
         token: agent.workerToken,
+        protocolVersion: agent.protocolVersion,
       })
       if (out.error) return reply({ error: out.error, task_id: reg.taskId })
       return reply({ agent_id: agent.id, task_id: reg.taskId, configs: out.configs })
