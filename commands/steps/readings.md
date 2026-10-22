@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — print all three readings with the marker line (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py`; commands in the step)
+When: every tick — take all four readings (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py` · `next-focus.py`; commands in the step)
 
 ## The saturation reading — the ratio, not tok/s
 
@@ -48,3 +48,26 @@ Read it from `python3 $P/unarmed-goals.py --vault "<vault>" --tasks-dir "<vault>
 ⚠️ **`unknown` is a third answer, not `0`.** An unreadable session registry prints `unarmed goals: unknown` and exits non-zero. Print it as it comes back; never round it down to a number.
 
 ⚠️ **The line reports; it never arms.** Arming a manager is the operator's answer to a `start manager` card (`commands/steps/propose-manager.md`), never this reading's act — `docs/fleet-surface.md` bars a manager from starting one on its own initiative.
+
+## The next-focus reading
+
+Every tick takes this reading; the block below is rendered as **Output shape item 2**, not at the marker line:
+
+    Next focus (3/30)
+      1. Write the Gate Contract for ORB XAUUSD V8 … — <vault>/60 Periodic Notes/Weekly/2026-W43.md:65 — …
+      2. ORB DE40 W43 Sunday Review … — <vault>/60 Periodic Notes/Weekly/2026-W43.md:79 — …
+      left for the next round (cap 5)
+
+Read it from `python3 $P/next-focus.py --vault "<vault>" --tasks-dir "25 Tasks"`; `--tasks-dir` is **vault-relative** (default `25 Tasks`) — the script joins it to `--vault`, so pass the bare directory name; an absolute path is used as-is rather than joined. ⚠️ **Capacity: the script reads it itself** (`worker-sessions.py --count`, `worker-target.py`), so a round reaching this reading first — it is router row 15, ahead of both the voice step at 16 and the render at 18 — passes nothing, and that is correct. `--live`/`--target` override it for a round that already holds the numbers (a later re-read of the table), and passing them is what keeps this block's head and Output shape item 1's `workers:` line from disagreeing. `--now <ISO>` pins the period. ⚠️ **It executes the vault's own `.claude/scripts/prometheus-alerts.sh`** — the operator's declared alert source, and the vault is worker-writable, so that is a deliberate trust boundary; a round that keeps its alert script outside the vault passes `--alerts-script <path>` and no vault content is executed. ⚠️ **Run it ONCE with `--json`**: that form carries both the rendered block (`render`) and the proposals' dedup keys and payloads (`proposed[].card_key`, `proposed[].payload`), so a card-posting round never needs a second invocation. **The script owns the parse, the tier order, the cap and the dedup key** — read the cap off the block it prints, never from this page, and never re-derive any of them at this call site. Read its header for the order and why it is what it is.
+
+**It is the round's answer to "what should the free slot do?".** The sweep classifies live sessions and never reads the pages the operator writes to rank work, so without this reading a free slot goes to whatever was filed last. Measured 2026-10-21: `grep -rln 'Next focus'` over the repo returned nothing — the capability did not exist, so every round chose blind.
+
+⚠️ **A `phase: todo` row renders `needs your approval` and carries no action at all** — not an empty one. Such a row is reported and opens nothing — no spawn, no resume, no nudge. The rule's single home is `agents/goal-sweep-reader.md` § step 4's *Waiting-approval* bullet, with `the Manager Session runbook` § Step 4 carrying the operator's copy.
+
+⚠️ **The held line is not an omission.** At or above the target the block reads `Next focus: held — at target (<live>/<target>)`; an unreadable capacity store reads `held — workers unknown`. Both still print. A suppressed round and a round that found nothing must never render the same, and a fleet that cannot count itself is not an idle fleet — `unknown` is a third answer, never `0`.
+
+⚠️ **Proposals are capped and the remainder is named.** **Every** item under `Proposed for this week's plan:` gets its own card — the cap is the number on the `left for the next round (cap <n>)` line that **follows the `Proposed for this week's plan:` rows** (the block also carries a `(cap <n>)` line for the ranked candidates, so take the one after the proposals), never from this page — each with its own stable `card_key` from the script (`proposed[].card_key` in `--json`), posted as **one card each — never a batch**: `python3 $P/attention-ask.py post --dedup-key "<that row's card_key>" --payload <that row's payload, verbatim and UNQUOTED> --context "proposed for this week's plan" --option "add it to the plan" --option "leave it out" --recommend "add it to the plan"`. ⚠️ **`payload` arrives already shell-quoted from the script — paste it bare, never inside `"…"`.** The text it carries is an alert row's raw `prometheus-alerts.sh` line, or a task/goal filename any worker can choose, so hand-assembling `"<name> — <why> — <file>:<line>"` lets a `"` break the quoting and a `$(…)` or backtick **execute** in this session's shell. Never rebuild the string at this call site. The rest print `left for the next round (cap <n>): <name>, <name>, … and <n> more` — **named, not a bare count**: the first five are listed and the rest are counted (`and <n> more`), so the operator can see what the cap is holding back rather than only that something is. ⚠️ **A firing prod alert is ranked FIRST and is never in that remainder** — it is the one proposal that is time-critical, and behind the P1 rows it was capped out entirely whenever three or more unplanned P1 tasks existed. 38 open `priority: 1` tasks existed on 2026-10-21, so an unbounded rule would have put 38 cards on the board in one round. ⚠️ **The card is an ASK, never an act** — no plan page is edited, no item added; the operator's answer is read back with `attention-ask.py poll <item-id>`.
+
+⚠️ **Any non-zero exit is a REFUSAL, never "nothing to do".** An unreadable vault or a bad `--now` exits 2 with the reason on stderr, and an unexpected failure is mapped to the same 2 rather than escaping as a traceback — render it as `Next focus: refused — <that reason>`, per Output shape item 2; an empty plan set exits 0 with `note:` lines. The two must not render the same.
+
+⚠️ **The reading reports; it never opens.** Opening the approved candidate is the operator's answer to the card, executed through `/supervisor:open` — never this reading's act.
