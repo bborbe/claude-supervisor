@@ -46,7 +46,7 @@ test('a read-only entry matches its extensions', () => {
 
 test('the prefix is a whole token, not a substring', () => {
   // Catches a `key.includes(prefix)` implementation — the exact bug `policy.mjs` documents for
-  // `match: 'ls '` also matching `rm -rf ~/Documents && ls `.
+  // a `match: 'ls '` rule also matching a destructive command with `&& ls ` appended.
   const list = entries()
   assert.equal(matchManagerEntry(list, 'Bash', 'lsblk'), null)
   assert.equal(matchManagerEntry(list, 'Bash', 'catalogue'), null)

@@ -18,8 +18,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { loadManagerAllowlist, matchManagerEntry, MANAGER_ALLOWLIST_FILE } from './manager-allowlist.mjs'
-import { config } from './config.mjs'
+import { loadManagerAllowlist, matchManagerEntry, MANAGER_ALLOWLIST_FILE } from '../server/manager-allowlist.mjs'
+import { config } from '../server/config.mjs'
 
 // The five pinned probes.
 //
