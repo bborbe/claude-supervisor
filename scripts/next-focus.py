@@ -59,6 +59,9 @@ PROPOSAL_CAP = 3
 TERMINAL = {"completed", "aborted"}
 
 FM_LINE = re.compile(r"^([a-z_]+):\s*(.*)$")
+# A block-style list entry under a key: `  - [[Some Task]]`. Column-0 keys never match
+# FM_LINE when indented, so the two regexes cannot claim the same line.
+FM_ITEM = re.compile(r"^\s+-\s+(.*)$")
 
 
 # --------------------------------------------------------------------------- io
@@ -70,7 +73,11 @@ def read_text(path):
         return Path(path).read_text(encoding="utf-8"), None
     except FileNotFoundError:
         return None, "missing"
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError is load-bearing: a non-UTF-8 file raises UnicodeDecodeError, which
+        # is NOT an OSError — catching only OSError crashed the every-tick reading
+        # instead of rendering that plan as unread, the exact collapse the three-valued
+        # rule forbids.
         return None, f"unreadable ({exc.__class__.__name__})"
 
 
@@ -86,10 +93,25 @@ def frontmatter(text):
     if end < 0:
         return {}
     out = {}
+    pending = None
     for line in text[4:end].splitlines():
+        item = FM_ITEM.match(line)
+        if item and pending:
+            more = item.group(1).strip().strip('"').strip("'")
+            out[pending] = ", ".join(x for x in (out[pending], more) if x)
+            continue
         m = FM_LINE.match(line)
         if m:
-            out[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+            key = m.group(1)
+            value = m.group(2).strip().strip('"').strip("'")
+            out[key] = value
+            # A key with no inline value may carry a BLOCK-style list, and `blocked_by`
+            # is written as a block even for a single entry (agents/goal-sweep-reader.md).
+            # An inline-only read returns "" for it, so the hold-goal proposal class
+            # silently never fired — the value's absence read as "no blocker".
+            pending = key if not value else None
+            continue
+        pending = None
     return out
 
 
@@ -294,9 +316,19 @@ def read_capacity(live, target, plugin):
     return live, target, "flags" if from_flags else "scripts"
 
 
-def read_alerts(vault):
-    """`firing` / `clear` / `unread` / `unavailable` — never a number that could be `0`."""
-    script = Path(vault) / ".claude" / "scripts" / "prometheus-alerts.sh"
+def read_alerts(vault, script=None):
+    """`firing` / `clear` / `unread` / `unavailable` — never a number that could be `0`.
+
+    ⚠️ **TRUST BOUNDARY, stated because it is load-bearing:** the default script lives
+    INSIDE the vault, and the vault is writable by the workers this reading runs
+    alongside. Executing it here therefore runs vault-resident code in the manager
+    session every tick. That is accepted rather than accidental — the operator's own
+    alert source is a vault script, and the same session already runs the vault's
+    `sweep-gate.py` — but a caller that keeps its alert script outside the vault passes
+    `--alerts-script <path>` and this reading never executes vault content at all.
+    """
+    script = Path(script) if script else (
+        Path(vault) / ".claude" / "scripts" / "prometheus-alerts.sh")
     if not script.exists():
         return "unavailable", []
     try:
@@ -504,12 +536,12 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
 # ---------------------------------------------------------------------- main
 
 
-def build(vault, tasks_dir, day, live=None, target=None, plugin=None):
+def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_script=None):
     board = Board(vault, tasks_dir)
     notes = []
 
     live, target, capacity_source = read_capacity(live, target, plugin)
-    alerts_state, alerts_lines = read_alerts(vault)
+    alerts_state, alerts_lines = read_alerts(vault, alerts_script)
 
     today = due_today(board, Path(vault) / tasks_dir, day)
     if today is None:
@@ -615,6 +647,8 @@ def main(argv=None):
     ap.add_argument("--live", type=int, default=None)
     ap.add_argument("--target", type=int, default=None)
     ap.add_argument("--plugin", default=os.environ.get("CLAUDE_PLUGIN_ROOT") or str(Path(__file__).resolve().parent.parent))
+    ap.add_argument("--alerts-script", default=None,
+                    help="alert script to run; default is <vault>/.claude/scripts/prometheus-alerts.sh")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -627,7 +661,8 @@ def main(argv=None):
         print(f"next-focus: REFUSED — bad --now: {args.now}", file=sys.stderr)
         return 2
 
-    result = build(args.vault, args.tasks_dir, day, args.live, args.target, args.plugin)
+    result = build(args.vault, args.tasks_dir, day, args.live, args.target,
+                   args.plugin, args.alerts_script)
     print(json.dumps(result, indent=2) if args.json else result["render"])
     return 0
 

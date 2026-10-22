@@ -259,6 +259,19 @@ class NextFocusTest(unittest.TestCase):
         result = self.run_script()
         self.assertNotIn("Parked Goal", [r["name"] for r in result["proposed"]])
 
+    def test_block_style_blocked_by_is_read(self):
+        """The vault writes `blocked_by` as a BLOCK even for one entry.
+
+        `agents/goal-sweep-reader.md` states the shape explicitly: a read that matches
+        the key line and takes its inline scalar returns empty. The inline-only parser
+        therefore never fired this proposal class at all.
+        """
+        self.write("24 Goals/Blocked Goal.md",
+                   "---\nstatus: hold\nphase: planning\nblocked_by:\n"
+                   "  - Some Bug Task\n---\n\n# Blocked Goal\n")
+        result = self.run_script()
+        self.assertIn("Blocked Goal", [r["name"] for r in result["proposed"]])
+
     # -- the three-valued reads --------------------------------------------
 
     def test_alerts_unread_on_nonzero_exit(self):
@@ -271,6 +284,28 @@ class NextFocusTest(unittest.TestCase):
 
     def test_alerts_unavailable_without_the_script(self):
         self.assertEqual(self.run_script()["alerts"], "unavailable")
+
+    def test_alerts_script_override_reads_outside_the_vault(self):
+        """`--alerts-script` is the escape from executing vault-resident code."""
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        script = pathlib.Path(outside.name) / "alerts.sh"
+        script.write_text("#!/bin/bash\necho 'total active alerts: 1'\n"
+                          "echo 'KafkaLagHigh'\n", encoding="utf-8")
+        result = self.run_script("--alerts-script", str(script))
+        self.assertEqual(result["alerts"], "firing")
+
+    def test_non_utf8_plan_renders_unread_not_crash(self):
+        """UnicodeDecodeError is a ValueError, NOT an OSError — it used to kill the tick.
+
+        The three-valued rule says an unreadable plan renders as unread; a decode error
+        escaping as a crash makes the every-tick reading produce no block at all.
+        """
+        path = self.vault / "60 Periodic Notes" / "Weekly" / f"{WEEK}.md"
+        path.write_bytes(b"\xff\xfe not valid utf-8")
+        result = self.run_script()          # asserts returncode 0
+        self.assertTrue(any("unreadable" in note for note in result["notes"]),
+                        f"expected an unreadable note, got {result['notes']}")
 
     def test_alerts_clear_when_the_count_is_zero(self):
         self.add_alerts("#!/bin/bash\necho 'total active alerts: 0'\n")
