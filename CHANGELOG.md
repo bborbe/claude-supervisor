@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the watcher tests no longer write incidents into the operator's live ledger.** `scripts/tests/test_manager_attention_watch.py` never set `SUPERVISOR_INCIDENTS_LEDGER`, and `open_incident` shells out to `incident-ledger.py` inheriting this process's environment — so every test that drove the real loop opened a REAL incident. Measured 2026-10-22: two fixture records (`aaaa1111`, `15fce333`) had landed in `~/.claude/state/incidents/ledger.json`. The fixture now redirects the override to its own temp dir and restores it in `cleanup`.
+
 ## v0.202.0
 
 - feat: **Incident ledger — a blocker closes only on a verified resume.** `scripts/incident-ledger.py` records every worker blocker (permission prompt, question, stall) with owner, opened-at, deadline and outcome, and closes it only on the worker's next tool call or task change after the answer — never on a card close, which the attention store records as CLEARED rather than answered. `share --days <n>` prints the manager-resolved share, with an answered-but-never-resumed incident counted in the denominator only. `escalate` posts a board card for an incident past its deadline and stamps its caller (`round:<id>` from the periodic round, `manual:<session>` from a hand-run), so "escalated automatically" is an observation rather than an assertion.

@@ -101,11 +101,25 @@ class Fixture:
         if status is not None:
             with open(os.path.join(self.sessions, "96345.json"), "w") as fh:
                 json.dump({"sessionId": SID, "status": status, "pid": 96345}, fh)
+        # ⚠️ `open_incident` shells out to `incident-ledger.py`, which inherits THIS
+        # process's environment — so without an override every test that drives the
+        # real loop writes a REAL incident into the operator's ledger. Measured
+        # 2026-10-22: `incident:aaaa1111:permission` and a second fixture id landed
+        # in ~/.claude/state/incidents/ledger.json, because nothing in this file had
+        # ever set the override. Redirected here, restored in `cleanup`.
+        self._ledger_env = os.environ.get("SUPERVISOR_INCIDENTS_LEDGER")
+        os.environ["SUPERVISOR_INCIDENTS_LEDGER"] = os.path.join(
+            self.dir, "incidents.json"
+        )
 
     def probe(self):
         return watch.probe(self.tracked, self.tasks, self.projects, self.sessions)
 
     def cleanup(self):
+        if self._ledger_env is None:
+            os.environ.pop("SUPERVISOR_INCIDENTS_LEDGER", None)
+        else:
+            os.environ["SUPERVISOR_INCIDENTS_LEDGER"] = self._ledger_env
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
