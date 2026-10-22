@@ -315,7 +315,7 @@ When a task step is refused by the auto-mode classifier or by a gate you cannot 
 
 1. Write `~/.claude/state/attention/<your session id>.denial.json` — `{"tool": "<tool>", "reason": "<the denial's own words>", "ts": <epoch>}`.
 2. `SendMessage` your manager the task, the tool and the reason.
-3. Post an operator card: `attention-ask.py post --dedup-key "denial:<sha1(session_id + tool_name + lowercased whitespace-collapsed reason)[:12]>" --payload "<task>: <tool> denied — <reason>" --producer-id "<your session id>" --producer-kind session --option "fix the gate" --option "leave it" --recommend "fix the gate"`.
+3. Post an operator card: `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py post --dedup-key "denial:<sha1(session_id + tool_name + lowercased whitespace-collapsed reason)[:12]>" --payload "<task>: <tool> denied — <reason>" --producer-id "<your session id>" --producer-kind session --option "fix the gate" --option "leave it" --recommend "fix the gate"`. ⚠️ **Resolve the path — a bare `attention-ask.py` does not exist.** There is no `~/.claude/scripts/attention-ask.py`; the script ships in this plugin's `scripts/`, which is what the `${CLAUDE_PLUGIN_ROOT:-…}` prefix above resolves (the same form `answered-watch.py` uses at §8). Measured 2026-10-22: a bare invocation failed with `can't open file '/Users/bborbe/.claude/scripts/attention-ask.py': [Errno 2] No such file or directory` and the card had to be re-posted.
 
 ⚠️ **The marker is the only durable evidence.** A classifier denial raises **no** `permission` gate and writes no `pending_permissions` entry — the attention event log has no `answer`/`decision` field at all — so without the file the manager's round reads the feed as `clear` and buckets you `progressing` while you are blocked. Measured 2026-10-21: a worker denied `gh pr merge` twice reported nothing, and its round's receipt recorded no readings at all.
 
@@ -391,7 +391,7 @@ Short path (§0b): no `OPEN` table — `Next open box: <box>` instead.
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/answered-watch.py
 ```
 
-It emits `ANSWERED <item-id>` when the operator answers a card **this session posted** (`producer_id`), so a peer's card never fires it. **On `ANSWERED`, run `attention-ask.py poll <item-id>` and act immediately.** Re-arm on expiry as §0b does.
+It emits `ANSWERED <item-id>` when the operator answers a card **this session posted** (`producer_id`), so a peer's card never fires it. **On `ANSWERED`, run `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py poll <item-id>` and act immediately.** Re-arm on expiry as §0b does.
 
 Do **not** arm it when `👤 You:` reads `nothing` or `later (on …)`: the hook records those as `idle`, so there is no card. A manager's feed watcher is **not a second doorbell** — a raise vs an answer. Reading the answer — `ANSWERED:` releases; `NOT_OPERATOR_ANSWERED:`, `DECLINED:` and `HIDDEN` do not — has one home, `scripts/answered-attribution.py`.
 
