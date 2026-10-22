@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - docs: add the manager permission allowlist — the closed list of commands a manager may answer, the deny list that overrides it, and the clean-tree confinement that admits test runs
+- feat: managers answer permission prompts from the written allowlist — the server matches each parked prompt against `server/manager-allowlist.json` and records the matched entry on the answer record, and `goal-wrangler` answers only what the list covers, escalating everything else
 
 ## v0.200.1
 

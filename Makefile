@@ -73,10 +73,16 @@ check-drive-ledger-writes:
 check-drive-audit-budget:
 	@python3 scripts/check-drive-audit-budget.py
 
-check:
+check: check-manager-allowlist
 	@for f in server/*.mjs scripts/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server + scripts modules parse"
-	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json']]" && echo "  manifests parse"
+	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json','server/manager-allowlist.json']]" && echo "  manifests parse"
 	@test -f .mcp.json && test -f README.md && echo "  plugin files present"
+
+# Two artifacts, one policy: `server/manager-allowlist.json` is what the server matches against,
+# `docs/permission-allowlist.md` is what a human reads. Without this check they drift silently and
+# in the worst direction — the doc is the half a reader trusts, the JSON is the half that decides.
+check-manager-allowlist:
+	@node scripts/check-manager-allowlist.mjs
 
 # ⚠️ The guard the suite's own failure cannot give you, and the reason it is a target rather
 # than another paragraph of the note below. With `server/node_modules` absent, `node --test`
