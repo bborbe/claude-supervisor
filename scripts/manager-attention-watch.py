@@ -261,6 +261,107 @@ PARK_AGE_THRESHOLDS = (15, 60)
 # — is not limited to the reasons that incident happened to show.
 PARKED_REASONS = ("registry:waiting", "busy+parked-modal", "headless+closer")
 
+# Which incident kind a raised gate records. EVERY reason that can reach `NEW GATE`
+# appears here or in `STALL_REASON_PREFIXES`; an unmapped one records nothing rather
+# than defaulting to `question`, because a wrong kind is a record that reads as
+# evidence while answering a different question.
+#
+# ⚠️ `registry:waiting` is `permission`, and that is a decision rather than a
+# measurement: the registry reports *blocked on input*, which is the SUPERSET of a
+# permission prompt and a question (`CLAUDE.md` § Reading a worker, `awaiting_input`).
+# The kind that can be proven from this read is "the worker is parked on a tool gate";
+# a question the worker asked is read from its closer line, which is
+# `headless+closer`'s shape. Splitting `registry:waiting` further would need the
+# pending tool name, which this watcher does not read.
+INCIDENT_KIND_BY_REASON = {
+    "registry:waiting": "permission",
+    "busy+parked-modal": "permission",
+    "headless+closer": "question",
+    "closer-unknown": "question",
+}
+
+#: `stuck:` is a headless worker, `stuck-tab:` a registered one — both are a stall:
+#: the worker is not moving, which is a duration rather than a gate someone can answer.
+STALL_REASON_PREFIXES = ("stuck:", "stuck-tab:")
+
+
+def incident_kind(reason):
+    """The incident kind for a gate reason, or None when the reason records nothing."""
+    if reason in INCIDENT_KIND_BY_REASON:
+        return INCIDENT_KIND_BY_REASON[reason]
+    if reason.startswith(STALL_REASON_PREFIXES):
+        return "stall"
+    return None
+
+
+def open_incident(session_id, reason):
+    """Record a blocker incident for a gate this watcher just raised.
+
+    Shells out rather than importing: `incident-ledger.py` carries a hyphen in its
+    name so it cannot be imported by name, and this script ships as a plugin artifact
+    that must run with no sibling on the import path — the same reason `_ENTITY` and
+    `LIVE_WINDOW` are copied rather than imported.
+
+    ⚠️ Fires on the NEW GATE TRANSITION only, never on every poll: one subprocess per
+    gate, not per tick. `open` is idempotent on the dedup key, so a gate that is
+    re-raised cannot double-count in the denominator.
+
+    ⚠️ A failure here is SWALLOWED, deliberately. The watcher's job is to report
+    gates; a ledger that cannot be written must not take the watcher down and leave
+    every gate in the fleet unreported — the larger failure by far. The record is
+    the durable half, and a missing one is visible as a missing row.
+    """
+    kind = incident_kind(reason)
+    if kind is None:
+        return
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "incident-ledger.py")
+    if not os.path.exists(script):
+        return
+    command = [
+        sys.executable,
+        script,
+        "open",
+        "--session",
+        session_id,
+        "--kind",
+        kind,
+        "--owner",
+        session_id,
+        "--detected-by",
+        "gate:%s" % reason,
+    ]
+    try:
+        subprocess.run(command, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def resume_observer(projects_root):
+    """Close incidents whose worker acted after its answer.
+
+    One subprocess per poll, not per incident: the ledger owns the scan (which
+    transcript to read, what counts as a resume, which outcome to stamp) and this
+    watcher only supplies the projects root. Duplicating that scan here would put
+    the definition of "resumed" in two files, which is how the two readers of the
+    same fact start disagreeing.
+
+    ⚠️ Swallowed on failure for the same reason `open_incident` is: a ledger that
+    cannot be read must not take the watcher down and leave every gate in the fleet
+    unreported. A missed close is visible as an incident still open.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "incident-ledger.py")
+    if not os.path.exists(script):
+        return
+    try:
+        subprocess.run(
+            [sys.executable, script, "resume", "--projects-root", projects_root],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
 
 def tracked_ids(tracked_path, tasks_dir):
     """{sid8: task name} for every tracked task carrying an id, read fresh each poll.
@@ -1599,6 +1700,12 @@ def main(argv=None):
             state = probe(args.tracked, args.tasks_dir, args.projects_root,
                           args.sessions_dir, warned, args.live_dir,
                           tracked={s: n for s, (n, _) in entries.items()})
+            # The one transition this watcher RECORDS rather than reports: a worker
+            # that acted after its answer has resolved its blocker, and nothing else
+            # proves that. Runs every poll because a resume can land at any point
+            # between ticks, and a poll that skipped it would leave the incident open
+            # until the next tick after the worker had already moved on.
+            resume_observer(args.projects_root)
             key = gated_keys(state)
             # Counted every poll, not only under `--once`: the liveness record
             # reports both halves, and a HELD session is exactly what makes a
@@ -1645,6 +1752,13 @@ def main(argv=None):
                         print(f"NEW GATE  {sid8}  {label[:46]}  ::  {detail}",
                               flush=True)
                         prev[sid8] = content_key(state[sid8][2], state[sid8][1])
+                        # The FULL id, not `sid8`: the ledger keys on the session, and
+                        # an eight-character prefix is a collision waiting for two
+                        # sessions that share one. `tracked_entries` already holds it,
+                        # and falls back to the prefix only when it does not — which
+                        # the incident then records rather than inventing.
+                        open_incident(entries.get(sid8, (None, ""))[1] or sid8,
+                                      state[sid8][2])
                     elif kind == "HELD":
                         prev.pop(sid8, None)
                     else:
