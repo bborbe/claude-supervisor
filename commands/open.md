@@ -541,7 +541,7 @@ The rule that *produces* the value is not restated here — it has its single ho
 
 **Do NOT add `policy` while `defaultMode` is `auto`.** `auto` is in `POLICY_UNREACHABLE_MODES`, so `spawn_agent` **refuses** a named policy (*"policy would never be consulted"*). Omit it; the overlay needs `acceptEdits`.
 
-**`interactive` is the debug escape hatch, in both directions.** Pass `interactive=true` to watch a worker's screen live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn only. ⚠️ **Local rows only** (§ Spawn a worker item 7).
+**`interactive` is the debug escape hatch.** Pass `interactive=true` to watch a worker's screen live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn only. ⚠️ **Local rows only.**
 
 Requires `mcp__supervisor__*` in this session — its absence fails silently.
 
@@ -620,7 +620,7 @@ The trailing `"/color $CHIP"` is the initial prompt — Claude executes it at st
 
 ### 3.2 Send the work command — **wezterm fallback, plus every `goal_loop` row**
 
-**Skip on the `spawn_agent` path** — the work prompt *is* the spawn argument. ⚠️ **A `goal_loop: true` row uses this section on BOTH paths** — `send_agent_message` on `spawn_agent`, `send-text` here, after the pane shows `⎿ Goal set:`. ⚠️ **On the wezterm path send the condition here FIRST** — `send-text` its stdout, wait for `⎿ Goal set:`, then the work command; the colour stays the prompt.
+**Skip on the `spawn_agent` path** — the work prompt *is* the spawn argument. ⚠️ **A `goal_loop: true` row uses this section on BOTH paths** — `send_agent_message` on `spawn_agent`, `send-text` here, after the pane shows `⎿ Goal set:`. ⚠️ **On the wezterm path send the condition here FIRST** — `send-text` its stdout, wait for `⎿ Goal set:`, then the work command; the colour stays the prompt. **Bounded wait; `--first-step` drops (10).**
 
 The colour already ran as the spawn prompt, so the session is idle and the work command submits on the first try:
 
