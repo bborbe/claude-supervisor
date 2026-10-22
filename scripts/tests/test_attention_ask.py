@@ -1279,11 +1279,21 @@ class MechanismTest(unittest.TestCase):
                          "an arm writes and the board never sends")
         self.assertIn("ack", ask.POSTABLE_MECHANISMS)
 
-    def test_a_caller_supplied_value_outside_the_set_falls_back(self):
-        # The mock/namespace guard: argparse already rejects typed values, so
-        # this only protects a programmatic caller whose args carry something
-        # that is not a mechanism at all.
-        rc, body, _ = self._post(mechanism="not-a-mechanism")
+    def test_a_real_string_outside_the_set_is_refused(self):
+        # ⚠️ Not defaulted. argparse already rejects typed values, so reaching
+        # here with one means a programmatic caller — and silently downgrading
+        # `"ack "` to `message` posts exactly the misleading question card this
+        # change exists to remove, with no error anywhere.
+        rc, body, text = self._post(mechanism="ack ")
+        self.assertEqual(rc, 2)
+        self.assertIsNone(body)
+        self.assertIn("REFUSED", text)
+        self.assertIn("not one of", text)
+
+    def test_a_non_string_placeholder_takes_the_default(self):
+        # A mock/namespace caller carries a non-string here; that is a fixture,
+        # not a request, so it must not be refused.
+        rc, body, _ = self._post(mechanism=mock.Mock())
         self.assertEqual(rc, 0)
         self.assertEqual(body["answer_mechanism"], "message")
 

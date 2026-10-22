@@ -1452,7 +1452,7 @@ def post_repost(sid8, full, label, reason="", script_dir=None, timeout=30):
                 f"{label}: this session is parked on a prompt in its own pane. "
                 f"Answer it in the pane — a board answer cannot release a "
                 f"prompt raised in another session."
-                + _jump_sentence(label)]
+                + _jump_sentence(full, label, script_dir)]
     else:
         cmd += ["--payload",
                 f"{label}: this session is parked on the operator and the "
@@ -1473,20 +1473,65 @@ def post_repost(sid8, full, label, reason="", script_dir=None, timeout=30):
     return True
 
 
-# The glyphs WezTerm prefixes a pane title with, copied from `jump.py`'s
-# `clean_title` rather than imported: this script ships as a plugin artifact that
-# must run with no sibling on the path, the same reason `_ENTITY` is copied.
-_STATUS_GLYPHS = ("✳", "◐", "◑", "⏺", "✻",
-                  "✽", "·", "●", "○")
+# ⚠️ **Not a fixed glyph list.** The pane title carries BOTH WezTerm's status
+# glyph and the `⚙ ` session marker a manager-spawned tab is named with
+# (`-n '⚙ <label>'`), so `✳ ⚙ MDM split command` has to normalise to the same
+# thing as the registry's `⚙ MDM split command` AND as a bare `MDM split
+# command`. Enumerating the glyphs fixes only the first of those — the exact
+# bug `who-needs-me.py`'s `strip_status_glyph` had to fix, measured there as 17
+# of 27 rows disagreeing on the leading `⚙` alone. Stripping any leading
+# non-alphanumeric run handles every marker without a list to keep current.
+_TRAILING_SUFFIX = re.compile(r"\s*\(\d+\)\s*$")
 
 
-def _clean_title(title):
-    """A pane title with WezTerm's leading status glyph removed."""
-    text = (title or "").strip()
-    for glyph in _STATUS_GLYPHS:
-        if text.startswith(glyph):
-            return text[len(glyph):].strip()
-    return text
+def _norm_title(title):
+    """A pane or registry title reduced to the part two sides can agree on.
+
+    Leading decoration (status glyphs, the `⚙`/`✳` markers) is dropped, a
+    duplicated-title `(2)` suffix is dropped, and whitespace is collapsed — so
+    a pane title and a registry name compare on the words alone.
+    """
+    text = re.sub(r"^\W+", "", (title or "").strip(), flags=re.UNICODE)
+    text = _TRAILING_SUFFIX.sub("", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def registry_name_for_session(session_id):
+    """The registry `name` for a full session id, or None.
+
+    ⚠️ **This is the join the re-post actually needs.** `tracked_entries` yields
+    the TASK NAME, and a manager-spawned tab is titled with the session's own
+    registry name — the two are routinely different (`Register an Unmerge
+    Command on …` vs `⚙ MDM split command`). Matching a pane title against the
+    task name therefore finds nothing, and the card silently loses the jump
+    target it advertises. The registry is the one place the session's real name
+    lives, so it is read here rather than guessed from the label.
+
+    `None` on any failure, for the same reason `pane_for_session_name` returns
+    it: a failed read proves nothing, and the caller degrades rather than
+    suppressing the card.
+    """
+    if not session_id:
+        return None
+    try:
+        entries = os.listdir(SESSIONS_DIR)
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(SESSIONS_DIR, entry), encoding="utf-8") as fh:
+                record = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("sessionId") != session_id:
+            continue
+        name = record.get("name")
+        return name if isinstance(name, str) and name.strip() else None
+    return None
 
 
 def pane_for_session_name(name):
@@ -1498,7 +1543,7 @@ def pane_for_session_name(name):
     exists" — a failed `wezterm cli list` cannot prove that — so callers must
     treat it as "not resolved", never as "there is none".
     """
-    wanted = _clean_title(name)
+    wanted = _norm_title(name)
     if not wanted:
         return None
     try:
@@ -1512,7 +1557,7 @@ def pane_for_session_name(name):
     for pane in panes if isinstance(panes, list) else []:
         if not isinstance(pane, dict):
             continue
-        if _clean_title(pane.get("title")) != wanted:
+        if _norm_title(pane.get("title")) != wanted:
             continue
         # ⚠️ `str(pane.get("pane_id"))` is NOT enough: a pane dict without the
         # key yields the literal string "None", which is truthy, so the caller
@@ -1529,19 +1574,32 @@ def pane_for_session_name(name):
     return None
 
 
-def _jump_sentence(label):
+def _jump_sentence(full, label, script_dir=None):
     """The trailing sentence naming where to answer, empty when no pane resolves.
+
+    ⚠️ **The join goes through the REGISTRY name, never the task label.** The
+    caller supplies `label` — the tracked task's name — and a manager-spawned
+    tab is titled with the session's own registry name; those differ routinely
+    (`Register an Unmerge Command on …` vs `⚙ MDM split command`). Matching the
+    pane against the label therefore finds nothing and the card silently loses
+    the jump target it advertises, which is a control that looks present in the
+    code and is absent on every real card. The label is used only as a fallback
+    when the registry cannot name the session at all.
 
     ⚠️ Shelled to `jump-link.py` for the same reason the post is shelled to
     `attention-ask.py`: that script owns whether a clickable URL is available
     and its own fallback, and re-deriving either here would be a second copy of
-    a rule that already has one home.
+    a rule that already has one home. It honours the same `script_dir` seam as
+    the post, so a caller that redirects one sibling does not silently get the
+    other from `__file__`.
     """
-    pane = pane_for_session_name(label)
+    name = registry_name_for_session(full) or label
+    pane = pane_for_session_name(name)
     if not pane:
         return ""
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "jump-link.py")
+    script = os.path.join(
+        script_dir or os.path.dirname(os.path.abspath(__file__)),
+        "jump-link.py")
     target = ""
     try:
         proc = subprocess.run([sys.executable, script, pane],

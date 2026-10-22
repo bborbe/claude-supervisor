@@ -806,7 +806,8 @@ def _report_transport_failure(reason, item_may_exist, out):
     return 1
 
 
-def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
+def _post_and_report(args, producer_id, liveness_ref, payload, options, out,
+                     mechanism=MECHANISM):
     """POST one item and print its id and poll line. Returns the exit code."""
     # ⚠️ Resolved BEFORE the store call, and reported HERE rather than raised out
     # of the helper, so a bad `$ATTENTION_ASK_TTL_HOURS` follows the file's own
@@ -832,7 +833,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             context=args.context,
             options=options,
             expires_at=expires_at,
-            mechanism=_mechanism_or_default(args),
+            mechanism=mechanism,
         )
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
@@ -860,24 +861,39 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
 
 
 def _mechanism_or_default(args):
-    """`args.mechanism`, or the default when the caller did not supply one.
+    """`args.mechanism`, the default when the caller supplied none, else a refusal.
 
     ⚠️ Not a bare `getattr(args, "mechanism", MECHANISM)`. `getattr` only falls
     back when the ATTRIBUTE is absent, and callers that build their args from a
     mock or a hand-made namespace carry one that is not a legal mechanism — which
     is how a test fixture's placeholder reached the request body and made the
-    store's own field unserialisable. Anything outside the postable set is the
-    default, because argparse has already rejected every bad *typed* value.
+    store's own field unserialisable. A placeholder is silently defaulted.
+
+    ⚠️ **A real string outside the set is REFUSED, not defaulted.** argparse
+    already rejects every bad typed value, so reaching here with one means a
+    programmatic caller — and silently downgrading `"ack "` or `"ACK"` to
+    `message` would post exactly the misleading question card this change
+    exists to remove, with no error anywhere. A value that is not a string at
+    all is a placeholder and takes the default.
     """
     mechanism = getattr(args, "mechanism", MECHANISM)
-    return mechanism if mechanism in POSTABLE_MECHANISMS else MECHANISM
+    if mechanism in POSTABLE_MECHANISMS:
+        return mechanism, None
+    if isinstance(mechanism, str) and mechanism.strip():
+        return None, (
+            f"--mechanism {mechanism!r} is not one of "
+            f"{', '.join(POSTABLE_MECHANISMS)}")
+    return MECHANISM, None
 
 
 def cmd_post(args, out=sys.stdout):
     producer = _producer_or_refuse(args, out)
     if producer is None:
         return 2
-    mechanism = _mechanism_or_default(args)
+    mechanism, refusal = _mechanism_or_default(args)
+    if refusal:
+        print(f"REFUSED: {refusal}", file=out)
+        return 2
     if mechanism == "ack" and (args.option or args.recommend):
         # The store rejects `options` on an `ack` item (the schema gives the
         # mechanism no choices), so the refusal has to land here where it reads
@@ -908,7 +924,8 @@ def cmd_post(args, out=sys.stdout):
             "--force if the card is deliberate.",
             file=out)
         return 2
-    return _post_and_report(args, *producer, args.payload, options, out)
+    return _post_and_report(args, *producer, args.payload, options, out,
+                            mechanism=mechanism)
 
 
 def cmd_post_batch(args, out=sys.stdout):

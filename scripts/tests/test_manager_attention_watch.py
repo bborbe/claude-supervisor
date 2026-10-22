@@ -2027,5 +2027,116 @@ class ParkReasonJoinTest(unittest.TestCase):
                          "wrong card shape")
 
 
+class RegistryNameJoinTest(unittest.TestCase):
+    """The jump target joins through the REGISTRY name, not the task label.
+
+    ⚠️ **This is the defect the first bot review found, and it is the whole
+    reason this class exists.** `post_repost` receives the tracked TASK's name
+    (`Register an Unmerge Command on …`) while a manager-spawned tab is titled
+    with the session's own registry name (`⚙ MDM split command`). Matching the
+    pane title against the task name therefore finds nothing, `_jump_sentence`
+    returns `""`, and every real ack card silently loses the jump target it
+    advertises — while a unit test that passes the registry name by hand stays
+    green. The label survives only as a fallback for a session the registry
+    cannot name.
+    """
+
+    SID = "cef86313-cd45-411c-b4c4-cfbace549112"
+    LABEL = "Register an Unmerge Command on mdm-party-v2 and mdm-contact-v1"
+    REG_NAME = "⚙ MDM split command"
+
+    def _registry(self, d, record):
+        with open(os.path.join(d, "54924.json"), "w") as fh:
+            json.dump(record, fh)
+
+    def test_the_registry_name_is_found_by_session_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._registry(d, {"sessionId": self.SID, "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d):
+                self.assertEqual(watch.registry_name_for_session(self.SID),
+                                 self.REG_NAME)
+
+    def test_an_unknown_session_resolves_no_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._registry(d, {"sessionId": "other", "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d):
+                self.assertIsNone(watch.registry_name_for_session(self.SID))
+
+    def test_an_unreadable_registry_resolves_no_name(self):
+        with mock.patch.object(watch, "SESSIONS_DIR", "/nonexistent/registry"):
+            self.assertIsNone(watch.registry_name_for_session(self.SID))
+
+    def test_a_corrupt_record_is_skipped_not_raised(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "1.json"), "w") as fh:
+                fh.write("{not json")
+            self._registry(d, {"sessionId": self.SID, "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d):
+                self.assertEqual(watch.registry_name_for_session(self.SID),
+                                 self.REG_NAME)
+
+    def test_the_pane_is_looked_up_by_registry_name_not_the_task_label(self):
+        asked = []
+
+        def fake_pane(name):
+            asked.append(name)
+            return "1543"
+
+        with tempfile.TemporaryDirectory() as d:
+            self._registry(d, {"sessionId": self.SID, "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d), \
+                    mock.patch.object(watch, "pane_for_session_name", fake_pane), \
+                    mock.patch.object(watch.subprocess, "run",
+                                      lambda *a, **kw: mock.Mock(
+                                          returncode=1, stdout="", stderr="")):
+                sentence = watch._jump_sentence(self.SID, self.LABEL)
+        self.assertEqual(asked, [self.REG_NAME],
+                         "the join must ask for the session's real name; asking "
+                         "for the task label finds no pane on every real card")
+        self.assertIn("1543", sentence)
+
+    def test_the_label_is_the_fallback_when_the_registry_cannot_name_it(self):
+        asked = []
+
+        def fake_pane(name):
+            asked.append(name)
+            return None
+
+        with mock.patch.object(watch, "SESSIONS_DIR", "/nonexistent/registry"), \
+                mock.patch.object(watch, "pane_for_session_name", fake_pane):
+            sentence = watch._jump_sentence(self.SID, self.LABEL)
+        self.assertEqual(asked, [self.LABEL])
+        self.assertEqual(sentence, "",
+                         "an unresolved pane must degrade to no sentence, never "
+                         "to a target that goes nowhere")
+
+
+class NormTitleTest(unittest.TestCase):
+    """Title normalisation: the markers two sides differ by, and nothing else.
+
+    ⚠️ A fixed glyph list is what made the join fail: it stripped `✳` and left
+    `⚙ `, which the bare registry name does not carry. The normaliser strips any
+    leading decoration instead, so a pane title, a registry name and a bare
+    label all reduce to the same words.
+    """
+
+    def test_status_glyph_and_session_marker_both_strip(self):
+        self.assertEqual(watch._norm_title("✳ ⚙ MDM split command"),
+                         watch._norm_title("⚙ MDM split command"))
+        self.assertEqual(watch._norm_title("⚙ MDM split command"),
+                         watch._norm_title("MDM split command"))
+
+    def test_a_duplicate_suffix_is_dropped(self):
+        self.assertEqual(watch._norm_title("MDM split command (2)"),
+                         watch._norm_title("MDM split command"))
+
+    def test_whitespace_is_collapsed(self):
+        self.assertEqual(watch._norm_title("  a   b  "), "a b")
+
+    def test_empty_input_is_empty(self):
+        self.assertEqual(watch._norm_title(""), "")
+        self.assertEqual(watch._norm_title(None), "")
+
+
 if __name__ == "__main__":
     unittest.main()
