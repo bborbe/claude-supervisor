@@ -47,6 +47,7 @@ def entry(sid, **over):
         "reprobe_probe": "",
         "unverifiable_streak": 0,
         "unverifiable_round": "",
+        "unverifiable_action": "",
     }
     row.update(over)
     return row
@@ -60,7 +61,7 @@ class Fixture(unittest.TestCase):
         with open(self.digest, "w", encoding="utf-8") as handle:
             handle.write(DIGEST)
 
-    def measure(self, entries, moved=(), task_changed=()):
+    def measure(self, entries, moved=(), task_changed=(), sent=None):
         def transcript_ts(sid):
             return START + 60 if sid in moved else START - 60
 
@@ -70,7 +71,12 @@ class Fixture(unittest.TestCase):
             return START + 60 if path in task_changed else START - 60
 
         return drive_share.measure(
-            drive_share.digest_classes(self.digest), entries, START, transcript_ts, task_mtime
+            drive_share.digest_classes(self.digest),
+            entries,
+            START,
+            transcript_ts,
+            task_mtime,
+            sent=sent,
         )
 
 
@@ -125,7 +131,12 @@ class TestShare(Fixture):
     def test_unverifiable_entry_joins_the_denominator(self):
         rows = self.measure(
             [
-                entry("eeeeeeee", verdict="unverifiable", unverifiable_streak=2),
+                entry(
+                    "eeeeeeee",
+                    verdict="unverifiable",
+                    unverifiable_streak=2,
+                    unverifiable_action="escalation",
+                ),
             ],
             moved=("eeeeeeee",),
         )
@@ -134,6 +145,66 @@ class TestShare(Fixture):
         self.assertEqual(len(joined), 1)
         self.assertEqual(joined[0]["class"], "unverifiable")
         self.assertTrue(joined[0]["verified"], "the 2-round pane read counts as an action")
+
+
+class TestSentSet(Fixture):
+    """The drive leg DRAFTS; the round SENDS. Only a send may reach the numerator.
+
+    Measured 2026-10-22T13:15Z: a round with every send deliberately held still printed
+    `share: 2/112 (2%)`, because two drafted rows happened to move for unrelated reasons.
+    """
+
+    def test_drafted_but_unsent_is_not_an_action(self):
+        rows = self.measure(
+            [entry("aaaaaaaa", nudge="drafted")], moved=("aaaaaaaa",), sent=set()
+        )
+        aaaa = [row for row in rows if row["sid"] == "aaaaaaaa"][0]
+        self.assertFalse(aaaa["verified"], "movement alone must not credit an unsent draft")
+        self.assertEqual(aaaa["evidence"], "drafted, not sent")
+
+    def test_a_real_send_is_credited(self):
+        rows = self.measure(
+            [entry("aaaaaaaa", nudge="drafted")],
+            moved=("aaaaaaaa",),
+            sent={"aaaaaaaa"},
+        )
+        aaaa = [row for row in rows if row["sid"] == "aaaaaaaa"][0]
+        self.assertTrue(aaaa["verified"])
+
+    def test_a_send_with_no_movement_is_not_verified(self):
+        rows = self.measure(
+            [entry("aaaaaaaa", nudge="drafted")], moved=(), sent={"aaaaaaaa"}
+        )
+        aaaa = [row for row in rows if row["sid"] == "aaaaaaaa"][0]
+        self.assertFalse(aaaa["verified"])
+        self.assertEqual(aaaa["evidence"], "no movement after the round start")
+
+    def test_unknown_send_state_is_declared_in_the_header(self):
+        rows = self.measure([entry("aaaaaaaa", nudge="drafted")])
+        self.assertIn("send state unknown", drive_share.render(rows, sent_known=False))
+        self.assertNotIn("send state unknown", drive_share.render(rows, sent_known=True))
+
+    def test_the_sent_none_fallback_reads_the_action_marker_not_the_streak(self):
+        """A row held back and acted at streak 3 must still count as actioned.
+
+        The fallback used to test `unverifiable_streak == 2`; under the `>= 2` trigger a
+        row acted at 3 fell through it and rendered "no action taken" although a nudge or
+        escalation was taken.
+        """
+        rows = self.measure(
+            [
+                entry(
+                    "aaaaaaaa",
+                    nudge="none",
+                    unverifiable_streak=3,
+                    unverifiable_action="nudge",
+                )
+            ],
+            moved=("aaaaaaaa",),
+        )
+        aaaa = [row for row in rows if row["sid"] == "aaaaaaaa"][0]
+        self.assertTrue(aaaa["verified"])
+        self.assertEqual(aaaa["action"], "action")
 
 
 class TestRefusals(Fixture):
