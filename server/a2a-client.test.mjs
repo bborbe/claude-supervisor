@@ -372,6 +372,35 @@ test('every field the controller validates is required, and a missing one refuse
   assert.match(a2aSendRequestFor({ ...CALL, request: null }).error, /non-null object/)
 })
 
+// ⚠️ The controller moved to a2a-go v2.7.0 at v0.17.0, where an ABSENT version header defaults to
+// "0.3" and is refused — every control call, `create` included, answered `-32009 … requested
+// "0.3", served "1.0"` (measured 2026-10-22). So the version the controller advertises has to
+// reach the wire on THIS plane too, not only on the turn plane.
+test('the control call carries the version the controller advertises', () => {
+  const { headers } = a2aSendRequestFor({
+    endpoint: 'http://localhost:8080/a2a',
+    contextId: 'ctx-1',
+    request: { operation: 'create', task: 't' },
+    token: 'not-a-real-token',
+    messageId: 'msg-1',
+    protocolVersion: '1.0',
+  })
+  assert.equal(headers['a2a-version'], '1.0')
+})
+
+test('the control call sends no version header when the card named none', () => {
+  // The pre-negotiation behaviour, and what a controller with no version check at all still
+  // accepts — so a failed or versionless card read degrades rather than breaks.
+  const { headers } = a2aSendRequestFor({
+    endpoint: 'http://localhost:8080/a2a',
+    contextId: 'ctx-1',
+    request: { operation: 'list' },
+    token: 'not-a-real-token',
+    messageId: 'msg-1',
+  })
+  assert.equal(headers['a2a-version'], undefined)
+})
+
 // --- the controller-facing half: the reply ---------------------------------------------------
 
 const CONTROL_REPLY = (response) => ({
