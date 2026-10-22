@@ -55,6 +55,23 @@ REFUSED = 2
 #: is a drive-leg verdict and arrives on the entries, not on a digest class.
 DETECTED_CLASSES = ("stalled", "parked")
 
+#: Every class a `CLASSIFICATION` row can carry. Used to LOCATE the class column instead
+#: of assuming its index -- see `digest_classes`.
+DIGEST_CLASSES = (
+    "progressing",
+    "stalled",
+    "parked",
+    "finished",
+    "unclassified",
+    "held",
+    "stood-down",
+    "lapsed",
+    "done",
+    "blocked",
+    "error",
+    "error-marked",
+)
+
 HOME = os.environ.get("HOME") or os.path.expanduser("~")
 
 
@@ -123,10 +140,21 @@ def digest_classes(path):
     """(name, sid8, class) for every row of the digest's `CLASSIFICATION` section.
 
     Read as text, because the digest is a render rather than a serialisation: the section
-    runs from its heading to the next all-caps heading, and each row is `·`-separated with
-    the class at index 3. A digest with no `CLASSIFICATION` section yields nothing and the
-    caller reports the refusal -- never an empty classification, which would read as a
-    fleet with no problems.
+    runs from its heading to the next all-caps heading, and each row is `·`-separated.
+
+    ⚠️ **The class column is LOCATED, never assumed.** The real render is
+    `Name [sid8] · idle · parked · task · boxes · link`, so the class sits at index 2 --
+    but the test fixture carries an age column (`· idle · 12m · parked · …`) and puts it
+    at index 3. A fixed index therefore reads the task file as the class on live digests
+    and counts **zero** stalled/parked rows, which is invisible because the share's
+    denominator is usually dominated by the ledger's `unverifiable` entries. Measured
+    2026-10-22: `parts[3]` parsed 4 of 27 rows and returned classes `{idle, shell}`,
+    while the same digest's header said `parked=5`. Scanning for a known class token
+    accepts both shapes, and `DIGEST_CLASSES` is the vocabulary that bounds it.
+
+    A digest with no `CLASSIFICATION` section yields nothing and the caller reports the
+    refusal -- never an empty classification, which would read as a fleet with no
+    problems.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -147,13 +175,18 @@ def digest_classes(path):
         if line and not line[0].isspace():
             break
         parts = [part.strip() for part in stripped.split("·")]
-        if len(parts) < 4:
+        if len(parts) < 3:
             continue
         label = parts[0]
         match = re.search(r"\[([^\]]+)\]", label)
         sid8 = match.group(1) if match else ""
         name = label[: match.start()].strip() if match else label
-        rows.append((name, sid8, parts[3]))
+        # The state is parts[1] (idle/busy/shell) and never a class token, so starting at
+        # index 2 cannot pick it up by mistake.
+        klass = next((p for p in parts[2:] if p.lower() in DIGEST_CLASSES), None)
+        if klass is None:
+            continue
+        rows.append((name, sid8, klass))
     return rows
 
 

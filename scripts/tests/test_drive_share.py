@@ -32,6 +32,20 @@ BLOCKED (feed, raised — not verified open)
 ROUND = "2026-10-22T10-00-00Z"
 START = drive_share.round_epoch(ROUND)
 
+#: The digest as the fleet ACTUALLY renders it: `name · state · CLASS · task · boxes · link`.
+#: There is no age column. The fixture above carries `12m`, which pushes the class to
+#: index 3 and is exactly what hid the defect: the parser indexed the class and read the
+#: task file on every live digest.
+REAL_DIGEST = """\
+DIGEST 2026-10-22T18:35:05Z · 3 sessions
+CLASSIFICATION  3 classified · progressing=1 · parked=2 · finished=0 · unclassified=0
+  Parked One [11111111] · idle · parked · Task One.md · 3 · http://127.0.0.1:1337/jump?pane=1
+  Parked Two [22222222] · shell · parked · — · — · http://127.0.0.1:1337/jump?pane=2
+  Moving Three [33333333] · busy · progressing · Task Three.md · 1 · http://127.0.0.1:1337/jump?pane=3
+BLOCKED (feed, raised — not verified open)
+  (none)
+"""
+
 
 def entry(sid, **over):
     row = {
@@ -145,6 +159,45 @@ class TestShare(Fixture):
         self.assertEqual(len(joined), 1)
         self.assertEqual(joined[0]["class"], "unverifiable")
         self.assertTrue(joined[0]["verified"], "the 2-round pane read counts as an action")
+
+
+class TestRealDigestFormat(unittest.TestCase):
+    """The class column must be LOCATED, not indexed.
+
+    Measured 2026-10-22 on live rounds: the parser read `parts[3]`, which is the task file
+    in the real render, and returned classes `{idle, shell}` -- zero parked rows counted
+    while the same digest's header said `parked=5`. The share's denominator then omitted
+    every stalled and parked row, and the printed ratio was wrong while looking plausible.
+
+    The fixture in this file could not catch it: it carries an age column, so it mirrors
+    the parser's wrong assumption instead of the render's real shape.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.path = os.path.join(self.tmp, "real.digest")
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(REAL_DIGEST)
+
+    def test_class_is_located_not_indexed(self):
+        rows = drive_share.digest_classes(self.path)
+        self.assertEqual(
+            [(row[1], row[2]) for row in rows],
+            [("11111111", "parked"), ("22222222", "parked"), ("33333333", "progressing")],
+        )
+
+    def test_parked_rows_reach_the_denominator(self):
+        """The consequence the defect had: two parked rows must be two detected rows."""
+        rows = drive_share.measure(
+            drive_share.digest_classes(self.path),
+            [],
+            START,
+            lambda sid: None,
+            lambda path: None,
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["sid"] for row in rows}, {"11111111", "22222222"})
 
 
 class TestSentSet(Fixture):
