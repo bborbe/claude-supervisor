@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — print all four readings with the marker line (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py` · `next-focus.py`; commands in the step)
+When: every tick — take all four readings (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py` · `next-focus.py`; commands in the step)
 
 ## The saturation reading — the ratio, not tok/s
 
@@ -51,7 +51,7 @@ Read it from `python3 $P/unarmed-goals.py --vault "<vault>" --tasks-dir "<vault>
 
 ## The next-focus reading
 
-Every tick prints this block with the marker line:
+Every tick takes this reading; the block below is rendered as **Output shape item 2**, not at the marker line:
 
     Next focus (3/30)
       1. Write the Gate Contract for ORB XAUUSD V8 … — 60 Periodic Notes/Weekly/2026-W43.md:65 — …
