@@ -1449,9 +1449,9 @@ def post_repost(sid8, full, label, reason="", script_dir=None, timeout=30):
            "--dedup-key", f"park:{sid8}"]
     if INCIDENT_KIND_BY_REASON.get(reason) == "permission":
         cmd += ["--mechanism", "ack", "--payload",
-                f"{label}: this session is parked on a permission prompt. "
+                f"{label}: this session is parked on a prompt in its own pane. "
                 f"Answer it in the pane — a board answer cannot release a "
-                f"native permission modal."
+                f"prompt raised in another session."
                 + _jump_sentence(label)]
     else:
         cmd += ["--payload",
@@ -1512,8 +1512,20 @@ def pane_for_session_name(name):
     for pane in panes if isinstance(panes, list) else []:
         if not isinstance(pane, dict):
             continue
-        if _clean_title(pane.get("title")) == wanted:
-            return str(pane.get("pane_id"))
+        if _clean_title(pane.get("title")) != wanted:
+            continue
+        # ⚠️ `str(pane.get("pane_id"))` is NOT enough: a pane dict without the
+        # key yields the literal string "None", which is truthy, so the caller
+        # would emit `Jump to pane None: /supervisor:jump None` — a jump target
+        # that looks resolved and goes nowhere. Guard the key itself.
+        pane_id = pane.get("pane_id")
+        if pane_id is None:
+            continue
+        # The FIRST title match wins. Duplicate titles are possible (two panes
+        # restored from the same session name), and picking the first is a
+        # decision rather than a derivation — stated so a later reader does not
+        # read it as "the only match".
+        return str(pane_id)
     return None
 
 

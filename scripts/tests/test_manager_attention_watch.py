@@ -1869,7 +1869,7 @@ class ParkCardShapeTest(unittest.TestCase):
         self.assertNotIn("--option", cmd)
         payload = cmd[cmd.index("--payload") + 1]
         self.assertIn("Answer it in the pane", payload)
-        self.assertIn("cannot release a native permission modal", payload,
+        self.assertIn("cannot release a prompt raised in another session", payload,
                       "the card must say WHY the board cannot answer it, or the "
                       "operator reads the missing field as a rendering fault")
 
@@ -1919,6 +1919,112 @@ class ParkCardShapeTest(unittest.TestCase):
         self.assertEqual(seen, [("aaaa1111", "busy+parked-modal")],
                          "without the reason the post cannot pick a shape and "
                          "falls back to the card this defect was filed against")
+
+
+class PaneForSessionNameTest(unittest.TestCase):
+    """The pane join that gives a re-registered card its jump target.
+
+    ⚠️ Every case here returns `None` rather than raising, and `None` means
+    "not resolved", never "no pane exists" — a failed `wezterm cli list` cannot
+    prove a pane is gone, and the card is posted either way. What must NOT
+    happen is a *bogus* target: a pane id of the literal string `"None"` is
+    truthy, so the caller would emit `Jump to pane None: /supervisor:jump None`
+    — a control that looks resolved and goes nowhere.
+    """
+
+    NAME = "⚙ MDM split command"
+
+    def _resolve(self, *, stdout="", returncode=0, raises=None):
+        def fake_run(cmd, **kw):
+            if raises:
+                raise raises
+            return mock.Mock(returncode=returncode, stdout=stdout, stderr="")
+
+        with mock.patch.object(watch.subprocess, "run", fake_run):
+            return watch.pane_for_session_name(self.NAME)
+
+    def test_the_status_glyph_is_stripped_before_matching(self):
+        self.assertEqual(
+            self._resolve(stdout=json.dumps([{"pane_id": 1907,
+                                              "title": "✳ " + self.NAME}])),
+            "1907")
+
+    def test_a_pane_without_a_pane_id_is_skipped_not_stringified(self):
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([{"title": "✳ " + self.NAME}])),
+            "str(None) is 'None' and truthy — that is the defect this pins")
+
+    def test_a_pane_with_a_null_pane_id_is_skipped(self):
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([{"pane_id": None,
+                                              "title": self.NAME}])))
+
+    def test_a_failed_query_resolves_nothing(self):
+        self.assertIsNone(self._resolve(returncode=1, stdout="boom"))
+
+    def test_malformed_json_resolves_nothing(self):
+        self.assertIsNone(self._resolve(stdout="{not json"))
+
+    def test_a_non_list_payload_resolves_nothing(self):
+        self.assertIsNone(self._resolve(stdout=json.dumps({"panes": []})))
+
+    def test_a_missing_wezterm_resolves_nothing(self):
+        self.assertIsNone(self._resolve(raises=OSError("no wezterm")))
+
+    def test_a_non_dict_element_is_skipped(self):
+        self.assertIsNone(self._resolve(stdout=json.dumps([None, "x", 3])))
+
+    def test_no_title_match_resolves_nothing(self):
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([{"pane_id": 1, "title": "other"}])))
+
+    def test_the_first_of_two_duplicate_titles_wins(self):
+        self.assertEqual(
+            self._resolve(stdout=json.dumps([
+                {"pane_id": 11, "title": self.NAME},
+                {"pane_id": 22, "title": self.NAME}])),
+            "11")
+
+
+class ParkReasonJoinTest(unittest.TestCase):
+    """`main` hands `repost_empty_parks` the reason from its own `state` tuple.
+
+    ⚠️ The shape tests all supply `reasons=` directly, so without this the
+    `state[sid8][2]` extraction — and the tuple layout it depends on — is never
+    exercised. The index is correct today (`(label, detail, reason, verdict)`);
+    a reorder would silently select a wrong reason and post the `message` card
+    this change exists to remove, with every other test still green.
+    """
+
+    SID = "aaaa1111-0000-0000-0000-000000000000"
+    SID8 = "aaaa1111"
+
+    def test_the_reason_travels_from_the_probe_state_to_the_repost(self):
+        seen = {}
+
+        def fake_repost(parked, entries, log_path, **kw):
+            seen["parked"] = list(parked)
+            seen["reasons"] = kw.get("reasons")
+            return []
+
+        state = {self.SID8: ("Some Task", "pick — 1. a", "busy+parked-modal", True)}
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "t.txt"), "w") as fh:
+                fh.write("Some Task\n")
+            with mock.patch.object(watch, "probe", lambda *a, **kw: state), \
+                 mock.patch.object(watch, "repost_empty_parks", fake_repost), \
+                 mock.patch.object(watch, "log_event", lambda *a, **kw: None), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", "1"])
+        self.assertEqual(seen.get("reasons"),
+                         {self.SID8: "busy+parked-modal"},
+                         "the reason is the THIRD element of the state tuple; a "
+                         "reorder must fail here rather than silently post the "
+                         "wrong card shape")
 
 
 if __name__ == "__main__":

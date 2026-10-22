@@ -1219,5 +1219,74 @@ class RecordPostedCloserTest(unittest.TestCase):
         self.assertEqual([n for n in self._names() if n.endswith(".tmp")], [])
 
 
+class MechanismTest(unittest.TestCase):
+    """`--mechanism` at the script boundary: the body it sends, and what it refuses.
+
+    ⚠️ **`ack` exists so a card can report a condition and ask nothing.** It is
+    the shape the re-registered-park arm posts for a session parked on a prompt
+    in its own pane, where a board answer cannot release anything. The store
+    rejects `options` on an `ack` item, so the refusal has to land HERE — as a
+    bad argument — rather than as a 400 the caller reads as a store fault.
+
+    ⚠️ `permission` is deliberately not offered. A permission gate is released
+    only by an answer carrying `resolved_by`, which only an arm writes and the
+    board never sends, so a card minted by this script could not release one.
+    That refusal is asserted here rather than left to `choices=` alone.
+    """
+
+    def _post(self, **overrides):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        out = io.StringIO()
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            rc = ask.cmd_post(post_args(**overrides), out=out)
+        return rc, captured.get("body"), out.getvalue()
+
+    def test_an_ack_post_carries_the_mechanism_and_no_options(self):
+        rc, body, _ = self._post(mechanism="ack", payload="answer it in the pane")
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["answer_mechanism"], "ack")
+        self.assertNotIn("options", body,
+                         "the schema gives an ack item no choices; an empty "
+                         "list is a present field the store rejects")
+
+    def test_an_ack_post_refuses_options(self):
+        rc, body, text = self._post(mechanism="ack", option=["allow", "deny"])
+        self.assertEqual(rc, 2)
+        self.assertIsNone(body, "nothing may be posted on a refusal")
+        self.assertIn("REFUSED", text)
+        self.assertIn("asks nothing", text)
+
+    def test_an_ack_post_refuses_a_recommendation(self):
+        rc, body, text = self._post(mechanism="ack", recommend="allow")
+        self.assertEqual(rc, 2)
+        self.assertIsNone(body)
+        self.assertIn("REFUSED", text)
+
+    def test_the_default_is_still_a_message_card(self):
+        rc, body, _ = self._post()
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["answer_mechanism"], "message")
+
+    def test_permission_is_not_a_postable_mechanism(self):
+        self.assertNotIn("permission", ask.POSTABLE_MECHANISMS,
+                         "a card minted here could not release a permission "
+                         "gate — the release path reads resolved_by, which only "
+                         "an arm writes and the board never sends")
+        self.assertIn("ack", ask.POSTABLE_MECHANISMS)
+
+    def test_a_caller_supplied_value_outside_the_set_falls_back(self):
+        # The mock/namespace guard: argparse already rejects typed values, so
+        # this only protects a programmatic caller whose args carry something
+        # that is not a mechanism at all.
+        rc, body, _ = self._post(mechanism="not-a-mechanism")
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["answer_mechanism"], "message")
+
+
 if __name__ == "__main__":
     unittest.main()
