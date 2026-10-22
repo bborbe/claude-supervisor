@@ -45,6 +45,7 @@ Exit codes: 0 emitted · 2 refused (bad input, unreadable vault).
 """
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -364,7 +365,13 @@ def card_key(vault, kind, name):
     """
     slug = re.sub(r"[^a-z0-9]+", "-", Path(vault).name.lower()).strip("-")
     item = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return f"next-focus:{slug}:{kind}:{item}"
+    # The slug ALONE collides: `A B` and `A-B` both become `a-b`, and the store
+    # suppresses a re-push on producer_id + dedup_key — so the second proposal's card
+    # was silently dropped, the exact "ask vanishes unasked" outcome the cap exists to
+    # prevent. The digest is deterministic in the raw name, so the key stays stable
+    # across rounds while distinct names stay distinct.
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    return f"next-focus:{slug}:{kind}:{item}-{digest}"
 
 
 def candidate(name, kind, fm, source, why):
@@ -661,8 +668,16 @@ def main(argv=None):
         print(f"next-focus: REFUSED — bad --now: {args.now}", file=sys.stderr)
         return 2
 
-    result = build(args.vault, args.tasks_dir, day, args.live, args.target,
-                   args.plugin, args.alerts_script)
+    try:
+        result = build(args.vault, args.tasks_dir, day, args.live, args.target,
+                       args.plugin, args.alerts_script)
+    except Exception as exc:  # noqa: BLE001 — deliberate: the tick must always render
+        # Any non-zero exit is a REFUSAL the round must render, so an unexpected bug
+        # has to reach that contract. Unguarded, it exited 1 with a bare traceback —
+        # a state Output shape item 2 defines no render for, which is how a broken
+        # reading becomes an omitted block.
+        print(f"next-focus: FAILED — {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return 2
     print(json.dumps(result, indent=2) if args.json else result["render"])
     return 0
 

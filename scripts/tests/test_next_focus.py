@@ -248,6 +248,19 @@ class NextFocusTest(unittest.TestCase):
         second = self.run_script()["proposed"][0]["card_key"]
         self.assertEqual(first, second)
 
+    def test_card_keys_are_distinct_for_names_that_slug_alike(self):
+        """`A B` and `A-B` both slug to `a-b`, and the store suppresses on the dedup key.
+
+        A shared key therefore silently drops the second proposal's card — the "ask
+        vanishes unasked" outcome the cap and the key both exist to prevent.
+        """
+        self.write("25 Tasks/A B.md", task("A B", priority="1"))
+        self.write("25 Tasks/A-B.md", task("A-B", priority="1"))
+        keys = {r["name"]: r["card_key"] for r in self.run_script()["proposed"]}
+        self.assertEqual(set(keys), {"A B", "A-B"})
+        self.assertNotEqual(keys["A B"], keys["A-B"],
+                            "two distinct proposals must never share a dedup key")
+
     def test_blocked_goal_is_proposed(self):
         self.write("24 Goals/Blocked Goal.md",
                    task("Blocked Goal", status="hold", blocked="Some Bug Task"))
