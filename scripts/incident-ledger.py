@@ -126,6 +126,73 @@ def stall_rounds():
     return value if value > 0 else 2
 
 
+def incident_budget():
+    """How many NEW stall incidents one round may open.
+
+    The drive leg caps its own actions for the same reason (`drive-unverifiable.py`,
+    `MAX_ACTIONS`): a population that goes unverifiable together must not become a
+    flood of cards. Measured 2026-10-22: one round opened 117 stall incidents and
+    every one of them became a board card, because the action leg had a cap and
+    this leg did not.
+    """
+    raw = os.environ.get("SUPERVISOR_INCIDENT_STALL_BUDGET", "3")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 3
+    return value if value > 0 else 3
+
+
+def live_sessions():
+    """Every session the heartbeat store lists, or None when the probe failed.
+
+    ⚠️ **`None` is NOT an empty set, and the caller fails OPEN on it.** A store
+    that cannot be reached must never read as "every session is dead": suppressing
+    the whole incident class on an outage is the false-empty this ledger refuses one
+    store over (`read_drive_ledger` refuses a corrupt file for exactly this reason).
+    So an outage keeps the current behaviour and says so, rather than going quiet.
+
+    ⚠️ A session ABSENT from this set is GONE, not silent. `session-liveness.py`
+    separates absent from unknown precisely so a reader can tell them apart, and the
+    distinction is the whole point: a stall is a running session that is not moving,
+    while a session that no longer exists has nothing to investigate and no card the
+    operator could act on.
+    """
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(HERE, "session-liveness.py"),
+                "--list",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    # `--list --json` prints a `rows=… registry_live=… degraded=…` header before the
+    # JSON body, so the payload starts at the first bracket rather than at byte 0.
+    body = result.stdout or ""
+    start = body.find("[")
+    if start < 0:
+        return None
+    try:
+        rows = json.loads(body[start:])
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    return {
+        row["sessionId"]
+        for row in rows
+        if isinstance(row, dict) and row.get("sessionId")
+    }
+
+
 def caller_id():
     return (
         os.environ.get("CLAUDE_CODE_SESSION_ID")
@@ -475,22 +542,58 @@ def cmd_stall(args):
 
     ⚠️ This does not count rounds. `drive-unverifiable.py` does, and reading its
     streak is what keeps one measurement in one place.
+
+    ⚠️ **A session that is GONE is skipped, not filed.** The drive ledger keeps
+    retained rows for sessions that have since exited, so a long-dead session can
+    reach any streak at all; an incident for one can only ever produce a card saying
+    "no verified resume", which is nothing the operator can act on. Measured
+    2026-10-22: 117 incidents opened in one round, every one of them for a session
+    absent from the heartbeat store.
+
+    ⚠️ **At most `incident_budget()` new incidents a round.** The per-round cap the
+    drive leg already applies to its own actions had no counterpart here, so the
+    flood arrived through the one door it did not cover.
     """
     required = stall_rounds()
     drive_ledger = args.drive_ledger or os.environ.get(
         "SUPERVISOR_DRIVE_LEDGER"
     ) or os.path.expanduser("~/.claude/state/fleet-drive/ledger.json")
     observed = read_drive_ledger(drive_ledger)
+    live = live_sessions()
+    if live is None:
+        sys.stderr.write(
+            "warning: session liveness unavailable, so a gone session cannot be "
+            "told from a stalled one; opening without that filter\n"
+        )
+    eligible = []
+    gone = []
+    for sid in sorted(observed):
+        verdict, streak = observed[sid]
+        if verdict != "unverifiable" or streak < required:
+            continue
+        if live is not None and sid not in live:
+            gone.append((sid, streak))
+            continue
+        eligible.append((sid, streak))
+    for sid, streak in gone:
+        print("skipped %s (streak %d): the session is gone, not stalled" % (sid, streak))
+    # Longest streak first, then session id — the drive leg's own order, so a backlog
+    # drains oldest-first and nothing starves behind a steady trickle of new rows.
+    eligible.sort(key=lambda row: (-row[1], row[0]))
+    budget = incident_budget()
     opened = 0
     with Locked():
         data = read_ledger()
-        for sid in sorted(observed):
-            verdict, streak = observed[sid]
-            if verdict != "unverifiable" or streak < required:
-                continue
+        for sid, streak in eligible:
             key = dedup_key(sid, "stall")
             if find_open(data["incidents"], key):
                 print("already open %s (streak %d)" % (key, streak))
+                continue
+            if opened >= budget:
+                print(
+                    "held back %s (streak %d): the round's budget of %d is spent"
+                    % (sid, streak, budget)
+                )
                 continue
             at = now()
             incident = {

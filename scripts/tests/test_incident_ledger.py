@@ -471,7 +471,23 @@ class TestStall(Base):
     same question and the two would drift. `test_the_streak_is_read_not_recounted`
     is the discriminator: it calls `stall` twice against an unchanged streak of 1,
     which a self-counting implementation turns into 2 and opens on.
+
+    ⚠️ **The liveness probe is stubbed, and the default is "these sessions are
+    live".** `live_sessions()` shells out to `session-liveness.py`, so an unstubbed
+    run would answer from the host's real fleet — a test whose verdict depends on
+    which sessions happen to be running. The default set keeps the pre-existing
+    cases on the filter's happy path, and the gone/absent cases set it themselves.
     """
+
+    def setUp(self):
+        super().setUp()
+        self._live_sessions = il.live_sessions
+        self.live = {SESSION, OTHER_SESSION}
+        il.live_sessions = lambda: self.live
+
+    def tearDown(self):
+        il.live_sessions = self._live_sessions
+        super().tearDown()
 
     def write_drive(self, rows, legacy=False):
         """`rows` is {session_id: (verdict, streak)}."""
@@ -576,6 +592,74 @@ class TestStall(Base):
         )
         self.assertEqual(rc, 0)
         self.assertIn("no session has stalled", out)
+
+    def test_a_gone_session_opens_nothing(self):
+        """A session absent from the heartbeat store is gone, not stalled.
+
+        Measured 2026-10-22: 117 incidents opened in one round, every one of them
+        for a session that no longer existed, and every one became a board card the
+        operator could not act on.
+        """
+        self.live = set()
+        path = self.write_drive({SESSION: ("unverifiable", 5)})
+        out = self.stall(path)
+        self.assertIn("the session is gone, not stalled", out)
+        self.assertIn("no session has stalled", out)
+        self.assertEqual(self.records(), [])
+
+    def test_a_gone_session_does_not_block_a_live_one(self):
+        """Negative control: the filter must drop only the gone row.
+
+        Without it, a change that opened nothing at all would satisfy the case
+        above while silently retiring the whole incident class.
+        """
+        self.live = {OTHER_SESSION}
+        path = self.write_drive({
+            SESSION: ("unverifiable", 9),
+            OTHER_SESSION: ("unverifiable", 2),
+        })
+        out = self.stall(path)
+        self.assertIn("the session is gone, not stalled", out)
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["session_id"], OTHER_SESSION)
+
+    def test_the_round_opens_at_most_the_budget(self):
+        """One round cannot open an incident per eligible session.
+
+        Measured 2026-10-22: 117 eligible sessions produced 117 incidents, and 116
+        of them became board cards in one burst, because the drive leg's per-round
+        cap had no counterpart here.
+        """
+        sessions = ["%08x-aaaa-bbbb-cccc-dddddddddddd" % i for i in range(117)]
+        self.live = set(sessions)
+        rows = {sid: ("unverifiable", 2) for sid in sessions}
+        rows[sessions[-1]] = ("unverifiable", 7)
+        path = self.write_drive(rows)
+        out = self.stall(path)
+        records = self.records()
+        budget = il.incident_budget()
+        self.assertEqual(len(records), budget)
+        self.assertEqual(out.count("held back"), 117 - budget)
+        # Longest streak first, so a backlog drains oldest-first rather than in
+        # session-id order, which would starve the oldest row behind any trickle.
+        self.assertEqual(records[0]["session_id"], sessions[-1])
+        self.assertEqual(records[0]["observations"], 7)
+
+    def test_a_failed_liveness_probe_fails_open(self):
+        """An unreachable store must not read as "every session is dead".
+
+        Suppressing the whole incident class on an outage is the false-empty
+        `read_drive_ledger` refuses for a corrupt drive ledger, one store over.
+        """
+        il.live_sessions = lambda: None
+        path = self.write_drive({SESSION: ("unverifiable", 2)})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.run_cli("stall", "--drive-ledger", path, "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("liveness unavailable", err.getvalue())
+        self.assertEqual(len(self.records()), 1)
 
 
 class TestResume(Base):
