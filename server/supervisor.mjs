@@ -2200,19 +2200,28 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // `SUPERVISOR_CLAUDE_CMD` stays the top override: an explicit operator setting rather
   // than a fallback, and the documented way to force a launcher for a one-off spawn.
   //
-  // Below it, a task's own `launcher:` frontmatter, then its goal's, then the vault's
-  // `claude_script` — see `resolveTaskLauncher`.
+  // Below it, a task's own `launcher:` frontmatter, then the vault's configured WORKER default
+  // (`worker_launcher`) — see `resolveTaskLauncher`. A goal's `launcher:` is not in that chain:
+  // it is a manager statement, and letting it reach a worker gave every task under a goal its
+  // manager's Opus launcher (measured 2026-10-22, 12 private-personal goals).
   let taskLauncher = { launcher: workerTarget.launcher, source: 'vault' }
   if (!config.claudeCmd && roleResolution.role === 'manager') {
-    // A manager takes the manager rule, not the worker rule: the `-claude` sibling of the
-    // vault launcher when it exists — see `resolveManagerLauncher`. No subject page is read
-    // here; a topic's `manager_launcher:` is resolved by `/supervisor:open` Step 2C.
-    taskLauncher = resolveManagerLauncher({ vaultLauncher: workerTarget.launcher, exists: existsSync })
+    // A manager takes the manager rule, not the worker rule: the vault's configured manager
+    // default, then the `-claude` sibling — see `resolveManagerLauncher`. No subject page is
+    // read here; a topic's `manager_launcher:` is resolved by `/supervisor:open` Step 2C.
+    taskLauncher = resolveManagerLauncher({
+      vaultLauncher: workerTarget.launcher,
+      managerDefault: workerTarget.managerLauncher,
+      exists: existsSync,
+    })
   } else if (!config.claudeCmd && typeof task === 'string' && task) {
     const read = readTaskLaunchers({ task, vault: workerTarget.vault })
     if (read.error) return { error: read.error }
-    taskLauncher = resolveTaskLauncher({ vaultLauncher: workerTarget.launcher, ...read })
-    for (const w of read.warnings ?? []) log(`spawn ${task}: ${w}`)
+    taskLauncher = resolveTaskLauncher({
+      vaultLauncher: workerTarget.launcher,
+      workerLauncher: workerTarget.workerLauncher,
+      ...read,
+    })
     if (taskLauncher.error) return { error: taskLauncher.error }
   }
   const workerLauncher = config.claudeCmd || taskLauncher.launcher

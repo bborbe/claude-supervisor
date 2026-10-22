@@ -199,7 +199,16 @@ class ResumeCommand(unittest.TestCase):
 
 
 class ResolveLauncher(unittest.TestCase):
-    """The resume runs the worker's OWN launcher: task > goal > vault `claude_script`."""
+    """The resume runs the worker's OWN launcher: task > vault worker default > `claude_script`.
+
+    ⚠️ A goal is NOT in that chain, and the cases named for it pin its absence. A goal's
+    `launcher:` is a manager statement; inheriting it resumed every worker under such a goal on
+    its manager's Opus launcher (measured 2026-10-22: 12 private-personal goals).
+
+    The fixture config deliberately carries only `claude_script` — the shape an older vault-cli
+    emits — so the compatibility rung is exercised here; `configure()` adds the role keys for
+    the cases that need them.
+    """
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -209,7 +218,7 @@ class ResolveLauncher(unittest.TestCase):
         for sub in ("25 Tasks", "24 Goals"):
             os.makedirs(os.path.join(self.vault, sub))
         os.makedirs(self.scripts)
-        for name in ("cc-private", "cc-private-claude", "cc-goal"):
+        for name in ("cc-private", "cc-private-claude", "cc-private-deepseek", "cc-goal"):
             open(os.path.join(self.scripts, name), "w").close()
         cfg = os.path.join(d, "vaults.json")
         with open(cfg, "w") as fh:
@@ -232,23 +241,58 @@ class ResolveLauncher(unittest.TestCase):
         with open(os.path.join(self.vault, sub, f"{title}.md"), "w") as fh:
             fh.write(f"---\n{fm}\n---\nbody\n")
 
+    def configure(self, **extra):
+        """Rewrite the vault config with the role keys a current vault-cli emits."""
+        entry = {"name": "v", "path": self.vault,
+                 "claude_script": os.path.join(self.scripts, "cc-private")}
+        entry.update(extra)
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump([entry], fh)
+
     def test_task_launcher_wins(self):
         self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-private-claude")
         path, source = rw.resolve_launcher("s1", self.vault, self.fb)
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "task"))
 
-    def test_goal_launcher_when_task_names_none(self):
+    def test_goal_launcher_is_not_inherited(self):
+        """The regression lock: a goal's `launcher:` must never reach its workers."""
         self.page("24 Goals", "G", "launcher: cc-goal")
         self.page("25 Tasks", "T", "claude_session_id: s1\ngoals:\n    - '[[G]]'")
-        self.assertEqual(rw.resolve_launcher("s1", self.vault, self.fb)[1], "goal")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual(source, "vault")
+        self.assertEqual(path, os.path.join(self.scripts, "cc-private"))
 
-    def test_vault_default_for_an_unbound_session(self):
+    def test_worker_default_wins_when_the_task_names_none(self):
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("24 Goals", "G", "launcher: cc-goal")
+        self.page("25 Tasks", "T", "claude_session_id: s1\ngoals:\n    - '[[G]]'")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
+
+    def test_task_launcher_still_beats_the_worker_default(self):
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-private-claude")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "task"))
+
+    def test_unsafe_configured_worker_launcher_is_none(self):
+        self.configure(worker_launcher="cc;rm -rf")
+        self.page("25 Tasks", "T", "claude_session_id: s1")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+
+    def test_vault_default_for_an_unbound_session_on_an_older_vault_cli(self):
+        """No `worker_launcher` in config (old vault-cli): the compatibility rung, visibly."""
         path, source = rw.resolve_launcher("nobody", os.path.join(self.vault, "25 Tasks"), self.fb)
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private"), "vault"))
 
     def test_manager_takes_the_claude_sibling(self):
         path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_manager_takes_the_configured_manager_default(self):
+        self.configure(manager_launcher=os.path.join(self.scripts, "cc-private-claude"))
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "manager-default"))
 
     def test_manager_subject_manager_launcher_wins(self):
         os.makedirs(os.path.join(self.vault, "23 Topics"))
@@ -289,11 +333,14 @@ class ResolveLauncher(unittest.TestCase):
         self.assertIsNone(path)
         self.assertIn("2 task pages", reason)
 
-    def test_goals_naming_different_launchers_is_none(self):
+    def test_goals_naming_different_launchers_no_longer_refuse(self):
+        """Goal values are inert, so a disagreement between them cannot block a resume."""
         self.page("24 Goals", "G1", "launcher: cc-goal")
         self.page("24 Goals", "G2", "launcher: cc-private-claude")
         self.page("25 Tasks", "T", "claude_session_id: s1\ngoals:\n    - '[[G1]]'\n    - '[[G2]]'")
-        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual(source, "vault")
+        self.assertEqual(path, os.path.join(self.scripts, "cc-private"))
 
     def test_unreadable_vault_config_is_none(self):
         os.environ["SUPERVISOR_VAULT_CONFIG"] = os.path.join(self.tmp.name, "absent.json")
