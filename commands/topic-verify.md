@@ -51,12 +51,12 @@ It prints **absolute** `TOPICS_DIR|GOALS_DIR|TASKS_DIR|VAULT_NAME` and exits 0, 
 substitute the literals, because three empty paths make every membership check report a topic with
 no members. An unset `CLAUDE_PLUGIN_ROOT` is `SKIPPED — resolver not found`, never a borrow.
 
-⚠️ **Only `awk`, `grep`, `find` and this plugin's own scripts are granted** — `sed`, `tr`, `jq` and
-`vault-cli` park on an approval this command was never scoped for, and `find` is reads-only.
+⚠️ **Granted as Bash: only `awk`, `grep`, `find` and this plugin's own scripts** — `sed`, `tr`, `jq`
+and `vault-cli` park on approval; `find` is used only in its read forms (`-delete`/`-exec` would pass).
 ⚠️ **This copy resolves but never writes.** Its re-scope trims `Bash(mkdir:*)` and the broad
 `Bash(vault-cli:*)`, so the recording block and § *Reconcile the subject's status* are unavailable
-here: it resolves, records nothing, and leaves `status` as it finds it — the carve-out at
-`docs/subject-resolution.md:123`.
+here: it resolves, records nothing, and leaves `status` as it finds it. The write-scope table in
+`docs/subject-resolution.md` carries the same row for this command.
 
 ## Branch check — never assume one
 

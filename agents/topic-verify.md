@@ -30,6 +30,8 @@ The caller passes, in its dispatch prompt:
   `25 Tasks`** — the folders are declared per vault, and a literal is wrong in every vault that
   numbers differently.
 - **the coverage output**, when the caller could dispatch it
+- **`VAULT_NAME`** — the **registered** vault name, not the directory basename. Report it; never
+  derive a vault root from it, since `topic-spawn.py --vault` wants a path.
 - **the ranking line**, when the caller ran `topic-spawn.py --rank`. Absent is the normal case —
   row 15 then reports `SKIPPED` rather than computing a split itself.
 
