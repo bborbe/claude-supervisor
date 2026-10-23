@@ -26,13 +26,13 @@ failed open would open a headless worker whose every gate dies unanswered, which
 
 Exit 0 = an answer path is running. Exit 1 = refuse, with the reason on stdout.
 
-⚠️ **The OK branch is UNPROVEN from a worker session, and that is recorded rather than
-hidden.** Measured 2026-10-23 over every registration in
-`~/.claude/state/worker-manager/` (106 of them): **52 STOPPED, 36 STALE, 18 UNARMED,
-0 OK**. So the refuse direction is exercised on live data and the pass direction has no
-live positive to point at. Proving it needs a manager session whose loop is genuinely
-armed — a worker may not arm one (`docs/session-tiers.md`: a worker opens nothing), so
-the control belongs to the manager that runs the SC2 probe.
+⚠️ **Both directions are now exercised on live data.** The first measurement, over every
+registration in `~/.claude/state/worker-manager/` (106 of them), read **52 STOPPED, 36
+STALE, 18 UNARMED, 0 OK** — a lapsed fleet at measurement time, not a structural zero.
+Re-measured the same day, two live managers read **OK** (`01261c71`, `b9a2ea68`), so the
+pass direction has a live positive and the refuse direction is exercised against the rest.
+A worker may not arm a manager loop (`docs/session-tiers.md`: a worker opens nothing), so
+the SC2 probe's control belongs to a manager session.
 
 ⚠️ **That measurement is also a rollout constraint worth stating where the detector
 lives.** If the refusal is wired to this check before any manager loop is armed, it
@@ -47,8 +47,15 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIVENESS = os.path.join(HERE, "manager-liveness.py")
+# ⚠️ `SUPERVISOR_WORKER_MANAGER_DIR` FIRST — it is the repo's established override for this
+# directory (`scripts/adopt-orphans.py:70`, `scripts/inbox.py:119`), and a reader that honours
+# a different name than the writer is how a relocated tree reads as "no registration" and
+# refuses a manager that is in fact registered. `WORKER_MANAGER_STATE_DIR` stays as the
+# fixture knob the tests set, one step below it.
 MANAGER_DIR = os.path.expanduser(
-    os.environ.get("WORKER_MANAGER_STATE_DIR", "~/.claude/state/worker-manager")
+    os.environ.get("SUPERVISOR_WORKER_MANAGER_DIR")
+    or os.environ.get("WORKER_MANAGER_STATE_DIR")
+    or "~/.claude/state/worker-manager"
 )
 
 
@@ -65,6 +72,14 @@ def registration(session_id):
         )
     except (OSError, ValueError) as err:
         return None, f"{path} is unreadable ({err}) — cannot prove an answer path exists"
+    # ⚠️ The shape is checked INSIDE the guard, not after it. Valid JSON that is not an object
+    # (`null`, `[]`, a bare string or number) parses cleanly and then raises AttributeError on
+    # `.get` — a traceback where the caller is promised a quotable refusal, and a breach of
+    # `check()`'s "never raises". A registration is an object or it proves nothing.
+    if not isinstance(data, dict):
+        return None, (
+            f"{path} is not a JSON object ({type(data).__name__}) — cannot read subject/branch"
+        )
     subject = data.get("subject")
     branch = data.get("branch")
     if not subject or not branch:

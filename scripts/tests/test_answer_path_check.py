@@ -48,6 +48,9 @@ def fake_liveness(tmp, body, exit_code=0):
 class AnswerPathCheckTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        # The established override wins over the fixture knob, so it must be absent here or
+        # every test would read the operator's real store instead of its tempdir.
+        os.environ.pop("SUPERVISOR_WORKER_MANAGER_DIR", None)
         self.mod = load(self.tmp)
 
     def write_registration(self, session_id, payload):
@@ -68,6 +71,28 @@ class AnswerPathCheckTest(unittest.TestCase):
         ok, _, _, detail = self.mod.check("bad-json")
         self.assertFalse(ok)
         self.assertIn("unreadable", detail)
+
+    def test_non_object_registration_refuses_without_raising(self):
+        # Valid JSON that is not an object parses fine and then blows up on `.get` — a
+        # traceback where the caller is promised a quotable refusal.
+        for payload in ("null", "[]", '"a string"', "42", "true"):
+            with self.subTest(payload=payload):
+                self.write_registration("odd", payload)
+                ok, _, _, detail = self.mod.check("odd")
+                self.assertFalse(ok)
+                self.assertIn("not a JSON object", detail)
+
+    def test_the_established_env_override_wins_over_the_fixture_knob(self):
+        # `SUPERVISOR_WORKER_MANAGER_DIR` is what the rest of the repo sets (adopt-orphans,
+        # inbox); a probe honouring a different name reads a directory nobody writes.
+        other = tempfile.mkdtemp()
+        os.environ["SUPERVISOR_WORKER_MANAGER_DIR"] = other
+        try:
+            # The fixture knob points at `self.tmp`; the established name must still win.
+            reloaded = load(self.tmp)
+            self.assertEqual(reloaded.MANAGER_DIR, os.path.expanduser(other))
+        finally:
+            os.environ.pop("SUPERVISOR_WORKER_MANAGER_DIR", None)
 
     def test_registration_without_subject_or_branch_refuses(self):
         self.write_registration("half", {"vault": "private-personal"})
