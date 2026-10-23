@@ -147,8 +147,9 @@ across separate sessions, every one a false violation.
    a task wikilink in the prose), determine
    **which source it serves, or that it serves none**: the topic's own sentence (the prose above
    the **first `# ` heading**, `# Impact` on most pages), a specific topic Success Criterion
-   (`SC<n>`), a specific `# Completion Gate`
-   condition (`Gate<n>`), or, for a task whose own `goals:` frontmatter names a member goal, that
+   (`SC<n>`), a specific `# Completion Gate` condition
+   (`G<n>` — the same token row 11 uses), or, for a task whose own `goals:` frontmatter names a
+   member goal, that
    goal's Success Criterion (`<goal> SC<n>`) or `# Definition of Done` item (`<goal> DoD<n>`). ⚠️ **A passing
    verdict quotes the served line AND the task line that advances it.** A match inferred from a
    title, a shared theme, or a loosely related criterion is **`FAIL — unquotable match`**, naming
