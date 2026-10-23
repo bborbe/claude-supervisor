@@ -104,7 +104,10 @@ across separate sessions, every one a false violation.
 
 1. **Status valid** — the topic's `status` is one of `in_progress|next|backlog|completed|hold|aborted`.
    The vault-canonical set uses `next`; the goal tier still carries the legacy `todo` alias —
-   accept `todo` but report it as legacy.
+   accept `todo` but report it as legacy. ⚠️ **A page with no `status` field at all is
+   `FAIL — no status to judge`**, not `UNPROVEN`: the field is required of every topic page, so
+   its absence is a violation rather than a row with no subject. This is the one page row with no
+   `UNPROVEN` condition, deliberately — a missing status fails the topic.
 
 2. **Member links resolve** — every `## Goals` entry resolves to a real file under
    **`$GOALS_DIR` or `$TASKS_DIR`**, by exact basename, case-insensitive. An entry may name a
@@ -119,8 +122,13 @@ across separate sessions, every one a false violation.
    exemption.** A `completed` topic still listing an `aborted` member **FAILs**: the member was
    dropped, not finished, and a finished topic carrying a dropped member is exactly the silent
    divergence this row exists to catch. Do not read `aborted` as *"no longer active, so fine"*.
-   ⚠️ **Unevaluable inputs:** a topic with no members is `UNPROVEN — no member to compare`; a
-   member that row 2 reported unresolved is `SKIPPED — member unresolved (row 2)`, never `PASS`.
+   ⚠️ **Unevaluable inputs:** a topic with no members is `UNPROVEN — no member to compare`. A
+   member that row 2 reported unresolved is **excluded from this row's population and named**,
+   never reported `PASS` — ⚠️ **the row still judges every member that did resolve**, so one miss
+   does not discard the other comparisons; if *no* member resolved, the row is
+   `SKIPPED — every member unresolved (row 2)`.
+   ⚠️ **An `aborted` member under a live topic is legal** — this row constrains members by the
+   topic's own status, and `aborted` outranks nothing. Only the `completed` branch forbids it.
 
 4. **Task must not outrank its goal** — for each member goal: goal `completed` → every subtask
    `completed`; goal not `in_progress` → no subtask `in_progress`. A topic whose members are all
@@ -186,10 +194,11 @@ across separate sessions, every one a false violation.
     entry under `# Completion Gate` opening `G<n>`. Read the entry line itself — never infer the
     gate item from a goal's title or topic; topical fit is not a reference. Flag an entry with no
     `closes G<n>`, and one naming a `G<n>` the gate does not define. A hyphen (`- closes G1`) is
-    a **format finding**, not a pass: the marker is the em-dash. ⚠️ **A topic with no
-    `# Completion Gate` cannot satisfy this row — `FAIL`, naming the missing section.** Topics
-    with `status: completed` or `aborted` are **`UNPROVEN`** (grandfathered), never `FAIL`; a
-    `hold` topic is **not** grandfathered and `FAIL`s like any other.
+    a **format finding**, not a pass: the marker is the em-dash.
+    ⚠️ **The grandfathering clause decides first.** A topic with `status: completed` or `aborted`
+    is **`UNPROVEN`** (grandfathered) — including one with no `# Completion Gate` at all, since it
+    predates the convention. Only a topic on a **live status** (`in_progress`, `next`, `backlog`,
+    `hold`) with no `# Completion Gate` is **`FAIL`**, naming the missing section.
 
 **Rows 12–16 — coverage and readiness. Rows 13–16 are advisory output, not verdicts.**
 
@@ -197,8 +206,9 @@ across separate sessions, every one a false violation.
     grant**, so never dispatch the coverage mode; read the rows the caller passed in. A goal
     whose open criteria have no driving item is the gap; a box rated `asserted` is the
     met-looking box a hand read cannot separate from an evidenced one. `FAIL` — at least one
-    open criterion has no driving item; `PASS` — none; `SKIPPED` — no coverage output and the
-    fixed read returned nothing to judge. ⚠️ **When the caller passed no coverage output**, fall
+    open criterion has no driving item; `PASS` — zero, **including a topic whose criteria are all
+    closed** (`PASS — 0 open criteria across <n> goals`); `SKIPPED` — no coverage output **and**
+    no goal page to read at all. ⚠️ **When the caller passed no coverage output**, fall
     back to the fixed read and **say which of the two you used**:
 
     ```bash
@@ -220,13 +230,13 @@ across separate sessions, every one a false violation.
 
 15. **SLOTS** — report the slot split **only from a ranking line the caller passed**. The line is
     the caller's to produce, with
-    `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/topic-spawn.py --topic "<topic>" --rank --vault <vault>`
-    — ⚠️ **`--topic` is mandatory**; without it the script exits 2 on argparse, and the bare name
-    is not on PATH. ⚠️ **Never invent an order and never restate the cap** — the script owns N and
-    already prints which goals take the slots. ⚠️ **No ranking line passed → `SKIPPED — no ranking
-    line from the caller`**, which is the normal outcome: this row is caller-optional and **no
-    shipped caller passes one today**. Report the gap rather than computing a split nobody asked
-    for.
+    `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/topic-spawn.py --topic "<topic>" --rank --vault "<vault-root>"`
+    — ⚠️ **`--topic` is mandatory** (without it the script exits 2 on argparse), **`--vault` takes
+    the vault ROOT and never the registered name**, and the bare name is not on PATH. **The root
+    is the caller's to supply** — you are given the name, not the root, so never substitute it.
+    ⚠️ **Never invent an order and never derive the cap yourself** — read N and the held count off
+    the script's own line. ⚠️ **No ranking line → `SKIPPED — no ranking line`**: this row is
+    caller-optional and **no shipped caller passes one today**.
 
 16. **ROUTE** — the one line the caller must send to the topic's manager, naming what to start
     or resume first. ⚠️ **You hold no `SendMessage`** — return the line and say so.
@@ -252,7 +262,7 @@ across separate sessions, every one a false violation.
 ```text
 Subject: <name> (from <explicit|session|name|conversation|last>)
 Branch: topic (<path>)   Folders: <topics> · <goals> · <tasks>
-Checks: <n>/12 run · Advisory: <n>/4 emitted
+Checks: <n>/12 run · Advisory: <n>/4 reported
 Verdict: PASS | FAIL
 
   1. Status valid ................. PASS | FAIL | UNPROVEN | SKIPPED — <detail>
