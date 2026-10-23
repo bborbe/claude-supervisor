@@ -25,6 +25,11 @@ absent is not a vault with a default goals folder — it is a config that cannot
 substituting a literal there is the hardcoded-path defect this whole file exists to remove,
 applied quietly instead of loudly.
 
+⚠️ **A resolved folder that does not exist is also refused.** A key left stale by a renumber
+emits a plausible absolute path, the caller's `find` matches nothing, and the report reads as
+"no match" on a page that exists. `isdir` turns that into the loud answer the docstring above
+argues for.
+
 Prints one line, `TOPICS_DIR|GOALS_DIR|TASKS_DIR|VAULT_NAME`, and exits 0. On any failure prints
 `UNKNOWN <one-line reason>` and exits 1 — the caller reports that reason against every row
 that reads a folder and stops, rather than running checks over empty paths.
@@ -40,7 +45,6 @@ reconstruct it, so the resolver hands it over rather than leaving the caller to 
 import json
 import os
 import subprocess
-import sys
 
 TIMEOUT_SECONDS = 10
 KEYS = ("topics_dir", "goals_dir", "tasks_dir")
@@ -51,80 +55,113 @@ def fail(reason: str) -> int:
     return 1
 
 
-def configured_vaults() -> tuple[list[dict], str]:
-    """Every configured vault, plus a one-line degradation reason (`""` on success)."""
+def configured_vaults() -> tuple[list[dict], int, str]:
+    """Every configured vault, the entry count, plus a one-line reason (`""` on success)."""
     try:
         res = subprocess.run(
             ["vault-cli", "--output", "json", "config", "list"],
             capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
         )
     except FileNotFoundError:
-        return [], "vault-cli is not on PATH"
+        return [], 0, "vault-cli is not on PATH"
     except subprocess.TimeoutExpired:
-        return [], f"vault-cli config list timed out after {TIMEOUT_SECONDS}s"
+        return [], 0, f"vault-cli config list timed out after {TIMEOUT_SECONDS}s"
     except OSError as exc:
-        return [], f"vault-cli could not be run: {exc.strerror or exc}"
+        return [], 0, f"vault-cli could not be run: {exc.strerror or exc}"
 
     if res.returncode != 0:
-        detail = (res.stderr or "").strip().splitlines()
+        detail = ((res.stderr or "").strip() or (res.stdout or "").strip()).splitlines()
         suffix = f": {detail[0]}" if detail else ""
-        return [], f"vault-cli config list exited {res.returncode}{suffix}"
+        return [], 0, f"vault-cli config list exited {res.returncode}{suffix}"
 
     try:
         payload = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return [], "vault-cli config list did not print JSON"
+        return [], 0, "vault-cli config list did not print JSON"
 
     if not isinstance(payload, list):
-        return [], f"vault-cli config list returned {type(payload).__name__}, not a list"
+        return [], 0, f"vault-cli config list returned {type(payload).__name__}, not a list"
 
-    vaults = [v for v in payload if isinstance(v, dict) and isinstance(v.get("path"), str)]
+    # ⚠️ A blank path is rejected, not accepted. `realpath(expanduser(""))` is the cwd, so an
+    # entry carrying `path: ""` would match the cwd exactly and — being the longest match —
+    # outrank every real vault, emitting `cwd/23 Topics` with exit 0.
+    vaults = [
+        v for v in payload
+        if isinstance(v, dict) and isinstance(v.get("path"), str) and v["path"].strip()
+    ]
     if not vaults:
-        return [], "vault-cli config list names no vault with a path"
-    return vaults, ""
+        return [], len(payload), "vault-cli config list names no vault with a path"
+    return vaults, len(payload), ""
 
 
-def owning_vault(vaults: list[dict]) -> tuple[dict, str] | None:
-    """The vault whose root is the cwd or its nearest ancestor, with that resolved root."""
-    cwd = os.path.realpath(os.getcwd())
-    best: tuple[dict, str] | None = None
-    best_len = -1
+def owning_vault(vaults: list[dict]) -> tuple[dict, str] | str:
+    """The vault whose root is the cwd or its nearest ancestor, or a reason string."""
+    try:
+        cwd = os.path.realpath(os.getcwd())
+    except OSError as exc:
+        return f"the session's cwd could not be read: {exc.strerror or exc}"
+
+    matches: list[tuple[str, dict]] = []
     for vault in vaults:
         root = os.path.realpath(os.path.expanduser(vault["path"]))
         if cwd == root or cwd.startswith(root + os.sep):
-            if len(root) > best_len:
-                best, best_len = (vault, root), len(root)
-    return best
+            matches.append((root, vault))
+
+    if not matches:
+        return (
+            "the session's cwd is inside no configured vault "
+            f"({len(vaults)} configured) — run this from a vault, not from a bare directory"
+        )
+
+    matches.sort(key=lambda m: len(m[0]), reverse=True)
+    best_root, best_vault = matches[0]
+    # ⚠️ A tie is reported, not broken silently. Two configs can resolve to one path through a
+    # symlink alias, and the caller keys two subject sources on the name — which one won would
+    # then depend on config order.
+    if len(matches) > 1 and len(matches[1][0]) == len(best_root):
+        names = sorted({str(m[1].get("name") or m[0]) for m in matches[:2]})
+        return f"two vaults resolve to {best_root}: {', '.join(names)} — ambiguous"
+    return best_vault, best_root
 
 
 def main() -> int:
-    vaults, reason = configured_vaults()
+    vaults, total, reason = configured_vaults()
     if reason:
         return fail(reason)
 
     owned = owning_vault(vaults)
-    if owned is None:
-        return fail(
-            "the session's cwd is inside no configured vault "
-            f"({len(vaults)} configured) — run this from a vault, not from a bare directory"
-        )
+    if isinstance(owned, str):
+        return fail(owned)
     vault, root = owned
 
-    missing = [k for k in KEYS if not str(vault.get(k) or "").strip()]
-    if missing:
+    # ⚠️ A non-string value is not a folder name. `topics_dir: ["a"]` coerces to "['a']" and
+    # joins to a path that looks real, so the type is checked rather than stringified.
+    bad = [k for k in KEYS if not (isinstance(vault.get(k), str) and vault[k].strip())]
+    if bad:
         name = vault.get("name") or vault["path"]
-        return fail(f"vault {name!r} does not configure {', '.join(missing)}")
+        return fail(f"vault {name!r} does not configure {', '.join(bad)}")
+
+    name = str(vault.get("name") or "").strip()
+    if not name:
+        return fail(f"vault at {root!r} carries no registered name")
+    if "|" in name:
+        return fail(f"vault name {name!r} contains '|', which is the field separator")
+
+    folders = [os.path.join(root, vault[k].strip()) for k in KEYS]
+    absent = [folder for folder in folders if not os.path.isdir(folder)]
+    if absent:
+        listed = ", ".join(repr(folder) for folder in absent)
+        verb = "it does" if len(absent) == 1 else "they do"
+        return fail(
+            f"vault {name!r} configures {listed} but {verb} not exist — the key is stale"
+        )
 
     # ⚠️ ABSOLUTE, joined against the owning vault's root — never the bare relative name.
     # The config stores `23 Topics`, which resolves only from the vault root; a caller that
     # ran `find "24 Goals"` from `…/private-personal/25 Tasks` would match nothing and read
     # as "this topic has no members". That is the misdiagnosis this file exists to remove,
     # and emitting a relative name would have moved it one step later rather than fixed it.
-    name = str(vault.get("name") or "").strip()
-    if not name:
-        return fail(f"vault at {root!r} carries no registered name")
-    fields = [os.path.join(root, str(vault[k]).strip()) for k in KEYS] + [name]
-    print("|".join(fields))
+    print("|".join(folders + [name]))
     return 0
 
 
