@@ -120,9 +120,9 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 | `/supervisor:topic-loop` | yes | **yes** |
 | `/supervisor:topic-drive` | yes | **yes** |
 | `/supervisor:topic-status` | yes | **no** — read-only by its own contract (*"No vault writes"*) |
-| `/supervisor:topic-verify` | yes | **no** — holds no `Bash(vault-cli:*)` |
+| `/supervisor:topic-verify` | yes | **no** — holds no `Bash(vault-cli:*)`; a narrow `Bash(vault-cli config list:*)` resolves the three folders only, and it records nothing and writes nothing |
 
-⚠️ **This is a write-scope carve-out, never a resolution one** — all four non-writers still resolve, and none is a *"does not resolve a subject"* case to fall back on. They report the page's status as they find it, exactly as before. The `*-status` pair states the read-only contract in its own frontmatter, and `docs/fleet-surface.md` § *Session roles* calls the status/drive split *"the look from the act"*; the `*-verify` pair's trim is the same one § Resolve the vault first and § Recording already record. Each non-writer's body states its own divergence.
+⚠️ **This is a write-scope carve-out, never a resolution one** — all four non-writers still resolve, and none is a *"does not resolve a subject"* case to fall back on. They report the page's status as they find it, exactly as before. The `*-status` pair states the read-only contract in its own frontmatter, and `docs/fleet-surface.md` § *Session roles* calls the status/drive split *"the look from the act"*; the `*-verify` pair's trim is the same one § Resolve the vault first and § Recording already record — except that `topic-verify` now holds a **narrow** `Bash(vault-cli config list:*)` for folder resolution, which is why its row carries the phrase above rather than the broad grant. Each non-writer's body states its own divergence.
 
 ⚠️ **The branch picks the command, and the write goes through that branch's own verb** — `vault-cli goal set "<subject>" status in_progress --vault "$VAULT"` on the goal branch, `vault-cli topic set "<subject>" status in_progress --vault "$VAULT"` on the topic. ⚠️ **Never let one branch be the fallback** — a branch that is unset or mistyped and silently takes the goal write puts a topic's name into a goal command.
 

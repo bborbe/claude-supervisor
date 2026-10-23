@@ -44,7 +44,7 @@ Probe with the resolved `$SUBJECT`, never the raw argument (under detection the 
 
 **`-iname`, not a shell glob** — a plain `ls` glob is case-sensitive under zsh, so a lowercase argument resolves nothing against Title Case filenames.
 
-⚠️ **Both folder names are literals, and that is a known defect left in place.** This step already prepended the hardcoded `23 Topics/` rather than resolving `topics_dir` from `vault-cli config` — the exact fault `verify-topic.md:18` fixed for its own path. It adds a second literal (`24 Goals`) rather than repairing the class; the repair belongs to a separate task, not here.
+⚠️ **Both folder names are literals, and that is a known defect left in place.** This step already prepended the hardcoded `23 Topics/` rather than resolving `topics_dir` from `vault-cli config` — the exact fault `/supervisor:topic-verify` fixed for its own path. It adds a second literal (`24 Goals`) rather than repairing the class; the repair belongs to a separate task, not here.
 
 ## Procedure
 
@@ -52,7 +52,7 @@ Probe with the resolved `$SUBJECT`, never the raw argument (under detection the 
 
 2. **Detect the branch** (§ above) and print the `Branch:` line.
 
-3. **Call the branch's instrument** — the topic branch's `verify-topic`, or the goal branch's `/vault-cli:verify-goal`, with the subject. ⚠️ The independent-checks branch is **NOT TAKEN**: both verifiers landed, so this command calls them; forking would duplicate and drift. `verify-topic` is still vault-local (tracked by *a separate task*); in a vault without it, pass no instrument output and let the agent report step 1 as `UNKNOWN`.
+3. **Call the branch's instrument** — the topic branch's `supervisor:topic-verify` (the shipped agent, whose check 5 is the necessity read), or the goal branch's `/vault-cli:verify-goal`, with the subject. ⚠️ The independent-checks branch is **NOT TAKEN**: both verifiers landed, so this command calls them; forking would duplicate and drift. ⚠️ **The topic's necessity read moved into this plugin on 2026-10-23** — the vault-local `verify-topic` command it used to call is archived, so an install older than that release has no inlined check; pass no instrument output and let the agent report step 1 as `UNKNOWN`.
 
 4. **Dispatch the coverage mode — check 3's instrument, and the reason it no longer reports `GAP`.** The criterion-coverage check had no instrument of its own: `agents/goal-verify.md` check 3 read `GAP` by hand. It now consumes the same reverse map the drive rounds use. ⚠️ **The dispatch is this command's act and never the agent's** — that agent holds **no `Task` grant** (`agents/goal-verify.md:5`, `tools: Read, Bash`) and its own contract at `:69` says so outright, so a dispatch written into the agent would be a promise it cannot keep. One call per closure-box owner, the same split `commands/steps/goal-coverage.md` uses:
 
