@@ -64,10 +64,29 @@ def write_registration(session_id, vault, directory=None, now=None):
     # refuses unparseable JSON — but a spurious refusal once per round is a defect worth three
     # lines to remove.
     tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    os.replace(tmp, path)
+    # ⚠️ `O_EXCL` + `O_NOFOLLOW` + `0o600`, which is this repo's convention for a state file
+    # under `~/.claude` (`scripts/session-identity.py:222-238` names the bare `open()` as the
+    # defect, `scripts/manager-predispatch.py` does the same). The name is pid-derived, so it
+    # must not be followable, and this registration is read as an identity assertion by
+    # `answer-path-check.py` — it must not be world-readable.
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        # A failed dump must not leave a stale temp file for the next round to trip over.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return path
 
 

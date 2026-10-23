@@ -41,9 +41,27 @@ def load_probe(manager_dir):
 
 
 class FleetRegister(unittest.TestCase):
+    # Every env var this class touches, snapshotted once and restored after each test — the
+    # probe loader sets two and the arm tests set a third, and leaving them mutated makes the
+    # suite order-dependent for any later module that resolves a path at import.
+    ENV_KEYS = (
+        "WORKER_MANAGER_STATE_DIR",
+        "SUPERVISOR_WORKER_MANAGER_DIR",
+        "MANAGER_LIVENESS_STATE_DIR",
+        "CLAUDE_CODE_SESSION_ID",
+    )
+
     def setUp(self):
+        self._saved_env = {key: os.environ.get(key) for key in self.ENV_KEYS}
         self.mod = load()
         self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def test_writes_the_registration_answer_path_check_reads(self):
         path = self.mod.write_registration("sid-1", "private-personal", directory=self.dir)
