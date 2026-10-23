@@ -7,7 +7,7 @@ allowed-tools:
   - Bash(find:*)
   - Bash(awk:*)
   - Bash(grep:*)
-  - Bash(python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/*)
+  - Bash(python3:*)
 ---
 
 <objective>
@@ -41,14 +41,14 @@ The eleven checks read three folders, each **declared per vault, never fixed**. 
 all three, for the vault owning the session's cwd **or its nearest ancestor**:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/resolve-folders.py"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/resolve-folders.py"
 ```
 
 It prints **absolute** `TOPICS_DIR|GOALS_DIR|TASKS_DIR` and exits 0, or `UNKNOWN <reason>` and
 exits 1 — never a bare `23 Topics`, which resolves only from the vault root. ⚠️ **On `UNKNOWN`,
 stop and report that reason** against every row that reads a folder; never substitute the
 literals, because three empty paths make every membership check report a topic with no members.
-A missing script is neither outcome — report `SKIPPED — resolver not found`.
+⚠️ **Never fall back to the marketplace clone** — it is a *different, usually stale* copy, so a borrow runs an old resolver against a new command; an unset `CLAUDE_PLUGIN_ROOT` is `SKIPPED — resolver not found`.
 
 ⚠️ **Only `awk`, `grep`, `find` and this plugin's own scripts are granted** — a pipeline reaching
 for `sed`, `tr`, `jq` or `vault-cli` parks on an approval this command was never scoped for, and
