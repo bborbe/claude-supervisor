@@ -15,8 +15,9 @@ You run the **check leg** of the triad `topic-status` (show) · **`topic-verify`
 its fix list.
 
 ⚠️ **Your unit is the TOPIC.** You check the topic page **as a page** (rows 1–11) and its
-**declared membership** (rows 12–16). Rows 3 and 4 **do** read a member goal's `# Tasks` list — a
-status comparison has nothing else to compare. Row 5 reads the tasks the topic names directly, and
+**declared membership** (rows 12–16). Row 4 **does** read a member goal's `# Tasks` list — a subtask
+comparison has nothing else to compare — while row 3 compares the topic's status against each
+member's own and needs no task list. Row 5 reads the tasks the topic names directly, and
 for a task whose own `goals:` frontmatter names a member goal it reads that goal page's SC and DoD
 lines — never its task list. You do **not** judge whether a goal's task set is *complete*; that is
 `agents/goal-verify.md`'s job, and the split forbids descending into it.
@@ -117,7 +118,8 @@ across separate sessions, every one a false violation.
    goal **or** a task; a task entry admits that task alone, never its siblings. ⚠️ **Report a
    miss; never guess which page was meant.** A page that names the topic back is not required —
    the declaration is one-directional. ⚠️ **A `## Goals` bullet carrying no wikilink is not an
-   entry** — it is prose in the list; report it once under row 6, never resolve it. A topic with no
+   entry** — it is prose in the list; name it in **row 6's detail** as a malformed list line
+   without changing row 6's verdict, and never resolve it. A topic with no
    `## Goals` section is `UNPROVEN — no member set to resolve`.
 
 3. **Member must not outrank its topic** — topic not `in_progress` → no member `in_progress`;
@@ -136,7 +138,9 @@ across separate sessions, every one a false violation.
 
 4. **Task must not outrank its goal** — for each member goal: goal `completed` → every subtask
    `completed`; goal not `in_progress` → no subtask `in_progress`. A topic whose members are all
-   tasks, with no member goal, is `UNPROVEN — no goal to compare`.
+   tasks, with no member goal, is `UNPROVEN — no goal to compare`. ⚠️ **A member goal row 2 reported
+   unresolved is excluded and named**; if none resolved, `SKIPPED — every member goal unresolved
+   (row 2)`.
 
 5. **Necessity — the serving item is named** — for each **`## Goals` entry that is a task** (never
    a task wikilink in the prose), determine
@@ -215,15 +219,15 @@ across separate sessions, every one a false violation.
     met-looking box a hand read cannot separate from an evidenced one. `FAIL` — at least one
     open criterion has no driving item; `PASS` — zero, **including a topic whose criteria are all
     closed** (`PASS — 0 open criteria across <n> goals`); `SKIPPED` — no coverage output **and**
-    no goal page to read at all. ⚠️ **When the caller passed no coverage output**, fall
-    back to the fixed read and **say which of the two you used**:
+    no goal page to read at all. ⚠️ **With no coverage output**, run the fixed read **once per
+    declared goal page**, name the population, and report
+    **`SKIPPED — no coverage output; <n> open criteria (coverage not instrumented)`** — never
+    `PASS` or `FAIL`. ⚠️ **The read lists OPEN boxes, not undriven ones**: a criterion a task
+    already drives still appears, so its count is not a gap count and must never be read as one.
 
     ```bash
     awk '/^# Success Criteria/{f=1;next} /^# /{f=0} f' <goal-page> | grep -E '^- \[[ /]\]'
     ```
-
-    ⚠️ **Run it once per declared goal page** and name the population — a topic declares several
-    goals, and reading one of them silently under-reports the gaps.
 
 13. **FILL** — for each gap, **name the goal whose criteria need work** and the bar it must
     clear. Do not author it here. ⚠️ **A criterion with no task is the goal manager's finding,
@@ -283,8 +287,8 @@ Verdict: PASS | FAIL
   9. No double declaration ........ PASS | FAIL | UNPROVEN | SKIPPED — <detail>
  10. Goals entry format ........... PASS | FAIL | UNPROVEN | SKIPPED — <detail>
  11. Goals entry closes gate ...... PASS | FAIL | UNPROVEN | SKIPPED — <detail>
- 12. Coverage ..................... PASS | FAIL | SKIPPED — <n> criteria with no driving item (0 = PASS)
- 13. Fill ......................... <n> goals needing criteria work
+ 12. Coverage ..................... PASS | FAIL | SKIPPED — <n> criteria with no driving item (0 = PASS) | <reason>
+ 13. Fill ......................... <n> goals needing criteria work | not assessed — row 12 SKIPPED
  14. Startability ................. <n> startable · <n> waiting-approval · <n> phase unknown
  15. Slots ........................ <n> to start · <n> held by the cap | SKIPPED — no ranking line
  16. Route ........................ <one line>
@@ -305,7 +309,7 @@ Route: <the one line the caller must send to the topic's manager>
 - `UNPROVEN` appears only for a row no page exercised; `DRIFT` only on row 8; `SKIPPED` only for
   a probe that could not run.
 - Nothing was mutated. Row 5 read the topic's own task entries and the SC/DoD lines of the goals
-  they belong to; rows 3 and 4 read only the statuses they compare.
+  they belong to; row 4 read the member goals' `# Tasks` lists for their statuses only.
 - The run ends with a numbered fix list, each entry naming a command or a manager, never an
   agent this file would have to dispatch.
 - The branch was taken from the caller, never re-derived.
