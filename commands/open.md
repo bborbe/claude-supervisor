@@ -625,10 +625,9 @@ The trailing `"/color $CHIP"` is the initial prompt — Claude executes it at st
 The colour already ran as the spawn prompt, so the session is idle and the work command submits on the first try:
 
 ```bash
-# goal_loop rows only: arm the goal FIRST, then wait for '⎿ Goal set:' (item 10)
-wezterm cli send-text --pane-id <new-pane-id> --no-paste "$(python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-condition.py" --task "<task>" --vault "<vault>")"
-sleep 1
-wezterm cli send-text --pane-id <new-pane-id> --no-paste $'\r'
+# goal_loop rows only: arm the goal and fail closed — non-zero means the emitter refused
+# the row or 'Goal set:' never appeared, and the work command below must not be sent
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/spawn-goal.py" --pane <new-pane-id> --task "<task>" --vault "<vault>" || exit 1
 sleep 8                                   # let the session reach its prompt
 wezterm cli send-text --pane-id <new-pane-id> --no-paste $'/vault-cli:work-on-task "<task>"'
 sleep 1
