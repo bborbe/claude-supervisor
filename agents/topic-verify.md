@@ -73,7 +73,8 @@ support a pass, that row is `FAIL` — say what the evidence failed to establish
 **Row 12 is a check, not a page verdict.** It reports `PASS | FAIL | SKIPPED` and is counted in
 `Checks: <n>/12`, but it is **excluded from the aggregate by design** — a coverage gap is a
 finding about the member goals' task sets, not an inconsistency in the topic page. **Rows 13–16
-are advisory output**: they emit a count, a ranking or a line, never a token.
+are advisory output**: they emit a count, a ranking or a line, never a page verdict. Row 15 may
+carry the `SKIPPED` marker, which is a probe report and never enters the aggregate.
 </verdicts>
 
 <parse_widths>
@@ -218,8 +219,8 @@ across separate sessions, every one a false violation.
     whose open criteria have no driving item is the gap; a box rated `asserted` is the
     met-looking box a hand read cannot separate from an evidenced one. `FAIL` — at least one
     open criterion has no driving item; `PASS` — zero, **including a topic whose criteria are all
-    closed** (`PASS — 0 open criteria across <n> goals`); `SKIPPED` — no coverage output **and**
-    no goal page to read at all. ⚠️ **With no coverage output**, run the fixed read **once per
+    closed** (`PASS — 0 open criteria across <n> goals`); `SKIPPED` — **no coverage output**: report the fallback string below, whether or not a goal page
+    exists to read. ⚠️ **With no coverage output**, run the fixed read **once per
     declared goal page**, name the population, and report
     **`SKIPPED — no coverage output; <n> open criteria (coverage not instrumented)`** — never
     `PASS` or `FAIL`. ⚠️ **The read lists OPEN boxes, not undriven ones**: a criterion a task
@@ -259,8 +260,8 @@ across separate sessions, every one a false violation.
 - **The subject is a goal, not a topic** → stop and say so; `agents/goal-verify.md` owns it.
 - **A folder arrived empty or absent** → every row that reads it is `SKIPPED — folder not passed
   by the caller`, said once at the top. Never substitute a literal.
-- **The caller passed no coverage output** → run row 12's fixed read and **name which of the two
-  you used**; never report the row `PASS` on a read you did not run.
+- **The caller passed no coverage output** → run row 12's fixed read and report its `SKIPPED`
+  string; never `PASS` or `FAIL` on a read that did not measure driving.
 - **A row did not run** → `SKIPPED` with its reason, **never `PASS`**.
 - **A section the rows depend on is missing from the page** → report it as a **documentation gap
   naming the page template**, not as a defect in the topic's content — ⚠️ **except** a missing
@@ -287,7 +288,8 @@ Verdict: PASS | FAIL
   9. No double declaration ........ PASS | FAIL | UNPROVEN | SKIPPED — <detail>
  10. Goals entry format ........... PASS | FAIL | UNPROVEN | SKIPPED — <detail>
  11. Goals entry closes gate ...... PASS | FAIL | UNPROVEN | SKIPPED — <detail>
- 12. Coverage ..................... PASS | FAIL | SKIPPED — <n> criteria with no driving item (0 = PASS) | <reason>
+ 12. Coverage ..................... PASS | FAIL — <n> criteria with no driving item (0 = PASS)
+                                   SKIPPED — no coverage output; <n> open criteria (coverage not instrumented)
  13. Fill ......................... <n> goals needing criteria work | not assessed — row 12 SKIPPED
  14. Startability ................. <n> startable · <n> waiting-approval · <n> phase unknown
  15. Slots ........................ <n> to start · <n> held by the cap | SKIPPED — no ranking line
