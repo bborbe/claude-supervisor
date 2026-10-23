@@ -1,5 +1,5 @@
 ---
-description: Verify ONE topic and suggest the fixes — the topic tier's sixteen-row check (eleven page-consistency checks plus five review rows), read-only, ending in a numbered fix list
+description: Verify ONE topic and suggest the fixes — the topic tier's sixteen-row check (eleven page-consistency checks, one coverage read, four advisory rows), read-only, ending in a numbered fix list
 argument-hint: "[topic-name] — a bare name or a path (its basename is used); omit it to resolve from the session"
 allowed-tools:
   - Read
@@ -23,7 +23,7 @@ the whole run *is* the preview. Do not reintroduce a mutating mode behind a flag
 a subject and a loop; a worker needing a subject verified routes it to its manager with
 `SendMessage` and says so.
 
-## Subject resolution — when `$1` is omitted
+## Subject resolution — when `$ARGUMENTS` is empty
 
 **The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — never a
 `~/.claude/plugins/marketplaces/…` clone, which is a different, usually stale copy. **Only source
@@ -32,9 +32,7 @@ a subject and a loop; a worker needing a subject verified routes it to its manag
 3. **Conversation** — the most recent `/supervisor:topic-*` argument in this conversation, then
    the most recent **topic** page referenced as a subject.
 
-**Nothing resolves → STOP.** Print `❌ No subject detected. Pass a topic name: /supervisor:topic-verify "<name>"`.
-
-**Print the source** on the first line: `Subject: <name> (from <explicit|session|name|conversation|last>)`.
+**Nothing resolves → STOP.** Print `❌ No subject detected. Pass a topic name: /supervisor:topic-verify "<name>"`. Otherwise print the source first: `Subject: <name> (from <explicit|session|name|conversation|last>)`.
 
 ## Resolve the folders — once, from the vault's own config
 
@@ -46,17 +44,18 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/resolve-folders.py
 ```
 
 It prints **absolute** `TOPICS_DIR|GOALS_DIR|TASKS_DIR|VAULT_NAME` and exits 0, or `UNKNOWN
-<reason>` and exits 1 — never a bare `23 Topics`, which resolves only from the vault root. ⚠️ **On
-`UNKNOWN` the run ABORTS**: report the reason and stop, before the coverage dispatch — never
-substitute the literals, because three empty paths make every membership check report a topic with
-no members. An unset `CLAUDE_PLUGIN_ROOT` is `SKIPPED — resolver not found`, never a borrow.
+<reason>` and exits 1 — never a bare `23 Topics`, which resolves only from the vault root. ⚠️ **Split
+that line into those four names** — the probe below uses `$GOALS_DIR` / `$TOPICS_DIR`, and an unset
+one makes `find ""` match nothing, reading as `no match` on a page that exists. ⚠️ **On `UNKNOWN` the
+run ABORTS**: report the reason and stop, before the coverage dispatch — never substitute the
+literals, because three empty paths make every membership check report a topic with no members.
+Never fall back to a marketplace clone — a different, usually stale copy.
 
 ⚠️ **Granted as Bash: only `awk`, `grep`, `find` and this plugin's own scripts** — `sed`, `tr`, `jq`
 and `vault-cli` park on approval; `find` is used only in its read forms (`-delete`/`-exec` would pass).
 ⚠️ **This copy resolves but never writes.** Its re-scope trims `Bash(mkdir:*)` and the broad
 `Bash(vault-cli:*)`, so the recording block and § *Reconcile the subject's status* are unavailable
-here: it resolves, records nothing, and leaves `status` as it finds it. The write-scope table in
-`docs/subject-resolution.md` carries the same row for this command.
+here: it resolves, records nothing, and leaves `status` as it finds it (`docs/subject-resolution.md`).
 
 ## Branch check — never assume one
 
@@ -90,7 +89,7 @@ probe is the command's own.
 
 5. **Dispatch the agent:**
 
-   `Task(subagent_type: "supervisor:topic-verify", prompt: <subject + resolution source + the three folders + VAULT_NAME + the coverage output + timestamp>)`
+   `Task(subagent_type: "supervisor:topic-verify", prompt: <subject + resolution source + the three folders + VAULT_NAME + the coverage output>)`
 
    ⚠️ **No external instrument to call any more** — the eleven checks live in
    `agents/topic-verify.md`, so this step passes the folders and lets the agent read the page
