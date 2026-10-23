@@ -38,6 +38,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import time
@@ -2442,6 +2444,69 @@ class LastAssistantTextBeyondTheTail(unittest.TestCase):
     def test_a_transcript_with_no_assistant_text_reads_empty(self):
         path = self.write([{"type": "attachment", "attachment": {"content": "x" * 300_000}}])
         self.assertEqual("", wnm._read_last_assistant_text({"transcript": path, "session_id": "s"}))
+
+
+class AgesFlagTest(unittest.TestCase):
+    """`--ages` is the clock the fleet digest renders, and the quiet half of `stalled`.
+
+    Both failure directions are silent in production: a wrong age renders a working
+    session as 37-59 minutes inactive (measured 2026-10-23, five rows), and a wrong
+    `quiet` puts it in `stalled` where a manager is invited to nudge it. The fixture
+    transcripts are constructed; the live claims belong to the task page's `# Results`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._old_projects = wnm.PROJECTS_DIR
+        wnm.PROJECTS_DIR = self.tmp
+        wnm._AGE_CACHE.clear()
+
+    def tearDown(self):
+        wnm.PROJECTS_DIR = self._old_projects
+        wnm._AGE_CACHE.clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def transcript(self, sid, age_seconds, project="proj"):
+        directory = os.path.join(self.tmp, project)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f"{sid}.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def ages(self, *ids):
+        env = dict(os.environ, PROJECTS_DIR=self.tmp)
+        result = subprocess.run([sys.executable, _SCRIPT, "--ages", *ids],
+                                capture_output=True, text=True, env=env)
+        self.assertEqual(0, result.returncode, result.stderr)
+        return [line.split("\t") for line in result.stdout.splitlines()]
+
+    def test_a_prefix_resolves_to_the_full_id(self):
+        sid = "0123456789abcdef0123456789abcdef"
+        self.transcript(sid, 10)
+        self.assertEqual((sid, False), wnm._resolve_session_id("01234567"))
+
+    def test_an_ambiguous_prefix_is_reported_never_quiet(self):
+        self.transcript("01234567-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 10)
+        self.transcript("01234567-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 10)
+        rows = self.ages("01234567")
+        self.assertEqual(["01234567", "?", "?", "ambiguous"], rows[0])
+
+    def test_a_session_writing_its_transcript_is_active_whatever_its_task_file_says(self):
+        sid = "01234567-cccc-4ccc-8ccc-cccccccccccc"
+        self.transcript(sid, 120)
+        self.assertEqual(["01234567", "120", "2m ago", "active"], self.ages("01234567")[0])
+
+    def test_a_transcript_past_the_bound_reads_quiet(self):
+        sid = "01234567-dddd-4ddd-8ddd-dddddddddddd"
+        self.transcript(sid, wnm.STALL_TRANSCRIPT_SECONDS + 60)
+        self.assertEqual("quiet", self.ages("01234567")[0][3])
+
+    def test_a_session_with_no_transcript_reads_quiet_not_active(self):
+        rows = self.ages("ffffffff")
+        self.assertEqual(["ffffffff", "inf", "no transcript", "quiet"], rows[0])
 
 
 if __name__ == "__main__":
