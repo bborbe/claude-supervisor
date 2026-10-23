@@ -86,12 +86,13 @@ echo derives sha256(sid:kind:detail), and those two keys can never collide.
 Passing it writes <sid>.posted.json, which the hook's `Stop` branch and the
 feed's `reclassify_idle` both read to decline the echo. Omitted, nothing is
 recorded and the echo is raised exactly as before — so omitting it is correct
-only when the closer asks something *else*.
+only when the closer asks something *else* or mints nothing.
 
 ⚠️ It holds ONE record per session, so a round that posts two cards overwrites
-the first closer. And it cannot cover a card ANOTHER session raised: a manager
-relaying someone else's gate writes no record here, so its closer must carry no
-minting verb at all — `commands/steps/needs-input.md`, the relay bullet.
+the first closer. And it cannot cover a card this session did not post: a
+manager relaying a gate it never carded writes no record here, so its closer
+must carry no minting verb at all — `commands/steps/needs-input.md`, the relay
+bullet.
 
 Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
      python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
