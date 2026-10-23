@@ -19,14 +19,14 @@
 // id, a probe that cannot run, output that does not parse, an unproven state — because a
 // check that failed open would open exactly the worker this rule exists to prevent.
 //
-// ⚠️ **The known gap, stated where the refusal is written rather than left to be
-// discovered.** The probe proves a MANAGER LOOP; a session with no `worker-manager`
-// registration (the Fleet Manager among them — `commands/fleet-loop.md` deliberately writes
-// no liveness record) reads as having no answer path and is refused. That is the correct
-// verdict for this probe and the wrong verdict for that session, and the two are not
-// distinguishable here. Resolving it is a fleet-tier registration question, not a spawn-site
-// one; until it is settled the refusal text names the remedy (open interactive, or arm a
-// manager loop) rather than pretending the gap does not exist.
+// ⚠️ **The fleet-tier gap this guard used to name is CLOSED, and the note stays because the
+// shape recurs.** A session with no `worker-manager` registration reads as having no answer
+// path and is refused — the correct verdict for this probe, and the wrong one for any tier
+// that answers prompts but files no record. That was the Fleet Manager until
+// `scripts/fleet-register.py` plus `commands/steps/re-arm.md` gave it one (v0.209.0). The
+// lesson is the rule: **a tier that answers parks must write its registration**, and the fix
+// is always the record, never a bypass at the spawn site — a bypass here would remove the
+// check for every session at once.
 
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
