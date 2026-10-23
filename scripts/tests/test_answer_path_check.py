@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -140,6 +141,38 @@ class AnswerPathCheckTest(unittest.TestCase):
         ok, _, _, detail = self.mod.check("half")
         self.assertFalse(ok)
         self.assertIn("no subject/branch", detail)
+
+    def test_a_fleet_registration_with_an_armed_loop_passes(self):
+        # ⚠️ THE END-TO-END PATH THE SPAWN GUARD GATES ON, and the one a cadence-only fix
+        # silently failed: a registration alone reads UNARMED, an arm alone reads no
+        # registration. Both, and the probe passes — the real manager-liveness.py, not a fake.
+        state = tempfile.mkdtemp()
+        os.environ["MANAGER_LIVENESS_STATE_DIR"] = state
+        try:
+            self.write_registration("fleet-session", {"subject": "Fleet Manager", "branch": "fleet"})
+            subprocess.run(
+                [sys.executable, self.mod.LIVENESS, "--arm", "--subject", "Fleet Manager",
+                 "--branch", "fleet", "--interval", "900"],
+                check=True, capture_output=True,
+            )
+            ok, subject, branch, detail = self.mod.check("fleet-session")
+            self.assertTrue(ok, detail)
+            self.assertEqual((subject, branch), ("Fleet Manager", "fleet"))
+        finally:
+            os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def test_a_fleet_registration_alone_still_refuses(self):
+        # The half the reviewer caught: the cadence is not the registration, and an
+        # unarmed subject refuses exactly like an unregistered one.
+        state = tempfile.mkdtemp()
+        os.environ["MANAGER_LIVENESS_STATE_DIR"] = state
+        try:
+            self.write_registration("fleet-session", {"subject": "Fleet Manager", "branch": "fleet"})
+            ok, _, _, detail = self.mod.check("fleet-session")
+            self.assertFalse(ok)
+            self.assertIn("UNARMED", detail)
+        finally:
+            os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
 
     # --- the liveness half -----------------------------------------------------
 

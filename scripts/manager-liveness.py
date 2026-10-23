@@ -231,7 +231,9 @@ def detect_branch(subject: str, vault: str = ".") -> str:
     resolved a page in this process:
 
       1. **An existing prefixed record** — a manager already running under
-         `goal--<base>` or `topic--<base>` keeps its branch, whatever the page says now.
+         `goal--<base>`, `topic--<base>` or `fleet--<base>` keeps its branch, whatever the
+         page says now. `fleet` is checked like the others because the Fleet Manager arms a
+         loop and manages no page: it has no other way to be resolved.
       2. **The vault's pages** — `24 Goals/<subject>.md` is a goal; the topics folder
          holding `<subject>.md` is a topic.
       3. **`goal`** — the default, announced on stderr so a wrong guess is visible
@@ -467,7 +469,7 @@ def main() -> int:
     ap.add_argument(
         "--branch",
         choices=BRANCHES,
-        help="goal | topic — auto-detected when omitted (existing record, then the vault's pages)",
+        help="goal | topic | fleet — auto-detected when omitted (existing record, then the vault's pages)",
     )
     ap.add_argument("--vault", default=".", help="vault ROOT, used only to auto-detect --branch")
     ap.add_argument("--interval", type=int, help="the ScheduleWakeup delay just armed, seconds")
