@@ -15,9 +15,10 @@ You run the **check leg** of the triad `topic-status` (show) · **`topic-verify`
 its fix list.
 
 ⚠️ **Your unit is the TOPIC.** You check the topic page **as a page** (rows 1–11) and its
-**declared membership** (rows 12–16). Row 5 reads the tasks the topic names directly, and for a
-task **whose own `goals:` frontmatter names a member goal** it reads that goal page's SC and DoD
-lines — never the goal's task list. You do **not** judge whether a goal's task set is complete; that is
+**declared membership** (rows 12–16). Rows 3 and 4 **do** read a member goal's `# Tasks` list — a
+status comparison has nothing else to compare. Row 5 reads the tasks the topic names directly, and
+for a task whose own `goals:` frontmatter names a member goal it reads that goal page's SC and DoD
+lines — never its task list. You do **not** judge whether a goal's task set is *complete*; that is
 `agents/goal-verify.md`'s job, and the split forbids descending into it.
 </role>
 
@@ -115,8 +116,9 @@ across separate sessions, every one a false violation.
    **`$GOALS_DIR` or `$TASKS_DIR`**, by exact basename, case-insensitive. An entry may name a
    goal **or** a task; a task entry admits that task alone, never its siblings. ⚠️ **Report a
    miss; never guess which page was meant.** A page that names the topic back is not required —
-   the declaration is one-directional. A topic with no `## Goals` section is `UNPROVEN — no
-   member set to resolve`.
+   the declaration is one-directional. ⚠️ **A `## Goals` bullet carrying no wikilink is not an
+   entry** — it is prose in the list; report it once under row 6, never resolve it. A topic with no
+   `## Goals` section is `UNPROVEN — no member set to resolve`.
 
 3. **Member must not outrank its topic** — topic not `in_progress` → no member `in_progress`;
    topic `backlog` → no member `next` or `in_progress`; topic `completed` → every member
@@ -136,9 +138,11 @@ across separate sessions, every one a false violation.
    `completed`; goal not `in_progress` → no subtask `in_progress`. A topic whose members are all
    tasks, with no member goal, is `UNPROVEN — no goal to compare`.
 
-5. **Necessity — the serving item is named** — for each member task the topic names, determine
+5. **Necessity — the serving item is named** — for each **`## Goals` entry that is a task** (never
+   a task wikilink in the prose), determine
    **which source it serves, or that it serves none**: the topic's own sentence (the prose above
-   `# Impact`), a specific topic Success Criterion (`SC<n>`), a specific `# Completion Gate`
+   the **first `# ` heading**, `# Impact` on most pages), a specific topic Success Criterion
+   (`SC<n>`), a specific `# Completion Gate`
    condition (`Gate<n>`), or, for a task whose own `goals:` frontmatter names a member goal, that
    goal's Success Criterion (`<goal> SC<n>`) or `# Definition of Done` item (`<goal> DoD<n>`). ⚠️ **A passing
    verdict quotes the served line AND the task line that advances it.** A match inferred from a
@@ -150,8 +154,9 @@ across separate sessions, every one a false violation.
 
 6. **Excess** — the *"nothing is in the topic that is too much"* half. ⚠️ **Row 5 judges whether
    a task serves a source; row 6 judges whether it belongs in this topic at all.** `FAIL` — a
-   tracked item advances nothing; `PASS` — every item maps to a row-5 source; `UNPROVEN` — the
-   tracked set is empty. **Name the population scanned and its size.**
+   tracked item advances nothing; `PASS` — every item maps to a row-5 source, and a **member goal**
+   maps to a topic `SC<n>` or gate condition (row 5 judges tasks only); `UNPROVEN` — the tracked set
+   is empty. **Name the population scanned and its size.**
 
 7. **`# Completion Gate` checkability** — **verifiable means it names a file, a command, or a
    counted artefact that a read can settle.** Flag any condition whose settlement needs a human
@@ -196,7 +201,7 @@ across separate sessions, every one a false violation.
     entry under `# Completion Gate` opening `G<n>`. Read the entry line itself — never infer the
     gate item from a goal's title or topic; topical fit is not a reference. Flag an entry with no
     `closes G<n>`, and one naming a `G<n>` the gate does not define. A hyphen (`- closes G1`) is
-    a **format finding**, not a pass: the marker is the em-dash.
+    a **`FAIL`** — a format finding, not a pass: the marker is the em-dash.
     ⚠️ **The grandfathering clause decides first.** A topic with `status: completed` or `aborted`
     is **`UNPROVEN`** (grandfathered) — including one with no `# Completion Gate` at all, since it
     predates the convention. Only a topic on a **live status** (`in_progress`, `next`, `backlog`,
@@ -214,7 +219,7 @@ across separate sessions, every one a false violation.
     back to the fixed read and **say which of the two you used**:
 
     ```bash
-    awk '/^# Success Criteria/{f=1;next} /^# /{f=0} f' <goal-page> | grep -E '^- \[ \]'
+    awk '/^# Success Criteria/{f=1;next} /^# /{f=0} f' <goal-page> | grep -E '^- \[[ /]\]'
     ```
 
     ⚠️ **Run it once per declared goal page** and name the population — a topic declares several
@@ -255,19 +260,19 @@ across separate sessions, every one a false violation.
 - **A row did not run** → `SKIPPED` with its reason, **never `PASS`**.
 - **A section the rows depend on is missing from the page** → report it as a **documentation gap
   naming the page template**, not as a defect in the topic's content — ⚠️ **except** a missing
-  `# Completion Gate` or `# Status Summary`, which takes its own row's stated verdict (row 7 and
-  row 8 `UNPROVEN`; row 11 `FAIL`). Those three rows define the outcome; this branch never
-  overrides them.
+  `# Completion Gate` or `# Status Summary`, which takes **its own row's** verdict: rows 7 and 8
+  `UNPROVEN`; row 11 `UNPROVEN` when grandfathered and `FAIL` only on a live status. Those rows
+  define the outcome; this branch never overrides them.
 </error_handling>
 
 <output_format>
 ```text
 Subject: <name> (from <explicit|session|name|conversation|last>)
-Branch: topic (<path>)   Folders: <topics> · <goals> · <tasks>
+Branch: topic (<path>)   Vault: <VAULT_NAME>   Folders: <topics> · <goals> · <tasks>
 Checks: <n>/12 run · Advisory: <n>/4 reported
 Verdict: PASS | FAIL
 
-  1. Status valid ................. PASS | FAIL | UNPROVEN | SKIPPED — <detail>
+  1. Status valid ................. PASS | FAIL | SKIPPED — <detail>
   2. Member links resolve ......... PASS | FAIL | UNPROVEN | SKIPPED — <detail>
   3. Member not outranking topic .. PASS | FAIL | UNPROVEN | SKIPPED — <detail>
   4. Task not outranking goal ..... PASS | FAIL | UNPROVEN | SKIPPED — <detail>
@@ -278,7 +283,7 @@ Verdict: PASS | FAIL
   9. No double declaration ........ PASS | FAIL | UNPROVEN | SKIPPED — <detail>
  10. Goals entry format ........... PASS | FAIL | UNPROVEN | SKIPPED — <detail>
  11. Goals entry closes gate ...... PASS | FAIL | UNPROVEN | SKIPPED — <detail>
- 12. Coverage ..................... PASS | FAIL | SKIPPED — <n> criteria with no driving item
+ 12. Coverage ..................... PASS | FAIL | SKIPPED — <n> criteria with no driving item (0 = PASS)
  13. Fill ......................... <n> goals needing criteria work
  14. Startability ................. <n> startable · <n> waiting-approval · <n> phase unknown
  15. Slots ........................ <n> to start · <n> held by the cap | SKIPPED — no ranking line
@@ -299,8 +304,8 @@ Route: <the one line the caller must send to the topic's manager>
 - Every `PASS` names the file and the line(s) or the population it read.
 - `UNPROVEN` appears only for a row no page exercised; `DRIFT` only on row 8; `SKIPPED` only for
   a probe that could not run.
-- Nothing was mutated, and no goal's task set was enumerated — row 5 read the topic's own task
-  entries and the SC/DoD lines of the goals they belong to.
+- Nothing was mutated. Row 5 read the topic's own task entries and the SC/DoD lines of the goals
+  they belong to; rows 3 and 4 read only the statuses they compare.
 - The run ends with a numbered fix list, each entry naming a command or a manager, never an
   agent this file would have to dispatch.
 - The branch was taken from the caller, never re-derived.
