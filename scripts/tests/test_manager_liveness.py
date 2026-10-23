@@ -61,6 +61,24 @@ class Liveness(unittest.TestCase):
         self.arm("Manager Layer", 300, age=100)
         self.assertEqual(self.check(), (0, ""))
 
+    def test_the_fleet_branch_is_its_own_tier(self):
+        # The Fleet Manager manages no subject page, so it registers under its own branch
+        # rather than borrowing `goal` or `topic` — and the two must never share a slug, or
+        # one would overwrite the other's cadence in this flat directory.
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Fleet Manager", "fleet", 900)
+        fleet = self.m.slug("Fleet Manager", "fleet")
+        self.assertEqual(fleet, "fleet--fleet-manager")
+        self.assertNotEqual(fleet, self.m.slug("Fleet Manager", "goal"))
+        self.assertNotEqual(fleet, self.m.slug("Fleet Manager", "topic"))
+        self.assertTrue(os.path.exists(self.m.path(fleet, "cadence")))
+        # A fresh arm reads OK — the state `scripts/answer-path-check.py` requires to pass.
+        self.assertEqual(self.m.classify(fleet, time.time())[0], "OK")
+
+    def test_an_unknown_branch_is_still_refused(self):
+        with self.assertRaises(ValueError):
+            self.m.slug("Fleet Manager", "workers")
+
     def test_past_two_intervals_is_stale(self):
         self.arm("Manager Layer", 300, age=2 * 300 + 61)
         rc, out = self.check()

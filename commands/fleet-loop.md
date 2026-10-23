@@ -49,6 +49,13 @@ The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rule
 ## Arm procedure
 
 1. **Arm `ScheduleWakeup` FIRST — before the read half, not after it.** It is one-shot per call, so a long round (a drive leg, an escalation, a gate relay) that re-arms at its end is exactly the round that never reaches the re-arm and stops silently. Arm at the **clamped** interval with the prompt `/supervisor:fleet-drive --interval <N>m` — **name the ROUND, never the arm** — and `noop: false` (the round has not run yet, so `noop` cannot be honest at the head). A second `ScheduleWakeup` supersedes the first rather than stacking.
+   ⚠️ **The same step writes the liveness record, and that record is what makes the fleet loop's answer path provable.** Immediately after the `ScheduleWakeup`:
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py" --arm --subject "Fleet Manager" --branch fleet --interval <clamped seconds>
+   ```
+
+   The fleet round answers headless workers' parked prompts — it runs the wrangler and watches the queue — so it **has** an answer path; what it lacked was any record of one. `scripts/answer-path-check.py` reads a session with no registration as having none, so an unrecorded fleet loop refuses **every** headless spawn the Fleet Manager makes (measured 2026-10-23: correct for the probe, wrong for that session — the fix is the record, never a bypass). ⚠️ **`--branch fleet` is its own tier**, not a stand-in for `goal` or `topic`: the Fleet Manager manages no subject page, and registering it under either would put a non-subject into that tier's namespace. The interval is the **clamped** one, never the requested one.
 2. **Then run the round** — read `${CLAUDE_PLUGIN_ROOT}/commands/fleet-drive.md` and follow its router table. Every step file it names is under `${CLAUDE_PLUGIN_ROOT}/commands/steps/`.
 
 ## Router
