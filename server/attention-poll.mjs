@@ -42,6 +42,39 @@ export function storeDecisionRecord({ requestId, agentId, decision, park, now = 
   }
 }
 
+// The `permissions.jsonl` record for a park that timed out unanswered.
+//
+// ⚠️ **Until this existed, a timeout wrote NO record at all.** The settle path in
+// `supervisor.mjs` resolved the promise with a deny and returned, so the log's `manager deny`
+// rows were all EXPLICIT manager denies and could not proxy a timeout — which is why the
+// 7-day criterion cannot be measured from them (SC5(a)). Absence was the correct reading of
+// that log, not a missing probe.
+//
+// Shaped to match `storeDecisionRecord` above and the `answer_permission` record in
+// `supervisor.mjs`, so all three are comparable in one log and only `decided_by` separates
+// them. Built here rather than at the call site for the same reason: `supervisor.mjs` starts
+// an MCP server at import and cannot be imported in-process, so a builder living there could
+// not be tested at all.
+//
+// ⚠️ `decision` is fixed to `deny` rather than taken as a parameter: a timeout has exactly one
+// outcome, and a builder that could be handed `allow` is a way to write a timeout that never
+// happened.
+export const TIMEOUT_DECIDER = 'timeout'
+
+export function timeoutDecisionRecord({ requestId, agentId, park, now = new Date() }) {
+  return {
+    ts: now.toISOString(),
+    agent: agentId,
+    tool: park.toolName,
+    key: inputKey(park.input),
+    matched_rule: null,
+    decision: 'deny',
+    decided_by: TIMEOUT_DECIDER,
+    request_id: requestId,
+    latency_ms: now.getTime() - Date.parse(park.requestedAt),
+  }
+}
+
 // The verdict a store item carries, or a reason it carries none.
 //
 // A missing decision is a refusal rather than a default, for the same reason the arm
