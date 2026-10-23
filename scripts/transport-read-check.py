@@ -119,6 +119,15 @@ SITE_LIST = {
     # session with nothing to say, which is the exact silence the rule exists to end.
     # Enumerated so the mechanism and this list agree.
     ("drive-unverifiable.py", "pane_text"),
+    # added 2026-10-22 — `spawn-goal.py`, the arm sequence the `goal_loop` spawn path
+    # runs. `pane_text` is the `wezterm cli get-text` read behind the bounded
+    # `Goal set:` wait, and it returns `None` for a failed read, never `''`: a dead mux
+    # socket and a pane that has not printed yet are different states, and the whole
+    # point of the wait is that absence of evidence is not evidence of arming. `send`
+    # is an ACTION — it types into the pane and reports its own failure rather than
+    # collapsing one into an empty result — so it is enumerated for the mechanism/list
+    # agreement and, like `close-worker.py`'s `main`, deliberately not driven.
+    ("spawn-goal.py", "pane_text"), ("spawn-goal.py", "send"),
     # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
     # gives a re-registered park card its jump target. It returns `None` for a failed
     # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
@@ -187,6 +196,7 @@ POPULATED = {
     ("pvc", "_pid_ttys"): "101 ttys001",
     ("mmf", "wezterm_panes"): '[{"pane_id": "204", "title": "t"}]',
     ("mmf", "pane_lines"): "context\nEnter to select",
+    ("sg", "pane_text"): "  ⎿  Goal set: Task \"t\" is finished.",
 }
 
 
@@ -260,6 +270,7 @@ def main():
             ("pvc", "plugin-version-census.py"),
             ("wnmh", "who-needs-my-help.py"),
             ("mmf", "manager-menu-footer.py"),
+            ("sg", "spawn-goal.py"),
         )
     }
 
@@ -294,6 +305,10 @@ def main():
         # the sites the change added: an enumeration entry nothing reaches is a false
         # green for exactly the read it claims to protect. Found by review.
         ("mmf", "wezterm_panes", ()), ("mmf", "pane_lines", (1,)),
+        # added 2026-10-22 — the `goal_loop` arm sequence's viewport read. Driven for the
+        # same reason as the pair above: an entry this loop never reaches is a false green
+        # for exactly the read it claims to protect.
+        ("sg", "pane_text", (1,)),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")
