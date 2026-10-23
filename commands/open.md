@@ -215,6 +215,14 @@ Writing them is the point, not a side effect. The next batch reads the fields in
 
 **`shipping:` is read here and passed at Step 3 — never inferred.** Pass `shipping: true` to `spawn_agent` only when the field reads `true`; omit it otherwise. A derived value would hand unattended commit rights to a row nobody marked. Rule: § Spawn a worker item 9.
 
+**A `headless` row is not opened until an answer path is proven — run the probe before the spawn.** Exit 0 → open the row. Exit 1 → **refuse the row**, print the probe's own line (it names the reason and the remedy), and open nothing.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/answer-path-check.py" --session-id "$CLAUDE_CODE_SESSION_ID"
+```
+
+This is the same probe `server/supervisor.mjs`'s `spawnAgent` enforces, so a spawn that skips this step is still refused — this step exists so the refusal is seen before the row is opened rather than as an error after it. A headless worker's prompts park with **this** session and die unanswered after 15 minutes (§ Spawn a worker item 6, constraint (a)).
+
 ⚠️ **A machine-written role is indistinguishable from an operator-written one on disk.** Nothing in the frontmatter records who decided. So **print every auto-filled row distinctly** (`🏷️ filled now`) instead of folding it into the opened count. That report line is the only provenance this decision has, and it exists for exactly one read — the first one, while objecting is still cheap.
 
 ⚠️ **The undecidable guard still refuses; never soften it into a default.** When the body genuinely does not say, do **not** guess and do **not** write the field — print `⛔ REFUSED — role: undecidable (body carries no signal; not written)`. **This applies to `role` only.** `mode` never blocks either — but it resolves the other way: a `role: agent` body carrying none of item 6's five watch-need signals is `headless`, so an undecidable `mode` is `headless`, never a refusal.

@@ -47,6 +47,7 @@ import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatu
 import { findLiveHolder } from './resume-guard.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
+import { answerPathRefusal } from './answer-path.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
@@ -2208,6 +2209,24 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   })
   if (spawnMode.error) return { error: spawnMode.error }
   const opensInteractive = spawnMode.mode === 'interactive'
+
+  // ⚠️ THE ANSWER-PATH GUARD, and it sits with the other refusals — before a worker, a tab
+  // or a ledger record exists. `docs/fleet-surface.md` § Spawn a worker item 6, constraint
+  // (a): a headless worker's permission gate parks with the session that SPAWNED it, so a
+  // spawner with no answer path strands it (measured 2026-09-20: two workers, four gates
+  // expired in ~90 minutes). Nothing asked at the spawn site until now.
+  //
+  // REFUSED rather than warned: a warning cannot block a spawn, and the caller reads the
+  // returned text as the reply. The probe is `scripts/answer-path-check.py` — this server
+  // owns no second observable (see `answer-path.mjs`'s header for why).
+  //
+  // The asking session is resolved the way every ledger row's `parent_session` is: by
+  // walking the process tree, because an MCP server carries no argument naming it.
+  const answerPathError = answerPathRefusal({
+    opensInteractive,
+    sessionId: parentSessionId({ dir: config.sessionsDir }),
+  })
+  if (answerPathError) return { error: answerPathError }
 
   // Resolved on the same principle and at the same point: a bad role costs no worker, no
   // ledger record and no tab. `resolveRole` refuses an unknown role and only DEGRADES on
