@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.206.0
 
 - fix: **a manager no longer mints a second attention card for a worker gate it relays.** Every surface that documents `--closer` now says the same thing — `commands/steps/needs-input.md`, `commands/steps/goal-gates.md`, `docs/voice-asks.md`, `agents/goal-drive.md` and `attention-ask.py`'s own docstring: the flag is **required, not opt-in**, whenever the closer repeats the card's ask, and omitting it is correct only when the closer asks something *else*. The `Stop` hook mints one card per closer verb — its condition is `board_opt_in or approve_closer or waiting_closer` — so a round that posted the board card and then ended on a `you run:` / `review:` line naming the same gate produced two or three cards for one decision; measured 2026-10-23, one worker gate was re-rendered across three managers' closers and the visible queue read roughly twice its real length. The rule change is the fix — no hook change, because a verb-free handover (`jump-link.py <pane>` with no `👤 You:` verb) already mints nothing and needs no `--closer`.
 
