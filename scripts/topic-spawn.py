@@ -2,9 +2,10 @@
 """The topic tier's spawn gate: may THIS topic start a goal manager right now?
 
 `topic-spawn` is the one verb a topic manager owns that starts a session, and it starts
-**exactly one level below itself** — a goal manager, never a worker. Every refusal is a
-named token on the **first line of stdout**, so a probe can assert on it without parsing
-prose, and the exit code is non-zero for every one of them.
+**exactly one level below itself** — a goal manager. A worker is the tier's to open too, but
+not this verb's: it goes through `/supervisor:open --task`, the same path a goal manager
+uses. Every refusal is a named token on the **first line of stdout**, so a probe can assert
+on it without parsing prose, and the exit code is non-zero for every one of them.
 
   goal-not-in-scope      the goal is not in the topic page's declared `## Goals`
   goal-not-startable     the goal's `phase` is a value that is not `planning` or
@@ -16,7 +17,7 @@ prose, and the exit code is non-zero for every one of them.
   manager-cap            a bound is reached; the SECOND line names which:
                            goal-cap      — this topic already runs N goal managers
                            manager-cap   — the fleet-wide manager ceiling is reached
-  workers are not this tier's to start
+  workers are not this verb's to start
 
 Exit 0 = allowed (prints `spawn-ok: <goal>` and, with `--print`, the `/supervisor:open`
 line to run). Exit 2 = usage error, which is never a verdict.
@@ -48,7 +49,7 @@ DEFAULT_N = 3
 STARTABLE_PHASES = ("planning", "execution")
 TERMINAL_STATUSES = ("completed", "aborted")
 
-REFUSE_WORKER = "workers are not this tier's to start"
+REFUSE_WORKER = "workers are not this verb's to start"
 REFUSE_SCOPE = "goal-not-in-scope"
 REFUSE_STARTABLE = "goal-not-startable"
 REFUSE_CAP = "manager-cap"
@@ -353,7 +354,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
     ap.add_argument("--topic", help="the topic manager's subject")
     ap.add_argument("--goal", help="the goal to start a manager for")
-    ap.add_argument("--worker", help="refused outright — this tier never starts a worker")
+    ap.add_argument("--worker", help="refused outright — a worker is opened with /supervisor:open --task")
     ap.add_argument("--topics-dir", default=DEFAULT_TOPICS_DIR)
     ap.add_argument("--max-goal-managers", type=int, default=DEFAULT_N)
     ap.add_argument("--print", dest="emit", action="store_true",
@@ -362,11 +363,12 @@ def main(argv: list[str]) -> int:
                     help="print the § 1 ranking for the topic and which goals take the N slots")
     a = ap.parse_args(argv)
 
-    # (1) The tier boundary, checked first: it is the refusal a caller most often gets
+    # (1) The verb boundary, checked first: it is the refusal a caller most often gets
     # wrong, and it must not depend on any page resolving.
     if a.worker:
         return refuse(REFUSE_WORKER, f"<{a.worker}> is a task, and a task is a worker's "
-                                     f"anchor. A topic manager starts goal managers only.")
+                                     f"anchor. This verb starts goal managers; open a worker "
+                                     f"with /supervisor:open --task.")
 
     if not a.topic:
         ap.error("--topic is required (with --goal, --rank, or --worker)")

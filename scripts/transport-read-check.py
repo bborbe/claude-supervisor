@@ -128,6 +128,14 @@ SITE_LIST = {
     # collapsing one into an empty result — so it is enumerated for the mechanism/list
     # agreement and, like `close-worker.py`'s `main`, deliberately not driven.
     ("spawn-goal.py", "pane_text"), ("spawn-goal.py", "send"),
+    # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
+    # gives a re-registered park card its jump target. It returns `None` for a failed
+    # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
+    # absent, and the card must degrade to "no jump target" rather than claim there is
+    # nowhere to go. Enumerated so the mechanism and this list agree; it is a READ, but
+    # deliberately not driven into the three states below — the card is posted either
+    # way, so the read's failure is a degraded affordance and not a gate of its own.
+    ("manager-attention-watch.py", "pane_for_session_name"),
 }
 
 

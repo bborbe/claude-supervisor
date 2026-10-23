@@ -471,7 +471,26 @@ class TestStall(Base):
     same question and the two would drift. `test_the_streak_is_read_not_recounted`
     is the discriminator: it calls `stall` twice against an unchanged streak of 1,
     which a self-counting implementation turns into 2 and opens on.
+
+    ⚠️ **The liveness probe is stubbed, and the default is "these sessions are
+    live".** `live_sessions()` shells out to `session-liveness.py`, so an unstubbed
+    run would answer from the host's real fleet — a test whose verdict depends on
+    which sessions happen to be running. The default set keeps the pre-existing
+    cases on the filter's happy path, and the gone/absent cases set it themselves.
     """
+
+    def setUp(self):
+        super().setUp()
+        # The budget must not depend on the operator's shell: a host value larger
+        # than the fixture population would make the cap test unfalsifiable.
+        os.environ.pop("SUPERVISOR_INCIDENT_STALL_BUDGET", None)
+        self._live_sessions = il.live_sessions
+        self.live = {SESSION, SESSION[:8], OTHER_SESSION, OTHER_SESSION[:8]}
+        il.live_sessions = lambda: self.live
+
+    def tearDown(self):
+        il.live_sessions = self._live_sessions
+        super().tearDown()
 
     def write_drive(self, rows, legacy=False):
         """`rows` is {session_id: (verdict, streak)}."""
@@ -576,6 +595,241 @@ class TestStall(Base):
         )
         self.assertEqual(rc, 0)
         self.assertIn("no session has stalled", out)
+
+    def test_a_gone_session_opens_nothing(self):
+        """A session absent from the heartbeat store is gone, not stalled.
+
+        Measured 2026-10-22: 117 incidents opened in one round, every one of them
+        for a session that no longer existed, and every one became a board card the
+        operator could not act on.
+        """
+        self.live = set()
+        path = self.write_drive({SESSION: ("unverifiable", 5)})
+        out = self.stall(path)
+        self.assertIn("gone session(s) past the threshold", out)
+        self.assertNotIn("no session has stalled", out, "the skip line already says why")
+        self.assertEqual(self.records(), [])
+
+    def test_a_gone_session_does_not_block_a_live_one(self):
+        """Negative control: the filter must drop only the gone row.
+
+        Without it, a change that opened nothing at all would satisfy the case
+        above while silently retiring the whole incident class.
+        """
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        path = self.write_drive({
+            SESSION: ("unverifiable", 9),
+            OTHER_SESSION: ("unverifiable", 2),
+        })
+        out = self.stall(path)
+        self.assertIn("gone session(s) past the threshold", out)
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["session_id"], OTHER_SESSION)
+
+    def test_a_drive_row_keyed_on_the_eight_char_handle_still_opens(self):
+        """The pin for the key-space mismatch — the defect the bot caught in #506.
+
+        The drive ledger keys `session_id` on the **8-char display handle**
+        (`agents/fleet-drive.md:44`, `scripts/drive-ledger.py:108`), while
+        `--list --json` returns **full UUIDs**. Comparing a full-UUID live set
+        against 8-char keys classifies EVERY row as gone: the stall incident class
+        is silently disabled and each round prints a plausible skip line per row —
+        the mirror of the bug this change exists to fix, and invisible to a fixture
+        that uses one id shape on both sides.
+        """
+        self.live = {SESSION, SESSION[:8]}
+        path = self.write_drive({SESSION[:8]: ("unverifiable", 2)})
+        out = self.stall(path)
+        self.assertIn("opened", out)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_an_eight_char_row_absent_from_the_live_set_is_skipped(self):
+        """The negative control for the prefix join: an unmatched handle is gone."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        path = self.write_drive({SESSION[:8]: ("unverifiable", 2)})
+        out = self.stall(path)
+        self.assertIn("gone session(s) past the threshold", out)
+        self.assertEqual(self.records(), [])
+
+    def test_the_round_opens_at_most_the_budget(self):
+        """One round cannot open an incident per eligible session.
+
+        Measured 2026-10-22: 117 eligible sessions produced 117 incidents, and 116
+        of them became board cards in one burst, because the drive leg's per-round
+        cap had no counterpart here.
+        """
+        sessions = ["%08x-aaaa-bbbb-cccc-dddddddddddd" % i for i in range(117)]
+        self.live = set(sessions)
+        rows = {sid: ("unverifiable", 2) for sid in sessions}
+        rows[sessions[-1]] = ("unverifiable", 7)
+        path = self.write_drive(rows)
+        out = self.stall(path)
+        records = self.records()
+        budget = il.incident_budget()
+        self.assertEqual(len(records), budget)
+        self.assertEqual(out.count("held back"), 117 - budget)
+        # Longest streak first, so a backlog drains oldest-first rather than in
+        # session-id order, which would starve the oldest row behind any trickle.
+        self.assertEqual(records[0]["session_id"], sessions[-1])
+        self.assertEqual(records[0]["observations"], 7)
+
+    def test_a_failed_liveness_probe_fails_open(self):
+        """An unreachable store must not read as "every session is dead".
+
+        Suppressing the whole incident class on an outage is the false-empty
+        `read_drive_ledger` refuses for a corrupt drive ledger, one store over.
+        """
+        il.live_sessions = lambda: None
+        path = self.write_drive({SESSION: ("unverifiable", 2)})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.run_cli("stall", "--drive-ledger", path, "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("liveness unavailable", err.getvalue())
+        self.assertEqual(len(self.records()), 1)
+
+
+class TestLiveSessions(Base):
+    """`live_sessions()`'s own parsing — the seam every stall test stubs past.
+
+    ⚠️ **This suite exists because the stall tests stub `live_sessions` wholesale**,
+    so the parse had no coverage at all. That is the worst place to have none: a
+    change in `session-liveness.py`'s output shape makes the function return `None`,
+    the caller fails OPEN, and the gate is silently off while every other test stays
+    green.
+
+    ⚠️ **The `rows=… registry_live=… degraded=…` header is written to STDERR, not
+    stdout** (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
+    real contract is therefore "stdout is the JSON array, stderr carries the human
+    line", and `test_the_real_shape_parses` pins exactly that. The stdout-header case
+    is kept as a separate tolerance test rather than as the fixture — asserting the
+    tolerance as if it were the shape would pass for the wrong reason and stop
+    covering the contract that actually holds.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._run = il.subprocess.run
+
+    def tearDown(self):
+        il.subprocess.run = self._run
+        super().tearDown()
+
+    def stub_run(self, stdout, stderr="", returncode=0):
+        result = type("Result", (), {})()
+        result.stdout = stdout
+        result.stderr = stderr
+        result.returncode = returncode
+        il.subprocess.run = lambda *args, **kwargs: result
+
+    def test_the_real_shape_parses_and_returns_both_key_forms(self):
+        """stdout is the array; the header rides stderr; both id forms come back.
+
+        ⚠️ Both forms, because the drive ledger keys on the 8-char display handle
+        while `--list` returns full UUIDs — see
+        `TestStall.test_a_drive_row_keyed_on_the_eight_char_handle_still_opens`.
+        """
+        self.stub_run(
+            '[\n  {"sessionId": "%s"},\n  {"sessionId": "%s"}\n]\n'
+            % (SESSION, OTHER_SESSION),
+            stderr="rows=2 registry_live=2 degraded=0\n",
+        )
+        self.assertEqual(
+            il.live_sessions(),
+            {SESSION, SESSION[:8], OTHER_SESSION, OTHER_SESSION[:8]},
+        )
+
+    def test_a_header_on_stdout_is_tolerated(self):
+        """Tolerance, not the shape: the header moving to stdout must not fail open."""
+        self.stub_run(
+            "rows=2 registry_live=2 degraded=0\n"
+            '[\n  {"sessionId": "a"},\n  {"sessionId": "b"}\n]\n'
+        )
+        self.assertEqual(il.live_sessions(), {"a", "b"})
+
+    def test_a_row_without_a_session_id_is_dropped(self):
+        self.stub_run('[{"sessionId": "a"}, {"nope": 1}]')
+        self.assertEqual(il.live_sessions(), {"a"})
+
+    def test_a_non_zero_exit_reads_as_unavailable(self):
+        self.stub_run("[]", returncode=1)
+        self.assertIsNone(il.live_sessions())
+
+    def test_an_unparseable_body_reads_as_unavailable(self):
+        self.stub_run("[ not json", stderr="rows=1 registry_live=1 degraded=0\n")
+        self.assertIsNone(il.live_sessions())
+
+    def test_a_body_with_no_array_reads_as_unavailable(self):
+        self.stub_run("", stderr="rows=0 registry_live=0 degraded=0\n")
+        self.assertIsNone(il.live_sessions())
+
+
+class TestIncidentBudget(Base):
+    """`incident_budget()`'s env parsing.
+
+    ⚠️ The FALLBACK is the property under test, not the override: `0` parsed
+    literally would mean "open nothing", so a typo'd override would silently disable
+    the stall incident class — the same silent-off failure mode the cap exists to
+    prevent, one input further out.
+    """
+
+    def test_the_default_is_three(self):
+        os.environ.pop("SUPERVISOR_INCIDENT_STALL_BUDGET", None)
+        self.assertEqual(il.incident_budget(), 3)
+
+    def test_a_valid_override_is_honoured(self):
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "7"
+        self.assertEqual(il.incident_budget(), 7)
+
+    def test_a_non_numeric_override_falls_back(self):
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "many"
+        self.assertEqual(il.incident_budget(), 3)
+
+    def test_a_zero_or_negative_override_falls_back(self):
+        for raw in ("0", "-2"):
+            os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = raw
+            self.assertEqual(il.incident_budget(), 3)
+
+
+class TestEscalateSkipsGoneStallIncidents(Base):
+    """The CARD is posted by `escalate`, not by `stall`, so the gate belongs there too.
+
+    `cmd_stall` gates creation, but an incident that already exists still reaches the
+    board through `cmd_escalate` — which is the leg the CHANGELOG measures ("116 open
+    board cards in 41 seconds"). A creation-only gate would leave the stated harm
+    untouched for everything already in the ledger.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._live_sessions = il.live_sessions
+        self.live = set()
+        il.live_sessions = lambda: self.live
+
+    def tearDown(self):
+        il.live_sessions = self._live_sessions
+        super().tearDown()
+
+    def test_a_gone_stall_incident_posts_no_card(self):
+        self.open_incident(kind="stall", deadline_seconds=0)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("gone sessions", out)
+        self.assertEqual(self.posted, [])
+        self.assertEqual(
+            self.records()[0]["outcome"], il.PENDING, "a skip is not an escalation"
+        )
+
+    def test_a_live_stall_incident_still_escalates(self):
+        """Negative control: the gate must not disable escalation generally."""
+        self.live = {SESSION, SESSION[:8]}
+        self.open_incident(kind="stall", deadline_seconds=0)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("escalated", out)
+        self.assertEqual(len(self.posted), 1)
+        self.assertEqual(self.records()[0]["outcome"], il.TIMED_OUT)
 
 
 class TestResume(Base):

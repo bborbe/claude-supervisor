@@ -25,15 +25,24 @@ Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 
 ## The four tiers
 
-The tiers form a **strict tree**: each level manages only the level directly below it, and
-each level's `-spawn` starts that level and nothing else. `topic-spawn` starts a **goal
-manager**; `goal-spawn` starts a **worker**. There is no `fleet-spawn` — the operator starts
-topic managers — and no `worker-spawn` at all.
+The tiers form a **tree**, and the operator's hierarchy (2026-10-23) names what each level may
+open: **the fleet manager is top of everything** — it opens topic managers, goal managers and
+workers, each when no lower-tier manager owns the subject; **a topic manager opens goal
+managers and workers**; **a goal manager opens workers**; **a worker opens nothing**. A tier
+opens a lower one through `/supervisor:open`, never by a bare spawn.
+
+⚠️ **The `-spawn` verbs are narrower than their tier, and that is not a contradiction.** A
+`-spawn` verb starts the level directly below it and nothing else — `topic-spawn` starts a
+**goal manager**, `goal-spawn` starts a **worker** — while the tier itself opens anything
+below it through `/supervisor:open`: a worker opened from the topic tier goes through
+`/supervisor:open --task`, the same path a goal manager uses. There is no `fleet-spawn` — a
+topic manager is opened on the **operator's initiative** and the fleet manager performs the
+open — and no `worker-spawn` at all.
 
 | Tier | Manages | May start | Done condition |
 |---|---|---|---|
-| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (operator-initiated); never a goal manager or a worker directly | the fleet has no unmanaged subject and no gate it owns is outstanding |
-| **Topic manager** | ONE topic's declared goal set, and the goal managers running on it | a **goal manager**, at most N at once per topic and never past the fleet manager ceiling | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
+| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), and — when no lower-tier manager owns the subject — a goal manager or a worker directly | the fleet has no unmanaged subject and no gate it owns is outstanding |
+| **Topic manager** | ONE topic's declared goal set, the goal managers running on it, and the workers it opens | a **goal manager**, at most N at once per topic and never past the fleet manager ceiling; and a **worker** | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
 | **Goal manager** | ONE goal's declared task set, and the workers running on it | a **worker**, under the spawn cap | every task in its declared set is terminal, waiting on a named party, or held with a stated reason |
 | **Worker** | ONE anchored task | nothing — a worker never opens a session | its anchored task is terminal, or it reports the gate that stops it |
 
@@ -45,8 +54,10 @@ subject is the canonical statement of that fallback.
 
 ⚠️ **A worker whose task declares a goal is parented only to that goal's manager.** When the
 goal has no live manager the worker falls to the fleet manager (the root) as a holding row —
-never to the topic manager through the goal's topic, because a topic manager never manages a
-worker (`commands/topic-loop.md`). The topic manager's product is starting that goal's manager
+never to the topic manager through the goal's topic, because a topic manager parents only the
+workers it already owns (`commands/topic-loop.md`). ⚠️ **Opening a worker and parenting one
+are different rights** — a topic manager may open a worker, but it does not thereby adopt the
+worker of a goal it does not own. The topic manager's product is starting that goal's manager
 (`docs/fleet-surface.md` § Which manager owns a subject tier 4); once it is live the worker
 parents to it. Two documented exceptions keep a topic manager as a worker's parent: a task
 whose `managed_by` names a topic, and a goal-less task listed directly under a topic.
@@ -74,7 +85,7 @@ other side.
 | `/supervisor:topic-status` | topic manager | worker; goal manager |
 | `/supervisor:topic-drive` | topic manager | worker; goal manager |
 | `/supervisor:topic-verify` | topic manager | worker; goal manager |
-| `/supervisor:topic-spawn` | topic manager — starts a goal manager | worker; goal manager — this tier starts only the level below it |
+| `/supervisor:topic-spawn` | topic manager — starts a goal manager | worker; goal manager — this verb belongs to the topic tier |
 | `/supervisor:goal-loop` | goal manager | worker — arming it collapses the two roles silently |
 | `/supervisor:goal-status` | goal manager | worker; topic manager (use `topic-status`) |
 | `/supervisor:goal-drive` | goal manager | worker; topic manager (use `topic-drive`) |
@@ -155,9 +166,10 @@ output — the fleet table.
 
 ## The manager boundary
 
-- **A manager is never started in a worker session.** ⚠️ **Starting a *topic* manager is a
-  human act; starting a *goal* manager is the topic manager's** — `docs/fleet-surface.md`
-  § Session roles is the canonical statement.
+- **A manager is never started in a worker session.** ⚠️ **Starting a *topic* manager is the
+  operator's decision — the fleet manager performs the open. A *goal* manager is started by
+  its topic manager, or by the fleet manager when no topic manager is live** —
+  `docs/fleet-surface.md` § Session roles is the canonical statement.
 - **A manager does not execute a worker's task.** It spawns, drives, answers and reaps
   workers; the task's work happens in the worker's own session.
 - **A goal manager starts or resumes a worker on a vault task with `/supervisor:open --task`** —
