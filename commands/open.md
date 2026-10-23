@@ -468,15 +468,43 @@ Then take exactly one branch:
 
 ## Step 2B — Goal branch
 
-The goal branch **resolves and delegates**; it reimplements nothing. A worker tab is titled with a *task*, never a goal, so there is no pane to probe at goal level.
+The goal branch **resolves the goal's manager and delegates**; it reimplements nothing. A worker tab is titled with a *task*, never a goal, so there is no pane to probe at goal level — the manager is found in the session registry.
 
 0. **Approval gate — before resolving anything.** `vault-cli goal get "<goal>" phase`. A goal at `phase: todo` is in the operator's approval inbox and is NOT approved for management: print `⌛ waiting-approval — <goal> is at phase: todo; approve it with vault-cli goal approve "<goal>"` and STOP — spawn nothing, list nothing, jump nowhere. An absent `phase` is **exempt**, as is every other value; `todo` alone is gated.
 
-1. List the goal's tasks — every task whose `goals:` frontmatter names this goal. **Frontmatter only.** A body-text `[[Goal]]` mention is not membership: grepping `[[goal]]` file-wide over one topic's five member goals returned 39 tasks where frontmatter returns 21, and two of the extras were `in_progress` under entirely different goals.
-2. Then:
+1. Resolve the goal's manager from the **session registry**, exactly as Step 2C item 1 does — read it through its single reader, never by opening the directory:
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json
+   ```
+
+   ⚠️ **A non-zero exit is "cannot tell", never "no manager" — do not spawn on it.** **Only exit 0 with no match means "none is running now".** A non-zero exit, or unparseable JSON, means the question could not be answered: report it and stop; never fall through to item 4.
+
+   Then match `<goal> Manager` case-insensitively against `name` and against every entry in `formerNames`.
+
+   ⚠️ **The goal page's `manager_session_id` is a lead, never the answer.** When the registry matches nothing, read it and **run `session-liveness.py --check <id>` on it before doing anything with it**, then take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*.
+
+2. **Live → JUMP** to it, same `/supervisor:jump pane:<pane-id>` + window-id reporting as Step 2A — this covers both a registry hit and a page-field `LIVE`.
+
+3. **`ABSENT` → RESUME it by id** (Step 3). The conversation is what is durable, not the process, so an `ABSENT` id is a resume, never a reason to spawn. ⚠️ **Do not reach item 4 on an `ABSENT` verdict** — a second manager on a live goal is precisely the outcome this step exists to prevent.
+
+4. **None, `UNKNOWN` or `AMBIGUOUS` → spawn a goal manager** on `<MGR>` from `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-launcher.py" "<manager_launcher>" "<goal page>" --default-source manager-default` (prints `<MGR>\t<source>`; non-zero → stop; rule: `docs/fleet-surface.md` § Which launcher a manager opens on). `<manager_launcher>` is the vault's configured value **as the absolute path `config list` emits** — a bare name fails the script's file check. `<goal page>` is the vault's goals folder plus `<goal>.md` (`24 Goals/` in the operator's vault). Resolve the `Managers` window and the `orange` chip from the role map (§ 3.0, `role: manager`), then:
+
+   ```bash
+   wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<MGR>" -n "<goal> Manager" "/color orange"'
+   ```
+
+   Same `unset` prefix as Step 3.1 — without it the manager comes up named after the session that spawned it. Then tell the operator to run, in that tab, `/vault-cli:work-on-goal "<goal>"` and `/supervisor:goal-loop "<goal>"`. `/supervisor:open` starts the session; the manager arms its own loop.
+
+   **The colour and the window are role signals, not decoration** — a manager comes up `orange` in `Managers` so it can never be read as a worker, which stays `pink` in `Agents` (§ 3.0).
+
+5. **Only when the manager branch cannot run** — `manager-launcher.py` exited non-zero, or the spawn failed — fall back to the goal's tasks:
+   - List them — every task whose `goals:` frontmatter names this goal. **Frontmatter only.** A body-text `[[Goal]]` mention is not membership: grepping `[[goal]]` file-wide over one topic's five member goals returned 39 tasks where frontmatter returns 21, and two of the extras were `in_progress` under entirely different goals.
    - **one non-terminal task** → run the task branch (Step 2A) on it
    - **several** → list them with status/phase and ask which; never pick for the operator
    - **none** → the goal has nothing executable. Report that and suggest `/vault-cli:work-on-goal "<goal>"`, which is the planning path that creates tasks. Do not spawn anything
+
+⚠️ **A live goal manager owns the goal's tasks** — do not open a worker from this branch on a goal whose manager is live. Item 5 exists for a goal that has no manager and could not get one, never as a shortcut past the manager.
 
 ## Step 2C — Topic branch
 

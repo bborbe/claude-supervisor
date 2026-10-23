@@ -41,8 +41,9 @@ Topic-drive — **the topic tier's round**. The wakeup names THIS command; the a
 manager carries a subject and a loop. A worker that needs a subject driven routes it to its
 manager with `SendMessage` and says so.
 
-⚠️ **The rows are GOAL MANAGERS, never workers.** This tier manages exactly one level below
-itself (`docs/session-tiers.md` § The four tiers). A worker row is reported downward.
+⚠️ **The rows are GOAL MANAGERS.** The topic tier may open a worker, but it does so on demand
+with `/supervisor:open --task`, never by sweeping one here (`docs/session-tiers.md` § The four
+tiers). A worker row is reported downward.
 
 ## Router — read a step file only when its When holds
 

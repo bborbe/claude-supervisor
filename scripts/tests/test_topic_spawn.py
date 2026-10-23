@@ -161,7 +161,7 @@ class TopicSpawnTest(unittest.TestCase):
     def test_a_worker_request_is_refused(self):
         rc, out = self.run_gate("--worker", "Some Task")
         self.assertEqual(1, rc)
-        self.assertEqual("workers are not this tier's to start", out[0])
+        self.assertEqual("workers are not this verb's to start", out[0])
 
     def test_an_undeclared_goal_is_refused(self):
         self.goal("Orphan", "planning", 1)

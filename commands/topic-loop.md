@@ -38,12 +38,15 @@ allowed-tools:
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
 Topic-loop — the **topic tier's arm**. It owns ONE topic's declared goal set and the goal
-managers running on it. It manages **goal managers, never a worker**.
+managers running on it. It manages **goal managers, and the workers it opens**.
 
-⚠️ **The tree is strict and this tier is its middle rung** — fleet → **topic** → goal →
-worker, each level managing only the one below it (`docs/session-tiers.md` § The four
-tiers). A worker row reaching this tier is a bug, not work: route it down to the goal
-manager that owns it, or up to the fleet manager when no goal owns it.
+⚠️ **The loop sweeps goal rows; opening a worker is a separate right.** The operator's
+hierarchy (2026-10-23) puts the fleet manager at the top of everything, has a topic manager
+managing goal managers **and** workers, and a goal manager managing workers
+(`docs/session-tiers.md` § The four tiers). A worker is opened on demand with
+`/supervisor:open --task`, never swept here. A worker row reaching this tier is not work for
+the sweep: route it down to the goal manager that owns it, or up to the fleet manager when no
+goal owns it.
 
 ⚠️ **This file is the ARM.** It resolves, confirms no manager already owns the subject,
 arms the wakeup and exits. Every wakeup runs **`/supervisor:topic-drive "<topic>"`** — the

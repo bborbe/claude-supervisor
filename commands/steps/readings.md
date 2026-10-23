@@ -47,7 +47,7 @@ Read it from `python3 $P/unarmed-goals.py --vault "<vault>" --tasks-dir "<vault>
 
 ⚠️ **`unknown` is a third answer, not `0`.** An unreadable session registry prints `unarmed goals: unknown` and exits non-zero. Print it as it comes back; never round it down to a number.
 
-⚠️ **The line reports; it never arms.** Arming a manager is the operator's answer to a `start manager` card (`commands/steps/propose-manager.md`), never this reading's act — `docs/fleet-surface.md` bars a manager from starting one on its own initiative.
+⚠️ **The line reports; it never arms.** Arming a manager is either the operator's answer to a `start manager` card (`commands/steps/propose-manager.md`) or a manager opening one through `/supervisor:open` (`docs/session-tiers.md` § The four tiers); this reading does neither.
 
 ## The next-focus reading
 
