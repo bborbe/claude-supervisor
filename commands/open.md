@@ -211,9 +211,9 @@ vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 
 Writing them is the point, not a side effect. The next batch reads the fields instead of re-deciding, so one task cannot be classified one way today and the other way tomorrow. It also makes the call reviewable — a wrong value is visible on disk and the operator corrects it with that same one-line command.
 
-**`mode` is consumed, not merely recorded** — Step 3 passes `interactive=false` to `spawn_agent` only when the field reads `headless` (absent field → the argument is omitted and the fleet config decides; see § 535).
+**`shipping:` is read here and passed at Step 3 — never inferred.** Pass `shipping: true` to `spawn_agent` only when the field reads `true`; omit it otherwise. Rule: § Spawn a worker item 9.
 
-**`shipping:` is read here and passed at Step 3 — never inferred.** Pass `shipping: true` to `spawn_agent` only when the field reads `true`; omit it otherwise. A derived value would hand unattended commit rights to a row nobody marked. Rule: § Spawn a worker item 9.
+**`goal_loop:` is read here and used at Step 3** — on `true` the spawn prompt is the condition alone; the work command follows. Rule: § Spawn a worker item 10.
 
 **A `headless` row is not opened until an answer path is proven — run the probe before the spawn.** Exit 0 → open the row. Exit 1 → **refuse the row**, print the probe's own line (it names the reason and the remedy), and open nothing.
 
@@ -476,15 +476,43 @@ Then take exactly one branch:
 
 ## Step 2B — Goal branch
 
-The goal branch **resolves and delegates**; it reimplements nothing. A worker tab is titled with a *task*, never a goal, so there is no pane to probe at goal level.
+The goal branch **resolves the goal's manager and delegates**; it reimplements nothing. A worker tab is titled with a *task*, never a goal, so there is no pane to probe at goal level — the manager is found in the session registry.
 
 0. **Approval gate — before resolving anything.** `vault-cli goal get "<goal>" phase`. A goal at `phase: todo` is in the operator's approval inbox and is NOT approved for management: print `⌛ waiting-approval — <goal> is at phase: todo; approve it with vault-cli goal approve "<goal>"` and STOP — spawn nothing, list nothing, jump nowhere. An absent `phase` is **exempt**, as is every other value; `todo` alone is gated.
 
-1. List the goal's tasks — every task whose `goals:` frontmatter names this goal. **Frontmatter only.** A body-text `[[Goal]]` mention is not membership: grepping `[[goal]]` file-wide over one topic's five member goals returned 39 tasks where frontmatter returns 21, and two of the extras were `in_progress` under entirely different goals.
-2. Then:
+1. Resolve the goal's manager from the **session registry**, exactly as Step 2C item 1 does — read it through its single reader, never by opening the directory:
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json
+   ```
+
+   ⚠️ **A non-zero exit from `--list --json` is "cannot tell", never "no manager" — do not spawn on it.** **Only exit 0 with no match means "none is running now".** A non-zero exit from that call, or unparseable JSON, means the question could not be answered: report it and stop; never fall through to item 4. ⚠️ **This scopes to `--list --json` alone** — the `--check` verdicts below exit non-zero by design (`UNKNOWN` 2, `AMBIGUOUS` 3) and item 4 maps exactly those to a spawn.
+
+   Then match `<goal> Manager` case-insensitively against `name` and against every entry in `formerNames`.
+
+   ⚠️ **The goal page's `manager_session_id` is a lead, never the answer.** When the registry matches nothing, read it and **run `session-liveness.py --check <id>` on it before doing anything with it**, then take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*.
+
+2. **Live → JUMP** to it, same `/supervisor:jump pane:<pane-id>` + window-id reporting as Step 2A — this covers both a registry hit and a page-field `LIVE`.
+
+3. **`ABSENT` → RESUME it by id** (Step 3). The conversation is what is durable, not the process, so an `ABSENT` id is a resume, never a reason to spawn. ⚠️ **Do not reach item 4 on an `ABSENT` verdict** — a second manager on a live goal is precisely the outcome this step exists to prevent.
+
+4. **None, `UNKNOWN` or `AMBIGUOUS` → spawn a goal manager** on `<MGR>` from `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-launcher.py" "<manager_launcher>" "<goal page>" --default-source manager-default` (prints `<MGR>\t<source>`; a non-zero exit here is **not** fatal — it is item 5's trigger, not a stop; rule: `docs/fleet-surface.md` § Which launcher a manager opens on). `<manager_launcher>` is the vault's configured value **as the absolute path `config list` emits** — a bare name fails the script's file check. `<goal page>` is the vault's goals folder plus `<goal>.md` (`24 Goals/` in the operator's vault). ⚠️ **Escape `<goal>` before interpolating it** into the shell line and the path: a title containing `"` closes the inner quoting and one containing `../` escapes the goals folder. Resolve the `Managers` window and the `orange` chip from the role map (§ 3.0, `role: manager`), then:
+
+   ```bash
+   wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<MGR>" -n "<goal> Manager" "/color orange"'
+   ```
+
+   Same `unset` prefix as Step 3.1 — without it the manager comes up named after the session that spawned it. Then tell the operator to run, in that tab, `/vault-cli:work-on-goal "<goal>"` and `/supervisor:goal-loop "<goal>"`. `/supervisor:open` starts the session; the manager arms its own loop.
+
+   **The colour and the window are role signals, not decoration** — a manager comes up `orange` in `Managers` so it can never be read as a worker, which stays `pink` in `Agents` (§ 3.0).
+
+5. **Only when the manager branch cannot run** — `manager-launcher.py` exited non-zero, or the spawn failed — fall back to the goal's tasks:
+   - List them — every task whose `goals:` frontmatter names this goal. **Frontmatter only.** A body-text `[[Goal]]` mention is not membership: grepping `[[goal]]` file-wide over one topic's five member goals returned 39 tasks where frontmatter returns 21, and two of the extras were `in_progress` under entirely different goals.
    - **one non-terminal task** → run the task branch (Step 2A) on it
    - **several** → list them with status/phase and ask which; never pick for the operator
    - **none** → the goal has nothing executable. Report that and suggest `/vault-cli:work-on-goal "<goal>"`, which is the planning path that creates tasks. Do not spawn anything
+
+⚠️ **A live goal manager owns the goal's tasks** — do not open a worker from this branch on a goal whose manager is live. Item 5 exists for a goal that has no manager and could not get one, never as a shortcut past the manager.
 
 ## Step 2C — Topic branch
 
@@ -535,7 +563,7 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 ⚠️ **Pass `role`, not `window_id`.** `spawn_agent` takes an optional `role` (`manager` / `agent` / `human`, default `agent`) and resolves **both** the colour and the window from the published map **in-process**, so pass § 3.0's resolved role here. The older `window_id` argument still works but is no longer how a role is routed. The response reports the resolved `role` and `window_id` — **check those fields**.
 
-**Create branch — `spawn_agent`, which takes the work prompt as an *argument*.** Call shape: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) — prompt `/vault-cli:work-on-task "<task>"`, `vault <vault>`, **`task <task>`**, label `<task>`, role `<role>` (§ 3.0), `[target <target>]`, `[shipping]` (Step 0.6's read). ⚠️ **`task` binds the worker to the vault; `label` is NOT a substitute.** ⚠️ **Pass `vault`, not `cwd`** — one of the two is **required**; rule and refusals: `§ Spawn a worker` **item 8**. **With `--first-step <text>`, the prompt is `<text>`, a blank line, then `/vault-cli:work-on-task "<task>"`**; otherwise the bare work command.
+**Create branch — `spawn_agent`, which takes the work prompt as an *argument*.** Call shape: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) — prompt `/vault-cli:work-on-task "<task>"`, `vault <vault>`, **`task <task>`**, label `<task>`, role `<role>` (§ 3.0), `[target <target>]`, `[shipping]` (Step 0.6's read). ⚠️ **`task` binds the worker to the vault; `label` is NOT a substitute.** ⚠️ **Pass `vault`, not `cwd`** — one of the two is **required**; rule and refusals: `§ Spawn a worker` **item 8**. **With `--first-step <text>`, the prompt is `<text>`, a blank line, then `/vault-cli:work-on-task "<task>"`**; otherwise the bare work command. ⚠️ **On a `goal_loop: true` row the prompt is neither** — it is `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-condition.py" --task "<task>" --vault "<vault>"`, whose stdout already carries the `/goal ` prefix, with the work command sent afterwards (§ 3.2); refuse on any non-zero exit.
 
 **Read `target:` and pass `target="<value>"` when the field is present, omitting it when absent** (absent = `local`; `docs/fleet-surface.md` § Spawn a worker item 7 is the single home for the field, its default and the `docker` / `k8s` argument contract). Pass the value **verbatim** — an unknown value reaches the server and is refused there, never defaulted or lower-cased here. ⚠️ **Then check ELIGIBILITY — a separate question from which target, read from the same item.** When the row carries a disqualifier, **print a warning naming it** before spawning (`⚠️ target "<t>" is not eligible for "<task>": needs <disqualifier>`). ⚠️ **Advisory, never a refusal** — print it and leave the decision here; never silently drop the `target`, never rewrite the row's frontmatter, never refuse the spawn on this ground. The disqualifier list has its single home in item 7 — **read it there and never restate it here.** ⚠️ **On a `docker` / `k8s` row the argument contract changes and the `role` above is dropped** — item 7 carries that branch; never hand-build it from this line.
 
@@ -543,21 +571,15 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 **The carve-out is both-ways: pass the argument whenever the task's frontmatter declares a `mode:`, and omit it only when the field is absent.** `mode: headless` → `interactive=false`; `mode: interactive` → `interactive=true`. An absent `mode:` still means *omit the argument entirely*, not *pass interactive*. ⚠️ **Local rows only** — on a `docker` / `k8s` row this carve-out does not apply; `§ Spawn a worker` item 7 carries that branch.
 
-⚠️ **The interactive half is load-bearing, not a saving.** A `mode:` the spawn honours in only one direction is inert in the other — the field must be consumed both ways.
-
 The rule that *produces* the value is not restated here — it has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6; this line is only the consumption.
 
 ⚠️ **A headless worker carries two standing constraints, and both are the spawner's, not the worker's** — its gates park with the session that spawned it, and its turn ends at READY rather than at completion. Both are stated in full in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6, together with the resume-path behaviour; read them there before opening one. ⚠️ **This paragraph previously concluded that `headless` was rare and never a guess**, which was the pre-2026-10-22 floor — recorded rather than quietly dropped, because it is what this file carried until the flip.
 
-**Parity is real, not a compromise** — a headless worker inherits the same MCP servers a tab does.
+**Do NOT add `policy` while `defaultMode` is `auto`** — `auto` is in `POLICY_UNREACHABLE_MODES`, so the spawn refuses a named policy. Omit it; the overlay needs `acceptEdits`.
 
-**Do NOT add `policy` while `defaultMode` is `auto`.** `auto` is in `POLICY_UNREACHABLE_MODES`, so `spawn_agent` **refuses** a named policy (*"policy would never be consulted"*) and the spawn fails. Omit it; the overlay is usable only under `acceptEdits`.
+**`interactive` is the debug escape hatch.** Pass `interactive=true` to watch a worker live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn. ⚠️ **Local rows only.**
 
-**`interactive` is the debug escape hatch, and it works in both directions.** Pass `interactive=true` when a worker's own screen must be watched live. Pass `interactive=false` to force one headless worker while the fleet runs in tabs. Either way it overrides the fleet default for that one spawn only. The colour applies only on the tab path. ⚠️ **Local rows only** (§ Spawn a worker item 7).
-
-**The fleet's current mode is not recorded here — read the file.** `cat ~/.config/claude-supervisor/config.json` is the answer; the standing mode is `interactive`.
-
-Requires `mcp__supervisor__*` in **this** session — see the recipe's precondition, which fails silently.
+Requires `mcp__supervisor__*` in this session — its absence fails silently.
 
 **Fallback when `mcp__supervisor__*` is unavailable.** Every `cc-*` launcher passes `--strict-mcp-config`, which turns its config file into an allowlist — plugin-provided servers are never loaded, so a vault whose `~/.claude/mcp-obsidian-<vault>.json` does not itself name `supervisor` carries no supervisor tools at all. Then spawn the wezterm way and send the work command afterwards.
 
@@ -632,22 +654,25 @@ The trailing `"/color $CHIP"` is the initial prompt — Claude executes it at st
 - the **`unset` prefix** — kept, but its peer-registration *reason* is **refuted**; the recipe records the measurement. Do not restate the socket story as its justification.
 - the **`/color`-as-spawn-prompt split** — Claude Code parses one submitted message as one command and `/color` takes the entire trimmed argument, so the colour cannot ride inside a larger prompt.
 
-### 3.2 Send the work command — **wezterm fallback path only**
+### 3.2 Send the work command — **wezterm fallback, plus every `goal_loop` row**
 
-**Skip this section entirely on the `spawn_agent` path** — there the work prompt *is* the spawn argument, so nothing needs sending. This applies only when 3.1's wezterm shape was used.
+**Skip on the `spawn_agent` path unless the row is `goal_loop: true`** — the work prompt *is* the spawn argument. ⚠️ **A `goal_loop: true` row uses this section on BOTH paths** — `send_agent_message` on `spawn_agent`, `send-text` here, after the pane shows `⎿ Goal set:`. ⚠️ **On the wezterm path send the condition here FIRST** — `send-text` its stdout, wait for `⎿ Goal set:`, then the work command; the colour stays the prompt. **Bounded wait; `--first-step` rides on the work command (10).**
 
 The colour already ran as the spawn prompt, so the session is idle and the work command submits on the first try:
 
 ```bash
+# goal_loop rows only: arm the goal and fail closed — non-zero means the emitter refused
+# the row or 'Goal set:' never appeared, and the work command below must not be sent
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/spawn-goal.py" --pane <new-pane-id> --task "<task>" --vault "<vault>" || exit 1
 sleep 8                                   # let the session reach its prompt
 wezterm cli send-text --pane-id <new-pane-id> --no-paste $'/vault-cli:work-on-task "<task>"'
 sleep 1
 wezterm cli send-text --pane-id <new-pane-id> --no-paste $'\r'   # submit as a separate step
 ```
 
-**Send the text and the submit as two steps.** A trailing `\r` appended to the text is not sufficient. Send the text, then a bare `\r` (`wezterm cli send-text --pane-id <N> --no-paste $'\r'`), and **repeat until the composer clears**. **Read the pane back after sending** — a prompt is not delivered until the composer is empty *and* the session is visibly working. ⚠️ **The `sleep` is a race** — the supervisor waits for the `❯` glyph instead.
+**Send the text and the submit as two steps** — a trailing `\r` on the text is not enough; read the pane back until the composer is empty and the session is visibly working. ⚠️ **The `sleep` is a race** — the supervisor waits for the `❯` glyph instead.
 
-**Why the colour goes in the spawn and the work command does not.** Confirm `Session color set to: <name>` appears before you send the work command.
+Confirm `Session color set to: <name>` appears before sending the work command.
 
 ⚠️ **Only ever send this into a pane THIS command just spawned, while it is still idle.** This is not a licence to drive other sessions by `send-text` — answering another session's operator gate that way is still forbidden.
 

@@ -77,15 +77,18 @@ is a real case rather than a bug, and it is refused rather than posted: an item
 with no producer can never be polled back by anyone, so it would be a question
 asked into a void.
 
-`--closer` is the one declaration that is OPTIONAL. It names the `👤 You:` line
+`--closer` is the one declaration that is OPTIONAL at the CLI — but REQUIRED
+whenever the closer repeats the card's ask, which is the common case for a
+manager relaying a worker's gate. It names the `👤 You:` line
 this card answers, and it exists because a session that posts a card and then
 ends its turn with the same ask on that line put ONE ask on the board twice: the
 deliberate card declares a `dedup_key` slug while the hook's echo derives
 sha256(sid:kind:detail), and those two keys can never collide. Passing it writes
 <sid>.posted.json, which the hook's `Stop` branch and the feed's `reclassify_idle`
 both read to decline the echo. Omitted, nothing is recorded and the echo is
-raised exactly as before — the mechanism is opt-in, so the board stays dirty
-until a poster passes it.
+raised exactly as before — so omitting it is correct only when the closer asks
+something *else*. A closer that repeats the card's ask must pass it, or the
+board carries one question twice.
 
 Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
      python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
@@ -293,12 +296,27 @@ def is_store_item_id(candidate):
     return len(candidate) == STORE_ITEM_ID_LEN and all(c in _HEX_DIGITS for c in candidate)
 
 
-# The answer mechanisms this script posts. It asks questions, so `message` is
-# the only one it offers: a `permission` item is approve-shaped and only the
-# operator may answer it, in the session that raised it, and an `ack` item asks
-# nothing. Offering either here would let a manager post a gate it cannot
-# legally answer.
+# The answer mechanism this script posts by default. It asks questions, so
+# `message` is the default.
 MECHANISM = "message"
+
+# The mechanisms a caller may select with `--mechanism`.
+#
+# ⚠️ **`permission` is deliberately absent, and the omission is the rule rather
+# than an unfinished enum.** A `permission` item is approve-shaped: its verdict
+# is `decision`, it carries no options, and the release path reads `resolved_by`
+# — a field only an ARM writes, never the board (`attention-answer.py` records
+# why, and `attention-store-impl.go` permits the arm's second write for exactly
+# this class). A poster that minted one here would be creating a gate whose
+# Allow/Deny the operator can click and which releases nothing, which is the
+# defect this script must not be able to express.
+#
+# `ack` IS offered because it is the honest shape for a card that reports a
+# condition and asks nothing: it renders no input field and no Allow/Deny, so it
+# cannot offer an action it does not have. The re-registered-park arm uses it for
+# a session parked on a native permission modal — the modal is answerable only in
+# that session's pane, so a card there must say so and offer no field.
+POSTABLE_MECHANISMS = (MECHANISM, "ack")
 
 
 # The producer kinds the store accepts. It validates this field against a closed
@@ -534,6 +552,7 @@ def post_question(
     context,
     options,
     expires_at,
+    mechanism=MECHANISM,
 ):
     body = {
         "producer_id": producer_id,
@@ -542,7 +561,7 @@ def post_question(
         "dedup_key": dedup_key,
         "interrupt_class": interrupt_class,
         "payload": payload,
-        "answer_mechanism": MECHANISM,
+        "answer_mechanism": mechanism,
     }
     # Omitted rather than sent empty. The schema treats an absent `context` and
     # an absent `expires_at` as pre-change/optional values, while "" would be a
@@ -790,7 +809,8 @@ def _report_transport_failure(reason, item_may_exist, out):
     return 1
 
 
-def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
+def _post_and_report(args, producer_id, liveness_ref, payload, options, out,
+                     mechanism=MECHANISM):
     """POST one item and print its id and poll line. Returns the exit code."""
     # ⚠️ Resolved BEFORE the store call, and reported HERE rather than raised out
     # of the helper, so a bad `$ATTENTION_ASK_TTL_HOURS` follows the file's own
@@ -816,6 +836,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             context=args.context,
             options=options,
             expires_at=expires_at,
+            mechanism=mechanism,
         )
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
@@ -842,9 +863,49 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
     return 0
 
 
+def _mechanism_or_default(args):
+    """`args.mechanism`, the default when the caller supplied none, else a refusal.
+
+    ⚠️ Not a bare `getattr(args, "mechanism", MECHANISM)`. `getattr` only falls
+    back when the ATTRIBUTE is absent, and callers that build their args from a
+    mock or a hand-made namespace carry one that is not a legal mechanism — which
+    is how a test fixture's placeholder reached the request body and made the
+    store's own field unserialisable. A placeholder is silently defaulted.
+
+    ⚠️ **A real string outside the set is REFUSED, not defaulted.** argparse
+    already rejects every bad typed value, so reaching here with one means a
+    programmatic caller — and silently downgrading `"ack "` or `"ACK"` to
+    `message` would post exactly the misleading question card this change
+    exists to remove, with no error anywhere. A value that is not a string at
+    all is a placeholder and takes the default.
+    """
+    mechanism = getattr(args, "mechanism", MECHANISM)
+    if mechanism in POSTABLE_MECHANISMS:
+        return mechanism, None
+    if isinstance(mechanism, str) and mechanism.strip():
+        return None, (
+            f"--mechanism {mechanism!r} is not one of "
+            f"{', '.join(POSTABLE_MECHANISMS)}")
+    return MECHANISM, None
+
+
 def cmd_post(args, out=sys.stdout):
     producer = _producer_or_refuse(args, out)
     if producer is None:
+        return 2
+    mechanism, refusal = _mechanism_or_default(args)
+    if refusal:
+        print(f"REFUSED: {refusal}", file=out)
+        return 2
+    if mechanism == "ack" and (args.option or args.recommend):
+        # The store rejects `options` on an `ack` item (the schema gives the
+        # mechanism no choices), so the refusal has to land here where it reads
+        # as a bad argument rather than a store fault.
+        print(
+            "REFUSED: --mechanism ack asks nothing, so --option and --recommend "
+            "are not allowed — post the card with no choices, or drop the "
+            "--mechanism flag to ask a message question.",
+            file=out)
         return 2
     try:
         options = build_options(args.option, args.recommend)
@@ -866,7 +927,8 @@ def cmd_post(args, out=sys.stdout):
             "--force if the card is deliberate.",
             file=out)
         return 2
-    return _post_and_report(args, *producer, args.payload, options, out)
+    return _post_and_report(args, *producer, args.payload, options, out,
+                            mechanism=mechanism)
 
 
 def cmd_post_batch(args, out=sys.stdout):
@@ -998,6 +1060,16 @@ def main(argv=None):
     post.add_argument("--dedup-key", required=True)
     post.add_argument("--payload", required=True)
     post.add_argument("--context", default="")
+    post.add_argument(
+        "--mechanism",
+        default=MECHANISM,
+        choices=POSTABLE_MECHANISMS,
+        help="how this item is answered; default message. `ack` reports a "
+             "condition and asks nothing (no input field, no options). "
+             "`permission` is not offered: a permission gate is released only "
+             "by an arm answer carrying resolved_by, which the board never "
+             "sends, so a card minted here could not release one.",
+    )
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
     post.add_argument(

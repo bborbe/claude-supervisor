@@ -1120,7 +1120,7 @@ class RepostTest(unittest.TestCase):
                     watch.repost_empty_parks(
                         list(parked), self.ENTRIES,
                         os.path.join(d, "events.jsonl"),
-                        post=lambda sid8, full, label: (
+                        post=lambda sid8, full, label, **kw: (
                             posted.append((sid8, full)) or True),
                         # Epoch 0 — the park predates every answer row, so the
                         # answer covers it. Tests that need the opposite pass one.
@@ -1159,7 +1159,7 @@ class RepostTest(unittest.TestCase):
                                    lambda *a, **kw: (set(), set())):
                 out = watch.repost_empty_parks(
                     [self.SID8], self.ENTRIES, os.path.join(d, "events.jsonl"),
-                    post=lambda *a: False)
+                    post=lambda *a, **kw: False)
         self.assertEqual(out, [], "a refused post is not a re-post")
 
     def test_an_answered_park_is_not_re_posted(self):
@@ -1198,7 +1198,7 @@ class RepostTest(unittest.TestCase):
                         watch, "answered_park_keys",
                         lambda *a, **kw: {self.SID8: self.ANSWERED_ROW}):
                     watch.repost_empty_parks(
-                        [self.SID8], self.ENTRIES, log, post=lambda *a: True,
+                        [self.SID8], self.ENTRIES, log, post=lambda *a, **kw: True,
                         park_since={self.SID8: 0.0})
             with open(log, encoding="utf-8") as fh:
                 rows = [json.loads(line) for line in fh if line.strip()]
@@ -1259,7 +1259,7 @@ class RepostTest(unittest.TestCase):
                         lambda *a, **kw: {self.SID8: self.ANSWERED_ROW}):
                     out = watch.repost_empty_parks(
                         [self.SID8], self.ENTRIES,
-                        os.path.join(d, "events.jsonl"), post=lambda *a: True)
+                        os.path.join(d, "events.jsonl"), post=lambda *a, **kw: True)
         self.assertEqual(out, [self.SID8])
 
 
@@ -1826,6 +1826,340 @@ class OpenIncidentTest(unittest.TestCase):
                 mock.patch.object(watch.subprocess, "run") as run:
             watch.open_incident(SID, "headless+closer")
         run.assert_not_called()
+
+
+class ParkCardShapeTest(unittest.TestCase):
+    """The re-posted card's SHAPE follows the park it is about.
+
+    ⚠️ **This is the 2026-10-22 board defect, pinned.** The tracked-set watcher
+    re-registered a tab worker parked on a native permission modal (`Ask` rule on
+    `Bash(git push:*)`) as a `message` card, so the board offered a free-text
+    field and a Submit button. A typed answer reaches the store and nothing else:
+    the modal is answered by a keystroke in its own pane. The card has to say so
+    and offer no field at all.
+
+    Both directions are asserted. Narrowing every re-posted card to `ack` would
+    pass a test that only checked the permission case, and would silently remove
+    the board's only way to answer a parked closer line — so the question-class
+    case is asserted to KEEP its input field.
+    """
+
+    FULL = "aaaa1111-0000-0000-0000-000000000000"
+
+    def _run(self, reason, pane=None):
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(watch.subprocess, "run", fake_run), \
+                mock.patch.object(watch, "pane_for_session_name",
+                                  lambda name: pane):
+            ok = watch.post_repost("aaaa1111", self.FULL, "Some Task",
+                                   reason=reason)
+        return ok, captured.get("cmd") or []
+
+    def test_a_permission_modal_park_posts_an_ack_with_no_input(self):
+        ok, cmd = self._run("busy+parked-modal")
+        self.assertTrue(ok)
+        self.assertEqual(cmd[cmd.index("--mechanism") + 1], "ack",
+                         "an ack item renders no input field and no Allow/Deny, "
+                         "which is the only honest shape for a native modal")
+        self.assertNotIn("--option", cmd)
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertIn("Answer it in the pane", payload)
+        self.assertIn("cannot release a prompt raised in another session", payload,
+                      "the card must say WHY the board cannot answer it, or the "
+                      "operator reads the missing field as a rendering fault")
+
+    def test_a_registry_waiting_park_is_also_permission_class(self):
+        _, cmd = self._run("registry:waiting")
+        self.assertEqual(cmd[cmd.index("--mechanism") + 1], "ack")
+
+    def test_a_closer_park_keeps_its_message_card_and_input(self):
+        ok, cmd = self._run("headless+closer")
+        self.assertTrue(ok)
+        self.assertNotIn("--mechanism", cmd,
+                         "the message default is what gives this card its input "
+                         "field — the answer path for a parked closer line")
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertIn("parked on the operator", payload)
+
+    def test_a_resolved_pane_puts_a_jump_target_on_the_card(self):
+        _, cmd = self._run("busy+parked-modal", pane="1907")
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertIn("1907", payload)
+        self.assertTrue("/supervisor:jump 1907" in payload
+                        or "jump?pane=1907" in payload, payload)
+
+    def test_an_unresolved_pane_posts_the_card_anyway(self):
+        ok, cmd = self._run("busy+parked-modal", pane=None)
+        self.assertTrue(ok, "a pane read that fails must never suppress the card")
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertNotIn("Jump to pane", payload)
+
+    def test_the_reason_reaches_the_post_from_the_park_set(self):
+        seen = []
+
+        def fake_post(sid8, full, label, reason=""):
+            seen.append((sid8, reason))
+            return True
+
+        with mock.patch.object(watch, "open_store_items",
+                               lambda *a, **kw: (set(), set())), \
+                mock.patch.object(watch, "answered_park_keys",
+                                  lambda *a, **kw: {}):
+            watch.repost_empty_parks(
+                ["aaaa1111"],
+                {"aaaa1111": ("Some Task", self.FULL)},
+                "/dev/null",
+                post=fake_post,
+                reasons={"aaaa1111": "busy+parked-modal"})
+        self.assertEqual(seen, [("aaaa1111", "busy+parked-modal")],
+                         "without the reason the post cannot pick a shape and "
+                         "falls back to the card this defect was filed against")
+
+
+class PaneForSessionNameTest(unittest.TestCase):
+    """The pane join that gives a re-registered card its jump target.
+
+    ⚠️ Every case here returns `None` rather than raising, and `None` means
+    "not resolved", never "no pane exists" — a failed `wezterm cli list` cannot
+    prove a pane is gone, and the card is posted either way. What must NOT
+    happen is a *bogus* target: a pane id of the literal string `"None"` is
+    truthy, so the caller would emit `Jump to pane None: /supervisor:jump None`
+    — a control that looks resolved and goes nowhere.
+    """
+
+    NAME = "⚙ MDM split command"
+
+    def _resolve(self, *, stdout="", returncode=0, raises=None):
+        def fake_run(cmd, **kw):
+            if raises:
+                raise raises
+            return mock.Mock(returncode=returncode, stdout=stdout, stderr="")
+
+        with mock.patch.object(watch.subprocess, "run", fake_run):
+            return watch.pane_for_session_name(self.NAME)
+
+    def test_the_status_glyph_is_stripped_before_matching(self):
+        self.assertEqual(
+            self._resolve(stdout=json.dumps([{"pane_id": 1907,
+                                              "title": "✳ " + self.NAME}])),
+            "1907")
+
+    def test_a_pane_without_a_pane_id_is_skipped_not_stringified(self):
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([{"title": "✳ " + self.NAME}])),
+            "str(None) is 'None' and truthy — that is the defect this pins")
+
+    def test_a_pane_with_a_null_pane_id_is_skipped(self):
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([{"pane_id": None,
+                                              "title": self.NAME}])))
+
+    def test_a_failed_query_resolves_nothing(self):
+        self.assertIsNone(self._resolve(returncode=1, stdout="boom"))
+
+    def test_malformed_json_resolves_nothing(self):
+        self.assertIsNone(self._resolve(stdout="{not json"))
+
+    def test_a_non_list_payload_resolves_nothing(self):
+        self.assertIsNone(self._resolve(stdout=json.dumps({"panes": []})))
+
+    def test_a_missing_wezterm_resolves_nothing(self):
+        self.assertIsNone(self._resolve(raises=OSError("no wezterm")))
+
+    def test_a_non_dict_element_is_skipped(self):
+        self.assertIsNone(self._resolve(stdout=json.dumps([None, "x", 3])))
+
+    def test_no_title_match_resolves_nothing(self):
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([{"pane_id": 1, "title": "other"}])))
+
+    def test_two_panes_matching_one_key_resolve_nothing(self):
+        # ⚠️ Not "the first wins". A card that jumps to a sibling's pane is
+        # worse than a card with no jump button — the operator presses it and
+        # lands in a different session's modal. Same rule as
+        # `who-needs-me.py:pane_for` (`len(hits) == 1`).
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([
+                {"pane_id": 11, "title": self.NAME},
+                {"pane_id": 22, "title": self.NAME}])),
+            "an ambiguous match must degrade to no target, never to one of them")
+
+    def test_a_uniqueness_suffixed_name_does_not_match_the_unsuffixed_pane(self):
+        # `uniqueTabName` appends ` (2)` precisely so two sessions never answer
+        # to one name; collapsing it would point the suffixed session's card at
+        # its sibling's pane.
+        def fake_run(cmd, **kw):
+            return mock.Mock(returncode=0, stderr="", stdout=json.dumps(
+                [{"pane_id": 11, "title": "⚙ MDM split command"}]))
+
+        with mock.patch.object(watch.subprocess, "run", fake_run):
+            self.assertIsNone(
+                watch.pane_for_session_name("⚙ MDM split command (2)"),
+                "a `(2)` name must not match the unsuffixed session's pane")
+            self.assertEqual(
+                watch.pane_for_session_name("⚙ MDM split command"), "11")
+
+
+class ParkReasonJoinTest(unittest.TestCase):
+    """`main` hands `repost_empty_parks` the reason from its own `state` tuple.
+
+    ⚠️ The shape tests all supply `reasons=` directly, so without this the
+    `state[sid8][2]` extraction — and the tuple layout it depends on — is never
+    exercised. The index is correct today (`(label, detail, reason, verdict)`);
+    a reorder would silently select a wrong reason and post the `message` card
+    this change exists to remove, with every other test still green.
+    """
+
+    SID = "aaaa1111-0000-0000-0000-000000000000"
+    SID8 = "aaaa1111"
+
+    def test_the_reason_travels_from_the_probe_state_to_the_repost(self):
+        seen = {}
+
+        def fake_repost(parked, entries, log_path, **kw):
+            seen["parked"] = list(parked)
+            seen["reasons"] = kw.get("reasons")
+            return []
+
+        state = {self.SID8: ("Some Task", "pick — 1. a", "busy+parked-modal", True)}
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "t.txt"), "w") as fh:
+                fh.write("Some Task\n")
+            with mock.patch.object(watch, "probe", lambda *a, **kw: state), \
+                 mock.patch.object(watch, "repost_empty_parks", fake_repost), \
+                 mock.patch.object(watch, "log_event", lambda *a, **kw: None), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", "1"])
+        self.assertEqual(seen.get("reasons"),
+                         {self.SID8: "busy+parked-modal"},
+                         "the reason is the THIRD element of the state tuple; a "
+                         "reorder must fail here rather than silently post the "
+                         "wrong card shape")
+
+
+class RegistryNameJoinTest(unittest.TestCase):
+    """The jump target joins through the REGISTRY name, not the task label.
+
+    ⚠️ **This is the defect the first bot review found, and it is the whole
+    reason this class exists.** `post_repost` receives the tracked TASK's name
+    (`Register an Unmerge Command on …`) while a manager-spawned tab is titled
+    with the session's own registry name (`⚙ MDM split command`). Matching the
+    pane title against the task name therefore finds nothing, `_jump_sentence`
+    returns `""`, and every real ack card silently loses the jump target it
+    advertises — while a unit test that passes the registry name by hand stays
+    green. The label survives only as a fallback for a session the registry
+    cannot name.
+    """
+
+    SID = "cef86313-cd45-411c-b4c4-cfbace549112"
+    LABEL = "Register an Unmerge Command on mdm-party-v2 and mdm-contact-v1"
+    REG_NAME = "⚙ MDM split command"
+
+    def _registry(self, d, record):
+        with open(os.path.join(d, "54924.json"), "w") as fh:
+            json.dump(record, fh)
+
+    def test_the_registry_name_is_found_by_session_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._registry(d, {"sessionId": self.SID, "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d):
+                self.assertEqual(watch.registry_name_for_session(self.SID),
+                                 self.REG_NAME)
+
+    def test_an_unknown_session_resolves_no_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._registry(d, {"sessionId": "other", "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d):
+                self.assertIsNone(watch.registry_name_for_session(self.SID))
+
+    def test_an_unreadable_registry_resolves_no_name(self):
+        with mock.patch.object(watch, "SESSIONS_DIR", "/nonexistent/registry"):
+            self.assertIsNone(watch.registry_name_for_session(self.SID))
+
+    def test_a_corrupt_record_is_skipped_not_raised(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "1.json"), "w") as fh:
+                fh.write("{not json")
+            self._registry(d, {"sessionId": self.SID, "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d):
+                self.assertEqual(watch.registry_name_for_session(self.SID),
+                                 self.REG_NAME)
+
+    def test_the_pane_is_looked_up_by_registry_name_not_the_task_label(self):
+        asked = []
+
+        def fake_pane(name):
+            asked.append(name)
+            return "1543"
+
+        with tempfile.TemporaryDirectory() as d:
+            self._registry(d, {"sessionId": self.SID, "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d), \
+                    mock.patch.object(watch, "pane_for_session_name", fake_pane), \
+                    mock.patch.object(watch.subprocess, "run",
+                                      lambda *a, **kw: mock.Mock(
+                                          returncode=1, stdout="", stderr="")):
+                sentence = watch._jump_sentence(self.SID, self.LABEL)
+        self.assertEqual(asked, [self.REG_NAME],
+                         "the join must ask for the session's real name; asking "
+                         "for the task label finds no pane on every real card")
+        self.assertIn("1543", sentence)
+
+    def test_the_label_is_the_fallback_when_the_registry_cannot_name_it(self):
+        asked = []
+
+        def fake_pane(name):
+            asked.append(name)
+            return None
+
+        with mock.patch.object(watch, "SESSIONS_DIR", "/nonexistent/registry"), \
+                mock.patch.object(watch, "pane_for_session_name", fake_pane):
+            sentence = watch._jump_sentence(self.SID, self.LABEL)
+        self.assertEqual(asked, [self.LABEL])
+        self.assertEqual(sentence, "",
+                         "an unresolved pane must degrade to no sentence, never "
+                         "to a target that goes nowhere")
+
+
+class NormTitleTest(unittest.TestCase):
+    """Title normalisation: the markers two sides differ by, and nothing else.
+
+    ⚠️ A fixed glyph list is what made the join fail: it stripped `✳` and left
+    `⚙ `, which the bare registry name does not carry. The normaliser strips any
+    leading decoration instead, so a pane title, a registry name and a bare
+    label all reduce to the same words.
+    """
+
+    def test_status_glyph_and_session_marker_both_strip(self):
+        self.assertEqual(watch._norm_title("✳ ⚙ MDM split command"),
+                         watch._norm_title("⚙ MDM split command"))
+        self.assertEqual(watch._norm_title("⚙ MDM split command"),
+                         watch._norm_title("MDM split command"))
+
+    def test_the_uniqueness_suffix_is_kept(self):
+        # ⚠️ Not decoration: `uniqueTabName` adds it so two sessions never
+        # answer to one name, so it must survive normalisation or two distinct
+        # sessions collapse to one key and a card can point at the wrong pane.
+        self.assertNotEqual(watch._norm_title("MDM split command (2)"),
+                            watch._norm_title("MDM split command"))
+        self.assertEqual(watch._norm_title("✳ ⚙ MDM split command (2)"),
+                         "MDM split command (2)")
+
+    def test_whitespace_is_collapsed(self):
+        self.assertEqual(watch._norm_title("  a   b  "), "a b")
+
+    def test_empty_input_is_empty(self):
+        self.assertEqual(watch._norm_title(""), "")
+        self.assertEqual(watch._norm_title(None), "")
 
 
 if __name__ == "__main__":
