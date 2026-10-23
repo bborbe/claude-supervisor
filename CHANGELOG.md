@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.209.1
 
 - fix: **the fleet digest reports a session's transcript age, and `stalled` needs both clocks.** The digest's `<age>` column rendered the **task file's** mtime age, not the transcript's: measured 2026-10-23 on round `20:09:07Z`, all five `stalled` rows matched their task-file mtime to the minute (56m/59m/37m/40m/41m) while four of them had written their transcripts minutes before the round — so a session in a long turn, which edits no task page, was rendered as 37–59 minutes dead. `scripts/who-needs-me.py` gains `--ages <ids…>` → `<sid8>\t<seconds>\t<human>\t<quiet|active|ambiguous>`, reading the same memoized `session_transcript_age()` the board's `Inactive` column uses and formatting through `fleet-sessions.py`'s `human_age()` rather than a second formatter; an ambiguous 8-char prefix reports `ambiguous` and never `quiet`, because an unresolvable id read as quiet would render a live session as stalled. `STALL_TRANSCRIPT_SECONDS` (30 min — two sweeps at the 15-min cadence, sharing its value with `manager-predispatch.py`'s `STUCK_SECONDS` and nothing else) is the transcript half of the class, so `stalled` now requires the task mtime unchanged for ≥2 sweeps **and** a quiet transcript; `agents/fleet-sweep-reader.md` states the call in step 4, the both-clocks condition in the classification table, and the rendered clock in the payload row, funded by cutting redundant prose in the same file (the 30 720-byte body budget). `docs/sweep-output.md` records the two clocks and which one is rendered.
 
