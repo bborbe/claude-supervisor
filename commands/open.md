@@ -478,7 +478,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
    python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json
    ```
 
-   ⚠️ **A non-zero exit is "cannot tell", never "no manager" — do not spawn on it.** **Only exit 0 with no match means "none is running now".** A non-zero exit, or unparseable JSON, means the question could not be answered: report it and stop; never fall through to item 4.
+   ⚠️ **A non-zero exit from `--list --json` is "cannot tell", never "no manager" — do not spawn on it.** **Only exit 0 with no match means "none is running now".** A non-zero exit from that call, or unparseable JSON, means the question could not be answered: report it and stop; never fall through to item 4. ⚠️ **This scopes to `--list --json` alone** — the `--check` verdicts below exit non-zero by design (`UNKNOWN` 2, `AMBIGUOUS` 3) and item 4 maps exactly those to a spawn.
 
    Then match `<goal> Manager` case-insensitively against `name` and against every entry in `formerNames`.
 
@@ -488,7 +488,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
 3. **`ABSENT` → RESUME it by id** (Step 3). The conversation is what is durable, not the process, so an `ABSENT` id is a resume, never a reason to spawn. ⚠️ **Do not reach item 4 on an `ABSENT` verdict** — a second manager on a live goal is precisely the outcome this step exists to prevent.
 
-4. **None, `UNKNOWN` or `AMBIGUOUS` → spawn a goal manager** on `<MGR>` from `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-launcher.py" "<manager_launcher>" "<goal page>" --default-source manager-default` (prints `<MGR>\t<source>`; non-zero → stop; rule: `docs/fleet-surface.md` § Which launcher a manager opens on). `<manager_launcher>` is the vault's configured value **as the absolute path `config list` emits** — a bare name fails the script's file check. `<goal page>` is the vault's goals folder plus `<goal>.md` (`24 Goals/` in the operator's vault). Resolve the `Managers` window and the `orange` chip from the role map (§ 3.0, `role: manager`), then:
+4. **None, `UNKNOWN` or `AMBIGUOUS` → spawn a goal manager** on `<MGR>` from `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-launcher.py" "<manager_launcher>" "<goal page>" --default-source manager-default` (prints `<MGR>\t<source>`; a non-zero exit here is **not** fatal — it is item 5's trigger, not a stop; rule: `docs/fleet-surface.md` § Which launcher a manager opens on). `<manager_launcher>` is the vault's configured value **as the absolute path `config list` emits** — a bare name fails the script's file check. `<goal page>` is the vault's goals folder plus `<goal>.md` (`24 Goals/` in the operator's vault). ⚠️ **Escape `<goal>` before interpolating it** into the shell line and the path: a title containing `"` closes the inner quoting and one containing `../` escapes the goals folder. Resolve the `Managers` window and the `orange` chip from the role map (§ 3.0, `role: manager`), then:
 
    ```bash
    wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<MGR>" -n "<goal> Manager" "/color orange"'

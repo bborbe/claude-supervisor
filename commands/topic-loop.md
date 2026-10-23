@@ -2,7 +2,7 @@
 # No `name:` field, deliberately — a command takes its name from its filename. The
 # frontmatter rule for `commands/*.md` (`agent-cmd/command-frontmatter`) requires
 # `description`, `allowed-tools` and `argument-hint` and nothing else.
-description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start what the ranking admits, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Never manages a worker.
+description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start what the ranking admits, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Sweeps goal managers, never workers.
 allowed-tools:
   - Task
   - Read
@@ -53,9 +53,9 @@ arms the wakeup and exits. Every wakeup runs **`/supervisor:topic-drive "<topic>
 **round** — which owns the step list and the router table. ⚠️ **The step list is
 deliberately NOT copied here**: a list with two homes drifts.
 
-⚠️ **Never invoke this command from a worker session.** Starting a *topic* manager is a
-human act; starting a *goal* manager is this tier's. Rule:
-`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles.
+⚠️ **Never invoke this command from a worker session.** Starting a *topic* manager is the
+operator's decision (the fleet manager performs the open); starting a *goal* manager is this
+tier's. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles.
 
 ## Interval — the tick and its floor
 
@@ -161,9 +161,10 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
 - **The line is work vs management — not read vs write.** Management writes are the
   manager's own — the topic page, a goal's `status`/`phase`, stale stamps — via `Edit` /
   `vault-cli goal set`. Code, verification, investigation and the fix go to a worker.
-- **A topic manager never manages a worker.** It starts, keeps alive and reaps **goal
-  managers**. A worker row is reported downward to the goal manager that owns it, never
-  acted on here. This is the boundary the split exists to draw.
+- **A topic manager never sweeps a worker.** It starts, keeps alive and reaps **goal
+  managers**, and it may open a worker on demand with `/supervisor:open --task` — but a
+  worker row is reported downward to the goal manager that owns it, never acted on here.
+  This is the boundary the split exists to draw.
 - **Never present a manager-owned action as an `AskUserQuestion` option.** Opening or
   resuming an approved goal manager, readying a row, repairing a page box — execute them,
   then report them as a table line. The modal is reserved for operator-only decisions

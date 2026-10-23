@@ -35,12 +35,13 @@ opens a lower one through `/supervisor:open`, never by a bare spawn.
 `-spawn` verb starts the level directly below it and nothing else — `topic-spawn` starts a
 **goal manager**, `goal-spawn` starts a **worker** — while the tier itself opens anything
 below it through `/supervisor:open`: a worker opened from the topic tier goes through
-`/supervisor:open --task`, the same path a goal manager uses. There is no `fleet-spawn` —
-the operator starts topic managers — and no `worker-spawn` at all.
+`/supervisor:open --task`, the same path a goal manager uses. There is no `fleet-spawn` — a
+topic manager is opened on the **operator's initiative** and the fleet manager performs the
+open — and no `worker-spawn` at all.
 
 | Tier | Manages | May start | Done condition |
 |---|---|---|---|
-| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (operator-initiated), and — when no lower-tier manager owns the subject — a goal manager or a worker directly | the fleet has no unmanaged subject and no gate it owns is outstanding |
+| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), and — when no lower-tier manager owns the subject — a goal manager or a worker directly | the fleet has no unmanaged subject and no gate it owns is outstanding |
 | **Topic manager** | ONE topic's declared goal set, the goal managers running on it, and the workers it opens | a **goal manager**, at most N at once per topic and never past the fleet manager ceiling; and a **worker** | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
 | **Goal manager** | ONE goal's declared task set, and the workers running on it | a **worker**, under the spawn cap | every task in its declared set is terminal, waiting on a named party, or held with a stated reason |
 | **Worker** | ONE anchored task | nothing — a worker never opens a session | its anchored task is terminal, or it reports the gate that stops it |
@@ -165,9 +166,10 @@ output — the fleet table.
 
 ## The manager boundary
 
-- **A manager is never started in a worker session.** ⚠️ **Starting a *topic* manager is a
-  human act; a *goal* manager is started by its topic manager, or by the fleet manager when no
-  topic manager is live** — `docs/fleet-surface.md` § Session roles is the canonical statement.
+- **A manager is never started in a worker session.** ⚠️ **Starting a *topic* manager is the
+  operator's decision — the fleet manager performs the open. A *goal* manager is started by
+  its topic manager, or by the fleet manager when no topic manager is live** —
+  `docs/fleet-surface.md` § Session roles is the canonical statement.
 - **A manager does not execute a worker's task.** It spawns, drives, answers and reaps
   workers; the task's work happens in the worker's own session.
 - **A goal manager starts or resumes a worker on a vault task with `/supervisor:open --task`** —
