@@ -20,7 +20,7 @@ import { runAgentLoop } from './agent-loop.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
-import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
+import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from './attention-poll.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
@@ -635,8 +635,14 @@ function makeCanUseTool(agent) {
         settle,
       }
       // Fail safe: an unanswered prompt must not park a worker forever.
+      // ⚠️ The timeout writes a record BEFORE it settles, and that ordering is the point:
+      // this path used to settle with no `permissions.jsonl` row at all, so a timeout and a
+      // clean exit were indistinguishable in the log and the 7-day criterion had no
+      // observable (SC5(a)). The builder lives in `attention-poll.mjs` because this file
+      // cannot be imported by a test; only the call site is pinned here, by source text.
       const timer = setTimeout(() => {
         log(`permission ${requestId} timed out -> deny`)
+        logPermission(timeoutDecisionRecord({ requestId, agentId: agent.id, park: record }))
         settle({ behavior: 'deny', message: 'Supervisor did not answer within 15 minutes.' })
       }, PERMISSION_TIMEOUT_MS)
 
