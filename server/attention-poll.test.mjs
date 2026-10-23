@@ -611,6 +611,14 @@ test('the timeout record is written at the settle path, and only there', () => {
   assert.match(around, /PERMISSION_TIMEOUT_MS/, 'the call must sit inside the timeout timer')
   assert.match(around, /timed out -> deny/)
   assert.match(around, /Supervisor did not answer within 15 minutes\./)
+
+  // ⚠️ ORDER, not just presence. The claim this record exists for is that the row is written
+  // BEFORE the park is settled, so it survives a settle that throws — and every assertion
+  // above is order-insensitive, so a reorder would keep them all green while breaking it.
+  const logAt = src.indexOf('logPermission(timeoutDecisionRecord(')
+  const settleAt = src.indexOf("settle({ behavior: 'deny', message: 'Supervisor did not answer within 15 minutes.' })")
+  assert.ok(settleAt > 0, 'the timeout settle call must be found')
+  assert.ok(logAt < settleAt, 'the record must be written before the settle, never after it')
 })
 
 // --- the idle cadence ------------------------------------------------------------------

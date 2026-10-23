@@ -62,6 +62,19 @@ export function runProbe(sessionId, { path = PROBE_PATH, exec = spawnSync } = {}
   // `ok === true` rather than truthiness: a probe that printed `"ok": "yes"` is a probe
   // whose contract changed, and reading it as a pass would fail open on the one check whose
   // whole job is to refuse.
+  //
+  // ⚠️ **The exit status is read too, and only where it can disagree.** `answer-path-check.py`
+  // exits 1 on a refusal *and* prints the structured body, so a blanket `status !== 0 → refuse`
+  // would throw away the reason the caller is meant to quote. The dangerous case is narrower:
+  // a probe that exits non-zero while reporting `ok`, i.e. its two halves contradicting each
+  // other. That is a refusal, never a pass — the fail-open direction this guard exists to
+  // prevent, and the property would otherwise rest on an unstated contract between two files.
+  if (done.status !== 0 && parsed.ok === true) {
+    return {
+      ok: false,
+      detail: `the answer-path probe exited ${done.status} while reporting ok — refusing on the disagreement`,
+    }
+  }
   return { ok: parsed.ok === true, detail: parsed.detail ?? 'the probe gave no detail' }
 }
 

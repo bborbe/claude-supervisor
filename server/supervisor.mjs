@@ -2216,24 +2216,6 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   if (spawnMode.error) return { error: spawnMode.error }
   const opensInteractive = spawnMode.mode === 'interactive'
 
-  // ⚠️ THE ANSWER-PATH GUARD, and it sits with the other refusals — before a worker, a tab
-  // or a ledger record exists. `docs/fleet-surface.md` § Spawn a worker item 6, constraint
-  // (a): a headless worker's permission gate parks with the session that SPAWNED it, so a
-  // spawner with no answer path strands it (measured 2026-09-20: two workers, four gates
-  // expired in ~90 minutes). Nothing asked at the spawn site until now.
-  //
-  // REFUSED rather than warned: a warning cannot block a spawn, and the caller reads the
-  // returned text as the reply. The probe is `scripts/answer-path-check.py` — this server
-  // owns no second observable (see `answer-path.mjs`'s header for why).
-  //
-  // The asking session is resolved the way every ledger row's `parent_session` is: by
-  // walking the process tree, because an MCP server carries no argument naming it.
-  const answerPathError = answerPathRefusal({
-    opensInteractive,
-    sessionId: parentSessionId({ dir: config.sessionsDir }),
-  })
-  if (answerPathError) return { error: answerPathError }
-
   // Resolved on the same principle and at the same point: a bad role costs no worker, no
   // ledger record and no tab. `resolveRole` refuses an unknown role and only DEGRADES on
   // an unusable map, because the map publishes on a reconcile tick and a headless worker
@@ -2262,6 +2244,32 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     const managerError = await managerLimitError({ operatorNamed })
     if (managerError) return { error: managerError }
   }
+
+  // ⚠️ THE ANSWER-PATH GUARD, and it sits HERE rather than first because it is the only guard
+  // that costs a subprocess. `docs/fleet-surface.md` § Spawn a worker item 6, constraint (a):
+  // a headless worker's permission gate parks with the session that SPAWNED it, so a spawner
+  // with no answer path strands it (measured 2026-09-20: two workers, four gates expired in
+  // ~90 minutes). Nothing asked at the spawn site until now.
+  //
+  // REFUSED rather than warned: a warning cannot block a spawn, and the caller reads the
+  // returned text as the reply. The probe is `scripts/answer-path-check.py` — this server
+  // owns no second observable (see `answer-path.mjs`'s header for why).
+  //
+  // ⚠️ **Placement is a cost decision, and it is a real one.** `parentSessionId` walks the
+  // process tree with up to ten `spawnSync('ps')` calls and `runProbe` shells out to python,
+  // and both are SYNCHRONOUS — this one process also answers every worker's `canUseTool`, so a
+  // hung probe would stall unrelated workers' permission handling for up to its timeout. Every
+  // refusal above costs no subprocess, so they go first: a bad role, a full fleet, an
+  // unsupported resume or policy is answered before the probe is paid for. The remaining
+  // window is the one a spawn would have paid anyway.
+  //
+  // The asking session is resolved the way every ledger row's `parent_session` is: by
+  // walking the process tree, because an MCP server carries no argument naming it.
+  const answerPathError = answerPathRefusal({
+    opensInteractive,
+    sessionId: parentSessionId({ dir: config.sessionsDir }),
+  })
+  if (answerPathError) return { error: answerPathError }
 
   // An explicit window id WINS — the caller may need a window the map does not describe.
   // Otherwise the role decides, in-process, and no window id crosses the tool boundary.

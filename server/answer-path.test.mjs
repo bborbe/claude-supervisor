@@ -83,7 +83,23 @@ test('a truthy-but-not-true ok refuses — a changed contract must not fail open
   assert.equal(out.ok, false)
 })
 
+test('a non-zero exit that still reports ok refuses — the two halves disagree', () => {
+  const out = runProbe('sid', { exec: exec({ status: 1, stdout: '{"ok":true,"detail":"loop is OK"}' }) })
+  assert.equal(out.ok, false)
+  assert.match(out.detail, /exited 1 while reporting ok/)
+})
+
+test('a non-zero exit carrying a structured refusal keeps its reason', () => {
+  // The probe exits 1 on every refusal AND prints the body, so a blanket
+  // `status !== 0 → generic message` would throw away the sentence the caller quotes.
+  const out = runProbe('sid', { exec: exec({ status: 1, stdout: '{"ok":false,"detail":"reads STALE, not OK"}' }) })
+  assert.equal(out.ok, false)
+  assert.equal(out.detail, 'reads STALE, not OK')
+})
+
 test('the real probe shape parses', () => {
-  const out = runProbe('sid', { exec: exec({ stdout: '{"ok":true,"detail":"loop is OK"}' }) })
+  // `status: 0` is part of the shape, not decoration: a real `spawnSync` always carries it,
+  // and the disagreement branch reads it, so a fake without it tests a call that cannot happen.
+  const out = runProbe('sid', { exec: exec({ status: 0, stdout: '{"ok":true,"detail":"loop is OK"}' }) })
   assert.deepEqual(out, { ok: true, detail: 'loop is OK' })
 })

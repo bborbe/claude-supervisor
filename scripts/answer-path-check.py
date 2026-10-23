@@ -124,7 +124,18 @@ def main():
     args = parser.parse_args()
 
     if not args.session_id:
-        print("REFUSED\tno session id (pass --session-id or set $CLAUDE_CODE_SESSION_ID)")
+        # The JSON envelope is emitted here too, not only on the branches below: a caller
+        # that passed --json must be able to read every refusal the same way, and a plain
+        # line would reach it as "nothing parseable" — still a refusal, but one whose reason
+        # the caller cannot quote.
+        detail = "no session id (pass --session-id or set $CLAUDE_CODE_SESSION_ID)"
+        if args.json:
+            print(json.dumps(
+                {"ok": False, "subject": None, "branch": None, "detail": detail},
+                ensure_ascii=True,
+            ))
+        else:
+            print(f"REFUSED\t{detail}")
         return 1
 
     ok, subject, branch, detail = check(args.session_id)

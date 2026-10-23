@@ -1,7 +1,9 @@
 ---
 description: Spawn a supervisor worker for a task
 argument-hint: "[task brief]"
-allowed-tools: mcp__supervisor__spawn_agent
+allowed-tools:
+  - mcp__supervisor__spawn_agent
+  - Bash(python3:*)
 ---
 Spawn one worker for: $ARGUMENTS
 
