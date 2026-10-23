@@ -30,9 +30,9 @@ marketplace changes the prefix with it — a one-place edit here, not a sweep of
 
 **A manager is never started in a worker session.** A worker session carries a *task*; a manager session carries a *topic or goal* and a loop. Arming one inside the other collapses the two roles, and the collapse is silent: the session keeps its task name and its task anchor while its turns now sweep a topic's whole tracked set, and the operator sees a worker whose tab is quietly doing someone else's job. (Operator rule, 2026-09-21 — stated when a worker session proposed to exercise a one-sweep `/supervisor:goal-loop` run as its own end-to-end check.)
 
-The direction that **is** allowed runs the other way, and since 2026-10-20 it has **two rungs**: the fleet manager starts a topic manager's *goals*' managers, a **topic manager starts its goal managers itself**, and a goal manager starts workers (§ Spawn a worker). A worker reaches its manager over `SendMessage`. **Starting a *topic* manager is a human act** — the operator invokes `/supervisor:topic-loop <topic>` in a session created for that purpose; the rung below it is the topic tier's own act (`commands/topic-spawn.md`).
+The direction that **is** allowed runs the other way, and the operator's hierarchy (2026-10-23) names what each level may open: **the fleet manager is top of everything** — it opens topic managers, goal managers and workers, each when no lower-tier manager owns the subject; **a topic manager opens goal managers and workers**; **a goal manager opens workers** (§ Spawn a worker); **a worker opens nothing**. A worker reaches its manager over `SendMessage`. **Starting a *topic* manager is the operator's decision** — no manager invents a topic — but the open is the fleet manager's, through `/supervisor:open --topic`; every rung below it belongs to a manager tier (`commands/topic-spawn.md`, `commands/open.md` § Step 2B).
 
-⚠️ **The tree is strict: each level manages only the level directly below it.** fleet → topic → goal → worker. A topic manager never starts or messages a worker; a goal manager never starts or messages another goal manager. `docs/session-tiers.md` § The four tiers is the canonical table.
+⚠️ **The tree is a tree, not a ladder** — fleet → topic → goal → worker, and a level may open any level below it, not only the next one down. A goal manager never starts or messages another goal manager, and a worker opens nothing. `docs/session-tiers.md` § The four tiers is the canonical table.
 
 ⚠️ **The tree starts at whatever level exists.** A task with no goal is managed by its nearest ancestor — its topic's manager if the task sits directly under a topic, otherwise the fleet manager. A goal with no topic is managed by the fleet manager. § Which manager owns a subject carries the resolution.
 
@@ -881,10 +881,12 @@ never see each other.
 unmanaged goal so it can start that goal's manager; it does not put the worker under the topic
 manager. `scripts/fleet-board.py`'s `manager_on_chain` parents a worker only to the goal
 manager of a goal its task declares (`managed_by` first, then `goals:`), and when no goal
-manager is live the worker falls to the Fleet Manager (the root) as a holding row. A topic
-manager never manages a worker (`commands/topic-loop.md`). Two exceptions keep a topic manager
-as a worker's parent: a task whose `managed_by` names a topic, and a goal-less task listed
-directly under a topic (the nearest-ancestor case above).
+manager is live the worker falls to the Fleet Manager (the root) as a holding row. ⚠️ **Opening
+a worker is a separate right from parenting one** — the topic tier may open a worker
+(`/supervisor:open --task`), but that does not adopt the worker of a goal it does not own
+(`commands/topic-loop.md`). Two exceptions keep a topic manager as a worker's parent: a task
+whose `managed_by` names a topic, and a goal-less task listed directly under a topic (the
+nearest-ancestor case above).
 
 ⚠️ **`managed_by` has no writer yet, and saying so is part of the rule.** It is authored by
 hand — by the operator, or by a manager settling a task whose `goals:` genuinely names more

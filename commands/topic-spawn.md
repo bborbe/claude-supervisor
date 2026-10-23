@@ -12,7 +12,9 @@ allowed-tools:
 ---
 
 `<tier>-spawn` starts the level directly below. For a **topic** manager that level is a
-**goal manager** — never a worker, and never another topic manager.
+**goal manager** — never another topic manager. ⚠️ **A worker is this tier's to open, but not
+this verb's**: it goes through `/supervisor:open --task`, the same path a goal manager uses
+(`docs/session-tiers.md` § The four tiers).
 
 ⚠️ **This command holds no `spawn_agent` tool, deliberately.** The session is created by
 `/supervisor:open --goal "<goal>"`, whose resume and spawn branches already carry the hold
@@ -46,7 +48,7 @@ never starts a session (`docs/session-tiers.md` § The worker boundary).
    | `goal-not-in-scope` | 1 | the goal is not in this topic's `## Goals` | report it; the topic's declared membership is the boundary. Do **not** widen the list to make it fit |
    | `goal-not-startable` | 1 | the goal's `phase` is not `planning`/`execution` | report it as `⌛ waiting-approval`. The `todo → planning` flip is the operator's, never yours |
    | `manager-cap` | 1 | a bound is reached; the **second line** names it: `goal-cap` (this topic runs N) or `manager-cap` (the fleet ceiling) | print the bound and the ranked `held` rows; start nothing this tick |
-   | `workers are not this tier's to start` | 1 | a `--worker` argument reached the gate | report it; a task is a worker's anchor, and this tier starts goal managers only |
+   | `workers are not this verb's to start` | 1 | a `--worker` argument reached the gate | report it; a task is a worker's anchor, and a worker is opened with `/supervisor:open --task`, not this verb |
 
    ⚠️ **The fleet ceiling always wins over N.** N = 3 is a per-topic share; `spawn.maxManagers`
    is the outer bound. **Never raise the cap to make room** — rank and wait, or say which
