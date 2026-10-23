@@ -77,15 +77,18 @@ is a real case rather than a bug, and it is refused rather than posted: an item
 with no producer can never be polled back by anyone, so it would be a question
 asked into a void.
 
-`--closer` is the one declaration that is OPTIONAL. It names the `👤 You:` line
+`--closer` is the one declaration that is OPTIONAL at the CLI — but REQUIRED
+whenever the closer repeats the card's ask, which is the common case for a
+manager relaying a worker's gate. It names the `👤 You:` line
 this card answers, and it exists because a session that posts a card and then
 ends its turn with the same ask on that line put ONE ask on the board twice: the
 deliberate card declares a `dedup_key` slug while the hook's echo derives
 sha256(sid:kind:detail), and those two keys can never collide. Passing it writes
 <sid>.posted.json, which the hook's `Stop` branch and the feed's `reclassify_idle`
 both read to decline the echo. Omitted, nothing is recorded and the echo is
-raised exactly as before — the mechanism is opt-in, so the board stays dirty
-until a poster passes it.
+raised exactly as before — so omitting it is correct only when the closer asks
+something *else*. A closer that repeats the card's ask must pass it, or the
+board carries one question twice.
 
 Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
      python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
