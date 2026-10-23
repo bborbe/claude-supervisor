@@ -89,9 +89,9 @@ recorded and the echo is raised exactly as before — so omitting it is correct
 only when the closer asks something *else* or mints nothing.
 
 ⚠️ It holds ONE record per session, so a round that posts two cards overwrites
-the first closer. And it cannot cover a card this session did not post: a
-manager relaying a gate it never carded writes no record here, so its closer
-must carry no minting verb at all — `commands/steps/needs-input.md`, the relay
+the first closer. And it does not apply to a relayed gate at all: the closer
+there must be verb-free, so there is no ask for the record to match — whether or
+not this session posted the card. See `commands/steps/needs-input.md`, the relay
 bullet.
 
 Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
