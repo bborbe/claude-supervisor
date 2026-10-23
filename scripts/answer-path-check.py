@@ -61,6 +61,23 @@ MANAGER_DIR = os.path.expanduser(
 
 def registration(session_id):
     """(subject, branch) for this session, or (None, reason)."""
+    # ⚠️ The id is JOINED INTO A PATH, so it must be a bare filename. `--session-id` is
+    # caller-supplied, and a value carrying `/`, `\` or `..` would read an arbitrary `*.json`
+    # outside the registration dir — a read this check has no reason to perform and no
+    # business reporting the contents of. Refused rather than sanitised, like every other
+    # branch here: a stripped id would address a registration the caller did not name.
+    if (
+        not isinstance(session_id, str)
+        or not session_id
+        or session_id in (".", "..")
+        or "/" in session_id
+        or "\\" in session_id
+        or "\x00" in session_id
+    ):
+        return None, (
+            f"session id {session_id!r} is not a bare filename — refusing to read a path "
+            f"outside the registration dir"
+        )
     path = os.path.join(MANAGER_DIR, f"{session_id}.json")
     try:
         with open(path, encoding="utf-8") as handle:
@@ -82,8 +99,15 @@ def registration(session_id):
         )
     subject = data.get("subject")
     branch = data.get("branch")
-    if not subject or not branch:
-        return None, f"{path} carries no subject/branch — cannot name the loop to check"
+    # ⚠️ STRINGS, not just truthy. A registration holding `{"subject": 123}` passes a bare
+    # truthiness test and then raises `TypeError` inside `subprocess.run`, which is outside the
+    # classes `liveness_state` catches — so `check()` would breach its own "never raises" and
+    # hand the caller a traceback where a quotable refusal is promised.
+    if not isinstance(subject, str) or not isinstance(branch, str) or not subject or not branch:
+        return None, (
+            f"{path} carries no subject/branch ({type(subject).__name__}/"
+            f"{type(branch).__name__}) — cannot name the loop to check"
+        )
     return (subject, branch), None
 
 

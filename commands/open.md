@@ -215,7 +215,7 @@ Writing them is the point, not a side effect. The next batch reads the fields in
 
 **`goal_loop:` is read here and used at Step 3** — on `true` the spawn prompt is the condition alone; the work command follows. Rule: § Spawn a worker item 10.
 
-**A `headless` row is not opened until an answer path is proven — run the probe before the spawn.** Exit 0 → open the row. Exit 1 → **refuse the row**, print the probe's own line (it names the reason and the remedy), and open nothing.
+**A `headless` row is not opened until an answer path is proven — run the probe before the spawn.** Exit 0 → open the row. Exit 1 → **refuse the row**, print the probe's own line (it names the reason), and open nothing. ⚠️ **The probe carries the reason only — add the remedy yourself when you report it**: open the row `interactive`, or arm this session's manager loop and re-run. The server's refusal text carries the same remedy; the probe does not.
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/answer-path-check.py" --session-id "$CLAUDE_CODE_SESSION_ID"

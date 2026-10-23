@@ -82,6 +82,34 @@ class AnswerPathCheckTest(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertIn("not a JSON object", detail)
 
+    def test_non_string_subject_or_branch_refuses_without_raising(self):
+        # Truthy-but-not-a-string passes a bare `if not subject` and then raises TypeError
+        # inside subprocess.run — outside the classes liveness_state catches.
+        # The type names are asserted, not just the refusal: a misspelled key in the fixture
+        # would also refuse, so "no subject/branch" alone cannot prove the guard read the value.
+        for payload, types in (
+            ({"subject": 123, "branch": "goal"}, "int/str"),
+            ({"subject": "A Goal", "branch": ["goal"]}, "str/list"),
+            ({"subject": {"a": 1}, "branch": "goal"}, "dict/str"),
+        ):
+            with self.subTest(payload=payload):
+                self.write_registration("typed", json.dumps(payload))
+                ok, _, _, detail = self.mod.check("typed")
+                self.assertFalse(ok)
+                self.assertIn("no subject/branch", detail)
+                self.assertIn(types, detail)
+
+    def test_a_session_id_that_is_not_a_bare_filename_refuses(self):
+        # The id is joined into a path; `../` or an absolute value would read an arbitrary
+        # *.json outside the registration dir.
+        for bad in ("../escape", "a/b", "..", ".", "", "/etc/passwd", "a\\b"):
+            with self.subTest(session_id=bad):
+                ok, subject, branch, detail = self.mod.check(bad)
+                self.assertFalse(ok)
+                self.assertIsNone(subject)
+                self.assertIsNone(branch)
+                self.assertIn("not a bare filename", detail)
+
     def test_the_established_env_override_wins_over_the_fixture_knob(self):
         # `SUPERVISOR_WORKER_MANAGER_DIR` is what the rest of the repo sets (adopt-orphans,
         # inbox); a probe honouring a different name reads a directory nobody writes.
