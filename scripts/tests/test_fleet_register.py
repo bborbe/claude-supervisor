@@ -12,15 +12,29 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SCRIPT = os.path.join(os.path.dirname(_HERE), "fleet-register.py")
+_SCRIPTS = os.path.dirname(_HERE)
+_SCRIPT = os.path.join(_SCRIPTS, "fleet-register.py")
+_PROBE = os.path.join(_SCRIPTS, "answer-path-check.py")
 
 
 def load():
     spec = importlib.util.spec_from_file_location("fleet_register", _SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_probe(manager_dir):
+    """The REAL consumer, pointed at the same registration dir."""
+    os.environ["WORKER_MANAGER_STATE_DIR"] = manager_dir
+    os.environ.pop("SUPERVISOR_WORKER_MANAGER_DIR", None)
+    spec = importlib.util.spec_from_file_location("answer_path_check", _PROBE)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -60,6 +74,46 @@ class FleetRegister(unittest.TestCase):
         # silently, which is exactly how the cadence-only fix failed.
         self.assertEqual(self.mod.SUBJECT, "Fleet Manager")
         self.assertEqual(self.mod.BRANCH, "fleet")
+
+    def test_the_written_file_satisfies_the_real_probe(self):
+        # ⚠️ THE SEAM THIS PR EXISTS TO PROVE, and the one the review asked for. Pinning both
+        # sides to the same literals proves nothing: a payload-shape change here would leave
+        # both suites green while the probe refused every fleet spawn — the failure this PR
+        # repairs. So: run the real writer, then the real consumer.
+        self.mod.write_registration("sid-1", "v", directory=self.dir)
+        probe = load_probe(self.dir)
+        state = tempfile.mkdtemp()
+        os.environ["MANAGER_LIVENESS_STATE_DIR"] = state
+        try:
+            subprocess.run(
+                [sys.executable, probe.LIVENESS, "--arm", "--subject", "Fleet Manager",
+                 "--branch", "fleet", "--interval", "900"],
+                check=True, capture_output=True,
+            )
+            ok, subject, branch, detail = probe.check("sid-1")
+            self.assertTrue(ok, detail)
+            self.assertEqual((subject, branch), ("Fleet Manager", "fleet"))
+        finally:
+            os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def test_the_cli_writes_the_registration_and_exits_zero(self):
+        env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sid-cli", WORKER_MANAGER_STATE_DIR=self.dir)
+        env.pop("SUPERVISOR_WORKER_MANAGER_DIR", None)
+        done = subprocess.run(
+            [sys.executable, _SCRIPT, "--vault", "v"], capture_output=True, text=True, env=env
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("registered", done.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "sid-cli.json")))
+
+    def test_the_cli_refuses_without_a_session_id(self):
+        env = dict(os.environ, WORKER_MANAGER_STATE_DIR=self.dir)
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        env.pop("SUPERVISOR_WORKER_MANAGER_DIR", None)
+        done = subprocess.run([sys.executable, _SCRIPT], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 1)
+        self.assertTrue(done.stdout.startswith("REFUSED\t"))
+        self.assertEqual(os.listdir(self.dir), [], "a refused run must write nothing")
 
 
 if __name__ == "__main__":

@@ -57,9 +57,17 @@ def write_registration(session_id, vault, directory=None, now=None):
         "resolved_at": (now or datetime.datetime.now(datetime.timezone.utc)).isoformat(),
     }
     path = os.path.join(target_dir, f"{session_id}.json")
-    with open(path, "w", encoding="utf-8") as handle:
+    # ⚠️ Temp file + `os.replace`, matching `manager-liveness.py`'s `write_atomic` and every
+    # sibling state writer here. This is the one file whose whole purpose is to be read by
+    # another process (`answer-path-check.py`, once per headless spawn), and a plain
+    # `open(path, "w")` truncates before the dump fills it. It cannot fail OPEN — the probe
+    # refuses unparseable JSON — but a spurious refusal once per round is a defect worth three
+    # lines to remove.
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
+    os.replace(tmp, path)
     return path
 
 

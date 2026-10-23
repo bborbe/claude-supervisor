@@ -234,6 +234,11 @@ def detect_branch(subject: str, vault: str = ".") -> str:
          `goal--<base>`, `topic--<base>` or `fleet--<base>` keeps its branch, whatever the
          page says now. `fleet` is checked like the others because the Fleet Manager arms a
          loop and manages no page: it has no other way to be resolved.
+         ⚠️ The order is goal → topic → fleet, so a goal or topic literally named
+         "Fleet Manager" shadows the fleet record. The arm path is unaffected — every arm
+         passes `--branch fleet` explicitly — but a branch-less call (`commands/stop.md`
+         runs `--stop --topic <subject>` with no branch) would mark the wrong record. The
+         goal-vs-topic ambiguity of the same shape predates this branch.
       2. **The vault's pages** — `24 Goals/<subject>.md` is a goal; the topics folder
          holding `<subject>.md` is a topic.
       3. **`goal`** — the default, announced on stderr so a wrong guess is visible
