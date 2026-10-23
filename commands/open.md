@@ -154,7 +154,7 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 **`mode` is derived per row and written, and the table carries a `mode` column.**
 
-✅ **Per-task mode is its own `mode:` field, never folded into `role:`**, with the fallback rule that makes it safe: *unclear → interactive*. Step 0.6 decides and writes it.
+✅ **Per-task mode is its own `mode:` field, never folded into `role:`** — a `role: agent` row with none of item 6's five watch-need signals is `headless`. Step 0.6 decides and writes it.
 
 ⚠️ **Two fields, not one: `role` cannot answer the mode question.** The mapping is not restated here — owned by item 6 of § Spawn a worker.
 
@@ -217,7 +217,7 @@ Writing them is the point, not a side effect. The next batch reads the fields in
 
 ⚠️ **A machine-written role is indistinguishable from an operator-written one on disk.** Nothing in the frontmatter records who decided. So **print every auto-filled row distinctly** (`🏷️ filled now`) instead of folding it into the opened count. That report line is the only provenance this decision has, and it exists for exactly one read — the first one, while objecting is still cheap.
 
-⚠️ **The undecidable guard still refuses; never soften it into a default.** When the body genuinely does not say, do **not** guess and do **not** write the field — print `⛔ REFUSED — role: undecidable (body carries no signal; not written)`. **This applies to `role` only.** `mode` has a safe floor and never blocks — an undecidable mode is `interactive`.
+⚠️ **The undecidable guard still refuses; never soften it into a default.** When the body genuinely does not say, do **not** guess and do **not** write the field — print `⛔ REFUSED — role: undecidable (body carries no signal; not written)`. **This applies to `role` only.** `mode` never blocks either — but it resolves the other way: a `role: agent` body carrying none of item 6's five watch-need signals is `headless`, so an undecidable `mode` is `headless`, never a refusal.
 
 **A `role: human` row is never opened as a WORKER — it is opened into the Direct window instead.**
 
@@ -539,7 +539,7 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 The rule that *produces* the value is not restated here — it has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6; this line is only the consumption.
 
-⚠️ **Writing `mode: headless` today opens a worker into a mechanism with two known, measured defects** — its gates park with the spawning session's server and no one else can answer them, and the resume guard does not guard. Until prompts and questions can be answered remotely, `headless` should be rare and never a guess.
+⚠️ **A headless worker carries two standing constraints, and both are the spawner's, not the worker's** — its gates park with the session that spawned it, and its turn ends at READY rather than at completion. Both are stated in full in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6, together with the resume-path behaviour; read them there before opening one. ⚠️ **This paragraph previously concluded that `headless` was rare and never a guess**, which was the pre-2026-10-22 floor — recorded rather than quietly dropped, because it is what this file carried until the flip.
 
 **Parity is real, not a compromise** — a headless worker inherits the same MCP servers a tab does.
 

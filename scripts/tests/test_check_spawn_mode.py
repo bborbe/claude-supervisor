@@ -56,10 +56,12 @@ SITE_NO_BINDING = (
     "See `docs/fleet-surface.md` § Spawn a worker item 6 for the rule.\n"
     "Never pass `interactive` here.\n"
 )
+#: The home fixture carries BOTH of the checker's pins, and the pair moved with the rule on
+#: 2026-10-22 — the closed list, and its exhaustiveness. A fixture left on the superseded
+#: phrases would keep this test green against a tree the checker now rejects.
 HOME = (
-    "6. Decide the mode before you spawn.\n\n"
-    "Ask: does finishing this task raise questions mid-flight that only a human can settle?\n\n"
-    "`interactive` is a floor, not a tie-break.\n"
+    "6. Decide the mode before you spawn — a `role: agent` task defaults to `headless`.\n\n"
+    "**The five watch-need signals, and the list is exhaustive — no sixth, no `etc.`**\n"
 )
 #: A resume: both keys present, so NOT a new-worker site.
 RESUME_CALL = 'mcp__supervisor__spawn_agent(prompt="<the answer>", resume="<sid>", interactive=false)\n'
@@ -178,6 +180,20 @@ class CheckSpawnModeTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("no longer defines it", result.stderr)
+
+    def test_home_must_state_the_list_is_exhaustive(self):
+        """The second pin is load-bearing on its own: a home naming the signals but leaving
+        the list open-ended passes the first pin and is exactly the shape that grows a sixth
+        signal on the first edge case someone meets."""
+        self.write(
+            "docs/fleet-surface.md",
+            "6. Decide the mode before you spawn.\n\n"
+            "**The five watch-need signals** keep a `role: agent` row interactive.\n",
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no longer defines it", result.stderr)
+        self.assertIn("no sixth", result.stderr)
 
     def test_missing_home_fails_cleanly(self):
         (pathlib.Path(self.dir) / "docs" / "fleet-surface.md").unlink()
