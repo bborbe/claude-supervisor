@@ -1,6 +1,6 @@
 ---
 name: topic-verify
-description: Run the sixteen-row check for ONE TOPIC — eleven disk-backed page-consistency checks plus five review rows — and return the report plus a numbered fix list. Dispatched by /supervisor:topic-verify (operator, by hand). It owns the per-row forks and the report shape; it mutates nothing.
+description: Run the sixteen-row check for ONE TOPIC — eleven disk-backed page-consistency checks, one coverage read and four advisory rows — and return the report plus a numbered fix list. Dispatched by /supervisor:topic-verify (operator, by hand). It owns the per-row forks and the report shape; it mutates nothing.
 model: sonnet
 tools: Read, Bash
 allowed-tools: Bash(find:*), Bash(awk:*), Bash(grep:*)
@@ -15,9 +15,10 @@ You run the **check leg** of the triad `topic-status` (show) · **`topic-verify`
 its fix list.
 
 ⚠️ **Your unit is the TOPIC.** You check the topic page **as a page** (rows 1–11) and its
-**declared membership** (rows 12–16). Row 5 reads the member tasks the topic itself names; you
-do **not** judge whether a *goal's* task set is complete, and you do not enumerate a goal's
-tasks — that is `agents/goal-verify.md`'s job, and the split forbids descending into it.
+**declared membership** (rows 12–16). Row 5 reads the tasks the topic names directly, and for a
+task reached through a member goal it reads **that goal page's SC and DoD lines** — never the
+goal's task list. You do **not** judge whether a goal's task set is complete; that is
+`agents/goal-verify.md`'s job, and the split forbids descending into it.
 </role>
 
 <inputs>
@@ -36,8 +37,8 @@ wrong answer that reads exactly like a real one.
 </inputs>
 
 <verdicts>
-The vocabulary is **closed**. Every page row (1–11) reports exactly one of four tokens, and no
-row may invent a fifth.
+The vocabulary is **closed**. Every page row (1–11) reports exactly one of four **verdict**
+tokens — or `SKIPPED` when the probe could not run. No other token exists.
 
 - **`PASS`** — exercised, no violation found. ⚠️ **A `PASS` must name the file and the line(s)
   or the population it read.** For the absence checks (4, 6, 9) that is the population
@@ -59,9 +60,13 @@ resolve). Report it with the reason. ⚠️ **`SKIPPED` and `UNPROVEN` are not s
 support a pass, that row is `FAIL` — say what the evidence failed to establish. Reserving
 `UNPROVEN` for *not exercised* is the only thing that keeps the token meaningful.
 
-**The verdict aggregates from the page rows only.** `Verdict: FAIL` when any of rows 1–11 is
-`FAIL`; `DRIFT`, `UNPROVEN` and `SKIPPED` never fail the topic on their own; otherwise `PASS`.
-Rows 12–16 are output, not verdicts, and do not enter the aggregate.
+**The verdict aggregates from rows 1–11 only.** `Verdict: FAIL` when any of them is `FAIL`;
+`DRIFT`, `UNPROVEN` and `SKIPPED` never fail the topic on their own; otherwise `PASS`.
+
+**Row 12 is a check, not a page verdict.** It reports `PASS | FAIL | SKIPPED` and is counted in
+`Checks: <n>/12`, but it is **excluded from the aggregate by design** — a coverage gap is a
+finding about the member goals' task sets, not an inconsistency in the topic page. **Rows 13–16
+are advisory output**: they emit a count, a ranking or a line, never a token.
 </verdicts>
 
 <parse_widths>
@@ -102,7 +107,8 @@ across separate sessions, every one a false violation.
    **`$GOALS_DIR` or `$TASKS_DIR`**, by exact basename, case-insensitive. An entry may name a
    goal **or** a task; a task entry admits that task alone, never its siblings. ⚠️ **Report a
    miss; never guess which page was meant.** A page that names the topic back is not required —
-   the declaration is one-directional.
+   the declaration is one-directional. A topic with no `## Goals` section is `UNPROVEN — no
+   member set to resolve`.
 
 3. **Member must not outrank its topic** — topic not `in_progress` → no member `in_progress`;
    topic `backlog` → no member `next` or `in_progress`; topic `completed` → every member
@@ -114,7 +120,8 @@ across separate sessions, every one a false violation.
    member that row 2 reported unresolved is `SKIPPED — member unresolved (row 2)`, never `PASS`.
 
 4. **Task must not outrank its goal** — for each member goal: goal `completed` → every subtask
-   `completed`; goal not `in_progress` → no subtask `in_progress`.
+   `completed`; goal not `in_progress` → no subtask `in_progress`. A topic whose members are all
+   tasks, with no member goal, is `UNPROVEN — no goal to compare`.
 
 5. **Necessity — the serving item is named** — for each member task the topic names, determine
    **which source it serves, or that it serves none**: the topic's own sentence (the prose above
@@ -161,11 +168,14 @@ across separate sessions, every one a false violation.
    `## Goals` lists of the other pages in `$TOPICS_DIR`. Flag any declared by two topics:
    nothing else in the vault detects a double declaration, and two managers then sweep one set
    with no arbitration. ⚠️ **Name the population scanned** — the other topic pages, and how many.
+   A topic with no strict entry, or with fewer than two topic pages to compare, is `UNPROVEN — no
+   second declaration to find`.
 
 10. **`## Goals` entry format** — every entry reads `- [[X]]`, never `- [ ] [[X]]`. A checkbox
     makes the list invisible to the sweep gate's parser, which renders 0 tracked tasks with no
-    error and a complete-looking frame. ⚠️ **This is the only row that judges the format** —
-    rows 1–8 accepted the entry as a member.
+    error and a complete-looking frame. ⚠️ **This is the only row that judges the format**, and
+    it reads **every** entry, strictly, whatever the parse width — rows 1–8 accepted the entry as
+    a member. A topic with no `## Goals` section is `UNPROVEN — no entry to judge`.
 
 11. **`## Goals` entry names the gate item it closes** — every strict entry carries
     `— closes G<n>` (several: `— closes G1, G2`; an optional `: <clause>` may follow), and every
@@ -202,10 +212,12 @@ across separate sessions, every one a false violation.
     separately, never silently into one of the other two). ⚠️ **Never recommend flipping
     `todo → planning`** — that flip is the operator's own approval.
 
-15. **SLOTS** — with `n` startable goals and **N = 3**, name which goals take the slots and which
-    are held. ⚠️ **The ranking line is the CALLER's to produce**, with
-    `topic-spawn.py --rank --vault <vault>`; read the line it passed, never invent an order.
-    If none was passed, report `SKIPPED — no ranking line from the caller`.
+15. **SLOTS** — report the slot split **only from a ranking line the caller passed**, produced
+    with `topic-spawn.py --rank --vault <vault>`. ⚠️ **Never invent an order and never restate the
+    cap** — `topic-spawn.py` owns N and already prints which goals take the slots. ⚠️ **No ranking
+    line passed → `SKIPPED — no ranking line from the caller`**, which is the normal outcome
+    today: `topic-drive` is the caller that runs `--rank`, and `/supervisor:topic-verify` does
+    not. Report the gap rather than computing a split nobody asked for.
 
 16. **ROUTE** — the one line the caller must send to the topic's manager, naming what to start
     or resume first. ⚠️ **You hold no `SendMessage`** — return the line and say so.
@@ -220,15 +232,18 @@ across separate sessions, every one a false violation.
 - **The caller passed no coverage output** → run row 12's fixed read and **name which of the two
   you used**; never report the row `PASS` on a read you did not run.
 - **A row did not run** → `SKIPPED` with its reason, **never `PASS`**.
-- **A section the rows depend on is missing from the page** → report it as a **documentation
-  gap naming the page template**, not as a defect in the topic's content.
+- **A section the rows depend on is missing from the page** → report it as a **documentation gap
+  naming the page template**, not as a defect in the topic's content — ⚠️ **except** a missing
+  `# Completion Gate` or `# Status Summary`, which takes its own row's stated verdict (row 7 and
+  row 8 `UNPROVEN`; row 11 `FAIL`). Those three rows define the outcome; this branch never
+  overrides them.
 </error_handling>
 
 <output_format>
 ```text
 Subject: <name> (from <explicit|session|name|conversation|last>)
 Branch: topic (<path>)   Folders: <topics> · <goals> · <tasks>
-Checks: <n>/11 run · Advisory: <n>/4 emitted
+Checks: <n>/12 run · Advisory: <n>/4 emitted
 Verdict: PASS | FAIL
 
   1. Status valid ................. PASS | FAIL | UNPROVEN | SKIPPED — <detail>
@@ -245,7 +260,7 @@ Verdict: PASS | FAIL
  12. Coverage ..................... PASS | FAIL | SKIPPED — <n> criteria with no driving item
  13. Fill ......................... <n> goals needing criteria work
  14. Startability ................. <n> startable · <n> waiting-approval · <n> phase unknown
- 15. Slots ........................ <n> to start · <n> the cap holds
+ 15. Slots ........................ <n> to start · <n> the cap holds | SKIPPED — no ranking line
  16. Route ........................ <one line>
 
 Issues:
@@ -263,8 +278,8 @@ Route: <the one line the caller must send to the topic's manager>
 - Every `PASS` names the file and the line(s) or the population it read.
 - `UNPROVEN` appears only for a row no page exercised; `DRIFT` only on row 8; `SKIPPED` only for
   a probe that could not run.
-- Nothing was mutated, and no goal's full task set was enumerated — row 5 read only the member
-  tasks the topic names.
+- Nothing was mutated, and no goal's task set was enumerated — row 5 read the topic's own task
+  entries and the SC/DoD lines of the goals they belong to.
 - The run ends with a numbered fix list, each entry naming a command or a manager, never an
   agent this file would have to dispatch.
 - The branch was taken from the caller, never re-derived.

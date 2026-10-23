@@ -77,16 +77,16 @@ def configured_vaults() -> tuple[list[dict], str]:
     return vaults, ""
 
 
-def owning_vault(vaults: list[dict]) -> dict | None:
-    """The vault whose root is the cwd or its nearest ancestor — longest prefix wins."""
+def owning_vault(vaults: list[dict]) -> tuple[dict, str] | None:
+    """The vault whose root is the cwd or its nearest ancestor, with that resolved root."""
     cwd = os.path.realpath(os.getcwd())
-    best: dict | None = None
+    best: tuple[dict, str] | None = None
     best_len = -1
     for vault in vaults:
         root = os.path.realpath(os.path.expanduser(vault["path"]))
         if cwd == root or cwd.startswith(root + os.sep):
             if len(root) > best_len:
-                best, best_len = vault, len(root)
+                best, best_len = (vault, root), len(root)
     return best
 
 
@@ -95,19 +95,25 @@ def main() -> int:
     if reason:
         return fail(reason)
 
-    vault = owning_vault(vaults)
-    if vault is None:
+    owned = owning_vault(vaults)
+    if owned is None:
         return fail(
             "the session's cwd is inside no configured vault "
             f"({len(vaults)} configured) — run this from a vault, not from a bare directory"
         )
+    vault, root = owned
 
     missing = [k for k in KEYS if not str(vault.get(k) or "").strip()]
     if missing:
         name = vault.get("name") or vault["path"]
         return fail(f"vault {name!r} does not configure {', '.join(missing)}")
 
-    print("|".join(str(vault[k]).strip() for k in KEYS))
+    # ⚠️ ABSOLUTE, joined against the owning vault's root — never the bare relative name.
+    # The config stores `23 Topics`, which resolves only from the vault root; a caller that
+    # ran `find "24 Goals"` from `…/private-personal/25 Tasks` would match nothing and read
+    # as "this topic has no members". That is the misdiagnosis this file exists to remove,
+    # and emitting a relative name would have moved it one step later rather than fixed it.
+    print("|".join(os.path.join(root, str(vault[k]).strip()) for k in KEYS))
     return 0
 
 
