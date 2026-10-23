@@ -66,17 +66,14 @@ def registration(session_id):
     # outside the registration dir — a read this check has no reason to perform and no
     # business reporting the contents of. Refused rather than sanitised, like every other
     # branch here: a stripped id would address a registration the caller did not name.
-    if (
-        not isinstance(session_id, str)
-        or not session_id
-        or session_id in (".", "..")
-        or "/" in session_id
-        or "\\" in session_id
-        or "\x00" in session_id
-    ):
+    # ⚠️ TWO messages, because they say different things. An absent id has no path escape at
+    # stake at all, and a refusal that names one is the same defect this file keeps fixing:
+    # text that claims more than it carries.
+    if not isinstance(session_id, str) or not session_id:
+        return None, f"no session id to resolve ({session_id!r}) — cannot read a registration"
+    if session_id in (".", "..") or "/" in session_id or "\\" in session_id or "\x00" in session_id:
         return None, (
-            f"session id {session_id!r} is not a bare filename — refusing to read a path "
-            f"outside the registration dir"
+            f"session id {session_id!r} is not a bare filename — refusing to join it into a path"
         )
     path = os.path.join(MANAGER_DIR, f"{session_id}.json")
     try:
