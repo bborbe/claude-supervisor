@@ -16,8 +16,8 @@ its fix list.
 
 ⚠️ **Your unit is the TOPIC.** You check the topic page **as a page** (rows 1–11) and its
 **declared membership** (rows 12–16). Row 5 reads the tasks the topic names directly, and for a
-task reached through a member goal it reads **that goal page's SC and DoD lines** — never the
-goal's task list. You do **not** judge whether a goal's task set is complete; that is
+task **whose own `goals:` frontmatter names a member goal** it reads that goal page's SC and DoD
+lines — never the goal's task list. You do **not** judge whether a goal's task set is complete; that is
 `agents/goal-verify.md`'s job, and the split forbids descending into it.
 </role>
 
@@ -30,6 +30,8 @@ The caller passes, in its dispatch prompt:
   `25 Tasks`** — the folders are declared per vault, and a literal is wrong in every vault that
   numbers differently.
 - **the coverage output**, when the caller could dispatch it
+- **the ranking line**, when the caller ran `topic-spawn.py --rank`. Absent is the normal case —
+  row 15 then reports `SKIPPED` rather than computing a split itself.
 
 ⚠️ **A folder that arrives empty or absent is `SKIPPED`, not a default.** An empty path makes
 `find ""` match nothing, and every membership row then reports a topic with no members — a
@@ -41,17 +43,18 @@ The vocabulary is **closed**. Every page row (1–11) reports exactly one of fou
 tokens — or `SKIPPED` when the probe could not run. No other token exists.
 
 - **`PASS`** — exercised, no violation found. ⚠️ **A `PASS` must name the file and the line(s)
-  or the population it read.** For the absence checks (4, 6, 9) that is the population
-  scanned and its size; row 3 is a status comparison and names **both** sides. A `PASS` that
-  names neither is not a result.
+  or the population it read.** For the absence checks (6, 9) that is the population scanned and
+  its size; rows 3 and 4 are comparisons and name **both** sides. A `PASS` that names neither is
+  not a result.
 - **`FAIL`** — exercised, a violation found. Quote the offending line and name its file.
-- **`UNPROVEN`** — **not exercised**, because the page carries no subject for the row: row 7
-  on a topic with no `# Completion Gate`, row 5 on a topic that declares no tasks, row 8 on a
-  topic with no `# Status Summary`. Say what was absent. This is a judgment about the page.
+- **`UNPROVEN`** — **not exercised**, because the page carries no subject for the row. Say what
+  was absent. This is a judgment about the page. Rows 2, 3, 4, 5, 6, 7, 8, 9, 10 and 11 each name
+  their own `UNPROVEN` condition in its own text — e.g. row 7 on a topic with no
+  `# Completion Gate`, row 5 on a topic that declares no tasks.
 - **`DRIFT`** — **row 8 only.** Exercised, a difference found, and the difference is expected.
   Not a failure and not non-conformance.
 
-**`SKIPPED` is the sole non-execution token, and it is not a verdict.** It means the row could
+**`SKIPPED` is the sole token for a probe that could not run, and it is not a verdict.** It means the row could
 not run at all — its input was missing (no folder, no coverage output, a member that did not
 resolve). Report it with the reason. ⚠️ **`SKIPPED` and `UNPROVEN` are not synonyms**:
 `UNPROVEN` is a judgment about the page, `SKIPPED` is a failure of the probe.
@@ -126,8 +129,8 @@ across separate sessions, every one a false violation.
 5. **Necessity — the serving item is named** — for each member task the topic names, determine
    **which source it serves, or that it serves none**: the topic's own sentence (the prose above
    `# Impact`), a specific topic Success Criterion (`SC<n>`), a specific `# Completion Gate`
-   condition (`Gate<n>`), or, for a task reached through a member goal, that goal's Success
-   Criterion (`<goal> SC<n>`) or `# Definition of Done` item (`<goal> DoD<n>`). ⚠️ **A passing
+   condition (`Gate<n>`), or, for a task whose own `goals:` frontmatter names a member goal, that
+   goal's Success Criterion (`<goal> SC<n>`) or `# Definition of Done` item (`<goal> DoD<n>`). ⚠️ **A passing
    verdict quotes the served line AND the task line that advances it.** A match inferred from a
    title, a shared theme, or a loosely related criterion is **`FAIL — unquotable match`**, naming
    the inference you could not ground. Never round it up to `needed`. Flag any task serving none
@@ -202,6 +205,9 @@ across separate sessions, every one a false violation.
     awk '/^# Success Criteria/{f=1;next} /^# /{f=0} f' <goal-page> | grep -E '^- \[ \]'
     ```
 
+    ⚠️ **Run it once per declared goal page** and name the population — a topic declares several
+    goals, and reading one of them silently under-reports the gaps.
+
 13. **FILL** — for each gap, **name the goal whose criteria need work** and the bar it must
     clear. Do not author it here. ⚠️ **A criterion with no task is the goal manager's finding,
     not a task you file** — return it as a route line.
@@ -212,12 +218,15 @@ across separate sessions, every one a false violation.
     separately, never silently into one of the other two). ⚠️ **Never recommend flipping
     `todo → planning`** — that flip is the operator's own approval.
 
-15. **SLOTS** — report the slot split **only from a ranking line the caller passed**, produced
-    with `topic-spawn.py --rank --vault <vault>`. ⚠️ **Never invent an order and never restate the
-    cap** — `topic-spawn.py` owns N and already prints which goals take the slots. ⚠️ **No ranking
-    line passed → `SKIPPED — no ranking line from the caller`**, which is the normal outcome
-    today: `topic-drive` is the caller that runs `--rank`, and `/supervisor:topic-verify` does
-    not. Report the gap rather than computing a split nobody asked for.
+15. **SLOTS** — report the slot split **only from a ranking line the caller passed**. The line is
+    the caller's to produce, with
+    `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/topic-spawn.py --topic "<topic>" --rank --vault <vault>`
+    — ⚠️ **`--topic` is mandatory**; without it the script exits 2 on argparse, and the bare name
+    is not on PATH. ⚠️ **Never invent an order and never restate the cap** — the script owns N and
+    already prints which goals take the slots. ⚠️ **No ranking line passed → `SKIPPED — no ranking
+    line from the caller`**, which is the normal outcome: this row is caller-optional and **no
+    shipped caller passes one today**. Report the gap rather than computing a split nobody asked
+    for.
 
 16. **ROUTE** — the one line the caller must send to the topic's manager, naming what to start
     or resume first. ⚠️ **You hold no `SendMessage`** — return the line and say so.
@@ -260,7 +269,7 @@ Verdict: PASS | FAIL
  12. Coverage ..................... PASS | FAIL | SKIPPED — <n> criteria with no driving item
  13. Fill ......................... <n> goals needing criteria work
  14. Startability ................. <n> startable · <n> waiting-approval · <n> phase unknown
- 15. Slots ........................ <n> to start · <n> the cap holds | SKIPPED — no ranking line
+ 15. Slots ........................ <n> to start · <n> held by the cap | SKIPPED — no ranking line
  16. Route ........................ <one line>
 
 Issues:
@@ -274,7 +283,7 @@ Route: <the one line the caller must send to the topic's manager>
 </output_format>
 
 <success_criteria>
-- All sixteen rows emitted, or reported `SKIPPED`/`UNPROVEN` with a reason.
+- All sixteen rows emitted, or reported with the row's own reason.
 - Every `PASS` names the file and the line(s) or the population it read.
 - `UNPROVEN` appears only for a row no page exercised; `DRIFT` only on row 8; `SKIPPED` only for
   a probe that could not run.

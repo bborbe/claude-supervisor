@@ -25,9 +25,16 @@ absent is not a vault with a default goals folder — it is a config that cannot
 substituting a literal there is the hardcoded-path defect this whole file exists to remove,
 applied quietly instead of loudly.
 
-Prints one line, `TOPICS_DIR|GOALS_DIR|TASKS_DIR`, and exits 0. On any failure prints
+Prints one line, `TOPICS_DIR|GOALS_DIR|TASKS_DIR|VAULT_NAME`, and exits 0. On any failure prints
 `UNKNOWN <one-line reason>` and exits 1 — the caller reports that reason against every row
 that reads a folder and stops, rather than running checks over empty paths.
+
+⚠️ **The fourth field is the registered vault NAME, and it is not derivable from the three
+paths.** `docs/subject-resolution.md` keys two of its four subject sources on that name — a
+session record counts only when its `vault` matches, and the last-subject fallback reads
+`last-<vault>.json` — while the directory basename routinely differs from the registered name
+(`Personal` on disk, `private-personal` in config). A caller with no `vault-cli` grant cannot
+reconstruct it, so the resolver hands it over rather than leaving the caller to invent one.
 """
 
 import json
@@ -113,7 +120,11 @@ def main() -> int:
     # ran `find "24 Goals"` from `…/private-personal/25 Tasks` would match nothing and read
     # as "this topic has no members". That is the misdiagnosis this file exists to remove,
     # and emitting a relative name would have moved it one step later rather than fixed it.
-    print("|".join(os.path.join(root, str(vault[k]).strip()) for k in KEYS))
+    name = str(vault.get("name") or "").strip()
+    if not name:
+        return fail(f"vault at {root!r} carries no registered name")
+    fields = [os.path.join(root, str(vault[k]).strip()) for k in KEYS] + [name]
+    print("|".join(fields))
     return 0
 
 

@@ -65,7 +65,7 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | `/supervisor:fleet-verify` | read-only: verify the fleet layer's own contract, ending in a numbered fix list |
 | `/supervisor:goal-loop` `/supervisor:goal-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
 | `/supervisor:goal-verify` | read-only: verify ONE goal or topic and suggest fixes, ending in a numbered fix list |
-| `/supervisor:topic-verify` | read-only: verify ONE topic against its own sixteen-row check — eleven disk-backed page checks plus five review rows — ending in a numbered fix list. Self-sufficient: it carries the checks itself and resolves the vault's folders from `vault-cli config`, so it needs no vault-local command |
+| `/supervisor:topic-verify` | read-only: verify ONE topic against its own sixteen-row check — eleven disk-backed page-consistency checks, one coverage read and four advisory rows — ending in a numbered fix list. Self-sufficient: it carries the checks itself and resolves the vault's folders from `vault-cli config`, so it needs no vault-local command |
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |

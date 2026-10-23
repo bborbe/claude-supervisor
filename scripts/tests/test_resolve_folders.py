@@ -71,8 +71,25 @@ class ResolvesTheOwningVault(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(
             out,
-            "|".join(os.path.join(self.root, d) for d in ("23 Topics", "24 Goals", "25 Tasks")),
+            "|".join(
+                [os.path.join(self.root, d) for d in ("23 Topics", "24 Goals", "25 Tasks")]
+                + ["private-personal"]
+            ),
         )
+
+    def test_the_vault_name_is_the_registered_one_not_the_directory(self):
+        """`docs/subject-resolution.md` keys two sources on this name; a dir basename differs."""
+        vaults = [dict(self.vaults[0], name="private-personal")]
+        code, out = run_main(vaults, cwd=self.root)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.split("|")[3], "private-personal")
+        self.assertNotEqual(out.split("|")[3], os.path.basename(self.root))
+
+    def test_a_vault_without_a_name_is_refused(self):
+        vaults = [dict(self.vaults[0], name="")]
+        code, out = run_main(vaults, cwd=self.root)
+        self.assertEqual(code, 1)
+        self.assertIn("no registered name", out)
 
     def test_from_a_subdirectory_emits_the_same_absolute_paths(self):
         """The regression this file exists for: bare names would not resolve from here."""
@@ -80,9 +97,11 @@ class ResolvesTheOwningVault(unittest.TestCase):
         code_sub, out_sub = run_main(self.vaults, cwd=self.sub)
         self.assertEqual((code_root, code_sub), (0, 0))
         self.assertEqual(out_root, out_sub)
-        for path in out_sub.split("|"):
+        folders, name = out_sub.split("|")[:3], out_sub.split("|")[3]
+        for path in folders:
             self.assertTrue(os.path.isabs(path), f"{path!r} is not absolute")
             self.assertTrue(path.startswith(self.root + os.sep), path)
+        self.assertEqual(name, "private-personal")
 
     def test_the_nearest_ancestor_wins(self):
         outer = os.path.join(self.root, "outer")
