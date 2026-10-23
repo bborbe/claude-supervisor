@@ -32,7 +32,7 @@ a subject and a loop; a worker needing a subject verified routes it to its manag
 3. **Conversation** — the most recent `/supervisor:topic-*` argument in this conversation, then
    the most recent **topic** page referenced as a subject.
 
-**Nothing resolves → STOP.** Print `❌ No subject detected. Pass a topic name: /supervisor:topic-verify "<name>"`. Otherwise print the source first: `Subject: <name> (from <explicit|session|name|conversation|last>)`.
+**A non-empty `$ARGUMENTS` is the subject itself** — basename only, source `explicit`; the three sources above apply only to a bare invocation. **Nothing resolves → STOP.** Print `❌ No subject detected. Pass a topic name: /supervisor:topic-verify "<name>"`. Otherwise print the source first: `Subject: <name> (from <explicit|session|name|conversation|last>)`.
 
 ## Resolve the folders — once, from the vault's own config
 
@@ -78,11 +78,11 @@ probe is the command's own.
 
 1. Resolve the subject (§ above); print `Subject:`.
 2. Resolve the folders (§ above); print `Folders:` and keep `VAULT_NAME` for step 5.
-3. Take the branch (§ above); print `Branch: topic`.
+3. Take the branch (§ above); print `Branch: topic (<the page the branch check found>)`.
 4. **Dispatch the coverage mode** — read the topic page's `## Goals` first, then one call per
    declared goal page (none, or no such section → skip this step and say so):
 
-   `Task(subagent_type: "vault-cli:goal-manager-agent", prompt: "Action: coverage. TASK_PATH: <absolute path to the goal page>. MODE: tool.")`
+   `Task(subagent_type: "vault-cli:goal-manager-agent", prompt: "Action: coverage. SUBJECT: <absolute path to the goal page>. MODE: tool.")`
 
    ⚠️ **The dispatch is this command's act, never the agent's** — that agent holds no `Task`
    grant, so a dispatch written into the agent would be a promise it cannot keep.
