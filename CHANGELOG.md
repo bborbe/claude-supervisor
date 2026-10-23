@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.209.1
 
 - fix: **three hygiene findings the fleet-registration approval left open.** `scripts/fleet-register.py` writes its temp file with `O_EXCL | O_NOFOLLOW` at `0o600` and removes it on a failed dump — the bare `open()` it used landed at the umask with a pid-predictable, followable name, against the convention `scripts/session-identity.py:222-238` states for a state file under `~/.claude`, and this registration is read as an identity assertion. `commands/steps/re-arm.md` gains the missing failure branch for the **arm** leg: a non-zero `--arm` leaves the session registered but `UNARMED`, which `--state` refuses exactly like no registration, and the usual cause is an interval given as `15m`/`900s` instead of bare seconds. `scripts/tests/test_fleet_register.py` snapshots and restores the four env vars its tests mutate, so the suite is no longer order-dependent for any later module that resolves a path at import.
 
