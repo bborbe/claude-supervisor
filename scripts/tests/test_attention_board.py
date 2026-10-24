@@ -63,18 +63,25 @@ BOARD = (
 
 # The board's own script block reads `data-item-id` off each row, so the served
 # page carries 10 more occurrences of the string than it has rendered rows
-# (measured 2026-10-24: 92 against 82). A count over the raw text is inflated by
-# 12% and reads as a pass. This fixture is that gap in miniature.
+# (measured 2026-10-24: 92 against 82). A count over the raw text is inflated and
+# reads as a pass. The script and style bodies carry BOTH shapes: the measured
+# attribute read (`getAttribute('data-item-id')`) and a row-shaped string. The
+# row-shaped decoys are what make the assertion below able to fail — a decoy
+# carrying only the measured form counts the same with or without the stripping.
+_ROW_DECOY = '<li class="item risk-risk" data-item-id="zz">'
+
 SCRIPTED = (
     '<ul class="items">'
     '<li class="item risk-decision" data-item-id="aa">open</li>'
     '<li class="item risk-routine dimmed" data-item-id="bb">answered</li>'
     "</ul>"
+    "<style>/* " + _ROW_DECOY + " */</style>"
     "<script>"
     "var i = row.getAttribute('data-item-id');"
     "document.querySelectorAll('li.item').forEach(function (r) {"
     "var j = r.getAttribute('data-item-id');"
     "});"
+    "var tpl = '" + _ROW_DECOY + "';"
     "</script>"
 )
 
@@ -90,11 +97,17 @@ class CountTest(unittest.TestCase):
                 self.assertEqual(ab.count_open_cards(html), 1)
 
     def test_ignores_the_string_inside_script_and_style(self):
-        # 2 rendered rows, 4 raw occurrences of the attribute name.
-        self.assertEqual(SCRIPTED.count("data-item-id"), 4)
+        # 2 rendered rows, 6 raw occurrences of the attribute name. The two
+        # row-shaped decoys make this fail if the stripping is removed: the
+        # count would read 3, not 1.
+        self.assertEqual(SCRIPTED.count("data-item-id"), 6)
         self.assertEqual(ab.count_open_cards(SCRIPTED), 1)
-        styled = '<style>li[data-item-id] { color: red }</style>' + BOARD
-        self.assertEqual(ab.count_open_cards(styled), 2)
+
+    def test_a_row_without_a_class_counts_as_open(self):
+        # Fail-safe direction. The template always emits a class, so a classless
+        # row would be a renderer change we do not expect; over-counting is the
+        # safe error, unlike the silent zero this predicate replaces.
+        self.assertEqual(ab.count_open_cards('<li data-item-id="x">open</li>'), 1)
 
     def test_an_all_answered_board_counts_zero(self):
         html = '<li class="item risk-risk dimmed" data-item-id="bb">answered</li>'
