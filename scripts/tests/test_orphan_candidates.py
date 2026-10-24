@@ -84,6 +84,21 @@ class ParkFilter(unittest.TestCase):
         block = 'defer_date: "2026-09-18"'
         self.assertIsNone(oc.is_parked(block, self.TODAY))
 
+    def test_same_day_rfc3339_defer_date_is_not_parked(self):
+        """The unquoted shape vault-cli writes must not read as future by length.
+
+        `2026-09-18T00:00:00Z` compares GREATER than `2026-09-18` as a raw string,
+        so a comparison that skips the date normalization still parks a same-day
+        row of this shape -- the fix would hold for one stored shape and not the
+        other, which is the failure the two-shape clause exists to prevent.
+        """
+        block = "defer_date: 2026-09-18T00:00:00Z"
+        self.assertIsNone(oc.is_parked(block, self.TODAY))
+
+    def test_future_rfc3339_defer_date_is_parked(self):
+        block = "defer_date: 2026-09-19T00:00:00Z"
+        self.assertEqual(oc.is_parked(block, self.TODAY), "defer_date")
+
     def test_past_defer_date_is_not_parked(self):
         block = 'defer_date: "2026-09-01"'
         self.assertIsNone(oc.is_parked(block, self.TODAY))

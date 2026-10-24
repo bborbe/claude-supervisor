@@ -66,9 +66,17 @@ def is_parked(block, today):
     a date still in the future parks it. The comparison is `>` for that reason --
     `>=` reads today as future and costs the row a further full day, which is the
     same off-by-one `agents/goal-drive.md` clause (10) carried.
+
+    ⚠️ **Both stored shapes must be compared on their DATE, not on the raw string.**
+    vault-cli writes an unquoted `defer_date` as RFC3339 (`2026-09-18T00:00:00Z`),
+    and that string compares GREATER than `2026-09-18` purely because it is longer
+    -- so a raw `>` still parks a same-day row of that shape. Slicing the first ten
+    characters normalizes both shapes to `YYYY-MM-DD`, the same normalization
+    `sweep-gate.py`'s `_parse_defer_date()` does by regex.
     """
     defer_date = field(block, "defer_date")
-    if defer_date and defer_date > today:
+    defer_day = defer_date[:10] if defer_date else ""
+    if defer_day and defer_day > today:
         return "defer_date"
     if field(block, "created_by") == "recurring-task-creator":
         return "created_by"
