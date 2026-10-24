@@ -14,13 +14,27 @@ The board is authoritative for its own card count by construction: counting the
 cards it actually rendered cannot drift from the page the operator is looking at,
 which is the one failure this line exists to prevent.
 
-The board marks an OPEN card `<li class="item" data-item-id="...">` and an
-ANSWERED one `<li class="item dimmed" data-item-id="...">`
-(`pkg/handler/attention-page.go`, attention-controller). Counting the exact string
-`class="item" data-item-id=` therefore counts open cards and nothing else:
-`class="item dimmed"` does not contain it. The board's own "Hide answered" switch
-is a client-side toggle over markup that already carries both kinds, so it does
-not change what this counts.
+The board renders every card as `<li class="item risk-<risk>[ dimmed]"
+data-item-id="...">` (`pkg/handler/attention-page.go`, attention-controller): a
+`risk-*` class on every row, and `dimmed` appended once the card is answered. So
+the count is over rendered `<li>` rows carrying a `data-item-id`, excluding any
+whose class list contains `dimmed`.
+
+⚠️ **Never match the class attribute as an exact string.** It gains a risk class,
+and an exact-string match reads zero rather than erroring — the failure is
+indistinguishable from an empty board. Measured 2026-10-24: every row carried a
+`risk-*` class, the old `class="item"` literal matched none, and the line printed
+`Board: 0 open` beside five live operator gates.
+
+⚠️ **Scope the count to rendered markup.** The page is served whole, so its own
+`<script>` carries the string being counted — measured 2026-10-24, 10
+`data-item-id` occurrences inside the script block against 82 rendered rows, a
+12% inflation. `<script>` and `<style>` blocks are stripped before counting. An
+inflated count reads as a pass, which is the failure direction this line exists
+to prevent.
+
+The board's own "Hide answered" switch is a client-side toggle over markup that
+already carries both kinds, so it does not change what this counts.
 
 ⚠️ **The page carries the whole history**, so it is ~2.6 MB against a live store
 and grows with it. That is the accepted cost of reading the board rather than the
@@ -41,15 +55,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 
-# The board's open-card marker, exact. `<li class="item dimmed" ...>` does not
-# contain it, which is what makes this a count of open cards rather than of cards.
-OPEN_CARD = '<li class="item" data-item-id="'
+# Rendered markup only: a `<script>`/`<style>` body can carry the string being
+# counted, and an inflated count reads as a pass. Measured 2026-10-24: 10
+# `data-item-id` occurrences inside the board's script block, 0 inside its style.
+_SCRIPT_OR_STYLE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+
+_ROW_TAG = re.compile(r"<li\b[^>]*>", re.IGNORECASE)
+_CLASS_ATTR = re.compile(r'\bclass="([^"]*)"')
+_ITEM_ID_ATTR = re.compile(r'\bdata-item-id="')
+
+# The class token that marks an answered card. Never match the whole class
+# attribute: it carries a risk class too, so an exact-string match reads zero.
+_DIMMED = "dimmed"
 
 UNAVAILABLE = "board unavailable"
 
@@ -66,8 +90,17 @@ def fetch_board(store: str, timeout: float) -> str:
 
 
 def count_open_cards(html: str) -> int:
-    """Count the board's undimmed cards. See the module docstring for the marker."""
-    return html.count(OPEN_CARD)
+    """Count the board's undimmed cards. See the module docstring for the predicate."""
+    rendered = _SCRIPT_OR_STYLE.sub("", html)
+    open_cards = 0
+    for tag in _ROW_TAG.findall(rendered):
+        if not _ITEM_ID_ATTR.search(tag):
+            continue
+        classes = _CLASS_ATTR.search(tag)
+        if classes and _DIMMED in classes.group(1).split():
+            continue
+        open_cards += 1
+    return open_cards
 
 
 def main(argv: list[str] | None = None) -> int:
