@@ -44,6 +44,12 @@ PROJECTS_DIR = os.environ.get("PROJECTS_DIR") or os.path.expanduser("~/.claude/p
 # Matched to vault-cli's per-session flock, per `session-liveness.md`. A transcript
 # written inside this window counts as fresh.
 LIVE_WINDOW = 5 * 60
+# The sweep's `stalled` class needs a transcript-quiet bound, not only a task-file one:
+# a session in a long turn writes its transcript continuously and edits its task file
+# never, so task mtime alone reads it as stalled. Two consecutive sweeps at the loop's
+# 15-min cadence. It shares its VALUE with `manager-predispatch.py`'s `STUCK_SECONDS`
+# and nothing else — that rule measures the task file's mtime, this one the transcript's.
+STALL_TRANSCRIPT_SECONDS = 30 * 60
 
 # How long a posted-closer record stays authoritative. The echo it suppresses
 # always lands at the END of the same turn as its post, so the window only has to
@@ -510,6 +516,25 @@ def _fleet_colours():
     return _FLEET_COLOURS
 
 
+_FLEET_SESSIONS = None
+
+
+def _fleet_sessions():
+    """Import fleet-sessions.py (hyphenated filename -> importlib) — the one age formatter.
+
+    `human_age()` there is what `fleet-board.py` renders its `Inactive` column with, so a
+    second formatter here would drift the digest's age from the board's.
+    """
+    global _FLEET_SESSIONS
+    if _FLEET_SESSIONS is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleet-sessions.py")
+        spec = importlib.util.spec_from_file_location("fleet_sessions", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _FLEET_SESSIONS = mod
+    return _FLEET_SESSIONS
+
+
 def read_registry(sessions_dir=None):
     """The session registry as `session id -> the name it holds now`; `None` if unreadable.
 
@@ -630,6 +655,26 @@ def session_transcript_age(sid):
 
 
 _AGE_CACHE = {}
+
+
+def _resolve_session_id(sid):
+    """`(full id, ambiguous)` — the digest renders 8-char prefixes, transcripts need the id.
+
+    A prefix matching more than one transcript is reported rather than guessed: two
+    sessions sharing a prefix would otherwise lend one session's age to the other. An
+    argument that is not an id fragment at all is reported too — globbing it
+    would treat `*`, `?` and `[` as metacharacters and `/` as a path step, so the read
+    would silently widen past `PROJECTS_DIR`.
+    """
+    if len(sid) >= 36:
+        return sid, False
+    if not re.fullmatch(r"[0-9a-fA-F-]{1,35}", sid):
+        return sid, True
+    hits = {os.path.basename(p)[: -len(".jsonl")]
+            for p in glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}*.jsonl"))}
+    if len(hits) == 1:
+        return hits.pop(), False
+    return sid, len(hits) > 1
 
 
 def quiet_session_ids(records, live_ids):
@@ -2083,6 +2128,15 @@ def main():
         help="fill the `owners` map in causes.json via `vault-cli task search`. "
         "Slow — the search loads a model — and never on the default path.",
     )
+    ap.add_argument(
+        "--ages",
+        nargs="+",
+        metavar="SESSION_ID",
+        help="print '<sid8>\\t<seconds>\\t<human>\\t<quiet|active|ambiguous>' per id and "
+        "exit — the transcript clock the fleet digest renders its age from, and the "
+        "quiet test its `stalled` class needs. `inf` when the session has no "
+        "transcript; `ambiguous` when the id resolves to no single session.",
+    )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
     ap.add_argument(
         "--pane-for",
@@ -2091,6 +2145,23 @@ def main():
         "non-zero when no live session resolves",
     )
     a = ap.parse_args()
+    if a.ages:
+        human_age = _fleet_sessions().human_age
+        for sid in a.ages:
+            full, ambiguous = _resolve_session_id(sid)
+            if ambiguous:
+                # Never `quiet`: an unresolvable id read as quiet would render a live
+                # session as stalled, the very defect this flag exists to remove.
+                print(f"{sid[:8]}\t?\t?\tambiguous")
+                continue
+            age = session_transcript_age(full)
+            if math.isfinite(age):
+                secs, human = str(int(age)), human_age(age)
+            else:
+                secs, human = "inf", "no transcript"
+            print(f"{sid[:8]}\t{secs}\t{human}\t"
+                  f"{'quiet' if age >= STALL_TRANSCRIPT_SECONDS else 'active'}")
+        sys.exit(0)
     if a.jump:
         sys.exit(subprocess.call(["wezterm", "cli", "activate-pane", "--pane-id", a.jump]))
     if a.pane_for:
