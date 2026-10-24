@@ -73,9 +73,16 @@ class ParkFilter(unittest.TestCase):
         block = 'defer_date: "2026-09-19"\nstatus: in_progress'
         self.assertEqual(oc.is_parked(block, self.TODAY), "defer_date")
 
-    def test_same_day_defer_date_is_parked(self):
+    def test_same_day_defer_date_is_not_parked(self):
+        """A defer_date naming TODAY is due, not parked -- it surfaces on that date.
+
+        The vault's rule is that a `defer_date` keeps a task `in_progress` and
+        makes it available ON that date, so only a date still in the future
+        parks it. Reading today as parked cost a deferred row a further full
+        day, every time.
+        """
         block = 'defer_date: "2026-09-18"'
-        self.assertEqual(oc.is_parked(block, self.TODAY), "defer_date")
+        self.assertIsNone(oc.is_parked(block, self.TODAY))
 
     def test_past_defer_date_is_not_parked(self):
         block = 'defer_date: "2026-09-01"'
@@ -129,8 +136,19 @@ class Candidates(unittest.TestCase):
 
     def test_parked_routines_are_skipped(self):
         task_file(self.dir, "Routine.md", "status: in_progress\nclaude_session_id: eeee5555\ncreated_by: recurring-task-creator")
-        task_file(self.dir, "Scheduled.md", f'status: in_progress\nclaude_session_id: ffff6666\ndefer_date: "{self.today}"')
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        task_file(self.dir, "Scheduled.md", f'status: in_progress\nclaude_session_id: ffff6666\ndefer_date: "{tomorrow}"')
         self.assertEqual(self.names(), [])
+
+    def test_due_today_is_a_candidate(self):
+        """A defer_date naming TODAY is due, not parked -- the row must be listed.
+
+        Paired with test_parked_routines_are_skipped: the same fixture one day
+        apart must flip the verdict. Without both halves a comparison that is
+        never read passes either one alone.
+        """
+        task_file(self.dir, "Due.md", f'status: in_progress\nclaude_session_id: 7777aaaa\ndefer_date: "{self.today}"')
+        self.assertEqual(self.names(), ["Due"])
 
     def test_missing_session_id_is_skipped(self):
         task_file(self.dir, "Unstamped.md", "status: in_progress")

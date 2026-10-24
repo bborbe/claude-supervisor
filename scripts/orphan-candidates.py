@@ -59,9 +59,16 @@ def field(block, key):
 
 
 def is_parked(block, today):
-    """True when the task is scheduled rather than abandoned."""
+    """True when the task is scheduled rather than abandoned.
+
+    A `defer_date` naming TODAY is due, not parked: the vault's rule is that the
+    field keeps a task `in_progress` and makes it available ON that date, so only
+    a date still in the future parks it. The comparison is `>` for that reason --
+    `>=` reads today as future and costs the row a further full day, which is the
+    same off-by-one `agents/goal-drive.md` clause (10) carried.
+    """
     defer_date = field(block, "defer_date")
-    if defer_date and defer_date >= today:
+    if defer_date and defer_date > today:
         return "defer_date"
     if field(block, "created_by") == "recurring-task-creator":
         return "created_by"
