@@ -26,11 +26,16 @@ from an empty board. Measured 2026-10-24, every row carried a `risk-*` class, th
 old `class="item"` literal matched none, and the line printed `Board: 0 open`
 beside five live operator gates.
 
-The count is also scoped to rendered markup: `<script>` and `<style>` bodies are
-stripped before counting. The page is served whole, so its own script carries the
-string being counted — measured 2026-10-24, 10 `data-item-id` occurrences inside
-the script block against 82 rendered rows, a 12% inflation. An inflated count
-reads as a pass, which is the failure direction this line exists to prevent.
+The count is scoped to rendered markup: `<script>` and `<style>` bodies are
+stripped before counting. The predicate scans `<li>` opening tags, so the board's
+own script — which reads `data-item-id` off each row, 10 occurrences on a page of
+~82 rows — is not counted either way; the strip guards against a script that
+*constructs* row markup, a shape a future template change could introduce. A
+raw-text count is the form that inflates (12% on the live page), and the strip
+keeps the predicate correct if it ever drifts toward one.
+`scripts/tests/test_attention_board.py` pins that guard with a row-shaped decoy
+inside the script body, because the measured attribute-read form alone counts the
+same with or without the strip.
 
 The board's own "Hide answered" switch is a client-side toggle over markup that
 already carries both kinds, so it does not change what this counts.

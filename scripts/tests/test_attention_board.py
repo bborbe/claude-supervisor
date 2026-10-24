@@ -9,10 +9,12 @@ would be off by ~1600 on a live board, would never match the page, and would loo
 like a working count while doing it.
 
 Second property: the count is over **rendered rows**, not raw text. The board's
-script block names `data-item-id` on every row it reads, so the served page
-carries more occurrences of the string than it has rows (measured 2026-10-24: 92
-against 82). A raw-text count is inflated by 12% and reads as a pass — the one
-failure direction this line exists to prevent.
+script block names `data-item-id` on every row it reads, so a raw-text count of
+the served page is inflated by 12% (measured 2026-10-24: 92 occurrences against 82
+rows) — the failure direction this line exists to prevent. The predicate scans
+`<li>` tags and so is not inflated by that form; the `SCRIPTED` fixture's
+row-shaped decoy pins the `<script>`/`<style>` strip, which guards against a
+script that constructs row markup rather than against the measured reads.
 
 Third property: every way the board can be unreachable — refused, timed out,
 non-200 — takes the SAME branch, one line and one exit code. The caller has
