@@ -16,22 +16,21 @@ which is the one failure this line exists to prevent.
 
 The board renders every card as `<li class="item risk-<risk>[ dimmed]"
 data-item-id="...">` (`pkg/handler/attention-page.go`, attention-controller): a
-`risk-*` class on every row, and `dimmed` appended once the card is answered. So
-the count is over rendered `<li>` rows carrying a `data-item-id`, excluding any
-whose class list contains `dimmed`.
+`risk-*` class on every row, and `dimmed` appended once the card is answered. The
+count is over rendered `<li>` rows carrying a `data-item-id`, excluding any whose
+class list contains `dimmed` — over the class *tokens*, not the attribute text.
 
-⚠️ **Never match the class attribute as an exact string.** It gains a risk class,
-and an exact-string match reads zero rather than erroring — the failure is
-indistinguishable from an empty board. Measured 2026-10-24: every row carried a
-`risk-*` class, the old `class="item"` literal matched none, and the line printed
-`Board: 0 open` beside five live operator gates.
+An exact-string match on the class attribute reads zero rather than erroring,
+because the attribute also carries a risk class: the zero is indistinguishable
+from an empty board. Measured 2026-10-24, every row carried a `risk-*` class, the
+old `class="item"` literal matched none, and the line printed `Board: 0 open`
+beside five live operator gates.
 
-⚠️ **Scope the count to rendered markup.** The page is served whole, so its own
-`<script>` carries the string being counted — measured 2026-10-24, 10
-`data-item-id` occurrences inside the script block against 82 rendered rows, a
-12% inflation. `<script>` and `<style>` blocks are stripped before counting. An
-inflated count reads as a pass, which is the failure direction this line exists
-to prevent.
+The count is also scoped to rendered markup: `<script>` and `<style>` bodies are
+stripped before counting. The page is served whole, so its own script carries the
+string being counted — measured 2026-10-24, 10 `data-item-id` occurrences inside
+the script block against 82 rendered rows, a 12% inflation. An inflated count
+reads as a pass, which is the failure direction this line exists to prevent.
 
 The board's own "Hide answered" switch is a client-side toggle over markup that
 already carries both kinds, so it does not change what this counts.
@@ -71,8 +70,8 @@ _ROW_TAG = re.compile(r"<li\b[^>]*>", re.IGNORECASE)
 _CLASS_ATTR = re.compile(r'\bclass="([^"]*)"')
 _ITEM_ID_ATTR = re.compile(r'\bdata-item-id="')
 
-# The class token that marks an answered card. Never match the whole class
-# attribute: it carries a risk class too, so an exact-string match reads zero.
+# The class token that marks an answered card. Matched against the token list
+# rather than the attribute text, which also carries a risk class.
 _DIMMED = "dimmed"
 
 UNAVAILABLE = "board unavailable"
