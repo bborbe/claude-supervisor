@@ -661,10 +661,15 @@ def _resolve_session_id(sid):
     """`(full id, ambiguous)` — the digest renders 8-char prefixes, transcripts need the id.
 
     A prefix matching more than one transcript is reported rather than guessed: two
-    sessions sharing a prefix would otherwise lend one session's age to the other.
+    sessions sharing a prefix would otherwise lend one session's age to the other. An
+    argument that is not an id fragment at all is reported too — globbing it
+    would treat `*`, `?` and `[` as metacharacters and `/` as a path step, so the read
+    would silently widen past `PROJECTS_DIR`.
     """
     if len(sid) >= 36:
         return sid, False
+    if not re.fullmatch(r"[0-9a-fA-F-]{1,35}", sid):
+        return sid, True
     hits = {os.path.basename(p)[: -len(".jsonl")]
             for p in glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}*.jsonl"))}
     if len(hits) == 1:
@@ -2127,9 +2132,10 @@ def main():
         "--ages",
         nargs="+",
         metavar="SESSION_ID",
-        help="print '<sid8>\\t<seconds>\\t<human>\\t<quiet|active>' per id and exit — the "
-        "transcript clock the fleet digest renders its age from, and the quiet test its "
-        "`stalled` class needs. `inf` when the session has no transcript.",
+        help="print '<sid8>\\t<seconds>\\t<human>\\t<quiet|active|ambiguous>' per id and "
+        "exit — the transcript clock the fleet digest renders its age from, and the "
+        "quiet test its `stalled` class needs. `inf` when the session has no "
+        "transcript; `ambiguous` when the id resolves to no single session.",
     )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
     ap.add_argument(

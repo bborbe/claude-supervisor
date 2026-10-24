@@ -2504,6 +2504,24 @@ class AgesFlagTest(unittest.TestCase):
         self.transcript(sid, wnm.STALL_TRANSCRIPT_SECONDS + 60)
         self.assertEqual("quiet", self.ages("01234567")[0][3])
 
+    def test_the_bound_itself_is_quiet_not_active(self):
+        # `>=`, not `>`: a session quiet for exactly the threshold is quiet. A `>` here
+        # would leave the boundary row reading active for one whole sweep.
+        sid = "01234567-eeee-4eee-8eee-eeeeeeeeeeee"
+        self.transcript(sid, wnm.STALL_TRANSCRIPT_SECONDS)
+        self.assertEqual("quiet", self.ages("01234567")[0][3])
+
+    def test_a_full_id_skips_the_prefix_glob(self):
+        sid = "01234567-ffff-4fff-8fff-ffffffffffff"
+        self.transcript(sid, 10)
+        self.assertEqual((sid, False), wnm._resolve_session_id(sid))
+
+    def test_an_id_that_is_not_an_id_fragment_is_never_globbed(self):
+        # `*` broadens the match and `/` escapes PROJECTS_DIR; both would answer with a
+        # stranger's age. Reported instead, and never as `quiet`.
+        self.assertEqual("ambiguous", self.ages("*")[0][3])
+        self.assertEqual("ambiguous", self.ages("../01234567")[0][3])
+
     def test_a_session_with_no_transcript_reads_quiet_not_active(self):
         rows = self.ages("ffffffff")
         self.assertEqual(["ffffffff", "inf", "no transcript", "quiet"], rows[0])
