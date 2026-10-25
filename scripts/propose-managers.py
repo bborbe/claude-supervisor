@@ -181,6 +181,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -208,6 +209,19 @@ ROOT_NAME = "Fleet Manager"
 # goals whose slugs would collide ("A/B" and "A B") cannot share a file; they are different
 # asks with different dedup keys.
 STATE_DIR = os.path.expanduser("~/.claude/state/manager-propose")
+
+# Where the tier resolution records which manager a session is — `subject`, `branch` and
+# `vault`, written at spawn by the same code that decides the tier. Resolved the way
+# `scripts/answer-path-check.py` does, and for its stated reason: `SUPERVISOR_WORKER_MANAGER_DIR`
+# is this repo's established override for the directory, and a reader honouring a different
+# name than the writer is how a relocated tree reads as "no registration" — here that would
+# silently restore the defect this path exists to fix. `WORKER_MANAGER_STATE_DIR` stays one
+# step below as the fixture knob the tests set.
+WORKER_MANAGER_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_WORKER_MANAGER_DIR")
+    or os.environ.get("WORKER_MANAGER_STATE_DIR")
+    or "~/.claude/state/worker-manager"
+)
 
 # The three startability tokens, mirroring `scripts/under-target-state.py`. `unknown` is
 # its own value because a blank phase is neither startable nor unstartable, and reading it
@@ -270,6 +284,107 @@ def _board():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_LIVENESS = None
+
+
+def _liveness():
+    """`scripts/manager-liveness.py` as a module — the fleet's own liveness verdict, imported.
+
+    ⚠️ **Imported, not copied**, the same rule as `_board()` and for the same reason:
+    `classify` is the single definition of what `OK` / `STALE` / `STOPPED` / `UNARMED` /
+    `INVALID` mean, and a second state machine here would drift from the one the operator's
+    fleet surface reads. Imported lazily and cached, because the import cost belongs to the
+    runs that actually hold registrations.
+    """
+    global _LIVENESS
+    if _LIVENESS is None:
+        spec = importlib.util.spec_from_file_location(
+            "manager_liveness", os.path.join(HERE, "manager-liveness.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _LIVENESS = module
+    return _LIVENESS
+
+
+def _registration(session_id):
+    """`(subject, branch, vault)` from this session's registration, or None.
+
+    ⚠️ The id is JOINED INTO A PATH, so it must be a bare filename — the same guard, with
+    the same two messages, as `scripts/answer-path-check.py:72`. A value carrying `/`, `\\`
+    or `..` would read a `*.json` outside the registration dir, and a stripped id would
+    address a registration the caller never named.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    if session_id in (".", "..") or "/" in session_id or "\\" in session_id or "\x00" in session_id:
+        return None
+    path = os.path.join(WORKER_MANAGER_DIR, f"{session_id}.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    # ⚠️ The shape is checked INSIDE the guard, not after it: valid JSON that is not an
+    # object (`null`, `[]`, a bare string) parses cleanly and then raises on `.get`.
+    if not isinstance(data, dict):
+        return None
+    subject = data.get("subject")
+    branch = data.get("branch")
+    # ⚠️ STRINGS, not truthy — `{"subject": 123}` passes a truthiness test and then raises
+    # inside the matcher, turning a suppression check into a traceback.
+    if not isinstance(subject, str) or not isinstance(branch, str) or not subject or not branch:
+        return None
+    vault = data.get("vault")
+    return subject, branch, vault if isinstance(vault, str) else ""
+
+
+def _liveness_ok(subject, branch, module=None):
+    """Whether `subject`'s manager loop on `branch` is armed and fresh — state `OK`.
+
+    ⚠️ **Only `OK` suppresses.** `STALE`, `STOPPED`, `UNARMED`, `INVALID` and every refusal
+    (an unknown branch raises inside `slug`) leave the goal qualifying. The registration
+    directory is documented as never cleaned, so a registration outlives its session; a
+    stale one that suppressed would hide a genuinely manager-less goal, and hiding work is
+    the silent direction. Failing to suppress posts a card the operator can decline.
+    """
+    try:
+        module = module or _liveness()
+        return module.classify(module.slug(subject, branch), time.time())[0] == "OK"
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def live_registrations(board_json):
+    """`(subject, branch, vault)` per live manager session — `[]` when unreadable.
+
+    ⚠️ Read from `~/.claude/state/worker-manager/<session-id>.json`, **not** from the
+    board's own `subject` key. The board's `subject` is the resolved *page* title and is
+    `null` whenever resolution did not run or failed (measured: every row of the live
+    board), so it cannot carry this answer. The registration is what the tier wrote at
+    spawn, which is the one record that cannot disagree with who the session is.
+
+    A session with no registration contributes nothing — a manager spawned outside the tier
+    path is not evidence about any goal, and the label path still covers it.
+    """
+    try:
+        parsed = json.loads(board_json)
+    except ValueError:
+        return []
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("sessions"), list):
+        return []
+    found = []
+    for session in parsed["sessions"]:
+        if not isinstance(session, dict) or session.get("role") != "manager":
+            continue
+        if (session.get("label") or "").strip() == ROOT_NAME:
+            continue
+        record = _registration(session.get("session_id"))
+        if record is not None:
+            found.append(record)
+    return found
 
 
 def frontmatter(text):
@@ -514,23 +629,56 @@ def live_manager_labels(board_json):
     ]
 
 
-def managed(titles, labels, board):
+def managed(titles, labels, board, registrations=(), vault=None, live_ok=None):
     """Whether a live manager names any of `titles`.
 
-    `titles` is the goal plus every topic that lists it. The match is `fleet-board.py`'s
-    own — `_MANAGER_SUFFIX` stripped, `_norm_session_name` applied, `_matches_one_title`
-    compared — so a decorated label, a case difference and an abbreviated title all match
-    exactly as they do on the board the operator reads.
+    `titles` is the goal plus every topic that lists it. Two independent answers, either of
+    which suppresses:
+
+    1. **The label** — `_MANAGER_SUFFIX` stripped, `_norm_session_name` applied,
+       `_matches_one_title` compared — so a decorated label, a case difference and a
+       truncated title all match exactly as they do on the board the operator reads.
+    2. **The registered subject** — the SAME `_matches_one_title` rule, deliberately, so
+       there is still one answer to "does this name that subject". No suffix is stripped:
+       the subject is a page title, not a session label, and removing a trailing ` manager`
+       from a goal name would corrupt it. A registration counts only when it is for this
+       candidate's `vault` and its own loop reads `OK` — see `_liveness_ok` for why every
+       other state must leave the goal qualifying.
+
+    ⚠️ **Why a second path at all.** An abbreviated session name is neither the title nor a
+    prefix of it, so the label rule cannot see it: `Vault API Manager` does not name
+    *Typed Vault REST API for Agents and Tools*, `Agent Namespace Manager` does not name
+    *Agent Workloads Run in Dedicated Agent Namespaces*, and `PR Review Agent Fast Manager`
+    does not name *PR Reviews Return a Verdict Within Minutes, Not Hours* — the last two
+    below `_TRUNCATION_MIN_PREFIX` or failing the prefix test, the first above it and still
+    not a prefix. Each is a goal offered a manager it already had. The registration states
+    the subject the tier resolved, so it is exact where the label is abbreviated.
+
+    `live_ok` is injectable so the suppression rule can be exercised without a live
+    `sweep-gate/` directory; production passes nothing and gets `_liveness_ok`.
     """
     normalized = {board._norm_session_name(t): t for t in titles if t}
     for label in labels:
         base = board._MANAGER_SUFFIX.sub("", label)
         if board._matches_one_title(board._norm_session_name(base), normalized):
             return True
+    live_ok = live_ok or _liveness_ok
+    wanted = (vault or "").strip().lower()
+    for subject, branch, registered_vault in registrations:
+        # A goal title is not namespaced across vaults, so an unpaired registration cannot
+        # prove anything about THIS vault's goal — the loud direction is to leave it
+        # qualifying, never to suppress on a title that happens to match elsewhere.
+        if not wanted or (registered_vault or "").strip().lower() != wanted:
+            continue
+        if not board._matches_one_title(board._norm_session_name(subject), normalized):
+            continue
+        if live_ok(subject, branch):
+            return True
     return False
 
 
-def qualify(rows, labels, topics, board, threshold=GOAL_THRESHOLD):
+def qualify(rows, labels, topics, board, threshold=GOAL_THRESHOLD, registrations=(),
+            live_ok=None):
     """The qualifying goals, ranked — a pure function over already-read inputs.
 
     Grouping is by `(vault name, goal name)`: goal titles are not namespaced across vaults,
@@ -555,7 +703,8 @@ def qualify(rows, labels, topics, board, threshold=GOAL_THRESHOLD):
         if len(live) < threshold:
             continue
         titles = [goal] + sorted(topics.get(goal, ()))
-        if managed(titles, labels, board):
+        if managed(titles, labels, board, registrations=registrations,
+                   vault=group["vault"]["name"], live_ok=live_ok):
             continue
         priority = goal_priority(group["vault"]["goals_dir"], goal)
         candidates.append({
@@ -815,19 +964,25 @@ def resolve_cap():
     return facts["limit"], facts["hardLimit"], facts["source"], facts["hardSource"]
 
 
-def live_manager_count():
-    """`(count, labels)` from the board — or `(None, None)` when it could not be read."""
+def live_managers():
+    """`(labels, registrations)` from ONE board read — or `None` when it could not be taken.
+
+    ⚠️ **One read, deliberately.** `fleet-board.py --json` measures at ~5.7 s. The count,
+    the labels and the registrations must come from the same snapshot: a second read would
+    let the cap arithmetic and the suppression disagree about the same fleet, and it would
+    double the card's cost.
+    """
     board = os.path.join(HERE, "fleet-board.py")
     try:
         proc = subprocess.run(["python3", board, "--json"], capture_output=True, text=True)
     except OSError:
-        return None, None
+        return None
     if proc.returncode != 0:
-        return None, None
+        return None
     labels = live_manager_labels(proc.stdout or "")
     if labels is None:
-        return None, None
-    return len(labels), labels
+        return None
+    return labels, live_registrations(proc.stdout or "")
 
 
 def card_for(candidate, free, cap):
@@ -1000,11 +1155,13 @@ def main(argv):
         return 2
     soft, hard, source, hard_source = resolved
 
-    count, labels = live_manager_count()
-    if count is None:
+    live = live_managers()
+    if live is None:
         print("UNKNOWN — the live-manager count could not be taken (fleet-board.py --json)",
               file=sys.stderr)
         return 2
+    labels, registrations = live
+    count = len(labels)
 
     # `hard is None` is the resolver's UNLIMITED (the operator's `0` off switch), never
     # "unknown" — `cap_cards` posts every candidate for it. An unreadable board or cap
@@ -1017,7 +1174,8 @@ def main(argv):
         for goal, names in topics_by_goal(root).items():
             topics.setdefault(goal, set()).update(names)
 
-    candidates = qualify(scan(roots), labels, topics, board, args.threshold)
+    candidates = qualify(scan(roots), labels, topics, board, args.threshold,
+                         registrations=registrations)
     collisions = key_collisions(candidates)
     if collisions:
         for key, goals in sorted(collisions.items()):
