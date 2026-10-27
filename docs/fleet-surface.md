@@ -465,22 +465,18 @@ installed the trap. Record path: `~/.claude/state/session-exit/pane-<pane>.log`,
 pane because a resumed session is a new process in a new pane — two panes, two ends, never one
 overwriting the other.
 
-⚠️ **Two writers, layered by what each survives.** The `EXIT` trap covers a normal exit, a
-non-zero exit and a signal delivered to the launcher child — it is the only writer that can name
-a signal, because `137` is a value only the parent's `waitpid` holds. The second writer is the
-detached observer the `observe` call starts: it records a heartbeat every interval and, when the
-watched pid disappears, writes `unknown-end` — an **inference**, never `signalled kill`. It is
-started **before** the trap and the launcher, and self-daemonizes by double fork plus
-`os.setsid()` (macOS ships no `setsid(1)`), waiting on a pipe handshake so the shell does not
-resume until the grandchild is in its own session — a process-group kill landing immediately
-after the spawn therefore cannot take it along. It watches `$$`, not the launcher's pid: the
-shell outlives the launcher and dies exactly when the group is killed, which is the case the
-trap cannot record. Two consequences worth keeping: the heartbeat lives in the observer rather
-than a pane-side loop (a pane-side heartbeat dies with the thing it describes), and the observer
-re-reads the record before writing its end line, so a parent report already on disk always wins.
+⚠️ **The `observe` call is part of the shape, and its order is load-bearing.** Start it
+**before** the trap and **before** the launcher, and let it watch `$$` — the pane shell, which
+outlives the launcher and dies exactly when the process group is killed. It detaches into its
+own session and blocks the shell on a pipe handshake until it is there, which is what lets it
+survive a group kill landing immediately after the spawn; the ordering is a requirement, not a
+style choice.
 
-The record's own reader/writer is `scripts/session-exit-record.py`; its module docstring owns the
-end-kind vocabulary and each writer's survival properties.
+What each writer can and cannot name — the end-kind vocabulary, the `unknown-end` inference
+boundary, and each writer's survival properties — is owned by
+[`session-end-record.md`](session-end-record.md) § *Two writers, layered by what each survives*
+and is deliberately not restated here. The record's reader/writer is
+`scripts/session-exit-record.py`; its module docstring is the design record.
 
 **`--cwd` is required, and a resume does not inherit it.** The session id names a
 conversation, not a working directory, so `wezterm cli spawn` falls back to *wezterm's own*

@@ -26,7 +26,7 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
 import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, clusterAllowlistRefusal, clusterOfTarget, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
@@ -37,6 +37,7 @@ import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveCluster
 import { resolveMessageChannel } from './message-channel.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
+import { tabSpawnInner } from './tab-spawn.mjs'
 import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
@@ -338,6 +339,11 @@ const STATE_DIR = config.stateDir
 const USER_POLICY = config.userPolicy
 const BUNDLED_POLICY = new URL('./policy.json', import.meta.url).pathname
 const PERMISSION_LOG = config.permissionLog
+// The session end record's writer, handed to the spawned pane as `SESSION_EXIT_RECORD`.
+// Resolved from this module so the tab spawn and the rest of the fleet write the same
+// store; a missing or non-executable script is fail-open (every call is `|| true`), so a
+// partial deploy costs a record, never a spawn.
+const RECORD_SCRIPT = new URL('../scripts/session-exit-record.py', import.meta.url).pathname
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']
 
@@ -1093,7 +1099,12 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   // the parameter, and the half a headless-only implementation leaves unexercised. It goes
   // before the `cd` so it survives the login shell's profile files; see `shellEnvExports`
   // for why it must be an `export` rather than a `VAR=value` prefix on the `cd`.
-  const inner = `${shellEnvExports(env)}cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
+  // The shape — the `EXIT` trap, the start marker, the observer, and the absence of `exec` —
+  // lives in `tab-spawn.mjs`, where it can be asserted on. This is the SIXTH call site of that
+  // shape (the other five are `commands/open.md` ×3, `docs/fleet-surface.md` and
+  // `scripts/restart-worker.py`), and the only one that a review found rather than a test: the
+  // string was built here, so nothing could check it without starting an MCP server.
+  const inner = tabSpawnInner({ cwd, launcher: claudeCmd, tabName, prompt, env })
   // `--window-id` is what puts the tab in a ROLE's window. Omitted, the tab inherits
   // WEZTERM_PANE from the calling session and lands in whatever window the caller is
   // in — which is how a human-only task came up in the Agents window (2026-09-20).
@@ -1103,7 +1114,10 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   if (windowId !== undefined && windowId !== null && String(windowId).trim() !== '') {
     spawnArgs.push('--window-id', String(windowId))
   }
-  spawnArgs.push('--', 'bash', '-lc', inner)
+  // The writer path rides as an `env` assignment rather than a `VAR=value` prefix, because a
+  // spawned pane inherits wezterm's MUX-SERVER environment, not this process's — the same
+  // reason `scripts/restart-worker.py` passes it this way.
+  spawnArgs.push('--', 'env', `SESSION_EXIT_RECORD=${RECORD_SCRIPT}`, 'bash', '-lc', inner)
   const res = spawnSync('wezterm', spawnArgs, { encoding: 'utf8' })
 
   if (res.error || res.status !== 0) {
