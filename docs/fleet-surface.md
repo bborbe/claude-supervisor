@@ -441,8 +441,39 @@ from every session. If `mcp__supervisor__*` is unavailable, use path B.
 **B — raw `wezterm cli spawn` (fallback, and the path for resuming a live session).**
 
 ```bash
-wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; exec "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
+wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "<session_id>" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "<session_id>" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "<session_id>" || true; trap _sx EXIT; "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
 ```
+
+⚠️ **The launcher runs as a CHILD, never behind `exec`.** `exec` replaces the pane's shell, so
+nothing is left to `waitpid` and the session's exit status becomes unobservable by
+construction: `137` is a value only the *parent* can read. Measured 2026-10-27 on this shape —
+with the launcher as a child and `trap _sx EXIT` installed, `kill -9` of the child records
+`rc=137`; with `exec`, the same kill leaves the trap unable to fire and the outer status is all
+that survives. **A call site that re-adds `exec` silently re-opens the gap this shape exists to
+close**, and nothing in the fleet would report it — the session simply leaves no record.
+
+⚠️ **`env` carries the writer path, and that is load-bearing.** A spawned pane inherits
+*wezterm's mux server* environment, not the calling shell's — the same fact that makes the
+`unset` prefix necessary. An exported variable therefore does not arrive, and inlining the path
+inside the single-quoted `bash -lc` string cannot expand at all. Pass it as an `env`
+assignment before `bash`.
+
+⚠️ **`--kind spawn` is a start marker, and an empty record is ambiguous without it.** The line
+is written before the launcher runs. A record holding `kind=spawn` and no end line is a session
+still running (or one whose writer died with it); **no record at all** is a spawn that never
+installed the trap. Record path: `~/.claude/state/session-exit/pane-<pane>.log`, keyed on the
+pane because a resumed session is a new process in a new pane — two panes, two ends, never one
+overwriting the other.
+
+⚠️ **The `observe` call is part of the shape, and its order is load-bearing.** Start it
+**before** the trap and **before** the launcher, and let it watch `$$` — the pane shell, which
+outlives the launcher and dies exactly when the process group is killed. It detaches into its
+own session and blocks the shell on a pipe handshake until it is there, so a group kill landing
+immediately after the spawn cannot take it along.
+
+What each writer can and cannot name — the end-kind vocabulary, the `unknown-end` inference
+boundary, each writer's survival properties — is owned by the `scripts/session-exit-record.py`
+module docstring and is deliberately not restated here.
 
 **`--cwd` is required, and a resume does not inherit it.** The session id names a
 conversation, not a working directory, so `wezterm cli spawn` falls back to *wezterm's own*
