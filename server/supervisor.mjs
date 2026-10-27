@@ -28,6 +28,7 @@ import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './ma
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, clusterAllowlistRefusal, clusterOfTarget, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
@@ -343,7 +344,12 @@ const PERMISSION_LOG = config.permissionLog
 // Resolved from this module so the tab spawn and the rest of the fleet write the same
 // store; a missing or non-executable script is fail-open (every call is `|| true`), so a
 // partial deploy costs a record, never a spawn.
-const RECORD_SCRIPT = new URL('../scripts/session-exit-record.py', import.meta.url).pathname
+// `fileURLToPath`, not `.pathname`: a `.pathname` is percent-encoded, so a plugin installed
+// under a path with a space or a non-ASCII character yields `%20`/`%C3%BC` and the variable
+// names a file that does not exist — every write then fails open behind `|| true` and the
+// pane silently records nothing, which reads exactly like a session that is still alive.
+// Same idiom as `server/answer-path.mjs:36`. Raised by the PR review.
+const RECORD_SCRIPT = fileURLToPath(new URL('../scripts/session-exit-record.py', import.meta.url))
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']
 

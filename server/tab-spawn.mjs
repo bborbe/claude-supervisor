@@ -47,8 +47,19 @@ const EXIT_TRAP =
  * environment, not this process's.
  */
 export function tabSpawnInner({ cwd, launcher, tabName, prompt, env }) {
+  // ⚠️ **The `&&` must guard the LAUNCHER, not just the first statement after it.** Written
+  // as `cd X && ${EXIT_TRAP}${launcher}`, bash parses `cd X && _sx() {...}; marker; observe;
+  // trap _sx EXIT; launcher` — a failed `cd` skips only the function DEFINITION, and the
+  // `;`-separated marker, observer, trap and launcher all still run. The worker then starts
+  // in wezterm's mux-server cwd (typically `$HOME`) while the tab title and the ledger name
+  // the requested one, which is exactly the silent wrong-directory spawn `spawn-cwd.mjs`
+  // refuses by design. The shape it replaced — `cd X && exec <launcher>` — did abort.
+  // Found by the PR review as a critical regression, and the test below runs a real shell
+  // to pin it, because an ordering assertion on the string passes on the broken form too.
+  //
+  // A brace group keeps the guard covering every statement it was written to cover.
   return (
-    `${shellEnvExports(env)}cd ${shellQuote(cwd)} && ` +
-    `${EXIT_TRAP}${launcher} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
+    `${shellEnvExports(env)}cd ${shellQuote(cwd)} && { ` +
+    `${EXIT_TRAP}${launcher} -n ${shellQuote(tabName)} ${shellQuote(prompt)}; }`
   )
 }
