@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - docs: state the subject-level phase precondition beside the spawn readiness rules in `docs/fleet-surface.md` § Spawn a worker
+- fix: a phase-refused loop ends rather than re-arming — a re-arming refusal records liveness and hides the subject from the armed-set check
 
 ## v0.211.0
 
