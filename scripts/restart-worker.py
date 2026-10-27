@@ -595,10 +595,19 @@ def resume_command(sid, title, chip, cwd, launcher):
     # `trap _sx EXIT`, a `kill -9` records `rc=137`; behind `exec`, the trap cannot fire.
     # The writer path travels as an `env` assignment because a spawned pane inherits
     # wezterm's mux-server environment, not this process's.
+    #
+    # The observer is started BEFORE the trap and BEFORE the launcher, and it detaches into
+    # its own session, so it outlives a kill of this whole process group. It watches `$$`
+    # — this shell — because the shell outlives the launcher and dies exactly when the group
+    # is killed, which is the case the trap cannot record. Its own `append` call writes the
+    # spawn marker first so a record that begins at `kind=spawn` proves the writer was wired.
     trap = (
         '_sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "'
         + sid
-        + '" --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "'
+        + '" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn '
+        '--session "'
+        + sid
+        + '" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "'
         + sid
         + '" || true; trap _sx EXIT; '
     )

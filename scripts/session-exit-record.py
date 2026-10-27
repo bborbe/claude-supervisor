@@ -16,23 +16,33 @@ every blocker — so folding it into `incident-ledger.py` would either pollute t
 permanent dedup-key namespace with non-blockers or make every ended session look like an
 incident. Checked 2026-10-27; recorded here because the check is the reason.
 
-**The writers, and what each survives.** A record is only as good as the writer that
-survives the death it is describing:
+**Two writers, layered by what each survives.** A record is only as good as the writer
+that survives the death it is describing, and no single writer covers every end:
 
-1. **The pane shell's `EXIT` trap** — this script's `append` verb. Survives a normal
-   exit, a non-zero exit, and a signal delivered to the *child* (the shell's `waitpid`
-   reports `128+n`, which is how `137` becomes visible at all). Does NOT survive a signal
-   delivered to the whole process group, because the shell dies with the child.
-2. **A flushed heartbeat line** — a periodic `heartbeat` write, so a record that stops
-   mid-sequence still says when the session was last known alive.
-3. **A detached observer** — a `setsid` process outside the pane's process group that
-   polls the pid and writes `unknown-end` when it disappears.
+1. **The pane shell's `EXIT` trap** (`append`) — survives a normal exit, a non-zero exit,
+   and a signal delivered to the *child* (the shell's `waitpid` reports `128+n`, which is
+   how `137` becomes visible at all). Does NOT survive a signal delivered to the whole
+   process group, because the shell dies with the child.
+2. **A detached observer** (`observe`) — `os.setsid()` puts it in its own session and
+   process group, so `kill -9 -<pane pgid>` cannot reach it. It polls the pane's pid,
+   writes a `heartbeat` line every interval, and on the pid's disappearance writes
+   `unknown-end`. Its report is an *inference*, so it never claims `signalled kill` — a
+   signal is a fact only the parent's `waitpid` can report.
+
+⚠️ **The heartbeat lives in the observer, not in a third pane-side loop.** An earlier
+design put a 30-second heartbeat in the pane shell as a separate writer. It was dropped:
+a pane-side loop dies in exactly the case the heartbeat exists for (a group kill), so it
+would have bought nothing the observer does not already do, at the cost of a second
+process and a second timer. The heartbeat's purpose is unchanged — under a group kill the
+record's last line is stamped at most one interval before the death, which attributes the
+death to a window — but one process now produces both the liveness and the end line.
 
 ⚠️ **Exit status is parent-only, and that is the whole point of dropping `exec`.** With
 `exec "<launcher>"` the pane's shell *becomes* Claude, so no process is left to `waitpid`
 and `137` is unobservable by construction. The spawn recipe therefore runs the launcher as
 a child and traps `EXIT`. A record naming `137` is necessarily written *after* the kill,
-by that parent — which is why writer 3 can never claim `signalled kill`, only `unknown-end`.
+by that parent — which is why the observer can never claim `signalled kill`, only
+`unknown-end`.
 
 **Keyed on the pane, not the session.** The pane is the process container that dies, and a
 resumed session gets a new pane (it is a new process in a new container), so two panes are
@@ -45,27 +55,54 @@ event. Override the directory with `SUPERVISOR_SESSION_EXIT_DIR`.
 
 Line shape (fixed field order, so a reader never guesses):
 
-    2026-10-27T14:03:11Z\tkind=exited\tpane=2156\tsession=-\trc=0\tsignal=-
+    ts  kind  pane  session  pid  rc  signal  sender  writer
 
-`kind` is one of `exited`, `signalled kill`, `unknown-end`, `closed-tab` — the four end
-kinds — plus `spawn`, a **start** marker written when the trap is installed. ⚠️ The spawn
-marker is not decoration: without it an empty record cannot be told apart from a record
-whose writer was never wired, which is exactly how a previous attempt at this looked
-successful while proving nothing. A record that begins with `kind=spawn` and has no end
-line is a session that was still running (or whose writer died with it); a record that does
-not exist at all is a spawn that never installed the writer. ⚠️ `closed-tab` is never
-emitted by this terminal: WezTerm's own event surface has no pane/tab-close event (15
-events, 13 window + 2 mux, enumerated 2026-10-27), and `SIGHUP` is not specific to a tab
-close — a terminal quit, a wezterm crash and an SSH drop deliver the same signal — so a
-trap that stamped `closed-tab` on `HUP` would assert a cause it cannot distinguish. The
-kind is kept in the vocabulary because a different surface might one day report it.
+e.g.
+
+    2026-10-27T14:03:11Z	kind=signalled kill	pane=2156	session=-	pid=41234	rc=137	signal=SIGKILL	sender=unavailable(eslogger rc=1 ES_NEW_CLIENT_RESULT_ERR_NOT_PRIVILEGED)	writer=trap
+
+`kind` is one of the four end kinds — `exited`, `signalled kill`, `unknown-end`,
+`closed-tab` — plus two markers that are not ends: `spawn`, written when the trap is
+installed, and `heartbeat`, written by the observer. ⚠️ The spawn marker is not
+decoration: without it an empty record cannot be told apart from a record whose writer was
+never wired, which is exactly how a previous attempt at this looked successful while
+proving nothing. A record that begins with `kind=spawn` and has no end line is a session
+that was still running (or whose writer died with it); a record that does not exist at all
+is a spawn that never installed the writer. ⚠️ `closed-tab` is never emitted by this
+terminal: WezTerm's own event surface has no pane/tab-close event (15 events, 13 window +
+2 mux, enumerated 2026-10-27), and `SIGHUP` is not specific to a tab close — a terminal
+quit, a wezterm crash and an SSH drop deliver the same signal — so a trap that stamped
+`closed-tab` on `HUP` would assert a cause it cannot distinguish. The kind is kept in the
+vocabulary because a different surface might one day report it.
+
+**`sender` is about who ended the process, and it is deliberately three-valued.**
+`sender=-` on a marker (nothing ended anything), `sender=none` on a normal exit (the
+process ended itself), and `sender=unavailable(<reason>)` where a signal was delivered but
+the machine cannot name the sender. The reason is the *probe's own output*, never a claim
+from documentation: the only mechanism here that could name a sender is `eslogger`, and it
+refuses a non-root caller. See `_sender_unavailable`.
+
+**`writer` records which writer produced the line** — `trap` or `observer`. The two are
+not equivalent evidence: the trap reports what a parent reaped, the observer reports what
+a bystander noticed, and a reader that cannot tell them apart cannot tell a fact from an
+inference.
+
+⚠️ **Two fields from the original design are not here, deliberately.** The design listed
+`tty` and a separate `event` field. `tty` existed only to resolve pane → pid through
+`ps -t`, and the spawn passes the pid directly, so it would be a derivable duplicate
+(`ps -o tty= -p <pid>`). `event` duplicated `kind`, which already distinguishes the two
+markers from the four end kinds. Recorded here because the design in the task file still
+lists them; the code is the truth.
 """
 
 import argparse
 import datetime
 import json
 import os
+import re
+import subprocess
 import sys
+import time
 
 DEFAULT_DIR = "~/.claude/state/session-exit"
 
@@ -85,8 +122,19 @@ KIND_UNKNOWN = "unknown-end"
 KIND_CLOSED_TAB = "closed-tab"
 #: A START marker, not an end kind. See the module docstring for why it is written at all.
 KIND_SPAWN = "spawn"
+#: Written by the observer. Also not an end kind — it says the pane was alive at `ts`.
+KIND_HEARTBEAT = "heartbeat"
 
-KINDS = (KIND_EXITED, KIND_SIGNALLED, KIND_UNKNOWN, KIND_CLOSED_TAB, KIND_SPAWN)
+KINDS = (KIND_EXITED, KIND_SIGNALLED, KIND_UNKNOWN, KIND_CLOSED_TAB, KIND_SPAWN, KIND_HEARTBEAT)
+
+#: The kinds that mean the pane has ended. A record carrying one of these is closed, and
+#: the observer stays silent rather than adding an inference beside a parent's report.
+END_KINDS = (KIND_EXITED, KIND_SIGNALLED, KIND_UNKNOWN, KIND_CLOSED_TAB)
+
+WRITER_TRAP = "trap"
+WRITER_OBSERVER = "observer"
+
+DEFAULT_INTERVAL = 30
 
 
 def state_dir():
@@ -117,7 +165,12 @@ def classify(rc):
     return KIND_EXITED, "-"
 
 
-def format_line(now, kind, pane, session, rc, signal):
+def now_utc():
+    """The record's timestamp: ISO 8601, UTC, second resolution, `Z`-suffixed."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def format_line(now, kind, pane, session="", pid="", rc="-", signal="-", sender="-", writer="-"):
     """One record line. Field order is fixed and load-bearing for every reader."""
     return "\t".join(
         (
@@ -125,10 +178,22 @@ def format_line(now, kind, pane, session, rc, signal):
             f"kind={kind}",
             f"pane={pane}",
             f"session={session or '-'}",
+            f"pid={pid or '-'}",
             f"rc={rc}",
             f"signal={signal}",
+            f"sender={sender or '-'}",
+            f"writer={writer or '-'}",
         )
     )
+
+
+def parse_field(line, name):
+    """The value of `name=` in one record line, or `""`. Never raises on a malformed line."""
+    prefix = name + "="
+    for field in line.rstrip("\n").split("\t"):
+        if field.startswith(prefix):
+            return field[len(prefix) :]
+    return ""
 
 
 def append_line(path, line):
@@ -146,12 +211,117 @@ def append_line(path, line):
         os.close(fd)
 
 
+def _sender_unavailable():
+    """Why this machine cannot name the process that delivered a signal, quoted from a probe.
+
+    `eslogger` is the only surface here that could attribute a signal to a sender, and it
+    is root-only. The recorded reason is the probe's own refusal, not a claim from its
+    documentation — run it once and see. Bounded to the symbolic code it prints so the
+    reason stays a token rather than a sentence inside a line-oriented record.
+    """
+    eslogger = "/usr/bin/eslogger"
+    if not os.path.exists(eslogger):
+        return "unavailable(eslogger not installed)"
+    try:
+        proc = subprocess.run(
+            [eslogger, "exec"], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"unavailable(eslogger failed: {type(exc).__name__})"
+    if proc.returncode == 0:
+        # The probe was accepted, which only happens as root. Nothing here subscribes to
+        # its stream, so the sender is still not carried — say that rather than imply it is.
+        return "unavailable(eslogger accepted but no subscription is wired)"
+    text = (proc.stderr or proc.stdout or "").strip().splitlines()
+    first = text[0] if text else "no output"
+    match = re.search(r"\(([A-Z][A-Z0-9_]*)\)\s*$", first)
+    if match:
+        return f"unavailable(eslogger rc={proc.returncode} {match.group(1)})"
+    return f"unavailable(eslogger rc={proc.returncode} {first[:80]})"
+
+
+def sender_for(kind):
+    """The honest `sender` value for a kind. See the module docstring's three-valued note."""
+    if kind == KIND_EXITED:
+        return "none"
+    if kind in (KIND_SIGNALLED, KIND_UNKNOWN, KIND_CLOSED_TAB):
+        return _sender_unavailable()
+    return "-"
+
+
+def has_end(path):
+    """Whether the record already carries an end line for this pane."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if parse_field(line, "kind") in END_KINDS:
+                    return True
+    except FileNotFoundError:
+        return False
+    return False
+
+
+def alive(pid):
+    """Whether `pid` still exists. `EPERM` means it exists and belongs to someone else."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _daemonize():
+    """Detach into a new session, so a process-group kill cannot reach this process.
+
+    Double fork: the intermediate child exits so the grandchild is reparented and can never
+    be waited for, and `os.setsid()` gives it its own session and process group — which is
+    the whole point, since `kill -9 -<pane pgid>` does not reach a process in another
+    group.
+
+    The parent blocks on one byte from a pipe before returning. Without that handshake the
+    shell resumes while the observer may still be inside the shell's process group, and a
+    group kill landing in that window takes the observer with it — the exact failure this
+    process exists to survive.
+
+    Returns `True` in the daemon (carry on) and `False` in the caller (return 0).
+    """
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid > 0:
+        os.close(write_fd)
+        try:
+            os.read(read_fd, 1)
+        finally:
+            os.close(read_fd)
+        os.waitpid(pid, 0)
+        return False
+    os.close(read_fd)
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    if devnull > 2:
+        os.close(devnull)
+    os.write(write_fd, b"1")
+    os.close(write_fd)
+    return True
+
+
 def cmd_append(args):
-    """Write one end line. The trap's entry point — never raises past its own exit code.
+    """Write one record line. The trap's entry point — never raises past its own exit code.
 
     Returns 0 on success and 2 on a malformed pane id. The trap wraps the call in `|| true`,
     so a failure here can never change the session's own exit status; it is reported on
     stderr so the failure is visible rather than silently absent.
+
+    The line is echoed to stdout as well as appended. That is what makes the writer's own
+    output a usable control: a test can capture a pre-kill line from here without reading
+    the record path, which is the only way to tell "the writer was never wired" apart from
+    "the writer wrote nothing" when the record path is still empty.
     """
     pane = args.pane or os.environ.get("WEZTERM_PANE") or ""
     try:
@@ -159,13 +329,91 @@ def cmd_append(args):
     except ValueError as exc:
         print(f"session-exit-record: {exc}", file=sys.stderr)
         return 2
-    now = args.now or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = args.now or now_utc()
     if args.kind:
         kind, signal = args.kind, (args.signal or "-")
     else:
         kind, signal = classify(args.rc)
-    append_line(path, format_line(now, kind, pane, args.session, args.rc, signal))
+    line = format_line(
+        now,
+        kind,
+        pane,
+        args.session,
+        args.pid,
+        args.rc,
+        signal,
+        args.sender or sender_for(kind),
+        args.writer or WRITER_TRAP,
+    )
+    append_line(path, line)
+    print(line)
     return 0
+
+
+def cmd_observe(args):
+    """Poll a pane's pid and record its disappearance. The out-of-group writer.
+
+    Writes a `heartbeat` line every `--interval` seconds and one `unknown-end` line when the
+    pid is gone. Stays silent when the record already carries an end line, so the parent's
+    report always wins over this process's inference — the trap runs before the shell exits,
+    so by the time this process sees the pid gone, any line the trap was going to write is
+    already on disk.
+
+    The pid is polled *before* the first sleep, so a pane that is already gone is recorded
+    without waiting a full interval, and the first heartbeat lands immediately — which is
+    also the evidence that this process started at all.
+
+    `--ticks N` stops after N heartbeats and `--foreground` skips the detach. Both exist for
+    the tests, which cannot drive an unbounded daemon.
+    """
+    pane = args.pane or os.environ.get("WEZTERM_PANE") or ""
+    try:
+        path = record_path(pane)
+    except ValueError as exc:
+        print(f"session-exit-record: {exc}", file=sys.stderr)
+        return 2
+    if args.pid <= 0:
+        print("session-exit-record: --pid must be positive", file=sys.stderr)
+        return 2
+    if not args.foreground and not _daemonize():
+        return 0
+    heartbeats = 0
+    while True:
+        if not alive(args.pid):
+            if not has_end(path):
+                append_line(
+                    path,
+                    format_line(
+                        now_utc(),
+                        KIND_UNKNOWN,
+                        pane,
+                        args.session,
+                        args.pid,
+                        "unavailable",
+                        "unavailable",
+                        sender_for(KIND_UNKNOWN),
+                        WRITER_OBSERVER,
+                    ),
+                )
+            return 0
+        append_line(
+            path,
+            format_line(
+                now_utc(),
+                KIND_HEARTBEAT,
+                pane,
+                args.session,
+                args.pid,
+                "-",
+                "-",
+                "-",
+                WRITER_OBSERVER,
+            ),
+        )
+        heartbeats += 1
+        if args.ticks and heartbeats >= args.ticks:
+            return 0
+        time.sleep(args.interval)
 
 
 def cmd_path(args):
@@ -229,14 +477,32 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Record how a Claude Code pane ended.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_append = sub.add_parser("append", help="append one end line (the EXIT trap's writer)")
+    p_append = sub.add_parser("append", help="append one record line (the EXIT trap's writer)")
     p_append.add_argument("--pane", default="", help="pane id (default: $WEZTERM_PANE)")
     p_append.add_argument("--session", default="", help="session id, or empty when unknown")
+    p_append.add_argument("--pid", default="", help="the pid whose end this record describes")
     p_append.add_argument("--rc", type=int, default=0, help="the child's wait status")
     p_append.add_argument("--kind", choices=KINDS, default="", help="override the derived kind")
     p_append.add_argument("--signal", default="", help="signal name, with --kind")
+    p_append.add_argument("--sender", default="", help="override the derived sender")
+    p_append.add_argument("--writer", default="", help=f"writer name (default: {WRITER_TRAP})")
     p_append.add_argument("--now", default="", help="timestamp override, for tests")
     p_append.set_defaults(func=cmd_append)
+
+    p_observe = sub.add_parser("observe", help="poll a pane's pid and record its disappearance")
+    p_observe.add_argument("--pane", default="", help="pane id (default: $WEZTERM_PANE)")
+    p_observe.add_argument("--pid", type=int, required=True, help="the pane's pid to watch")
+    p_observe.add_argument("--session", default="", help="session id, or empty when unknown")
+    p_observe.add_argument(
+        "--interval", type=int, default=DEFAULT_INTERVAL, help="seconds between polls"
+    )
+    p_observe.add_argument(
+        "--ticks", type=int, default=0, help="stop after N heartbeats (0 = never); for tests"
+    )
+    p_observe.add_argument(
+        "--foreground", action="store_true", help="do not detach (tests, and debugging)"
+    )
+    p_observe.set_defaults(func=cmd_observe)
 
     p_path = sub.add_parser("path", help="print the record path for a pane")
     p_path.add_argument("--pane", default="")

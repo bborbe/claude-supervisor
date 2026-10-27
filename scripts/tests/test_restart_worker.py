@@ -213,6 +213,25 @@ class ResumeCommand(unittest.TestCase):
         self.assertIn("--kind spawn --session \"sid\"", inner)
         self.assertLess(inner.index("--kind spawn"), inner.index('--resume sid'))
 
+    def test_the_observer_watches_this_shell(self):
+        """`$$` outlives the launcher and dies exactly when the group is killed.
+
+        That is the death the trap cannot record, so it is the one the out-of-group observer
+        exists for; watching anything else would leave the group kill unattributed.
+        """
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertIn('observe --pid $$ --session "sid"', inner)
+
+    def test_the_observer_starts_before_the_launcher(self):
+        """Started after the launcher would be started after the first kill can land."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertLess(inner.index(" observe "), inner.index('--resume sid'))
+
+    def test_the_trap_and_the_marker_both_carry_the_pid(self):
+        """A record without a pid cannot be joined to the process it describes."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertEqual(inner.count("--pid $$"), 3)
+
     def test_resume_target_and_unset_list_intact(self):
         """The copied recipe's own invariants must survive the --cwd addition."""
         inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
