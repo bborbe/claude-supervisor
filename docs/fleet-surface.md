@@ -468,15 +468,12 @@ overwriting the other.
 ⚠️ **The `observe` call is part of the shape, and its order is load-bearing.** Start it
 **before** the trap and **before** the launcher, and let it watch `$$` — the pane shell, which
 outlives the launcher and dies exactly when the process group is killed. It detaches into its
-own session and blocks the shell on a pipe handshake until it is there, which is what lets it
-survive a group kill landing immediately after the spawn; the ordering is a requirement, not a
-style choice.
+own session and blocks the shell on a pipe handshake until it is there, so a group kill landing
+immediately after the spawn cannot take it along.
 
 What each writer can and cannot name — the end-kind vocabulary, the `unknown-end` inference
-boundary, and each writer's survival properties — is owned by
-[`session-end-record.md`](session-end-record.md) § *Two writers, layered by what each survives*
-and is deliberately not restated here. The record's reader/writer is
-`scripts/session-exit-record.py`; its module docstring is the design record.
+boundary, each writer's survival properties — is owned by the `scripts/session-exit-record.py`
+module docstring and is deliberately not restated here.
 
 **`--cwd` is required, and a resume does not inherit it.** The session id names a
 conversation, not a working directory, so `wezterm cli spawn` falls back to *wezterm's own*
