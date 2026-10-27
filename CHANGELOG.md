@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.211.0
 
 - feat: a goal or topic loop arms only a subject at `phase: execution`; it otherwise refuses and names the level's gate command — the round re-arms so the re-check is automatic, the arm asks the operator to re-run it
 
