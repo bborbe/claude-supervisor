@@ -182,7 +182,36 @@ class ResumeCommand(unittest.TestCase):
     def test_resumes_through_the_given_launcher_not_bare_claude(self):
         """Regression 2026-10-10: a bare-`claude` resume dropped `--mcp-config` and `a2a`."""
         inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc-private-claude")[-1]
-        self.assertIn('exec "/l/cc-private-claude" --resume sid', inner)
+        self.assertIn('"/l/cc-private-claude" --resume sid', inner)
+
+    def test_no_exec_so_the_exit_status_survives(self):
+        """`exec` makes a SIGKILLed worker leave no record anywhere — the whole point.
+
+        Measured 2026-10-27: `bash -lc 'exec bash -c "kill -9 $$"'` reports 137 to its own
+        caller but leaves nothing to run a trap; the same child run *without* `exec`, behind
+        `trap _sx EXIT`, records `rc=137`. A test that only checked the launcher path would
+        pass with `exec` still in place and silently re-open the gap.
+        """
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")
+        inner = argv[-1]
+        self.assertNotIn("exec ", inner)
+        self.assertNotIn("exec ", " ".join(argv))
+        self.assertIn("trap _sx EXIT", inner)
+        self.assertIn("rc=$?", inner)
+
+    def test_the_writer_path_rides_as_an_env_assignment(self):
+        """A spawned pane inherits wezterm's mux-server environment, not this process's."""
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")
+        self.assertIn("--", argv)
+        assignments = [a for a in argv if a.startswith("SESSION_EXIT_RECORD=")]
+        self.assertEqual(len(assignments), 1)
+        self.assertTrue(assignments[0].endswith("/scripts/session-exit-record.py"))
+
+    def test_a_spawn_marker_is_written_before_the_launcher_runs(self):
+        """Without it an empty record cannot be told from an unwired writer."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertIn("--kind spawn --session \"sid\"", inner)
+        self.assertLess(inner.index("--kind spawn"), inner.index('--resume sid'))
 
     def test_resume_target_and_unset_list_intact(self):
         """The copied recipe's own invariants must survive the --cwd addition."""

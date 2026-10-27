@@ -70,6 +70,12 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# The exit-record writer, which sits beside this script. Passed to the spawned pane as an
+# absolute path through `env`, because the pane inherits wezterm's mux-server environment
+# and cannot resolve `$CLAUDE_PLUGIN_ROOT` for a script this file already knows the
+# location of.
+RECORD_SCRIPT = os.path.join(HERE, "session-exit-record.py")
+
 # The registry. `SUPERVISOR_SESSIONS_DIR` first so a drill can point at a fixture tree;
 # never a hardcoded home path in committed content.
 SESSIONS_DIR = os.path.expanduser(
@@ -582,15 +588,30 @@ def resume_command(sid, title, chip, cwd, launcher):
     manager relaunched as a worker on 2026-09-18. The quotes are dropped here, deliberately.
     """
     script = launcher
+    # ⚠️ NO `exec`, and the trap is why. `exec` replaces the pane's shell with the launcher,
+    # so no process is left to `waitpid` and the session's exit status stops existing — a
+    # SIGKILLed worker then leaves no record anywhere, which is the whole gap
+    # `session-exit-record.py` closes. Measured 2026-10-27 on this shape: as a child with
+    # `trap _sx EXIT`, a `kill -9` records `rc=137`; behind `exec`, the trap cannot fire.
+    # The writer path travels as an `env` assignment because a spawned pane inherits
+    # wezterm's mux-server environment, not this process's.
+    trap = (
+        '_sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "'
+        + sid
+        + '" --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "'
+        + sid
+        + '" || true; trap _sx EXIT; '
+    )
     inner = (
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
-        f'exec "{script}" --resume {sid} -n "{title}" "/color {chip}"'
+        + trap
+        + f'"{script}" --resume {sid} -n "{title}" "/color {chip}"'
     )
     argv = ["wezterm", "cli", "spawn"]
     if cwd:
         argv += ["--cwd", cwd]
-    return argv + ["--", "bash", "-lc", inner]
+    return argv + ["--", "env", f"SESSION_EXIT_RECORD={RECORD_SCRIPT}", "bash", "-lc", inner]
 
 
 HOLDS_PATH = os.path.expanduser(
