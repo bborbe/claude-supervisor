@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.210.0
 
 - docs: **`docs/session-end-record.md` is the session end record's own home**, split out of #520 because that PR exceeded the auto-reviewer's 1200-line budget and could never receive a verdict. The page carries the line's nine fields in order, the kinds table with `closed-tab` marked never-emitted, the trap-versus-observer split with `unknown-end` named as an inference rather than a signal, the `read` / `list` / `path` commands, and the `eslogger` refusal quoted from the probe instead of asserted from documentation. It is the page `server/tab-spawn.mjs` cites for the two-writer vocabulary and `docs/fleet-surface.md` defers to, so both references resolve again; indexed in the README's Documentation list. Change set: `docs/session-end-record.md`, `README.md`, `CHANGELOG.md`.
 
