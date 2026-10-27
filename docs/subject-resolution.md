@@ -82,6 +82,47 @@ The first output line is `Subject: <name> (from <explicit|session|name|conversat
 
 The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<the page it came from>)`.
 
+## The phase precondition
+
+**A loop arms only a subject at `phase: execution`.** Having resolved a subject — **§ The page test has run, so both the page path and the branch are known** — read its page's frontmatter `phase:` and, **unless it reads `execution`, refuse and STOP**: arm nothing, sweep nothing, spawn nothing. ⚠️ **`planning`, `todo`, and an absent `phase:` are all refusals** — the field's absence is not a permission. ⚠️ **Read the page § The page test found**, and normalise exactly as § *Reconcile the subject's status* prescribes: the CR comes off every line before the frontmatter delimiter is matched, then the value is stripped and case-folded. A page that yields no `phase:` line is a refusal, never an absent field read as permission.
+
+**The refusal names the level's gate command and nothing else** — `/vault-cli:execute-goal <subject>` on the goal branch, `/vault-cli:execute-topic <subject>` on the topic:
+
+```text
+❌ <subject> is at phase: <value|none> — a loop arms only at phase: execution.
+   Run /vault-cli:execute-goal "<subject>", then re-run the loop.
+```
+
+⚠️ **Never print the gate's prerequisite.** `execute-goal` and `execute-topic` already refuse a `todo`/empty-phase subject with the correct next step, and **that text changes between vault-cli releases** — between v0.169 and v0.183 `execute-topic`'s phase-less path moved from *"set it with `vault-cli topic set … phase planning`"* to *"approve it with `vault-cli topic approve …`"*. A loop that duplicates the chain prints a stale instruction the moment vault-cli ships; a loop that names the gate prints a pointer that is always current, and the gate states its own next step when the operator runs it. **One hop more, and correct forever.**
+
+⚠️ **The loop never runs the gate, and never writes `phase:`.** `execute-goal` re-runs the goal's planning hard checks, which can refuse; a loop that owned that call would either block its round on an interactive gate or flip the field without the checks — and a bare `phase` write recreates exactly the decoration this precondition exists to remove. **The loop refuses and stops; the operator runs the gate.**
+
+⚠️ **It runs before § *Reconcile the subject's status*, not after.** A refused arm must leave the page untouched — flipping a `todo` subject to `status: in_progress` on the way to refusing it would report work as started that the same command declined to start.
+
+⚠️ **A refusal must re-arm the round, or it ends the loop — the two tiers differ here, and conflating them is the defect this paragraph exists to prevent.** `/goal-loop` and `/topic-loop` are the *arm*; `/goal-drive` and `/topic-drive` are the *round*.
+
+- **The round refuses and RE-ARMS.** The one-shot `ScheduleWakeup` is issued at the round's **tail**, so a bare STOP at step 1 would end the loop with no next tick — the round must instead **re-arm for the next interval and end the turn**, exactly as the ABSORBED early exit does (`commands/steps/round-readings.md:11`). The re-check is then automatic: a subject refused at one tick arms on the first tick after its phase reads `execution`, with no second command to remember.
+- **The arm refuses and does NOT re-arm.** `/goal-loop` and `/topic-loop` run once and are never re-invoked by a wakeup, so a refusal at arm time leaves **no cadence running at all**. Print the gate command and say plainly that the operator re-runs the arm after the flip — there is no tick to carry the retry.
+
+⚠️ **Who refuses — and it is not all eight resolvers.** The gate belongs to the verbs that *start or drive* work. The look-and-verify tier keeps resolving a `planning` subject, because refusing it would leave the operator unable to inspect the very page the refusal points at:
+
+| Command | Resolves a subject | Requires `phase: execution` |
+|---|---|---|
+| `/supervisor:goal-loop` | yes | **required** — refuses to arm |
+| `/supervisor:goal-drive` | yes | **required** — refuses to drive |
+| `/supervisor:goal-status` | yes | **not required** — read-only inspection must reach a `planning` subject |
+| `/supervisor:goal-verify` | yes | **not required** — it *is* the pre-execution check |
+| `/supervisor:topic-loop` | yes | **required** — refuses to arm |
+| `/supervisor:topic-drive` | yes | **required** — refuses to drive |
+| `/supervisor:topic-status` | yes | **not required** — read-only inspection must reach a `planning` subject |
+| `/supervisor:topic-verify` | yes | **not required** — it *is* the pre-execution check |
+
+⚠️ **This is not § *Reconcile the subject's status*'s write-scope table** — that one governs writes and is parsed by `scripts/check-subject-write-scope.py`; this one governs arming. Keep the verdict cells as `**required**` / `**not required**`, never `**yes**` / `**no**`, so the write-scope parser cannot read these rows as a second copy of its own table.
+
+⚠️ **The `*-verify` pair is excluded by definition, not by oversight** — they are the commands that *produce* the readiness a `planning → execution` flip needs, so gating them on `execution` would make the gate unreachable. ⚠️ **The `*-status` pair is excluded by its own read-only contract**, the same carve-out § *Reconcile the subject's status* records: the operator's first move on a refusal is to look at the page.
+
+⚠️ **Why, measured 2026-10-27 over `private-personal`.** 33 goals were `in_progress` and only **1** read `phase: execution` — 12 `planning`, **20 with no `phase:` at all** — while their loops ran anyway; of 6 `in_progress` topics, 1 read `execution` and **5 carried no `phase:`**. `Agent Egress Is Default-Deny` was the worked example: 7 of its 12 success criteria met in place, its manager loop armed and reading `OK`, and its page still at `phase: planning`. The field had stopped carrying information because nothing ever required it.
+
 ## Reconcile the subject's status
 
 **Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject — **§ The page test has run, so both the page path and the branch are known** — read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **It runs once the page test has run, not merely "before the sweep"** — both inputs it needs are produced there, so a literal reading that runs it earlier leaves it guessing the branch, which is the case that silently takes the goal write. ⚠️ **Place the step wherever § The page test runs in the command, which is not necessarily the same section as the recording step** — the two are adjacent in some commands and not in others, and the precondition is the page test, not the adjacency. ⚠️ **The condition is the guard, not decoration** — a write that skips it lands `in_progress` over a `hold`.
