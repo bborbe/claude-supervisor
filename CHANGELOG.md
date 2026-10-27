@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- feat: a goal or topic loop arms only a subject at `phase: execution`; it otherwise refuses, names the level's gate command, and re-checks on the next tick
+- feat: a goal or topic loop arms only a subject at `phase: execution`; it otherwise refuses and names the level's gate command — the round re-arms so the re-check is automatic, the arm asks the operator to re-run it
 
 ## v0.210.0
 

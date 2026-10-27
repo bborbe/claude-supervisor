@@ -86,11 +86,11 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 
 **A loop arms only a subject at `phase: execution`.** Having resolved a subject — **§ The page test has run, so both the page path and the branch are known** — read its page's frontmatter `phase:` and, **unless it reads `execution`, refuse and STOP**: arm nothing, sweep nothing, spawn nothing. ⚠️ **`planning`, `todo`, and an absent `phase:` are all refusals** — the field's absence is not a permission. ⚠️ **Read the page § The page test found**, and normalise exactly as § *Reconcile the subject's status* prescribes: the CR comes off every line before the frontmatter delimiter is matched, then the value is stripped and case-folded. A page that yields no `phase:` line is a refusal, never an absent field read as permission.
 
-**The refusal names the level's gate command and nothing else** — `/vault-cli:execute-goal <name>` on the goal branch, `/vault-cli:execute-topic <name>` on the topic:
+**The refusal names the level's gate command and nothing else** — `/vault-cli:execute-goal <subject>` on the goal branch, `/vault-cli:execute-topic <subject>` on the topic:
 
 ```text
 ❌ <subject> is at phase: <value|none> — a loop arms only at phase: execution.
-   Run /vault-cli:execute-goal "<subject>", then re-run this command.
+   Run /vault-cli:execute-goal "<subject>", then re-run the loop.
 ```
 
 ⚠️ **Never print the gate's prerequisite.** `execute-goal` and `execute-topic` already refuse a `todo`/empty-phase subject with the correct next step, and **that text changes between vault-cli releases** — between v0.169 and v0.183 `execute-topic`'s phase-less path moved from *"set it with `vault-cli topic set … phase planning`"* to *"approve it with `vault-cli topic approve …`"*. A loop that duplicates the chain prints a stale instruction the moment vault-cli ships; a loop that names the gate prints a pointer that is always current, and the gate states its own next step when the operator runs it. **One hop more, and correct forever.**
@@ -99,7 +99,10 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 
 ⚠️ **It runs before § *Reconcile the subject's status*, not after.** A refused arm must leave the page untouched — flipping a `todo` subject to `status: in_progress` on the way to refusing it would report work as started that the same command declined to start.
 
-⚠️ **The round re-reads it every tick, and that is what makes the refusal a step rather than a dead end.** `/goal-loop` and `/topic-loop` are the *arm*; `/goal-drive` and `/topic-drive` are the *round*. The arm checks once at manager start; every wakeup re-checks through the round, so a subject refused at one tick arms on the first tick after its phase reads `execution` — no second command to remember.
+⚠️ **A refusal must re-arm the round, or it ends the loop — the two tiers differ here, and conflating them is the defect this paragraph exists to prevent.** `/goal-loop` and `/topic-loop` are the *arm*; `/goal-drive` and `/topic-drive` are the *round*.
+
+- **The round refuses and RE-ARMS.** The one-shot `ScheduleWakeup` is issued at the round's **tail**, so a bare STOP at step 1 would end the loop with no next tick — the round must instead **re-arm for the next interval and end the turn**, exactly as the ABSORBED early exit does (`commands/steps/round-readings.md:11`). The re-check is then automatic: a subject refused at one tick arms on the first tick after its phase reads `execution`, with no second command to remember.
+- **The arm refuses and does NOT re-arm.** `/goal-loop` and `/topic-loop` run once and are never re-invoked by a wakeup, so a refusal at arm time leaves **no cadence running at all**. Print the gate command and say plainly that the operator re-runs the arm after the flip — there is no tick to carry the retry.
 
 ⚠️ **Who refuses — and it is not all eight resolvers.** The gate belongs to the verbs that *start or drive* work. The look-and-verify tier keeps resolving a `planning` subject, because refusing it would leave the operator unable to inspect the very page the refusal points at:
 
