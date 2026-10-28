@@ -325,7 +325,7 @@ POSTABLE_MECHANISMS = (MECHANISM, "ack")
 # is — the failure reads as a store fault rather than a bad argument. Pinning the
 # enum here lets argparse reject it before the request is sent, and list the
 # accepted values in `--help`.
-PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+PRODUCER_KINDS = ("session", "manager", "agent", "cron", "dark-factory")
 # The three levels the store's schema declares for `risk`. It is a producer
 # declaration, stored unchanged; the board may render HIGHER than it and never
 # lower, so a poster that under-declares still cannot make a destructive card

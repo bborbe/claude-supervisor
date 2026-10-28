@@ -1045,6 +1045,7 @@ def post(card):
     ask = os.path.join(HERE, "attention-ask.py")
     cmd = [
         "python3", ask, "post",
+        "--producer-kind", "manager",
         "--dedup-key", card["dedup_key"],
         "--payload", card["payload"],
         "--context", card["context"],
