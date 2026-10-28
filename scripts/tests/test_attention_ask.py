@@ -393,11 +393,12 @@ class ProducerKindTest(unittest.TestCase):
                 self.assertIn("invalid choice", err.getvalue())
                 self.assertIn("worker", err.getvalue())
 
-    def test_the_accepted_kinds_are_pinned_to_the_recorded_four(self):
-        # The recorded four, not a read of the store's Go source — see the class
+    def test_the_accepted_kinds_are_pinned_to_the_recorded_five(self):
+        # The recorded five, not a read of the store's Go source — see the class
         # docstring. A divergence on the store's side is the e2e's to catch.
         self.assertEqual(
-            ask.PRODUCER_KINDS, ("session", "agent", "cron", "dark-factory")
+            ask.PRODUCER_KINDS,
+            ("session", "manager", "agent", "cron", "dark-factory"),
         )
 
 

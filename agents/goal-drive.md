@@ -346,6 +346,7 @@ One compact report — see `<output_format>`. You do not render the status table
 
   ```
   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py post \
+    --producer-kind manager \
     --dedup-key "<task_identifier>" \
     --payload "Raise \"<task>\"? It scores <score>/10 after its improvement pass, against a 7/10 open threshold." \
     --context "Gaps: <the audit's named gaps>. Task: <vault path>. Held until it passes." \
