@@ -82,6 +82,50 @@ The first output line is `Subject: <name> (from <explicit|session|name|conversat
 
 The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<the page it came from>)`.
 
+## The phase precondition
+
+**A loop arms only a subject at `phase: execution`.** Having resolved a subject — **§ The page test has run, so both the page path and the branch are known** — read its page's frontmatter `phase:` and, **unless it reads `execution`, refuse and STOP**: arm nothing, sweep nothing, spawn nothing. ⚠️ **`planning`, `todo`, and an absent `phase:` are all refusals** — the field's absence is not a permission. ⚠️ **Read the page § The page test found**, and normalise exactly as § *Reconcile the subject's status* prescribes: the CR comes off every line before the frontmatter delimiter is matched, then the value is stripped and case-folded. A page that yields no `phase:` line is a refusal, never an absent field read as permission.
+
+**The refusal names the level's gate command and nothing else** — `/vault-cli:execute-goal <subject>` on the goal branch, `/vault-cli:execute-topic <subject>` on the topic:
+
+```text
+❌ <subject> is at phase: <value|none> — a loop arms only at phase: execution.
+   Run /vault-cli:execute-goal "<subject>", then re-run the loop.
+```
+
+⚠️ **Never print the gate's prerequisite.** `execute-goal` and `execute-topic` already refuse a `todo`/empty-phase subject with the correct next step, and **that text changes between vault-cli releases** — between v0.169 and v0.183 `execute-topic`'s phase-less path moved from *"set it with `vault-cli topic set … phase planning`"* to *"approve it with `vault-cli topic approve …`"*. A loop that duplicates the chain prints a stale instruction the moment vault-cli ships; a loop that names the gate prints a pointer that is always current, and the gate states its own next step when the operator runs it. **One hop more, and correct forever.**
+
+⚠️ **The loop never runs the gate, and never writes `phase:`.** `execute-goal` re-runs the goal's planning hard checks, which can refuse; a loop that owned that call would either block its round on an interactive gate or flip the field without the checks — and a bare `phase` write recreates exactly the decoration this precondition exists to remove. **The loop refuses and stops; the operator runs the gate.**
+
+⚠️ **It runs before § *Reconcile the subject's status*, not after.** A refused arm must leave the page untouched — flipping a `todo` subject to `status: in_progress` on the way to refusing it would report work as started that the same command declined to start.
+
+⚠️ **The refusal ENDS the loop, in both tiers — it never re-arms.** Print the gate command, re-arm nothing, **record a deliberate stand-down**, end the turn, and say plainly that **the operator re-runs the command once the gate passes.**
+
+⚠️ **The stand-down is not optional, and it is a different act from "not arming".** Ending the turn without a `ScheduleWakeup` stops the loop, but the manager's *session* stays LIVE — and the topic tier's keep-alive **restarts a LIVE session whose cadence reads `STALE` or `INVALID`** (`scripts/topic-keepalive.py`, the `LIVE` branch), **uncapped**: that branch is not covered by the 3-per-30-min resume cap, which applies only to the `ABSENT` path. A refusal that merely stops is therefore restarted on the next topic tick, re-resolves, refuses again and stops again — an uncapped restart loop that still runs a round on a non-execution subject every tick, defeating the invariant this section exists to create. **Call `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py --stop --subject "<subject>" --branch goal|topic` before ending the turn.** It writes `<slug>.stopped`, which the keep-alive maps to `leave` — *"a deliberate stand-down is not a lapse"* — and the next `--arm` clears it, so the operator's re-run resumes the loop with no manual cleanup. ⚠️ **Scope the restart-loop half to the goal branch:** `scripts/topic-keepalive.py` is the topic tier's keep-alive **of goal managers** — it hardcodes `--branch goal` and writes `goal--<slug>.json` — so nothing restarts a *topic* manager from a `topic--<slug>` cadence. On the topic branch the marker still records the deliberate stand-down, which is what separates it from a lapse; it is not preventing a restart loop there.
+
+⚠️ **Do not "improve" this into a re-arm, and the reason is the acceptance criterion rather than taste.** The round's `ScheduleWakeup` is the arm at the tick's head (`commands/goal-loop.md` § The loop item 3; `commands/steps/round-tail.md`), and it runs **after** the resolve step — so a refusal at the resolve step precedes it and the loop ends. The obvious repair, re-arming before the STOP as the ABSORBED early exit does (`commands/steps/round-readings.md`), is **wrong here**: a re-arming round also records a liveness beat, so `manager-liveness.py --state` keeps reporting the subject `OK` while it sits outside `execution`, and *"no loop runs on a non-execution subject"* could never be measured true. **A stood-down loop reads `STOPPED` and drops out of the armed set, which is what makes the invariant checkable.** The re-check is the operator's re-run, not an automatic tick.
+
+⚠️ **This is why the refusal text says "then re-run the loop" and not "then wait for the next tick".** There is no next tick — the loop has ended by design.
+
+⚠️ **Who refuses — and it is not all eight resolvers.** The gate belongs to the verbs that *start or drive* work. The look-and-verify tier keeps resolving a `planning` subject, because refusing it would leave the operator unable to inspect the very page the refusal points at:
+
+| Command | Resolves a subject | Requires `phase: execution` |
+|---|---|---|
+| `/supervisor:goal-loop` | yes | **required** — refuses to arm |
+| `/supervisor:goal-drive` | yes | **required** — refuses to drive |
+| `/supervisor:goal-status` | yes | **not required** — read-only inspection must reach a `planning` subject |
+| `/supervisor:goal-verify` | yes | **not required** — it *is* the pre-execution check |
+| `/supervisor:topic-loop` | yes | **required** — refuses to arm |
+| `/supervisor:topic-drive` | yes | **required** — refuses to drive |
+| `/supervisor:topic-status` | yes | **not required** — read-only inspection must reach a `planning` subject |
+| `/supervisor:topic-verify` | yes | **not required** — it *is* the pre-execution check |
+
+⚠️ **This is not § *Reconcile the subject's status*'s write-scope table** — that one governs writes and is parsed by `scripts/check-subject-write-scope.py`; this one governs arming. Keep the verdict cells as `**required**` / `**not required**`, never `**yes**` / `**no**`, so the write-scope parser cannot read these rows as a second copy of its own table.
+
+⚠️ **The `*-verify` pair is excluded by definition, not by oversight** — they are the commands that *produce* the readiness a `planning → execution` flip needs, so gating them on `execution` would make the gate unreachable. ⚠️ **The `*-status` pair is excluded by its own read-only contract**, the same carve-out § *Reconcile the subject's status* records: the operator's first move on a refusal is to look at the page.
+
+⚠️ **Why, measured 2026-10-27 over `private-personal`.** 33 goals were `in_progress` and only **1** read `phase: execution` — 12 `planning`, **20 with no `phase:` at all** — while their loops ran anyway; of 6 `in_progress` topics, 1 read `execution` and **5 carried no `phase:`**. `Agent Egress Is Default-Deny` was the worked example: 7 of its 12 success criteria met in place, its manager loop armed and reading `OK`, and its page still at `phase: planning`. The field had stopped carrying information because nothing ever required it.
+
 ## Reconcile the subject's status
 
 **Resolution is once per session, so this is a resolution step — never a per-sweep one.** Having resolved a subject — **§ The page test has run, so both the page path and the branch are known** — read its page's frontmatter `status` and, **only when** it reads `todo`/`next` **or is absent**, set it to `in_progress`. ⚠️ **It runs once the page test has run, not merely "before the sweep"** — both inputs it needs are produced there, so a literal reading that runs it earlier leaves it guessing the branch, which is the case that silently takes the goal write. ⚠️ **Place the step wherever § The page test runs in the command, which is not necessarily the same section as the recording step** — the two are adjacent in some commands and not in others, and the precondition is the page test, not the adjacency. ⚠️ **The condition is the guard, not decoration** — a write that skips it lands `in_progress` over a `hold`.
@@ -120,9 +164,9 @@ The branch line follows it, exactly as in the siblings: `Branch: <goal|topic> (<
 | `/supervisor:topic-loop` | yes | **yes** |
 | `/supervisor:topic-drive` | yes | **yes** |
 | `/supervisor:topic-status` | yes | **no** — read-only by its own contract (*"No vault writes"*) |
-| `/supervisor:topic-verify` | yes | **no** — holds no `Bash(vault-cli:*)` |
+| `/supervisor:topic-verify` | yes | **no** — holds no `Bash(vault-cli:*)`; a `Bash(python3 …/scripts/*)` grant runs `scripts/resolve-folders.py`, which reads the three folder names and the registered vault name and nothing else, and the command records nothing and writes nothing |
 
-⚠️ **This is a write-scope carve-out, never a resolution one** — all four non-writers still resolve, and none is a *"does not resolve a subject"* case to fall back on. They report the page's status as they find it, exactly as before. The `*-status` pair states the read-only contract in its own frontmatter, and `docs/fleet-surface.md` § *Session roles* calls the status/drive split *"the look from the act"*; the `*-verify` pair's trim is the same one § Resolve the vault first and § Recording already record. Each non-writer's body states its own divergence.
+⚠️ **This is a write-scope carve-out, never a resolution one** — all four non-writers still resolve, and none is a *"does not resolve a subject"* case to fall back on. They report the page's status as they find it, exactly as before. The `*-status` pair states the read-only contract in its own frontmatter, and `docs/fleet-surface.md` § *Session roles* calls the status/drive split *"the look from the act"*; the `*-verify` pair's write trim is the same one § Resolve the vault first and § Recording already record. Each non-writer's body states its own divergence.
 
 ⚠️ **The branch picks the command, and the write goes through that branch's own verb** — `vault-cli goal set "<subject>" status in_progress --vault "$VAULT"` on the goal branch, `vault-cli topic set "<subject>" status in_progress --vault "$VAULT"` on the topic. ⚠️ **Never let one branch be the fallback** — a branch that is unset or mistyped and silently takes the goal write puts a topic's name into a goal command.
 

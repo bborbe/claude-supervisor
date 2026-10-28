@@ -52,6 +52,8 @@ If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a
 
 Everything above is `/supervisor:open`'s, run by reference. This is the half that is not.
 
+⚠️ **A `goal_loop: true` row is refused HERE, before any backend branch.** This path reads the task's frontmatter but never runs the goal emitter, so the goal would be silently absent — a downgrade with no error. Print `⛔ goal_loop not supported on open-a2a — use /supervisor:open` and spawn nothing. It sits at the top of Step 2 rather than in § 2.3 because a target-less row dispatches through § 2.2 and would otherwise never reach the check. Rule: `docs/fleet-surface.md` § Spawn a worker item 10.
+
 ### 2.1 Read `target:` — it picks the backend, and nothing else does
 
 ```bash

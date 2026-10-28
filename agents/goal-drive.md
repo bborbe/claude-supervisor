@@ -346,6 +346,7 @@ One compact report — see `<output_format>`. You do not render the status table
 
   ```
   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py post \
+    --producer-kind manager \
     --dedup-key "<task_identifier>" \
     --payload "Raise \"<task>\"? It scores <score>/10 after its improvement pass, against a 7/10 open threshold." \
     --context "Gaps: <the audit's named gaps>. Task: <vault path>. Held until it passes." \
@@ -353,7 +354,7 @@ One compact report — see `<output_format>`. You do not render the status table
     --closer "pick — 1. raise it now · 2. leave it held"
   ```
 
-  ⚠️ **Pass `--closer` whenever your turn will close on the same ask, and omit it otherwise.** The card declares a `dedup_key` slug; the hook's echo of your closer derives `sha256(sid:kind:detail)`, and those two keys can never collide — so without the record the board carries one question twice and the operator spends an action dismissing the echo (measured 2026-10-02, cards `d393d3e9…` and `3d9263ae…`). The flag names the `👤 You:` line you intend to end on, and the hook and the feed both read it to decline the echo. It is **opt-in**: omit it and nothing is recorded, the echo is raised exactly as before, and no caller is harmed — so a card whose closer asks something *else* should omit it, and a closer asking a *different* question than the card always reaches the board.
+  ⚠️ **Pass `--closer` whenever your turn will close on the same ask, and omit it otherwise.** The card declares a `dedup_key` slug; the hook's echo of your closer derives `sha256(sid:kind:detail)`, and those two keys can never collide — so without the record the board carries one question twice and the operator spends an action dismissing the echo (measured 2026-10-02, cards `d393d3e9…` and `3d9263ae…`). The flag names the `👤 You:` line you intend to end on, and the hook and the feed both read it to decline the echo. It is **required, not opt-in, whenever the closer repeats the card's ask** — omit it then and the board carries one question twice. Omitting it is correct only when the closer asks something *else*.
 
   ⚠️ **Two fields are mandatory, and the card is worthless without them — this is measured, not stylistic.** On 2026-09-27 a live sweep posted **21** cards whose payload read `held below bar 3/10` with **no task name in `--payload` and no task link in `--context`**; the only identifier on the card was the opaque `dedup_key` UUID. An operator reading that board cannot tell **which** task to raise, so the card replaces an invisible hold with an **unactionable** one — a strictly worse outcome, because it looks like the asking happened. **The task name goes in `--payload` and the task link in `--context`, both verbatim.** A score without a subject is not an ask. Verify by reading the card back (`attention-ask.py poll <item-id>` for state, or the store's `/api/1.0/attention/<item-id>`) before reporting the row held — a card that was posted is not a card that can be acted on.
 
@@ -421,7 +422,7 @@ Audit (n):             ← the cache evidence: dispatched vs cached, per clause 
   ⚠️ **`<task>` is the row's OWN title, in full — never an elided form.** These lines are what the caller persists, and the name on the line becomes the cache's key, so a title elided to `…` is not something the caller can key off: `--write-verdicts` refuses any key carrying `…` outright, and a name whose elided remainder was guessed is stored under a title no later tick will ever match. ⚠️ **The measurement behind that refusal is not restated here** — it lives once, with `ABBREVIATION_MARKER` in `scripts/manager-predispatch.py`, so a correction to it has one landing site rather than one per copy. ⚠️ **The elision is yours, not this format's** — the block below is a per-row line format and defines no width, so nothing here needs shortening; emit the title whole however long the line grows. A caller that reads the row's own file keys correctly either way; an abbreviated render only costs it the row.
 
 Card (1):              ← the POSTING PAYLOAD, never a second ranking — the caller posts it
-  post-batch --dedup-key "<key>" — covers <n> waiting-approval + <m> stale
+  post-batch --producer-kind manager --dedup-key "<key>" — covers <n> waiting-approval + <m> stale
   ⚠️ **`<key>` is the card producer's OUTPUT, not a field to copy.** Run
   `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/waiting-approval-state.py" key --topic <topic> --row "<row>" …`
   — one `--row` per row of this round's waiting-approval set — and substitute the returned value for `<key>`.

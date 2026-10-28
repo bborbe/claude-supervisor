@@ -288,17 +288,21 @@ class TestRealDigestFormat(unittest.TestCase):
     def test_age_column_shape_still_reads_the_class_after_the_age(self):
         """Every age form the render emits, not just `11m`.
 
-        `18:04Z` and `stall 2` are age cells too, and a `\\d+[smhdw]`-only test dropped two
-        real **stalled** rows out of the denominator on round `19-39-16Z`.
+        `18:04Z`, `stall 2` and `0.3h` are age cells too. A `\\d+[smhdw]`-only test dropped
+        two real **stalled** rows on round `19-39-16Z`; the decimal form alone dropped
+        **13** stalled/parked rows on 2026-10-28. The position is therefore decided by the
+        structural rule in `class_index` (a class cell is never a task basename), not by
+        matching the age.
         """
         path = os.path.join(self.tmp, "aged.digest")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(
-                "DIGEST x · 3 sessions\n"
-                "CLASSIFICATION  3 classified\n"
+                "DIGEST x · 4 sessions\n"
+                "CLASSIFICATION  4 classified\n"
                 "  Aged One [44444444] · shell · 11m · parked · Task.md · 1 · url\n"
                 "  Aged Two [55555555] · idle · 18:04Z · finished · Task.md · 1 · url\n"
                 "  Aged Three [66666666] · shell · stall 2 · stalled · Task.md · 1 · url\n"
+                "  Aged Four [77777777] · shell · 0.3h · stalled (stall=2) · Task.md · 1 · url\n"
                 "BLOCKED (feed, raised — not verified open)\n"
             )
         rows, unparsed = drive_share.digest_rows(path)
@@ -308,6 +312,7 @@ class TestRealDigestFormat(unittest.TestCase):
                 ("Aged One", "44444444", "parked"),
                 ("Aged Two", "55555555", "finished"),
                 ("Aged Three", "66666666", "stalled"),
+                ("Aged Four", "77777777", "stalled"),
             ],
         )
         self.assertEqual(unparsed, 0)

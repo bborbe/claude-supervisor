@@ -111,7 +111,19 @@ INTERACTIVE_FALSE = "interactive=false"
 #: indistinguishable from an unwired one in the ledger.
 INTERACTIVE_TRUE = "interactive=true"
 #: The home must actually define the rule, not merely name it.
-HOME_DEFINES = ("does finishing this task raise questions mid-flight", "floor, not a tie-break")
+#:
+#: ⚠️ **These two phrases moved on 2026-10-22, with the rule they pin, and they pin its
+#: two halves rather than any one sentence of it.** The first names the *closed list* that
+#: keeps a `role: agent` row interactive — the classifier itself. The second pins its
+#: **exhaustiveness**, which is the half a reader is most likely to soften back into an
+#: open-ended "and similar cases": an exhaustive list with no closure sentence is a list
+#: that will grow a sixth signal the day someone finds an edge case.
+#:
+#: The superseded pair was ``("does finishing this task raise questions mid-flight",
+#: "floor, not a tie-break")`` — the old classifier question and the old floor. Both were
+#: deleted by the flip, and a check that kept pinning them would have failed on the correct
+#: tree while passing on the stale one, which is the one direction a guard must never fail.
+HOME_DEFINES = ("five watch-need signals", "no sixth, no `etc.`")
 
 
 def call_spans(text):

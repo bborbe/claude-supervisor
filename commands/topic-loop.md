@@ -2,7 +2,7 @@
 # No `name:` field, deliberately — a command takes its name from its filename. The
 # frontmatter rule for `commands/*.md` (`agent-cmd/command-frontmatter`) requires
 # `description`, `allowed-tools` and `argument-hint` and nothing else.
-description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start what the ranking admits, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Never manages a worker.
+description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start what the ranking admits, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Sweeps goal managers, never workers.
 allowed-tools:
   - Task
   - Read
@@ -38,21 +38,24 @@ allowed-tools:
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
 Topic-loop — the **topic tier's arm**. It owns ONE topic's declared goal set and the goal
-managers running on it. It manages **goal managers, never a worker**.
+managers running on it. It manages **goal managers, and the workers it opens**.
 
-⚠️ **The tree is strict and this tier is its middle rung** — fleet → **topic** → goal →
-worker, each level managing only the one below it (`docs/session-tiers.md` § The four
-tiers). A worker row reaching this tier is a bug, not work: route it down to the goal
-manager that owns it, or up to the fleet manager when no goal owns it.
+⚠️ **The loop sweeps goal rows; opening a worker is a separate right.** The operator's
+hierarchy (2026-10-23) puts the fleet manager at the top of everything, has a topic manager
+managing goal managers **and** workers, and a goal manager managing workers
+(`docs/session-tiers.md` § The four tiers). A worker is opened on demand with
+`/supervisor:open --task`, never swept here. A worker row reaching this tier is not work for
+the sweep: route it down to the goal manager that owns it, or up to the fleet manager when no
+goal owns it.
 
 ⚠️ **This file is the ARM.** It resolves, confirms no manager already owns the subject,
 arms the wakeup and exits. Every wakeup runs **`/supervisor:topic-drive "<topic>"`** — the
 **round** — which owns the step list and the router table. ⚠️ **The step list is
 deliberately NOT copied here**: a list with two homes drifts.
 
-⚠️ **Never invoke this command from a worker session.** Starting a *topic* manager is a
-human act; starting a *goal* manager is this tier's. Rule:
-`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles.
+⚠️ **Never invoke this command from a worker session.** Starting a *topic* manager is the
+operator's decision (the fleet manager performs the open); starting a *goal* manager is this
+tier's. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles.
 
 ## Interval — the tick and its floor
 
@@ -119,6 +122,8 @@ Print `Tracked (N): <goal> · <goal> …` at manager start, and **re-print it wh
 declaration read changes it**. Membership is never widened mid-run; the subject and branch
 detection resolve **once** at manager start, never per wakeup.
 
+4b. **⚠️ The phase precondition — a loop arms only a subject at `phase: execution`.** Having found the page, run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *The phase precondition* **before arming anything**: read the page's `phase:` and, unless it reads `execution`, print the refusal naming `/vault-cli:execute-topic "<subject>"` and **STOP** — arm no cadence, record no arm, write no `status`, and **record the stand-down with `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py --stop --subject "<subject>" --branch topic`**. ⚠️ **`planning`, `todo` and an absent `phase:` are all refusals.** ⚠️ **Say plainly that the operator re-runs this command after the flip** — the refusal ends the loop, so no cadence is left running to carry the retry. The round carries the same rule: a refused loop stops rather than re-arming, because a re-arming refusal keeps recording liveness and would hide the subject from the armed-set check. ⚠️ **The loop never runs the gate and never writes `phase:`** — the operator runs it. ⚠️ **The rule, the refusal shape, the version-drift rationale and the eight-command scope table live in the doc — read them there; they are not restated here.**
+
 5. **Confirm no manager already owns this subject — before arming anything.** `ListAgents`
    for `<Topic> Manager`. Hit → print its name and age and **stop**. Miss → re-read the
    roster **once**; still a miss → proceed and arm. Never probe with `pgrep -f`.
@@ -158,9 +163,10 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
 - **The line is work vs management — not read vs write.** Management writes are the
   manager's own — the topic page, a goal's `status`/`phase`, stale stamps — via `Edit` /
   `vault-cli goal set`. Code, verification, investigation and the fix go to a worker.
-- **A topic manager never manages a worker.** It starts, keeps alive and reaps **goal
-  managers**. A worker row is reported downward to the goal manager that owns it, never
-  acted on here. This is the boundary the split exists to draw.
+- **A topic manager never sweeps a worker.** It starts, keeps alive and reaps **goal
+  managers**, and it may open a worker on demand with `/supervisor:open --task` — but a
+  worker row is reported downward to the goal manager that owns it, never acted on here.
+  This is the boundary the split exists to draw.
 - **Never present a manager-owned action as an `AskUserQuestion` option.** Opening or
   resuming an approved goal manager, readying a row, repairing a page box — execute them,
   then report them as a table line. The modal is reserved for operator-only decisions

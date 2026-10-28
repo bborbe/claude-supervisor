@@ -429,7 +429,7 @@ class WireContractTest(unittest.TestCase):
     # is quotable. Verified against the source on 2026-10-06:
     # `OwnerLivenessModel LivenessModel = "owner"` (`pkg/liveness-ref.go:39`),
     # carried by `AvailableLivenessModels` (`:46-49`).
-    STORE_PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+    STORE_PRODUCER_KINDS = ("session", "manager", "agent", "cron", "dark-factory")
     STORE_LIVENESS_MODELS = ("session", "heartbeat", "owner")
 
     def _posted(self, command="ask"):

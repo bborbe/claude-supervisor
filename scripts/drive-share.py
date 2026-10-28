@@ -151,28 +151,30 @@ def task_mtime(path):
         return None
 
 
-#: The age cell, in every form the render has been observed to emit: `11m`, `18:04Z`,
-#: `stall 2`. Deliberately narrow -- a shape this does not recognise falls through to the
-#: no-age position and is counted as unparsed, which is loud. Widening it to "anything that
-#: is not a class word" is what let a task basename be read as the class.
-AGE_CELL = re.compile(r"^(?:\d+[smhdw]|\d{2}:\d{2}Z|stall \d+)$", re.I)
-
-
 def class_index(parts):
-    """Which cell holds the class: 3 when an age column precedes it, else 2.
+    """Which cell holds the class: 3 when a leading cell precedes it, else 2.
 
     The two observed shapes differ by exactly one cell -- `name · state · CLASS · task · …`
-    and `name · state · AGE · CLASS · …` -- so the position is *decided*, not searched.
-    Searching forward was the first cut and it walked into the task column: a row reading
-    `brandnewclass · Parked Ideas.md` yielded class `parked` (denominator inflated,
-    `unparsed` 0) and `brandnewclass · Finished Migration.md` was dropped silently.
+    and `name · state · <age> · CLASS · …`.
 
-    The age cell is the discriminator, and it is matched against the forms actually seen
-    rather than guessed at. Measured across five live digests: `11m`, `75s`, `42m`, `25m`,
-    `18:04Z`, `stall 2` -- the last two are why a `\\d+[smhdw]`-only test dropped two real
-    **stalled** rows out of the denominator.
+    ⚠️ **The position is decided structurally, because enumerating the age format does not
+    converge.** Measured across nine live digests the age cell has appeared as `11m`,
+    `75s`, `42m`, `25m`, `0.3h`, `0.1h`, `18:04Z` and `stall 2`; every enumeration missed
+    the next form, and the decimal one alone dropped **13 real stalled/parked rows** on
+    2026-10-28. A pattern is the wrong instrument here.
+
+    The structural fact is that **the class cell is never a task basename**. A cell ending
+    in `.md` is the task column, so a class word found there is the collision case
+    (`brandnewclass · Parked Ideas.md`) and is rejected rather than counted. Two candidate
+    positions, one guard, and anything unrecognised falls through to the loud path.
     """
-    if len(parts) > 3 and AGE_CELL.match(parts[2].strip()):
+    if class_token(parts[2]) in DIGEST_CLASSES and not parts[2].lower().endswith(".md"):
+        return 2
+    if (
+        len(parts) > 3
+        and class_token(parts[3]) in DIGEST_CLASSES
+        and not parts[3].lower().endswith(".md")
+    ):
         return 3
     return 2
 

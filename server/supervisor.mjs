@@ -20,14 +20,15 @@ import { runAgentLoop } from './agent-loop.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
-import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
+import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from './attention-poll.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, clusterAllowlistRefusal, clusterOfTarget, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
@@ -37,6 +38,7 @@ import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveCluster
 import { resolveMessageChannel } from './message-channel.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
+import { tabSpawnInner } from './tab-spawn.mjs'
 import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
@@ -47,6 +49,7 @@ import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatu
 import { findLiveHolder } from './resume-guard.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
+import { answerPathRefusal } from './answer-path.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
@@ -337,6 +340,16 @@ const STATE_DIR = config.stateDir
 const USER_POLICY = config.userPolicy
 const BUNDLED_POLICY = new URL('./policy.json', import.meta.url).pathname
 const PERMISSION_LOG = config.permissionLog
+// The session end record's writer, handed to the spawned pane as `SESSION_EXIT_RECORD`.
+// Resolved from this module so the tab spawn and the rest of the fleet write the same
+// store; a missing or non-executable script is fail-open (every call is `|| true`), so a
+// partial deploy costs a record, never a spawn.
+// `fileURLToPath`, not `.pathname`: a `.pathname` is percent-encoded, so a plugin installed
+// under a path with a space or a non-ASCII character yields `%20`/`%C3%BC` and the variable
+// names a file that does not exist — every write then fails open behind `|| true` and the
+// pane silently records nothing, which reads exactly like a session that is still alive.
+// Same idiom as `server/answer-path.mjs:36`. Raised by the PR review.
+const RECORD_SCRIPT = fileURLToPath(new URL('../scripts/session-exit-record.py', import.meta.url))
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']
 
@@ -634,8 +647,14 @@ function makeCanUseTool(agent) {
         settle,
       }
       // Fail safe: an unanswered prompt must not park a worker forever.
+      // ⚠️ The timeout writes a record BEFORE it settles, and that ordering is the point:
+      // this path used to settle with no `permissions.jsonl` row at all, so a timeout and a
+      // clean exit were indistinguishable in the log and the 7-day criterion had no
+      // observable (SC5(a)). The builder lives in `attention-poll.mjs` because this file
+      // cannot be imported by a test; only the call site is pinned here, by source text.
       const timer = setTimeout(() => {
         log(`permission ${requestId} timed out -> deny`)
+        logPermission(timeoutDecisionRecord({ requestId, agentId: agent.id, park: record }))
         settle({ behavior: 'deny', message: 'Supervisor did not answer within 15 minutes.' })
       }, PERMISSION_TIMEOUT_MS)
 
@@ -1086,7 +1105,12 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   // the parameter, and the half a headless-only implementation leaves unexercised. It goes
   // before the `cd` so it survives the login shell's profile files; see `shellEnvExports`
   // for why it must be an `export` rather than a `VAR=value` prefix on the `cd`.
-  const inner = `${shellEnvExports(env)}cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
+  // The shape — the `EXIT` trap, the start marker, the observer, and the absence of `exec` —
+  // lives in `tab-spawn.mjs`, where it can be asserted on. This is the SIXTH call site of that
+  // shape (the other five are `commands/open.md` ×3, `docs/fleet-surface.md` and
+  // `scripts/restart-worker.py`), and the only one that a review found rather than a test: the
+  // string was built here, so nothing could check it without starting an MCP server.
+  const inner = tabSpawnInner({ cwd, launcher: claudeCmd, tabName, prompt, env })
   // `--window-id` is what puts the tab in a ROLE's window. Omitted, the tab inherits
   // WEZTERM_PANE from the calling session and lands in whatever window the caller is
   // in — which is how a human-only task came up in the Agents window (2026-09-20).
@@ -1096,7 +1120,10 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   if (windowId !== undefined && windowId !== null && String(windowId).trim() !== '') {
     spawnArgs.push('--window-id', String(windowId))
   }
-  spawnArgs.push('--', 'bash', '-lc', inner)
+  // The writer path rides as an `env` assignment rather than a `VAR=value` prefix, because a
+  // spawned pane inherits wezterm's MUX-SERVER environment, not this process's — the same
+  // reason `scripts/restart-worker.py` passes it this way.
+  spawnArgs.push('--', 'env', `SESSION_EXIT_RECORD=${RECORD_SCRIPT}`, 'bash', '-lc', inner)
   const res = spawnSync('wezterm', spawnArgs, { encoding: 'utf8' })
 
   if (res.error || res.status !== 0) {
@@ -2237,6 +2264,32 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     const managerError = await managerLimitError({ operatorNamed })
     if (managerError) return { error: managerError }
   }
+
+  // ⚠️ THE ANSWER-PATH GUARD, and it sits HERE rather than first because it is the only guard
+  // that costs a subprocess. `docs/fleet-surface.md` § Spawn a worker item 6, constraint (a):
+  // a headless worker's permission gate parks with the session that SPAWNED it, so a spawner
+  // with no answer path strands it (measured 2026-09-20: two workers, four gates expired in
+  // ~90 minutes). Nothing asked at the spawn site until now.
+  //
+  // REFUSED rather than warned: a warning cannot block a spawn, and the caller reads the
+  // returned text as the reply. The probe is `scripts/answer-path-check.py` — this server
+  // owns no second observable (see `answer-path.mjs`'s header for why).
+  //
+  // ⚠️ **Placement is a cost decision, and it is a real one.** `parentSessionId` walks the
+  // process tree with up to ten `spawnSync('ps')` calls and `runProbe` shells out to python,
+  // and both are SYNCHRONOUS — this one process also answers every worker's `canUseTool`, so a
+  // hung probe would stall unrelated workers' permission handling for up to its timeout. Every
+  // refusal above costs no subprocess, so they go first: a bad role, a full fleet, an
+  // unsupported resume or policy is answered before the probe is paid for. The remaining
+  // window is the one a spawn would have paid anyway.
+  //
+  // The asking session is resolved the way every ledger row's `parent_session` is: by
+  // walking the process tree, because an MCP server carries no argument naming it.
+  const answerPathError = answerPathRefusal({
+    opensInteractive,
+    sessionId: parentSessionId({ dir: config.sessionsDir }),
+  })
+  if (answerPathError) return { error: answerPathError }
 
   // An explicit window id WINS — the caller may need a window the map does not describe.
   // Otherwise the role decides, in-process, and no window id crosses the tool boundary.

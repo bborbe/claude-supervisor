@@ -126,6 +126,96 @@ def stall_rounds():
     return value if value > 0 else 2
 
 
+def incident_budget():
+    """How many NEW stall incidents one round may open.
+
+    The drive leg caps its own actions for the same reason (`drive-unverifiable.py`,
+    `MAX_ACTIONS`): a population that goes unverifiable together must not become a
+    flood of cards. Measured 2026-10-22: one round opened 117 stall incidents and
+    every one of them became a board card, because the action leg had a cap and
+    this leg did not.
+    """
+    raw = os.environ.get("SUPERVISOR_INCIDENT_STALL_BUDGET", "3")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 3
+    return value if value > 0 else 3
+
+
+def live_sessions():
+    """Every session the heartbeat store lists, or None when the probe failed.
+
+    ⚠️ **`None` is NOT an empty set, and the caller fails OPEN on it.** A store
+    that cannot be reached must never read as "every session is dead": suppressing
+    the whole incident class on an outage is the false-empty this ledger refuses one
+    store over (`read_drive_ledger` refuses a corrupt file for exactly this reason).
+    So an outage keeps the current behaviour and says so, rather than going quiet.
+
+    ⚠️ A session ABSENT from this set is GONE, not silent. `session-liveness.py`
+    separates absent from unknown precisely so a reader can tell them apart, and the
+    distinction is the whole point: a stall is a running session that is not moving,
+    while a session that no longer exists has nothing to investigate and no card the
+    operator could act on.
+    """
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(HERE, "session-liveness.py"),
+                "--list",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    # ⚠️ **The `rows=… registry_live=… degraded=…` header goes to STDERR, not stdout**
+    # (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
+    # tolerance below is therefore not the shape this reads today — it is a guard for
+    # the header moving to stdout, which would otherwise be a one-character change in
+    # the producer that silently turns this gate off. Line-based, never
+    # `stdout.find("[")`: a bracket in a future header would be read as the payload
+    # start, the parse would fail, and the caller would fail OPEN — off, not loud.
+    lines = (result.stdout or "").splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if line.lstrip().startswith("[")), None
+    )
+    if start is None:
+        return None
+    try:
+        rows = json.loads("\n".join(lines[start:]))
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    # ⚠️ **BOTH key spaces, because the two sides do not agree on one.** `--list`
+    # returns full registry UUIDs, while the drive ledger keys its entries on the
+    # 8-char display handle the sweep digest carries (`agents/fleet-drive.md:44`,
+    # `scripts/drive-ledger.py:108`) — every other consumer is prefix-tolerant
+    # (`--check`, `--pane-for`, `transcript_for`'s `session_id[:8]`), which is what
+    # made the mismatch invisible. Returning only the full id would match no
+    # production row at all: every eligible session would read as gone, the incident
+    # class would be silently disabled, and each round would print a plausible skip
+    # line per row. Lower-cased on both sides for the same reason the rest of the
+    # fleet compares ids case-insensitively.
+    live = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        session_id = row.get("sessionId")
+        if not session_id:
+            continue
+        session_id = session_id.lower()
+        live.add(session_id)
+        live.add(session_id[:8])
+    return live
+
+
 def caller_id():
     return (
         os.environ.get("CLAUDE_CODE_SESSION_ID")
@@ -358,6 +448,10 @@ def post_card(incident):
         sys.executable,
         ATTENTION_ASK,
         "post",
+        # Raised by the periodic manager loop (see the module docstring: the ledger
+        # records worker blockers and the manager sweep is what escalates them), so
+        # the card is a manager's escalation even though its subject is a worker.
+        "--producer-kind", "manager",
         "--dedup-key",
         incident["dedup_key"],
         "--payload",
@@ -389,6 +483,16 @@ def cmd_escalate(args):
     to prevent.
     """
     at = parse_ts(now())
+    # ⚠️ The probe runs BEFORE the lock, and only when it can change the outcome:
+    # holding the ledger lock across a subprocess plus an HTTP call would stall every
+    # other writer for the length of a network round trip.
+    pending_due_stall = any(
+        incident.get("outcome") == PENDING
+        and incident.get("kind") == "stall"
+        and past_deadline(incident, at)
+        for incident in read_ledger()["incidents"]
+    )
+    live = live_sessions() if pending_due_stall else None
     with Locked():
         data = read_ledger()
         due = [
@@ -400,7 +504,20 @@ def cmd_escalate(args):
             print("nothing past its deadline")
             return 0
         stamp = "round:%s" % args.round_id if args.round_id else "manual:%s" % caller_id()
+        gone = []
         for incident in due:
+            # ⚠️ A stall incident for a session that is GONE must not become a card:
+            # the card can only say "no verified resume" for a session that no longer
+            # exists, which is nothing the operator can act on. Gating only `stall`,
+            # because a permission or question incident belongs to a live producer
+            # that posted it and is polling for the answer.
+            if (
+                live is not None
+                and incident.get("kind") == "stall"
+                and (incident.get("session_id") or "").lower() not in live
+            ):
+                gone.append(incident["dedup_key"])
+                continue
             if args.dry_run:
                 print("would escalate %s (stamp %s)" % (incident["dedup_key"], stamp))
                 continue
@@ -411,6 +528,13 @@ def cmd_escalate(args):
             incident["outcome"] = TIMED_OUT
             incident["escalated_by"] = stamp
             print("escalated %s (stamp %s)" % (incident["dedup_key"], stamp))
+        if gone:
+            # Left PENDING on purpose: retention is a separate question, and a
+            # `timed-out` stamp would claim an escalation that never happened.
+            print(
+                "skipped %d stall incident(s) for gone sessions: %s"
+                % (len(gone), ", ".join(gone))
+            )
         if not args.dry_run:
             write_ledger(data)
         return 0
@@ -475,22 +599,73 @@ def cmd_stall(args):
 
     ⚠️ This does not count rounds. `drive-unverifiable.py` does, and reading its
     streak is what keeps one measurement in one place.
+
+    ⚠️ **A session that is GONE is skipped, not filed.** The drive ledger keeps
+    retained rows for sessions that have since exited, so a long-dead session can
+    reach any streak at all; an incident for one can only ever produce a card saying
+    "no verified resume", which is nothing the operator can act on. Measured
+    2026-10-22: 117 incidents opened in one round, every one of them for a session
+    absent from the heartbeat store.
+
+    ⚠️ **At most `incident_budget()` new incidents a round.** The per-round cap the
+    drive leg already applies to its own actions had no counterpart here, so the
+    flood arrived through the one door it did not cover.
     """
     required = stall_rounds()
     drive_ledger = args.drive_ledger or os.environ.get(
         "SUPERVISOR_DRIVE_LEDGER"
     ) or os.path.expanduser("~/.claude/state/fleet-drive/ledger.json")
     observed = read_drive_ledger(drive_ledger)
+    if not observed:
+        # A fresh install or an empty ledger has nothing to filter, so the probe's
+        # subprocess + registry read + HTTP call would be paid for nothing.
+        print("no session has stalled for %d consecutive rounds" % required)
+        return 0
+    live = live_sessions()
+    if live is None:
+        sys.stderr.write(
+            "warning: session liveness unavailable, so a gone session cannot be "
+            "told from a stalled one; opening without that filter\n"
+        )
+    eligible = []
+    gone = []
+    for sid in sorted(observed):
+        verdict, streak = observed[sid]
+        if verdict != "unverifiable" or streak < required:
+            continue
+        if live is not None and sid.lower() not in live:
+            gone.append((sid, streak))
+            continue
+        eligible.append((sid, streak))
+    if gone:
+        # One line, not one per row: the drive ledger keeps a row for every session
+        # that has ever been unverifiable, so a per-row line grows without bound as
+        # that graveyard does. The names stay, because a skip that only counted
+        # would be indistinguishable from a threshold that stopped firing.
+        print(
+            "skipped %d gone session(s) past the threshold: %s"
+            % (
+                len(gone),
+                ", ".join("%s(%d)" % (sid, streak) for sid, streak in gone),
+            )
+        )
+    # Longest streak first, then session id — the drive leg's own order, so a backlog
+    # drains oldest-first and nothing starves behind a steady trickle of new rows.
+    eligible.sort(key=lambda row: (-row[1], row[0]))
+    budget = incident_budget()
     opened = 0
     with Locked():
         data = read_ledger()
-        for sid in sorted(observed):
-            verdict, streak = observed[sid]
-            if verdict != "unverifiable" or streak < required:
-                continue
+        for sid, streak in eligible:
             key = dedup_key(sid, "stall")
             if find_open(data["incidents"], key):
                 print("already open %s (streak %d)" % (key, streak))
+                continue
+            if opened >= budget:
+                print(
+                    "held back %s (streak %d): the round's budget of %d is spent"
+                    % (sid, streak, budget)
+                )
                 continue
             at = now()
             incident = {
@@ -518,7 +693,7 @@ def cmd_stall(args):
             )
         if opened and not args.dry_run:
             write_ledger(data)
-    if opened == 0:
+    if opened == 0 and not gone:
         print("no session has stalled for %d consecutive rounds" % required)
     return 0
 
