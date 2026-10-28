@@ -1185,6 +1185,61 @@ class UnroutableHandover(unittest.TestCase):
         self.assertEqual("STOREID", rec["store_item_id"])
 
 
+class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
+    """A pane-less, answerable row is a headless gate — it is never `unroutable`.
+
+    A headless worker owns no pane by construction (`owned_pane()` refuses an
+    unprovable pane, so the hook records `pane: ""`), so every such row took the
+    "no pane recorded" branch and was labelled unroutable **while carrying a working
+    answer command**. Measured 2026-10-24: four operator-bound gates surfaced in one
+    sweep, all four rendered that way, and the operator acted on none of them — the
+    row read as a session that had exited rather than a question waiting.
+
+    Both halves are asserted, because the operator named both: the jump line's
+    wording, and the `?` in the pane column.
+    """
+
+    HEADLESS = {"session_id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "pane": "",
+                "ts": 0, "cwd": "/tmp/x", "kind": "permission", "detail": "d",
+                "store_item_id": "0f701f0b4b654e3338dcc97d9be8b314"}
+
+    def test_a_headless_gate_is_not_called_unroutable(self):
+        rendered = wnm.row(self.HEADLESS, {}, "d")
+        self.assertNotIn("unroutable", rendered)
+        self.assertIn("headless", rendered)
+
+    def test_a_headless_gate_still_hands_over_its_answer_command(self):
+        """The handover is what makes the row actionable — losing it would be worse."""
+        rendered = wnm.row(self.HEADLESS, {}, "d")
+        self.assertIn("attention-answer.py answer 0f701f0b4b654e3338dcc97d9be8b314", rendered)
+        self.assertIn("--decision allow|deny", rendered)
+
+    def test_a_headless_gate_marks_its_pane_column(self):
+        """`?` in the pane column is the other half of the exited-session reading."""
+        self.assertIn("[ hst]", wnm.row(self.HEADLESS, {}, "d"))
+
+    def test_a_pane_less_row_with_nothing_to_answer_stays_unroutable(self):
+        """The negative control: the relabel is scoped to rows that ARE answerable.
+
+        Without a store id there is no handover and no route, so the row is
+        genuinely unroutable and must keep saying so — otherwise this change would
+        dress up a dead end as actionable, which is the failure the original
+        `unroutable` wording existed to prevent.
+        """
+        rec = dict(self.HEADLESS)
+        del rec["store_item_id"]
+        rendered = wnm.row(rec, {}, "d")
+        self.assertIn("unroutable — no pane recorded for this item", rendered)
+        self.assertNotIn("attention-answer.py", rendered)
+
+    def test_a_pane_backed_unroutable_row_is_unchanged(self):
+        """The other negative control: a stale pane is still unroutable, not headless."""
+        rec = dict(self.HEADLESS, pane="999")
+        rendered = wnm.row(rec, {"1": {}}, "d")
+        self.assertIn("unroutable — pane 999 does not resolve to this session", rendered)
+        self.assertNotIn("headless", rendered)
+
+
 class ProvenanceRendering(unittest.TestCase):
     """The row carries its provenance, and an absent value renders as absent.
 

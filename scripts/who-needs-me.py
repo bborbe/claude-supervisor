@@ -1814,6 +1814,15 @@ def row(rec, pmap, what, registry=None):
         # is untouched and keeps the single jump line it has always rendered.
         answer = answer_handover(rec)
         if answer:
+            if not pane:
+                # A headless worker owns no pane BY CONSTRUCTION, so this row is not
+                # unroutable — it is answerable and simply has no jump to offer. The
+                # old wording said the opposite, and the row then read as a session
+                # that had exited rather than a question waiting for an answer, which
+                # is why it was never acted on: measured 2026-10-24, four such gates
+                # surfaced in one sweep and every one was cleared only by a manager
+                # reading the store directly. Name what the row is, not what it lacks.
+                jump = "headless — no pane to jump to; answer with the command below"
             jump = f"{jump}\n         {answer}"
     # A replayed row says so ON THE ROW, in the scan position a manager reads first.
     # The marker is EMPTY when the store answered, so a live read renders
@@ -1821,7 +1830,13 @@ def row(rec, pmap, what, registry=None):
     # a responsive store's output is unchanged, and a marker that was always present
     # would fail it. `replayed` is set by `needs_source()` on the fallback branch.
     mark = "⟳replay  " if rec.get("replayed") else ""
-    return (f"  [{pane or '?':>4}] {age(rec['ts']):>6}  {mark}"
+    # `?` in the pane column read as an exited session rather than a live headless
+    # one — the second half of the same misreading the jump line carried, and the
+    # half the operator named first. `hst` says what the row is; the column keeps
+    # its 4-char width so the table does not shift. Same falsiness as before, so a
+    # pane id that is present still renders unchanged.
+    pane_col = pane if pane else "hst"
+    return (f"  [{pane_col:>4}] {age(rec['ts']):>6}  {mark}"
             f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
             f"         {provenance_of(rec)}\n"
             f"         {jump}")
