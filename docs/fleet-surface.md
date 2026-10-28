@@ -195,6 +195,8 @@ is not a check.
 
 **This section documents `/supervisor:open`'s internals — the spawn shape it produces, and the mechanics every spawn site shares — not a parallel path to use instead of it.** The rule for when a manager dispatches through `/supervisor:open` rather than a bare spawn is stated once, in `docs/session-tiers.md` § The manager boundary; what follows is what that command does under the hood, so read it to understand or debug a spawn.
 
+**Subject precondition — a loop arms only a subject at `phase: execution`.** This is the **subject-level** counterpart to the task-level readiness below: the task is ready, but the goal or topic it belongs to has not passed its own gate. The rule, its refusal shape and its stand-down requirement have a single home in `docs/subject-resolution.md` § The phase precondition — read it there; it is not restated here.
+
 **Readiness precondition — author and score the task before any spawn, or the worker's own gate parks.** A task the manager hand-writes usually ships without `# Tasks` and `# Definition of Done`, so the worker's own `plan-task` gate stops and asks the operator to supply the decomposition — inside the worker's pane, as a multi-question wizard that cannot safely be relayed. Measured 2026-09-19: three hand-written task files produced **three 3-question wizards**, nine operator decisions, none of which needed the repo open. So, before spawning:
 
 1. **Author the task through `/vault-cli:create-task`, passing `--docs-only` or `--code`** — the route you already know, and passing it is what stops `create-task` asking. The wrapper dispatches the `task-creator` agent, which emits exactly the sections `plan-task` needs: `# Success Criteria`, `# Definition of Done`, `# Tasks`.
