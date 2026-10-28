@@ -1231,6 +1231,11 @@ class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
         rendered = wnm.row(rec, {}, "d")
         self.assertIn("unroutable — no pane recorded for this item", rendered)
         self.assertNotIn("attention-answer.py", rendered)
+        # The pane column is scoped with the jump line, not applied to every
+        # pane-less row: with no handover there is no route, and `hst` would claim
+        # a live headless worker where the row may be an exited session.
+        self.assertIn("[   ?]", rendered)
+        self.assertNotIn("hst", rendered)
 
     def test_a_pane_backed_unroutable_row_is_unchanged(self):
         """The other negative control: a stale pane is still unroutable, not headless."""
