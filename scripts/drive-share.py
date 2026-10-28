@@ -179,6 +179,22 @@ def class_index(parts):
     return 2
 
 
+def classification_present(path):
+    """Whether the digest carries a `CLASSIFICATION` heading at all.
+
+    A missing heading is **not** "a fleet with no problems" -- it is a render this parser
+    cannot read (a renamed section, a truncated file), and measuring a share over the
+    ledger alone would silently drop the digest half of the denominator. An explicitly
+    empty section is different: `CLASSIFICATION  UNKNOWN (pass not run)` is a readable
+    statement about the round, so it keeps the `0/0 (n/a)` reading rather than refusing.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return any(line.startswith("CLASSIFICATION") for line in handle)
+    except OSError:
+        return False
+
+
 def digest_rows(path):
     """(rows, unparsed) for the digest's `CLASSIFICATION` section.
 
@@ -202,8 +218,11 @@ def digest_rows(path):
     consecutive live rounds: the fixed index detected 0, 0 and 1; scanning detected 5, 7
     and 1.
 
-    A digest with no `CLASSIFICATION` section yields `([], 0)` and the caller reports the
-    refusal -- never an empty classification, which would read as a fleet with no problems.
+    A digest with no `CLASSIFICATION` section yields `([], 0)` here; `cmd_share` refuses
+    that case through `classification_present()` rather than reporting a share over the
+    ledger alone -- a renamed heading is a render this parser cannot read, not a fleet with
+    no problems. An explicitly empty section (`CLASSIFICATION  UNKNOWN (pass not run)`) is
+    a readable statement and keeps the `0/0 (n/a)` reading.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -285,7 +304,7 @@ def action_taken(entry, sid="", sent=None):
 
 
 def measure(
-    digest_rows,
+    classes,
     entries,
     start,
     transcript_ts_fn=transcript_ts,
@@ -321,7 +340,7 @@ def measure(
         return None
 
     detected = {}
-    for name, sid8, klass in digest_rows or []:
+    for name, sid8, klass in classes or []:
         key = sid8 or name
         if klass in DETECTED_CLASSES or "error" in klass.lower():
             detected[key] = {"name": name, "sid": sid8, "class": klass, "entry": None}
@@ -447,6 +466,13 @@ def cmd_share(args):
         )
         return REFUSED
     rows, unparsed = parsed
+    if not rows and not unparsed and not classification_present(args.digest):
+        print(
+            "drive-share: digest at %s carries no CLASSIFICATION section -- refusing to "
+            "report a share over a classification that could not be found" % args.digest,
+            file=sys.stderr,
+        )
+        return REFUSED
     entries = []
     if args.entries:
         try:

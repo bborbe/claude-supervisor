@@ -6,6 +6,8 @@ distinguishes a computed one is a case where the numerator and the denominator d
 for a stated reason, and a case where an action was taken and still does not verify.
 """
 import importlib.util
+import contextlib
+import io
 import os
 import pathlib
 import shutil
@@ -227,6 +229,25 @@ class TestRealDigestFormat(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual({row["sid"] for row in rows}, {"11111111", "22222222"})
 
+    def test_age_shape_with_unknown_class_is_counted_unparsed(self):
+        """The index-2 fallback must still be loud, not silently misread.
+
+        An age-shape row whose class token is unknown falls back to index 2 and reads the
+        age cell. The row must land in `unparsed` — the loud path — rather than being
+        dropped or classified as something else.
+        """
+        path = os.path.join(self.tmp, "age-unknown.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 1 sessions\n"
+                "CLASSIFICATION  1 classified\n"
+                "  Odd [88888888] · shell · 0.3h · brandnewclass · Task.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        rows, unparsed = drive_share.digest_rows(path)
+        self.assertEqual(rows, [])
+        self.assertEqual(unparsed, 1)
+
     def test_unknown_class_token_is_counted_not_swallowed(self):
         """The fail-quiet path: an unrecognised token must be REPORTED, not skipped.
 
@@ -414,6 +435,33 @@ class TestRefusals(Fixture):
     def test_bad_round_tag_refuses(self):
         rc = drive_share.main(["share", "--round", "round-14", "--digest", self.digest])
         self.assertEqual(rc, drive_share.REFUSED)
+
+    def test_missing_classification_section_refuses(self):
+        """A renamed or truncated section is unreadable, not a fleet with no problems."""
+        path = os.path.join(self.tmp, "nosection.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("DIGEST x · 0 sessions\nNOTES\n  nothing here\n")
+        rc = drive_share.main(["share", "--round", ROUND, "--digest", path])
+        self.assertEqual(rc, drive_share.REFUSED)
+
+    def test_cmd_share_prints_the_unparsed_warning_end_to_end(self):
+        """The warning must reach stdout beside a real denominator, not just from render()."""
+        path = os.path.join(self.tmp, "odd.digest")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x · 2 sessions\n"
+                "CLASSIFICATION  2 classified\n"
+                "  Parked One [11111111] · idle · parked · Task.md · 1 · url\n"
+                "  Odd One [22222222] · idle · brandnewclass · Task.md · 1 · url\n"
+                "BLOCKED (feed, raised — not verified open)\n"
+            )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = drive_share.main(["share", "--round", ROUND, "--digest", path])
+        self.assertEqual(rc, 0)
+        printed = out.getvalue()
+        self.assertIn("1 CLASSIFICATION line(s) could not be read as a row", printed)
+        self.assertIn("share: 0/1 (0%)", printed)
 
     def test_both_round_spellings_parse(self):
         self.assertEqual(
