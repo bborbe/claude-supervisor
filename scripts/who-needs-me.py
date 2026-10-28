@@ -1800,6 +1800,7 @@ def answer_handover(rec):
 
 def row(rec, pmap, what, registry=None):
     pane = rec.get("pane")
+    headless = False
     if pane and is_routable(rec, pmap, registry):
         jump = f"wezterm cli activate-pane --pane-id {pane}"
     else:
@@ -1814,6 +1815,15 @@ def row(rec, pmap, what, registry=None):
         # is untouched and keeps the single jump line it has always rendered.
         answer = answer_handover(rec)
         if answer:
+            if not pane:
+                # A headless worker owns no pane by construction (`owned_pane()`
+                # refuses an unprovable pane, so the hook records `pane: ""`), so the
+                # row is answerable with no jump to offer. Calling it unroutable made
+                # it read as an exited session and it went unacted on — measured
+                # 2026-10-24, four such gates in one sweep, each cleared only by a
+                # manager reading the store directly.
+                headless = True
+                jump = "headless — no pane to jump to; answer with the command below"
             jump = f"{jump}\n         {answer}"
     # A replayed row says so ON THE ROW, in the scan position a manager reads first.
     # The marker is EMPTY when the store answered, so a live read renders
@@ -1821,7 +1831,14 @@ def row(rec, pmap, what, registry=None):
     # a responsive store's output is unchanged, and a marker that was always present
     # would fail it. `replayed` is set by `needs_source()` on the fallback branch.
     mark = "⟳replay  " if rec.get("replayed") else ""
-    return (f"  [{pane or '?':>4}] {age(rec['ts']):>6}  {mark}"
+    # `hst` is scoped exactly like the jump relabel above — it marks a row we can
+    # route to an answer, not merely one with no pane. A pane-less row with nothing
+    # to answer (a replayed log row, or one kept because the pane list was
+    # unreadable) may be an exited session, so it keeps `?`: claiming a live
+    # headless worker there would be the same overstatement this change removes
+    # one branch up. Column width is unchanged, so the table does not shift.
+    pane_col = pane if pane else ("hst" if headless else "?")
+    return (f"  [{pane_col:>4}] {age(rec['ts']):>6}  {mark}"
             f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
             f"         {provenance_of(rec)}\n"
             f"         {jump}")
