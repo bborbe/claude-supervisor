@@ -448,6 +448,10 @@ def post_card(incident):
         sys.executable,
         ATTENTION_ASK,
         "post",
+        # Raised by the periodic manager loop (see the module docstring: the ledger
+        # records worker blockers and the manager sweep is what escalates them), so
+        # the card is a manager's escalation even though its subject is a worker.
+        "--producer-kind", "manager",
         "--dedup-key",
         incident["dedup_key"],
         "--payload",

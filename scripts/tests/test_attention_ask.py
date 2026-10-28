@@ -50,7 +50,8 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SCRIPT = os.path.join(os.path.dirname(_HERE), "attention-ask.py")
+_SCRIPTS_DIR = os.path.dirname(_HERE)
+_SCRIPT = os.path.join(_SCRIPTS_DIR, "attention-ask.py")
 
 _spec = importlib.util.spec_from_file_location("attention_ask", _SCRIPT)
 ask = importlib.util.module_from_spec(_spec)
@@ -364,11 +365,11 @@ class ProducerKindTest(unittest.TestCase):
     unknown value with a `400` naming the field, so an invented kind used to cost
     a round trip and read as a store fault rather than a bad argument. `choices=`
     refuses it client-side instead, which is correct only while this tuple still
-    carries the four the store accepts.
+    carries the five the store accepts.
 
     ⚠️ **Nothing here checks that against the store.** The enum's source is
     `attention-controller` `pkg/producer-kind.go`, a sibling repo this suite does
-    not read, so the second case pins the tuple to the four values this repo
+    not read, so the second case pins the tuple to the five values this repo
     *records* — the comment block at `scripts/pod-attention.py:104` and its mirror
     in `test_pod_attention.py`. A local edit that widens or narrows the tuple
     fails there; a change on the store's side passes silently, and the e2e is what
@@ -1326,6 +1327,99 @@ class MechanismTest(unittest.TestCase):
         rc, body, _ = self._post(mechanism=mock.Mock())
         self.assertEqual(rc, 0)
         self.assertEqual(body["answer_mechanism"], "message")
+
+
+_REPO = os.path.dirname(_SCRIPTS_DIR)
+
+
+def _load_script(name, filename):
+    """Import a sibling script by path, the way this file imports `attention-ask.py`."""
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(_SCRIPTS_DIR, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ManagerCallSitesPassTheKindTest(unittest.TestCase):
+    """Every manager-loop posting site must pass `--producer-kind manager`.
+
+    ⚠️ **`--producer-kind` DEFAULTS to `session`**, so a call site that omits the
+    flag keeps emitting `session` silently — the omission is the failure mode,
+    not a neutral default. That makes a reverted flag invisible to every other
+    test in this suite: the enum still accepts `manager`, the store still
+    accepts the post, and only the board's grouping is wrong. Each site is
+    pinned here for that reason.
+    """
+
+    def _captured_argv(self, module, call):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return mock.Mock(
+                returncode=0,
+                stdout="ITEM_ID: %s\n" % STORE_ITEM_ID,
+                stderr="",
+            )
+
+        with mock.patch.object(module.subprocess, "run", fake_run):
+            call()
+        self.assertIn("cmd", captured, "the call site never shelled out")
+        return captured["cmd"]
+
+    def assert_manager_kind(self, cmd, site):
+        self.assertIn("--producer-kind", cmd, f"{site} omits --producer-kind")
+        self.assertEqual(
+            "manager",
+            cmd[cmd.index("--producer-kind") + 1],
+            f"{site} does not pass manager",
+        )
+
+    def test_open_items_posts_its_ledger_cards_as_manager(self):
+        module = _load_script("open_items_under_test", "open-items.py")
+        item = {"id": "abc", "text": "a question", "card_options": ["one", "two"]}
+        cmd = self._captured_argv(
+            module,
+            lambda: module.post_card(item, "sid-1", script_dir=_SCRIPTS_DIR),
+        )
+        self.assert_manager_kind(cmd, "scripts/open-items.py post_card")
+
+    def test_propose_managers_posts_as_manager(self):
+        module = _load_script("propose_managers_under_test", "propose-managers.py")
+        card = {
+            "dedup_key": "key",
+            "payload": "a question",
+            "context": "why",
+            "recommend": "start manager",
+            "options": ["start manager", "not now"],
+        }
+        cmd = self._captured_argv(module, lambda: module.post(card))
+        self.assert_manager_kind(cmd, "scripts/propose-managers.py post")
+
+    def test_every_manager_command_posting_site_carries_the_flag(self):
+        # The markdown call sites are prose, so they cannot be argv-captured.
+        # Pinning the literal flag is what stops one being reverted as noise.
+        sites = [
+            "agents/goal-drive.md",
+            "commands/open.md",
+            "commands/steps/covered-subject-invariant.md",
+            "commands/steps/drive.md",
+            "commands/steps/goal-gates.md",
+            "commands/steps/goal-under-target.md",
+            "commands/steps/needs-input.md",
+            "commands/steps/readings.md",
+            "commands/steps/round-tail.md",
+        ]
+        for site in sites:
+            with self.subTest(site=site):
+                with open(os.path.join(_REPO, site), encoding="utf-8") as handle:
+                    body = handle.read()
+                self.assertIn(
+                    "--producer-kind manager",
+                    body,
+                    f"{site} no longer passes --producer-kind manager",
+                )
 
 
 if __name__ == "__main__":
