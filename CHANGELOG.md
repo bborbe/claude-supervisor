@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a reaped `permission` gate stops reading as open, and the arm stops naming a cause the store cannot establish.** Two surfaces misreported the same close. `poll` printed `OPEN` for any record carrying neither an answer nor an act — a branch deliberately *not* keyed on `state` — so a card closed by a dead producer's sweep read exactly like a live gate; measured 2026-10-27, `poll` and `answer` disagreed about one card seconds apart. That branch is now keyed on `state == "open"`, and a reaped close falls through to `NOT_OPERATOR_ANSWERED:`, still distinct from the `ANSWERED:` an acknowledgement reaches, so the separation the old branch existed to protect survives without the overload. ⚠️ **"No actor" is not a synonym for "producer exited"**: the watcher's dead-session sweep, the compact-crossing clear, a forwarded `SessionEnd` and `close_session_approval` all post an empty body — and the last is not an exit at all. The `ITEM_CLOSED:` refusal therefore now says the store does not record *why* a card left, instead of offering "the card was cleared, or its producer exited" as if the record had settled which; the `LOST:` fallback stops merging *answered* with *no longer open* for the same reason, at strictly less evidence. `commands/attention-next.md` was still repeating the two-cause claim, so it is corrected too. Change set: `scripts/attention-ask.py`, `scripts/attention-answer.py`, `commands/attention-next.md`, `CHANGELOG.md`.
+
 ## v0.211.0
 
 - feat: a goal or topic loop arms only a subject at `phase: execution`; it otherwise refuses and names the level's gate command — the round re-arms so the re-check is automatic, the arm asks the operator to re-run it

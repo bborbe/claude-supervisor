@@ -929,23 +929,36 @@ class PollTest(unittest.TestCase):
         self.assertIn("item is answered", text)
         self.assertNotIn("item is closed", text)
 
-    def test_reaped_close_with_no_actor_reads_as_open(self):
-        # The dominant closed shape in the live store is a reap: no
-        # answered_at, no answered_by, no client. It is not an act by anyone,
-        # so it must not be reported as an answer in either direction.
+    def test_reaped_close_with_no_actor_does_not_read_as_open(self):
+        # ⚠️ Reversed 2026-10-27. This shape — `closed`, no `answered_at`, no
+        # `answered_by` — is the no-actor close, and it used to print OPEN so
+        # that a reap stayed distinct from an acknowledgement. It bought that at
+        # the cost of the pair that actually fails: a reaped close and a LIVE
+        # gate both printed OPEN, and on 2026-10-27 `poll` and `answer` disagreed
+        # about one card seconds apart because of it. The store cannot name the
+        # cause either — an empty-body close comes from the dead-session sweep,
+        # the compact-crossing clear, a forwarded SessionEnd and
+        # `close_session_approval`, and the last is not a producer exit at all —
+        # so OPEN is not a claim this record can support. NOT_OPERATOR_ANSWERED
+        # is still distinct from the ANSWERED: an acknowledgement reaches, which
+        # is the separation the old branch existed to protect.
         rc, text = self.poll({"item_id": STORE_ITEM_ID, "state": "closed"})
         self.assertEqual(rc, 0)
-        self.assertIn("OPEN", text)
-        self.assertNotIn("NOT_OPERATOR_ANSWERED", text)
+        self.assertIn("NOT_OPERATOR_ANSWERED", text)
+        self.assertNotIn("OPEN", text)
 
-    def test_answer_absent_reads_as_open_even_when_state_says_answered(self):
-        # A permission-class item is answered with a `decision` and carries no
-        # `answer`, so the poll must not report content that is not there.
+    def test_answer_absent_and_state_not_open_does_not_read_as_open(self):
+        # The same guard, second shape: an `answered` record carrying no
+        # `answered_at` classifies as NOTHING, and OPEN is the one terminal that
+        # must not be printed for a record which has left `open`. The arm cannot
+        # render a `decision` as answer content, so it says it has no answer
+        # recorded rather than claiming the gate is still waiting.
         rc, text = self.poll(
             {"item_id": STORE_ITEM_ID, "state": "answered", "decision": "allow"}
         )
         self.assertEqual(rc, 0)
-        self.assertIn("OPEN", text)
+        self.assertIn("NOT_OPERATOR_ANSWERED", text)
+        self.assertNotIn("OPEN", text)
 
     def poll_error(self, code, body=b""):
         # fetch_item passes a URL string to urlopen, not a Request, so the fake

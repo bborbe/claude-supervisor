@@ -186,22 +186,41 @@ def answer_conflict_line(item_id, err, verb):
     item, "deliver" for a permission one -- so each branch keeps its own word for
     what it is refusing. An unreadable or unknown code falls back to the generic
     line rather than to either named one: a code this arm cannot read is not
-    evidence of which failure happened, and the two named lines claim a specific
-    cause.
+    evidence of which failure happened.
+
+    ⚠️ **`ITEM_CLOSED` does NOT name a cause, and that is deliberate.** It used
+    to read "the card was cleared, or its producer exited" -- two causes offered
+    as if the record settled which. It cannot. A `permission` gate that leaves
+    the queue with no verdict carries no `answered_by` (the store refuses an
+    arm-caused close of an open gate, so there is no actor to read) and that
+    same no-actor close is produced by a producer exit, by a compact-crossing
+    clear and by a forwarded `SessionEnd` -- so the record establishes that the
+    gate was never answered, and establishes nothing about why. Saying so is the
+    honest line; picking one cause would invent a fact.
+
+    ⚠️ The `LOST:` fallback must not merge its two causes either. It fires on a
+    code this arm could not read at all, which is strictly LESS evidence than
+    `ITEM_CLOSED` carries -- so a line asserting "already answered or no longer
+    open" claims two specific causes from zero information.
     """
     code = store_error_code(err)
     if code == STORE_CODE_ITEM_CLOSED:
         return (
-            f"ITEM_CLOSED: {item_id} left the queue before this answer arrived -- the card "
-            f"was cleared, or its producer exited; no arm can answer it now and no verdict "
-            f"was recorded; do not {verb}"
+            f"ITEM_CLOSED: {item_id} left the queue before this answer arrived and no "
+            f"verdict was recorded; the store does not record why -- a cleared card, a "
+            f"withdrawn one and one whose producer exited leave the same record, so no "
+            f"arm can establish the cause and none can answer it now; do not {verb}"
         )
     if code == STORE_CODE_ALREADY_ANSWERED:
         return (
             f"ALREADY_ANSWERED: {item_id} already has a verdict from another arm; "
             f"do not {verb}"
         )
-    return f"LOST: {item_id} already answered or no longer open -- do not {verb}"
+    return (
+        f"LOST: {item_id} was not answered by this arm -- the store refused it with a code "
+        f"this arm cannot read, so it cannot say whether the card already had a verdict or "
+        f"had left the queue; do not {verb}"
+    )
 
 
 def cmd_next(registry, out=sys.stdout):
