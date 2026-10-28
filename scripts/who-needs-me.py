@@ -1815,13 +1815,12 @@ def row(rec, pmap, what, registry=None):
         answer = answer_handover(rec)
         if answer:
             if not pane:
-                # A headless worker owns no pane BY CONSTRUCTION, so this row is not
-                # unroutable — it is answerable and simply has no jump to offer. The
-                # old wording said the opposite, and the row then read as a session
-                # that had exited rather than a question waiting for an answer, which
-                # is why it was never acted on: measured 2026-10-24, four such gates
-                # surfaced in one sweep and every one was cleared only by a manager
-                # reading the store directly. Name what the row is, not what it lacks.
+                # A headless worker owns no pane by construction (`owned_pane()`
+                # refuses an unprovable pane, so the hook records `pane: ""`), so the
+                # row is answerable with no jump to offer. Calling it unroutable made
+                # it read as an exited session and it went unacted on — measured
+                # 2026-10-24, four such gates in one sweep, each cleared only by a
+                # manager reading the store directly.
                 jump = "headless — no pane to jump to; answer with the command below"
             jump = f"{jump}\n         {answer}"
     # A replayed row says so ON THE ROW, in the scan position a manager reads first.
@@ -1830,11 +1829,10 @@ def row(rec, pmap, what, registry=None):
     # a responsive store's output is unchanged, and a marker that was always present
     # would fail it. `replayed` is set by `needs_source()` on the fallback branch.
     mark = "⟳replay  " if rec.get("replayed") else ""
-    # `?` in the pane column read as an exited session rather than a live headless
-    # one — the second half of the same misreading the jump line carried, and the
-    # half the operator named first. `hst` says what the row is; the column keeps
-    # its 4-char width so the table does not shift. Same falsiness as before, so a
-    # pane id that is present still renders unchanged.
+    # A pane-less row is a live headless session, not an exited one — `?` in the
+    # pane column read as the latter. `hst` names it, and the column keeps its
+    # 4-char width so the table does not shift. Same falsiness as before, so a pane
+    # id that is present still renders unchanged.
     pane_col = pane if pane else "hst"
     return (f"  [{pane_col:>4}] {age(rec['ts']):>6}  {mark}"
             f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
