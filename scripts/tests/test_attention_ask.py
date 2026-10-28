@@ -1397,9 +1397,32 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
         cmd = self._captured_argv(module, lambda: module.post(card))
         self.assert_manager_kind(cmd, "scripts/propose-managers.py post")
 
+    def test_incident_ledger_posts_its_escalation_as_manager(self):
+        module = _load_script("incident_ledger_under_test", "incident-ledger.py")
+        incident = {
+            "dedup_key": "incident:abc",
+            "session_id": "sid-1",
+            "kind": "stall",
+            "owner": "worker",
+            "opened_at": "2026-10-28T10:00:00Z",
+            "deadline": "2026-10-28T12:00:00Z",
+            "detected_by": "sweep",
+        }
+        cmd = self._captured_argv(module, lambda: module.post_card(incident))
+        self.assert_manager_kind(cmd, "scripts/incident-ledger.py post_card")
+
     def test_every_manager_command_posting_site_carries_the_flag(self):
         # The markdown call sites are prose, so they cannot be argv-captured.
-        # Pinning the literal flag is what stops one being reverted as noise.
+        #
+        # ⚠️ **Per INVOCATION, not per file.** A file-level `assertIn` passes as
+        # soon as ONE of a file's posting sites carries the flag, which is how
+        # `commands/steps/goal-gates.md` shipped with its second site (the
+        # `waiting-approval` `post-batch`) still defaulting to `session`. Both
+        # `goal-gates.md` and `agents/goal-drive.md` carry more than one.
+        #
+        # A bare `attention-ask.py post` in backticks is a PROSE reference to the
+        # verb, not an invocation, so the closing backtick is excluded — otherwise
+        # "in the order `attention-ask.py post` takes them" reads as a call site.
         sites = [
             "agents/goal-drive.md",
             "commands/open.md",
@@ -1411,15 +1434,24 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
             "commands/steps/readings.md",
             "commands/steps/round-tail.md",
         ]
+        invocation = re.compile(r"attention-ask\.py\s+(post-batch|post)(?!`)")
+        seen = 0
         for site in sites:
             with self.subTest(site=site):
                 with open(os.path.join(_REPO, site), encoding="utf-8") as handle:
                     body = handle.read()
-                self.assertIn(
-                    "--producer-kind manager",
-                    body,
-                    f"{site} no longer passes --producer-kind manager",
-                )
+                matches = list(invocation.finditer(body))
+                self.assertTrue(matches, f"{site} has no posting invocation")
+                for match in matches:
+                    seen += 1
+                    window = body[match.start():match.start() + 400]
+                    self.assertIn(
+                        "--producer-kind manager",
+                        window,
+                        f"{site}: the invocation at offset {match.start()} does "
+                        "not pass --producer-kind manager",
+                    )
+        self.assertGreaterEqual(seen, 10, "the site list stopped covering the tree")
 
 
 if __name__ == "__main__":
