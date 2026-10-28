@@ -949,6 +949,20 @@ class PollTest(unittest.TestCase):
         self.assertIn("NOT_OPERATOR_ANSWERED", text)
         self.assertNotIn("OPEN", text)
 
+    def test_record_with_no_state_does_not_read_as_open(self):
+        # ⚠️ The fail-closed half of the guard, and the one shape it was added
+        # for that had no fixture. `state` is what the OPEN branch keys on, so a
+        # record carrying none must not be claimed as open. It must also not be
+        # *described* as open: `classify` used to default an absent state to
+        # `open`, so this record printed `NOT_OPERATOR_ANSWERED: (no answer
+        # content recorded; item is None) -- no answer recorded (state open)` —
+        # naming the very state the gate had just rejected.
+        rc, text = self.poll({"item_id": STORE_ITEM_ID})
+        self.assertEqual(rc, 0)
+        self.assertIn("NOT_OPERATOR_ANSWERED", text)
+        self.assertNotIn("OPEN", text)
+        self.assertIn("no answer recorded (state unreadable)", text)
+
     def test_answer_absent_and_state_not_open_does_not_read_as_open(self):
         # The same guard, second shape: an `answered` record carrying no
         # `answered_at` classifies as NOTHING, and OPEN is the one terminal that

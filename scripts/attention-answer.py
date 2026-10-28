@@ -210,9 +210,11 @@ def answer_conflict_line(item_id, err, verb):
     if code == STORE_CODE_ITEM_CLOSED:
         return (
             f"ITEM_CLOSED: {item_id} left the queue before this answer arrived and no "
-            f"verdict was recorded; the store does not record why -- a cleared card, a "
-            f"withdrawn one and one whose producer exited leave the same record, so no "
-            f"arm can establish the cause and none can answer it now; do not {verb}"
+            f"verdict was recorded; the store does not record why -- the dead-session "
+            f"sweep, the compact-crossing clear, a forwarded SessionEnd and the "
+            f"compact-approval clear all leave the same closed row with no actor, and "
+            f"one of them is not a producer exit at all, so no arm can establish the "
+            f"cause and none can answer it now; do not {verb}"
         )
     if code == STORE_CODE_ALREADY_ANSWERED:
         return (

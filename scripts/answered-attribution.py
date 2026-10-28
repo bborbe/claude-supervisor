@@ -71,7 +71,10 @@ Load it the way the tree loads its siblings (`fleet-board.py:77`):
 # The store's own state vocabulary. `closed` is **not** an act — see
 # `was_acted_on`: a close records that a card was cleared, not that anything was
 # answered. The state stays in the vocabulary because a sweep must still be able
-# to name what it saw.
+# to name what it saw. ⚠️ `OPEN` is the only state no branch in this module
+# compares against, and that is deliberate: it is the one live value, and
+# `classify` must never *default* to it — an absent state is `unreadable`, not
+# open, so a caller gating on `state == "open"` and this reason line agree.
 OPEN = "open"
 ANSWERED = "answered"
 CLOSED = "closed"
@@ -172,7 +175,13 @@ def classify(item):
     """
     item = item or {}
     if not was_acted_on(item):
-        state = item.get("state") or OPEN
+        # ⚠️ **Never default this to `OPEN`.** `attention-ask.py`'s poll gates its
+        # `OPEN` terminal on `state == "open"`, so a record with no readable
+        # state is deliberately NOT claimed as open there. A fallback of `OPEN`
+        # here made the reason line contradict that gate on the same record —
+        # `NOT_OPERATOR_ANSWERED: … (state None) -- no answer recorded (state
+        # open)` — naming the one state the caller had just rejected.
+        state = item.get("state") or "unreadable"
         return NOTHING, f"no answer recorded (state {state})"
 
     # ⚠️ **A close is a clear, not an answer — 2026-09-27.** `was_acted_on` still
