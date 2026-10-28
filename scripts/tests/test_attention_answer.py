@@ -10,11 +10,14 @@ Covers the two decisions that make an answer safe to route:
     print a TARGET. A 409 must never be followed by a route, and an `ack` item
     must be refused before the store is written at all.
   * the 409 itself -- the status covers more than one failure, so the body's
-    `error.code` names which: ITEM_CLOSED (the card was cleared and left the
-    queue, so no arm can answer it) must read differently from ALREADY_ANSWERED
-    (another arm's verdict landed first). A code the arm cannot read falls back
-    to the generic line, because a body it cannot parse is not evidence of
-    either, and both named lines claim a specific cause.
+    `error.code` names which: ITEM_CLOSED (the card left the queue, so no arm
+    can answer it) must read differently from ALREADY_ANSWERED (another arm's
+    verdict landed first). A code the arm cannot read falls back to the generic
+    line, because a body it cannot parse is not evidence of either.
+    ⚠️ **ITEM_CLOSED names no cause** — the store does not record why a card
+    left, so the line states that rather than picking one; only
+    ALREADY_ANSWERED claims a specific fact, and that fact is the verdict's
+    existence, which the code does establish.
   * the permission branch -- a permission-class item needs an explicit
     --decision. Without one it is refused rather than defaulted, because
     neither an implicit allow nor an implicit deny is safe; with one it prints
@@ -171,17 +174,23 @@ class AnswerGateTest(unittest.TestCase):
         self.assertIn("LOST:", out)
         self.assertNotIn("DELIVERY", out)
 
-    def test_item_closed_names_the_cleared_card(self):
+    def test_item_closed_does_not_pick_a_cause(self):
         item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
         rc, out, _ = self._run(item, post=_conflict("ITEM_CLOSED"))
         self.assertEqual(rc, 1)
         self.assertIn("ITEM_CLOSED:", out)
         self.assertNotIn("LOST:", out)
-        # The whole point of the split: a reader who sees only this line must
-        # learn the card was cleared and no verdict was recorded, which is a
-        # different fact about the gate from a lost race.
-        self.assertIn("cleared", out)
+        # ⚠️ The whole point of the split is that a reader who sees only this
+        # line learns no verdict was recorded — NOT which cause produced it. The
+        # line used to offer "the card was cleared, or its producer exited" as
+        # if the record had settled which; it cannot. An empty-body close comes
+        # from the dead-session sweep, the compact-crossing clear, a forwarded
+        # SessionEnd and `close_session_approval`, and the last is not a
+        # producer exit at all. Naming one member of that set would be a claim
+        # the record does not support, so the line must name the ambiguity.
         self.assertIn("no verdict was recorded", out)
+        self.assertIn("the store does not record why", out)
+        self.assertNotIn("producer exited;", out)
         self.assertNotIn("TARGET", out)
 
     def test_already_answered_names_the_lost_race(self):
@@ -199,6 +208,13 @@ class AnswerGateTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("LOST:", out)
         self.assertNotIn("ITEM_CLOSED:", out)
+        # ⚠️ This branch fires on a code the arm could not read at all, so it
+        # carries strictly LESS evidence than ITEM_CLOSED carries — and it used
+        # to assert "already answered or no longer open", two specific causes
+        # drawn from zero information. It must now say it cannot tell which.
+        self.assertIn("cannot read", out)
+        self.assertIn("cannot say whether", out)
+        self.assertNotIn("already answered or no longer open", out)
         self.assertNotIn("ALREADY_ANSWERED:", out)
 
     def test_unknown_code_falls_back_to_the_generic_line(self):

@@ -996,19 +996,45 @@ def cmd_poll(item_id, out=sys.stdout):
     verdict, reason = attribution.classify(item)
     described = describe_answer(item)
     # `OPEN` is the one terminal that means "still unanswered", and it is
-    # reached only when the record carries neither an answer nor an act. An
-    # item that moved but whose mover cannot be attributed falls through to
-    # NOT_OPERATOR_ANSWERED rather than being read as open — failing closed in
-    # that direction is what keeps a re-ask from looking like a lost gate.
+    # reached only when the record is still open AND carries neither an answer
+    # nor an act. An item that moved but whose mover cannot be attributed falls
+    # through to NOT_OPERATOR_ANSWERED rather than being read as open — failing
+    # closed in that direction is what keeps a re-ask from looking like a lost
+    # gate.
     #
-    # ⚠️ **This branch is deliberately NOT keyed on `state`, and 2026-09-27 is
-    # why it was checked.** A `closed` item that carries an actor still classifies
-    # as an act and falls through to NOT_OPERATOR_ANSWERED — the item moved, and
-    # saying "open" would invite a manager to keep waiting on a card that is
-    # gone. Only a record with no actor at all — the reaped close — reaches OPEN
-    # here, which is what makes a reap and an acknowledgement distinguishable in
-    # the terminal rather than collapsed into one word.
-    if verdict == attribution.NOTHING and described is None:
+    # ⚠️ **This branch IS keyed on `state`, and the 2026-09-27 note it replaces
+    # is why.** That note argued the opposite: a record with no actor at all —
+    # the reaped close — should reach OPEN, so a reap and an acknowledgement
+    # stay distinguishable in the terminal. The reasoning holds; the terminal it
+    # picked does not. A reap is not the only record with no actor. Every one of
+    # these posts an empty body and lands here with no `answered_by`:
+    # `sweep_dead_sessions` (attention-watcher.py:668), the compact-crossing
+    # clear (:1327), a forwarded `SessionEnd` (:2991), and
+    # `close_session_approval` (:1213) — and the last is not a producer exit at
+    # all. So "no actor" cannot stand in for "open", and printing OPEN for it
+    # made a reaped close read exactly like a live gate: measured 2026-10-27,
+    # `poll` and `answer` disagreed about one card seconds apart because of it.
+    #
+    # The separation the old note protected survives, but on a different field,
+    # and saying so plainly is the point of this paragraph. A reaped close now
+    # falls through to NOT_OPERATOR_ANSWERED — and so does an acknowledgement,
+    # the actor-carrying close (`state: closed` + `answered_by`, no
+    # `answered_at`), which `answered-attribution.py` deliberately does not
+    # treat as a release (pinned by
+    # `test_ack_close_with_no_client_is_not_operator_answered`). The two stay
+    # distinguishable by `ANSWERED_BY:` — an acknowledgement carries an actor
+    # and a reap carries none — not by the terminal word. What the old branch
+    # actually bought was a word that also meant "a live gate is waiting", and
+    # that overload is what this change gives up. `state` is the only field that
+    # can carry the open/not-open distinction: the store refuses an arm-caused
+    # close of an open `permission` gate (attention-store-impl.go:1498-1506),
+    # so the reaped record has no `answered_by` to read. A record whose `state`
+    # is unreadable is not claimed as open either; failing closed is the point.
+    if (
+        verdict == attribution.NOTHING
+        and described is None
+        and item.get("state") == "open"
+    ):
         print("OPEN", file=out)
         return 0
     answered_by = item.get("answered_by") or ""
