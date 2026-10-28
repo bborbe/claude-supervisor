@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.211.1
 
 - docs: state the subject-level phase precondition beside the spawn readiness rules in `docs/fleet-surface.md` § Spawn a worker
 - fix: a phase-refused loop stands down rather than re-arming — re-arming records liveness and hides the subject from the armed-set check, and a bare stop is restarted uncapped by the topic keep-alive
