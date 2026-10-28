@@ -1015,13 +1015,21 @@ def cmd_poll(item_id, out=sys.stdout):
     # made a reaped close read exactly like a live gate: measured 2026-10-27,
     # `poll` and `answer` disagreed about one card seconds apart because of it.
     #
-    # The separation the old note protected survives without the overload: a
-    # reaped close now falls through to NOT_OPERATOR_ANSWERED, still distinct
-    # from the ANSWERED: an acknowledgement reaches. `state` is the only field
-    # that can carry this — the store refuses an arm-caused close of an open
-    # `permission` gate (attention-store-impl.go:1498-1506), so the record has
-    # no `answered_by` to read. A record whose `state` is unreadable is not
-    # claimed as open either; failing closed is the point.
+    # The separation the old note protected survives, but on a different field,
+    # and saying so plainly is the point of this paragraph. A reaped close now
+    # falls through to NOT_OPERATOR_ANSWERED — and so does an acknowledgement,
+    # the actor-carrying close (`state: closed` + `answered_by`, no
+    # `answered_at`), which `answered-attribution.py` deliberately does not
+    # treat as a release (pinned by
+    # `test_ack_close_with_no_client_is_not_operator_answered`). The two stay
+    # distinguishable by `ANSWERED_BY:` — an acknowledgement carries an actor
+    # and a reap carries none — not by the terminal word. What the old branch
+    # actually bought was a word that also meant "a live gate is waiting", and
+    # that overload is what this change gives up. `state` is the only field that
+    # can carry the open/not-open distinction: the store refuses an arm-caused
+    # close of an open `permission` gate (attention-store-impl.go:1498-1506),
+    # so the reaped record has no `answered_by` to read. A record whose `state`
+    # is unreadable is not claimed as open either; failing closed is the point.
     if (
         verdict == attribution.NOTHING
         and described is None

@@ -151,8 +151,11 @@ def post_answer(item_id, answered_by, resolved_by="", decision=""):
 # The answer endpoint returns HTTP 409 for more than one failure, and the status
 # alone cannot tell them apart -- only the `error.code` in the body can. The two
 # this arm can meet are different facts about the gate, so each gets its own
-# line: ITEM_CLOSED means the card left the queue before the answer arrived (the
-# board cleared it, or its producer exited) and no arm can answer it now;
+# line: ITEM_CLOSED means the card left the queue before the answer arrived and
+# no arm can answer it now -- ⚠️ **and it does not say why, because the record
+# does not.** A cleared card, a withdrawn one and one whose producer exited
+# leave the same `closed` row with no actor, so naming any of them would be a
+# claim the store cannot support; the line says so instead.
 # ALREADY_ANSWERED means another arm's verdict landed first. Neither is a retry.
 STORE_CODE_ITEM_CLOSED = "ITEM_CLOSED"
 STORE_CODE_ALREADY_ANSWERED = "ALREADY_ANSWERED"

@@ -939,9 +939,11 @@ class PollTest(unittest.TestCase):
         # cause either — an empty-body close comes from the dead-session sweep,
         # the compact-crossing clear, a forwarded SessionEnd and
         # `close_session_approval`, and the last is not a producer exit at all —
-        # so OPEN is not a claim this record can support. NOT_OPERATOR_ANSWERED
-        # is still distinct from the ANSWERED: an acknowledgement reaches, which
-        # is the separation the old branch existed to protect.
+        # so OPEN is not a claim this record can support. A reap now shares
+        # NOT_OPERATOR_ANSWERED with an acknowledgement — they are separated by
+        # `ANSWERED_BY:`, which an acknowledgement carries and a reap cannot,
+        # not by the terminal word. The word that used to separate them also
+        # meant "a live gate is waiting", and that is the overload given up.
         rc, text = self.poll({"item_id": STORE_ITEM_ID, "state": "closed"})
         self.assertEqual(rc, 0)
         self.assertIn("NOT_OPERATOR_ANSWERED", text)

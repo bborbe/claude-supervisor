@@ -118,10 +118,15 @@ def was_acted_on(item):
 
     What changed is downstream, in `classify`: a close is an act but **not a
     release**, because the asking session is still frozen — treating the clear as
-    an answer opens a gate nobody opened. Splitting the two is what keeps a reap
-    distinguishable from an acknowledgement in the poll's terminal: a reap
-    carries no actor at all and reads as OPEN, while an acknowledgement carries
-    one and reads as NOT_OPERATOR_ANSWERED.
+    an answer opens a gate nobody opened. Splitting the two keeps a reap
+    distinguishable from an acknowledgement, but **not by the poll's terminal
+    word** — since 2026-10-28 both reach `NOT_OPERATOR_ANSWERED:`, and they are
+    separated by the `ANSWERED_BY:` line, which an acknowledgement carries and a
+    reap cannot. ⚠️ **This docstring said the opposite until then** — that a reap
+    "reads as OPEN" — and `attention-ask.py`'s `cmd_poll` keyed its OPEN branch
+    on it, so a reaped close printed the same word as a live gate. That is why
+    the branch is now keyed on `state == "open"`: OPEN is the one terminal that
+    means "still unanswered", and no close of any kind can support it.
 
     ⚠️ The reap reading this function was written for is unchanged. The dominant
     closed shape in the live store is a reap — `closed` with no `answered_at`,

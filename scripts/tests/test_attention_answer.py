@@ -10,11 +10,14 @@ Covers the two decisions that make an answer safe to route:
     print a TARGET. A 409 must never be followed by a route, and an `ack` item
     must be refused before the store is written at all.
   * the 409 itself -- the status covers more than one failure, so the body's
-    `error.code` names which: ITEM_CLOSED (the card was cleared and left the
-    queue, so no arm can answer it) must read differently from ALREADY_ANSWERED
-    (another arm's verdict landed first). A code the arm cannot read falls back
-    to the generic line, because a body it cannot parse is not evidence of
-    either, and both named lines claim a specific cause.
+    `error.code` names which: ITEM_CLOSED (the card left the queue, so no arm
+    can answer it) must read differently from ALREADY_ANSWERED (another arm's
+    verdict landed first). A code the arm cannot read falls back to the generic
+    line, because a body it cannot parse is not evidence of either.
+    ⚠️ **ITEM_CLOSED names no cause** — the store does not record why a card
+    left, so the line states that rather than picking one; only
+    ALREADY_ANSWERED claims a specific fact, and that fact is the verdict's
+    existence, which the code does establish.
   * the permission branch -- a permission-class item needs an explicit
     --decision. Without one it is refused rather than defaulted, because
     neither an implicit allow nor an implicit deny is safe; with one it prints
