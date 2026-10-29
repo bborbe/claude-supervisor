@@ -16,7 +16,9 @@ import {
   StreamLaggedError,
   WrapperError,
   answerWrappedSession,
+  listWrappedSessions,
   parseSSE,
+  pendingQuestionOf,
   readParkedQuestion,
   sendWrappedSession,
   spawnWrappedSession,
@@ -187,4 +189,52 @@ test('readParkedQuestion returns the question when the child is parked', async (
   const question = { request_id: 'r1', tool_name: 'Bash', input: {}, options: ['allow', 'deny'] }
   const fetchImpl = async () => jsonResponse({ id: SESSION, state: 'blocked-on-permission', question })
   assert.deepEqual(await readParkedQuestion({ baseUrl: 'http://w', sessionId: SESSION, fetchImpl }), question)
+})
+
+test('listWrappedSessions reads the collection in one call', async () => {
+  let seen
+  const fetchImpl = async (url) => {
+    seen = url
+    return jsonResponse([{ id: SESSION, state: 'blocked-on-permission' }])
+  }
+  const all = await listWrappedSessions({ baseUrl: 'http://w/', fetchImpl })
+  assert.equal(seen, 'http://w/api/1.0/sessions')
+  assert.equal(all.length, 1)
+})
+
+test('listWrappedSessions reports a non-200 rather than returning an empty fleet', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 503 })
+  await assert.rejects(
+    listWrappedSessions({ baseUrl: 'http://w', fetchImpl }),
+    (err) => err instanceof WrapperError && err.status === 503,
+  )
+})
+
+// ── pendingQuestionOf: the three states, which must not collapse ────────────────────────────
+// This is what a manager reads to obtain the request id it then passes to `answer_permission`.
+// A `null` for a wrapper-backed worker whose wrapper is down would report "not parked" during
+// exactly the outage that matters, so the unreadable state is separate and pinned here.
+test('pendingQuestionOf is null for a worker that is not wrapper-backed', () => {
+  assert.equal(pendingQuestionOf([{ id: SESSION, question: { request_id: 'r1' } }], null), null)
+  assert.equal(pendingQuestionOf(null, undefined), null)
+})
+
+test('pendingQuestionOf returns the live question for a parked worker', () => {
+  const question = { request_id: 'r1', tool_name: 'Bash', input: {} }
+  assert.deepEqual(pendingQuestionOf([{ id: SESSION, question }], SESSION), question)
+})
+
+test('pendingQuestionOf is null when the wrapper lists the session with nothing parked', () => {
+  assert.equal(pendingQuestionOf([{ id: SESSION, state: 'generating' }], SESSION), null)
+})
+
+test('pendingQuestionOf is null when the wrapper no longer lists the session', () => {
+  // An exited-and-reaped child is not a park either — the distinction is the state, not absence.
+  assert.equal(pendingQuestionOf([{ id: 'other-session' }], SESSION), null)
+})
+
+test('pendingQuestionOf reports an unreadable wrapper as unreadable, never as "not parked"', () => {
+  const out = pendingQuestionOf(null, SESSION)
+  assert.equal(out.unreadable, true)
+  assert.equal(out.request_id, undefined)
 })

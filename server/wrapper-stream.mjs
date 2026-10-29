@@ -116,6 +116,45 @@ export async function sendWrappedSession({ baseUrl, sessionId, text, fetchImpl =
   return resp.json()
 }
 
+/**
+ * Project the wrapper's roster read onto ONE agent's parked question.
+ *
+ * ⚠️ Three states, and collapsing any two of them is a false negative a manager acts on:
+ *   `null`                  — not wrapper-backed (the field does not apply), or wrapper-backed
+ *                             and the wrapper reports nothing parked;
+ *   `{request_id, …}`       — parked, and this is the id `answer_permission` takes;
+ *   `{unreadable: true, …}` — wrapper-backed but the wrapper could not be read.
+ * `wrapper_session_id` on the same row is what separates the first from the third, which is
+ * why the two ship together: an outage that reads as "not parked" is the exact defect
+ * `open_cards: null` exists to prevent on the attention store.
+ *
+ * @param {Array<object>|null} sessions the wrapper's session list, or `null` when unreadable
+ * @param {string|null|undefined} wrapperSessionId this agent's wrapper session
+ */
+export function pendingQuestionOf(sessions, wrapperSessionId) {
+  if (!wrapperSessionId) return null
+  if (sessions === null) return { unreadable: true, error: 'wrapper session list unreadable' }
+  // A session the wrapper no longer lists has exited and been reaped — not parked either.
+  return sessions.find((s) => s?.id === wrapperSessionId)?.question ?? null
+}
+
+/**
+ * Read EVERY child's current record in one call.
+ *
+ * ⚠️ One read for the whole roster, never one per worker. The status surface fans this out
+ * over every agent, so a per-agent call is N round-trips with the wrapper down being N × the
+ * timeout in front of every manager sweep — the same reason `fetchAttentionItems` exists
+ * beside `fetchOpenCards`. The wrapper's list handler returns `snapshot()` per session, the
+ * identical record `readWrappedSession` returns for one, so nothing is lost by batching.
+ */
+export async function listWrappedSessions({ baseUrl, fetchImpl = fetch }) {
+  const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions`, { method: 'GET' })
+  if (!resp.ok) {
+    throw new WrapperError(`wrapper list failed: HTTP ${resp.status}`, resp.status)
+  }
+  return resp.json()
+}
+
 /** Read one child's current record. Used only to classify an end, never to poll state. */
 export async function readWrappedSession({ baseUrl, sessionId, fetchImpl = fetch }) {
   const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}`, {

@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { answerWrappedSession, readWrappedSession, sendWrappedSession, spawnWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
+import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, readWrappedSession, sendWrappedSession, spawnWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
@@ -748,6 +748,21 @@ async function answerWrapperPark(requestId, behavior) {
   return null
 }
 
+// One wrapper read for the whole roster, or null when it cannot be read or was not needed.
+//
+// `needed` is not an optimisation detail: without it every manager sweep in a fleet holding no
+// wrapper-backed worker would still pay a round-trip (and, wrapper down, its timeout) for a
+// field that cannot apply to any row.
+async function readWrapperQuestions(needed) {
+  if (!needed) return null
+  try {
+    const sessions = await listWrappedSessions({ baseUrl: config.wrapperUrl })
+    return Array.isArray(sessions) ? sessions : null
+  } catch {
+    return null
+  }
+}
+
 function waitForPermission(timeoutMs) {
   const first = pending.values().next().value
   if (first) return Promise.resolve(publicPerm(first))
@@ -881,6 +896,10 @@ function writeLedger(agent, patch) {
       resumedFrom: agent.resumedFrom ?? null,
       policy: agent.policyPath ?? null,
       shipping: agent.shipping === true,
+      // Persisted, unlike `shipping`: the wrapper is the only holder of this worker's parked
+      // prompt, so a server that lost the id on restart could neither report the park nor
+      // answer it.
+      wrapperSessionId: agent.wrapperSessionId ?? null,
       parentSession: agent.parentSession ?? null,
       // The role this spawn declared. Carried into the record because the spawn edge
       // cannot otherwise distinguish a manager from a worker: `gate-owner-filter.py`
@@ -2925,6 +2944,10 @@ const agentView = (a) => {
     // indistinguishable from "no gate outstanding" — the exact reading that cost a manager a
     // misdirected worker in the v0.110.4 incident. See registry-rehydrate.mjs.
     rehydrated: a.rehydrated === true,
+    // The wrapper session this worker's child runs under, or null when the worker is not
+    // wrapper-backed. Ships beside `pending_question` because it is the field that tells a
+    // caller which of that field's nulls it is holding.
+    wrapper_session_id: a.wrapperSessionId ?? null,
     // Which source decided interactive-vs-headless: argument, env, config or default. A
     // worker that opened the wrong way is otherwise diagnosed by guessing which of four
     // places was consulted.
@@ -3560,10 +3583,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // this session) on every row: collapsing them reports a parked worker as unblocked, which
       // is the false negative this field exists to remove.
       const items = await fetchAttentionItems({ storeUrl: config.attentionStoreUrl })
+      // ⚠️ Same shape, same reason: ONE wrapper read for the whole roster, and skipped
+      // entirely when no row is wrapper-backed. A per-row `readWrappedSession` would be N
+      // round-trips with the wrapper down being N × the timeout in front of every sweep.
+      const questions = await readWrapperQuestions(roster.some((a) => a.wrapperSessionId))
       return reply(
         roster.map((agent) => ({
           ...agentView(agent),
           open_cards: items === null ? null : openCardsOf(items, agent.sessionId),
+          pending_question: pendingQuestionOf(questions, agent.wrapperSessionId),
         })),
       )
     }
@@ -3576,7 +3604,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // are the gate a manager can see — and, via the plugin's PermissionRequest hook,
       // answer with `attention-answer.py answer <item_id>`. Null = store unreadable/off.
       const open_cards = await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: agent.sessionId })
-      return reply({ ...agentView(agent), open_cards })
+      // Read the wrapper's LIVE record, never a cache: a worker can unpark and re-park, and a
+      // request id read from anything stale names a question the caller can no longer answer.
+      const questions = await readWrapperQuestions(Boolean(agent.wrapperSessionId))
+      return reply({
+        ...agentView(agent),
+        open_cards,
+        pending_question: pendingQuestionOf(questions, agent.wrapperSessionId),
+      })
     }
 
     case 'read_push_config': {
