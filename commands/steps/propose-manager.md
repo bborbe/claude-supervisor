@@ -8,7 +8,7 @@ user-invocable: false
 
 ⚠️ **Hand-run only — no round routes here.** Removed from the fleet round's router table on 2026-10-29 by the operator's ruling: *"u should not recommend to open more goals, maybe only crashed managers."* A round that surfaces expansion work spends the operator's attention on goals nobody asked to open, so the round raises only the recovery signal (a manager that is live but lapsed) and this step is no longer reachable from it. It stays in the repo because a hand-run `--post` still works, and because `commands/steps/readings.md` and `commands/steps/goal-spawn.md` still cite it as the home of the `start manager` answer path.
 
-When: `propose-managers.py` printed a card — run: `python3 $P/propose-managers.py --post`
+When: a hand-run `--post` is wanted — run: `python3 $P/propose-managers.py --post`
 
 Rationale: runbook § Propose a manager for an unmanaged goal — maintained.
 
