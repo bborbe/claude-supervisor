@@ -164,7 +164,9 @@ def _classify_kubectl(command, args):
         if "--" in args:
             inner = args[args.index("--") + 1:]
             return classify_argv(inner, _depth=1)
-        return None
+        # `kubectl exec pod cmd` (no `--`) still executes inside the pod; a prod
+        # wrapper makes that a prod action even though the inner command is opaque.
+        return "prod" if command in PROD_WRAPPERS else None
     if verb in MUTATING_VERBS:
         return "prod" if command in PROD_WRAPPERS else None
     return None
@@ -311,11 +313,12 @@ def main(argv=None):
 
     records = read_window(args.log, start, end)
     manager_records = [r for r in records if r.get("decided_by") == "manager"]
-    violations = [r for r in records if classify_record(r) != "clean"]
+    violations = [(record, classify_record(record)) for record in records]
+    violations = [(record, verdict) for record, verdict in violations if verdict != "clean"]
 
     counts = {verdict: 0 for verdict in VERDICTS if verdict != "clean"}
-    for record in violations:
-        counts[classify_record(record)] += 1
+    for _, verdict in violations:
+        counts[verdict] += 1
 
     controls = fixture.get("controls", {})
     payload = {
