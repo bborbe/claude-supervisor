@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.214.0
 
 - feat: **a wrapper-spawned headless worker's prompt is answerable over REST, starting with the event-stream adapter.** `server/wrapper-stream.mjs` reads a `claude-wrapper` child's `GET /api/1.0/sessions/{id}/events` stream as the same `AsyncIterable` of SDK messages `runAgentLoop` already consumes, so the loop, the ledger, the heartbeat and the resume guards stay unchanged and only the source of `q` moves. ⚠️ **The end of the stream is not one condition**: the wrapper ends the response both when the child exits and when a subscriber falls far enough behind that the stream stopped being a faithful account of it, while the loop settles a worker as `done` the moment iteration ends — so a lag mistaken for an exit marks a still-generating worker finished. The adapter therefore ignores the sentinel's silence and asks the wrapper's own session record, throwing `StreamLaggedError` for any state that is not `exited`. ⚠️ **Every wrapper call carries a timeout** (`DEFAULT_TIMEOUT_MS`): without one a wrapper that accepts the connection and never answers hangs a spawn or a status sweep indefinitely, which is worse than the refusal it replaces. ⚠️ **A refused opening turn reaps its child** — the wrapper has no `prompt` field, so the turn is a second call, and a failure there used to leave a live process holding stdin that looked exactly like a thinking worker. Change set: `server/wrapper-stream.mjs`, `server/wrapper-stream.test.mjs`, `CHANGELOG.md`.
 
