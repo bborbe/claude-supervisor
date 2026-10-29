@@ -70,10 +70,12 @@ def main():
               % (a.closer_class, ", ".join(sorted(VERDICTS))), file=sys.stderr)
         return 2
     if a.closer:
-        # Flatten and truncate: the echo is one line, and a caller handing over raw
-        # pane or transcript text must not be able to forge a second output line for
-        # the agent reading it. Same rule `normalize_closer` applies on the digest path.
-        reason = "%s · closer: %s" % (reason, " ".join(a.closer.split())[:120])
+        # Flatten, strip control characters, then truncate: the echo is one line, and
+        # a caller handing over raw pane or transcript text must not be able to forge a
+        # second output line or leave a dangling ANSI escape (slicing at 120 can cut
+        # `\x1b[31m` in half). `\x1b` survives `split()`, so it is removed explicitly.
+        flat = "".join(c for c in " ".join(a.closer.split()) if c >= " " and c != "\x7f")
+        reason = "%s · closer: %s" % (reason, flat[:120])
     print("%s  %s" % (word, reason))
     return 0
 

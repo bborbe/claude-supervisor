@@ -2515,6 +2515,10 @@ class CloserClass(unittest.TestCase):
     """
 
     def classify(self, closer_line):
+        # Restore after each test: a bare assignment leaks the stub into every class
+        # that sorts after this one, and one of them reads the closer too.
+        original = wnm.last_assistant_text
+        self.addCleanup(setattr, wnm, "last_assistant_text", original)
         wnm.last_assistant_text = lambda _rec, _t=closer_line: _t
         return wnm.closer_class({"session_id": "unit", "pane": "1", "cwd": "/tmp",
                                  "kind": "idle", "detail": "OK", "ts": 0,
@@ -2532,6 +2536,14 @@ class CloserClass(unittest.TestCase):
         # Same parser trap `reclassify_idle` guards: `&nbsp;` is not whitespace.
         self.assertEqual("routine", self.classify("👤 You: &nbsp;&nbsp;nothing"))
 
+    def test_a_capitalised_nothing_falls_through_to_ask(self):
+        """Fail-closed, and pinned so a later "fix" cannot flip it to routine.
+
+        The prefix test is lower-case by design — a closer that only *looks* like a
+        routine turn end reaches the drive leg as blocked, never as revivable.
+        """
+        self.assertEqual("ask", self.classify("👤 You: Nothing — I continue"))
+
     def test_a_nothing_closer_naming_a_destructive_verb_is_not_routine(self):
         """The one hole a `nothing …` prefix would otherwise open.
 
@@ -2540,6 +2552,16 @@ class CloserClass(unittest.TestCase):
         blacklist (test 3) would be skipped — this closer would reach `revive`.
         """
         self.assertEqual("ask", self.classify("👤 You: nothing — approve: deploy prod"))
+
+    def test_the_destructive_matcher_over_matches_on_purpose(self):
+        """`produce` trips `prod` and `staged` trips `tag`; both are deliberate.
+
+        Over-matching costs a routine row one blocked verdict; under-matching would
+        revive a closer that names a destructive verb.
+        """
+        for line in ("👤 You: nothing — produce the report",
+                     "👤 You: nothing — staged the change"):
+            self.assertEqual("ask", self.classify(line), line)
 
     def test_a_parked_wait_is_parked_wait(self):
         self.assertEqual("parked-wait",

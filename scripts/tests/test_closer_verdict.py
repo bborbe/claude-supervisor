@@ -108,6 +108,13 @@ class Cli(unittest.TestCase):
         self.assertEqual(0, out.returncode)
         self.assertEqual(1, len(out.stdout.strip().splitlines()), out.stdout)
 
+    def test_the_echo_strips_control_characters(self):
+        # `\x1b` survives split(), so it is removed explicitly — a dangling escape in
+        # the one line an agent reads is the failure this guards.
+        out = self.run_cli("--class", "ask", "--closer", "a\x1b[31mred")
+        self.assertEqual(0, out.returncode)
+        self.assertNotIn("\x1b", out.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,10 @@
 # Closer classes — what a session's last turn ended on
 
 The canonical home for the `CLOSERS` class vocabulary, the routine-continue table, and
-the join rule the fleet digest uses. `agents/fleet-sweep-reader.md` renders the rows;
-`agents/fleet-drive.md` step 4a reads them. Both point here rather than restating it,
-because an agent body is re-injected on every invocation and is held to a 30 KB budget
-(`scripts/check-budget.py`).
+the join rule the fleet digest uses. `agents/fleet-sweep-reader.md` renders the rows and
+states the class tokens inline; `agents/fleet-drive.md` step 4a reads them and points
+here for the table. An agent body is re-injected on every invocation and is held to a
+30 KB budget (`scripts/check-budget.py`), which is why the detail lives here.
 
 ## Why a class at all
 
