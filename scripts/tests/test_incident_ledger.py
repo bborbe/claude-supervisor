@@ -970,7 +970,14 @@ class TestLiveSessions(Base):
             '{"sessionId": "b", "degraded": true}]',
             stderr="rows=2 registry_live=2 degraded=2\n",
         )
-        self.assertIsNone(il.live_sessions())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(il.live_sessions())
+        # The branch must say WHICH fail-open fired: the callers' shared warning is
+        # one line for every unavailable read, so a partial rollout would otherwise
+        # be indistinguishable from an empty probe or a subprocess failure.
+        self.assertIn("corroborated none of them", err.getvalue())
+        self.assertIn("2 session(s)", err.getvalue())
 
     def test_one_corroborated_row_makes_the_probe_usable(self):
         """The negative control: a single endpoint-corroborated row restores the gate."""

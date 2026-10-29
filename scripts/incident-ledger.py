@@ -265,6 +265,7 @@ def live_sessions():
     # fleet compares ids case-insensitively.
     live = set()
     corroborated = False
+    listed = 0
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -277,6 +278,7 @@ def live_sessions():
         # is a display line this function no longer parses.
         if not row.get("degraded"):
             corroborated = True
+        listed += 1
         live.add(session_id)
         live.add(session_id[:8])
     if not live:
@@ -303,6 +305,17 @@ def live_sessions():
         # branch. This is the ONE narrow case the count still decides: at least one
         # corroborated row means the endpoint answered, which is all the absent-set
         # needs; zero means it did not, and the read fails open.
+        #
+        # ⚠️ **Says WHICH fail-open fired.** The callers' shared
+        # `warn_liveness_unavailable` is one line for every unavailable read, so
+        # without this an operator cannot tell a partial rollout from an empty probe
+        # or a subprocess failure -- and a fail-open nobody can attribute is the same
+        # silent-off this whole gate exists to remove, one branch further in.
+        sys.stderr.write(
+            "note: the liveness probe listed %d session(s) and the endpoint "
+            "corroborated none of them; reading the fleet as unmeasured rather than "
+            "as absent\n" % listed
+        )
         return None
     return live
 
