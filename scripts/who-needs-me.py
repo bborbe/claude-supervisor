@@ -952,6 +952,15 @@ def closer_class(rec):
     re-deriving them: `startswith("nothing")` and `is_parked_verb()` are exactly the
     classes the digest must never nudge, and a second copy of the test here would let
     the two drift apart.
+
+    ⚠️ **`ask` is a catch-all, not a verb list.** It is every closer that is neither a
+    routine turn end nor a clock-bound park — including a plain status line
+    (`👤 You: done — all green`, `waiting for CI`), which is not a question at all.
+    That is deliberate and it is the safe direction: an unrecognised closer reaches the
+    drive leg as `blocked`, never as `revivable`, and step 4a's routine-continue table
+    is what re-admits the ones that only look like asks. Narrowing this to the
+    documented verbs would make every unlisted closer `revivable`, which is the
+    fail-open direction the `CLOSERS` fail-closed rule exists to prevent.
     """
     ask = closer_from_transcript(rec)
     if not ask:
@@ -1994,8 +2003,9 @@ def pane_for(session_id):
     return 1
 
 
-# The six sections this feed renders, in render order. `--section` names them;
-# a manager's attention watcher arms on `needs-you` alone.
+# The seven sections this feed can render, in render order. `--section` names them;
+# a manager's attention watcher arms on `needs-you` alone. The first six are the
+# default render; `last-closers` is opt-in and never prints without `--section`.
 #
 # `board-missing` is its own section rather than a member of `needs-you`
 # deliberately -- see `board_missing_gates()`: those rows have NOT had their
@@ -2128,7 +2138,7 @@ def main():
         action="append",
         choices=SECTIONS,
         help="render only this section (repeatable); the default renders the feed's "
-        "five and never `last-closers`, which is opt-in because its rows are not "
+        "six and never `last-closers`, which is opt-in because its rows are not "
         "gates and no watcher should arm on them. A manager's attention watcher arms "
         "on `--section needs-you`: the others are not gates either, and an unscoped "
         "feed makes that watcher fire on every peer's rendered closer.",
@@ -2232,14 +2242,14 @@ def main():
     # what each parked session's turn ended on — `agents/fleet-drive.md` step 4a
     # fail-closes a candidate with no row to `unverifiable`, so a class-less absence
     # reads the same whether the turn ended on `nothing` or was never captured.
-    # Rendered only on request (see below); the five default sections are read by the
+    # Rendered only on request (see below); the six default sections are read by the
     # manager's watchers and a row here is not a gate.
     last_closers = sorted([r for r in needs if not answered(r)], key=lambda r: r["ts"])
 
     # Say which source answered, once, before any row. A silent fallback would
     # be indistinguishable from a healthy store — which is the whole failure
     # this note exists to prevent.
-    # `--section` scopes the render to the named sections; with no flag all five
+    # `--section` scopes the render to the named sections; with no flag all six
     # render, byte-for-byte as before. The scoping exists because the consumer,
     # `gate-owner-filter.py`'s `panes_from_feed`, matches `[<pane>]` on ANY line
     # regardless of the section header above it — so a whole-feed arm fires on every
@@ -2279,7 +2289,7 @@ def main():
         print(f"\nRendered panels ({len(panels)})  — a closer line, not a parked gate")
         for r in panels:
             print(row(r, pmap, r["detail"], registry))
-    # Opt-in only: `a.section` is required, so the no-flag render keeps its five
+    # Opt-in only: `a.section` is required, so the no-flag render keeps its six
     # sections byte-for-byte. A consumer that asks for it gets every live session's
     # last-turn closer and its class — the digest's `CLOSERS` source.
     if a.section and wanted("last-closers"):

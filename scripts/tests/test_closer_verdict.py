@@ -26,6 +26,16 @@ cv = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cv)
 
 
+def load_capture():
+    """`who-needs-me.py`, loaded the way `test_who_needs_me.py` loads it."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "who-needs-me.py")
+    spec = importlib.util.spec_from_file_location("who_needs_me_for_verdicts", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 class Verdicts(unittest.TestCase):
 
     def test_a_routine_continue_is_nudged(self):
@@ -57,6 +67,15 @@ class Verdicts(unittest.TestCase):
         # class may reach `revive`, and it is the routine one.
         reviving = [n for n in cv.VERDICTS if cv.VERDICTS[n][0] == "revive"]
         self.assertEqual(["routine"], reviving)
+
+    def test_the_vocabulary_matches_the_capture(self):
+        """A class added to one side must not silently miss the other.
+
+        `CLOSER_CLASSES` is what the capture emits and `VERDICTS` is what this script
+        answers. A class present in only one of them makes the digest emit a token
+        that exits 2, and nothing else in the suite would notice.
+        """
+        self.assertEqual(set(load_capture().CLOSER_CLASSES), set(cv.VERDICTS))
 
 
 class Cli(unittest.TestCase):

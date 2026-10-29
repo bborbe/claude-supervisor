@@ -21,19 +21,20 @@ closed)`.
 
 `closer_class()` in `scripts/who-needs-me.py` answers the digest's question instead,
 and `who-needs-me.py --section last-closers` prints it. The section is **opt-in**: the
-no-flag render keeps its five sections byte-for-byte, so no existing consumer changes.
+no-flag render keeps its six sections byte-for-byte, so no existing consumer changes.
 
 ## The classes
 
 | class | the turn ended on | drive-leg verdict |
 |---|---|---|
-| `ask` | a real ask — `pick`, `review:`, `you run:`, `approve:` | **blocked**, unless the routine-continue table below passes on its text |
+| `ask` | any closer that is neither a routine turn end nor a clock-bound park — a real `pick` / `review:` / `you run:` / `approve:`, **or a plain status line** (`done — all green`, `waiting for CI`) | **blocked**, unless the routine-continue table below passes on its text |
 | `routine` | `👤 You: nothing …` — the session asked nothing | **revive** — a read-only nudge is allowed |
 | `parked-wait` | `later (on …)` — names the event that resumes the work | **unverifiable** — nothing to nudge until it fires |
 | `none` | no closer line in the transcript | **unverifiable** — captured, and there is no closer |
 
-`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/closer-verdict.py --class <class>` prints the
-verdict and its reason; the table above is that script's, not a second copy of it.
+`python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closer-verdict.py --class <class>` prints the verdict and its reason. The table above and that script's `VERDICTS` are two copies of one mapping, and `scripts/tests/test_closer_verdict.py` pins them together (`set(CLOSER_CLASSES) == set(VERDICTS)`) so a class added to one cannot silently miss the other.
+
+⚠️ **`ask` is a catch-all, not a verb list** — every closer that is neither a routine turn end nor a clock-bound park, a plain status line included. That is the safe direction: an unrecognised closer reaches the drive leg as **blocked**, never as revivable, and the routine-continue table is what re-admits the ones that only look like asks. Narrowing it to the documented verbs would make every unlisted closer revivable, which is the fail-open direction the `CLOSERS` fail-closed rule exists to prevent.
 
 ⚠️ **`routine` does not overrule step 4a test 4.** The class describes the turn's LAST
 line, not the session's whole state: a session whose last closer reads `nothing` but
