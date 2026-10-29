@@ -229,8 +229,11 @@ def live_sessions():
     # 7 of the 43 registry rows lack a heartbeat and 2 rows are endpoint-only, so
     # `degraded > 0` is the NORMAL state. A `degraded > 0 → None` rule would return
     # "unavailable" every round, warn every round, and never retire anything — the same
-    # silent-off this gate exists to prevent, reached from the third side. Only an
-    # EMPTY list is unusable (below).
+    # silent-off this gate exists to prevent, reached from the third side.
+    #
+    # The read is unusable in exactly TWO cases, both below: an EMPTY list, and a
+    # non-empty list the endpoint corroborated nothing in (partial rollout). Everything
+    # else is a usable absent-set.
     # ⚠️ **The `rows=… registry_live=… degraded=…` header goes to STDERR, not stdout**
     # (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
     # tolerance below is therefore not the shape this reads today — it is a guard for
