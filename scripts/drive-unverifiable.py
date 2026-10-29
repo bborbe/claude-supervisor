@@ -510,6 +510,71 @@ def render(acted, held=(), max_actions=MAX_ACTIONS):
     return "\n".join(lines)
 
 
+#: Markers delimiting the block this script mirrors into the round's digest. A marker pair,
+#: not a bare append: a re-run must REPLACE the block rather than stack a second copy, and a
+#: reader must be able to tell the drive leg's mirror from the sweep reader's own render.
+DIGEST_BEGIN = "<!-- drive-unverifiable:begin -->"
+DIGEST_END = "<!-- drive-unverifiable:end -->"
+
+
+def digest_render(block):
+    """The marked form of `block` as it is written into the round's digest."""
+    return "%s\n%s\n%s" % (DIGEST_BEGIN, block.rstrip("\n"), DIGEST_END)
+
+
+def strip_mirror(body):
+    """`body` with any earlier mirror removed, markers included.
+
+    Split rather than regex: the block carries markdown and `·`, and a pattern built from
+    the marker strings would have to escape `<!--` correctly to be readable. The markers are
+    constants, so a plain partition cannot drift from them.
+    """
+    head, sep, rest = body.partition(DIGEST_BEGIN)
+    if not sep:
+        return body
+    _, _, tail = rest.partition(DIGEST_END)
+    return head.rstrip("\n") + "\n" + tail.lstrip("\n")
+
+
+def write_digest(path, block):
+    """Mirror `block` into the round's digest, replacing any earlier mirror.
+
+    **Why the digest at all.** The round leaves TWO artifacts -- the sweep reader's
+    `<round>.digest` and this leg's `<round>.drive` -- and a consumer may open either.
+    Before this, only the `.drive` could ever carry the `UNVERIFIABLE` block, so a reader of
+    the digest saw no block whether the fleet had rows or the leg had lost them: absence
+    rendered as "nothing was unverifiable". Measured 2026-10-29 on round `T1358`:
+    `grep -c UNVERIFIABLE` was 0 in both files while the script had produced rows.
+
+    **The digest is still the sweep reader's file.** This is its one later write, appended
+    after the sweep finished and delimited by `DIGEST_BEGIN`/`DIGEST_END`, so it is never
+    mistaken for a sweep section and a re-run replaces it in place. The digest's own row
+    parsers stop at the first non-indented line after their section, so an appended block at
+    the end is inert to them.
+
+    Idempotent, and atomic like the sweep reader's own write: a crash mid-write must not
+    leave a partial digest that reads as a smaller fleet. Returns True when the file
+    changed. A missing file is reported on stderr and is NOT an error here -- the block is
+    already on stdout and in the `.drive`, and `check-drive-unverifiable-paste.py` is what
+    fails loudly on a round whose digest lost it.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            body = handle.read()
+    except OSError as exc:
+        print("drive-unverifiable: digest not mirrored: %s" % exc, file=sys.stderr)
+        return False
+    marked = digest_render(block)
+    updated = strip_mirror(body).rstrip("\n") + "\n\n" + marked + "\n"
+    if updated == body:
+        return False
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(updated)
+    os.replace(tmp, path)
+    return True
+
+
 def cmd_handle(args):
     ledger, reason = read_ledger(args.ledger_script)
     if reason:
@@ -542,7 +607,12 @@ def cmd_handle(args):
         with open(args.json_out, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
-    print(render(acted, held, args.max_actions))
+    block = render(acted, held, args.max_actions)
+    if args.digest:
+        # The digest gets the same block the `.drive` payload carries, so a reader of either
+        # artifact can tell "nothing was unverifiable" from "the block never arrived".
+        write_digest(args.digest, block)
+    print(block)
     return 0
 
 
@@ -566,6 +636,12 @@ def main(argv=None):
     )
     handle.add_argument(
         "--ledger-script", default=None, help="path to drive-ledger.py (default: the sibling)"
+    )
+    handle.add_argument(
+        "--digest",
+        default=None,
+        help="also mirror the rendered block into this round's .digest, so both of the "
+        "round's artifacts carry it; idempotent, marker-delimited",
     )
     handle.add_argument(
         "--max-actions",
