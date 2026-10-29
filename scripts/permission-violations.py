@@ -8,9 +8,12 @@ with no producer is either quietly assumed met or quietly ignored.
 
 The number is worthless unless the classifier is pinned before it runs, so the
 expected verdicts live in a committed fixture (`scripts/tests/fixtures/
-permission-violations.json`) that was written in its own commit, ahead of this
-file. The probe re-runs that fixture on every invocation and **refuses to print
-a count** if any case disagrees. Two of those cases are controls:
+permission-violations.json`). Its first six cases were written in their own
+commit, ahead of this file; the rest were added from the three verdict
+definitions after the classifier was shown to miss those shapes, and eight of
+the nine failed against it as it then stood. The probe re-runs the whole fixture
+on every invocation and **refuses to print a count** if any case disagrees, or if
+either named control is absent. Two of the cases are the controls:
 
   known-positive  `rm -rf /tmp/x`  must classify irreversible
   known-negative  `ls /tmp`        must classify clean
@@ -25,9 +28,14 @@ visible without one.
 The classifier reads `tool` and `key` only. `label` is deliberately ignored: a
 task name carrying "prod" is not a prod action.
 
-Known limit: a shell payload quoted inside a tool that is not a shell
-(`python3 -c '…'`, an awk program) is opaque and is not inspected. `sh`/`bash`
-`-c` payloads are inspected one level deep.
+Known limits, named because a false negative here reads as a clean audit:
+
+  ⚠️ A payload quoted inside a non-shell tool (`python3 -c '…'`, an awk
+     program) is opaque and is not inspected. `sh`/`bash` `-c` payloads are.
+  ⚠️ Command substitution is inspected one level (`$(…)`, backticks); a nested
+     substitution inside a substitution is not.
+  ⚠️ A heredoc opener is recognised only outside quotes, and an unterminated one
+     drops the rest of the command — conservative, but it can hide a later line.
 """
 import argparse
 import json
@@ -64,16 +72,82 @@ MUTATING_VERBS = {
     "annotate", "label", "set", "cordon", "uncordon", "expose", "run",
 }
 IRREVERSIBLE_KUBECTL_VERBS = {"rollout", "delete", "drain"}
+#: `rollout` sub-verbs that only read; the rest replace running pods.
+ROLLOUT_READ_SUBVERBS = {"status", "history"}
 
-#: A key that changes the policy or the plan governing the fleet.
+#: Flags whose value is the next token, for the `kubectl` and `git` positional scans.
+KUBECTL_VALUE_FLAGS = {
+    "-n", "--namespace", "-l", "--selector", "-o", "--output", "-f", "--filename",
+    "--context", "--cluster", "--user", "--kubeconfig", "-c", "--container",
+    "--field-selector", "--since", "--type", "-p", "--patch", "--replicas",
+    "--image", "--timeout", "--tail", "--request-timeout", "--as", "--as-group",
+    "--server", "--token", "--chunk-size",
+}
+GIT_VALUE_FLAGS = {
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--super-prefix", "--config-env",
+}
+
+#: Privilege and scheduling prefixes that do not change the action.
+PREFIX_COMMANDS = {"sudo", "env", "timeout", "nice", "nohup", "command", "stdbuf"}
+PREFIX_VALUE_FLAGS = {
+    "sudo": {"-u", "-g", "-p", "-C", "-D", "-h", "-r", "-t", "-U", "-T", "-R"},
+    "nice": {"-n", "--adjustment"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "stdbuf": {"-i", "-o", "-e"},
+}
+PREFIX_OPERANDS = {"timeout": 1}
+
+#: Tools whose `key` is a path a manager can change policy through.
+WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+#: A key that changes the policy or the plan governing the fleet. The last two
+#: alternatives are the LIVE policy files: `~/.config/claude-supervisor/policy.json`
+#: is `config.userPolicy`, checked before the bundled `server/policy.json`.
 SCOPE_CHANGING_PATHS = re.compile(
-    r"(?:server/policy\.json|server/manager-allowlist\.json|"
-    r"(?:^|/)\.?claude/settings(?:\.local)?\.json)$"
+    r"(?:server/policy\.json"
+    r"|server/manager-allowlist\.json"
+    r"|claude-supervisor/policy\.json"
+    r"|(?:^|/)\.claude/settings(?:\.local)?\.json)$"
 )
 
-_HEREDOC = re.compile(r"<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?")
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_HEREDOC = re.compile(r"<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?")
+_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+
+
+def _heredoc_terminator(line):
+    """Return the heredoc terminator if this line opens one outside quotes."""
+    in_single = in_double = False
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if in_single:
+            if char == "'":
+                in_single = False
+            index += 1
+            continue
+        if in_double:
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                in_double = False
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char == "'":
+            in_single = True
+        elif char == '"':
+            in_double = True
+        elif line.startswith("<<", index):
+            match = _HEREDOC.match(line[index:])
+            return match.group(1) if match else None
+        index += 1
+    return None
 
 
 def strip_heredocs(command):
@@ -85,11 +159,17 @@ def strip_heredocs(command):
             if line.strip() == terminator:
                 terminator = None
             continue
-        match = _HEREDOC.search(line)
-        if match:
-            terminator = match.group(1)
+        terminator = _heredoc_terminator(line)
         kept.append(line)
     return "\n".join(kept)
+
+
+def substitution_bodies(command):
+    """Return the one-level `$(…)` and backtick bodies of a command."""
+    return [
+        match.group(1) or match.group(2) or ""
+        for match in _SUBSTITUTION.finditer(strip_heredocs(command))
+    ]
 
 
 def split_segments(command, _depth=0):
@@ -143,6 +223,30 @@ def _leading(argv):
     return argv[index], argv[index + 1:]
 
 
+def _strip_prefix(argv):
+    """Drop `sudo`/`env`/`timeout`/`nice`-style prefixes; they do not change the action."""
+    for _ in range(8):
+        index = 0
+        while index < len(argv) and _ENV_ASSIGN.match(argv[index]):
+            index += 1
+        if index >= len(argv) or argv[index] not in PREFIX_COMMANDS:
+            return argv
+        command = argv[index]
+        index += 1
+        while index < len(argv):
+            token = argv[index]
+            if command == "env" and _ENV_ASSIGN.match(token):
+                index += 1
+                continue
+            if token.startswith("-"):
+                index += 2 if token in PREFIX_VALUE_FLAGS.get(command, set()) else 1
+                continue
+            break
+        index += PREFIX_OPERANDS.get(command, 0)
+        argv = argv[index:]
+    return argv
+
+
 def _rm_is_forced(args):
     for arg in args:
         if arg == "--recursive" or arg == "--force":
@@ -154,18 +258,74 @@ def _rm_is_forced(args):
     return False
 
 
+def _git_subcommand(args):
+    """Return the git subcommand, skipping flags and their separate values."""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in GIT_VALUE_FLAGS:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token, args[index + 1:]
+    return None, []
+
+
+def _kubectl_verb(args):
+    """Return (verb, index) at its POSITION, skipping flags and their values."""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in KUBECTL_VALUE_FLAGS:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token, index
+    return None, None
+
+
+def _exec_inner(args):
+    """The command after `kubectl exec POD [flags] [--] CMD…`, with or without `--`."""
+    index = 0
+    pod_seen = False
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            index += 1
+            break
+        if token in KUBECTL_VALUE_FLAGS:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        if not pod_seen:
+            pod_seen = True
+            index += 1
+            continue
+        break
+    return args[index:]
+
+
 def _classify_kubectl(command, args):
-    verb = next((tok for tok in args if tok in READ_VERBS | MUTATING_VERBS | IRREVERSIBLE_KUBECTL_VERBS), None)
+    verb, verb_index = _kubectl_verb(args)
     if verb is None:
         return None
     if verb in IRREVERSIBLE_KUBECTL_VERBS:
+        if verb == "rollout":
+            rest = [tok for tok in args[verb_index + 1:] if not tok.startswith("-")]
+            if rest and rest[0] in ROLLOUT_READ_SUBVERBS:
+                return None
         return "irreversible"
     if verb == "exec":
-        if "--" in args:
-            inner = args[args.index("--") + 1:]
-            return classify_argv(inner, _depth=1)
-        # `kubectl exec pod cmd` (no `--`) still executes inside the pod; a prod
-        # wrapper makes that a prod action even though the inner command is opaque.
+        inner = _exec_inner(args[verb_index + 1:])
+        verdict = classify_argv(inner, _depth=1) if inner else None
+        if verdict:
+            return verdict
         return "prod" if command in PROD_WRAPPERS else None
     if verb in MUTATING_VERBS:
         return "prod" if command in PROD_WRAPPERS else None
@@ -174,6 +334,9 @@ def _classify_kubectl(command, args):
 
 def classify_argv(argv, _depth=0):
     """Return the verdict for one shell segment, or None when it is clean."""
+    if _depth > 3 or not argv:
+        return None
+    argv = _strip_prefix(argv)
     command, args = _leading(argv)
     if command is None:
         return None
@@ -182,14 +345,14 @@ def classify_argv(argv, _depth=0):
         return "irreversible"
 
     if command == "git":
-        words = [tok for tok in args if not tok.startswith("-")]
-        if words[:1] == ["push"]:
+        subcommand, rest = _git_subcommand(args)
+        if subcommand == "push":
             return "irreversible"
-        if words[:1] == ["mv"] and any(tok in ("-f", "--force") for tok in args):
+        if subcommand == "mv" and any(tok in ("-f", "--force") for tok in args):
             return "irreversible"
-        if words[:1] == ["reset"] and "--hard" in args:
+        if subcommand == "reset" and "--hard" in args:
             return "irreversible"
-        if words[:1] == ["clean"] and any(tok.startswith("-") and "f" in tok for tok in args):
+        if subcommand == "clean" and any(tok.startswith("-") and "f" in tok for tok in args):
             return "irreversible"
 
     if command in ALL_WRAPPERS:
@@ -205,10 +368,10 @@ def classify_argv(argv, _depth=0):
                 return "scope-changing"
 
     if command == "make" and any(tok in ("apply", "buca") for tok in args):
-        if "BRANCH=prod" in argv or any("BRANCH=prod" in tok for tok in args):
+        if any("BRANCH=prod" in tok for tok in argv):
             return "prod"
 
-    if command in _SHELLS and "-c" in args and _depth < 2:
+    if command in _SHELLS and "-c" in args and _depth < 3:
         index = args.index("-c")
         if index + 1 < len(args):
             worst = None
@@ -227,12 +390,15 @@ def classify_record(record):
         return "clean"
     tool = record.get("tool")
     key = record.get("key") or ""
-    if tool in ("Edit", "Write") and SCOPE_CHANGING_PATHS.search(key):
+    if tool in WRITE_TOOLS and SCOPE_CHANGING_PATHS.search(key):
         return "scope-changing"
     if tool != "Bash":
         return "clean"
+    segments = split_segments(key)
+    for body in substitution_bodies(key):
+        segments.extend(split_segments(body))
     worst = "clean"
-    for segment in split_segments(key):
+    for segment in segments:
         verdict = classify_argv(segment)
         if verdict and PRECEDENCE[verdict] > PRECEDENCE[worst]:
             worst = verdict
@@ -254,6 +420,18 @@ def run_fixture(fixture):
             }
         )
     return results, [row for row in results if not row["ok"]]
+
+
+def missing_controls(fixture):
+    """Names of the required controls the fixture does not define as cases."""
+    names = {case["name"] for case in fixture.get("cases", [])}
+    controls = fixture.get("controls", {})
+    missing = []
+    for role in ("known_positive", "known_negative"):
+        name = controls.get(role)
+        if not name or name not in names:
+            missing.append(f"{role} ({name or 'unset'})")
+    return missing
 
 
 def _parse_ts(value):
@@ -297,9 +475,26 @@ def main(argv=None):
     end = _parse_ts(args.end) if args.end else datetime.now(timezone.utc)
     start = _parse_ts(args.start) if args.start else end - timedelta(days=7)
 
-    fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
-    results, failures = run_fixture(fixture)
+    try:
+        fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(f"REFUSED — cannot read the fixture {args.fixture}: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"REFUSED — the fixture {args.fixture} is not valid JSON: {exc}", file=sys.stderr)
+        return 2
 
+    missing = missing_controls(fixture)
+    if missing:
+        print(
+            "CONTROL FAILED — the fixture does not define its required controls: "
+            + ", ".join(missing)
+            + ". Refusing to print a count.",
+            file=sys.stderr,
+        )
+        return 2
+
+    results, failures = run_fixture(fixture)
     if failures:
         for row in results:
             mark = "ok  " if row["ok"] else "FAIL"
@@ -311,10 +506,18 @@ def main(argv=None):
         )
         return 2
 
-    records = read_window(args.log, start, end)
+    try:
+        records = read_window(args.log, start, end)
+    except OSError as exc:
+        print(f"REFUSED — cannot read {args.log}: {exc}", file=sys.stderr)
+        return 2
+
     manager_records = [r for r in records if r.get("decided_by") == "manager"]
-    violations = [(record, classify_record(record)) for record in records]
-    violations = [(record, verdict) for record, verdict in violations if verdict != "clean"]
+    violations = []
+    for record in records:
+        verdict = classify_record(record)
+        if verdict != "clean":
+            violations.append((record, verdict))
 
     counts = {verdict: 0 for verdict in VERDICTS if verdict != "clean"}
     for _, verdict in violations:
