@@ -133,13 +133,21 @@ def stall_rounds():
 
 
 def incident_budget():
-    """How many NEW stall incidents one round may open.
+    """How many incidents one round may act on.
 
-    The drive leg caps its own actions for the same reason (`drive-unverifiable.py`,
-    `MAX_ACTIONS`): a population that goes unverifiable together must not become a
-    flood of cards. Measured 2026-10-22: one round opened 117 stall incidents and
-    every one of them became a board card, because the action leg had a cap and
-    this leg did not.
+    Both legs read it, so one round has one allowance: `cmd_stall` opens at most this
+    many stall incidents, and `cmd_escalate` posts at most this many escalation cards
+    -- whatever their kind, because a `permission` or `question` incident floods the
+    board exactly as a stall does. The drive leg caps its own actions for the same
+    reason (`drive-unverifiable.py`, `MAX_ACTIONS`): a population that goes
+    unverifiable together must not become a flood of cards. Measured 2026-10-22: one
+    round opened 117 stall incidents and every one of them became a board card,
+    because the action leg had a cap and this leg did not.
+
+    ⚠️ The env key keeps its `STALL` name (`SUPERVISOR_INCIDENT_STALL_BUDGET`), even
+    though it now governs more than stalls. Renaming it would silently reset every
+    deployed override to the default, and a knob whose name is narrower than its
+    effect is the lesser error against one that stops being read at all.
     """
     raw = os.environ.get("SUPERVISOR_INCIDENT_STALL_BUDGET", "3")
     try:
@@ -700,7 +708,10 @@ def post_card(incident):
 
 
 def cmd_escalate(args):
-    """Escalate every open incident past its deadline.
+    """Escalate up to `incident_budget()` of the open incidents past their deadline.
+
+    Oldest first. The rest are left `pending` and named in one bounded held-back line,
+    so a capped round is visibly a capped round rather than a round with less to do.
 
     The stamp is the discriminator the criterion reads: a periodic round passes
     `--round-id` and stamps `round:<id>`, while a typed run leaves it off and stamps
@@ -708,6 +719,13 @@ def cmd_escalate(args):
     observation instead of an assertion -- a hand-run cannot produce a `round:` stamp
     without inventing a round id, which is the class of dishonesty this ledger exists
     to prevent.
+
+    ⚠️ The cap bounds *posts*, not *rows examined*: a gone or mid-command session is
+    suppressed BEFORE the budget is consulted, so a round that retires a graveyard
+    still spends its whole allowance on real blockers. Measured 2026-10-29: one round
+    posted 165 cards in a single pass. The store's dedup did not help -- it is a
+    *content* key, so it collapses repeats of ONE session and says nothing about 162
+    different sessions going due together.
     """
     at = parse_ts(now())
     # ⚠️ The probe runs BEFORE the lock, and only when it can change the outcome:
@@ -735,9 +753,29 @@ def cmd_escalate(args):
         if not due:
             print("nothing past its deadline")
             return 0
+        # ⚠️ **Oldest blockers first.** `deadline = opened_at + deadline_seconds`, so the
+        # EARLIEST deadline is the oldest blocker -- the one that has waited longest.
+        # The dedup-key tiebreak is what makes the selection stable: without it the
+        # order is whatever `data["incidents"]` happens to be, so a capped round would
+        # act on an arbitrary slice of a same-second cohort and a replay would not
+        # reproduce it.
+        #
+        # No `or at` fallback on the timestamp: `past_deadline` is what put a row in
+        # `due`, and it returns False for an unparseable deadline, so every row here
+        # carries one. A fallback would sort a malformed row LAST (it would read as
+        # "now"), the opposite of the intent.
+        due.sort(
+            key=lambda incident: (
+                parse_ts(incident.get("deadline")),
+                incident.get("dedup_key", ""),
+            )
+        )
+        budget = incident_budget()
         stamp = "round:%s" % args.round_id if args.round_id else "manual:%s" % caller_id()
         gone = []
         working = []
+        held = []
+        slots_spent = 0
         malformed = 0
         for incident in due:
             # ⚠️ A stall incident for a session that is GONE must not become a card:
@@ -787,6 +825,18 @@ def cmd_escalate(args):
                     # round, so its incident stays PENDING and is re-judged.
                     working.append(incident["dedup_key"])
                     continue
+            # ⚠️ The budget is consulted AFTER the liveness gate, deliberately: a
+            # retired graveyard row is not an escalation, so it must not spend a slot
+            # the round could have given a live blocker.
+            if slots_spent >= budget:
+                held.append(incident["dedup_key"])
+                continue
+            # Spent BEFORE the post, not after: on a broken store every `post_card`
+            # pays a subprocess, so counting only successes would let one round pay
+            # 165 of them -- the same flood arriving on stderr instead of the board.
+            # A slot is spent whether the post lands or not, and under `--dry-run`
+            # too.
+            slots_spent += 1
             if args.dry_run:
                 print("would escalate %s (stamp %s)" % (incident["dedup_key"], stamp))
                 continue
@@ -828,6 +878,20 @@ def cmd_escalate(args):
             print(
                 "skipped %d stall incident(s) for sessions mid-command: %s"
                 % (len(working), ", ".join(working))
+            )
+        if held:
+            # ⚠️ NAMED, not counted, and bounded. A round that silently escalated 3 of
+            # 10 would be indistinguishable from a round where only 3 were due -- the
+            # false-empty this ledger refuses one store over. Bounded because the
+            # backlog is a property of the fleet, not of this round: the same
+            # `bounded_names` the gone line uses, for the same measured reason.
+            print(
+                "%s %d incident(s) past their deadline: %s"
+                % (
+                    "would hold back" if args.dry_run else "held back",
+                    len(held),
+                    bounded_names(held),
+                )
             )
         if not args.dry_run:
             write_ledger(data)
