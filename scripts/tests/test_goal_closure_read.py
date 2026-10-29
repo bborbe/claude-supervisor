@@ -112,6 +112,43 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(self._verdict(_page("- [x] a", "- [x] c", status="aborted")), "TERMINAL")
 
 
+def _topic_page(sc_boxes, gate_boxes, status="in_progress"):
+    return (
+        f"---\nstatus: {status}\n---\n\n# Success Criteria\n\n{sc_boxes}\n\n"
+        f"# Completion Gate\n\n{gate_boxes}\n"
+    )
+
+
+class TopicKindTest(unittest.TestCase):
+    """A topic closes on SC + `# Completion Gate`, never on a Definition of Done."""
+
+    def _verdict(self, page):
+        body = closure.strip_fences(page)
+        sections = {n: closure.section_of(body, n, strict) for n, strict in closure.SECTIONS["topic"]}
+        return closure.verdict_of(closure.read_status(page), sections)
+
+    def test_topic_closes_on_sc_plus_gate(self):
+        self.assertEqual(self._verdict(_topic_page("- [x] a", "- [x] G1\n- [x] G2")), "CLOSE")
+
+    def test_topic_with_open_gate_item_refuses(self):
+        self.assertEqual(self._verdict(_topic_page("- [x] a", "- [x] G1\n- [ ] G2")), "OPEN")
+
+    def test_topic_with_no_gate_section_is_unmeasurable(self):
+        page = "---\nstatus: in_progress\n---\n\n# Success Criteria\n\n- [x] a\n"
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_mixed_gate_is_out_of_compliance(self):
+        # docs/sweep-output.md:96 — a gate mixing checkboxes with an ordered list is
+        # out of compliance, not a second shape; counting the boxes alone would drop
+        # the numbered items from the denominator.
+        self.assertEqual(self._verdict(_topic_page("- [x] a", "- [x] G1\n1. not a box")), "UNMEASURABLE")
+
+    def test_topic_never_reads_definition_of_done(self):
+        # A topic page carrying a DoD must not be closed on it.
+        page = _topic_page("- [x] a", "- [x] G1") + "\n# Definition of Done\n\n- [ ] never\n"
+        self.assertEqual(self._verdict(page), "CLOSE")
+
+
 class SectionTest(unittest.TestCase):
     def test_absent_section_is_none(self):
         self.assertIsNone(closure.read_section("---\n---\n\n# Success Criteria\n\n- [x] a\n", "Definition of Done"))
@@ -130,6 +167,30 @@ class SectionTest(unittest.TestCase):
 
     def test_absent_status_is_none(self):
         self.assertIsNone(closure.read_status("---\nphase: execution\n---\n"))
+
+    def test_h2_heading_is_not_the_section(self):
+        # The tree's readers require an exact H1 (`agents/goal-verify.md:56`,
+        # `scripts/goal-condition.py:93`), so an H2 fails closed rather than closing.
+        page = "---\nstatus: in_progress\n---\n\n## Success Criteria\n\n- [x] a\n\n# Definition of Done\n\n- [x] c\n"
+        self.assertIsNone(closure.read_section(page, "Success Criteria"))
+
+    def test_inline_fence_at_line_start_is_unmeasurable(self):
+        page = "---\nstatus: in_progress\n---\n\n# Success Criteria\n\n```\n- [x] a\n\n# Definition of Done\n\n- [x] c\n"
+        self.assertIsNone(closure.strip_fences(page))
+
+    def test_mismatched_fence_markers_are_unmeasurable(self):
+        page = "---\nstatus: in_progress\n---\n\n# Success Criteria\n\n~~~\n- [x] a\n```\n\n- [x] b\n"
+        self.assertIsNone(closure.strip_fences(page))
+
+
+class AbsentStatusTest(unittest.TestCase):
+    def test_a_page_with_no_status_is_closable_on_evidence(self):
+        # Pinned intent: closure follows the evidence, and the verb re-checks its own
+        # gate. A page that never carried a `status:` is closable when both sections
+        # are measurable and fully ticked.
+        page = "---\nphase: execution\n---\n\n# Success Criteria\n\n- [x] a\n\n# Definition of Done\n\n- [x] c\n"
+        sections = {n: closure.read_section(page, n) for n in ("Success Criteria", "Definition of Done")}
+        self.assertEqual(closure.verdict_of(closure.read_status(page), sections), "CLOSE")
 
 
 class CliTest(unittest.TestCase):

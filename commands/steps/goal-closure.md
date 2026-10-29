@@ -22,8 +22,18 @@ For the subject, then each page of the tracked set:
 
 1. **Read it with the reader script — never a whole-page count:**
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py "<page>"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind goal  "<goal>"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind task  "<task>"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind topic "<topic>"
    ```
+   ⚠️ **`--kind` is not cosmetic — the tiers close on different evidence.** A goal and a
+   task close on `# Success Criteria` + `# Definition of Done`; a **topic closes on
+   `# Success Criteria` + `# Completion Gate`** (`docs/session-progress.md:37`,
+   `docs/sweep-output.md:95` — a topic is the only level carrying both sets). Measuring a
+   topic against a DoD it does not have reads UNMEASURABLE forever; measuring it against the
+   SC alone and ignoring the Gate closes it on the wrong evidence. A Gate mixing checkboxes
+   with an ordered list is **out of compliance**, and the reader refuses it.
+
    It prints the frontmatter `status`, each section's done/open split, and a verdict, and
    exits 0 only on `CLOSE`:
 
@@ -52,9 +62,12 @@ For the subject, then each page of the tracked set:
    subject in any other vault lands on the wrong page or nowhere at all. It is the same
    explicit-`--vault` contract `commands/steps/goal-resolve.md` carries for the manager's write.
 
-   ⚠️ **Escape the names before interpolating them into a shell line**, exactly as
-   `commands/open.md:499` mandates for its own write — a page title containing `"` closes the
-   inner quoting, and one containing `$(…)` executes. This line runs unattended every tick.
+   ⚠️ **Single-quote the names, never double-quote them, and refuse a name carrying a single
+   quote.** A page title containing `"` closes double-quoting and one containing `$(…)` or a
+   backtick executes — this line runs unattended every tick. `commands/open.md:499` carries the
+   same mandate without naming a mechanism; this is the mechanism: write `vault-cli goal complete
+   '$GOAL' --vault '$VAULT'` with the values already resolved into those variables, and when a
+   name contains `'`, escape it as `'\''` or stop and report rather than guess.
 
    The verb re-checks its own gate. **Its verdict is the authority, never this step's read** —
    when the two disagree, the verb wins and the disagreement is reported, not resolved by hand.
@@ -69,10 +82,10 @@ For the subject, then each page of the tracked set:
 
 ## Which pages this covers
 
-| Branch | Examined |
-|---|---|
-| goal | the subject goal, then each task printed in `Tracked (N):` |
-| topic | the topic page, then each goal in its `## Goals` list |
+| Branch | Examined | Contract |
+|---|---|---|
+| goal | the subject goal, then each task printed in `Tracked (N):` | SC + DoD |
+| topic | the topic page, then each goal in its `## Goals` list | topic page: SC + **Completion Gate**; member goals: SC + DoD |
 
 ⚠️ **Both tiers reach this step through a router row, and that row is what makes the claim
 true.** `commands/goal-drive.md` row 4c runs it on the goal branch; `commands/topic-drive.md`

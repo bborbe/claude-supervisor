@@ -130,9 +130,10 @@ approval boundary, not a bug.
 - **Never classify a task.** This tier's rows are goals and their managers; the task buckets
   are the goal manager's, in `agents/goal-sweep-reader.md`.
 - **Never decide an operator gate.** You surface it; the operator answers it.
-- **Close on complete evidence; never certify one.** This tier closes a member goal and the
-  topic page itself — never a task, which belongs to its goal's manager and which this tier
-  never reads — through `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md`,
+- **Close on complete evidence; never certify one.** This tier closes a member goal (SC + DoD)
+  and the topic page itself (**SC + `# Completion Gate`** — the topic's own contract, and the
+  reason the reader takes `--kind topic`) — never a task, which belongs to its goal's manager
+  and which this tier never reads — through `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md`,
   which is the rule's only execution home and carries the verbs, the `--vault` contract and
   the terminal guard. ⚠️ **Never tick a box, and never set `status`, to make a close possible**
   — closure follows the evidence, it never manufactures it, and a close that would need

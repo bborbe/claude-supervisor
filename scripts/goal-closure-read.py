@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
-"""Read one subject page's closure evidence — the two checkbox sections, counted apart.
+"""Read one subject page's closure evidence — its two closure sections, counted apart.
 
-    python3 scripts/goal-closure-read.py "24 Goals/<Goal>.md"
+    python3 scripts/goal-closure-read.py --kind goal  "24 Goals/<Goal>.md"
+    python3 scripts/goal-closure-read.py --kind topic "23 Topics/<Topic>.md"
+
+⚠️ **`--kind` is not cosmetic: the two tiers close on DIFFERENT evidence.** A goal and
+a task close on `# Success Criteria` + `# Definition of Done`; a **topic closes on
+`# Success Criteria` + `# Completion Gate`** (`docs/session-progress.md:37`,
+`docs/sweep-output.md:95` — a topic is the only level carrying both sets). Measuring a
+topic against a Definition of Done it does not have reads UNMEASURABLE forever, and
+measuring it against an SC it does have while ignoring the Gate closes it on the wrong
+evidence. The kind is stated, never guessed from the page.
 
 Prints one line per section plus a verdict, and exits on the verdict:
 
@@ -103,25 +112,50 @@ def read_status(text):
     return None
 
 
-def read_section(text, name):
+_LIST_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+\.)[ \t]+\S", re.M)
+
+
+def read_section(text, name, strict=False):
     """(done, open) for one `# <name>` section, or None when the section is absent.
 
     Returns (0, 0) for a section that is present but carries no box — the caller
     must treat that as unmeasurable, not as complete.
+
+    `strict=True` additionally refuses a section that carries any list item which is
+    not a checkbox. That is the `# Completion Gate` rule: a gate mixing `- [ ]` items
+    with an ordered list is **out of compliance**, not a second supported shape
+    (`docs/sweep-output.md:96`), and counting the checkboxes alone would silently drop
+    the numbered items from the denominator.
     """
-    body = strip_fences(text)
+    return section_of(strip_fences(text), name, strict)
+
+
+def section_of(body, name, strict=False):
+    """`read_section` over an already fence-stripped body, so a caller can strip once."""
     if body is None:
         return None
     m = re.search(rf"^# {re.escape(name)}\s*$(.*?)(?=^# |\Z)", body, re.S | re.M)
     if not m:
         return None
+    content = m.group(1)
     done = open_ = 0
-    for marker in _BOX.findall(m.group(1)):
+    for marker in _BOX.findall(content):
         if marker in _DONE:
             done += 1
         else:
             open_ += 1
+    if strict and len(_LIST_ITEM.findall(content)) != done + open_:
+        return None
     return done, open_
+
+
+# A topic is the only level carrying two closure sets, and its second one is the Gate,
+# not a Definition of Done (`docs/session-progress.md:37`, `docs/sweep-output.md:95`).
+SECTIONS = {
+    "goal": (("Success Criteria", False), ("Definition of Done", False)),
+    "task": (("Success Criteria", False), ("Definition of Done", False)),
+    "topic": (("Success Criteria", False), ("Completion Gate", True)),
+}
 
 
 def verdict_of(status, sections):
@@ -138,20 +172,37 @@ def verdict_of(status, sections):
 
 
 def main(argv):
-    if len(argv) != 2:
-        print(f"usage: {os.path.basename(argv[0])} <page>", file=sys.stderr)
+    args, kind = [], "goal"
+    rest = list(argv[1:])
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--kind":
+            if not rest:
+                print("--kind needs a value: goal, task or topic", file=sys.stderr)
+                return 2
+            kind = rest.pop(0)
+        elif arg.startswith("--kind="):
+            kind = arg.split("=", 1)[1]
+        else:
+            args.append(arg)
+    if len(args) != 1 or kind not in SECTIONS:
+        print(
+            f"usage: {os.path.basename(argv[0])} [--kind goal|task|topic] <page>",
+            file=sys.stderr,
+        )
         return 2
+    path = args[0]
     try:
-        with open(argv[1], encoding="utf-8") as handle:
-            text = handle.read()
+        with open(path, encoding="utf-8") as handle:
+            text = normalise(handle.read())
     except OSError as exc:
-        print(f"cannot read {argv[1]}: {exc}", file=sys.stderr)
+        print(f"cannot read {path}: {exc}", file=sys.stderr)
         return 2
 
-    text = normalise(text)
     status = read_status(text)
-    fenced_ok = strip_fences(text) is not None
-    sections = {name: read_section(text, name) for name in ("Success Criteria", "Definition of Done")}
+    body = strip_fences(text)
+    fenced_ok = body is not None
+    sections = {name: section_of(body, name, strict) for name, strict in SECTIONS[kind]}
     verdict = verdict_of(status, sections)
 
     print(f"status: {status or 'ABSENT'}")

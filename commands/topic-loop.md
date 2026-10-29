@@ -193,10 +193,12 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   `Operator answer, via supervisor:` when the operator answered here, `Manager answer, via
   supervisor:` for your own scope decision. Neither releases an irreversible or
   production-touching action.
-- **Close on complete evidence; never certify one.** A member goal's and this topic's own
-  `# Success Criteria` and `# Definition of Done` are their closure contract. When every box in
-  **both** reads `[x]`, the round runs the tier's verb — `vault-cli goal complete "<goal>" --vault
-  "<vault>"` or `vault-cli topic complete "<topic>" --vault "<vault>"` — and quotes its verdict;
+- **Close on complete evidence; never certify one.** A member goal closes on its `# Success
+  Criteria` + `# Definition of Done`; **this topic closes on its `# Success Criteria` + its
+  `# Completion Gate`** — a topic is the only level carrying both sets
+  (`docs/session-progress.md:37`). When every box in both of a page's own sets reads `[x]`, the
+  round runs the tier's verb — `vault-cli goal complete "<goal>" --vault "<vault>"` or
+  `vault-cli topic complete "<topic>" --vault "<vault>"` — and quotes its verdict;
   the execution, the terminal guard and the `--vault` contract live in
   `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` and are not restated here. ⚠️ **Never
   tick SC and never flip a page's status in order to close it** — a close that needs `--force`
