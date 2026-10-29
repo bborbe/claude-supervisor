@@ -147,10 +147,13 @@ def main(argv):
         f"\n_Releases older than {archived_heads[0]} ({archived_heads[-1]} … "
         f"{archived_heads[0]}) are archived in [CHANGELOG-archive.md]({ARCHIVE})._\n"
     )
-    path.write_text(f"{kept}\n{pointer}", encoding="utf-8")
+    # ⚠️ The archive is written FIRST. Truncating CHANGELOG.md before the archive exists means a
+    # failed archive write leaves the freshly cut sections in neither file — recoverable only
+    # from git. This order fails the other way: at worst a section is duplicated, never dropped.
     archive_path = root / ARCHIVE
     prior = archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
     archive_path.write_text(ARCHIVE_HEADER + merge_archive(prior, archived), encoding="utf-8")
+    path.write_text(f"{kept}\n{pointer}", encoding="utf-8")
 
     new_size = len(path.read_text(encoding="utf-8").encode("utf-8"))
     print(

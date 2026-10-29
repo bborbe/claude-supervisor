@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 
@@ -67,10 +68,33 @@ class EvaluateTest(unittest.TestCase):
     def test_covered_by_a_live_topic_manager_does_not_card(self):
         self.goal("Covered Goal")
         self.topic("Some Topic", ["Covered Goal"])
-        self.stub("STALE", "LIVE")
+        # the goal's own loop is lapsed; the topic's loop is running and will restart it
+        cm.cadence_state = lambda name, branch: "STALE" if branch == "goal" else "OK"
+        cm.session_state = lambda sid: "LIVE"
         row = cm.evaluate(self.vault, "goal", "covered-goal")
-        self.assertFalse(row["card"])
+        self.assertFalse(row["card"], row["reason"])
         self.assertIn("covered", row["reason"])
+
+    def test_a_stopped_topic_manager_covers_nothing(self):
+        """`/supervisor:stop` disarms the loop and leaves the session LIVE — it restarts nothing."""
+        self.goal("Orphan Goal")
+        self.topic("Stopped Topic", ["Orphan Goal"])
+        cm.cadence_state = lambda name, branch: "STALE" if branch == "goal" else "STOPPED"
+        cm.session_state = lambda sid: "LIVE"
+        row = cm.evaluate(self.vault, "goal", "orphan-goal")
+        self.assertTrue(
+            row["card"],
+            f"a STOPPED topic manager was treated as coverage: {row['reason']}",
+        )
+
+    def test_a_topic_declaring_the_goal_in_another_case_still_covers(self):
+        """Obsidian resolves wiki links case-insensitively."""
+        self.goal("Covered Goal")
+        self.topic("Some Topic", ["covered goal"])
+        cm.cadence_state = lambda name, branch: "STALE" if branch == "goal" else "OK"
+        cm.session_state = lambda sid: "LIVE"
+        row = cm.evaluate(self.vault, "goal", "covered-goal")
+        self.assertFalse(row["card"], f"a case-different link read as not declaring: {row['reason']}")
 
     def test_a_dead_topic_manager_leaves_the_goal_uncovered(self):
         self.goal("Orphan Goal")            # sid aaaa1111-… (LIVE)
@@ -242,6 +266,27 @@ class MainTest(unittest.TestCase):
         self.assertEqual(len(set(keys)), 2, f"colliding dedup keys: {keys}")
         self.assertIn("2 card(s)", out)
 
+    def test_a_goal_and_a_topic_with_one_base_get_distinct_dedup_keys(self):
+        """The branch is the only thing telling the two apart — a subject-only key collides."""
+        write(os.path.join(self.goals, "Shared Name.md"),
+              "---\nmanager_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
+        write(os.path.join(self.topics, "Shared Name.md"),
+              "---\nmanager_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n## Goals\n")
+        self.cadence("goal", "shared-name")
+        self.cadence("topic", "shared-name")
+        self.stub()
+        rec = Recorder()
+        cm.subprocess.run = rec
+        code, out, _ = self.run_main("--post", "--vault", self.vault, "--state-dir", self.statedir)
+        self.assertEqual(code, 0, out)
+        keys = [a[a.index("--dedup-key") + 1] for a in rec.posted()]
+        self.assertEqual(len(keys), 2, keys)
+        self.assertTrue(any("goal--shared-name" in k for k in keys), keys)
+        self.assertTrue(any("topic--shared-name" in k for k in keys), keys)
+        for argv in rec.posted():
+            self.assertIn("--producer-kind", argv)
+            self.assertEqual(argv[argv.index("--producer-kind") + 1], "manager")
+
     def test_a_bare_invocation_is_a_dry_run(self):
         self.goal("Lonely Goal")
         self.cadence("goal", "lonely-goal")
@@ -328,6 +373,44 @@ class CadenceStateTest(unittest.TestCase):
         self.assertIn("--state", argv)
         self.assertEqual(argv[argv.index("--subject") + 1], "Lapsed Topic")
         self.assertEqual(argv[argv.index("--branch") + 1], "topic")
+
+
+class SessionStateTest(unittest.TestCase):
+    """The one channel that can tell ABSENT from LIVE — read from exit codes, never stdout.
+
+    ⚠️ Every other test stubs this, so a regression back to stdout matching, a wrong code map,
+    or a dropped exception branch would leave the suite green while an `ABSENT` session became
+    invisible again — the measured bug this script exists to avoid.
+    """
+
+    def setUp(self):
+        cm._MEMO.clear()
+        self._run = cm.subprocess.run
+        self.addCleanup(lambda: setattr(cm.subprocess, "run", self._run))
+
+    def test_each_exit_code_maps_to_its_verdict(self):
+        for code, want in ((0, "LIVE"), (1, "ABSENT"), (2, "UNKNOWN"),
+                           (3, "AMBIGUOUS"), (4, "MALFORMED")):
+            cm._MEMO.clear()
+            cm.subprocess.run = lambda argv, **kw: Proc(stdout="", stderr="", returncode=code)
+            self.assertEqual(cm.session_state("aaaa1111-0000-0000-0000-000000000000"), want,
+                             f"exit {code}")
+
+    def test_an_undocumented_code_is_unknown_never_death(self):
+        cm.subprocess.run = lambda argv, **kw: Proc(returncode=99)
+        self.assertEqual(cm.session_state("aaaa1111-0000-0000-0000-000000000000"), "UNKNOWN")
+
+    def test_a_timeout_is_unknown_never_death(self):
+        def boom(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, 30)
+        cm.subprocess.run = boom
+        self.assertEqual(cm.session_state("aaaa1111-0000-0000-0000-000000000000"), "UNKNOWN")
+
+    def test_an_oserror_is_unknown_never_death(self):
+        def boom(argv, **kw):
+            raise OSError("cannot exec")
+        cm.subprocess.run = boom
+        self.assertEqual(cm.session_state("aaaa1111-0000-0000-0000-000000000000"), "UNKNOWN")
 
 
 class CoverageTest(unittest.TestCase):

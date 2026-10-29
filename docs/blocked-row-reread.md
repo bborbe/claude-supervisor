@@ -21,8 +21,15 @@ being wrong.
 ## The rule
 
 **Per row, against the live probe — never a re-run of the feed.** The feed is what was stale.
-Run the probe once per round and match each row's session id against it.
+Run the probe once per round and match each row on its **pane id**.
 
+- **The join key is the pane id, and it is the only one both sides carry.** The digest's
+  `BLOCKED` row renders `<name> · pane <id> · <link> · <gate text>` (`agents/fleet-sweep-reader.md`
+  § `<output_format>`) and the probe renders `[<pane>] <age> <name> …` — **neither carries a
+  session id**, and names are not unique across a fleet. A rule that matched on session id
+  could not be executed at all; that was this document's first draft, caught in review
+  2026-10-29. A row with `pane —` (the digest's "no pane" form) has no key and is **kept**
+  rather than dropped, with the re-read marked `no pane to re-read`.
 - **`--section needs-you` is the only section that is gates.** The feed's other sections —
   `rendered-panels`, `stuck`, `reapable`, `idle` — are not gates, and `last-closers` is opt-in
   precisely because arming on it would fire on every peer's rendered closer. Read `--all`, so
@@ -31,7 +38,7 @@ Run the probe once per round and match each row's session id against it.
   every row the probe confirmed. It is the only timestamp that says *when* the row was
   verified, and without it the render cannot be distinguished from the digest it came from.
 - **A row the probe does not list is dropped — and the drop is printed**, beneath the section:
-  `re-read <stamp>: no open gate for <name> [<sid8>]`. A section that quietly shrinks is
+  `re-read <stamp>: no open gate for <name> [pane <id>]`. A section that quietly shrinks is
   indistinguishable from a fleet that never had a gate, so the operator must be able to see
   that a row existed and was cleared.
 - **A probe that errors leaves every row standing**, and the section carries

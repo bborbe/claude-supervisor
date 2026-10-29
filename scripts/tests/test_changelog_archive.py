@@ -146,8 +146,19 @@ class ChangelogArchiveTest(unittest.TestCase):
         )
         self.assertIn(oldest, archive_now, "a previously archived release was dropped")
 
-        heads = re.findall(r"^## v\d+\.\d+\.\d+$", archive_now, re.M)
+        heads = re.findall(r"^## v(\d+)\.(\d+)\.(\d+)$", archive_now, re.M)
         self.assertEqual(len(heads), len(set(heads)), "a release was duplicated in the archive")
+
+        # ⚠️ Count-growth and "the oldest survived" are both satisfiable by an archive written
+        # OLDEST-FIRST, or by one that kept only the oldest prior section. The header says
+        # "newest first, verbatim", so assert the property itself.
+        for head in re.findall(r"^## v\d+\.\d+\.\d+$", first_archive, re.M):
+            self.assertIn(head, archive_now, f"a previously archived section was dropped: {head}")
+        numeric = [tuple(int(x) for x in h) for h in heads]
+        self.assertEqual(
+            numeric, sorted(numeric, reverse=True),
+            "the archive is not in strictly descending version order",
+        )
 
     def test_the_merge_junction_is_separated_by_a_blank_line(self):
         """Every section in the archive is preceded by exactly one blank line, junction included.

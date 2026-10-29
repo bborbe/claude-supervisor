@@ -139,9 +139,20 @@ def helpers():
             spec.loader.exec_module(module)
         except Exception as exc:  # noqa: BLE001 — any load failure is a refusal, never a crash
             raise Refused(f"cannot load {path}: {exc}") from exc
+        # ⚠️ A loaded module is not a usable one. A renamed or re-signatured helper would raise
+        # AttributeError/TypeError at a call site, which escapes `main`'s `except Refused` and
+        # exits 1 — this script's *ran, found nothing* code. Validate the three here instead.
+        missing = [a for a in ("base_slug", "scalar", "frontmatter") if not hasattr(module, a)]
+        if missing:
+            raise Refused(f"{path} is missing {', '.join(missing)} — a broken install, not an empty fleet")
         _KA = module
     return _KA
 
+
+#: The `--state-dir` this run was given, forwarded to the child probe. Without it a caller
+#: running `--state-dir X` enumerated X and then classified each subject from the DEFAULT
+#: store — two different readings in one run, silently.
+_STATE_DIR_OVERRIDE: str | None = None
 
 _MEMO: dict = {}
 
@@ -237,8 +248,19 @@ def goals_section(text: str) -> list[str]:
 
 def declares(text: str, goal: str) -> bool:
     """Does this topic page list `[[<goal>]]` in its goals list?"""
-    forms = (f"[[{goal}]]", f"[[{goal}|", f"[[{goal}#")
-    return any(form in line for line in goals_section(text) for form in forms)
+    # Obsidian resolves `[[link]]` case-insensitively, so a topic page writing `[[my goal]]`
+    # against `My Goal.md` DOES declare it. A case-sensitive test reads that as "not declared"
+    # and cards a covered manager — over-carding, the direction the coverage test exists to stop.
+    wanted = goal.casefold()
+    for line in goals_section(text):
+        for form in ("]]", "|", "#"):
+            start = line.find("[[")
+            while start != -1:
+                end = line.find(form, start + 2)
+                if end != -1 and line[start + 2 : end].strip().casefold() == wanted:
+                    return True
+                start = line.find("[[", start + 2)
+    return False
 
 
 def session_state(sid: str) -> str:
@@ -282,8 +304,16 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         if not declares(text, goal_name):
             continue
         sid = helpers().scalar(helpers().frontmatter(text), "manager_session_id")
-        if sid and session_state(sid) == "LIVE":
-            return True
+        if not sid or session_state(sid) != "LIVE":
+            continue
+        # ⚠️ A LIVE session is NOT a running keep-alive. `/supervisor:stop` disarms the loop and
+        # leaves the session alive, so a STOPPED topic manager reads LIVE while restarting
+        # nothing — and treating it as coverage would suppress a real goal-manager crash. The
+        # topic's own cadence is the only thing that says the loop is actually running.
+        topic_stem = entry[: -len(".md")]
+        if cadence_state(topic_stem, "topic") in ("STOPPED", "STALE", "UNARMED", PROBE_FAILED):
+            continue
+        return True
     return False
 
 
@@ -300,10 +330,13 @@ def cadence_state(name: str, branch: str) -> str:
 
     def probe() -> str:
         try:
+            env = None
+            if _STATE_DIR_OVERRIDE:
+                env = {**os.environ, "MANAGER_LIVENESS_STATE_DIR": _STATE_DIR_OVERRIDE}
             done = subprocess.run(
                 [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
                  "--state", "--subject", name, "--branch", branch],
-                capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+                capture_output=True, text=True, timeout=PROBE_TIMEOUT, env=env,
             )
         except (OSError, subprocess.SubprocessError):
             return PROBE_FAILED
@@ -405,6 +438,8 @@ def main(argv: list[str]) -> int:
     a = ap.parse_args(argv)
 
     vault = os.path.abspath(os.path.expanduser(a.vault))
+    global _STATE_DIR_OVERRIDE
+    _STATE_DIR_OVERRIDE = os.path.abspath(os.path.expanduser(a.state_dir))
     _MEMO.clear()  # the memo is per RUN, so a second call in one process starts clean
     _DETAIL.clear()
     try:
