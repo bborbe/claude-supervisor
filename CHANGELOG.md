@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.216.2
 
 - fix: **the escalate leg now posts at most `incident_budget()` cards a round, from the same knob the stall leg already uses.** `cmd_stall` was capped in #506; `cmd_escalate` — the leg that actually posts the cards — was left uncapped, so the cap bounded the queue that fills and not the one that empties. Measured 2026-10-29: one round ran `escalate` once and the attention store went from ~0 to **165 open blocker cards** (162 distinct sessions). The store's dedup did not help — it is a *content* key, so it collapses repeats of ONE session and says nothing about 162 sessions going due together. ⚠️ **The budget bounds posts, not rows examined:** it is consulted *after* the gone/mid-command gate, so a round that retires a graveyard still spends its budget on real blockers, and counted *before* `post_card`, so a broken store cannot turn one round into 165 subprocess calls. Selection is **earliest-deadline-first** (`deadline = opened_at + deadline_seconds`, so earliest deadline *is* oldest blocker) with a dedup-key tiebreak, so the choice is reproducible. Held-back rows are **named, not counted** and bounded through `bounded_names` (five names plus `… (+N more)`); `--dry-run` reports the same set as `would hold back`. A `0` override still falls back to 3, so the knob cannot be disabled. Change set: `scripts/incident-ledger.py`, `scripts/tests/test_incident_ledger.py`, `CHANGELOG.md`.
 
