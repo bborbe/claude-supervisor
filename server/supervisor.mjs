@@ -2609,7 +2609,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     log(
       contextStats
         ? `resume of ${resume} context: ${contextStats.restored ?? 'no usage'} restored against a ` +
-            `${contextStats.ceiling ?? 'no'} ceiling`
+            `${contextStats.ceiling ?? 'no'} ceiling${contextStats.model ? ` [${contextStats.model}]` : ''}`
         : `resume of ${resume} context: not measured (no transcript) — guard allowed it`,
     )
 
