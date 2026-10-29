@@ -35,6 +35,13 @@ A parked JUDGEMENT gate is not a death and is never healed: it is reported, and
 `answer_permission` is never called. Auto-answering a judgement gate is out of
 scope for this task and would be the worst possible direction — it settles a
 question the operator was asked, on their behalf, silently.
+
+⚠️ A `🔴 BLOCKED` closer carrying an answerable `👤 You:` verb is that same parked
+shape and does not arrive here at all: the watcher files it as a park reason
+(`registry:waiting` / `idle+closer`), not as a `stuck-tab:` cause. Only the
+VERBLESS closer — `👤 You: nothing`, where no card was minted and nobody was told —
+still reaches `--kind blocked-closer`, and it stays report-only like any other
+non-`stream-closed` kind.
 """
 import argparse
 import importlib.util
@@ -180,9 +187,18 @@ def main(argv=None):
     # caller that forgot it into a headless resume — the one rung that acts.
     # Constrained, so a mistyped or un-split value (`stuck:stream-closed`) is an
     # error rather than a silent report-only that reads like a real verdict.
+    #
+    # ⚠️ **`blocked-closer` here means the VERBLESS closer only** — a `🔴 BLOCKED`
+    # panel whose `👤 You:` line says `nothing` (or is absent). A closer carrying an
+    # answerable verb is a park, not a death, so the watcher files it as
+    # `registry:waiting` / `idle+closer` and it never reaches this script as a
+    # `stuck-tab:` cause. The choice stays because the verbless class still exists,
+    # and `decide()` already reports it rather than resuming or answering it.
     ap.add_argument("--kind", required=True,
                     choices=(KIND_STREAM_CLOSED, "blocked-closer", "permission-failures"),
-                    help="the stuck cause: the reason after `stuck:`")
+                    help="the stuck cause: the reason after `stuck:` (`blocked-closer` "
+                         "is the VERBLESS closer — a verb-carrying one is a park, "
+                         "not a stuck cause)")
     ap.add_argument("--endpoint", default=None, help="override the attention store base URL")
     ap.add_argument("--ledger-dir", default=None,
                     help="ACCEPTED AND IGNORED — the ledger comes from the endpoint")
