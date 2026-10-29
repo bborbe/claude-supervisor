@@ -8,9 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.214.2
+## Unreleased
 
 - fix: **a session whose pane does not resolve is observed, not carded, and no longer consumes a cap slot.** Measured 2026-10-22: of 114 unverifiable rows at streak 2, 12 resolved a pane and 102 did not — so the drive leg raised a card that could only ever say "no pane resolves", which is nothing the operator can act on, and each one spent one of the round's three action slots on a row nobody could act on. `decide()` now returns a third outcome, `observation`, when no pane resolves: the row is still named in the `UNVERIFIABLE` block, contributes nothing to `NUDGES` or `ESCALATIONS`, and — because `plan()` resolves the pane before the cap slice — never reaches `max_actions`. ⚠️ **The observation is recorded in a NEW `unverifiable_observation` ledger field, never in `unverifiable_action`**: `drive-share.py`'s `action_taken()` counts any non-empty action marker as an action taken, so reusing that field would have inflated the detected→verified numerator by one on every pane-less row — the metric this rule exists to keep honest. Like the action marker it fires once per silence and is cleared with the streak, so a gone session is named once rather than every round. Unreadable panes and panes that render no closer still escalate, pinned by negative controls in the same replay. Change set: `scripts/drive-unverifiable.py`, `scripts/drive-ledger.py`, `scripts/tests/test_drive_unverifiable.py`, `scripts/tests/test_drive_share.py`, `scripts/tests/test_drive_ledger.py`, `agents/fleet-drive.md`, `commands/steps/drive.md`, `CHANGELOG.md`.
+
+## v0.214.2
+
 - docs: **the README now says where a headless worker's process lives, because it decides who can answer its prompts.** A park belongs to whoever holds the child's stdin; that is now `claude-wrapper`, so the prompt is released over its REST route and the wrapper session id names the target. The section also states the cost plainly — the policy tier (`decide()`, the manager allowlist, the carried decision, the 15-minute deny) does not run for these workers, and a spawn reply carries a `policy_gap` naming each one as not-run, so **a successful spawn is not a policed spawn**. `pending_question` / `wrapper_session_id` are documented as status fields, never gates.
 
 ## v0.214.1
