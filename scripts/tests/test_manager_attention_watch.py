@@ -1872,7 +1872,7 @@ class BlockedCloserGateTest(unittest.TestCase):
         fx = Fixture([assistant(text=BLOCKED_ASK)], "waiting")
         self.addCleanup(fx.cleanup)
         state = fx.probe()
-        # SC1's fixture reading, straight through `probe()`: a `waiting` worker whose
+        # The fixture reading, straight through `probe()`: a `waiting` worker whose
         # tail ends on a verb-carrying `🔴 BLOCKED` closer is gated with a reason that
         # is neither `stuck:` nor `stuck-tab:`, and that reason is not a stall kind.
         self.assertEqual(state[SID8][2], "registry:waiting")
