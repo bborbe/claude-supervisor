@@ -46,7 +46,7 @@ import { mtimeReloadedAllowlist } from './cluster-allowlist.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
-import { findLiveHolder } from './resume-guard.mjs'
+import { resumeRefusal } from './resume-guard.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
 import { answerPathRefusal } from './answer-path.mjs'
@@ -2453,16 +2453,18 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // deleted filter existed to prevent, now bounded and self-healing on retry rather than
     // immediate. And when `liveSessionIds()` answers `null`, every row is kept — the fail-closed
     // direction, but a weaker property than "live by construction".
+    //
+    // ⚠️ The 60s bound does NOT cover a TAB row, and that asymmetry is the defect this path was
+    // fixed for. `pruneRehydratedAgents` only touches `rehydrated` rows, and an `interactive` row
+    // never settles anyway, so a tab's row is permanent — the age proxy never expires it. That is
+    // why the release lives in `resumeRefusal` (which sees `live`) and not in the prune.
     pruneRehydratedAgents()
-    const holder = findLiveHolder(agents.values(), resume)
-    if (holder) {
-      return {
-        // ⚠️ A rehydrated row's worker lives in the supervisor process that SPAWNED it, not
-        // in this one (`registry-rehydrate.mjs` — adoption crosses processes), so naming
-        // "this server" sends the operator to close the wrong thing.
-        error: `session ${resume} is still running (worker ${holder.id} is mid-turn ${holder.rehydrated ? 'in the supervisor process that spawned it' : 'in this server'}) — close it before resuming, or you will have two writers on one conversation`,
-      }
-    }
+    // The refusal is built in resume-guard.mjs rather than here, and `live` is passed in
+    // because it is the one fact that separates a dead tab from a live headless worker —
+    // see that module's header. It is also the seam a test can reach: this file starts an
+    // MCP server at module load and cannot be imported.
+    const refusal = resumeRefusal({ agentRecords: agents.values(), sessionId: resume, live })
+    if (refusal) return { error: refusal }
     // Neither probe could be read. Fail CLOSED: "could not tell" and "confirmed
     // closed" are different answers, and only one of them is safe to act on. A
     // refused resume costs one retry; an unguarded one corrupts a conversation.
