@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.216.1
 
 - fix: **the fleet round no longer proposes managers for goals that never had one.** Row 19 of the router table (`commands/fleet-drive.md`) routed `scripts/propose-managers.py --post` from every round, so each tick could spend the operator's attention on *expansion* work — *"which goal holds approved work nobody opened?"* — while the *recovery* reading the round already computes (`manager-liveness.py`'s `STALE`, meaning a manager that is live but lapsed) stayed buried in prose. Removed on the operator's ruling: *"u should not recommend to open more goals, maybe only crashed managers."* ⚠️ **The script and its step file stay in the repo and stay runnable by hand** — `commands/steps/readings.md:50` and `commands/steps/goal-spawn.md:21` still cite the step as the home of the `start manager` answer path for a hand-run `--post`, and `--json` remains the diagnosis form. The step file now says so at its head: hand-run only, no round routes here. The removal is single-site — `commands/fleet-tick.md` no longer exists — so the grep probe `grep -rn "propose-manager" commands/ docs/ agents/` drops from 7 hits to 6, and `commands/fleet-drive.md` carries none. Change set: `commands/fleet-drive.md`, `commands/steps/propose-manager.md`, `CHANGELOG.md`.
 
