@@ -40,7 +40,7 @@ test('the wrapper is not read when no worker is wrapper-backed', () => {
   assert.match(src, /async function readWrapperQuestions\(needed\) \{\n\s+if \(!needed\) return null/)
 })
 
-// ⚠️ CONDITION 2 ON THIS FIELD: `pending_question` is a STATUS FIELD, never a gate.
+// ⚠️ `pending_question` IS A STATUS FIELD, NEVER A GATE.
 // A parked worker already produces exactly one gate — its attention card (`open_cards`) — and
 // the fleet's attention poll reads the store, not agent status. A second surface reading the
 // same park as a gate would make one park look like two and invite a duplicate answer.

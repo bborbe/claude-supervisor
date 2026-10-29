@@ -2814,8 +2814,9 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // prompt and none of its policy machinery can run. `wrapperPolicyGap` carries that on the
   // agent record AND the spawn response, because a reader who has to infer which parts went
   // quiet will infer wrong in the direction that matters — the 15-minute deny changes
-  // behaviour most. It is also what makes SC2 falsifiable: an answered park in such a run
-  // was answered by the wrapper's hook, never by `decide()`.
+  // behaviour most. Naming it also keeps a later verification honest: an answered park in a
+  // wrapper-backed run was answered by the wrapper's hook, never by `decide()`, so it is not
+  // evidence that the policy tier works.
   const wrapperSession = await spawnWrappedSession({
     baseUrl: config.wrapperUrl,
     options: {
