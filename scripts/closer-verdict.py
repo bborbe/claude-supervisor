@@ -70,7 +70,10 @@ def main():
               % (a.closer_class, ", ".join(sorted(VERDICTS))), file=sys.stderr)
         return 2
     if a.closer:
-        reason = "%s · closer: %s" % (reason, a.closer)
+        # Flatten and truncate: the echo is one line, and a caller handing over raw
+        # pane or transcript text must not be able to forge a second output line for
+        # the agent reading it. Same rule `normalize_closer` applies on the digest path.
+        reason = "%s · closer: %s" % (reason, " ".join(a.closer.split())[:120])
     print("%s  %s" % (word, reason))
     return 0
 

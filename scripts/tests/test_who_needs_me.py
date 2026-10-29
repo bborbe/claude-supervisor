@@ -2532,6 +2532,15 @@ class CloserClass(unittest.TestCase):
         # Same parser trap `reclassify_idle` guards: `&nbsp;` is not whitespace.
         self.assertEqual("routine", self.classify("👤 You: &nbsp;&nbsp;nothing"))
 
+    def test_a_nothing_closer_naming_a_destructive_verb_is_not_routine(self):
+        """The one hole a `nothing …` prefix would otherwise open.
+
+        A `nothing …` closer is never promoted to a `BLOCKED` row, so step 4a test 4
+        can never fire on one and the routine-continue table's destructive-verb
+        blacklist (test 3) would be skipped — this closer would reach `revive`.
+        """
+        self.assertEqual("ask", self.classify("👤 You: nothing — approve: deploy prod"))
+
     def test_a_parked_wait_is_parked_wait(self):
         self.assertEqual("parked-wait",
                          self.classify("👤 You: later (on 2026-11-05T02:00): re-take SC(c)"))
@@ -2589,6 +2598,17 @@ class LastClosersSection(unittest.TestCase):
         for token in ("routine: nothing", "ask: pick", "parked-wait: later (on",
                       "none: no closer line"):
             self.assertIn(token, out)
+
+    def test_one_row_per_session_not_per_open_item(self):
+        # `needs` holds one record per open item, so a session carrying two of them
+        # would otherwise spend two of the digest's 40 payload lines on one closer.
+        records = [dict(self.RECORDS[0]), dict(self.RECORDS[0], ts=9)]
+        panes = {"901": {"pane_id": 901, "title": "S"}}
+        with mock.patch.object(wnm, "last_assistant_text",
+                               lambda rec: self.TEXTS["lc-routine"]):
+            rc, out, err = run_feed(panes, records, argv=["--section", "last-closers"])
+        self.assertEqual(0, rc, err)
+        self.assertIn("Last closers (1)", out)
 
 
 if __name__ == "__main__":

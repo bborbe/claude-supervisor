@@ -934,6 +934,16 @@ def closer_from_transcript(rec):
 #: from an uncaptured one.
 CLOSER_CLASSES = ("ask", "routine", "parked-wait", "none")
 
+#: The destructive verbs the routine-continue table's test 3 blacklists, applied to a
+#: `routine` row as well. A `nothing …` closer is never promoted to a `BLOCKED` row
+#: (`reclassify_idle` leaves it `idle`, and `is_open_gate` needs kind
+#: permission/question), so step 4a test 4 can never fire on one and test 3 would
+#: otherwise be skipped entirely — `nothing — approve: deploy prod` would reach
+#: `revive` with no text test at all. Substring matching over-matches on purpose
+#: (`produce` trips `prod`); the direction is fail-closed, an over-match is `ask`.
+_DESTRUCTIVE = ("push", "merge", "deploy", "release", "tag", "apply", "buca",
+                "kubectl", "delete", "rm ", "trade", "session-close", "prod")
+
 
 def closer_class(rec):
     """What this session's last turn ended on — `ask` | `routine` | `parked-wait` | `none`.
@@ -968,7 +978,9 @@ def closer_class(rec):
     if is_parked_verb(ask):
         return "parked-wait"
     if ask.startswith("nothing"):
-        return "routine"
+        # A `nothing …` closer that still names a destructive verb is self-
+        # contradictory, and no later test can catch it — see `_DESTRUCTIVE`.
+        return "ask" if any(v in ask.lower() for v in _DESTRUCTIVE) else "routine"
     return "ask"
 
 
@@ -2244,7 +2256,14 @@ def main():
     # reads the same whether the turn ended on `nothing` or was never captured.
     # Rendered only on request (see below); the six default sections are read by the
     # manager's watchers and a row here is not a gate.
-    last_closers = sorted([r for r in needs if not answered(r)], key=lambda r: r["ts"])
+    # One row per SESSION, not per open item. `needs` holds one record per open item,
+    # so a session carrying both a permission prompt and a question would otherwise
+    # render twice and spend the digest's 40-line payload cap on a duplicate. The
+    # newest record per session wins, since the sort is oldest-first.
+    _by_session = {}
+    for r in sorted([r for r in needs if not answered(r)], key=lambda r: r["ts"]):
+        _by_session[r.get("session_id") or id(r)] = r
+    last_closers = list(_by_session.values())
 
     # Say which source answered, once, before any row. A silent fallback would
     # be indistinguishable from a healthy store — which is the whole failure

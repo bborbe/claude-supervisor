@@ -30,9 +30,11 @@ no-flag render keeps its six sections byte-for-byte, so no existing consumer cha
 | `ask` | any closer that is neither a routine turn end nor a clock-bound park — a real `pick` / `review:` / `you run:` / `approve:`, **or a plain status line** (`done — all green`, `waiting for CI`) | **blocked**, unless the routine-continue table below passes on its text |
 | `routine` | `👤 You: nothing …` — the session asked nothing | **revive** — a read-only nudge is allowed |
 | `parked-wait` | `later (on …)` — names the event that resumes the work | **unverifiable** — nothing to nudge until it fires |
-| `none` | no closer line in the transcript | **unverifiable** — captured, and there is no closer |
+| `none` | no **readable** closer line — a missing or unreadable transcript reads the same as a turn that rendered none | **unverifiable** — captured, and there is no closer |
 
 `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closer-verdict.py --class <class>` prints the verdict and its reason. The table above and that script's `VERDICTS` are two copies of one mapping, and `scripts/tests/test_closer_verdict.py` pins them together (`set(CLOSER_CLASSES) == set(VERDICTS)`) so a class added to one cannot silently miss the other.
+
+⚠️ **A `nothing …` closer that still names a destructive verb is classed `ask`, not `routine`.** No later test can catch it: a `nothing …` closer is never promoted to a `BLOCKED` row, so step 4a test 4 never fires, and the routine-continue table's test 3 would be skipped entirely. The capture therefore applies that blacklist itself, before it will call a row routine.
 
 ⚠️ **`ask` is a catch-all, not a verb list** — every closer that is neither a routine turn end nor a clock-bound park, a plain status line included. That is the safe direction: an unrecognised closer reaches the drive leg as **blocked**, never as revivable, and the routine-continue table is what re-admits the ones that only look like asks. Narrowing it to the documented verbs would make every unlisted closer revivable, which is the fail-open direction the `CLOSERS` fail-closed rule exists to prevent.
 
@@ -76,11 +78,7 @@ own execution rules.
 
 ## Joining a `Last closers` row to a parked row
 
-**Join by PANE id, never by name.** `row()` truncates a name at 50 characters and two
-sessions routinely share a prefix, while the pane id is exact on both sides. A
-`Last closers` row rendering `[ hst]` or `[   ?]` owns no pane: carry it only where the
-session id resolves unambiguously, and otherwise emit no `CLOSERS` row for it — which
-fail-closes, correctly, because a pane-less closer was not observed.
+**Join by PANE id, never by name.** The pane id is the one key both sides carry: a `Last closers` row renders it in its `[<pane>]` column, and a `CLASSIFICATION` row carries it inside the jump link it prints (`…/jump?pane=<id>`). Names are not a key — `row()` truncates a name at 50 characters and two sessions routinely share a prefix. A `Last closers` row rendering `[ hst]` or `[   ?]` owns no pane and no link to join on: carry it only where the session id resolves unambiguously, and otherwise emit no `CLOSERS` row for it — which fail-closes, correctly, because a pane-less closer was not observed.
 
 Carry a `CLOSERS` row only for sessions that also appear in the digest's
 `CLASSIFICATION` section; the digest's 40-line payload cap depends on that filter.
