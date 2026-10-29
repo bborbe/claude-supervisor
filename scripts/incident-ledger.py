@@ -189,14 +189,20 @@ def warn_liveness_unavailable(verb):
 
 
 def _degraded_count(stderr):
-    """`degraded=` from the producer's stderr header, or 0 when absent/unreadable."""
+    """`degraded=` from the producer's stderr header.
+
+    Returns an int, `0` when the header is absent, or **`None` when it is present but
+    unreadable**. A `degraded=` nobody can parse is a producer bug, and reading it as
+    a clean `0` would be the same false green this whole gate exists to remove -- so
+    the caller fails open on `None` exactly as it does on a non-zero count.
+    """
     for line in (stderr or "").splitlines():
         for token in line.split():
             if token.startswith("degraded="):
                 try:
                     return int(token.split("=", 1)[1])
                 except (IndexError, ValueError):
-                    return 0
+                    return None
     return 0
 
 
@@ -236,7 +242,8 @@ def live_sessions():
     # degraded read may be unknown rather than absent — and reading it as absent would
     # retire a live session's incident on an outage. The header rides stderr
     # (`rows=… registry_live=… degraded=…`), so it is read from there.
-    if _degraded_count(result.stderr) > 0:
+    degraded = _degraded_count(result.stderr)
+    if degraded is None or degraded > 0:
         return None
     # ⚠️ **The `rows=… registry_live=… degraded=…` header goes to STDERR, not stdout**
     # (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The

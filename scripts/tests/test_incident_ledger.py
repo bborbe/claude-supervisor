@@ -888,6 +888,13 @@ class TestLiveSessions(Base):
         )
         self.assertIsNone(il.live_sessions())
 
+    def test_an_unreadable_degraded_header_is_unavailable(self):
+        """A `degraded=` nobody can parse must not read as a clean zero."""
+        self.stub_run(
+            '[{"sessionId": "a"}]', stderr="rows=1 registry_live=1 degraded=many\n"
+        )
+        self.assertIsNone(il.live_sessions())
+
     def test_a_row_with_a_non_string_session_id_is_dropped(self):
         self.stub_run('[{"sessionId": "a"}, {"sessionId": 42}]')
         self.assertEqual(il.live_sessions(), {"a"})
