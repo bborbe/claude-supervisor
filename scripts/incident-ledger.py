@@ -261,12 +261,19 @@ def live_sessions():
     # line per row. Lower-cased on both sides for the same reason the rest of the
     # fleet compares ids case-insensitively.
     live = set()
+    corroborated = False
     for row in rows:
         if not isinstance(row, dict):
             continue
         session_id = as_session_id(row.get("sessionId"))
         if not session_id:
             continue
+        # ⚠️ A row the endpoint corroborates carries `degraded: false`; a registry row
+        # with no live heartbeat row carries `degraded: true`. Tracked per row, from the
+        # PAYLOAD — never from the `degraded=` header, which counts the same thing but
+        # is a display line this function no longer parses.
+        if not row.get("degraded"):
+            corroborated = True
         live.add(session_id)
         live.add(session_id[:8])
     if not live:
@@ -281,6 +288,18 @@ def live_sessions():
         # could not see, so an empty payload carries `degraded=0` in both cases. An
         # empty read is therefore never trusted as a fleet reading: it fails open and
         # says so, which is the only direction that cannot suppress a live blocker.
+        return None
+    if not corroborated:
+        # ⚠️ **A non-empty payload the endpoint corroborated NOTHING in is not a fleet
+        # reading either.** During a partial rollout the endpoint holds no `live: true`
+        # row while the registry still lists sessions, so every row comes back
+        # `degraded: true` and the set is registry-only — and a cluster/a2a worker
+        # lives ONLY in the endpoint, so it would read as absent and its stall incident
+        # would be retired `skipped-gone`, terminally, for a session that is alive.
+        # `session-liveness.py` warns about exactly this state at the `--list` empty-row
+        # branch. This is the ONE narrow case the count still decides: at least one
+        # corroborated row means the endpoint answered, which is all the absent-set
+        # needs; zero means it did not, and the read fails open.
         return None
     return live
 

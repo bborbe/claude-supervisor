@@ -957,6 +957,30 @@ class TestLiveSessions(Base):
         )
         self.assertEqual(il.live_sessions(), {"a"})
 
+    def test_an_all_degraded_probe_is_unavailable(self):
+        """No corroborated row means the set may be registry-only, so it cannot decide.
+
+        The producer names this state: during a partial rollout the endpoint holds no
+        `live: true` row while the registry still lists sessions. A cluster/a2a worker
+        lives ONLY in the endpoint, so it would read as absent and its stall incident
+        would be retired `skipped-gone` — terminally — for a session that is alive.
+        """
+        self.stub_run(
+            '[{"sessionId": "a", "degraded": true}, '
+            '{"sessionId": "b", "degraded": true}]',
+            stderr="rows=2 registry_live=2 degraded=2\n",
+        )
+        self.assertIsNone(il.live_sessions())
+
+    def test_one_corroborated_row_makes_the_probe_usable(self):
+        """The negative control: a single endpoint-corroborated row restores the gate."""
+        self.stub_run(
+            '[{"sessionId": "a", "degraded": true}, '
+            '{"sessionId": "b", "degraded": false}]',
+            stderr="rows=2 registry_live=1 degraded=1\n",
+        )
+        self.assertEqual(il.live_sessions(), {"a", "b"})
+
     def test_an_unreadable_degraded_header_does_not_change_the_verdict(self):
         """A header this reader cannot parse is ignored, not read as a veto."""
         self.stub_run(
