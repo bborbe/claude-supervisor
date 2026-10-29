@@ -67,6 +67,7 @@ FIELDS = (
     "unverifiable_streak",
     "unverifiable_round",
     "unverifiable_action",
+    "unverifiable_observation",
 )
 VERDICTS = ("revive", "blocked", "unverifiable", "finished")
 #: What the 2-round rule did about a row, or "" when it has not acted. The marker is what
@@ -74,6 +75,12 @@ VERDICTS = ("revive", "blocked", "unverifiable", "finished")
 #: threshold: a row held back by the per-round cap keeps advancing its streak, so a
 #: `streak == 2` test would never match it again and it would be acted on never.
 UNVERIFIABLE_ACTIONS = ("", "nudge", "escalation")
+#: The third outcome, kept in its OWN field on purpose. `drive-share.py` counts any
+#: non-empty `unverifiable_action` as an action taken, so recording a pane-less
+#: observation there would inflate the detected->verified numerator on a row nobody acted
+#: on. Like the action marker it fires once per silence, so a gone session is named in the
+#: `UNVERIFIABLE` block once rather than every round.
+UNVERIFIABLE_OBSERVATIONS = ("", "observation")
 NUDGES = ("drafted", "none")
 
 #: Top-level keys that are not themselves session entries.
@@ -94,7 +101,7 @@ def bak_path():
 
 
 def canonical(sid, raw):
-    """One entry, canonical shape, all twelve fields present.
+    """One entry, canonical shape, all thirteen fields present.
 
     `open_boxes` is deliberately NOT defaulted to 0. A legacy row never carried the
     field, and 0 means "verified finished" while None means "never counted" -- the
@@ -140,6 +147,7 @@ def canonical(sid, raw):
         "unverifiable_streak": streak_of(raw.get("unverifiable_streak")),
         "unverifiable_round": raw.get("unverifiable_round") or "",
         "unverifiable_action": raw.get("unverifiable_action") or "",
+        "unverifiable_observation": raw.get("unverifiable_observation") or "",
     }
 
 
@@ -289,6 +297,13 @@ def check(row, sid):
             sid,
             action,
             UNVERIFIABLE_ACTIONS,
+        )
+    observation = row.get("unverifiable_observation", "")
+    if observation not in UNVERIFIABLE_OBSERVATIONS:
+        return "session %s carries unverifiable_observation %r, not one of %r" % (
+            sid,
+            observation,
+            UNVERIFIABLE_OBSERVATIONS,
         )
     return None
 

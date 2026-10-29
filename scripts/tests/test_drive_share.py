@@ -139,6 +139,49 @@ class TestShare(Fixture):
         self.assertFalse(aaaa["verified"])
         self.assertEqual(aaaa["evidence"], "no action taken")
 
+    def test_an_observation_does_not_reach_the_numerator(self):
+        """A pane-less row is DETECTED but not ACTED ON, so the share must not move.
+
+        `action_taken()` counts any non-empty `unverifiable_action`, which is why the
+        observation lives in its own `unverifiable_observation` field. The comparison below
+        is the criterion: over the same detected set, a round carrying an observation
+        prints exactly the same share as one without. The last assertion is the failure
+        mode made explicit -- the same row recorded in the action field inflates the
+        numerator on a row nobody acted on.
+        """
+        empty = os.path.join(self.tmp, "empty-obs.digest")
+        with open(empty, "w", encoding="utf-8") as handle:
+            handle.write("FLEET SWEEP — 0 sessions\nCLASSIFICATION  UNKNOWN (pass not run)\n")
+        classes = drive_share.digest_classes(empty)
+
+        def share(rows):
+            measured = drive_share.measure(
+                classes,
+                rows,
+                START,
+                lambda sid: START + 60 if sid == "99999999" else START - 60,
+                lambda path: None,
+            )
+            return drive_share.render(measured).splitlines()[-1]
+
+        bare = entry("99999999", verdict="unverifiable")
+        observed = dict(bare, unverifiable_observation="observation")
+
+        self.assertEqual(share([bare]), "share: 0/1 (0%)")
+        self.assertEqual(
+            share([observed]),
+            share([bare]),
+            "an observation must leave numerator and denominator identical",
+        )
+        # The build this criterion exists to fail: the observation written where the
+        # action marker lives.
+        inflated = dict(bare, unverifiable_action="observation")
+        self.assertEqual(
+            share([inflated]),
+            "share: 1/1 (100%)",
+            "writing the observation into unverifiable_action inflates the numerator",
+        )
+
     def test_task_file_change_verifies_too(self):
         rows = self.measure(
             [entry("aaaaaaaa", nudge="drafted", task_file="/vault/25 Tasks/Task A.md")],
