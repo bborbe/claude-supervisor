@@ -89,10 +89,12 @@ def merge_archive(existing, archived):
             seen.add(head)
     if not kept:
         return archived
-    # Every section in the archive is separated by exactly one blank line; a bare
-    # concatenation puts the next heading straight after the last bullet of the previous
-    # section, which renders (ATX headings interrupt paragraphs) but breaks the file's
-    # uniform spacing. Measured 2026-10-29 by review on CHANGELOG-archive.md:521.
+    # A bare concatenation puts the next heading straight after the last bullet of the previous
+    # section. ATX headings interrupt paragraphs, so it still renders — but it is the one junction
+    # this function CREATES, and it should not be the one that differs. ⚠️ **This does not
+    # normalise carried-forward blocks:** the real archive has 17+ junctions with no blank line
+    # from earlier hand-edits, and they are left verbatim because released sections are frozen.
+    # Measured 2026-10-29 by review on CHANGELOG-archive.md:521.
     return archived.rstrip("\n") + "\n\n" + "".join(kept).lstrip("\n")
 
 
@@ -149,7 +151,10 @@ def main(argv):
     )
     # ⚠️ The archive is written FIRST. Truncating CHANGELOG.md before the archive exists means a
     # failed archive write leaves the freshly cut sections in neither file — recoverable only
-    # from git. This order fails the other way: at worst a section is duplicated, never dropped.
+    # from git. This order fails the other way: a crash can duplicate a section, but the freshly
+    # cut ones are never absent from both. ⚠️ **Scoped to the cut sections, not to all of them:**
+    # the retained half is still truncated by its own write below, so a mid-write failure there
+    # is recoverable only from git. The order is an improvement, not a guarantee.
     archive_path = root / ARCHIVE
     prior = archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
     archive_path.write_text(ARCHIVE_HEADER + merge_archive(prior, archived), encoding="utf-8")

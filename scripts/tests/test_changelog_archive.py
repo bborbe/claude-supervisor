@@ -154,6 +154,12 @@ class ChangelogArchiveTest(unittest.TestCase):
         # "newest first, verbatim", so assert the property itself.
         for head in re.findall(r"^## v\d+\.\d+\.\d+$", first_archive, re.M):
             self.assertIn(head, archive_now, f"a previously archived section was dropped: {head}")
+        # ⚠️ A heading surviving is not the section surviving: the file's own contract is
+        # byte-for-byte slicing, so a merge that re-serialised the bodies would pass the check
+        # above. Assert the OLDEST prior section's full text, verbatim.
+        oldest_block = first_archive[first_archive.index(oldest):].rstrip("\n")
+        self.assertIn(oldest_block, archive_now,
+                      "a previously archived section's body was rewritten, not carried verbatim")
         numeric = [tuple(int(x) for x in h) for h in heads]
         self.assertEqual(
             numeric, sorted(numeric, reverse=True),
@@ -175,7 +181,8 @@ class ChangelogArchiveTest(unittest.TestCase):
         for i in range(800, 400, -1):
             newer += ["", f"## v0.{i}.0", "", "- feat: " + "x" * 2000]
         self.write("\n".join(newer) + "\n")
-        self.run_script()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
         archive_now = self.read("CHANGELOG-archive.md")
         orphans = [

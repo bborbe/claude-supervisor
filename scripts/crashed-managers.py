@@ -232,13 +232,14 @@ def goals_section(text: str) -> list[str]:
     A whole-file substring match also matches a `# Progress` entry, a quoted comment or an
     unrelated section that merely *mentions* the goal — and every such match made a goal look
     covered by a topic manager whose keep-alive never touches it, which suppresses a real card.
-    A page with no `## Goals` heading declares nothing.
+    A page with no `## Goals` heading declares nothing. ⚠️ **Any heading ends the section,
+    whatever its level** — a `# Progress` immediately after `## Goals` is a different section.
     """
     lines: list[str] = []
     inside = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("## "):
+        if stripped.startswith("#"):
             inside = stripped.lower() == "## goals"
             continue
         if inside:
@@ -248,18 +249,27 @@ def goals_section(text: str) -> list[str]:
 
 def declares(text: str, goal: str) -> bool:
     """Does this topic page list `[[<goal>]]` in its goals list?"""
-    # Obsidian resolves `[[link]]` case-insensitively, so a topic page writing `[[my goal]]`
-    # against `My Goal.md` DOES declare it. A case-sensitive test reads that as "not declared"
-    # and cards a covered manager — over-carding, the direction the coverage test exists to stop.
+    # ⚠️ **Only a list entry declares.** A `## Goals` section routinely carries prose recording a
+    # goal's REMOVAL, and a section-wide `[[…]]` scan reads that retraction as a declaration —
+    # `agents/topic-verify.md` § parse_widths names this defect and measured it four times on
+    # 2026-09-20. Over-matching here makes a goal look covered and suppresses its real card, so
+    # only a `-`/`*` bullet whose FIRST wikilink is the goal counts.
+    #
+    # Obsidian resolves `[[link]]` case-insensitively, so `[[my goal]]` against `My Goal.md` DOES
+    # declare it; a case-sensitive test would card a covered manager.
     wanted = goal.casefold()
     for line in goals_section(text):
-        for form in ("]]", "|", "#"):
-            start = line.find("[[")
-            while start != -1:
-                end = line.find(form, start + 2)
-                if end != -1 and line[start + 2 : end].strip().casefold() == wanted:
-                    return True
-                start = line.find("[[", start + 2)
+        if not line.lstrip().startswith(("- ", "* ")):
+            continue
+        start = line.find("[[")
+        if start == -1:
+            continue
+        ends = [i for i in (line.find("]]", start), line.find("|", start), line.find("#", start)) if i != -1]
+        if not ends:
+            continue
+        target = line[start + 2 : min(ends)].strip().casefold()
+        if target == wanted:
+            return True
     return False
 
 
@@ -440,6 +450,7 @@ def main(argv: list[str]) -> int:
     vault = os.path.abspath(os.path.expanduser(a.vault))
     global _STATE_DIR_OVERRIDE
     _STATE_DIR_OVERRIDE = os.path.abspath(os.path.expanduser(a.state_dir))
+    a.state_dir = _STATE_DIR_OVERRIDE  # the parent's read must use the same path as the child
     _MEMO.clear()  # the memo is per RUN, so a second call in one process starts clean
     _DETAIL.clear()
     try:

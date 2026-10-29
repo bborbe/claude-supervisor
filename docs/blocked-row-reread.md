@@ -30,10 +30,15 @@ Run the probe once per round and match each row on its **pane id**.
   could not be executed at all; that was this document's first draft, caught in review
   2026-10-29. A row with `pane —` (the digest's "no pane" form) has no key and is **kept**
   rather than dropped, with the re-read marked `no pane to re-read`.
-- **`--section needs-you` is the only section that is gates.** The feed's other sections —
-  `rendered-panels`, `stuck`, `reapable`, `idle` — are not gates, and `last-closers` is opt-in
-  precisely because arming on it would fire on every peer's rendered closer. Read `--all`, so
-  a row past the default 20 is not dropped for being late in the list.
+- **Read BOTH gate sections, and only those.** `--section needs-you --section board-missing`
+  (`--section` is repeatable). ⚠️ **`board-missing` is a gate section too, and it is where this
+  section's own rows come from:** `board_missing_gates()` returns *"open gates the EVENT LOG
+  holds and the STORE did not return"*, i.e. parked panes the board carries no card for — and a
+  probe scoped to `needs-you` alone would not list them, so the drop rule would clear every one
+  of them as `no open gate`. The feed's other sections — `rendered-panels`, `stuck`, `reapable`,
+  `idle` — are not gates, and `last-closers` is opt-in precisely because arming on it would fire
+  on every peer's rendered closer. Read `--all`, so a row past the default 20 is not dropped for
+  being late in the list.
 - **Stamp the read.** Take the wall clock at the moment the probe runs and carry that stamp on
   every row the probe confirmed. It is the only timestamp that says *when* the row was
   verified, and without it the render cannot be distinguished from the digest it came from.

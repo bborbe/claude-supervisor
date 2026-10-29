@@ -87,6 +87,35 @@ class EvaluateTest(unittest.TestCase):
             f"a STOPPED topic manager was treated as coverage: {row['reason']}",
         )
 
+    def test_alias_and_heading_link_forms_declare(self):
+        for body in ("- [[Covered Goal|alias]]", "- [[Covered Goal#Some Heading]]",
+                     "- [[covered goal]]"):
+            with self.subTest(body=body):
+                for entry in os.listdir(self.topics):
+                    os.remove(os.path.join(self.topics, entry))
+                for entry in os.listdir(self.goals):
+                    os.remove(os.path.join(self.goals, entry))
+                self.goal("Covered Goal")
+                write(os.path.join(self.topics, "Some Topic.md"),
+                      "---\nmanager_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
+                      f"## Goals\n\n{body}\n")
+                cm.cadence_state = lambda n, b: "STALE" if b == "goal" else "OK"
+                cm.session_state = lambda s: "LIVE"
+                row = cm.evaluate(self.vault, "goal", "covered-goal")
+                self.assertFalse(row["card"], f"{body} read as not declaring: {row['reason']}")
+
+    def test_prose_inside_the_goals_section_does_not_declare(self):
+        """A `## Goals` section records removals in prose; that is not a declaration."""
+        self.goal("Lonely Goal")
+        write(os.path.join(self.topics, "Some Topic.md"),
+              "---\nmanager_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
+              "## Goals\n\n- [[In Scope Goal]]\n\n"
+              "Removed 2026-09-20: [[Lonely Goal]] was re-homed.\n")
+        cm.cadence_state = lambda n, b: "STALE" if b == "goal" else "OK"
+        cm.session_state = lambda s: "LIVE"
+        row = cm.evaluate(self.vault, "goal", "lonely-goal")
+        self.assertTrue(row["card"], f"prose read as a declaration: {row['reason']}")
+
     def test_a_topic_declaring_the_goal_in_another_case_still_covers(self):
         """Obsidian resolves wiki links case-insensitively."""
         self.goal("Covered Goal")
@@ -343,6 +372,26 @@ class MainTest(unittest.TestCase):
             "an unreadable vault read as a clean, empty fleet",
         )
 
+    def test_a_hung_or_unrunnable_store_refuses(self):
+        for exc in (subprocess.TimeoutExpired(["attention-ask.py"], 60), OSError("no exec")):
+            with self.subTest(exc=type(exc).__name__):
+                def boom(argv, **kw):
+                    raise exc
+                cm.subprocess.run = boom
+                with self.assertRaises(cm.Refused):
+                    cm.post({"branch": "goal", "base": "lonely-goal", "subject": "Lonely Goal",
+                             "session": "aaaa1111-0000-0000-0000-000000000000"})
+
+    def test_the_age_vs_limit_reaches_the_card_payload(self):
+        rec = Recorder()
+        cm.subprocess.run = rec
+        cm.post({"branch": "goal", "base": "lonely-goal", "subject": "Lonely Goal",
+                 "session": "aaaa1111-0000-0000-0000-000000000000",
+                 "detail": "age=78742s limit=4648s period=4468s(observed)"})
+        payload = rec.calls[0][rec.calls[0].index("--payload") + 1]
+        self.assertIn("age=78742s", payload)
+        self.assertIn("limit=4648s", payload)
+
     def test_a_post_with_empty_stdout_still_returns_a_string(self):
         cm.subprocess.run = Recorder(lambda argv: Proc(stdout="", returncode=0))
         got = cm.post({"branch": "goal", "base": "lonely-goal", "subject": "Lonely Goal",
@@ -362,6 +411,7 @@ class CadenceStateTest(unittest.TestCase):
 
     def test_an_unparseable_or_failed_probe_is_invalid_and_never_cards(self):
         for proc in (Proc(stdout="", returncode=2), Proc(stdout="Traceback...\n", returncode=1)):
+            cm._MEMO.clear()  # or the second case is answered by the first case's memo
             cm.subprocess.run = lambda argv, **kw: proc
             self.assertEqual(cm.cadence_state("Lonely Goal", "goal"), cm.PROBE_FAILED)
 
@@ -427,8 +477,9 @@ class CoverageTest(unittest.TestCase):
         os.makedirs(self.topics)
         self._cadence = cm.cadence_state
         self._verdict = cm.session_state
-        self.addCleanup(lambda: (setattr(cm, "cadence_state", self._cadence),
-                                 setattr(cm, "session_state", self._verdict)))
+        orig_cadence, orig_session = self._cadence, self._verdict
+        self.addCleanup(lambda: (setattr(cm, "cadence_state", orig_cadence),
+                                 setattr(cm, "session_state", orig_session)))
 
     def test_a_live_topic_manager_declaring_another_goal_does_not_cover(self):
         write(os.path.join(self.goals, "Orphan Goal.md"),
@@ -461,7 +512,9 @@ class CoverageTest(unittest.TestCase):
               "## Goals\n\n- [[Orphan Goal]]\n")
         os.chmod(topic_page, 0o000)
         self.addCleanup(os.chmod, topic_page, 0o644)
-        cm.cadence_state = lambda n, b: "STALE"
+        # ⚠️ `chmod 000` does not deny root, so in a root container the page IS readable. Stub the
+        # topic's cadence as OK, so the assertion holds whether or not the chmod takes effect.
+        cm.cadence_state = lambda n, b: "STALE" if b == "goal" else "OK"
         cm.session_state = lambda s: "LIVE"
         try:
             row = cm.evaluate(self.vault, "goal", "orphan-goal")
