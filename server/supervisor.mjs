@@ -2828,7 +2828,21 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // behaviour most. Naming it also keeps a later verification honest: an answered park in a
   // wrapper-backed run was answered by the wrapper's hook, never by `decide()`, so it is not
   // evidence that the policy tier works.
-  const wrapperSession = await spawnWrappedSession({
+  // ⚠️ A refused SUPERVISOR_WRAPPER_URL is refused HERE, not at import. `config.mjs` returns
+  // the refusal rather than throwing so one mistyped variable cannot make the module
+  // unimportable and take the whole server down at load; the cost is that the refusal has to
+  // be acted on at the one place that would use the value.
+  if (config.wrapperUrlRefusal) {
+    agents.delete(id)
+    return { error: config.wrapperUrlRefusal }
+  }
+  // ⚠️ Every throw from here to the stream start must undo `agents.set(id, …)` above. Without
+  // this, a failed wrapper spawn leaves a phantom `running` row that `list_agents` reports for
+  // the life of the process — the tab path's `agents.delete(id)` rollback, which this branch
+  // otherwise omits.
+  let wrapperSession
+  try {
+    wrapperSession = await spawnWrappedSession({
     baseUrl: config.wrapperUrl,
     options: {
       cwd: agent.cwd,
@@ -2853,7 +2867,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       ...(resume ? { resume } : {}),
     },
   })
+  } catch (error) {
+    agents.delete(id)
+    throw error
+  }
   if (!wrapperSession || !wrapperSession.id) {
+    agents.delete(id)
     throw new Error(`wrapper spawn for ${id} returned no session id — nothing can answer its prompts`)
   }
   // The WRAPPER's handle, never the child's claude id: every wrapper route keys off it, and
@@ -2874,6 +2893,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((reapError) => {
         log(`WARNING: could not reap wrapper session ${wrapperSession.id} after a refused opening turn: ${reapError.message}`)
       })
+      agents.delete(id)
       throw error
     }
   }
@@ -3683,14 +3703,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const viaWrapper = await answerWrapperPark(args.request_id, args.behavior)
         // Computed, never constant — see `answerWrapperPark`'s four outcomes.
         const consulted = viaWrapper.consulted === false ? ['pending'] : ['pending', 'wrapper']
-        if (viaWrapper.answered || viaWrapper.error) return reply({ ...viaWrapper, sources_consulted: consulted })
+        // ⚠️ `unreadable` FIRST. It carries an `error` too, so testing `.error` before it made
+        // this arm unreachable and the outage sentence dead — the branch order is the fix.
         if (viaWrapper.unreadable) {
-          // An outage is not a foreign park: the id may still be live.
           return reply({
             error: `${viaWrapper.error} — a wrapper-backed worker may still be parked on ${args.request_id}; this is an outage, not a foreign park`,
             sources_consulted: consulted,
           })
         }
+        if (viaWrapper.answered || viaWrapper.error) return reply({ ...viaWrapper, sources_consulted: consulted })
         // Both sources were read and neither holds the id.
         return reply({
           error: await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger }),

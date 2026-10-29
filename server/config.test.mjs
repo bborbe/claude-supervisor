@@ -15,7 +15,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { config } from './config.mjs'
+import { config, resolveWrapperUrl } from './config.mjs'
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url))
 
@@ -323,4 +323,68 @@ test('SUPERVISOR_SPAWN_MODE is carried raw for spawn-mode.mjs to validate', asyn
     if (before === undefined) delete process.env.SUPERVISOR_SPAWN_MODE
     else process.env.SUPERVISOR_SPAWN_MODE = before
   }
+})
+
+// ── SUPERVISOR_WRAPPER_URL: the credential boundary ──────────────────────────────────────────
+// This guard is the only thing standing between a mistyped host and the whole inherited
+// environment — `ANTHROPIC_BASE_URL` and any credential riding in it — being posted to an
+// unauthenticated endpoint in cleartext on every spawn. It had no test at all, which is the
+// one kind of security control that must not rely on a comment.
+test('a loopback wrapper URL is accepted', () => {
+  for (const raw of ['http://localhost:18090', 'http://127.0.0.1:18090', 'https://127.0.0.2:1', 'http://[::1]:18090']) {
+    const out = resolveWrapperUrl(raw)
+    assert.equal(out.refusal, null, `${raw} must be accepted`)
+    assert.ok(out.url.startsWith('http'), raw)
+  }
+})
+
+test('the default is the wrapper own listen address', () => {
+  assert.deepEqual(resolveWrapperUrl(undefined), { url: 'http://localhost:18090', refusal: null })
+  assert.deepEqual(resolveWrapperUrl(''), { url: 'http://localhost:18090', refusal: null })
+  assert.deepEqual(resolveWrapperUrl('   '), { url: 'http://localhost:18090', refusal: null })
+})
+
+test('a non-loopback host is refused, not accepted with a warning', () => {
+  for (const raw of ['http://10.0.0.5:18090', 'http://evil.example.com', 'http://192.168.1.1:18090']) {
+    const out = resolveWrapperUrl(raw)
+    assert.ok(out.refusal, `${raw} must be refused`)
+    // The fallback keeps every other surface working; nothing silently points off-box.
+    assert.equal(out.url, 'http://localhost:18090')
+  }
+})
+
+// `@evil.com` and `localhost.evil.com` are the two shapes a naive string check accepts.
+test('userinfo and suffix tricks are refused', () => {
+  for (const raw of ['http://localhost@evil.com:18090', 'http://localhost.evil.com:18090', 'http://evil.com#localhost']) {
+    assert.ok(resolveWrapperUrl(raw).refusal, `${raw} must be refused`)
+  }
+})
+
+// WHATWG normalisation collapses the decimal/hex/short forms onto 127.0.0.1, so they are
+// accepted — and an out-of-range octet is NOT loopback even though it looks like one.
+test('alternate loopback spellings normalise, an invalid octet does not', () => {
+  for (const raw of ['http://2130706433:18090', 'http://0x7f000001:18090', 'http://127.1:18090']) {
+    assert.equal(resolveWrapperUrl(raw).refusal, null, `${raw} normalises to loopback`)
+  }
+  assert.ok(resolveWrapperUrl('http://127.0.0.256:18090').refusal, '127.0.0.256 is not loopback')
+})
+
+test('a non-http scheme and a non-URL are refused', () => {
+  for (const raw of ['ftp://localhost:18090', 'file:///etc/passwd', 'not-a-url']) {
+    assert.ok(resolveWrapperUrl(raw).refusal, `${raw} must be refused`)
+  }
+})
+
+// A trailing slash would produce `//api/1.0/sessions` once joined with a path.
+test('a trailing slash is stripped', () => {
+  assert.equal(resolveWrapperUrl('http://localhost:18090///').url, 'http://localhost:18090')
+})
+
+// ⚠️ The refusal is RETURNED, never thrown: this module stays importable so one mistyped
+// variable cannot take down tab workers and the attention surface at load. `supervisor.mjs`
+// acts on `config.wrapperUrlRefusal` at the spawn.
+test('a refused URL leaves the module importable', () => {
+  const out = resolveWrapperUrl('http://evil.example.com')
+  assert.equal(typeof out.refusal, 'string')
+  assert.ok(config !== undefined)
 })
