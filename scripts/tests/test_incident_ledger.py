@@ -25,7 +25,14 @@ Three things are load-bearing, and each is a way the suite could be plausibly wr
   an incident with no evidence must NOT close, a corrupt ledger must NOT read as
   empty, and `--dry-run` must NOT write.
 
-`post_card` is stubbed throughout. The real one shells out to `attention-ask.py` and
+- **The card id.** `test_escalate_persists_the_id_the_poster_printed` runs the real
+  `post_card` against a stubbed subprocess and reads the record back from DISK. The
+  field was empty on every escalated incident for as long as the ledger existed, and
+  the failure mode of the fix is a value captured and dropped one line later -- which
+  an in-memory assertion cannot see.
+
+`post_card` is stubbed in the escalate cases, and only its subprocess in the capture
+cases (`TestCardIdCapture`). The real one shells out to `attention-ask.py` and
 would reach the operator's attention service from a unit test -- a test that posts a
 board card is a test that needs the operator, which is the opposite of what this is.
 
@@ -51,6 +58,19 @@ _spec.loader.exec_module(il)
 SESSION = "11111111-2222-3333-4444-555555555555"
 OTHER_SESSION = "66666666-7777-8888-9999-aaaaaaaaaaaa"
 OWNER = "manager-session-1"
+
+#: What the store mints for an item id: 32 lowercase hex characters. Used as the
+#: stubbed poster's answer so a test can assert the id the escalation RECORDS.
+CARD_ID = "0123456789abcdef0123456789abcdef"
+
+
+class _Run:
+    """A `subprocess.run` result stand-in: only the three fields `post_card` reads."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 def iso(delta=None):
@@ -83,7 +103,7 @@ class Base(unittest.TestCase):
 
     def _stub_post(self, incident):
         self.posted.append(incident["dedup_key"])
-        return True
+        return CARD_ID
 
     def tearDown(self):
         il.LEDGER, il.LOCK = self._ledger, self._lock
@@ -390,9 +410,14 @@ class TestEscalate(Base):
         il.live_states = lambda: (
             None if self.live is None else {sid: ("idle", "idle") for sid in self.live}
         )
+        # `test_escalate_persists_the_id_the_poster_printed` stubs the poster's
+        # subprocess instead of `post_card`; restored here so no later case in this
+        # class can shell out to the real attention store.
+        self._run = il.subprocess.run
 
     def tearDown(self):
         il.live_states = self._live_states
+        il.subprocess.run = self._run
         super().tearDown()
 
     def make_overdue(self, session=SESSION, kind="permission"):
@@ -441,11 +466,83 @@ class TestEscalate(Base):
     def test_a_failed_post_leaves_the_incident_pending(self):
         # Stamping after a failed post would record an escalation that never
         # reached the board -- the same class of false green the ledger exists for.
+        #
+        # ⚠️ `None` is `post_card`'s "nothing was posted". The empty string is a
+        # DIFFERENT answer -- posted, id unread -- and it must still stamp (see the
+        # next case), so this stub cannot use a falsy value interchangeably.
         self.make_overdue()
-        il.post_card = lambda incident: False
+        il.post_card = lambda incident: None
         with contextlib.redirect_stderr(io.StringIO()):
             self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+        self.assertEqual(self.records()[0]["card_id"], "")
+
+    def test_a_post_that_prints_no_id_still_escalates_with_an_empty_card_id(self):
+        """The honest degradation: a posted card is never left `pending`.
+
+        A poster that exits 0 but prints nothing parseable has still posted the
+        card, so the row is stamped with `card_id` empty -- the pre-fix state, which
+        `post_card` names on stderr. Leaving it pending instead would re-post it
+        next round and duplicate the escalation.
+        """
+        self.make_overdue()
+        il.post_card = lambda incident: ""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.run_cli("escalate", "--round-id", "r1")
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
+        self.assertEqual(record["card_id"], "")
+
+    def test_an_existing_handle_is_replaced_and_the_replacement_is_named(self):
+        """A `timed-out` row must join on the ESCALATION's card, and the move is loud.
+
+        `open --card-id` supplies a handle for the blocker card; the escalation posts
+        a different one, whose `dedup_key` is the incident's own. Moving the field to
+        it is what makes the join checkable, and the warning is what keeps the
+        replacement from being silent.
+        """
+        self.open_incident(card_id="blk-1")
+        self.make_overdue()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(self.records()[0]["card_id"], CARD_ID)
+        self.assertIn("blk-1", err.getvalue())
+        self.assertIn(CARD_ID, err.getvalue())
+
+    def test_an_unread_id_does_not_blank_an_existing_handle(self):
+        """The negative control for the case above: an empty capture erases nothing.
+
+        Blanking the field would destroy a real join to record nothing at all, so a
+        poster that printed no id leaves the row's own handle in place.
+        """
+        self.open_incident(card_id="blk-1")
+        self.make_overdue()
+        il.post_card = lambda incident: ""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.run_cli("escalate", "--round-id", "r1")
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
+        self.assertEqual(record["card_id"], "blk-1", "a real handle is not erased")
+
+    def test_escalate_persists_the_id_the_poster_printed(self):
+        """SC1 + SC2 end to end inside the unit: the poster's line reaches the FILE.
+
+        `post_card` is the REAL one and only the subprocess is stubbed, so this
+        covers the capture and the write together -- a stub returning an id would
+        prove neither, and reading the record back from disk is the point: the
+        defect is a value captured and then dropped one line later.
+        """
+        self.make_overdue()
+        il.post_card = self._post_card
+        il.subprocess.run = lambda command, **kwargs: _Run(
+            stdout="ITEM_ID: %s\nPOLL: python3 attention-ask.py poll %s\n"
+            % (CARD_ID, CARD_ID)
+        )
+        self.run_cli("escalate", "--round-id", "r1")
+        record = self.records()[0]
+        self.assertEqual(record["card_id"], CARD_ID, "the id never reached the record")
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
 
     def test_escalate_is_idempotent(self):
         self.make_overdue()
@@ -776,6 +873,74 @@ class TestEscalate(Base):
         finally:
             il.incident_budget = real_budget
             il.live_sessions = real_sessions
+
+
+class TestCardIdCapture(Base):
+    """`post_card` reads the id the poster prints, and refuses anything else.
+
+    The poster is stubbed at `subprocess.run`, never invoked: the real one reaches
+    the operator's attention store, which is the opposite of what a unit test may do.
+    `Base` has already replaced `post_card` itself, so the ORIGINAL is held in
+    `self._post_card` and that is what these cases call.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._run = il.subprocess.run
+        self.incident = {
+            "dedup_key": "incident:%s:stall" % SESSION,
+            "session_id": SESSION,
+            "kind": "stall",
+            "owner": OWNER,
+            "opened_at": "2026-10-29T10:00:00Z",
+            "deadline": "2026-10-29T10:15:00Z",
+            "detected_by": "drive:unverifiable@r1",
+        }
+
+    def tearDown(self):
+        il.subprocess.run = self._run
+        super().tearDown()
+
+    def post(self, **result):
+        il.subprocess.run = lambda command, **kwargs: _Run(**result)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            card_id = self._post_card(self.incident)
+        return card_id, err.getvalue()
+
+    def test_the_item_id_line_is_what_is_captured(self):
+        card_id, err = self.post(
+            stdout="ITEM_ID: %s\nPOLL: python3 attention-ask.py poll %s\n"
+            % (CARD_ID, CARD_ID)
+        )
+        self.assertEqual(card_id, CARD_ID)
+        self.assertEqual(err, "", "a clean post says nothing")
+
+    def test_a_candidate_that_is_not_a_store_id_is_refused(self):
+        """Shape, not existence: the store mints 32 hex characters.
+
+        A truncated id or another script's display id would 404 at poll time and
+        read as "the card is gone", so it is refused here rather than recorded.
+        """
+        candidates = (
+            "0123456789abcdef",  # truncated by hand
+            "0123456789abcdef0123456789abcdeZ",  # 32 characters, not hex
+            "",  # the poster printed the label and no value
+        )
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                card_id, err = self.post(stdout="ITEM_ID: %s\n" % candidate)
+                self.assertEqual(card_id, "")
+                self.assertIn("printed no ITEM_ID", err)
+
+    def test_a_failed_post_returns_none_and_says_why(self):
+        card_id, err = self.post(returncode=1, stderr="store unreachable")
+        self.assertIsNone(card_id, "a failed post is not an empty id")
+        self.assertIn("could not post escalation", err)
+
+    def test_stdout_that_is_empty_is_not_an_id(self):
+        card_id, _ = self.post(stdout="")
+        self.assertEqual(card_id, "")
 
 
 class TestRefusal(Base):
