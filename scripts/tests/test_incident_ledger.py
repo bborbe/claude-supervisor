@@ -71,6 +71,11 @@ class Base(unittest.TestCase):
         self._env = dict(os.environ)
         os.environ.pop("SUPERVISOR_INCIDENT_DEADLINE_SECONDS", None)
         os.environ.pop("SUPERVISOR_INCIDENT_STALL_ROUNDS", None)
+        # Neutralised HERE, not per class: any class that inherits `Base` and reaches
+        # `escalate` would otherwise read the host's value, so its verdict would depend
+        # on the operator's shell -- green on a host with a large budget, red on a host
+        # with none. A class that wants a specific budget sets it in its own `setUp`.
+        os.environ.pop("SUPERVISOR_INCIDENT_STALL_BUDGET", None)
         # The real post_card would post a board card from a unit test.
         self._post_card = il.post_card
         self.posted = []
@@ -572,6 +577,205 @@ class TestEscalate(Base):
         rc, out = self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [])
+
+    # --- the per-round budget ------------------------------------------------
+    def make_due_stalls(self, count, reverse=False):
+        """`count` overdue stall incidents, one per distinct live session.
+
+        ⚠️ **Deadlines are spread across distinct past hours, and `reverse` moves the
+        INSERTION order without moving the deadlines.** That is the whole point of the
+        parameter: with a shared deadline the selection order would be whatever
+        `data["incidents"]` happened to hold, so a `due[:budget]` slice would satisfy
+        the cap and still pick the wrong three. Session `i` is always `count - i` hours
+        overdue, so session 0 is the oldest no matter which order it was written in.
+
+        The sessions are live AND parked (`setUp` stubs `live_states` to
+        `("idle", "idle")`, which `parked_on_a_human` reads as "a card is owed"), so
+        the liveness gate cannot retire the fixture before the budget is consulted --
+        the same trap the end-to-end seed must avoid.
+        """
+        sessions = ["%08x-aaaa-bbbb-cccc-dddddddddddd" % i for i in range(count)]
+        self.live = set(sessions) | {sid[:8] for sid in sessions}
+        for sid in (reversed(sessions) if reverse else sessions):
+            self.open_incident(session=sid, kind="stall", deadline_seconds=1)
+        data = self.ledger()
+        hours_past = {sid: -(count - index) for index, sid in enumerate(sessions)}
+        for record in data["incidents"]:
+            record["deadline"] = iso(
+                datetime.timedelta(hours=hours_past[record["session_id"]])
+            )
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        return sessions
+
+    def escalated_keys(self, out):
+        return [
+            row.split()[1] for row in out.splitlines() if row.startswith("escalated ")
+        ]
+
+    def test_the_round_escalates_at_most_the_budget(self):
+        """10 due, budget 3 — three cards, seven still pending."""
+        sessions = self.make_due_stalls(10)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.escalated_keys(out)), il.incident_budget())
+        pending = [r for r in self.records() if r["outcome"] == il.PENDING]
+        self.assertEqual(len(pending), 7)
+        self.assertEqual(
+            self.posted,
+            [il.dedup_key(sid, "stall") for sid in sessions[:3]],
+            "in selection order, not merely the same three",
+        )
+
+    def test_the_held_back_line_is_bounded(self):
+        """Seven held back renders as five names plus a remainder, not seven."""
+        self.make_due_stalls(10)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        line = [row for row in out.splitlines() if "past their deadline:" in row][0]
+        self.assertIn("held back 7", line)
+        self.assertIn("(+2 more)", line)
+        self.assertEqual(line.count("incident:"), 5, "five names, then a count")
+        # A real run must not borrow the dry-run's wording: `would hold back` also
+        # contains `held back`, so the positive assertion alone would pass either way.
+        self.assertNotIn("would hold back", out)
+
+    def test_the_env_override_caps_the_round(self):
+        """The knob the stall leg uses is the knob that caps this leg."""
+        self.make_due_stalls(10)
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "1"
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.escalated_keys(out)), 1)
+        self.assertIn("held back 9", out)
+
+    def test_a_zero_override_cannot_disable_the_cap(self):
+        """`0` falls back to the default 3 — it is not "unlimited"."""
+        self.make_due_stalls(10)
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "0"
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.escalated_keys(out)), 3)
+
+    def test_a_dry_run_matches_the_applied_set(self):
+        """A preview that promises 10 cards the run will not post is a lie."""
+        self.make_due_stalls(10)
+        rc, dry = self.run_cli("escalate", "--round-id", "r1", "--dry-run")
+        self.assertEqual(rc, 0)
+        would = [r.split()[2] for r in dry.splitlines() if r.startswith("would escalate")]
+        self.assertEqual(len(would), 3)
+        self.assertIn("would hold back 7", dry)
+        self.assertIn("(+2 more)", dry)
+        self.assertEqual(self.posted, [], "a dry run posts nothing")
+        # Same selection, not merely the same count.
+        rc, real = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(would, self.escalated_keys(real))
+
+    def test_the_oldest_blockers_are_chosen(self):
+        """The selection is the three most overdue, in deadline order."""
+        sessions = self.make_due_stalls(10)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self.escalated_keys(out),
+            [il.dedup_key(sid, "stall") for sid in sessions[:3]],
+            "the three most overdue, in deadline order",
+        )
+
+    def test_the_choice_survives_a_reversed_insertion_order(self):
+        """Same deadlines written backwards — the same three, in the same order.
+
+        This is the case a `due[:budget]` slice fails: it would post whichever three
+        rows happened to be written first, so the cap would hold while the selection
+        was arbitrary.
+        """
+        sessions = self.make_due_stalls(10, reverse=True)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self.escalated_keys(out),
+            [il.dedup_key(sid, "stall") for sid in sessions[:3]],
+        )
+        line = [row for row in out.splitlines() if "past their deadline:" in row][0]
+        self.assertIn(
+            ", ".join(il.dedup_key(sid, "stall") for sid in sessions[3:8]), line
+        )
+
+    def test_the_budget_is_spent_after_the_liveness_gate(self):
+        """Mid-command rows are skipped without spending a slot.
+
+        With six mid-command and four parked rows due and a budget of three, a round
+        that capped the RAW due set would post nothing: all three slots would go to
+        rows it then skips. Moving the budget check above the mid-command branch is
+        the regression this case exists to catch.
+        """
+        mid = ["%08x-bbbb-cccc-dddd-eeeeeeeeeeee" % i for i in range(6)]
+        parked = ["%08x-cccc-dddd-eeee-ffffffffffff" % i for i in range(4)]
+        states = {sid: ("idle", "idle") for sid in parked}
+        for sid in mid:
+            states[sid] = ("shell", "busy")
+        il.live_states = lambda: states
+        for sid in mid + parked:
+            self.open_incident(session=sid, kind="stall", deadline_seconds=1)
+        data = self.ledger()
+        for record in data["incidents"]:
+            record["deadline"] = iso(datetime.timedelta(hours=-1))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            len(self.escalated_keys(out)), 3, "all three slots went to parked rows"
+        )
+        self.assertIn("held back 1", out)
+        self.assertIn("skipped 6 stall incident(s) for sessions mid-command", out)
+
+    def test_the_budget_is_the_same_function_on_both_legs(self):
+        """One function, reached from both legs.
+
+        A duplicated guard — a second constant, or a re-derived `due[:3]` — passes the
+        env-override cases above and fails here. A grep for the call site cannot show
+        *nesting*, so this asserts the call instead of its spelling.
+
+        `live_sessions` is stubbed for the `stall` half: an unstubbed run would answer
+        from the host's real fleet, which is the trap `TestStall` documents.
+        """
+        calls = []
+        real_budget = il.incident_budget
+        real_sessions = il.live_sessions
+        il.incident_budget = lambda: calls.append(1) or real_budget()
+        il.live_sessions = lambda: {SESSION, SESSION[:8]}
+        try:
+            self.make_overdue()
+            rc, _ = self.run_cli("escalate", "--round-id", "r1")
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1, "cmd_escalate consults the shared budget")
+
+            del calls[:]
+            path = os.path.join(self.tmp, "drive.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "round": iso(),
+                        "entries": [
+                            {
+                                "session_id": SESSION,
+                                "verdict": "unverifiable",
+                                "unverifiable_streak": 5,
+                                "unverifiable_round": iso(),
+                            }
+                        ],
+                    },
+                    handle,
+                )
+            rc, _ = self.run_cli("stall", "--drive-ledger", path, "--round-id", "r1")
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1, "cmd_stall consults the same budget")
+        finally:
+            il.incident_budget = real_budget
+            il.live_sessions = real_sessions
 
 
 class TestRefusal(Base):
@@ -1144,6 +1348,10 @@ class TestEscalateMidCommandPredicate(Base):
 
     def setUp(self):
         super().setUp()
+        # This class proves the mid-command PREDICATE, not the per-round cap. Its
+        # largest fixture has six due rows of which five must escalate in ONE round,
+        # so the default budget of 3 would fail it for a reason it is not testing.
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "10"
         self._live_states = il.live_states
         self.states = {}
         il.live_states = lambda: self.states
