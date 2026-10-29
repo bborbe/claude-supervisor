@@ -169,6 +169,7 @@ commands/ready.md                                ready ONE named task to the bar
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + fleet table render spec (canonical)
+docs/closer-classes.md                           the CLOSERS class vocabulary, the routine-continue table and the digest join rule (canonical)
 docs/sweep-output.md                             the manager sweep's output frame — columns, widths, icons (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the eight manager commands share
