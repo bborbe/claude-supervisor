@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.214.2
 
 - docs: **the README now says where a headless worker's process lives, because it decides who can answer its prompts.** A park belongs to whoever holds the child's stdin; that is now `claude-wrapper`, so the prompt is released over its REST route and the wrapper session id names the target. The section also states the cost plainly — the policy tier (`decide()`, the manager allowlist, the carried decision, the 15-minute deny) does not run for these workers, and a spawn reply carries a `policy_gap` naming each one as not-run, so **a successful spawn is not a policed spawn**. `pending_question` / `wrapper_session_id` are documented as status fields, never gates.
 
