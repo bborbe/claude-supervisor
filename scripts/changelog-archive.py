@@ -60,6 +60,36 @@ def without_pointer(text):
     return "\n".join(lines) + "\n"
 
 
+def archive_body(text):
+    """The released sections of an existing archive, from its first `## v` heading.
+
+    The header is re-emitted from `ARCHIVE_HEADER`, so the prior body is taken from the first
+    release heading rather than from a header shape that may have drifted.
+    """
+    m = re.search(r"^## v\d+\.\d+\.\d+$", text, re.MULTILINE)
+    return text[m.start():] if m else ""
+
+
+def merge_archive(existing, archived):
+    """Newly archived sections first, then the prior archive's — newest first, no duplicates.
+
+    ⚠️ **The prior archive is not optional.** This rotation appends to frozen history; writing
+    only the freshly cut suffix silently deletes every section archived by an earlier run, and
+    nothing else in the tree holds them. Observed 2026-10-29: a second rotation overwrote
+    `CHANGELOG-archive.md` and dropped 316 released sections (v0.102.3 … v0.1.0) out of the
+    repository entirely. A heading already present in `archived` is skipped so a repeated run
+    cannot duplicate it.
+    """
+    seen = {line for line in archived.split("\n") if RELEASED.match(line)}
+    kept = []
+    for block in re.split(r"(?m)^(?=## v\d+\.\d+\.\d+$)", archive_body(existing)):
+        head = block.split("\n", 1)[0]
+        if RELEASED.match(head) and head not in seen:
+            kept.append(block)
+            seen.add(head)
+    return archived + "".join(kept)
+
+
 def main(argv):
     root = pathlib.Path(__file__).resolve().parent.parent
     path = root / CHANGELOG
@@ -112,7 +142,9 @@ def main(argv):
         f"{archived_heads[0]}) are archived in [CHANGELOG-archive.md]({ARCHIVE})._\n"
     )
     path.write_text(f"{kept}\n{pointer}", encoding="utf-8")
-    (root / ARCHIVE).write_text(ARCHIVE_HEADER + archived, encoding="utf-8")
+    archive_path = root / ARCHIVE
+    prior = archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
+    archive_path.write_text(ARCHIVE_HEADER + merge_archive(prior, archived), encoding="utf-8")
 
     new_size = len(path.read_text(encoding="utf-8").encode("utf-8"))
     print(

@@ -116,6 +116,39 @@ class ChangelogArchiveTest(unittest.TestCase):
         self.assertIn("nothing to archive", result.stdout)
         self.assertEqual((self.read(), self.read("CHANGELOG-archive.md")), before)
 
+    def test_a_second_rotation_extends_the_archive_instead_of_replacing_it(self):
+        """A rotation that actually cuts again must keep every section archived by the first.
+
+        ⚠️ `test_second_run_is_a_no_op` above never reaches this branch: the second run finds
+        nothing to cut, so it returns before writing the archive. That is why a rotation that
+        *overwrote* `CHANGELOG-archive.md` passed the suite — observed 2026-10-29, when a real
+        second rotation dropped 316 released sections (v0.102.3 … v0.1.0) out of the tree.
+        """
+        self.write(BIG)
+        self.run_script()
+        first_archive = self.read("CHANGELOG-archive.md")
+        first_sections = self.section_count(first_archive)
+        oldest = re.findall(r"^## v\d+\.\d+\.\d+$", first_archive, re.M)[-1]
+
+        # Grow the changelog past the target again, with strictly NEWER versions, so the next
+        # run really rotates and its sections belong ahead of the ones already archived.
+        newer = [PREAMBLE.rstrip("\n"), "", "## Unreleased", "", "- fix: second batch"]
+        for i in range(800, 400, -1):
+            newer += ["", f"## v0.{i}.0", "", "- feat: " + "x" * 2000]
+        self.write("\n".join(newer) + "\n")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        archive_now = self.read("CHANGELOG-archive.md")
+        self.assertGreater(
+            self.section_count(archive_now), first_sections,
+            "the second rotation did not add to the archive",
+        )
+        self.assertIn(oldest, archive_now, "a previously archived release was dropped")
+
+        heads = re.findall(r"^## v\d+\.\d+\.\d+$", archive_now, re.M)
+        self.assertEqual(len(heads), len(set(heads)), "a release was duplicated in the archive")
+
     def test_a_small_changelog_is_left_alone(self):
         source = changelog(3)
         self.write(source)
